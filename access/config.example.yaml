@@ -1,0 +1,84 @@
+# WhaleRein Access example configuration.
+#
+# Copy to access/config.yaml and export the referenced environment variables.
+# Tokens and passwords are never written here and are never logged.
+
+listen: "127.0.0.1:8080"
+internal_listen: "127.0.0.1:8081"
+public_url: "https://access.example.com"
+
+database_url: "${WHALEREIN_DATABASE_URL}"
+admin_token: "${WHALEREIN_ADMIN_TOKEN}"
+host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
+
+broker:
+  # Access -> broker. Use tls:// for production.
+  url: "${WHALEREIN_BROKER_URL}"
+  # URL advertised to clients in whalerein://pair URIs.
+  # Official: mqtts://access.example.com:443 (ALPN mqtt).
+  # Self-hosted: mqtts://mqtt.example.com:8883.
+  public_url: "mqtts://access.example.com:443"
+  client_id: "whalerein-access"
+  username: "access"
+  password: "${WHALEREIN_BROKER_PASSWORD}"
+  ca_file: ""
+  server_name: ""
+  insecure_skip_verify: false
+  connect_timeout: 10s
+  publish_timeout: 5s
+  keep_alive: 30s
+  reconnect_min: 500ms
+  reconnect_max: 30s
+
+emqx:
+  # Optional. $SYS topics and the host Ready signal provide presence without
+  # REST. Configure this for restart resilience and REST disconnects.
+  rest_url: ""
+  api_key: "${WHALEREIN_EMQX_API_KEY:-}"
+  api_secret: "${WHALEREIN_EMQX_API_SECRET:-}"
+  ca_file: ""
+  insecure_skip_verify: false
+  timeout: 5s
+  # "ctl" invokes `emqx ctl clients kick`; "rest" uses DELETE /api/v5/clients.
+  disconnect_mode: "ctl"
+  ctl_path: "emqx"
+
+internal:
+  callback_token: "${WHALEREIN_INTERNAL_TOKEN}"
+
+http:
+  read_header_timeout: 5s
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 60s
+  max_body_bytes: 25165824
+
+pairing:
+  invitation_ttl: 10m
+  claim_timeout: 15s
+  claim_ttl: 5m
+  max_failures: 5
+
+requests:
+  max_ttl: 24h
+  forward_interval: 500ms
+  lease: 30s
+  retry_interval: 10s
+  max_attempts: 5
+  batch_size: 50
+
+revocation:
+  ack_timeout: 10s
+
+presence:
+  cache_ttl: 15s
+
+cleanup:
+  interval: 1m
+  pairing_token_retention: 24h
+
+protocol:
+  version: 1
+
+log:
+  level: "info"

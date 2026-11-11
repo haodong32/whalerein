@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Reject a commit that breaks docs/commits.md.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+exec uv run --project "$ROOT/tools/repo" python -m repo.commits "$1"

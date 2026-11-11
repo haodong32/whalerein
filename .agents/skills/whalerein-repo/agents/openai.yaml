@@ -1,0 +1,4 @@
+interface:
+  display_name: "WhaleRein Repository Tasks"
+  short_description: "Choose and verify WhaleRein repository tasks"
+  default_prompt: "Use $whalerein-repo to select and run the checks needed for this change."

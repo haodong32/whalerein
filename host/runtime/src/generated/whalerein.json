@@ -1,0 +1,1692 @@
+{
+  "nested": {
+    "whalerein": {
+      "nested": {
+        "v1": {
+          "options": {
+            "go_package": "github.com/whalerein/whalerein/proto/v1/bindings/go;whalereinv1"
+          },
+          "nested": {
+            "OnlineStatus": {
+              "values": {
+                "online_status_unspecified": 0,
+                "received": 1,
+                "host_offline": 2,
+                "rejected": 3,
+                "host_accepted": 4,
+                "succeeded": 5,
+                "failed": 6,
+                "unknown": 7
+              }
+            },
+            "RequestKind": {
+              "values": {
+                "REQUEST_KIND_UNSPECIFIED": 0,
+                "REQUEST_KIND_HANDSHAKE": 1,
+                "REQUEST_KIND_QUERY": 2,
+                "REQUEST_KIND_COMMAND": 3,
+                "REQUEST_KIND_PAIRING_CLAIM": 4,
+                "REQUEST_KIND_PAIRING_AUTHORIZE": 5,
+                "REQUEST_KIND_REVOCATION": 6
+              }
+            },
+            "ErrorCode": {
+              "values": {
+                "error_code_unspecified": 0,
+                "invalid_argument": 1,
+                "unauthorized": 2,
+                "forbidden": 3,
+                "not_found": 4,
+                "conflict": 5,
+                "expired": 6,
+                "unsupported_capability": 7,
+                "protocol_version_incompatible": 8,
+                "payload_digest_mismatch": 9,
+                "approval_expired": 10,
+                "approval_version_mismatch": 11,
+                "approval_already_resolved": 12,
+                "approval_unavailable": 13,
+                "snapshot_required": 14,
+                "revocations_pending": 15,
+                "rate_limited": 16,
+                "internal": 17,
+                "unavailable": 18,
+                "payload_too_large": 19
+              }
+            },
+            "Capability": {
+              "values": {
+                "capability_unspecified": 0,
+                "sessions": 1,
+                "events": 2,
+                "messages": 3,
+                "approvals": 4,
+                "interrupt": 5,
+                "sync": 6,
+                "snapshot": 7
+              }
+            },
+            "PairingPhase": {
+              "values": {
+                "PAIRING_PHASE_UNSPECIFIED": 0,
+                "PAIRING_PHASE_HELLO": 1,
+                "PAIRING_PHASE_FINISH": 2,
+                "PAIRING_PHASE_AUTHORIZE": 3,
+                "PAIRING_PHASE_COMMIT": 4
+              }
+            },
+            "ApprovalState": {
+              "values": {
+                "APPROVAL_STATE_UNSPECIFIED": 0,
+                "APPROVAL_STATE_PENDING": 1,
+                "APPROVAL_STATE_APPROVED": 2,
+                "APPROVAL_STATE_REJECTED": 3,
+                "APPROVAL_STATE_EXPIRED": 4,
+                "APPROVAL_STATE_UNAVAILABLE": 5
+              }
+            },
+            "ApprovalDecision": {
+              "values": {
+                "APPROVAL_DECISION_UNSPECIFIED": 0,
+                "APPROVAL_DECISION_APPROVE": 1,
+                "APPROVAL_DECISION_REJECT": 2
+              }
+            },
+            "CapabilitySet": {
+              "fields": {
+                "capabilities": {
+                  "rule": "repeated",
+                  "type": "Capability",
+                  "id": 1
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 2
+                }
+              }
+            },
+            "HostRequest": {
+              "fields": {
+                "request_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "kind": {
+                  "type": "RequestKind",
+                  "id": 4
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "payload_digest": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 7
+                },
+                "trace_id": {
+                  "type": "string",
+                  "id": 8
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 9
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 10
+                },
+                "body": {
+                  "type": "bytes",
+                  "id": 11
+                },
+                "client_transport_version": {
+                  "type": "uint32",
+                  "id": 12
+                },
+                "relay_transport_version": {
+                  "type": "uint32",
+                  "id": 13
+                }
+              }
+            },
+            "HostResult": {
+              "fields": {
+                "request_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "status": {
+                  "type": "OnlineStatus",
+                  "id": 4
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "payload_digest": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "result_body": {
+                  "type": "bytes",
+                  "id": 7
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 8
+                },
+                "trace_id": {
+                  "type": "string",
+                  "id": 9
+                },
+                "error_message": {
+                  "type": "string",
+                  "id": 10
+                },
+                "completed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 11
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 12
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 13
+                }
+              }
+            },
+            "ErrorResponse": {
+              "fields": {
+                "code": {
+                  "type": "ErrorCode",
+                  "id": 1
+                },
+                "message": {
+                  "type": "string",
+                  "id": 2
+                },
+                "trace_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "request_id": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "RequestReceipt": {
+              "fields": {
+                "request_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "status": {
+                  "type": "OnlineStatus",
+                  "id": 2
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                }
+              }
+            },
+            "RequestState": {
+              "fields": {
+                "request_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "status": {
+                  "type": "OnlineStatus",
+                  "id": 4
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "payload_digest": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "result_body": {
+                  "type": "bytes",
+                  "id": 7
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 8
+                },
+                "error_message": {
+                  "type": "string",
+                  "id": 9
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 10
+                },
+                "updated_at_unix_ms": {
+                  "type": "int64",
+                  "id": 11
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 12
+                }
+              }
+            },
+            "HostInfo": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "online": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "fingerprint": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "HostList": {
+              "fields": {
+                "hosts": {
+                  "rule": "repeated",
+                  "type": "HostInfo",
+                  "id": 1
+                }
+              }
+            },
+            "PairingInvitationRequest": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 2
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 3
+                }
+              }
+            },
+            "PairingInvitation": {
+              "fields": {
+                "token": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 3
+                },
+                "pairing_uri": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "PairingClaimRequest": {
+              "fields": {
+                "token": {
+                  "type": "string",
+                  "id": 1
+                },
+                "claim_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "phase": {
+                  "type": "PairingPhase",
+                  "id": 3
+                },
+                "noise_message": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 6
+                },
+                "confirmed": {
+                  "type": "bool",
+                  "id": 7
+                }
+              }
+            },
+            "PairingClaimResponse": {
+              "fields": {
+                "claim_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "phase": {
+                  "type": "PairingPhase",
+                  "id": 3
+                },
+                "noise_message": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "host_public_key": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "host_fingerprint": {
+                  "type": "string",
+                  "id": 6
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "device_public_key": {
+                  "type": "bytes",
+                  "id": 8
+                },
+                "device_token": {
+                  "type": "string",
+                  "id": 9
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 10
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 11
+                }
+              }
+            },
+            "PairingClaim": {
+              "fields": {
+                "claim_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "token_hash": {
+                  "type": "string",
+                  "id": 2
+                },
+                "phase": {
+                  "type": "PairingPhase",
+                  "id": 3
+                },
+                "noise_message": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "device_public_key": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 7
+                },
+                "grant_generation": {
+                  "type": "uint64",
+                  "id": 8
+                }
+              }
+            },
+            "PairingClaimResult": {
+              "fields": {
+                "noise_message": {
+                  "type": "bytes",
+                  "id": 1
+                },
+                "host_public_key": {
+                  "type": "bytes",
+                  "id": 2
+                },
+                "host_fingerprint": {
+                  "type": "string",
+                  "id": 3
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "device_public_key": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "authorized": {
+                  "type": "bool",
+                  "id": 6
+                }
+              }
+            },
+            "RevocationNotice": {
+              "fields": {
+                "replay_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 2
+                },
+                "final": {
+                  "type": "bool",
+                  "id": 3
+                },
+                "revoked_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                },
+                "grant_generations": {
+                  "keyType": "string",
+                  "type": "uint64",
+                  "id": 5
+                }
+              }
+            },
+            "RevocationAck": {
+              "fields": {
+                "replay_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "HostReady": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "connected_at_unix_ms": {
+                  "type": "int64",
+                  "id": 2
+                },
+                "authorization_public_key": {
+                  "type": "bytes",
+                  "id": 3
+                },
+                "transport_version": {
+                  "type": "uint32",
+                  "id": 4
+                }
+              }
+            },
+            "HostGrantRevocation": {
+              "fields": {
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 1
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 2
+                }
+              }
+            },
+            "EncryptedFrame": {
+              "fields": {
+                "channel_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "nonce": {
+                  "type": "bytes",
+                  "id": 2
+                },
+                "ciphertext": {
+                  "type": "bytes",
+                  "id": 3
+                }
+              }
+            },
+            "ChannelHello": {
+              "fields": {
+                "device_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "capabilities": {
+                  "type": "CapabilitySet",
+                  "id": 4
+                },
+                "client_nonce": {
+                  "type": "string",
+                  "id": 5
+                }
+              }
+            },
+            "ChannelReady": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "capabilities": {
+                  "type": "CapabilitySet",
+                  "id": 4
+                },
+                "host_nonce": {
+                  "type": "string",
+                  "id": 5
+                }
+              }
+            },
+            "PairingHello": {
+              "fields": {
+                "device_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "capabilities": {
+                  "type": "CapabilitySet",
+                  "id": 4
+                },
+                "device_nonce": {
+                  "type": "string",
+                  "id": 5
+                },
+                "display_name": {
+                  "type": "string",
+                  "id": 6
+                },
+                "os": {
+                  "type": "string",
+                  "id": 7
+                }
+              }
+            },
+            "PairingHelloReply": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "protocol_version": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "capabilities": {
+                  "type": "CapabilitySet",
+                  "id": 4
+                },
+                "host_nonce": {
+                  "type": "string",
+                  "id": 5
+                }
+              }
+            },
+            "PairingFinish": {
+              "fields": {
+                "device_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "host_fingerprint": {
+                  "type": "string",
+                  "id": 3
+                }
+              }
+            },
+            "RequestPayload": {
+              "oneofs": {
+                "payload": {
+                  "oneof": [
+                    "list_sessions",
+                    "get_session",
+                    "get_approval",
+                    "get_command_result",
+                    "send_message",
+                    "interrupt",
+                    "resolve_approval",
+                    "ping",
+                    "list_approvals",
+                    "read_history",
+                    "watch_session",
+                    "refresh_watches",
+                    "unwatch_session"
+                  ]
+                }
+              },
+              "fields": {
+                "list_sessions": {
+                  "type": "ListSessions",
+                  "id": 1
+                },
+                "get_session": {
+                  "type": "GetSession",
+                  "id": 2
+                },
+                "get_approval": {
+                  "type": "GetApproval",
+                  "id": 4
+                },
+                "get_command_result": {
+                  "type": "GetCommandResult",
+                  "id": 5
+                },
+                "send_message": {
+                  "type": "SendMessage",
+                  "id": 6
+                },
+                "interrupt": {
+                  "type": "Interrupt",
+                  "id": 7
+                },
+                "resolve_approval": {
+                  "type": "ResolveApproval",
+                  "id": 8
+                },
+                "ping": {
+                  "type": "Ping",
+                  "id": 9
+                },
+                "list_approvals": {
+                  "type": "ListApprovals",
+                  "id": 10
+                },
+                "read_history": {
+                  "type": "HistoryRead",
+                  "id": 11
+                },
+                "watch_session": {
+                  "type": "WatchSession",
+                  "id": 12
+                },
+                "refresh_watches": {
+                  "type": "RefreshWatches",
+                  "id": 13
+                },
+                "unwatch_session": {
+                  "type": "UnwatchSession",
+                  "id": 14
+                }
+              }
+            },
+            "ResponsePayload": {
+              "oneofs": {
+                "payload": {
+                  "oneof": [
+                    "session_list",
+                    "approval",
+                    "command_accepted",
+                    "command_result",
+                    "pong",
+                    "approval_list",
+                    "history_page",
+                    "watch_ready",
+                    "watch_states",
+                    "session_info"
+                  ]
+                }
+              },
+              "fields": {
+                "session_list": {
+                  "type": "SessionList",
+                  "id": 1
+                },
+                "approval": {
+                  "type": "Approval",
+                  "id": 4
+                },
+                "command_accepted": {
+                  "type": "CommandAccepted",
+                  "id": 5
+                },
+                "command_result": {
+                  "type": "CommandResult",
+                  "id": 6
+                },
+                "pong": {
+                  "type": "Pong",
+                  "id": 7
+                },
+                "approval_list": {
+                  "type": "ApprovalList",
+                  "id": 10
+                },
+                "history_page": {
+                  "type": "HistoryPage",
+                  "id": 11
+                },
+                "watch_ready": {
+                  "type": "WatchReady",
+                  "id": 12
+                },
+                "watch_states": {
+                  "type": "WatchStates",
+                  "id": 13
+                },
+                "session_info": {
+                  "type": "SessionSummary",
+                  "id": 14
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 8
+                },
+                "error_detail": {
+                  "type": "string",
+                  "id": 9
+                }
+              }
+            },
+            "ListSessions": {
+              "fields": {}
+            },
+            "GetSession": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "GetApproval": {
+              "fields": {
+                "approval_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "ListApprovals": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "ApprovalList": {
+              "fields": {
+                "approvals": {
+                  "rule": "repeated",
+                  "type": "Approval",
+                  "id": 1
+                }
+              }
+            },
+            "GetCommandResult": {
+              "fields": {
+                "command_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "SendMessage": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "text": {
+                  "type": "string",
+                  "id": 2
+                },
+                "delivery_mode": {
+                  "type": "DeliveryMode",
+                  "id": 3
+                }
+              }
+            },
+            "Interrupt": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "ResolveApproval": {
+              "fields": {
+                "approval_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "decision": {
+                  "type": "ApprovalDecision",
+                  "id": 2
+                },
+                "expected_digest": {
+                  "type": "bytes",
+                  "id": 3
+                },
+                "expected_version": {
+                  "type": "int64",
+                  "id": 4
+                }
+              }
+            },
+            "Ping": {
+              "fields": {
+                "client_time_unix_ms": {
+                  "type": "int64",
+                  "id": 1
+                }
+              }
+            },
+            "Pong": {
+              "fields": {
+                "host_time_unix_ms": {
+                  "type": "int64",
+                  "id": 1
+                }
+              }
+            },
+            "SessionSummary": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "title": {
+                  "type": "string",
+                  "id": 2
+                },
+                "cwd": {
+                  "type": "string",
+                  "id": 3
+                },
+                "created_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                },
+                "updated_at_unix_ms": {
+                  "type": "int64",
+                  "id": 5
+                },
+                "running": {
+                  "type": "bool",
+                  "id": 6
+                },
+                "agent_available": {
+                  "type": "bool",
+                  "id": 7
+                },
+                "blank": {
+                  "type": "bool",
+                  "id": 8
+                },
+                "parent_session_id": {
+                  "type": "string",
+                  "id": 9
+                },
+                "origin": {
+                  "type": "string",
+                  "id": 10
+                },
+                "queued_prompts": {
+                  "type": "uint32",
+                  "id": 12
+                },
+                "history_cursor": {
+                  "type": "string",
+                  "id": 13
+                },
+                "source_capabilities": {
+                  "type": "SourceCapabilities",
+                  "id": 14
+                }
+              }
+            },
+            "SessionList": {
+              "fields": {
+                "sessions": {
+                  "rule": "repeated",
+                  "type": "SessionSummary",
+                  "id": 1
+                }
+              }
+            },
+            "CommandAccepted": {
+              "fields": {
+                "message_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "CommandResult": {
+              "fields": {
+                "found": {
+                  "type": "bool",
+                  "id": 1
+                },
+                "status": {
+                  "type": "OnlineStatus",
+                  "id": 2
+                },
+                "result_payload": {
+                  "type": "bytes",
+                  "id": 3
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 4
+                }
+              }
+            },
+            "Approval": {
+              "fields": {
+                "approval_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "session_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "tool_name": {
+                  "type": "string",
+                  "id": 3
+                },
+                "call_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 5
+                },
+                "digest": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "version": {
+                  "type": "int64",
+                  "id": 7
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 8
+                },
+                "state": {
+                  "type": "ApprovalState",
+                  "id": 9
+                },
+                "decision": {
+                  "type": "ApprovalDecision",
+                  "id": 10
+                }
+              }
+            },
+            "EventEnvelope": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "nonce": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "ciphertext": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "created_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                },
+                "trace_id": {
+                  "type": "string",
+                  "id": 7
+                }
+              }
+            },
+            "EventPayload": {
+              "fields": {
+                "update": {
+                  "type": "SessionUpdate",
+                  "id": 1
+                }
+              }
+            },
+            "TransportFrame": {
+              "fields": {
+                "version": {
+                  "type": "uint32",
+                  "id": 1
+                },
+                "transfer_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "topic": {
+                  "type": "string",
+                  "id": 3
+                },
+                "index": {
+                  "type": "uint32",
+                  "id": 4
+                },
+                "count": {
+                  "type": "uint32",
+                  "id": 5
+                },
+                "total_bytes": {
+                  "type": "uint32",
+                  "id": 6
+                },
+                "digest": {
+                  "type": "bytes",
+                  "id": 7
+                },
+                "payload": {
+                  "type": "bytes",
+                  "id": 8
+                },
+                "ack": {
+                  "type": "bool",
+                  "id": 9
+                },
+                "rejected": {
+                  "type": "bool",
+                  "id": 10
+                },
+                "complete": {
+                  "type": "bool",
+                  "id": 11
+                }
+              }
+            },
+            "SessionKey": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "session_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "SourceCapabilities": {
+              "fields": {
+                "history": {
+                  "type": "bool",
+                  "id": 1
+                },
+                "resumable_history": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "live_text": {
+                  "type": "bool",
+                  "id": 3
+                },
+                "interrupt": {
+                  "type": "bool",
+                  "id": 4
+                },
+                "approvals": {
+                  "type": "bool",
+                  "id": 5
+                },
+                "delivery_modes": {
+                  "rule": "repeated",
+                  "type": "DeliveryMode",
+                  "id": 6
+                }
+              }
+            },
+            "DeliveryMode": {
+              "values": {
+                "DELIVERY_MODE_UNSPECIFIED": 0,
+                "START_IF_IDLE": 1,
+                "ENQUEUE_AFTER_RUN": 2,
+                "STEER": 3
+              }
+            },
+            "MessageRole": {
+              "values": {
+                "MESSAGE_ROLE_UNSPECIFIED": 0,
+                "USER": 1,
+                "ASSISTANT": 2,
+                "TOOL": 3,
+                "NOTICE": 4
+              }
+            },
+            "RunPhase": {
+              "values": {
+                "RUN_PHASE_UNSPECIFIED": 0,
+                "IDLE": 1,
+                "RUNNING": 2,
+                "STOPPING": 3,
+                "SOURCE_UNAVAILABLE": 4
+              }
+            },
+            "AttemptOutcome": {
+              "values": {
+                "ATTEMPT_OUTCOME_UNSPECIFIED": 0,
+                "COMMITTED": 1,
+                "ABANDONED": 2,
+                "INTERRUPTED": 3,
+                "ATTEMPT_FAILED": 4
+              }
+            },
+            "AttemptRef": {
+              "fields": {
+                "live_epoch": {
+                  "type": "string",
+                  "id": 1
+                },
+                "attempt_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "TextContent": {
+              "fields": {
+                "text": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "ToolCallContent": {
+              "fields": {
+                "call_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "summary": {
+                  "type": "string",
+                  "id": 3
+                }
+              }
+            },
+            "ToolResultContent": {
+              "fields": {
+                "call_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "text": {
+                  "type": "string",
+                  "id": 2
+                },
+                "is_error": {
+                  "type": "bool",
+                  "id": 3
+                }
+              }
+            },
+            "NoticeContent": {
+              "fields": {
+                "category": {
+                  "type": "string",
+                  "id": 1
+                },
+                "text": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "AttachmentContent": {
+              "fields": {
+                "media_type": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "size": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "available": {
+                  "type": "bool",
+                  "id": 4
+                }
+              }
+            },
+            "ContentBlock": {
+              "oneofs": {
+                "content": {
+                  "oneof": [
+                    "text",
+                    "tool_call",
+                    "tool_result",
+                    "notice",
+                    "attachment"
+                  ]
+                }
+              },
+              "fields": {
+                "block_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "text": {
+                  "type": "TextContent",
+                  "id": 2
+                },
+                "tool_call": {
+                  "type": "ToolCallContent",
+                  "id": 3
+                },
+                "tool_result": {
+                  "type": "ToolResultContent",
+                  "id": 4
+                },
+                "notice": {
+                  "type": "NoticeContent",
+                  "id": 5
+                },
+                "attachment": {
+                  "type": "AttachmentContent",
+                  "id": 6
+                }
+              }
+            },
+            "ConversationMessage": {
+              "fields": {
+                "message_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "role": {
+                  "type": "MessageRole",
+                  "id": 2
+                },
+                "blocks": {
+                  "rule": "repeated",
+                  "type": "ContentBlock",
+                  "id": 3
+                },
+                "authored_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                }
+              }
+            },
+            "MessageUpsert": {
+              "fields": {
+                "message": {
+                  "type": "ConversationMessage",
+                  "id": 1
+                },
+                "origin": {
+                  "type": "AttemptRef",
+                  "id": 2
+                }
+              }
+            },
+            "HistoryBatch": {
+              "fields": {
+                "from_cursor": {
+                  "type": "string",
+                  "id": 1
+                },
+                "to_cursor": {
+                  "type": "string",
+                  "id": 2
+                },
+                "batch_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "changes": {
+                  "rule": "repeated",
+                  "type": "MessageUpsert",
+                  "id": 4
+                }
+              }
+            },
+            "HistoryRead": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "snapshot": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "after_cursor": {
+                  "type": "string",
+                  "id": 3
+                },
+                "cut_cursor": {
+                  "type": "string",
+                  "id": 4
+                },
+                "max_bytes": {
+                  "type": "uint32",
+                  "id": 5
+                },
+                "max_messages": {
+                  "type": "uint32",
+                  "id": 6
+                }
+              }
+            },
+            "HistoryPage": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "batch": {
+                  "type": "HistoryBatch",
+                  "id": 2
+                },
+                "cut_cursor": {
+                  "type": "string",
+                  "id": 3
+                },
+                "complete": {
+                  "type": "bool",
+                  "id": 4
+                },
+                "snapshot": {
+                  "type": "bool",
+                  "id": 5
+                }
+              }
+            },
+            "AttemptStarted": {
+              "fields": {}
+            },
+            "AttemptEnded": {
+              "fields": {
+                "outcome": {
+                  "type": "AttemptOutcome",
+                  "id": 1
+                }
+              }
+            },
+            "LiveFrame": {
+              "oneofs": {
+                "payload": {
+                  "oneof": [
+                    "started",
+                    "delta",
+                    "reset",
+                    "ended"
+                  ]
+                }
+              },
+              "fields": {
+                "attempt": {
+                  "type": "AttemptRef",
+                  "id": 1
+                },
+                "block_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "first_seq": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "last_seq": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "started": {
+                  "type": "AttemptStarted",
+                  "id": 5
+                },
+                "delta": {
+                  "type": "TextContent",
+                  "id": 6
+                },
+                "reset": {
+                  "type": "TextContent",
+                  "id": 7
+                },
+                "ended": {
+                  "type": "AttemptEnded",
+                  "id": 8
+                }
+              }
+            },
+            "SessionState": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "live_epoch": {
+                  "type": "string",
+                  "id": 2
+                },
+                "revision": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "history_head": {
+                  "type": "string",
+                  "id": 4
+                },
+                "run_phase": {
+                  "type": "RunPhase",
+                  "id": 5
+                },
+                "approvals": {
+                  "rule": "repeated",
+                  "type": "Approval",
+                  "id": 6
+                }
+              }
+            },
+            "HistoryReset": {
+              "fields": {
+                "reason": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "SessionUpdate": {
+              "oneofs": {
+                "payload": {
+                  "oneof": [
+                    "history",
+                    "live",
+                    "state",
+                    "reset"
+                  ]
+                }
+              },
+              "fields": {
+                "watch_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "session": {
+                  "type": "SessionKey",
+                  "id": 2
+                },
+                "history": {
+                  "type": "HistoryBatch",
+                  "id": 3
+                },
+                "live": {
+                  "type": "LiveFrame",
+                  "id": 4
+                },
+                "state": {
+                  "type": "SessionState",
+                  "id": 5
+                },
+                "reset": {
+                  "type": "HistoryReset",
+                  "id": 6
+                }
+              }
+            },
+            "WatchSession": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "WatchReady": {
+              "fields": {
+                "watch_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "state": {
+                  "type": "SessionState",
+                  "id": 2
+                },
+                "lease_ms": {
+                  "type": "uint32",
+                  "id": 3
+                }
+              }
+            },
+            "RefreshWatches": {
+              "fields": {
+                "watch_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "WatchStates": {
+              "fields": {
+                "watches": {
+                  "rule": "repeated",
+                  "type": "WatchReady",
+                  "id": 1
+                }
+              }
+            },
+            "UnwatchSession": {
+              "fields": {
+                "watch_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

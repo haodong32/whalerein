@@ -1,0 +1,119 @@
+package broker
+
+import (
+	"errors"
+	"strings"
+)
+
+// MQTT topics and filters from proto/v1/WIRE.md.
+const (
+	topicRoot = "whalerein/v1/h/"
+
+	// ResultFilter receives HostResult messages from every host.
+	ResultFilter = "whalerein/v1/h/+/result"
+	// EventFilter receives event envelopes from every host.
+	EventFilter     = "whalerein/v1/h/+/event"
+	DeviceAckFilter = "whalerein/v1/h/+/d/+/ack"
+	// SysConnectedFilter receives broker client-connected events.
+	SysConnectedFilter = "$SYS/brokers/+/clients/+/connected"
+	// SysDisconnectedFilter receives broker client-disconnected events.
+	SysDisconnectedFilter = "$SYS/brokers/+/clients/+/disconnected"
+)
+
+// TopicKind is one of the four wire topic shapes.
+type TopicKind string
+
+// Wire topic kinds.
+const (
+	KindRequest     TopicKind = "request"
+	KindResult      TopicKind = "result"
+	KindEvent       TopicKind = "event"
+	KindDeviceEvent TopicKind = "device_event"
+	KindDeviceAck   TopicKind = "device_ack"
+)
+
+// ErrInvalidTopic is returned for topics outside the four wire templates.
+var ErrInvalidTopic = errors.New("invalid topic")
+
+// Topic is a parsed wire topic.
+type Topic struct {
+	HostID   string
+	DeviceID string
+	Kind     TopicKind
+}
+
+func validID(value string) bool {
+	return value != "" && !strings.ContainsAny(value, "/+#\x00")
+}
+
+// RequestTopic is the Access -> host request topic.
+func RequestTopic(hostID string) string { return topicRoot + hostID + "/request" }
+
+// ResultTopic is the host -> Access result topic.
+func ResultTopic(hostID string) string { return topicRoot + hostID + "/result" }
+
+// EventTopic is the host -> Access event topic.
+func EventTopic(hostID string) string { return topicRoot + hostID + "/event" }
+
+// DeviceEventTopic is the Access -> device event topic.
+func DeviceEventTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/event"
+}
+
+func DeviceAckTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/ack"
+}
+
+// ParseTopic parses one concrete wire topic. Wildcards are rejected.
+func ParseTopic(topic string) (Topic, error) {
+	if !strings.HasPrefix(topic, topicRoot) {
+		return Topic{}, ErrInvalidTopic
+	}
+	parts := strings.Split(strings.TrimPrefix(topic, topicRoot), "/")
+	switch len(parts) {
+	case 2:
+		if !validID(parts[0]) {
+			return Topic{}, ErrInvalidTopic
+		}
+		switch TopicKind(parts[1]) {
+		case KindRequest, KindResult, KindEvent:
+			return Topic{HostID: parts[0], Kind: TopicKind(parts[1])}, nil
+		default:
+			return Topic{}, ErrInvalidTopic
+		}
+	case 4:
+		if !validID(parts[0]) || parts[1] != "d" || !validID(parts[2]) || (parts[3] != "event" && parts[3] != "ack") {
+			return Topic{}, ErrInvalidTopic
+		}
+		kind := KindDeviceEvent
+		if parts[3] == "ack" {
+			kind = KindDeviceAck
+		}
+		return Topic{HostID: parts[0], DeviceID: parts[2], Kind: kind}, nil
+	default:
+		return Topic{}, ErrInvalidTopic
+	}
+}
+
+// ParseSysClientTopic recognizes the EMQX $SYS client lifecycle topics and
+// returns client id and online state.
+func ParseSysClientTopic(topic string) (clientID string, online bool, ok bool) {
+	parts := strings.Split(topic, "/")
+	if len(parts) != 6 || parts[0] != "$SYS" || parts[1] != "brokers" || parts[3] != "clients" {
+		return "", false, false
+	}
+	switch parts[5] {
+	case "connected":
+		return parts[4], true, true
+	case "disconnected":
+		return parts[4], false, true
+	default:
+		return "", false, false
+	}
+}
+
+// ClientIDForHost returns the fixed host client id.
+func ClientIDForHost(hostID string) string { return "whalerein-host-" + hostID }
+
+// ClientIDForDevice returns the fixed device client id.
+func ClientIDForDevice(deviceID string) string { return "whalerein-device-" + deviceID }

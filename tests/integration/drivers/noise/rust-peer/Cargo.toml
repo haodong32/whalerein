@@ -1,0 +1,16 @@
+[package]
+name = "whalerein-noise-peer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone crate: it verifies the protocol independently of the workspace.
+[workspace]
+
+[dependencies]
+chacha20poly1305 = "0.10"
+hex = "0.4"
+hkdf = "0.12"
+serde_json = "1"
+sha2 = "0.10"
+snow = { version = "0.9", features = ["default-resolver"] }

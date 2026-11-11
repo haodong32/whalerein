@@ -1,0 +1,176 @@
+import { MemoryHostCredentials } from 'whalerein-host/security/credentials.js'
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { FakeDshAdapter } from '../src/adapter/fake.js'
+import { AdapterError } from 'whalerein-host/errors.js'
+import { createAdapter, hasDshServices } from '../src/adapter/index.js'
+import { approvalDigest } from 'whalerein-host/security/digest.js'
+
+test('when FakeDSH is queried or emits committed events, the adapter returns sessions and snapshots', async () => {
+  const adapter = new FakeDshAdapter({ now: () => 1000 })
+  await adapter.open()
+  adapter.createSession({ sessionId: 's1', title: 'One', cwd: '/tmp', running: false })
+  assert.throws(() => adapter.createSession({ sessionId: 's1' }), (error) => error.code === 'conflict')
+  const sessions = await adapter.listSessions()
+  assert.equal(sessions.length, 1)
+  assert.equal(sessions[0].sessionId, 's1')
+  assert.equal(sessions[0].title, 'One')
+  assert.equal(sessions[0].running, false)
+
+  const seen = []
+  const off = adapter.subscribeEvents((event) => seen.push(event))
+  adapter.output('s1', 'hello')
+  adapter.setRunning('s1', true)
+  const event = adapter.emit('s1', { type: 'tool/result', kind: 'output', data: { ok: true } })
+  assert.equal(event.seq, 2)
+  off()
+  adapter.output('s1', 'not delivered')
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0].sessionId, 's1')
+  assert.equal(seen[0].dshSeq, 1)
+  assert.equal(seen[1].kind, 'output')
+
+  const snapshot = await adapter.getSessionSnapshot('s1')
+  assert.equal(snapshot.complete, true)
+  assert.equal(snapshot.source, 'dsh')
+  assert.equal(snapshot.events.length, 3)
+  assert.equal(snapshot.summary.running, true)
+  await assert.rejects(adapter.getSessionSnapshot('missing'), (error) => error.code === 'not_found')
+  adapter.close()
+})
+
+test('when FakeDSH accepts a message, it returns a nonempty receipt and records one user message followed by the configured assistant reply and turn end', async () => {
+  const adapter = new FakeDshAdapter({ now: () => 1000, sessions: [{ sessionId: 's1', running: false }], behavior: { emitOutputOnMessage: true } })
+  await adapter.open()
+  const message = await adapter.sendUserMessage('s1', 'hello')
+  assert.equal(typeof message.messageId, 'string')
+  const events = (await adapter.getSessionSnapshot('s1')).events
+  assert.deepEqual(events.map((event) => event.type), ['user/message', 'assistant/message', 'turn/end'])
+  assert.ok(message.messageId.length > 0)
+  assert.equal(events[0].data.text, 'hello')
+  assert.equal(events[1].data.text, 'hello')
+  await assert.rejects(adapter.sendUserMessage('s1', '  '), (error) => error.code === 'invalid_argument')
+  await assert.rejects(adapter.sendUserMessage('missing', 'x'), (error) => error.code === 'not_found')
+
+  assert.equal((await adapter.getSessionSnapshot('s1')).events.length, 3)
+  await adapter.close()
+})
+
+test('when a running FakeDSH session is interrupted, it records one interrupt and becomes idle', async () => {
+  const adapter = new FakeDshAdapter({ now: () => 1000, sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  await adapter.interrupt('s1')
+  const interrupted = (await adapter.getSessionSnapshot('s1')).events.at(-1)
+  assert.equal(interrupted.type, 'session/interrupted')
+  assert.equal((await adapter.getSessionSnapshot('s1')).summary.running, false)
+  assert.equal((await adapter.getSessionSnapshot('s1')).events.length, 1)
+  await adapter.close()
+})
+
+test('when a fake approval expires or is resolved, expiry and one-shot consumption are enforced atomically', async () => {
+  let now = 1000
+  const adapter = new FakeDshAdapter({ now: () => now, sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  const requested = []
+  adapter.subscribeApprovals((event) => requested.push(event))
+  const approval = adapter.requestApproval({ sessionId: 's1', toolName: 'bash', callId: 'call-1', reason: 'because', ttlMs: 100 })
+  assert.equal(requested[0].type, 'requested')
+  assert.deepEqual([...approval.digest], [...approvalDigest(approval)])
+  assert.equal((await adapter.getApproval(approval.approvalId)).state, 'pending')
+  assert.equal(await adapter.getApproval('missing'), null)
+
+  const resolved = await adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version)
+  assert.equal(resolved.state, 'approved')
+  assert.equal(requested[1].type, 'resolved')
+  await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version), (error) => error.code === 'approval_already_resolved')
+
+  const second = adapter.requestApproval({ sessionId: 's1', ttlMs: 10 })
+  now += 20
+  const expired = await adapter.getApproval(second.approvalId)
+  assert.equal(expired.state, 'expired')
+  await assert.rejects(adapter.resolveApproval(second.approvalId, 'approve', second.digest, second.version), (error) => error.code === 'approval_expired')
+  assert.throws(() => adapter.requestApproval({ sessionId: 'missing' }), (error) => error.code === 'not_found')
+})
+
+test('when approval digest/version is wrong, session stopped, or resolution repeated, FakeDSH rejects it', async () => {
+  const adapter = new FakeDshAdapter({ now: () => 1000, sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  const approval = adapter.requestApproval({ sessionId: 's1' })
+  await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', new Uint8Array(32), approval.version), (error) => error.code === 'approval_version_mismatch')
+  await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version + 1), (error) => error.code === 'approval_version_mismatch')
+  await assert.rejects(adapter.resolveApproval(approval.approvalId, 'maybe', approval.digest, approval.version), (error) => error.code === 'invalid_argument')
+  adapter.setRunning('s1', false)
+  await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version), (error) => error.code === 'approval_unavailable')
+  adapter.setRunning('s1', true)
+  await adapter.simulateResolution(approval.approvalId, 'reject')
+  assert.equal((await adapter.getApproval(approval.approvalId)).state, 'rejected')
+  const local = adapter.requestApproval({ sessionId: 's1' })
+  await Promise.all([
+    adapter.resolveApproval(local.approvalId, 'approve', local.digest, local.version).then(() => 'won').catch((error) => error.code),
+    adapter.resolveApproval(local.approvalId, 'reject', local.digest, local.version).then(() => 'won').catch((error) => error.code),
+  ]).then((results) => {
+    assert.equal(results.filter((result) => result === 'won').length, 1)
+    assert.equal(results.filter((result) => result === 'approval_already_resolved').length, 1)
+  })
+})
+
+test('when crash, failure, or hang injection is configured, FakeDSH simulates that outcome', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  adapter.failNext('sendUserMessage', 'unavailable')
+  await assert.rejects(adapter.sendUserMessage('s1', 'x'), (error) => error.code === 'unavailable')
+  adapter.failNext('listSessions')
+  await assert.rejects(adapter.listSessions(), (error) => error.code === 'unavailable')
+  adapter.hangNext('sendUserMessage')
+  const hanging = adapter.sendUserMessage('s1', 'x')
+  assert.equal(hanging instanceof Promise, true)
+  adapter.crash()
+  assert.equal(adapter.describe().available, false)
+  await assert.rejects(adapter.listSessions(), (error) => error.code === 'unavailable')
+  assert.throws(() => adapter.emit('s1', {}), (error) => error.code === 'unavailable')
+  adapter.recover()
+  assert.equal(adapter.describe().available, true)
+  assert.equal(await adapter.getApproval('missing'), null)
+})
+
+test('when fake credentials are stored, they stay out of SQLite and optionally persist in a temporary file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-fake-cred-'))
+  try {
+    const file = join(dir, 'credentials.json')
+    const adapter = new MemoryHostCredentials({ credentialFile: file })
+    await adapter.setCredential('key', 'super-secret')
+    assert.equal(await adapter.getCredential('key'), 'super-secret')
+    assert.equal(await adapter.getCredential('missing'), null)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).key, 'super-secret')
+    const reopened = new MemoryHostCredentials({ credentialFile: file })
+    assert.equal(await reopened.getCredential('key'), 'super-secret')
+    const missing = new MemoryHostCredentials({ credentialFile: join(dir, 'missing', 'credentials.json') })
+    assert.equal(await missing.getCredential('key'), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('when adapter mode is auto, native session services select real DSH and absent services select FakeDSH; explicit overrides win', async () => {
+  const fake = createAdapter({ mode: 'fake' })
+  assert.equal(fake.describe().mode, 'fake')
+  const auto = createAdapter({ mode: 'auto' })
+  assert.equal(auto.describe().mode, 'fake')
+  const injected = new FakeDshAdapter()
+  assert.equal(createAdapter({ adapter: injected }), injected)
+  assert.equal(hasDshServices(null), false)
+  assert.equal(hasDshServices({}), false)
+  assert.equal(hasDshServices({ sessions: {} }), true)
+  const real = createAdapter({ mode: 'real', ctx: { sessions: { list: () => [] } }, config: {} })
+  assert.equal(real.describe().mode, 'real')
+  for (const ctx of [{ sessions: {} }, { sessionController: {} }]) {
+    assert.equal(createAdapter({ mode: 'auto', ctx, config: {} }).describe().mode, 'real')
+    assert.equal(createAdapter({ mode: 'fake', ctx }).describe().mode, 'fake')
+  }
+  for (const ctx of [null, {}, { sessions: null, sessionController: null }]) {
+    assert.equal(createAdapter({ mode: 'auto', ctx }).describe().mode, 'fake')
+  }
+})

@@ -1,0 +1,20 @@
+[package]
+name = "whalerein-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Generated Protobuf types for the WhaleRein v1 wire contract"
+build = "build.rs"
+
+[dependencies]
+pbjson = "0.9"
+prost = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[build-dependencies]
+pbjson-build = "0.9"
+prost-build = "0.14"

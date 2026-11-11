@@ -1,0 +1,2563 @@
+{
+  "enums": {
+    "ApprovalDecision": {
+      "values": [
+        {
+          "name": "APPROVAL_DECISION_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "APPROVAL_DECISION_APPROVE",
+          "number": 1
+        },
+        {
+          "name": "APPROVAL_DECISION_REJECT",
+          "number": 2
+        }
+      ]
+    },
+    "ApprovalState": {
+      "values": [
+        {
+          "name": "APPROVAL_STATE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "APPROVAL_STATE_PENDING",
+          "number": 1
+        },
+        {
+          "name": "APPROVAL_STATE_APPROVED",
+          "number": 2
+        },
+        {
+          "name": "APPROVAL_STATE_REJECTED",
+          "number": 3
+        },
+        {
+          "name": "APPROVAL_STATE_EXPIRED",
+          "number": 4
+        },
+        {
+          "name": "APPROVAL_STATE_UNAVAILABLE",
+          "number": 5
+        }
+      ]
+    },
+    "AttemptOutcome": {
+      "values": [
+        {
+          "name": "ATTEMPT_OUTCOME_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "COMMITTED",
+          "number": 1
+        },
+        {
+          "name": "ABANDONED",
+          "number": 2
+        },
+        {
+          "name": "INTERRUPTED",
+          "number": 3
+        },
+        {
+          "name": "ATTEMPT_FAILED",
+          "number": 4
+        }
+      ]
+    },
+    "Capability": {
+      "values": [
+        {
+          "name": "capability_unspecified",
+          "number": 0
+        },
+        {
+          "name": "sessions",
+          "number": 1
+        },
+        {
+          "name": "events",
+          "number": 2
+        },
+        {
+          "name": "messages",
+          "number": 3
+        },
+        {
+          "name": "approvals",
+          "number": 4
+        },
+        {
+          "name": "interrupt",
+          "number": 5
+        },
+        {
+          "name": "sync",
+          "number": 6
+        },
+        {
+          "name": "snapshot",
+          "number": 7
+        }
+      ]
+    },
+    "DeliveryMode": {
+      "values": [
+        {
+          "name": "DELIVERY_MODE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "START_IF_IDLE",
+          "number": 1
+        },
+        {
+          "name": "ENQUEUE_AFTER_RUN",
+          "number": 2
+        },
+        {
+          "name": "STEER",
+          "number": 3
+        }
+      ]
+    },
+    "ErrorCode": {
+      "values": [
+        {
+          "name": "error_code_unspecified",
+          "number": 0
+        },
+        {
+          "name": "invalid_argument",
+          "number": 1
+        },
+        {
+          "name": "unauthorized",
+          "number": 2
+        },
+        {
+          "name": "forbidden",
+          "number": 3
+        },
+        {
+          "name": "not_found",
+          "number": 4
+        },
+        {
+          "name": "conflict",
+          "number": 5
+        },
+        {
+          "name": "expired",
+          "number": 6
+        },
+        {
+          "name": "unsupported_capability",
+          "number": 7
+        },
+        {
+          "name": "protocol_version_incompatible",
+          "number": 8
+        },
+        {
+          "name": "payload_digest_mismatch",
+          "number": 9
+        },
+        {
+          "name": "approval_expired",
+          "number": 10
+        },
+        {
+          "name": "approval_version_mismatch",
+          "number": 11
+        },
+        {
+          "name": "approval_already_resolved",
+          "number": 12
+        },
+        {
+          "name": "approval_unavailable",
+          "number": 13
+        },
+        {
+          "name": "snapshot_required",
+          "number": 14
+        },
+        {
+          "name": "revocations_pending",
+          "number": 15
+        },
+        {
+          "name": "rate_limited",
+          "number": 16
+        },
+        {
+          "name": "internal",
+          "number": 17
+        },
+        {
+          "name": "unavailable",
+          "number": 18
+        },
+        {
+          "name": "payload_too_large",
+          "number": 19
+        }
+      ]
+    },
+    "MessageRole": {
+      "values": [
+        {
+          "name": "MESSAGE_ROLE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "USER",
+          "number": 1
+        },
+        {
+          "name": "ASSISTANT",
+          "number": 2
+        },
+        {
+          "name": "TOOL",
+          "number": 3
+        },
+        {
+          "name": "NOTICE",
+          "number": 4
+        }
+      ]
+    },
+    "OnlineStatus": {
+      "values": [
+        {
+          "name": "online_status_unspecified",
+          "number": 0
+        },
+        {
+          "name": "received",
+          "number": 1
+        },
+        {
+          "name": "host_offline",
+          "number": 2
+        },
+        {
+          "name": "rejected",
+          "number": 3
+        },
+        {
+          "name": "host_accepted",
+          "number": 4
+        },
+        {
+          "name": "succeeded",
+          "number": 5
+        },
+        {
+          "name": "failed",
+          "number": 6
+        },
+        {
+          "name": "unknown",
+          "number": 7
+        }
+      ]
+    },
+    "PairingPhase": {
+      "values": [
+        {
+          "name": "PAIRING_PHASE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "PAIRING_PHASE_HELLO",
+          "number": 1
+        },
+        {
+          "name": "PAIRING_PHASE_FINISH",
+          "number": 2
+        },
+        {
+          "name": "PAIRING_PHASE_AUTHORIZE",
+          "number": 3
+        },
+        {
+          "name": "PAIRING_PHASE_COMMIT",
+          "number": 4
+        }
+      ]
+    },
+    "RequestKind": {
+      "values": [
+        {
+          "name": "REQUEST_KIND_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "REQUEST_KIND_HANDSHAKE",
+          "number": 1
+        },
+        {
+          "name": "REQUEST_KIND_QUERY",
+          "number": 2
+        },
+        {
+          "name": "REQUEST_KIND_COMMAND",
+          "number": 3
+        },
+        {
+          "name": "REQUEST_KIND_PAIRING_CLAIM",
+          "number": 4
+        },
+        {
+          "name": "REQUEST_KIND_PAIRING_AUTHORIZE",
+          "number": 5
+        },
+        {
+          "name": "REQUEST_KIND_REVOCATION",
+          "number": 6
+        }
+      ]
+    },
+    "RunPhase": {
+      "values": [
+        {
+          "name": "RUN_PHASE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "IDLE",
+          "number": 1
+        },
+        {
+          "name": "RUNNING",
+          "number": 2
+        },
+        {
+          "name": "STOPPING",
+          "number": 3
+        },
+        {
+          "name": "SOURCE_UNAVAILABLE",
+          "number": 4
+        }
+      ]
+    }
+  },
+  "file": "proto/v1/whalerein.proto",
+  "messages": {
+    "Approval": {
+      "fields": [
+        {
+          "json_name": "approvalId",
+          "name": "approval_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "decision",
+          "name": "decision",
+          "number": "10",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ApprovalDecision"
+        },
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "toolName",
+          "name": "tool_name",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "callId",
+          "name": "call_id",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "digest",
+          "name": "digest",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "version",
+          "name": "version",
+          "number": "7",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "8",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": "9",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ApprovalState"
+        }
+      ]
+    },
+    "ApprovalList": {
+      "fields": [
+        {
+          "json_name": "approvals",
+          "label": "LABEL_REPEATED",
+          "name": "approvals",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Approval"
+        }
+      ]
+    },
+    "AttachmentContent": {
+      "fields": [
+        {
+          "json_name": "mediaType",
+          "name": "media_type",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "name",
+          "name": "name",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "size",
+          "name": "size",
+          "number": "3",
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "available",
+          "name": "available",
+          "number": "4",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "AttemptEnded": {
+      "fields": [
+        {
+          "json_name": "outcome",
+          "name": "outcome",
+          "number": "1",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.AttemptOutcome"
+        }
+      ]
+    },
+    "AttemptRef": {
+      "fields": [
+        {
+          "json_name": "liveEpoch",
+          "name": "live_epoch",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "attemptId",
+          "name": "attempt_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "AttemptStarted": {
+      "fields": []
+    },
+    "CapabilitySet": {
+      "fields": [
+        {
+          "json_name": "capabilities",
+          "label": "LABEL_REPEATED",
+          "name": "capabilities",
+          "number": "1",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.Capability"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "2",
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "ChannelHello": {
+      "fields": [
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "capabilities",
+          "name": "capabilities",
+          "number": "4",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CapabilitySet"
+        },
+        {
+          "json_name": "clientNonce",
+          "name": "client_nonce",
+          "number": "5",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ChannelReady": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "capabilities",
+          "name": "capabilities",
+          "number": "4",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CapabilitySet"
+        },
+        {
+          "json_name": "hostNonce",
+          "name": "host_nonce",
+          "number": "5",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "CommandAccepted": {
+      "fields": [
+        {
+          "json_name": "messageId",
+          "name": "message_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "CommandResult": {
+      "fields": [
+        {
+          "json_name": "found",
+          "name": "found",
+          "number": "1",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": "2",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OnlineStatus"
+        },
+        {
+          "json_name": "resultPayload",
+          "name": "result_payload",
+          "number": "3",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": "4",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        }
+      ]
+    },
+    "ContentBlock": {
+      "fields": [
+        {
+          "json_name": "blockId",
+          "name": "block_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": "2",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.TextContent"
+        },
+        {
+          "json_name": "toolCall",
+          "name": "tool_call",
+          "number": "3",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ToolCallContent"
+        },
+        {
+          "json_name": "toolResult",
+          "name": "tool_result",
+          "number": "4",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ToolResultContent"
+        },
+        {
+          "json_name": "notice",
+          "name": "notice",
+          "number": "5",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.NoticeContent"
+        },
+        {
+          "json_name": "attachment",
+          "name": "attachment",
+          "number": "6",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttachmentContent"
+        }
+      ]
+    },
+    "ConversationMessage": {
+      "fields": [
+        {
+          "json_name": "messageId",
+          "name": "message_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "role",
+          "name": "role",
+          "number": "2",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.MessageRole"
+        },
+        {
+          "json_name": "blocks",
+          "label": "LABEL_REPEATED",
+          "name": "blocks",
+          "number": "3",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ContentBlock"
+        },
+        {
+          "json_name": "authoredAtUnixMs",
+          "name": "authored_at_unix_ms",
+          "number": "4",
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "EncryptedFrame": {
+      "fields": [
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nonce",
+          "name": "nonce",
+          "number": "2",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "ciphertext",
+          "name": "ciphertext",
+          "number": "3",
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "ErrorResponse": {
+      "fields": [
+        {
+          "json_name": "code",
+          "name": "code",
+          "number": "1",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "message",
+          "name": "message",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "traceId",
+          "name": "trace_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": "4",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "EventEnvelope": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nonce",
+          "name": "nonce",
+          "number": "4",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "ciphertext",
+          "name": "ciphertext",
+          "number": "5",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "createdAtUnixMs",
+          "name": "created_at_unix_ms",
+          "number": "6",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "traceId",
+          "name": "trace_id",
+          "number": "7",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "EventPayload": {
+      "fields": [
+        {
+          "json_name": "update",
+          "name": "update",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionUpdate"
+        }
+      ]
+    },
+    "GetApproval": {
+      "fields": [
+        {
+          "json_name": "approvalId",
+          "name": "approval_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "GetCommandResult": {
+      "fields": [
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "GetSession": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HistoryBatch": {
+      "fields": [
+        {
+          "json_name": "fromCursor",
+          "name": "from_cursor",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "toCursor",
+          "name": "to_cursor",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "batchId",
+          "name": "batch_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "changes",
+          "label": "LABEL_REPEATED",
+          "name": "changes",
+          "number": "4",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.MessageUpsert"
+        }
+      ]
+    },
+    "HistoryPage": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "batch",
+          "name": "batch",
+          "number": "2",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryBatch"
+        },
+        {
+          "json_name": "cutCursor",
+          "name": "cut_cursor",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "complete",
+          "name": "complete",
+          "number": "4",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "snapshot",
+          "name": "snapshot",
+          "number": "5",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "HistoryRead": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "snapshot",
+          "name": "snapshot",
+          "number": "2",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "afterCursor",
+          "name": "after_cursor",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "cutCursor",
+          "name": "cut_cursor",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "maxBytes",
+          "name": "max_bytes",
+          "number": "5",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "maxMessages",
+          "name": "max_messages",
+          "number": "6",
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "HistoryReset": {
+      "fields": [
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostGrantRevocation": {
+      "fields": [
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": "1",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": "2",
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "HostInfo": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "online",
+          "name": "online",
+          "number": "2",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "fingerprint",
+          "name": "fingerprint",
+          "number": "4",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostList": {
+      "fields": [
+        {
+          "json_name": "hosts",
+          "label": "LABEL_REPEATED",
+          "name": "hosts",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostInfo"
+        }
+      ]
+    },
+    "HostReady": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "connectedAtUnixMs",
+          "name": "connected_at_unix_ms",
+          "number": "2",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "authorizationPublicKey",
+          "name": "authorization_public_key",
+          "number": "3",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "transportVersion",
+          "name": "transport_version",
+          "number": "4",
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "HostRequest": {
+      "fields": [
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": "10",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "body",
+          "name": "body",
+          "number": "11",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "clientTransportVersion",
+          "name": "client_transport_version",
+          "number": "12",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "relayTransportVersion",
+          "name": "relay_transport_version",
+          "number": "13",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "kind",
+          "name": "kind",
+          "number": "4",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RequestKind"
+        },
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "payloadDigest",
+          "name": "payload_digest",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "7",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "traceId",
+          "name": "trace_id",
+          "number": "8",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "9",
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "HostResult": {
+      "fields": [
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "errorMessage",
+          "name": "error_message",
+          "number": "10",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "completedAtUnixMs",
+          "name": "completed_at_unix_ms",
+          "number": "11",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "12",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": "13",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": "4",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OnlineStatus"
+        },
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "payloadDigest",
+          "name": "payload_digest",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "resultBody",
+          "name": "result_body",
+          "number": "7",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": "8",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "traceId",
+          "name": "trace_id",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "Interrupt": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ListApprovals": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ListSessions": {
+      "fields": []
+    },
+    "LiveFrame": {
+      "fields": [
+        {
+          "json_name": "attempt",
+          "name": "attempt",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttemptRef"
+        },
+        {
+          "json_name": "blockId",
+          "name": "block_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "firstSeq",
+          "name": "first_seq",
+          "number": "3",
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "lastSeq",
+          "name": "last_seq",
+          "number": "4",
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "started",
+          "name": "started",
+          "number": "5",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttemptStarted"
+        },
+        {
+          "json_name": "delta",
+          "name": "delta",
+          "number": "6",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.TextContent"
+        },
+        {
+          "json_name": "reset",
+          "name": "reset",
+          "number": "7",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.TextContent"
+        },
+        {
+          "json_name": "ended",
+          "name": "ended",
+          "number": "8",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttemptEnded"
+        }
+      ]
+    },
+    "MessageUpsert": {
+      "fields": [
+        {
+          "json_name": "message",
+          "name": "message",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ConversationMessage"
+        },
+        {
+          "json_name": "origin",
+          "name": "origin",
+          "number": "2",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttemptRef"
+        }
+      ]
+    },
+    "NoticeContent": {
+      "fields": [
+        {
+          "json_name": "category",
+          "name": "category",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": "2",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingClaim": {
+      "fields": [
+        {
+          "json_name": "claimId",
+          "name": "claim_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "tokenHash",
+          "name": "token_hash",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "phase",
+          "name": "phase",
+          "number": "3",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PairingPhase"
+        },
+        {
+          "json_name": "noiseMessage",
+          "name": "noise_message",
+          "number": "4",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "devicePublicKey",
+          "name": "device_public_key",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "7",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "grantGeneration",
+          "name": "grant_generation",
+          "number": "8",
+          "type": "TYPE_UINT64"
+        }
+      ]
+    },
+    "PairingClaimRequest": {
+      "fields": [
+        {
+          "json_name": "token",
+          "name": "token",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "claimId",
+          "name": "claim_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "phase",
+          "name": "phase",
+          "number": "3",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PairingPhase"
+        },
+        {
+          "json_name": "noiseMessage",
+          "name": "noise_message",
+          "number": "4",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "6",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "confirmed",
+          "name": "confirmed",
+          "number": "7",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "PairingClaimResponse": {
+      "fields": [
+        {
+          "json_name": "claimId",
+          "name": "claim_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "10",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "11",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "phase",
+          "name": "phase",
+          "number": "3",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PairingPhase"
+        },
+        {
+          "json_name": "noiseMessage",
+          "name": "noise_message",
+          "number": "4",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostPublicKey",
+          "name": "host_public_key",
+          "number": "5",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostFingerprint",
+          "name": "host_fingerprint",
+          "number": "6",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "7",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "devicePublicKey",
+          "name": "device_public_key",
+          "number": "8",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "deviceToken",
+          "name": "device_token",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingClaimResult": {
+      "fields": [
+        {
+          "json_name": "noiseMessage",
+          "name": "noise_message",
+          "number": "1",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostPublicKey",
+          "name": "host_public_key",
+          "number": "2",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostFingerprint",
+          "name": "host_fingerprint",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "devicePublicKey",
+          "name": "device_public_key",
+          "number": "5",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "authorized",
+          "name": "authorized",
+          "number": "6",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "PairingFinish": {
+      "fields": [
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostFingerprint",
+          "name": "host_fingerprint",
+          "number": "3",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingHello": {
+      "fields": [
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "capabilities",
+          "name": "capabilities",
+          "number": "4",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CapabilitySet"
+        },
+        {
+          "json_name": "deviceNonce",
+          "name": "device_nonce",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "displayName",
+          "name": "display_name",
+          "number": "6",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "os",
+          "name": "os",
+          "number": "7",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingHelloReply": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "capabilities",
+          "name": "capabilities",
+          "number": "4",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CapabilitySet"
+        },
+        {
+          "json_name": "hostNonce",
+          "name": "host_nonce",
+          "number": "5",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingInvitation": {
+      "fields": [
+        {
+          "json_name": "token",
+          "name": "token",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "3",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "pairingUri",
+          "name": "pairing_uri",
+          "number": "4",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "PairingInvitationRequest": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": "2",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": "3",
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "Ping": {
+      "fields": [
+        {
+          "json_name": "clientTimeUnixMs",
+          "name": "client_time_unix_ms",
+          "number": "1",
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "Pong": {
+      "fields": [
+        {
+          "json_name": "hostTimeUnixMs",
+          "name": "host_time_unix_ms",
+          "number": "1",
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "RefreshWatches": {
+      "fields": [
+        {
+          "json_name": "watchIds",
+          "label": "LABEL_REPEATED",
+          "name": "watch_ids",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "RequestPayload": {
+      "fields": [
+        {
+          "json_name": "listSessions",
+          "name": "list_sessions",
+          "number": "1",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ListSessions"
+        },
+        {
+          "json_name": "listApprovals",
+          "name": "list_approvals",
+          "number": "10",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ListApprovals"
+        },
+        {
+          "json_name": "readHistory",
+          "name": "read_history",
+          "number": "11",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryRead"
+        },
+        {
+          "json_name": "watchSession",
+          "name": "watch_session",
+          "number": "12",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchSession"
+        },
+        {
+          "json_name": "refreshWatches",
+          "name": "refresh_watches",
+          "number": "13",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.RefreshWatches"
+        },
+        {
+          "json_name": "unwatchSession",
+          "name": "unwatch_session",
+          "number": "14",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.UnwatchSession"
+        },
+        {
+          "json_name": "getSession",
+          "name": "get_session",
+          "number": "2",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.GetSession"
+        },
+        {
+          "json_name": "getApproval",
+          "name": "get_approval",
+          "number": "4",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.GetApproval"
+        },
+        {
+          "json_name": "getCommandResult",
+          "name": "get_command_result",
+          "number": "5",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.GetCommandResult"
+        },
+        {
+          "json_name": "sendMessage",
+          "name": "send_message",
+          "number": "6",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SendMessage"
+        },
+        {
+          "json_name": "interrupt",
+          "name": "interrupt",
+          "number": "7",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Interrupt"
+        },
+        {
+          "json_name": "resolveApproval",
+          "name": "resolve_approval",
+          "number": "8",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ResolveApproval"
+        },
+        {
+          "json_name": "ping",
+          "name": "ping",
+          "number": "9",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Ping"
+        }
+      ]
+    },
+    "RequestReceipt": {
+      "fields": [
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": "2",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OnlineStatus"
+        },
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "4",
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "RequestState": {
+      "fields": [
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "10",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": "11",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": "12",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": "4",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OnlineStatus"
+        },
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "payloadDigest",
+          "name": "payload_digest",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "resultBody",
+          "name": "result_body",
+          "number": "7",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": "8",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "errorMessage",
+          "name": "error_message",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ResolveApproval": {
+      "fields": [
+        {
+          "json_name": "approvalId",
+          "name": "approval_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "decision",
+          "name": "decision",
+          "number": "2",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ApprovalDecision"
+        },
+        {
+          "json_name": "expectedDigest",
+          "name": "expected_digest",
+          "number": "3",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expectedVersion",
+          "name": "expected_version",
+          "number": "4",
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "ResponsePayload": {
+      "fields": [
+        {
+          "json_name": "sessionList",
+          "name": "session_list",
+          "number": "1",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionList"
+        },
+        {
+          "json_name": "approvalList",
+          "name": "approval_list",
+          "number": "10",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ApprovalList"
+        },
+        {
+          "json_name": "historyPage",
+          "name": "history_page",
+          "number": "11",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryPage"
+        },
+        {
+          "json_name": "watchReady",
+          "name": "watch_ready",
+          "number": "12",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchReady"
+        },
+        {
+          "json_name": "watchStates",
+          "name": "watch_states",
+          "number": "13",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchStates"
+        },
+        {
+          "json_name": "sessionInfo",
+          "name": "session_info",
+          "number": "14",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionSummary"
+        },
+        {
+          "json_name": "approval",
+          "name": "approval",
+          "number": "4",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Approval"
+        },
+        {
+          "json_name": "commandAccepted",
+          "name": "command_accepted",
+          "number": "5",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CommandAccepted"
+        },
+        {
+          "json_name": "commandResult",
+          "name": "command_result",
+          "number": "6",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CommandResult"
+        },
+        {
+          "json_name": "pong",
+          "name": "pong",
+          "number": "7",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Pong"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": "8",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "errorDetail",
+          "name": "error_detail",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "RevocationAck": {
+      "fields": [
+        {
+          "json_name": "replayId",
+          "name": "replay_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceIds",
+          "label": "LABEL_REPEATED",
+          "name": "device_ids",
+          "number": "2",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "RevocationNotice": {
+      "fields": [
+        {
+          "json_name": "replayId",
+          "name": "replay_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceIds",
+          "label": "LABEL_REPEATED",
+          "name": "device_ids",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "final",
+          "name": "final",
+          "number": "3",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "revokedAtUnixMs",
+          "name": "revoked_at_unix_ms",
+          "number": "4",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "grantGenerations",
+          "label": "LABEL_REPEATED",
+          "name": "grant_generations",
+          "number": "5",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.RevocationNotice.GrantGenerationsEntry"
+        }
+      ]
+    },
+    "SendMessage": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deliveryMode",
+          "name": "delivery_mode",
+          "number": "3",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.DeliveryMode"
+        }
+      ]
+    },
+    "SessionKey": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "SessionList": {
+      "fields": [
+        {
+          "json_name": "sessions",
+          "label": "LABEL_REPEATED",
+          "name": "sessions",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionSummary"
+        }
+      ]
+    },
+    "SessionState": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "liveEpoch",
+          "name": "live_epoch",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "revision",
+          "name": "revision",
+          "number": "3",
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "historyHead",
+          "name": "history_head",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "runPhase",
+          "name": "run_phase",
+          "number": "5",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RunPhase"
+        },
+        {
+          "json_name": "approvals",
+          "label": "LABEL_REPEATED",
+          "name": "approvals",
+          "number": "6",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.Approval"
+        }
+      ]
+    },
+    "SessionSummary": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "origin",
+          "name": "origin",
+          "number": "10",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "queuedPrompts",
+          "name": "queued_prompts",
+          "number": "12",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "historyCursor",
+          "name": "history_cursor",
+          "number": "13",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sourceCapabilities",
+          "name": "source_capabilities",
+          "number": "14",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SourceCapabilities"
+        },
+        {
+          "json_name": "title",
+          "name": "title",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "cwd",
+          "name": "cwd",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "createdAtUnixMs",
+          "name": "created_at_unix_ms",
+          "number": "4",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": "5",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "running",
+          "name": "running",
+          "number": "6",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "agentAvailable",
+          "name": "agent_available",
+          "number": "7",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "blank",
+          "name": "blank",
+          "number": "8",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "parentSessionId",
+          "name": "parent_session_id",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "SessionUpdate": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": "2",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "history",
+          "name": "history",
+          "number": "3",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryBatch"
+        },
+        {
+          "json_name": "live",
+          "name": "live",
+          "number": "4",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.LiveFrame"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": "5",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionState"
+        },
+        {
+          "json_name": "reset",
+          "name": "reset",
+          "number": "6",
+          "oneof_index": "0",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryReset"
+        }
+      ]
+    },
+    "SourceCapabilities": {
+      "fields": [
+        {
+          "json_name": "history",
+          "name": "history",
+          "number": "1",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "resumableHistory",
+          "name": "resumable_history",
+          "number": "2",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "liveText",
+          "name": "live_text",
+          "number": "3",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "interrupt",
+          "name": "interrupt",
+          "number": "4",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "approvals",
+          "name": "approvals",
+          "number": "5",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "deliveryModes",
+          "label": "LABEL_REPEATED",
+          "name": "delivery_modes",
+          "number": "6",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.DeliveryMode"
+        }
+      ]
+    },
+    "TextContent": {
+      "fields": [
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ToolCallContent": {
+      "fields": [
+        {
+          "json_name": "callId",
+          "name": "call_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "name",
+          "name": "name",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "summary",
+          "name": "summary",
+          "number": "3",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ToolResultContent": {
+      "fields": [
+        {
+          "json_name": "callId",
+          "name": "call_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "isError",
+          "name": "is_error",
+          "number": "3",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "TransportFrame": {
+      "fields": [
+        {
+          "json_name": "version",
+          "name": "version",
+          "number": "1",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "rejected",
+          "name": "rejected",
+          "number": "10",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "complete",
+          "name": "complete",
+          "number": "11",
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "transferId",
+          "name": "transfer_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "topic",
+          "name": "topic",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "index",
+          "name": "index",
+          "number": "4",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "count",
+          "name": "count",
+          "number": "5",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "totalBytes",
+          "name": "total_bytes",
+          "number": "6",
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "digest",
+          "name": "digest",
+          "number": "7",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "payload",
+          "name": "payload",
+          "number": "8",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "ack",
+          "name": "ack",
+          "number": "9",
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "UnwatchSession": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "WatchReady": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": "2",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionState"
+        },
+        {
+          "json_name": "leaseMs",
+          "name": "lease_ms",
+          "number": "3",
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "WatchSession": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "WatchStates": {
+      "fields": [
+        {
+          "json_name": "watches",
+          "label": "LABEL_REPEATED",
+          "name": "watches",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchReady"
+        }
+      ]
+    }
+  },
+  "schema": "whalerein/proto-fields/v1"
+}

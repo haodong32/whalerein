@@ -1,0 +1,13 @@
+{
+  "requestId": "req-1",
+  "hostId": "host-1",
+  "deviceId": "device-1",
+  "kind": "REQUEST_KIND_QUERY",
+  "commandId": "",
+  "payloadDigest": "",
+  "expiresAtUnixMs": "1893456000000",
+  "traceId": "trace-1",
+  "protocolVersion": 1,
+  "channelId": "channel-1",
+  "body": "aGVsbG8="
+}

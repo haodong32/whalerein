@@ -1,0 +1,334 @@
+{
+  "comment": "Generated from proto/v1/whalerein.proto. Test vectors only.",
+  "schema": "whalerein/proto-json/v1",
+  "messages": [
+    {
+      "caseId": "host-request",
+      "description": "When {language} round-trips the host-request vector (HostRequest), routing metadata, digest and encrypted body match the committed binary and JSON.",
+      "name": "whalerein.v1.HostRequest",
+      "json": {
+        "requestId": "req-1",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "kind": "REQUEST_KIND_COMMAND",
+        "commandId": "cmd-1",
+        "payloadDigest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresAtUnixMs": "1700000000000",
+        "traceId": "trace-1",
+        "protocolVersion": 1,
+        "channelId": "channel-1",
+        "body": "bm9pc2UtYnl0ZXM="
+      },
+      "hex": "0a057265712d311206686f73742d311a086465766963652d3120032a05636d642d313220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f3880d095ffbc31420774726163652d31480152096368616e6e656c2d315a0b6e6f6973652d6279746573"
+    },
+    {
+      "caseId": "host-result-success",
+      "description": "When {language} round-trips the host-result-success vector (HostResult), command status and encrypted result bytes match the committed binary and JSON.",
+      "name": "whalerein.v1.HostResult",
+      "json": {
+        "requestId": "req-1",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "status": "host_accepted",
+        "commandId": "cmd-1",
+        "payloadDigest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "resultBody": "cmVzdWx0LWJ5dGVz",
+        "traceId": "trace-1",
+        "completedAtUnixMs": "1700000000123",
+        "protocolVersion": 1,
+        "channelId": "channel-1"
+      },
+      "hex": "0a057265712d311206686f73742d311a086465766963652d3120042a05636d642d313220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f3a0c726573756c742d62797465734a0774726163652d3158fbd095ffbc3160016a096368616e6e656c2d31"
+    },
+    {
+      "caseId": "host-result-error",
+      "description": "When {language} round-trips the host-result-error vector (HostResult), failure status and error details match the committed binary and JSON.",
+      "name": "whalerein.v1.HostResult",
+      "json": {
+        "requestId": "req-2",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "status": "failed",
+        "errorCode": "payload_digest_mismatch",
+        "errorMessage": "digest conflict",
+        "traceId": "trace-2",
+        "completedAtUnixMs": "1700000000456",
+        "protocolVersion": 1
+      },
+      "hex": "0a057265712d321206686f73742d311a086465766963652d31200640094a0774726163652d32520f64696765737420636f6e666c69637458c8d395ffbc316001"
+    },
+    {
+      "caseId": "request-state",
+      "description": "When {language} round-trips the request-state vector (RequestState), persisted request metadata and status match the committed binary and JSON.",
+      "name": "whalerein.v1.RequestState",
+      "json": {
+        "requestId": "req-1",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "status": "succeeded",
+        "commandId": "cmd-1",
+        "payloadDigest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "resultBody": "cmVzdWx0LWJ5dGVz",
+        "expiresAtUnixMs": "1700000000000",
+        "updatedAtUnixMs": "1700000000500",
+        "channelId": "channel-1"
+      },
+      "hex": "0a057265712d311206686f73742d311a086465766963652d3120052a05636d642d313220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f3a0c726573756c742d62797465735080d095ffbc3158f4d395ffbc3162096368616e6e656c2d31"
+    },
+    {
+      "caseId": "pairing-claim-request",
+      "description": "When {language} round-trips the pairing-claim-request vector (PairingClaimRequest), pairing identifiers and handshake data match the committed binary and JSON.",
+      "name": "whalerein.v1.PairingClaimRequest",
+      "json": {
+        "token": "pairing-token-1",
+        "claimId": "claim-1",
+        "phase": "PAIRING_PHASE_HELLO",
+        "noiseMessage": "bXNnMQ==",
+        "deviceId": "device-1",
+        "protocolVersion": 1,
+        "confirmed": true
+      },
+      "hex": "0a0f70616972696e672d746f6b656e2d311207636c61696d2d31180122046d7367312a086465766963652d3130013801"
+    },
+    {
+      "caseId": "pairing-claim-response",
+      "description": "When {language} round-trips the pairing-claim-response vector (PairingClaimResponse), host identity and handshake response match the committed binary and JSON.",
+      "name": "whalerein.v1.PairingClaimResponse",
+      "json": {
+        "claimId": "claim-1",
+        "hostId": "host-1",
+        "phase": "PAIRING_PHASE_HELLO",
+        "noiseMessage": "bXNnMg==",
+        "hostPublicKey": "aG9zdC1wdWJsaWMta2V5",
+        "hostFingerprint": "fp-1",
+        "deviceId": "device-1",
+        "devicePublicKey": "ZGV2aWNlLXB1YmxpYy1rZXk=",
+        "deviceToken": "device-token-1",
+        "expiresAtUnixMs": "1700000000000",
+        "protocolVersion": 1
+      },
+      "hex": "0a07636c61696d2d311206686f73742d31180122046d7367322a0f686f73742d7075626c69632d6b6579320466702d313a086465766963652d3142116465766963652d7075626c69632d6b65794a0e6465766963652d746f6b656e2d315080d095ffbc315801"
+    },
+    {
+      "caseId": "encrypted-frame",
+      "description": "When {language} round-trips the encrypted-frame vector (EncryptedFrame), nonce and ciphertext match the committed binary and JSON.",
+      "name": "whalerein.v1.EncryptedFrame",
+      "json": {
+        "channelId": "channel-1",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ciphertext": "Y2lwaGVydGV4dA=="
+      },
+      "hex": "0a096368616e6e656c2d31120c000102030405060708090a0b1a0a63697068657274657874"
+    },
+    {
+      "caseId": "host-list",
+      "description": "When {language} round-trips the host-list vector (HostList), host identities and online states match the committed binary and JSON.",
+      "name": "whalerein.v1.HostList",
+      "json": {
+        "hosts": [
+          {
+            "hostId": "host-1",
+            "online": true,
+            "protocolVersion": 1,
+            "fingerprint": "fp-1"
+          },
+          {
+            "hostId": "host-2",
+            "online": true,
+            "protocolVersion": 1,
+            "fingerprint": "fp-2"
+          }
+        ]
+      },
+      "hex": "0a120a06686f73742d3110011801220466702d310a120a06686f73742d3210011801220466702d32"
+    },
+    {
+      "caseId": "capability-set",
+      "description": "When {language} round-trips the capability-set vector (CapabilitySet), advertised capabilities and protocol version match the committed binary and JSON.",
+      "name": "whalerein.v1.CapabilitySet",
+      "json": {
+        "capabilities": [
+          "sessions",
+          "events",
+          "messages",
+          "approvals",
+          "interrupt",
+          "sync"
+        ],
+        "protocolVersion": 1
+      },
+      "hex": "0a060102030405061001"
+    },
+    {
+      "caseId": "revocation-notice",
+      "description": "When {language} round-trips the revocation-notice vector (RevocationNotice), device identity and revocation metadata match the committed binary and JSON.",
+      "name": "whalerein.v1.RevocationNotice",
+      "json": {
+        "replayId": "replay-1",
+        "deviceIds": [
+          "device-1",
+          "device-2"
+        ],
+        "final": true,
+        "revokedAtUnixMs": "1700000000000",
+        "grantGenerations": {
+          "device-1": "1",
+          "device-2": "2"
+        }
+      },
+      "hex": "0a087265706c61792d3112086465766963652d3112086465766963652d3218012080d095ffbc312a0c0a086465766963652d3110012a0c0a086465766963652d321002"
+    },
+    {
+      "caseId": "approval",
+      "description": "When {language} round-trips the approval vector (Approval), approval identity, digest, version and pending state match the committed binary and JSON.",
+      "name": "whalerein.v1.Approval",
+      "json": {
+        "approvalId": "approval-1",
+        "sessionId": "session-1",
+        "toolName": "shell",
+        "callId": "call-1",
+        "reason": "needs approval",
+        "version": "1",
+        "digest": "ZGlnZXN0",
+        "expiresAtUnixMs": "1700000000000",
+        "state": "APPROVAL_STATE_PENDING"
+      },
+      "hex": "0a0a617070726f76616c2d31120973657373696f6e2d311a057368656c6c220663616c6c2d312a0e6e6565647320617070726f76616c320664696765737438014080d095ffbc314801"
+    },
+    {
+      "caseId": "typed-live",
+      "description": "When {language} round-trips a typed live update, scoped attempt identity, inclusive sequence interval and Unicode text survive without native JSON.",
+      "name": "whalerein.v1.EventPayload",
+      "json": {
+        "update": {
+          "watchId": "watch-1",
+          "session": {
+            "hostId": "h",
+            "sessionId": "s"
+          },
+          "live": {
+            "attempt": {
+              "liveEpoch": "epoch",
+              "attemptId": "a"
+            },
+            "blockId": "text",
+            "firstSeq": "1",
+            "lastSeq": "2",
+            "delta": {
+              "text": "你🙂"
+            }
+          }
+        }
+      },
+      "hex": "0a340a0777617463682d3112060a016812017322210a0a0a0565706f63681201611204746578741801200232090a07e4bda0f09f9982"
+    },
+    {
+      "caseId": "typed-history",
+      "description": "When {language} round-trips a typed history page, opaque cursor boundaries, message blocks and attempt origin remain identical.",
+      "name": "whalerein.v1.HistoryPage",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "batch": {
+          "fromCursor": "opaque-alpha",
+          "toCursor": "opaque-beta",
+          "batchId": "batch",
+          "changes": [
+            {
+              "message": {
+                "messageId": "m",
+                "role": "ASSISTANT",
+                "blocks": [
+                  {
+                    "blockId": "text",
+                    "text": {
+                      "text": "x"
+                    }
+                  }
+                ]
+              },
+              "origin": {
+                "liveEpoch": "epoch",
+                "attemptId": "a"
+              }
+            }
+          ]
+        },
+        "cutCursor": "opaque-beta",
+        "complete": true,
+        "snapshot": true
+      },
+      "hex": "0a060a016812017312440a0c6f70617175652d616c706861120b6f70617175652d626574611a05626174636822200a120a016d10021a0b0a047465787412030a0178120a0a0565706f63681201611a0b6f70617175652d6265746120012801"
+    },
+    {
+      "caseId": "typed-state",
+      "description": "When {language} round-trips typed session state, the source epoch, revision, history watermark and run phase remain distinct.",
+      "name": "whalerein.v1.SessionState",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "liveEpoch": "epoch",
+        "revision": "42",
+        "historyHead": "opaque-beta",
+        "runPhase": "RUNNING"
+      },
+      "hex": "0a060a0168120173120565706f6368182a220b6f70617175652d626574612802"
+    },
+    {
+      "caseId": "typed-history-read",
+      "description": "When {language} round-trips a typed history request, snapshot selection and independent byte and message budgets are preserved.",
+      "name": "whalerein.v1.RequestPayload",
+      "json": {
+        "readHistory": {
+          "sessionId": "s",
+          "snapshot": true,
+          "maxBytes": 262144,
+          "maxMessages": 100
+        }
+      },
+      "hex": "5a0b0a01731001288080103064"
+    },
+    {
+      "caseId": "typed-watch-ready",
+      "description": "When {language} round-trips a watch baseline, the lease and authoritative source watermark remain correlated with the watch identity.",
+      "name": "whalerein.v1.ResponsePayload",
+      "json": {
+        "watchReady": {
+          "watchId": "watch-1",
+          "state": {
+            "session": {
+              "hostId": "h",
+              "sessionId": "s"
+            },
+            "liveEpoch": "epoch",
+            "revision": "1",
+            "historyHead": "opaque-beta",
+            "runPhase": "IDLE"
+          },
+          "leaseMs": 30000
+        }
+      },
+      "hex": "622f0a0777617463682d3112200a060a0168120173120565706f63681801220b6f70617175652d62657461280118b0ea01"
+    },
+    {
+      "caseId": "typed-source-capabilities",
+      "description": "When {language} round-trips source capabilities, history, live text, approvals and explicit delivery modes remain independently declared.",
+      "name": "whalerein.v1.SourceCapabilities",
+      "json": {
+        "history": true,
+        "resumableHistory": true,
+        "liveText": true,
+        "interrupt": true,
+        "approvals": true,
+        "deliveryModes": [
+          "START_IF_IDLE"
+        ]
+      },
+      "hex": "08011001180120012801320101"
+    }
+  ]
+}

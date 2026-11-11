@@ -1,0 +1,45 @@
+[[projects]]
+id = "core"
+path = "core"
+kind = "rust"
+
+[[projects]]
+id = "cli"
+path = "apps/cli"
+kind = "rust"
+
+[[projects]]
+id = "proto"
+path = "proto/v1/bindings/rust"
+kind = "rust"
+role = "bindings"
+
+[[projects]]
+id = "noise-peer"
+path = "tools/noise-peer"
+kind = "rust"
+role = "tool"
+
+[[projects]]
+id = "access"
+path = "."
+kind = "go"
+sources = ["access", "proto/v1/bindings/go"]
+binary = "./access/cmd/server"
+
+[[projects]]
+id = "host"
+path = "host/runtime"
+kind = "node"
+
+[[projects]]
+id = "dsh"
+path = "host/dsh"
+kind = "node"
+
+[[projects]]
+id = "repo"
+path = "tools/repo"
+kind = "python"
+role = "tool"
+coverage_source = "repo"

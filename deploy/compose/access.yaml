@@ -1,0 +1,60 @@
+# Compose-local Access configuration. Secrets come from the compose
+# environment, never from this file.
+listen: "0.0.0.0:8080"
+internal_listen: "0.0.0.0:8081"
+public_url: "http://127.0.0.1:8080"
+database_url: "${WHALEREIN_DATABASE_URL}"
+admin_token: "${WHALEREIN_ADMIN_TOKEN}"
+host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
+
+broker:
+  url: "mqtt://emqx:1883"
+  public_url: "mqtt://127.0.0.1:1883"
+  client_id: "whalerein-access"
+  username: "access"
+  password: "${WHALEREIN_BROKER_PASSWORD}"
+  connect_timeout: 10s
+  publish_timeout: 5s
+  keep_alive: 30s
+  reconnect_min: 500ms
+  reconnect_max: 10s
+
+emqx:
+  rest_url: "http://emqx:18083"
+  api_key: "${WHALEREIN_EMQX_API_KEY}"
+  api_secret: "${WHALEREIN_EMQX_API_SECRET}"
+  disconnect_mode: "rest"
+  timeout: 5s
+
+internal:
+  callback_token: "${WHALEREIN_INTERNAL_TOKEN}"
+
+pairing:
+  invitation_ttl: 10m
+  claim_timeout: 10s
+  claim_ttl: 5m
+  max_failures: 5
+
+requests:
+  max_ttl: 1h
+  forward_interval: 200ms
+  lease: 5s
+  retry_interval: 1s
+  max_attempts: 5
+  batch_size: 50
+
+revocation:
+  ack_timeout: 5s
+
+presence:
+  cache_ttl: 1s
+
+cleanup:
+  interval: 1m
+  pairing_token_retention: 1h
+
+protocol:
+  version: 1
+
+log:
+  level: info

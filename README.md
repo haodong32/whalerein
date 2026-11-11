@@ -1,0 +1,194 @@
+# WhaleRein
+
+WhaleRein remotely operates **DeepSeek Harness (DSH)** sessions. It is not a
+remote desktop, shell, or file manager: it lets an operator view sessions and
+live output, send messages into an existing session, approve or reject tool
+calls, interrupt a task, and recover after disconnects.
+
+First version scope: one host, one CLI, one Access, one PostgreSQL, one MQTT
+broker. No control plane, user table, or multi-tenant model.
+
+Documentation: [index](docs/README.md), [testing](docs/testing.md),
+[troubleshooting](docs/troubleshooting.md), [security](docs/security.md).
+
+## Architecture
+
+See [the architecture overview](docs/architecture.md) for component boundaries,
+state ownership, request flows, security, and recovery behavior.
+Detailed guides cover [Core](docs/architecture/core.md),
+[CLI](docs/architecture/cli.md), [Access](docs/architecture/access.md), and
+[the DSH plugin](docs/architecture/dsh-plugin.md).
+
+```text
+whalerein CLI (apps/cli)
+  │  HTTPS + native MQTT 5
+  ▼
+WhaleRein Core (Rust library)
+  │
+WhaleRein Access (Go monolith) ── PostgreSQL (five tables)
+  │  MQTT 5
+  ▼
+EMQX 5.8 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
+```
+
+- `proto/v1/whalerein.proto` is the only wire contract. HTTPS uses proto3 JSON;
+  MQTT uses binary protobuf. There is no second OpenAPI or JSON Schema.
+- After pairing, handshakes, queries, controls and sync all use
+  `POST /v1/hosts/{host_id}/requests` and results are read only by
+  `request_id`. There is no HTTP route for sessions, messages or approvals.
+- Online status is the broker's connection fact. Access owns transport grants
+  and request copies; the shared Host owns execution records; source cursors stay opaque and DSH
+  owns session content; Core runtime owns in-memory client connection state.
+- Noise XX with X25519/ChaCha20-Poly1305/SHA-256 protects everything after
+  pairing. Access and EMQX only see routing and transport metadata.
+
+## Repository layout
+
+```text
+repo                     # engineering tasks (bash -> uv -> tools/repo)
+apps/cli/                # whalerein product CLI
+core/                    # Rust client core
+access/                  # Go Access service and PostgreSQL migrations
+host/                    # host-side implementation
+  runtime/               # shared Node.js host runtime
+  dsh/                   # WhaleRein for DSH connector
+proto/v1/                # wire schema, Go/Rust bindings and fixtures
+deploy/                  # Docker Compose stack for Access, EMQX, and Postgres
+tests/integration/       # isolated Docker/pytest suite with FakeDSH
+tests/integration/drivers/ # Native protocol and transport integration drivers
+tests/fixtures/          # fixed compatibility fixtures
+tools/repo/              # Python monorepo manager (uv)
+.local-docs/plans/        # local proposals (git-ignored)
+.local-docs/acceptance/   # local validation records (git-ignored)
+```
+
+The Compose stack lives only in `deploy/`. Core, Access and the plugin do not
+read it.
+
+The two Node.js packages share a pnpm workspace and root lockfile. Run
+`pnpm install --frozen-lockfile` at the repository root; DSH resolves Host through
+`workspace:*`. The private root `package.json` coordinates installation and pins
+pnpm; it is not a product package or a test suite. Use `./repo` for build and test.
+
+## Server stack
+
+[Docker Compose](deploy/README.md) runs Access, PostgreSQL and EMQX. The DSH
+plugin runs separately on its host.
+
+```bash
+docker compose -f deploy/compose/stack.yaml up -d --build
+docker compose -f deploy/compose/stack.yaml ps
+```
+
+See the deployment guide for ports, development configuration, readiness probes
+and shutdown. Repository engineering commands do not start the server stack.
+
+## Plugin debug
+
+```bash
+cd host/dsh
+
+# FakeDSH + watch
+pnpm dev
+
+# Real DSH + plugin, foreground until Ctrl-C
+pnpm start
+```
+
+`pnpm dev` starts the standalone FakeDSH host and restarts it on source changes.
+`pnpm start` creates/uses the `whalerein-debug` DSH profile, installs the plugin
+with pnpm, and runs real DSH on port 3099. Neither command starts or checks
+Access; the plugin reconnects when the control plane appears. The normal 3080
+DSH instance is untouched.
+
+The same `whalerein-dsh` plugin also adds **Settings → WhaleRein** to the DSH
+Web UI. It edits the host plugin's `configForms` section; saved values override
+the profile defaults, and clearing a field inherits the environment/default
+again. The form takes a server host, an administrator token, and the host
+identity. **Generate pairing link** mints one `whalerein://pair` URI on demand.
+There is no second plugin to install.
+
+## Prerequisites
+
+- Toolchains: Rust 1.85+ (rustfmt, Clippy), Go 1.26+, Node.js 22.5+,
+  pnpm 12.18.0, Python 3.11+, and uv.
+- Build tools: Git, Git LFS, Bash, a C/C++ compiler, protoc, and protoc-gen-go.
+- Local server stack: Docker with Compose. Integration tests: Docker with
+  buildx/BuildKit. PostgreSQL and EMQX run in containers.
+- Optional: cargo-llvm-cov and llvm-tools-preview for Rust coverage;
+  DSH for real-host plugin development.
+
+Run `./repo doctor` to check the basic toolchains, or add
+`--for build|coverage|proto|integration` to check a specific workflow.
+
+## Quickstart (self-hosted)
+
+```bash
+# 1. Toolchain report (never modifies the system)
+./repo doctor
+
+# 2. Local stack: PostgreSQL 18 on 55432, EMQX on 1883, and Access on 8080.
+#    Docker checks image inputs and reuses cached layers.
+docker compose -f deploy/compose/stack.yaml up -d --build
+curl -sS http://127.0.0.1:8080/readyz
+
+# 3. Build the native CLI and install plugin workspace dependencies.
+./repo build --project cli
+pnpm install --frozen-lockfile
+
+# 4. In another terminal, start the plugin against real DSH.
+(cd host/dsh && pnpm start)
+
+# 5. Pair the CLI with the host.
+./target/debug/whalerein pair   # then hosts/sessions/tail/send/approve/reject/interrupt/sync/revoke
+```
+
+See [deploy/README.md](deploy/README.md) for the Compose layout and smoke tests.
+
+## Build and test
+
+```bash
+./repo projects                     # Project IDs and available operations
+./repo fmt --project core           # Write formatting changes
+./repo check --project core         # Format checks and static analysis
+./repo build                        # Applicable native builds
+./repo test                         # Unit tests only
+./repo test --project repo --coverage
+./repo test --suite integration     # Explicit, slower container suite
+```
+
+Use the [repo command reference](tools/repo/README.md) for project selection,
+protocol generation, coverage and reports. The [testing policy](docs/testing.md)
+defines validation required by each change; the
+[integration guide](tests/integration/README.md) describes fixture isolation.
+For Agent task selection, use
+[whalerein-repo](.agents/skills/whalerein-repo/SKILL.md).
+
+## Contributing
+
+Follow the [commit rules](docs/commits.md).
+Run `git config core.hooksPath tools/hooks` once to enable the `commit-msg` check.
+
+## Security notes
+
+- Message bodies, tool parameters, private keys and pairing tokens are never
+  logged, never placed in fixtures and never committed. The only printed token
+  is the one-time pairing token the user supplies.
+- TLS is mandatory for public HTTPS and MQTT. The development plaintext MQTT
+  listener is loopback-only; disable it (`bind = 0`) in production.
+- The EMQX dashboard binds to loopback and uses a rendered password. Access
+  uses a bootstrapped API key for REST disconnect; the key file is mode 0600
+  and outside Git.
+- Access and EMQX share a fixed internal callback token that must differ from
+  the admin token. All deployment secrets live in mode-0600 environment files.
+- Development certificates are generated into `.data/certs` (gitignored) and
+  must never be used in production.
+- See [AGENTS.md](AGENTS.md) for repository-wide rules.
+
+## Release validation
+
+Real DSH, target-platform SecretStore, production TLS, and deployment behavior
+require validation in their target environments. See [testing](docs/testing.md)
+for the validation layers and commands.
+
+Shared Host modules live in [`host/runtime`](host/runtime/README.md). The current DSH connector implements the typed [Harness conversation contract](docs/architecture/harness-contract.md); no Pi connector is included.

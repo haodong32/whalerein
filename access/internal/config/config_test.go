@@ -1,0 +1,255 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+const minimalYAML = `
+listen: "127.0.0.1:18080"
+internal_listen: "127.0.0.1:18081"
+public_url: "https://access.example.com"
+database_url: "${DB_URL}"
+admin_token: "${ADMIN_TOKEN}"
+host_provisioning_token: "${HOST_TOKEN}"
+broker:
+  url: "tls://mqtt.example.com:8883"
+  username: "access"
+  password: "${BROKER_PASSWORD}"
+internal:
+  callback_token: "${INTERNAL_TOKEN}"
+`
+
+func env(lookup map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		value, ok := lookup[name]
+		return value, ok
+	}
+}
+
+func validEnv() map[string]string {
+	return map[string]string{
+		"DB_URL":          "postgres://access@db/access",
+		"ADMIN_TOKEN":     "admin-secret",
+		"HOST_TOKEN":      "host-secret",
+		"BROKER_PASSWORD": "broker-secret",
+		"INTERNAL_TOKEN":  "internal-secret",
+	}
+}
+
+func TestParseMinimalConfigurationAppliesDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML), env(validEnv()))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:18080" || cfg.InternalListen != "127.0.0.1:18081" {
+		t.Fatalf("listeners = %s / %s", cfg.Listen, cfg.InternalListen)
+	}
+	if cfg.Pairing.InvitationTTL.D() != 10*time.Minute || cfg.Requests.Lease.D() != 30*time.Second {
+		t.Fatalf("defaults not applied: %+v", cfg)
+	}
+	if cfg.HTTP.MaxBodyBytes != 24<<20 || cfg.Protocol.Version != 1 || cfg.Log.Level != "info" {
+		t.Fatalf("defaults not applied: %+v", cfg)
+	}
+	if cfg.EMQX.DisconnectMode != "ctl" {
+		t.Fatalf("disconnect mode = %q", cfg.EMQX.DisconnectMode)
+	}
+}
+
+func TestParseEnvironmentDefaultsAndEscapedDollarSigns(t *testing.T) {
+	yaml := strings.Replace(minimalYAML, "${DB_URL}", "${DB_URL}", 1)
+	yaml = strings.Replace(yaml, "${ADMIN_TOKEN}", "${MISSING:-fallback-admin}", 1)
+	yaml = strings.Replace(yaml, "access.example.com", "access.example.com", 1)
+	yaml += "\nlog:\n  level: \"${LOG_LEVEL:-debug}\"\n"
+	cfg, err := Parse([]byte(yaml), env(validEnv()))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AdminToken != "fallback-admin" || cfg.Log.Level != "debug" {
+		t.Fatalf("env defaults not applied: admin=%q log=%q", cfg.AdminToken, cfg.Log.Level)
+	}
+	escaped, err := expandEnv([]byte("password: $$literal"), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(escaped) != "password: $literal" {
+		t.Fatalf("escaped = %q", escaped)
+	}
+}
+
+func TestParseRejectsMissingEnvironmentVariable(t *testing.T) {
+	_, err := Parse([]byte(minimalYAML), env(map[string]string{}))
+	if err == nil || !strings.Contains(err.Error(), "missing required environment") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestParseRejectsUnknownConfigurationField(t *testing.T) {
+	_, err := Parse([]byte(strings.Replace(minimalYAML, "listen:", "unknown_field: 1\nlisten:", 1)), env(validEnv()))
+	if err == nil || !strings.Contains(err.Error(), "field unknown_field not found") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestParseRejectsInvalidDuration(t *testing.T) {
+	_, err := Parse([]byte(minimalYAML+"\nrequests:\n  lease: nonsense\n"), env(validEnv()))
+	if err == nil || !strings.Contains(err.Error(), "invalid duration") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadResolvesEnvironmentAndReadsConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(minimalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range validEnv() {
+		t.Setenv(name, value)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DatabaseURL == "" {
+		t.Fatal("database URL empty")
+	}
+	if _, err := LoadWithEnv(filepath.Join(dir, "missing.yaml"), env(validEnv())); err == nil {
+		t.Fatal("expected missing file error")
+	}
+	if _, err := LoadWithEnv(path, env(validEnv())); err != nil {
+		t.Fatalf("LoadWithEnv: %v", err)
+	}
+}
+
+func validConfig(t *testing.T) Config {
+	t.Helper()
+	cfg, err := Parse([]byte(minimalYAML), env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"rejects identical public and internal listeners", func(c *Config) { c.InternalListen = c.Listen }, "internal_listen must differ"},
+		{"rejects unsupported public URL scheme", func(c *Config) { c.PublicURL = "ftp://x" }, "public_url must be"},
+		{"rejects unsupported broker URL scheme", func(c *Config) { c.Broker.URL = "http://x" }, "broker.url must use"},
+		{"rejects unsupported advertised broker URL scheme", func(c *Config) { c.Broker.PublicURL = "http://x" }, "broker.public_url must use"},
+		{"rejects missing broker password", func(c *Config) { c.Broker.Password = "" }, "broker.password is required"},
+		{"rejects missing internal callback token", func(c *Config) { c.Internal.CallbackToken = "" }, "internal.callback_token is required"},
+		{"rejects callback token matching admin token", func(c *Config) { c.Internal.CallbackToken = c.AdminToken }, "must differ from admin_token"},
+		{"rejects nonpositive HTTP body limit", func(c *Config) { c.HTTP.MaxBodyBytes = 0 }, "max_body_bytes"},
+		{"rejects nonpositive HTTP timeout", func(c *Config) { c.HTTP.ReadTimeout = 0 }, "http timeouts"},
+		{"rejects unsupported EMQX REST URL scheme", func(c *Config) { c.EMQX.RESTURL = "ftp://emqx" }, "emqx.rest_url"},
+		{"rejects nonpositive pairing failure limit", func(c *Config) { c.Pairing.MaxFailures = 0 }, "max_failures"},
+		{"rejects nonpositive request batch size", func(c *Config) { c.Requests.BatchSize = 0 }, "requests tunables"},
+		{"rejects nonpositive revocation acknowledgement timeout", func(c *Config) { c.Revocation.AckTimeout = 0 }, "ack_timeout"},
+		{"rejects nonpositive presence cache TTL", func(c *Config) { c.Presence.CacheTTL = 0 }, "presence.cache_ttl"},
+		{"rejects nonpositive cleanup interval", func(c *Config) { c.Cleanup.Interval = 0 }, "cleanup durations"},
+		{"rejects unsupported protocol version", func(c *Config) { c.Protocol.Version = 0 }, "protocol.version"},
+		{"rejects nonpositive broker keepalive", func(c *Config) { c.Broker.KeepAlive = 0 }, "broker durations"},
+		{"rejects unsupported EMQX disconnect mode", func(c *Config) { c.EMQX.DisconnectMode = "ssh" }, "disconnect_mode"},
+		{"requires REST settings when REST disconnect is selected", func(c *Config) { c.EMQX.DisconnectMode = "rest" }, "emqx.rest_url is required"},
+		{"requires ctl path when ctl disconnect is selected", func(c *Config) { c.EMQX.CTLPath = "" }, "emqx.ctl_path is required"},
+		{"rejects unsupported log level", func(c *Config) { c.Log.Level = "trace" }, "log.level"},
+		{"rejects missing database URL", func(c *Config) { c.DatabaseURL = "" }, "database_url is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig(t)
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactedConfigurationOmitsCredentials(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.Broker.URL = "tls://user:url-password@mqtt.example.com:8883"
+	summary := cfg.Redacted()
+	text := summaryString(summary)
+	for _, secret := range []string{cfg.AdminToken, cfg.HostProvisioningToken, cfg.Broker.Password, cfg.Internal.CallbackToken, cfg.DatabaseURL, "url-password"} {
+		if secret != "" && strings.Contains(text, secret) {
+			t.Fatalf("redacted summary contains secret %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "tls://mqtt.example.com:8883") {
+		t.Fatalf("summary missing sanitized broker URL: %s", text)
+	}
+}
+
+func summaryString(value map[string]any) string {
+	var builder strings.Builder
+	for key, item := range value {
+		builder.WriteString(key)
+		builder.WriteString("=")
+		builder.WriteString(toString(item))
+		builder.WriteString(";")
+	}
+	return builder.String()
+}
+
+func toString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return "other"
+	}
+}
+
+func TestResolveMQTTPublicURLDerivesEndpointFromAccessScheme(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		want    string
+		derived bool
+	}{
+		{"preserves explicitly configured MQTT public URL", Config{Broker: BrokerConfig{PublicURL: "mqtts://mqtt.example.com:8883/"}}, "mqtts://mqtt.example.com:8883", false},
+		{"derives MQTT TLS URL from HTTPS default port", Config{PublicURL: "https://access.example.com"}, "mqtts://access.example.com:443", true},
+		{"preserves custom HTTPS port in derived MQTT URL", Config{PublicURL: "https://access.example.com:8443"}, "mqtts://access.example.com:8443", true},
+		{"derives plaintext MQTT URL from HTTP endpoint", Config{PublicURL: "http://127.0.0.1:8080"}, "mqtt://127.0.0.1:8080", true},
+		{"returns no MQTT URL for invalid Access URL", Config{PublicURL: ":::"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, derived := tc.cfg.ResolveMQTTPublicURL()
+			if got != tc.want || derived != tc.derived {
+				t.Fatalf("got %q derived=%v, want %q derived=%v", got, derived, tc.want, tc.derived)
+			}
+		})
+	}
+}
+
+func yamlNode(value string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Value: value}
+}
+
+func TestDurationMarshalSerializesConfiguredDuration(t *testing.T) {
+	value := Duration(90 * time.Second)
+	marshaled, err := value.MarshalYAML()
+	if err != nil || marshaled != "1m30s" {
+		t.Fatalf("marshaled = %v, err = %v", marshaled, err)
+	}
+	var parsed Duration
+	if err := parsed.UnmarshalYAML(yamlNode("2s")); err != nil || parsed.D() != 2*time.Second {
+		t.Fatalf("parsed = %v, err = %v", parsed, err)
+	}
+	if err := parsed.UnmarshalYAML(yamlNode("")); err == nil {
+		t.Fatal("expected invalid duration error")
+	}
+}

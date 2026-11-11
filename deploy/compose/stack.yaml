@@ -1,0 +1,94 @@
+# One-command WhaleRein server stack:
+#   docker-compose -f deploy/compose/stack.yaml up -d --build
+#
+# Services: PostgreSQL 18, EMQX 5.8, WhaleRein Access.
+# The DSH plugin runs on the DSH host (not in this compose) and connects to
+# the published MQTT port. MQTT is plaintext on loopback and Access is HTTP.
+# Published ports are loopback-only.
+
+name: whalerein
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: whalerein-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: whalerein_dev
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ../../.data/docker/postgres:/var/lib/postgresql
+      - ../postgres/init:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d whalerein_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  emqx:
+    image: emqx/emqx:5.8.8
+    container_name: whalerein-emqx
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      EMQX_NODE__NAME: "emqx@127.0.0.1"
+      EMQX_NODE__COOKIE: "whalerein-compose-cookie"
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: "compose-dashboard-password"
+    ports:
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:18083:18083"
+    volumes:
+      - ../compose/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ../compose/emqx/api-keys.csv:/opt/emqx/etc/api-keys.csv:ro
+      - ../../.data/docker/emqx:/opt/emqx/data
+    healthcheck:
+      test: ["CMD-SHELL", "emqx ctl status"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  access:
+    image: whalerein-access:local
+    build:
+      context: ../..
+      dockerfile: deploy/docker/access.Dockerfile
+    container_name: whalerein-access
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    environment:
+      WHALEREIN_DATABASE_URL: "postgres://postgres@postgres:5432/whalerein_dev?sslmode=disable"
+      WHALEREIN_ADMIN_TOKEN: "${WHALEREIN_ADMIN_TOKEN:-dev-admin-token}"
+      WHALEREIN_HOST_PROVISIONING_TOKEN: "${WHALEREIN_HOST_PROVISIONING_TOKEN:-dev-host-token}"
+      WHALEREIN_BROKER_PASSWORD: "${WHALEREIN_BROKER_PASSWORD:-dev-broker-password}"
+      WHALEREIN_INTERNAL_TOKEN: "compose-internal-token"
+      WHALEREIN_EMQX_API_KEY: "compose-api-key"
+      WHALEREIN_EMQX_API_SECRET: "compose-api-secret"
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ../compose/access.yaml:/etc/whalerein/access.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+networks:
+  default:
+    name: whalerein

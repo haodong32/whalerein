@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhaleRein Test Report</title>
+<script>
+const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+function applySystemTheme() {
+  document.documentElement.dataset.theme = systemTheme.matches ? 'dark' : 'light';
+}
+applySystemTheme();
+systemTheme.addEventListener('change', applySystemTheme);
+</script>
+<style>
+$css
+/* Layout only: component shapes, sizes and colors come from daisyUI. */
+* { box-sizing: border-box; }
+body { margin:0; background:var(--color-base-200); color:var(--color-base-content); }
+.report-layout { max-width:1440px; margin:auto; padding:24px; }
+aside { margin-bottom:16px; }
+aside nav.card-body { display:flex; flex-direction:row; align-items:center; gap:8px; padding:6px 8px; }
+aside nav > .menu { flex:1; min-width:0; flex-wrap:nowrap; overflow-x:auto; }
+aside nav > .menu li, aside nav > a { flex-shrink:0; }
+aside nav > .menu a { white-space:nowrap; }
+main { min-width:0; display:grid; gap:24px; }
+h1 { font-size:2rem; font-weight:700; line-height:1.2; }
+header { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.header-copy { display:grid; gap:12px; }
+.metadata { opacity:.65; font-size:.875rem; }
+.report-stats { display:grid; grid-auto-flow:row; grid-template-columns:repeat(6,minmax(0,1fr)); }
+.report-stats .stat { min-width:0; }
+.report-stats .stat-desc, .report-stats .stat-title { white-space:normal; }
+.panel-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.surface { background:var(--color-base-100); }
+.attention-list { padding:0; list-style:none; }
+.issue-row { padding:16px 0; border-bottom:1px solid var(--color-base-300); }
+.issue-row:last-child { border:0; }
+.issue-row a { display:block; line-height:1.8; }
+.issue-module { margin-left:8px; opacity:.65; }
+.collection-checks li { padding:8px 0; }
+.table-wrapper { overflow-x:auto; }
+.table th { white-space:nowrap; }
+.table td { vertical-align:top; }
+.toolbar { display:flex; flex-wrap:wrap; align-items:end; gap:16px; }
+.toolbar label { display:grid; gap:8px; }
+.toolbar label:first-child { flex:1; min-width:220px; }
+.toolbar .input { width:100%; }
+.module { scroll-margin-top:24px; }
+.module-heading { display:flex; align-items:center; flex-wrap:wrap; gap:16px; }
+.module-title { font-weight:600; }
+.case-table:has(tbody:empty) { display:none; }
+.case-table td:first-child { width:70%; min-width:260px; }
+.case-description { line-height:1.6; }
+.case-details { margin-top:8px; }
+.case-area, .case-details { font-size:.875rem; }
+.passed-tests, .quality-details { margin-top:16px; }
+pre, code { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.8125rem; }
+pre { padding:16px 0; }
+footer { display:flex; flex-wrap:wrap; gap:24px; }
+summary, button { cursor:pointer; }
+[hidden] { display:none!important; }
+/* Constrain intrinsic widths so only navigation and tables scroll horizontally. */
+.report-layout, main > *, .card-body, .collapse-content, .header-copy,
+.table-wrapper, .toolbar, .toolbar label, footer > details { min-width:0; max-width:100%; }
+.card-title, .metadata, .case-description, .issue-row a, .module-title { overflow-wrap:anywhere; }
+.table-wrapper { overscroll-behavior-x:contain; }
+.toolbar .input, .toolbar .select { max-width:100%; }
+footer > details { flex:1 1 280px; }
+@media(max-width:1100px) {
+  .report-stats { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .toolbar { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .toolbar label:first-child { grid-column:1/-1; min-width:0; }
+  .toolbar .select { width:100%; }
+}
+@media(max-width:700px) {
+  .report-layout { padding:12px; }
+  main { gap:16px; }
+  header { align-items:start; flex-direction:column; }
+  .report-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .report-stats .stat { padding:16px; }
+  .card > .card-body { padding:16px; }
+  aside nav.card-body { padding:6px; }
+  .panel-heading { align-items:start; flex-direction:column; gap:4px; }
+  .module-heading { gap:6px; padding-right:36px; }
+  .module-heading .module-title { flex-basis:100%; }
+  .case-table td:first-child { min-width:200px; }
+  .table { font-size:.875rem; }
+  .table-wrapper { width:100%; }
+  .toolbar { gap:12px; }
+  .toolbar .btn { white-space:normal; height:auto; min-height:44px; }
+  footer { gap:16px; }
+}
+@media(max-width:380px) {
+  .report-layout { padding:8px; }
+  .card > .card-body { padding:12px; }
+  .report-stats .stat { padding:12px; }
+  .toolbar { grid-template-columns:minmax(0,1fr); }
+  .toolbar label:first-child { grid-column:auto; }
+}
+</style></head>
+<body><div class="report-layout">
+<aside class="card card-border surface"><nav class="card-body" aria-label="Report modules"><a class="btn btn-ghost btn-sm" href="#overview">WhaleRein</a><ul class="menu menu-horizontal menu-sm">
+<li><a href="#overview">Overview</a></li>$navigation
+</ul></nav></aside>
+<main><header id="overview"><div class="header-copy"><span class="badge badge-outline">Quality overview</span><h1>Test Report</h1>
+<p class="metadata">Generated: $generated · Scope: $report_scope · Inventory: $completeness</p>
+<details class="collapse collapse-arrow"><summary class="collapse-title">Run configuration</summary><div class="collapse-content"><pre>$configuration</pre></div></details></div></header>
+<div class="stats surface" aria-label="Run duration">
+<div class="stat"><div class="stat-title">Total duration</div><div class="stat-value">$duration</div><div class="stat-desc">$duration_phases</div></div>
+</div>
+<div class="stats report-stats surface">$stats</div>
+<section id="attention" class="card card-border surface"><div class="card-body"><div class="panel-heading"><h2 class="card-title">Needs attention</h2><span class="metadata">Failures and skipped tests first</span></div>
+<ul class="attention-list">$attention</ul>
+<details class="collapse collapse-arrow collection-checks"><summary class="collapse-title">Collection &amp; measurement checks</summary><div class="collapse-content"><ul>$checks</ul></div></details></div></section>
+<section class="card card-border surface"><div class="card-body"><div class="panel-heading"><h2 class="card-title">Modules</h2><span class="metadata">Select a module below to inspect its tests</span></div>
+<div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable results table"><table class="table table-sm"><thead><tr><th>Module</th><th>Cases</th><th>Execution</th><th>Coverage</th><th>Collection</th></tr></thead><tbody>$summary_rows</tbody></table></div></div></section>
+<p class="metadata">Pytest setup may include shared fixture startup. Case durations do not sum to wall time.</p>
+<section class="card card-border surface"><div class="card-body"><h2 class="card-title" id="test-browser">Test browser</h2>
+<div class="toolbar" id="test-filters"><label>Search tests<input class="input" type="search" id="search" placeholder="Description or native ID"></label>
+<label>Module<select class="select" id="module-filter"><option value="">All modules</option>$module_options</select></label>
+<label>Status<select class="select" id="status-filter"><option value="">All statuses</option>$status_options<option value="attention">Skipped / Blocked</option></select></label>
+<label>Order<select class="select" id="duration-sort"><option value="default">Default</option><option value="slowest">Slowest first</option></select></label>
+<button type="button" class="btn" id="show-all">Show all tests</button>
+<button type="button" class="btn btn-ghost" id="clear-filters">Clear filters</button></div>
+<noscript>JavaScript is disabled. Passed tests remain available in expandable sections.</noscript>
+<p id="result-count" role="status" aria-live="polite"></p>
+$sections
+</div></section>
+<footer>
+<details class="collapse collapse-arrow"><summary class="collapse-title">Third-party license: daisyUI 5.5.14</summary><div class="collapse-content"><pre>$license</pre></div></details>
+</footer>
+</main></div>
+<script>
+const controls = ['search', 'module-filter', 'status-filter'].map(id => document.getElementById(id));
+let showPassed = false;
+document.getElementById('duration-sort').addEventListener('change', event => {
+  const slowest = event.target.value === 'slowest';
+  for (const body of document.querySelectorAll('.case-table tbody')) {
+    const rows = [...body.rows];
+    rows.sort((a, b) => slowest ? Number(b.dataset.duration) - Number(a.dataset.duration) : Number(a.dataset.order) - Number(b.dataset.order));
+    body.append(...rows);
+  }
+  if (slowest) showPassed = true;
+  filterTests();
+});
+function filterTests() {
+  const [query, module, status] = controls.map(element => element.value.toLowerCase());
+  const explicit = showPassed || query || status === 'passed';
+  const rows = document.querySelectorAll('.case-table tbody tr');
+  for (const row of rows) {
+    const state = row.dataset.status;
+    const matchesStatus = !status || (status === 'attention' ? ['skipped','blocked'].includes(state) : state === status);
+    row.hidden = !row.textContent.toLowerCase().includes(query) ||
+      (module && row.dataset.module.toLowerCase() !== module) || !matchesStatus;
+  }
+  for (const section of document.querySelectorAll('.module')) {
+    section.hidden = !!module && section.dataset.module.toLowerCase() !== module;
+    if (module || query || status || showPassed) section.open = !section.hidden;
+    for (const details of section.querySelectorAll('.passed-tests')) details.open = !!explicit;
+  }
+  updateCount();
+  document.getElementById('show-all').textContent = showPassed ? 'Hide passed tests' : 'Show all tests';
+}
+function updateCount() {
+  const rows = [...document.querySelectorAll('.case-table tbody tr')];
+  const visible = rows.filter(row => !row.hidden && !row.closest('.module').hidden &&
+    (!row.closest('.passed-tests') || row.closest('.passed-tests').open)).length;
+  document.getElementById('result-count').textContent = 'Showing ' + visible + ' of ' + rows.length + ' records (cases, containers and steps).';
+}
+document.querySelectorAll('.passed-tests').forEach(details => details.addEventListener('toggle', updateCount));
+controls.forEach(element => element.addEventListener('input', filterTests));
+document.getElementById('show-all').addEventListener('click', () => { showPassed = !showPassed; filterTests(); });
+document.getElementById('clear-filters').addEventListener('click', () => { controls.forEach(c => c.value = ''); showPassed = false; filterTests(); });
+document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
+  controls.forEach(c => c.value = '');
+  const status = button.dataset.filter;
+  controls[2].value = status === 'all' ? '' : status;
+  showPassed = status === 'all' || status === 'passed'; filterTests();
+  document.getElementById('test-filters').scrollIntoView();
+}));
+document.querySelectorAll('[data-case-link]').forEach(link => link.addEventListener('click', () => {
+  controls.forEach(c => c.value = ''); filterTests();
+  const row = document.getElementById(link.dataset.caseLink);
+  row.closest('.module').open = true;
+  const details = row.querySelector('details'); if (details) details.open = true;
+}));
+document.querySelectorAll('a[href^="#module-"]:not([data-case-link])').forEach(link => link.addEventListener('click', () => {
+  controls.forEach(c => c.value = ''); filterTests();
+  document.getElementById(link.getAttribute('href').slice(1)).open = true;
+}));
+filterTests();
+</script></body></html>

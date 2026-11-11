@@ -1,0 +1,48 @@
+# Local plans and acceptance records are temporary workspace material.
+.local-docs/
+
+
+# Build output and dependency trees.
+target/
+node_modules/
+dist/
+build/
+coverage/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.venv/
+.uv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local state, logs and generated runtime files.
+.data/
+*.log
+
+# Development TLS material and generated configuration. Never commit keys.
+*.key
+*.pem
+*.crt
+*.csr
+*.srl
+certs/
+.env
+.env.*
+*.env.local
+!.env.example
+!.env.*.example
+
+# OS/editor noise.
+.DS_Store
+.idea/
+.vscode/
+
+# Deliberately NOT ignored:
+#   proto/v1/bindings/** (Go bindings and Rust build/test scaffolding are committed)
+#   Cargo.lock, go.sum, uv.lock, package-lock.json
+#   deploy/**/*.example and *.template

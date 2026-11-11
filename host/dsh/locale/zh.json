@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "WhaleRein 远程控制",
+    "description": "查看 Broker 连接状态、当前主机配对码和已配对设备，并配置远程控制连接。"
+  },
+  "nav": "WhaleRein",
+  "title": "WhaleRein 远程控制",
+  "intro": "用于 DeepSeek Harness 会话的加密远程控制。主机插件是协议端点：只建立一条出站 MQTT 连接，不开放 HTTP 端口。",
+  "transport": "传输层",
+  "transportValue": "MQTT 5 · 建议使用 TLS",
+  "security": "通道安全",
+  "securityValue": "Noise XX · X25519 · ChaCha20-Poly1305 · SHA-256",
+  "listener": "HTTP 监听",
+  "listenerValue": "无",
+  "adapter": "DSH 适配器",
+  "adapterValue": "Real DSH 或 FakeDSH，启动时选择",
+  "configuration": "配置",
+  "configurationHint": "配置来自 DSH profile 的环境变量。修改后需要重启 profile。",
+  "mqttUrl": "MQTT 地址",
+  "hostId": "主机 ID",
+  "adapterKey": "适配器",
+  "stateDir": "状态目录",
+  "environment": "在 profile 环境变量中设置",
+  "commands": "开发命令",
+  "startCommand": "启动真实 DSH 和插件",
+  "devCommand": "启动 FakeDSH 并监听文件变化",
+  "note": "请不要把 host token 写进此页面。它只从 profile 环境变量读取，设置 UI 不会渲染它。"
+}

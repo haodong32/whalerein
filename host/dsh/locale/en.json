@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "WhaleRein remote control",
+    "description": "View broker connectivity, the host pairing code, and paired devices, and configure remote control."
+  },
+  "nav": "WhaleRein",
+  "title": "WhaleRein remote control",
+  "intro": "Encrypted remote control for DeepSeek Harness sessions. The host plugin is a protocol endpoint: it opens one outbound MQTT connection and no HTTP listener.",
+  "transport": "Transport",
+  "transportValue": "MQTT 5 · TLS recommended",
+  "security": "Channel security",
+  "securityValue": "Noise XX · X25519 · ChaCha20-Poly1305 · SHA-256",
+  "listener": "HTTP listener",
+  "listenerValue": "None",
+  "adapter": "DSH adapter",
+  "adapterValue": "Real DSH or FakeDSH, selected at startup",
+  "configuration": "Configuration",
+  "configurationHint": "Values come from the DSH profile environment. Restart the profile after changing them.",
+  "mqttUrl": "MQTT URL",
+  "hostId": "Host ID",
+  "adapterKey": "Adapter",
+  "stateDir": "State directory",
+  "environment": "Set in the profile environment",
+  "commands": "Development commands",
+  "startCommand": "Real DSH with the plugin",
+  "devCommand": "FakeDSH host with watch",
+  "note": "Never put the host token in this page. It is read from the profile environment and is not rendered by the settings UI."
+}

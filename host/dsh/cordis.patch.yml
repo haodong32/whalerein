@@ -1,0 +1,6 @@
+# WhaleRein for DSH. Connection settings live in the profile user layer,
+# which the settings page writes. This patch only inserts the plugin.
+# The plugin opens no HTTP port and uses one outbound MQTT 5/TLS connection.
+- insert:
+    - id: whalerein-dsh
+      name: 'whalerein-dsh'

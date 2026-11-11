@@ -1,0 +1,17 @@
+[package]
+name = "noise-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WhaleRein Noise XX interop peer (stdin/stdout line protocol)"
+
+[[bin]]
+name = "noise-peer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+whalerein-core = { workspace = true, features = ["protocol-testing"] }
