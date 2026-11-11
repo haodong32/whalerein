@@ -8,7 +8,11 @@ For Agent task selection, use the
 
 ## Commands
 
-Run commands from the repository root. Use `./repo COMMAND --help` for arguments.
+Run commands from the repository root. Run `./repo` or `./repo --help` for the
+command overview and common examples. Use `./repo COMMAND --help` for parameter
+meanings, defaults, selection constraints and command-specific examples. Invalid
+arguments include a hint to the relevant help; a bare `./repo` exits successfully
+without executing a task.
 
 | Command | Behavior |
 |---|---|
@@ -77,7 +81,7 @@ literal, case-sensitive substring; no matches fail. Supported combinations are:
 | Option | Suites | Additional constraints |
 |---|---|---|
 | `--project ID` | unit | Repeatable; exact registered IDs. |
-| `--group GROUP` | integration | One of protocol/storage/transport/chain. |
+| `--group GROUP` | integration | One of protocol/storage/transport/chain/native-dsh. |
 | `--only TEXT` | unit, integration | Nonempty; unit requires one project; incompatible with coverage. |
 | `--coverage` | unit, all | No `--only` or `--list`; all measures only its unit portion. |
 | `--list` | unit, integration, all | No coverage; Node static listing is unsupported. |
