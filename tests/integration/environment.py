@@ -29,11 +29,11 @@ def wait(predicate, timeout=60, process=None):
 
 
 class Process:
-    def __init__(self, argv, directory, env=None, control=False):
+    def __init__(self, argv, directory, env=None, control=False, cwd=None):
         self.output = (directory / (uuid.uuid4().hex + ".log")).open("w+")
         self.child = subprocess.Popen(
             argv,
-            cwd=ROOT,
+            cwd=cwd or ROOT,
             env={**os.environ, **(env or {})},
             stdin=subprocess.PIPE if control else subprocess.DEVNULL,
             stdout=subprocess.PIPE if control else self.output,

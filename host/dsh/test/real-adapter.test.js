@@ -705,3 +705,30 @@ test('when a live history tail is truncated, delta readers cannot skip the omitt
     await assert.rejects(adapter.readHistory('s1',{after_cursor:baseline.batch.to_cursor}),error=>error.code==='snapshot_required')
   } finally {await adapter.close()}
 })
+
+test('Agent-scoped native approvals reach the remote adapter through Cordis routing', async () => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const bus = new Context()
+  const session = makeLiveSession()
+  // A previously registered UI answerer is terminal, as the native Remote bridge is.
+  bus.on('approval/request', () => 'rejected', { global: true })
+  const ctx = makeCtx({ live: new Map([[session.id, session]]) })
+  ctx.on = bus.on.bind(bus)
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  try {
+    // Native Agent carriers filter unrelated plugin contexts. A deployment-wide
+    // approval answerer must explicitly participate in that dispatch.
+    const carrier = { [Context.filter]: () => false }
+    const outcome = bus.waterfall(carrier, 'approval/request', {
+      agent: { session }, toolName: 'native-fixture',
+    }, () => Promise.resolve('unavailable'))
+    await new Promise(resolve => setImmediate(resolve))
+    const pending = await adapter.listApprovals(session.id)
+    assert.equal(pending.length, 1)
+    await adapter.close()
+    assert.equal(await outcome, 'unavailable')
+  } finally {
+    await adapter.close()
+  }
+})

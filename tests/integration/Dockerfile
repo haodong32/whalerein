@@ -64,12 +64,24 @@ RUN --mount=type=cache,id=whalerein-pnpm-${TARGETARCH},target=/cache/pnpm,sharin
     pnpm install --frozen-lockfile --store-dir /cache/pnpm
 COPY host/ host/
 
+# Test-only DSH/browser tools are pinned independently of application packages.
+FROM node AS native-tools
+WORKDIR /opt/native
+COPY tests/integration/native/package.json tests/integration/native/package-lock.json ./
+RUN --mount=type=cache,id=whalerein-native-npm,target=/root/.npm,sharing=locked \
+    npm ci --ignore-scripts --no-audit --no-fund
+
 # Runtime contains test executables, not compiler toolchains or build caches.
 FROM emqx/emqx:5.8.8@sha256:4593b6e30196754779fa14483332cb0be56c233f1c8a387b1308bec4337c0144 AS runtime
 USER root
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich postgresql postgresql-client protobuf-compiler libprotobuf-dev libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=native-tools /opt/native /opt/native
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+ENV PATH=/opt/native/node_modules/.bin:$PATH
+RUN node /opt/native/node_modules/playwright/cli.js install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=postgres /usr/lib/postgresql/18 /usr/lib/postgresql/18
 COPY --from=postgres /usr/share/postgresql/18 /usr/share/postgresql/18
 COPY --from=postgres /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/postgresql.conf.sample

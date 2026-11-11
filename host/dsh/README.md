@@ -410,42 +410,63 @@ against a fake Cordis context; MQTT client; host lifecycle and reload.
   source metadata remains unavailable rather than inferred.
 - Pending approvals are current state and are queried on watch/reconnect/refresh;
   historical snapshots do not invent old pending actions.
-- Claim/delegate mode and local/remote approval races require actual DSH acceptance.
+- Delegated approval ownership and interactive profile HMR still require target-environment acceptance.
 - Current Core permits one active Watch per instance. Other Harness connectors,
   multi-session client multiplexing and generic provider integration are not shipped.
 
-## What is not verified against real DSH
+## Native DSH validation and remaining limits
 
-No real DSH process was run for this deliverable. The real adapter is written
-against the internal DSH `0.2.2-rc.1` typings and is exercised only with a fake
-Cordis context in `test/real-adapter.test.js`. The following remain unverified:
+The reproducible `native-dsh` integration group runs in the shared Docker image:
 
-1. Cold-session coverage of `ctx.sessionController.list({}, signal)`. Its value is `{ items }`.
-2. `ctx.sessionController.prompt/cancel/state` signatures, error codes, and
-   `queue`/`steer` semantics.
-3. `ctx.sessionController.events({address, beforeSeq, maxMessages})` cold paging
-   and `hasMore`/`cursor` semantics.
-4. `ctx.sessions.get(id).snapshotEvents()` full-log ordering and the deprecated
-   synchronous read contract; live-session coverage is assumed complete unless
-   `snapshot_max_events` truncates it.
-5. `ctx.on('session/event')` committed event types, sequence stability across
-   DSH restart, and whether any actual event is ephemeral.
-6. `ctx.on('approval/request')` waterfall registration, audit-id matching
-   (`approval/asked`), signal abort, timeout, and coexistence with a UI
-   answerer. `approval_mode=claim` answers every approval; this may hide local
-   prompts.
-7. `ctx.credentials.readRecord/modifyRecord` with a `GrantRecord` payload and
-   the `whalerein-dsh/host-key-*` record key.
-8. Session `active`/`running` state as the approval fail-closed gate.
-9. Cordis `ctx.effect` reload/stop behavior inside a real DSH profile.
-10. Real MQTT 5/TLS against the selected broker (CA, ACLs, client-id rules,
-    reconnect) and the Access HTTP/MQTT provisioning flow.
-11. Crash recovery on a real OS process boundary (the tests simulate it with a
-    second SQLite connection).
-12. DSH's own session sequence restart behavior; a regression triggers a
-    snapshot but has not been observed on a real DSH restart.
+```bash
+./repo test --suite integration --group native-dsh
+./repo test --suite integration --group native-dsh --only test_native_browser
+```
 
-Do not claim real DSH integration works until those are run.
+See the [integration guide](../../tests/integration/README.md#native-dsh-and-browser-journeys)
+for isolation, pinned dependencies, local model behavior and case selection.
+The group uses actual native APIs and Chromium; FakeDSH cases remain a separate
+source of controlled fault/recovery coverage.
+
+The native DSH `0.2.2-rc.1` runtime has been exercised in an isolated CLI Web
+profile, using a deterministic loopback Messages provider rather than a paid
+model account. The real Cordis services, Session persistence, credentials,
+SessionController, approval waterfall and WhaleRein plugin were used; FakeDSH
+was not part of that native journey.
+
+Verified paths include invitation pairing, native Session discovery, user prompt
+admission, live text plus final Message delivery (including an 80 KB body),
+fixed history-cut paging while the native log grows, cold history cursor/message
+identity after process restart, allowed-once approval, interruption during model
+streaming, late approval rejection after cancellation, Access restart/reconnect,
+and revocation/re-enrollment without reviving an old transport credential.
+
+The automated browser journeys additionally cover masked credentials, connection
+checking with valid/rejected drafts, save/reload persistence, invitation creation,
+paired-device revocation, and exclusive remote claim ownership while the native
+UI observes a UI-created Session. They use the actual installed settings page and
+headless Chromium, with no screenshot or trace export.
+
+Claim mode registers a global, prepended approval answerer: native Agent carriers
+filter unrelated contexts, and the UI Remote bridge can otherwise hold the
+waterfall before the remote adapter sees it. Delegate mode forwards immediately.
+The native journey and real-Cordis routing regression cover this ownership rule.
+
+Still requiring target-environment acceptance:
+
+- Real external model-provider/account behavior and long-running production logs.
+- Delegated local-UI approval ownership and Cordis configuration HMR in an
+  interactive user profile. Automated claim-mode tests preserve exclusive remote
+  ownership; simultaneous local and remote answers are not a shipped capability.
+- Production MQTT/HTTPS TLS, CA/ACL deployment, and platform credential-store policy.
+- Historical restoration of actual endpoint journals and model/provider failures
+  beyond deterministic loopback fixtures.
+- Very large cold histories beyond the configured snapshot bound and production
+  memory/throughput limits. A bounded source read does not bound DSH's native
+  full-snapshot allocation.
+
+Private acceptance records live under `.local-docs/acceptance/`; passing isolated
+native tests does not establish these remaining deployment properties.
 
 ### Correlating a CLI failure
 

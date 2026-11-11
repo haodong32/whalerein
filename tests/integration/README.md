@@ -15,6 +15,8 @@ Routine iteration should use focused unit tests.
 ./repo test --suite integration
 ./repo test --suite integration --group protocol
 ./repo test --suite integration --group storage
+./repo test --suite integration --group native-dsh
+./repo test --suite integration --group native-dsh --only test_native_browser
 ./repo test --suite integration --only test_send
 ./repo test --suite integration --list
 ```
@@ -54,6 +56,39 @@ Fixtures stop owned processes and drop their schemas in `finally` blocks, includ
 partial setup failures. Readiness waits are bounded and detect exited children;
 commands and native drivers have deadlines. Business controls are never retried
 implicitly. An unavailable required facility fails setup instead of skipping.
+
+## Native DSH and browser journeys
+
+`native-dsh` uses the same integration image and runner. It runs the actual pinned
+DSH `0.2.2-rc.1`, the real WhaleRein connector, CLI/Core and Access, with Playwright
+Chromium for settings and browser ownership checks. Backend and browser cases are
+one group; `--only` selects individual journeys. `--list` discovers them without
+starting DSH, Chromium, PostgreSQL or the broker.
+
+Each case owns a fresh DSH home, working directory, native process and loopback
+Messages provider. The provider returns deterministic text or a test-only native
+tool that asks the real Approval service before incrementing a private counter.
+This controls streaming, decisions and cancellation without a paid model account.
+The native PluginManager installs the local connector bundle; native Settings
+seeds configuration so browser saves exercise actual persistence. No personal DSH
+profile or host DSH installation is used. Runtime networking remains `none`;
+loopback services stay within the container. Image construction needs network to
+install the locked DSH/browser dependencies in `native/package-lock.json`.
+
+The cases cover pairing/revocation, large-message prefix/final consistency,
+fixed-cut history during growth, cold DSH recovery and Access restart, approval
+accept/reject, late resolution after cancellation, stream interruption, settings
+save/reload, read-only connection drafts, browser invitations and device revoke.
+Approval tests preserve claim semantics: remote ownership preempts the native UI,
+including when a browser is already observing the Session. They do not introduce
+simultaneous local and remote answers or establish delegated-mode behavior.
+
+Native logs and launch credentials remain private to the disposable case. Browser
+automation exports bounded stage codes only, with no traces, screenshots, raw
+browser errors, model request bodies or launch URLs. Readiness and event waits are
+bounded; no test automatically retries an uncertain control operation. This group
+uses file SecretStore and headless Linux Chromium. Keychain, desktop shell,
+production TLS, external model quality and other DSH versions remain release work.
 
 ## Protocol
 

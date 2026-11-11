@@ -1,0 +1,11 @@
+{
+  "name": "whalerein-native-integration",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "playwright": "1.65.0",
+    "pnpm": "12.18.0"
+  }
+}

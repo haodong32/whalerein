@@ -5,11 +5,13 @@
 | Scope | Covers | Environment |
 |---|---|---|
 | Unit | Module behavior, validation, state transitions and errors. | Native toolchains and isolated fixtures. |
-| Integration | Protocol compatibility, PostgreSQL, broker transport and CLI-to-FakeDSH behavior. | Independent Linux Docker container. |
-| Release | Real DSH, platform SecretStore, production TLS and deployment. | Actual target environments. |
+| Integration | Protocol compatibility, PostgreSQL, broker transport, CLI-to-FakeDSH and pinned native DSH/browser journeys. | Independent Linux Docker container. |
+| Release | Target DSH versions/configurations, platform SecretStore, production TLS and deployment. | Actual target environments. |
 
-FakeDSH does not verify real DSH APIs, credentials, approval atomicity or reload
-behavior. An integration or tooling-harness pass is not release validation.
+FakeDSH does not verify real DSH APIs or browser behavior. The `native-dsh`
+integration group adds actual DSH services and headless Chromium with a local
+deterministic model; its pinned Linux configuration does not establish behavior
+for every DSH version, external model, desktop shell or platform SecretStore. An integration or tooling-harness pass is not release validation.
 
 ## Choose checks for a change
 

@@ -3,8 +3,8 @@ import { mapAdapterError } from './errors.js'
 // written defensively: services are read dynamically, DSH packages are never
 // imported at module scope, and every failure is mapped to a stable wire code.
 //
-// The DSH APIs used here are internal to DSH 0.2.2-rc.1 and are verified only
-// by fake-context unit tests. See README.md for the unverified list.
+// The internal DSH 0.2.2-rc.1 APIs have isolated native-runtime acceptance
+// alongside unit tests. README.md separates that evidence from deployment gates.
 
 import { assistantReplyData, assistantStreamEvent } from './assistant-stream.js'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
@@ -152,8 +152,9 @@ export class RealDshAdapter extends DshAdapter {
       }, { global: true })
       if (typeof streamDisposer === 'function') this.#disposers.push(streamDisposer)
       if (typeof eventDisposer === 'function') this.#disposers.push(eventDisposer)
-      // Register in both modes: `delegate` forwards to the next answerer.
-      const approvalDisposer = on('approval/request', (request, next) => this.#onApprovalRequest(request, next))
+      // Claim owns native Agent approvals before the UI bridge can hold them.
+      // Delegate immediately forwards to the next answerer.
+      const approvalDisposer = on('approval/request', (request, next) => this.#onApprovalRequest(request, next), { global: true, prepend: true })
       if (typeof approvalDisposer === 'function') this.#disposers.push(approvalDisposer)
     }
     this.#closed = false

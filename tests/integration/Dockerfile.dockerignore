@@ -7,3 +7,6 @@
 .agents
 .claude
 *.log
+.local-docs
+AGENTS.md
+access/config.yaml

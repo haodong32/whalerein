@@ -22,14 +22,16 @@ def reporting(tmp_path, monkeypatch):
     return module
 
 
-def finish(module, tmp_path, collect=False, description=None, parameter_description=None):
+def finish(
+    module, tmp_path, collect=False, description=None, parameter_description=None, groups=()
+):
     def function():
         return None
 
     function.__doc__ = description
     item = SimpleNamespace(
         nodeid="case.one",
-        iter_markers=lambda: [],
+        iter_markers=lambda: [SimpleNamespace(name=group) for group in groups],
         function=function,
         get_closest_marker=lambda name: (
             SimpleNamespace(args=(parameter_description,))
@@ -205,3 +207,68 @@ def test_interruption_cleans_temporary_paths_without_traceback(tmp_path, phase):
     assert result.returncode == 2, result.stdout + result.stderr
     assert "KeyError" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_native_group_survives_export(reporting, tmp_path):
+    for when in ("setup", "call", "teardown"):
+        phase(reporting, when)
+    _, document = finish(reporting, tmp_path, groups=("native-dsh", "description"))
+    assert document["scope"]["tests"][0]["groups"] == ["native-dsh"]
+
+
+@pytest.mark.parametrize("collect", [False, True])
+def test_native_selection_excludes_unmatched_bodies(tmp_path, collect):
+    import os
+    import subprocess
+    import sys
+
+    directory = Path(__file__).resolve().parents[3] / "tests/integration"
+    (tmp_path / "conftest.py").write_text(
+        (directory / "conftest.py").read_text()
+        + '\n@pytest.fixture(scope="session", autouse=True)\ndef container_only():\n    pass\n'
+    )
+    (tmp_path / "test_selection.py").write_text(
+        "from pathlib import Path\nimport pytest\n"
+        '@pytest.mark.__getattr__("native-dsh")\n'
+        "def test_native_selected():\n"
+        '    """When selected, the native case executes its own body."""\n'
+        '    Path("executed").touch()\n'
+        '@pytest.mark.__getattr__("native-dsh")\n'
+        "def test_native_excluded():\n"
+        '    """When excluded by a name filter, the native body never runs."""\n'
+        '    raise AssertionError("excluded body ran")\n'
+        "@pytest.mark.chain\n"
+        "def test_other_selected():\n"
+        '    """When excluded by group, the chain body never runs."""\n'
+        '    raise AssertionError("other group ran")\n'
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--group",
+            "native-dsh",
+            "--only",
+            "selected",
+            *(["--collect-only"] if collect else []),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(directory), str(directory.parents[1] / "tools/repo/src")]
+            ),
+            "WHALEREIN_INTEGRATION_CONTAINER": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "executed").exists() is not collect
+    if collect:
+        assert "2 deselected" in result.stdout
+    else:
+        assert '"total": 1' in result.stdout

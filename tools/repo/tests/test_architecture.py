@@ -312,7 +312,8 @@ def test_atomic_report_does_not_replace_good_file_on_failure(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "mode", ["success", "build-fail", "invalid-export", "cleanup-fail", "interrupted"]
 )
-def test_container_ownership_and_export(tmp_path, mode, out):
+@pytest.mark.parametrize("group", ["protocol", "native-dsh"])
+def test_container_ownership_and_export(tmp_path, mode, out, group):
     class Docker(FakeRunner):
         def run(self, argv, cwd, **kw):
             args = tuple(map(str, argv))
@@ -346,7 +347,7 @@ def test_container_ownership_and_export(tmp_path, mode, out):
     result = integration.collect(
         tmp_path,
         runner,
-        testing.TestRequest(suite="integration", only="chosen", group="protocol"),
+        testing.TestRequest(suite="integration", only="chosen", group=group),
         tmp_path,
     )
     assert (not result["errors"]) == (mode == "success")
@@ -355,7 +356,8 @@ def test_container_ownership_and_export(tmp_path, mode, out):
         name = run[run.index("--name") + 1]
         assert name.startswith("whalerein-test-")
         assert any(args[1] == "rm" and args[-1] == name for args, _ in runner.calls)
-        assert "--group" in run
+        assert run[run.index("--group") + 1] == group
+        assert run[run.index("--only") + 1] == "chosen"
     if mode == "interrupted":
         assert result["exit_code"] == 130
 

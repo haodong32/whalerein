@@ -15,7 +15,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--group",
         action="append",
-        choices=["protocol", "storage", "transport", "chain"],
+        choices=["protocol", "storage", "transport", "chain", "native-dsh"],
     )
     parser.addoption("--only", help="Select a pytest case by substring")
 
@@ -52,7 +52,9 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(scope="session", autouse=True)
 def container_only():
     if os.environ.get("WHALEREIN_INTEGRATION_CONTAINER") != "1":
-        pytest.fail("Run integration cases with ./repo test --suite integration", pytrace=False)
+        pytest.fail(
+            "Run integration cases with ./repo test --suite integration", pytrace=False
+        )
 
 
 @pytest.fixture
@@ -170,7 +172,7 @@ def broker(tmp_path, request):
 
 
 @pytest.fixture
-def scenario(tmp_path, postgres, broker):
+def scenario(tmp_path, postgres, broker, request):
     schema = "case_" + uuid.uuid4().hex
     command = [
         "psql",
@@ -187,18 +189,36 @@ def scenario(tmp_path, postgres, broker):
         "-c",
     ]
     subprocess.run(
-        [*command, f"CREATE SCHEMA {schema}"], check=True, capture_output=True, timeout=10
+        [*command, f"CREATE SCHEMA {schema}"],
+        check=True,
+        capture_output=True,
+        timeout=10,
     )
-    value = Scenario(tmp_path, schema)
+    native = request.node.get_closest_marker("native-dsh") is not None
+    if native:
+        from native_environment import NativeScenario
+
+        value = NativeScenario(tmp_path, schema)
+    else:
+        value = Scenario(tmp_path, schema)
     try:
         from integration_report import progress
 
         progress(
-            {"event": "detail", "description": "Preparing FakeDSH, Access and plugin"}
+            {
+                "event": "detail",
+                "description": "Preparing native DSH and local model"
+                if native
+                else "Preparing FakeDSH, Access and plugin",
+            }
         )
-        value.start_dsh()
-        value.start_access()
-        value.start_plugin()
+        if native:
+            value.start_access()
+            value.start_native()
+        else:
+            value.start_dsh()
+            value.start_access()
+            value.start_plugin()
         yield value
     finally:
         from integration_report import progress

@@ -118,7 +118,7 @@ def pytest_sessionfinish(session, exitstatus):
             record["description_source"] = source
         record["groups"] = sorted(
             {m.name for m in item.iter_markers()}
-            & {"chain", "protocol", "storage", "transport"}
+            & {"chain", "protocol", "storage", "transport", "native-dsh"}
         )
         if record["status"] == "passed" and "teardown" not in _PHASES.get(
             item.nodeid, set()
