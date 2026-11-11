@@ -1,10 +1,9 @@
 # Security
 
-This page describes current behavior. The proposed
-[Access redesign](architecture/access-evolution.md) specifies future external
-identity trust, account-authorized pairing, regional service authentication and
-relay ownership. Those mechanisms require implementation and acceptance before
-they can be treated as security guarantees.
+This page describes Standalone mode. The
+[Access design](architecture/access-evolution.md) specifies later external identity
+trust, account-authorized pairing, regional service authentication and relay
+ownership; these are not implemented security guarantees.
 
 ## Trust and storage
 
@@ -29,7 +28,11 @@ loopback listeners require separate production TLS configuration.
 
 Core confirms the Noise host fingerprint before FINISH. Invitations are
 host-bound, short-lived, single-use and failure-limited. Access creates the grant
-after FINISH and returns the token after host authorization.
+after FINISH and completes only after Host activation. Core generates the
+transport credential before FINISH and binds its hash into the encrypted payload.
+Access stores only hashes and a token-free operation receipt. A confirmed pending
+FINISH is retained in SecretStore and can be resumed after restart within its
+validity window; changed keys, changed requests and revoked generations fail.
 
 Core persists the confirmed Host fingerprint and checks it on each fresh channel
 before sending Noise message 3. A mismatched key preserves local authorization
@@ -39,7 +42,10 @@ silently trusted. Pending controls are bound to their original device, Access
 endpoint and confirmed Host identity, so later profile changes cannot recover a
 different principal's command.
 
-Global revocation affects all device grants; host settings revokes one grant.
+Global revocation affects all device grants and deletes all its credential hashes.
+Host settings revokes one grant; credentials remain usable for other live grants,
+and are removed when the last grant is revoked. Later re-enrollment cannot revive
+those deleted credentials.
 Access commits first, disconnects the device and delivers applicable notices.
 Hosts wait for replay completion before new channels. Reconnect uses fresh keys.
 

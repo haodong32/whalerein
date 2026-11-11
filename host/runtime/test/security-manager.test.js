@@ -71,6 +71,7 @@ function finishPairing({ security, start, request = {}, fingerprintOverride = nu
     device_id: start.deviceId,
     host_id: hostId,
     host_fingerprint: fingerprintOverride ?? security.hostFingerprint,
+    device_auth_hash: new Uint8Array(32).fill(7),
   })
   const msg3 = start.noise.writeMessage(finish)
   return security.handlePairingClaim({
@@ -79,6 +80,7 @@ function finishPairing({ security, start, request = {}, fingerprintOverride = nu
       claim_id: start.claimId,
       token_hash: start.tokenHash,
       phase: 'PAIRING_PHASE_FINISH',
+      device_auth_hash: new Uint8Array(32).fill(7),
       noise_message: msg3,
       device_id: start.deviceId,
       expires_at_unix_ms: 0,
@@ -482,4 +484,41 @@ test('a revoked grant cannot reactivate and stale revocations do not clear a rep
   assert.equal(store.getPeerKey(start.deviceId).grantGeneration,2)
   assert.throws(()=>security.handlePairingClaim({request,claim:commit}),error=>error.code==='unauthorized')
  } finally {store.close()}
+})
+
+test('a staged FINISH survives manager restart and rejects a changed credential hash', () => {
+  const {store,identity,security}=makeSecurity()
+  try {
+    const start=pairingStart()
+    const hello=security.handlePairingClaim({request:{},claim:helloClaim(start)})
+    start.noise.readMessage(hello.noise_message)
+    const authHash=new Uint8Array(32).fill(7)
+    const finish=codec.encode('whalerein.v1.PairingFinish',{
+      device_id:start.deviceId,host_id:hostId,host_fingerprint:security.hostFingerprint,device_auth_hash:authHash,
+    })
+    const claim={claim_id:start.claimId,token_hash:start.tokenHash,device_id:start.deviceId,
+      phase:'PAIRING_PHASE_FINISH',noise_message:start.noise.writeMessage(finish),device_auth_hash:authHash}
+    const first=security.handlePairingClaim({request:{},claim})
+    const restarted=new SecurityManager({hostId,identity,store,codec,now:()=>1000})
+    const replay=restarted.handlePairingClaim({request:{},claim})
+    assert.deepEqual(Buffer.from(replay.device_public_key),Buffer.from(first.device_public_key))
+    assert.deepEqual(Buffer.from(replay.device_auth_hash),Buffer.from(first.device_auth_hash))
+    assert.throws(()=>restarted.handlePairingClaim({request:{},claim:{...claim,device_auth_hash:new Uint8Array(32)}}),/binding mismatch/)
+    assert.equal(store.countPeerKeys(),0)
+  } finally {store.close()}
+})
+
+test('Noise FINISH cannot authorize a substituted transport credential', () => {
+  const {store,security}=makeSecurity()
+  try {
+    const start=pairingStart()
+    const hello=security.handlePairingClaim({request:{},claim:helloClaim(start)})
+    start.noise.readMessage(hello.noise_message)
+    const finish=codec.encode('whalerein.v1.PairingFinish',{
+      device_id:start.deviceId,host_id:hostId,host_fingerprint:security.hostFingerprint,device_auth_hash:new Uint8Array(32).fill(7),
+    })
+    assert.throws(()=>security.handlePairingClaim({request:{},claim:{claim_id:start.claimId,token_hash:start.tokenHash,
+      device_id:start.deviceId,phase:'PAIRING_PHASE_FINISH',noise_message:start.noise.writeMessage(finish),device_auth_hash:new Uint8Array(32).fill(9)}}),/binding mismatch/)
+    assert.equal(store.getPendingPeer(start.claimId),null)
+  } finally {store.close()}
 })

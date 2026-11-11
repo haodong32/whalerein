@@ -2,7 +2,7 @@
 
 Internal design: [Access architecture](../docs/architecture/access.md).
 
-WhaleRein Access is the first-version Go modular monolith for transport
+WhaleRein Access is the Standalone-mode Go modular monolith for transport
 authorization, one-time pairing, `HostRequest` copies, and encrypted message
 relay. It owns one PostgreSQL database and one MQTT 5 broker session. It does
 not execute DSH business logic and never parses encrypted payloads.
@@ -23,7 +23,7 @@ access/
    ├─ requests                request copy, dedupe and forwarding lease
    ├─ events                  device event routing by outer device_id
    ├─ broker                  MQTT 5 client, presence, callbacks support
-   ├─ store                   the five PostgreSQL tables and migrations
+   ├─ store                   versioned PostgreSQL state and migrations
    └─ diagnostics             logs, /healthz, /readyz, /metrics
 ```
 
@@ -34,35 +34,41 @@ PostgreSQL or MQTT directly.
 
 ## PostgreSQL schema
 
-`store.Migrate` applies idempotent migrations under an advisory lock. There is
-no migration metadata table because the schema intentionally contains exactly
-five tables:
+`store.Migrate` applies checksummed migrations once under an advisory lock.
+It adopts existing unversioned installations without deleting their data and
+rejects modified migration history or a newer database schema. Tables:
 
 | Table | Purpose |
 |---|---|
 | `hosts` | Host identity, fingerprint, protocol version |
-| `devices` | Device identity, public-key fingerprint, SHA-256 transport hash |
+| `devices` | Pinned device identity |
+| `device_credentials` | Transport hashes; a new Host does not invalidate existing credentials |
+| `pairing_operations` | Durable public handshake data and token-free completion receipts |
+| `schema_migrations` | Applied migration names, checksums and timestamps |
 | `grants` | Live/revoked device-to-host authorization and replay state |
 | `pairing_tokens` | SHA-256 invitation hash, expiry, failure count, used_at |
 | `requests` | the one request/status copy plus forwarding lease |
 
 Important constraints and indexes:
 
-- `devices.auth_hash` unique.
+- `device_credentials.auth_hash` unique; devices store no duplicate credential hash.
 - `pairing_tokens.token_hash` primary key (unique).
 - `requests (host_id, device_id, command_id)` unique where `command_id <> ''`.
 - partial `requests (forward_after)` index where `forward_state = 'pending'`.
 - partial `grants (host_id)` index where revoked and not replayed.
 - `requests (expires_at)` index for body-clearing cleanup.
 
-Presence is **not** stored in PostgreSQL. There is no users, queue, presence,
-heartbeat, control-plane, or migration table.
+Presence remains broker-derived. No users, subscriptions or payment records
+are stored. Only `mode: standalone` is supported; other mode values fail startup.
+External account mode and its public integration protocol are later work.
 
 Cleanup runs every `cleanup.interval`:
 
-- expired `pairing_tokens` are deleted after `pairing_token_retention`;
-- expired `requests` keep `request_id`, `command_id`, `payload_digest` and
-  status but lose both `bytea` bodies.
+- expired pairing operations and `pairing_tokens` are deleted after `pairing_token_retention`;
+- expired requests lose both body columns;
+- handshake/query rows are deleted in batches of 2,000 once they have been expired
+  for 24 hours; control and activation records retain IDs/digests/status for
+  deduplication and recovery.
 
 ## Configuration
 
@@ -86,6 +92,7 @@ Configuration summary:
 
 | Key | Meaning |
 |---|---|
+| `mode` | `standalone` (default); external accounts are not implemented |
 | `listen` / `internal_listen` | public and internal listener addresses |
 | `public_url` | public Access URL used in pairing URIs |
 | `database_url` | PostgreSQL DSN |
@@ -139,7 +146,7 @@ is already running, stop it first with
 docker compose -f deploy/compose/stack.yaml up -d postgres emqx
 # The compose file creates whalerein_dev and whalerein_test.
 
-# Validate config and apply the five-table migration.
+# Validate config and apply versioned migrations.
 cp access/config.example.yaml access/config.yaml
 # Set database_url to:
 # postgres://postgres@127.0.0.1:55432/whalerein_dev?sslmode=disable
@@ -212,7 +219,7 @@ Access accepts:
 - `username=host:{host_id}` with `clientid=whalerein-host-{host_id}` and the
   host provisioning token; the host row is inserted on first success;
 - `username=device:{device_id}` with `clientid=whalerein-device-{device_id}` and
-  a transport token whose SHA-256 matches `devices.auth_hash` and which has at
+  a transport token whose SHA-256 matches a `device_credentials.auth_hash` and which has at
   least one live grant.
 
 A successful response is HTTP 200:
@@ -313,26 +320,41 @@ Nginx terminates public TLS/ALPN `mqtt` on 443 and proxies to the broker; the
 self-hosted deployment exposes an explicit `mqtts://host:8883` instead. Access
 itself does not terminate client MQTT TLS.
 
-## Pairing flow
+## Pairing and recovery
 
-1. Admin creates an invitation for an existing host. Access stores only
-   `SHA-256(token)` and returns the URI once.
-2. `HELLO` verifies token, host binding, expiry, failure budget and broker
-   presence, then forwards a transient `PAIRING_CLAIM` `HostRequest` with
-   in-memory correlation. No `requests` row and no device/grant rows are
-   written.
-3. `FINISH` requires the earlier HELLO claim in memory, `confirmed=true`, and a
-   connected host. After the host confirms FINISH, Access writes `devices` and
-   `grants` in one transaction, generates the device transport token, and
-   stores only its SHA-256.
-4. Access publishes `PAIRING_AUTHORIZE`. Only after `authorized=true` is
-   `pairing_tokens.used_at` written and the device token returned once.
-   Authorization failure revokes the grant just written.
-5. A used token is rejected forever with `used_at` retained. Every failed step
-   consumes one unit of the configured failure budget.
+1. Admin or the enrolled Host creates a one-time invitation. Access stores its
+   hash, Host binding, expiry and failure budget.
+2. HELLO relays Noise message 1 and persists the Host's opaque message 2 reply.
+   Core derives the Host fingerprint from Noise and asks for confirmation.
+3. Core generates a 32-byte base64url transport credential and includes its hash
+   inside Noise FINISH. The confirmed request and Host pin are saved in SecretStore
+   before transmission. Access forwards the hash; the Host verifies the encrypted
+   binding and durably stages the peer plus an exact FINISH replay receipt.
+4. After Host authorization, Access atomically consumes the invitation, writes
+   identity/credential/grant state, saves a token-free completion receipt and queues
+   generation-bound COMMIT. Only confirmed Host activation completes pairing.
+5. If the response is lost, run `whalerein pair-resume` with the same data directory
+   and SecretStore. It replays the original confirmed FINISH, not a new pairing.
+   Access requires the same request and a live, unexpired grant generation.
 
-Access restart between HELLO and FINISH loses the in-memory claim; the client
-restarts pairing from HELLO. No authorization exists before that point.
+Only hashes of invitations and transport credentials are persisted on Access.
+Client keys, the pending FINISH and the transport credential live in SecretStore.
+The pending operation is retained when a response, credential save or config save
+fails. Config and logs contain no pairing token or transport credential.
+
+Recovery is bounded by `pairing.claim_ttl`. If that deadline passed, revoke the
+old device grant through Host/admin access, explicitly forget the unfinished local
+identity, obtain a fresh invitation and pair again. Losing SecretStore also
+requires explicit revoke/re-enrollment; an operation ID is not recovery authority.
+A Host restart before it durably processed FINISH can require a new invitation
+attempt. No private Noise state is persisted by Access.
+
+Global device revocation invalidates all its credentials. Host-scoped revocation
+preserves other live grants; the last revoked grant invalidates credentials, so a
+later explicitly approved repair cannot resurrect old tokens. Successful pairing
+with another Host preserves earlier credentials. Repairing the only Host rotates
+its credentials; a repair with other live Hosts preserves their credentials. A new invitation is a deliberate
+operator-authorized re-enrollment, not automatic restoration of revoked access.
 
 ## Request forwarding
 

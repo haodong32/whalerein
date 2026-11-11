@@ -1,3 +1,4 @@
+mode: standalone
 # Compose-local Access configuration. Secrets come from the compose
 # environment, never from this file.
 listen: "0.0.0.0:8080"

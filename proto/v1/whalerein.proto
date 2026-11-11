@@ -229,6 +229,9 @@ message PairingClaimRequest {
   uint32 protocol_version = 6;
   // The user confirmed the host fingerprint shown after HELLO.
   bool confirmed = 7;
+  // Client-generated random credential; its hash is authenticated inside Noise FINISH.
+  // Never logged or persisted by Access. Required for FINISH.
+  string device_token = 8;
 }
 
 message PairingClaimResponse {
@@ -241,7 +244,7 @@ message PairingClaimResponse {
   string host_fingerprint = 6;
   string device_id = 7;
   bytes device_public_key = 8;
-  // Transport credential returned exactly once on successful registration.
+  // Echo of the client-generated credential after confirmed Host activation.
   string device_token = 9;
   int64 expires_at_unix_ms = 10;
   uint32 protocol_version = 11;
@@ -260,6 +263,8 @@ message PairingClaim {
   int64 expires_at_unix_ms = 7;
   // Access-assigned grant incarnation, populated on COMMIT.
   uint64 grant_generation = 8;
+  // SHA-256 of the client transport credential, verified against Noise FINISH.
+  bytes device_auth_hash = 9;
 }
 
 // Host -> Access, carried as HostResult.result_body for a pairing claim.
@@ -270,6 +275,7 @@ message PairingClaimResult {
   string device_id = 4;
   bytes device_public_key = 5;
   bool authorized = 6;
+  bytes device_auth_hash = 7;
 }
 
 // Access -> host, carried as the body of a REQUEST_KIND_REVOCATION request.
@@ -364,6 +370,7 @@ message PairingFinish {
   string device_id = 1;
   string host_id = 2;
   string host_fingerprint = 3;
+  bytes device_auth_hash = 4;
 }
 
 // ---------------------------------------------------------------------------

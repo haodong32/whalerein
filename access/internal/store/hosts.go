@@ -134,9 +134,9 @@ func (s *Store) ListAuthorizedHosts(ctx context.Context, deviceID string) ([]Hos
 // requiring at least one live grant.
 func (s *Store) ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (Device, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT d.device_id, d.public_key_fingerprint, d.auth_hash, d.created_at, d.updated_at
-		FROM devices d
-		WHERE d.auth_hash = $1
+		SELECT d.device_id, d.public_key_fingerprint, c.auth_hash, d.created_at, d.updated_at
+        FROM device_credentials c JOIN devices d ON d.device_id=c.device_id
+        WHERE c.auth_hash=$1
 		  AND EXISTS (SELECT 1 FROM grants g WHERE g.device_id = d.device_id AND g.revoked_at IS NULL)`,
 		authHash)
 	return scanDevice(row)
@@ -145,8 +145,9 @@ func (s *Store) ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (De
 // DeviceByID reads a device regardless of grant state.
 func (s *Store) DeviceByID(ctx context.Context, deviceID string) (Device, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT device_id, public_key_fingerprint, auth_hash, created_at, updated_at
-		FROM devices WHERE device_id = $1`, deviceID)
+		SELECT d.device_id, d.public_key_fingerprint,
+            (SELECT c.auth_hash FROM device_credentials c WHERE c.device_id=d.device_id ORDER BY c.created_at DESC,c.auth_hash LIMIT 1),
+            d.created_at,d.updated_at FROM devices d WHERE d.device_id=$1`, deviceID)
 	return scanDevice(row)
 }
 
@@ -175,8 +176,8 @@ func (s *Store) HasActiveGrant(ctx context.Context, hostID, deviceID string) (bo
 }
 
 // CreatePairedDevice writes devices and grants in one transaction after the
-// host confirmed FINISH. Re-pairing the same device rotates its transport hash
-// and clears any prior revocation for that host/device pair.
+// host confirmed FINISH. Each pairing adds a credential without invalidating
+// other live Host enrollments and explicitly renews this Host/device grant.
 func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, publicKeyFingerprint string, authHash []byte, at time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -197,7 +198,16 @@ func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, public
 // RevokeGrant marks one host's grant revoked after an authorized owner action.
 // Failed pairing transactions roll back and never invoke this operation.
 func (s *Store) RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error {
-	cmd, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedID string
+	if err := tx.QueryRow(ctx, "SELECT device_id FROM devices WHERE device_id=$1 FOR UPDATE", deviceID).Scan(&lockedID); err != nil {
+		return wrapRequestScan(err)
+	}
+	cmd, err := tx.Exec(ctx, `
 		UPDATE grants SET revoked_at = $3, updated_at = $3
 		WHERE host_id = $1 AND device_id = $2 AND revoked_at IS NULL`, hostID, deviceID, at)
 	if err != nil {
@@ -206,7 +216,7 @@ func (s *Store) RevokeGrant(ctx context.Context, hostID, deviceID string, at tim
 	if cmd.RowsAffected() == 0 {
 		// Already revoked is an acceptable compensation result.
 		var exists bool
-		if err := s.pool.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM grants WHERE host_id = $1 AND device_id = $2)`,
 			hostID, deviceID).Scan(&exists); err != nil {
 			return fmt.Errorf("check grant for revoke: %w", err)
@@ -215,7 +225,10 @@ func (s *Store) RevokeGrant(ctx context.Context, hostID, deviceID string, at tim
 			return ErrNotFound
 		}
 	}
-	return nil
+	if _, err := tx.Exec(ctx, `DELETE FROM device_credentials WHERE device_id=$1 AND NOT EXISTS(SELECT 1 FROM grants WHERE device_id=$1 AND revoked_at IS NULL)`, deviceID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // RevokeDeviceGrants revokes every live grant of a device in one transaction.
@@ -228,12 +241,12 @@ func (s *Store) RevokeDeviceGrants(ctx context.Context, deviceID string, at time
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE device_id = $1)`, deviceID).Scan(&exists); err != nil {
+	var lockedID string
+	if err := tx.QueryRow(ctx, `SELECT device_id FROM devices WHERE device_id=$1 FOR UPDATE`, deviceID).Scan(&lockedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("check device: %w", err)
-	}
-	if !exists {
-		return nil, false, nil
 	}
 
 	rows, err := tx.Query(ctx, `
@@ -258,6 +271,9 @@ func (s *Store) RevokeDeviceGrants(ctx context.Context, deviceID string, at time
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, true, fmt.Errorf("revoke device grants: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM device_credentials WHERE device_id=$1", deviceID); err != nil {
+		return nil, true, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, true, fmt.Errorf("commit revoke device: %w", err)
@@ -323,19 +339,31 @@ func (s *Store) CountActiveGrants(ctx context.Context, deviceID string) (int, er
 // writePairedDevice never rebinds an existing device ID to another public key.
 func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicKeyFingerprint string, authHash []byte, at time.Time) error {
 	if command, err := tx.Exec(ctx, `
-		INSERT INTO devices (device_id, public_key_fingerprint, auth_hash, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $4)
+		INSERT INTO devices (device_id, public_key_fingerprint, created_at, updated_at)
+        VALUES ($1, $2, $3, $3)
 		ON CONFLICT (device_id) DO UPDATE
 		SET public_key_fingerprint = EXCLUDED.public_key_fingerprint,
-		    auth_hash = EXCLUDED.auth_hash,
 		    updated_at = EXCLUDED.updated_at
         WHERE devices.public_key_fingerprint = EXCLUDED.public_key_fingerprint`,
-		deviceID, publicKeyFingerprint, authHash, at); err != nil {
+		deviceID, publicKeyFingerprint, at); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("register device: %w", ErrConflict)
 		}
 		return fmt.Errorf("register device: %w", err)
 	} else if command.RowsAffected() == 0 {
+		return ErrConflict
+	}
+
+	// A repair of the only Host rotates credentials. Other live Hosts retain
+	// their device credentials until an explicit global revocation.
+	if _, err := tx.Exec(ctx, `DELETE FROM device_credentials WHERE device_id=$1 AND NOT EXISTS(
+        SELECT 1 FROM grants WHERE device_id=$1 AND host_id<>$2 AND revoked_at IS NULL)`, deviceID, hostID); err != nil {
+		return err
+	}
+	if command, err := tx.Exec(ctx, `INSERT INTO device_credentials(auth_hash,device_id,created_at) VALUES($1,$2,$3)
+        ON CONFLICT(auth_hash) DO UPDATE SET device_id=EXCLUDED.device_id WHERE device_credentials.device_id=EXCLUDED.device_id`, authHash, deviceID, at); err != nil {
+		return fmt.Errorf("store device credential: %w", err)
+	} else if command.RowsAffected() != 1 {
 		return ErrConflict
 	}
 
@@ -354,7 +382,17 @@ func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicK
 // CommitPairing consumes the invitation and activates the device/grant in one
 // transaction. Failure never rotates an existing credential or revokes a grant.
 // On success, notice.Body is filled with the same generation bound into its durable outbox row.
-func (s *Store) CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest) (bool, error) {
+func (s *Store) CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest, operation *PairingOperation) (bool, error) {
+	if operation != nil {
+		var response whalereinv1.PairingClaimResponse
+		var claim whalereinv1.PairingClaim
+		if notice == nil || proto.Unmarshal(operation.FinishResponse, &response) != nil || proto.Unmarshal(notice.Body, &claim) != nil ||
+			response.DeviceToken != "" || len(operation.FinishHash) != 32 || response.ClaimId != operation.ClaimID ||
+			claim.ClaimId != operation.ClaimID || response.HostId != hostID || response.DeviceId != deviceID ||
+			response.Phase != whalereinv1.PairingPhase_PAIRING_PHASE_FINISH || len(response.DevicePublicKey) != 32 {
+			return false, ErrConflict
+		}
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -391,6 +429,22 @@ func (s *Store) CommitPairing(ctx context.Context, tokenHash []byte, hostID, dev
 		_, err = tx.Exec(ctx, `INSERT INTO requests (request_id,host_id,device_id,kind,protocol_version,status,request_body,expires_at,trace_id,forward_after,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,'received',$6,$7,$8,$9,$9,$9)`, notice.RequestId, hostID, deviceID, notice.Kind, notice.ProtocolVersion, committedBody, time.UnixMilli(notice.ExpiresAtUnixMs), notice.TraceId, at)
 		if err != nil {
 			return false, err
+		}
+	}
+	if operation != nil {
+		op := operation
+		var generation uint64
+		if err := tx.QueryRow(ctx, "SELECT grant_generation FROM grants WHERE host_id=$1 AND device_id=$2", hostID, deviceID).Scan(&generation); err != nil {
+			return false, err
+		}
+		cmd, err := tx.Exec(ctx, `UPDATE pairing_operations SET finish_hash=$2,finish_response=$3,commit_request_id=$4,grant_generation=$5,auth_hash=$6
+            WHERE claim_id=$1 AND token_hash=$7 AND host_id=$8 AND device_id=$9 AND finish_hash IS NULL AND expires_at>$10`,
+			op.ClaimID, op.FinishHash, op.FinishResponse, notice.RequestId, generation, authHash, tokenHash, hostID, deviceID, at)
+		if err != nil {
+			return false, err
+		}
+		if cmd.RowsAffected() != 1 {
+			return false, ErrConflict
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

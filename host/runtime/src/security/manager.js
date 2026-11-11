@@ -22,7 +22,7 @@ import {
   seal,
 } from './noise.js'
 import { randomBytes } from 'node:crypto'
-import { bytesEqual } from './digest.js'
+import { bytesEqual, sha256Bytes } from './digest.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import { PluginError } from '../errors.js'
 import { sanitizeDisplayName } from '../display-name.js'
@@ -244,6 +244,15 @@ export class SecurityManager {
   }
 
   #pairingFinish({ request, claim, claimId }) {
+    const staged=this.#completedPairings.get(claimId) ?? this.store.getPendingPeer(claimId)
+    if (staged) {
+      if (staged.deviceId!==claim.device_id || staged.tokenHash!==claim.token_hash ||
+          !bytesEqual(staged.finishHash,sha256Bytes(claim.noise_message)) || !bytesEqual(staged.authHash,claim.device_auth_hash)) {
+        throw new PluginError('unauthorized','pairing retry binding mismatch')
+      }
+      return {device_id:staged.deviceId,device_public_key:staged.publicKey,device_auth_hash:staged.authHash,
+        host_public_key:this.identity.publicKey,host_fingerprint:this.hostFingerprint}
+    }
     const pending = this.#pendingPairings.get(claimId)
     if (!pending) throw new PluginError('invalid_argument', 'pairing claim unknown')
     if (claim.device_id && claim.device_id !== pending.deviceId) throw new PluginError('forbidden', 'device mismatch')
@@ -262,6 +271,11 @@ export class SecurityManager {
     if (finish.host_fingerprint && normalizeFingerprint(finish.host_fingerprint) !== normalizeFingerprint(this.hostFingerprint)) {
       throw new PluginError('unauthorized', 'fingerprint mismatch')
     }
+    if (!(finish.device_auth_hash instanceof Uint8Array) || finish.device_auth_hash.length !== 32 ||
+        !bytesEqual(finish.device_auth_hash, claim.device_auth_hash)) {
+      this.#pendingPairings.delete(claimId)
+      throw new PluginError('unauthorized', 'pairing credential binding mismatch')
+    }
     const devicePublicKey = pending.noise.remoteStaticKey
     if (!devicePublicKey || devicePublicKey.length !== 32) throw new PluginError('unauthorized', 'device key missing')
     this.#pendingPairings.delete(claimId)
@@ -270,6 +284,9 @@ export class SecurityManager {
       displayName: pending.displayName ?? '',
       os: pending.os ?? '',
       publicKey: new Uint8Array(devicePublicKey),
+      finishHash: sha256Bytes(claim.noise_message),
+      authHash: finish.device_auth_hash,
+      tokenHash: claim.token_hash,
       expiresAt: this.now() + this.pendingTtlMs,
     })
     try { this.store.stagePeer({ claimId, ...this.#completedPairings.get(claimId) }) }
@@ -278,6 +295,7 @@ export class SecurityManager {
     return {
       device_id: pending.deviceId,
       device_public_key: new Uint8Array(devicePublicKey),
+      device_auth_hash: finish.device_auth_hash,
       host_public_key: this.identity.publicKey,
       host_fingerprint: this.hostFingerprint,
     }

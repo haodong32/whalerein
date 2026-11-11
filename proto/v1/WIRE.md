@@ -106,7 +106,8 @@ host binding, expiry and failure budget, requires the host to be online, and
 forwards a `HostRequest{kind=PAIRING_CLAIM, body=PairingClaim{HELLO,
 token_hash, noise_message}}` to the host. The host consumes msg1, returns
 `PairingClaimResult{noise_message=msg2, host_public_key,
-host_fingerprint}`. Access returns it to the client. Nothing is written yet.
+host_fingerprint}`. Access persists the public reply and request digest in
+`pairing_operations`; no device or grant is activated yet.
 
 The client completes the XX read of msg2, obtains the host static public key
 from Noise (not from Access), computes the fingerprint, and asks the user to
@@ -115,23 +116,37 @@ the host has not saved the peer key.
 
 ### Step 2: FINISH
 
-`POST /v1/pairing/claims` with `phase=FINISH, confirmed=true, noise_message=msg3`.
-Access revalidates the token and host readiness, forwards
-`PairingClaim{FINISH, msg3}`. The host completes XX, verifies `device_id`,
-and returns `PairingClaimResult{device_id, device_public_key}` without
-persisting the peer key.
+Core creates a random 32-byte base64url `device_token` and includes
+`SHA-256(UTF-8(device_token))` in encrypted `PairingFinish.device_auth_hash`.
+Before sending message 3 it persists the exact confirmed request, device key
+binding, endpoint and confirmed Host fingerprint in SecretStore.
 
-Only now does Access write `devices` and `grants` in one transaction, generating
-the device transport token and storing only its SHA-256. Access then publishes
-`HostRequest{kind=PAIRING_AUTHORIZE, body=PairingClaim{AUTHORIZE,
-device_id, device_public_key}}`; the host persists the peer key and returns
-`authorized=true`. Access marks `pairing_tokens.used_at` and returns
-`device_token` to the client once. If the host authorization step fails,
-Access compensates by revoking the grant it just wrote.
+`POST /v1/pairing/claims` sends `phase=FINISH`, `confirmed=true`, message 3 and
+`device_token`. Access forwards only the hash in `PairingClaim.device_auth_hash`.
+The Host completes XX, checks the credential hash against the encrypted FINISH,
+and returns the authenticated key and hash. It durably stages the peer and
+FINISH replay binding without activating the peer. Changed FINISH ciphertext,
+invitation hash or credential hash cannot reuse that staged receipt.
 
-A token with `used_at` set is rejected forever. A failure anywhere increments
-`failure_count`; after the configured budget the token is rejected before
-forwarding.
+After AUTHORIZE confirms the staged peer, Access atomically consumes the
+invitation, writes identity/credential/grant state, saves the request digest and
+credential-free completion response, and queues generation-bound COMMIT. Only
+confirmed COMMIT completes pairing. FINISH responses echo the credential already
+held by the client; Access never persists its plaintext. A failed pre-commit
+attempt rolls back rather than revoking an older valid grant.
+
+An exact FINISH retry after restart recovers the same receipt and COMMIT, subject
+to operation expiry, current credential validity and the exact active grant
+generation. The request digest covers every FINISH field, including the supplied
+credential. A consumed invitation alone is insufficient to recover or create a
+new grant. Revocation and grant replacement invalidate old completion receipts.
+The client command `pair-resume` reloads the request from SecretStore; it never
+reconstructs a credential from the operation ID. A lost SecretStore requires
+explicit operator revocation and a fresh enrollment.
+
+This credential-binding requirement is a coordinated protocol cutover: upgrade
+Access, Core/CLI and Host together. Missing or mismatched hashes fail pairing.
+
 
 ## Secure channel
 

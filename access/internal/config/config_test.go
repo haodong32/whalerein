@@ -253,3 +253,11 @@ func TestDurationMarshalSerializesConfiguredDuration(t *testing.T) {
 		t.Fatal("expected invalid duration error")
 	}
 }
+
+func TestExternalAccountModeCannotSilentlyFallBackToStandalone(t *testing.T) {
+	c := Default()
+	c.Mode = "external"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "mode must be standalone") {
+		t.Fatal("unsupported mode accepted")
+	}
+}

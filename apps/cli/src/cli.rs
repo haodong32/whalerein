@@ -43,6 +43,9 @@ pub enum Command {
         name: Option<String>,
     },
 
+    /// Resume a confirmed pairing after a lost response or process restart.
+    PairResume,
+
     /// List hosts authorized for this device.
     Hosts,
 
@@ -137,6 +140,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Pair { .. } => "pair",
+            Self::PairResume => "pair-resume",
             Self::Hosts => "hosts",
             Self::Sessions { .. } => "sessions",
             Self::Tail { .. } => "tail",

@@ -14,7 +14,49 @@ fn aad(key: &SessionKey, id: &str) -> Vec<u8> {
     .expect("string tuple")
 }
 
+// Evict complete source views, never individual messages beneath a retained
+// cursor. Command recovery records and endpoint credentials are not cache data.
+fn trim_history(
+    conn: &Connection,
+    protected: Option<&SessionKey>,
+    budget: u64,
+) -> Result<(), CacheError> {
+    loop {
+        let bytes: i64=conn.query_row("SELECT COALESCE((SELECT sum(length(payload)) FROM conversation_messages),0) + COALESCE((SELECT sum(length(payload)) FROM conversation_stage_messages),0)",[],|row|row.get(0))?;
+        if bytes as u64 <= budget {
+            return Ok(());
+        }
+        let excluded = protected.cloned().unwrap_or_default();
+        let candidate:Option<(String,String)>=conn.query_row("SELECT host_id,session_id FROM (SELECT host_id,session_id,rowid AS position FROM conversation_views UNION ALL SELECT host_id,session_id,rowid AS position FROM conversation_stages) WHERE NOT(host_id=?1 AND session_id=?2) ORDER BY position,host_id,session_id LIMIT 1",params![excluded.host_id,excluded.session_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let Some((host, session)) = candidate else {
+            return Err(CacheError::HistoryBudget);
+        };
+        for table in [
+            "conversation_messages",
+            "conversation_views",
+            "history_receipts",
+            "conversation_stage_messages",
+            "conversation_stages",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE host_id=?1 AND session_id=?2"),
+                params![host, session],
+            )?;
+        }
+    }
+}
+
 impl Cache {
+    pub(super) fn trim_history_cache(
+        &self,
+        protected: Option<&SessionKey>,
+    ) -> Result<(), CacheError> {
+        trim_history(
+            &self.conn.lock().expect("cache mutex"),
+            protected,
+            self.history_budget_bytes,
+        )
+    }
     pub fn initialize_conversations(&self) -> Result<(), CacheError> {
         self.conn.lock().expect("cache mutex").execute_batch("CREATE TABLE IF NOT EXISTS conversation_views (
           host_id TEXT NOT NULL, session_id TEXT NOT NULL, cursor TEXT NOT NULL,
@@ -205,6 +247,23 @@ impl Cache {
         }
         tx.execute("INSERT INTO history_receipts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(host_id,session_id,batch_id) DO NOTHING",params![key.host_id,key.session_id,batch.batch_id,protected_digest,crate::util::now_unix_ms()])?;
         tx.execute("DELETE FROM history_receipts WHERE host_id=?1 AND session_id=?2 AND batch_id NOT IN (SELECT batch_id FROM history_receipts WHERE host_id=?1 AND session_id=?2 ORDER BY applied_at DESC,rowid DESC LIMIT 512)",params![key.host_id,key.session_id])?;
+        if let Err(error) = trim_history(&tx, Some(key), self.history_budget_bytes) {
+            tx.rollback()?;
+            // Earlier pages of an abandoned replacement must not pin the budget.
+            // Keep the last committed view and its recovery metadata intact.
+            if matches!(error, CacheError::HistoryBudget) {
+                let cleanup = conn.transaction()?;
+                for table in ["conversation_stage_messages", "conversation_stages"] {
+                    cleanup.execute(
+                        &format!("DELETE FROM {table} WHERE host_id=?1 AND session_id=?2"),
+                        params![key.host_id, key.session_id],
+                    )?;
+                }
+                cleanup.commit()?;
+            }
+
+            return Err(error);
+        }
         tx.commit()?;
         Ok(!page.snapshot || page.complete)
     }
@@ -365,5 +424,134 @@ mod tests {
         assert!(cache.apply_history_page(&invalid).is_err());
         cache.clear().unwrap();
         assert!(cache.history_cursor(&key("a")).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use whalerein_proto::{content_block, ContentBlock, HistoryBatch, MessageRole, TextContent};
+
+    fn page(host: &str, from: &str, to: &str, text: &str, complete: bool) -> HistoryPage {
+        HistoryPage {
+            session: Some(SessionKey {
+                host_id: host.into(),
+                session_id: "s".into(),
+            }),
+            batch: Some(HistoryBatch {
+                from_cursor: from.into(),
+                to_cursor: to.into(),
+                batch_id: format!("{from}:{to}"),
+                changes: vec![MessageUpsert {
+                    message: Some(ConversationMessage {
+                        message_id: to.into(),
+                        role: MessageRole::Assistant as i32,
+                        blocks: vec![ContentBlock {
+                            block_id: "text".into(),
+                            content: Some(content_block::Content::Text(TextContent {
+                                text: text.into(),
+                            })),
+                        }],
+                        ..Default::default()
+                    }),
+                    origin: None,
+                }],
+            }),
+            snapshot: true,
+            complete,
+            cut_cursor: "cut".into(),
+        }
+    }
+
+    #[test]
+    fn budget_evicts_whole_old_views_and_preserves_uncertain_commands() {
+        let mut cache = Cache::open_in_memory([1; 32]).unwrap();
+        for host in ["a", "b"] {
+            cache
+                .apply_history_page(&page(host, "", "one", "fixture", true))
+                .unwrap();
+        }
+        let used: i64 = cache
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT sum(length(payload)) FROM conversation_messages",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        cache.history_budget_bytes = used as u64;
+        cache.conn.lock().unwrap().execute("INSERT INTO commands(request_id,command_id,status,updated_at_unix_ms) VALUES('uncertain','command','unknown',0)",[]).unwrap();
+        cache
+            .apply_history_page(&page("c", "", "one", "fixture", true))
+            .unwrap();
+        assert!(cache
+            .history_cursor(&SessionKey {
+                host_id: "a".into(),
+                session_id: "s".into()
+            })
+            .unwrap()
+            .is_none());
+        assert!(cache
+            .history_cursor(&SessionKey {
+                host_id: "b".into(),
+                session_id: "s".into()
+            })
+            .unwrap()
+            .is_some());
+        let conn = cache.conn.lock().unwrap();
+        let receipts: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM history_receipts WHERE host_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM commands WHERE request_id='uncertain'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, 0);
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn oversized_replacement_rolls_back_cursor_and_discards_only_staging() {
+        let mut cache = Cache::open_in_memory([1; 32]).unwrap();
+        let key = SessionKey {
+            host_id: "a".into(),
+            session_id: "s".into(),
+        };
+        cache
+            .apply_history_page(&page("a", "", "old", "original", true))
+            .unwrap();
+        cache.history_budget_bytes = 512;
+        cache
+            .apply_history_page(&page("a", "", "first", "small", false))
+            .unwrap();
+        assert!(matches!(
+            cache.apply_history_page(&page("a", "first", "last", &"x".repeat(1024), true)),
+            Err(CacheError::HistoryBudget)
+        ));
+        assert_eq!(cache.history_cursor(&key).unwrap().as_deref(), Some("old"));
+        assert_eq!(cache.history_messages(&key).unwrap()[0].message_id, "old");
+        let staged: i64 = cache
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM conversation_stage_messages",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(staged, 0);
+        cache.history_budget_bytes = 0;
+        cache.trim_history_cache(None).unwrap();
+        assert!(cache.history_cursor(&key).unwrap().is_none());
     }
 }

@@ -21,9 +21,11 @@ import (
 )
 
 type fakeStore struct {
-	hosts   map[string]store.Host
-	tokens  map[string]store.PairingToken
-	devices map[string]struct {
+	operations map[string]store.PairingOperation
+	notices    map[string]store.Request
+	hosts      map[string]store.Host
+	tokens     map[string]store.PairingToken
+	devices    map[string]struct {
 		fingerprint string
 		authHash    []byte
 	}
@@ -42,7 +44,8 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		hosts:  map[string]store.Host{},
+		hosts:      map[string]store.Host{},
+		operations: map[string]store.PairingOperation{}, notices: map[string]store.Request{},
 		tokens: map[string]store.PairingToken{},
 		devices: map[string]struct {
 			fingerprint string
@@ -126,7 +129,7 @@ func (f *fakeStore) CreatePairedDevice(_ context.Context, hostID, deviceID, fing
 	return nil
 }
 
-func (f *fakeStore) CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, _ *whalereinv1.HostRequest) (bool, error) {
+func (f *fakeStore) CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest, operation *store.PairingOperation) (bool, error) {
 	if f.deviceErr != nil {
 		return false, f.deviceErr
 	}
@@ -137,7 +140,20 @@ func (f *fakeStore) CommitPairing(ctx context.Context, tokenHash []byte, hostID,
 	if err != nil || !used {
 		return used, err
 	}
-	return true, f.CreatePairedDevice(ctx, hostID, deviceID, fingerprint, authHash, at)
+	if err := f.CreatePairedDevice(ctx, hostID, deviceID, fingerprint, authHash, at); err != nil {
+		return false, err
+	}
+	if operation != nil {
+		op := f.operations[operation.ClaimID]
+		op.FinishHash = operation.FinishHash
+		op.FinishResponse = operation.FinishResponse
+		op.CommitRequestID = notice.RequestId
+		op.Active = true
+		f.operations[op.ClaimID] = op
+		f.notices[notice.RequestId] = store.Request{RequestID: notice.RequestId, HostID: hostID, DeviceID: deviceID, Kind: notice.Kind,
+			RequestBody: notice.Body, ProtocolVersion: notice.ProtocolVersion, ExpiresAt: time.UnixMilli(notice.ExpiresAtUnixMs)}
+	}
+	return true, nil
 }
 
 func (f *fakeStore) UpdateHostMetadata(_ context.Context, hostID, fingerprint string, protocolVersion uint32, _ time.Time) error {
@@ -149,6 +165,7 @@ func (f *fakeStore) UpdateHostMetadata(_ context.Context, hostID, fingerprint st
 }
 
 type fakeTransport struct {
+	capable  *bool
 	requests []*whalereinv1.HostRequest
 	awaitFn  func(*whalereinv1.HostRequest) (*whalereinv1.HostResult, error)
 	err      error
@@ -169,7 +186,7 @@ type fakePresence struct{ online map[string]bool }
 
 func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool { return f.online[hostID] }
 
-func (f *fakeTransport) SupportsPairing(string) bool { return true }
+func (f *fakeTransport) SupportsPairing(string) bool { return f.capable == nil || *f.capable }
 
 type fixture struct {
 	service   *Service
@@ -221,7 +238,7 @@ func defaultPairingAnswers(req *whalereinv1.HostRequest) (*whalereinv1.HostResul
 	case whalereinv1.PairingPhase_PAIRING_PHASE_HELLO:
 		result = whalereinv1.PairingClaimResult{NoiseMessage: []byte("msg2"), HostPublicKey: []byte("host-key"), HostFingerprint: "host-fp"}
 	case whalereinv1.PairingPhase_PAIRING_PHASE_FINISH:
-		result = whalereinv1.PairingClaimResult{DeviceId: claim.GetDeviceId(), DevicePublicKey: bytes.Repeat([]byte{4}, 32)}
+		result = whalereinv1.PairingClaimResult{DeviceId: claim.GetDeviceId(), DevicePublicKey: bytes.Repeat([]byte{4}, 32), DeviceAuthHash: claim.DeviceAuthHash}
 	case whalereinv1.PairingPhase_PAIRING_PHASE_AUTHORIZE, whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT:
 		result = whalereinv1.PairingClaimResult{Authorized: true, DeviceId: claim.GetDeviceId()}
 	}
@@ -253,7 +270,7 @@ func helloRequest(token, claimID, deviceID string) *whalereinv1.PairingClaimRequ
 func finishRequest(token, claimID, deviceID string) *whalereinv1.PairingClaimRequest {
 	return &whalereinv1.PairingClaimRequest{
 		Token: token, ClaimId: claimID, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH,
-		NoiseMessage: []byte("msg3"), DeviceId: deviceID, ProtocolVersion: 1, Confirmed: true,
+		NoiseMessage: []byte("msg3"), DeviceId: deviceID, ProtocolVersion: 1, Confirmed: true, DeviceToken: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)),
 	}
 }
 
@@ -830,6 +847,10 @@ func TestPairingReplayAndCommitRecoveryPreserveIdentity(t *testing.T) {
 		t.Fatal("commit retry failed")
 	}
 	before = len(f.transport.requests)
+	for id, r := range f.store.notices {
+		r.Status = whalereinv1.OnlineStatus_succeeded
+		f.store.notices[id] = r
+	}
 	replay, err := f.service.Claim(ctx, finish)
 	if err != nil || !bytes.Equal(sha256Sum([]byte(replay.DeviceToken)), sha256Sum([]byte(response.DeviceToken))) || len(f.transport.requests) != before {
 		t.Fatal("finish replay changed outcome")
@@ -840,10 +861,10 @@ func TestPairingReplayAndCommitRecoveryPreserveIdentity(t *testing.T) {
 		t.Fatal("different finish proof reused receipt")
 	}
 	f.now = f.now.Add(2 * time.Minute)
-	f.service.gcClaims(f.now)
-	if len(f.service.completed) != 0 {
-		t.Fatal("completed receipt expired incorrectly")
+	if _, err := f.service.Claim(ctx, finish); !errors.Is(err, ErrClaimRequired) {
+		t.Fatal("expired receipt recovered")
 	}
+
 }
 
 func TestFailedRepairDoesNotRevokeExistingGrant(t *testing.T) {
@@ -912,5 +933,126 @@ func TestMalformedDevicePublicKeyCannotCreatePinnedIdentity(t *testing.T) {
 	}
 	if len(f.store.devices) != 0 {
 		t.Fatal("malformed key pinned an identity")
+	}
+}
+
+func (f *fakeStore) SavePairingOperation(_ context.Context, op store.PairingOperation) error {
+	if _, ok := f.operations[op.ClaimID]; ok {
+		return store.ErrConflict
+	}
+	f.operations[op.ClaimID] = op
+	return nil
+}
+func (f *fakeStore) PairingOperation(_ context.Context, id string) (store.PairingOperation, error) {
+	op, ok := f.operations[id]
+	if !ok {
+		return op, store.ErrNotFound
+	}
+	if len(op.FinishHash) > 0 {
+		op.Active = f.grants[op.HostID+"|"+op.DeviceID]
+	}
+	return op, nil
+}
+func (f *fakeStore) GetRequest(_ context.Context, id string) (store.Request, error) {
+	r, ok := f.notices[id]
+	if !ok {
+		return r, store.ErrNotFound
+	}
+	return r, nil
+}
+
+func TestDurablePairingRecoversAfterServiceRestartWithoutPersistingCredential(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	hello := helloRequest(token, "restart", "d1")
+	if _, err := f.service.Claim(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh service loses every in-memory claim and waiter.
+	restarted, err := New(Dependencies{Store: f.store, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }, Random: bytes.NewReader(bytes.Repeat([]byte{9}, 1024))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := finishRequest(token, "restart", "d1")
+	reply, err := restarted.Claim(ctx, finish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := f.store.operations["restart"]
+	if bytes.Contains(op.FinishResponse, []byte(finish.DeviceToken)) || bytes.Contains(op.HelloResponse, []byte(token)) {
+		t.Fatal("credential persisted in operation")
+	}
+	restarted, err = New(Dependencies{Store: f.store, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := restarted.Claim(ctx, finish)
+	if err != nil || !proto.Equal(reply, again) {
+		t.Fatal("committed pairing could not be recovered")
+	}
+	changed := proto.Clone(finish).(*whalereinv1.PairingClaimRequest)
+	changed.DeviceToken = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	if _, err := restarted.Claim(ctx, changed); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("changed credential reused receipt")
+	}
+	f.store.grants["h1|d1"] = false
+	if _, err := restarted.Claim(ctx, finish); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("revoked grant recovered")
+	}
+}
+
+func TestFinishRejectsMissingCredentialAndHostCredentialSubstitution(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	request := finishRequest(token, "bound", "d1")
+	request.DeviceToken = ""
+	if _, err := f.service.Claim(ctx, request); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("missing credential accepted")
+	}
+	request.DeviceToken = "invalid"
+	if _, err := f.service.Claim(ctx, request); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("invalid credential accepted")
+	}
+	if _, err := f.service.Claim(ctx, helloRequest(token, "bound", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	f.transport.awaitFn = func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		response, err := defaultPairingAnswers(req)
+		var result whalereinv1.PairingClaimResult
+		_ = proto.Unmarshal(response.ResultBody, &result)
+		result.DeviceAuthHash = nil
+		response.ResultBody, _ = proto.Marshal(&result)
+		return response, err
+	}
+	if _, err := f.service.Claim(ctx, finishRequest(token, "bound", "d1")); !errors.Is(err, ErrHostRejected) {
+		t.Fatal("Host did not authenticate credential")
+	}
+	if f.store.grants["h1|d1"] {
+		t.Fatal("substitution created grant")
+	}
+}
+
+func TestHelloBootstrapsCapabilityButRejectsAnUnsupportedHost(t *testing.T) {
+	f := newFixture(t)
+	_, token := f.invite(t)
+	ctx := context.Background()
+	capable := false
+	f.transport.capable = &capable
+	f.transport.awaitFn = func(request *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		capable = true
+		return defaultPairingAnswers(request)
+	}
+	if _, err := f.service.Claim(ctx, helloRequest(token, "bootstrap", "d1")); err != nil {
+		t.Fatal("unknown capability could not bootstrap")
+	}
+	capable = false
+	f.transport.awaitFn = defaultPairingAnswers
+	if _, err := f.service.Claim(ctx, helloRequest(token, "legacy", "d2")); !errors.Is(err, ErrProtocolVersion) {
+		t.Fatal("unsupported Host accepted")
+	}
+	if len(f.store.grants) != 0 {
+		t.Fatal("HELLO activated a grant")
 	}
 }

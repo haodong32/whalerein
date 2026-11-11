@@ -308,3 +308,15 @@ func (s *Store) CountRequests(ctx context.Context) (int, error) {
 	}
 	return count, nil
 }
+
+// DeleteExpiredQueries removes a bounded batch of old, non-control records.
+// Command and activation identities remain available for dedupe and recovery.
+func (s *Store) DeleteExpiredQueries(ctx context.Context, before time.Time) (int64, error) {
+	result, err := s.pool.Exec(ctx, `DELETE FROM requests WHERE request_id IN (
+        SELECT request_id FROM requests WHERE expires_at <= $1 AND command_id=''
+        AND kind IN (1,2) ORDER BY expires_at,request_id LIMIT 2000)`, before)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired query records: %w", err)
+	}
+	return result.RowsAffected(), nil
+}

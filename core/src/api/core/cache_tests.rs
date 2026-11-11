@@ -104,10 +104,10 @@ async fn pairing_initializes_one_cache_key_for_concurrent_core_instances() {
     let a = std::thread::spawn(move || {
         first.sync_service().unwrap().store_sessions(
             "host-a",
-            &[SessionSummary {
+            &[SessionSummary::from(whalerein_proto::SessionSummary {
                 session_id: "s".into(),
                 ..Default::default()
-            }],
+            })],
             "remote",
             true,
         )
@@ -115,10 +115,10 @@ async fn pairing_initializes_one_cache_key_for_concurrent_core_instances() {
     let b = std::thread::spawn(move || {
         second.sync_service().unwrap().store_sessions(
             "host-b",
-            &[SessionSummary {
+            &[SessionSummary::from(whalerein_proto::SessionSummary {
                 session_id: "s".into(),
                 ..Default::default()
-            }],
+            })],
             "remote",
             true,
         )

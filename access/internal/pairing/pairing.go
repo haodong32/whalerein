@@ -1,12 +1,13 @@
 // Package pairing owns one-time invitations and first registration.
 //
-// HELLO and FINISH pairing claims are relayed to the connected host as
-// transient MQTT HostRequests with in-memory correlation only. No requests row
-// is written. devices and grants are written only after the host confirms
-// FINISH and before PAIRING_AUTHORIZE.
+// HELLO and FINISH exchange opaque Noise messages with the Host. PostgreSQL
+// owns their operation receipts; only transport correlation is transient. FINISH
+// binds a client-generated credential hash to the verified device key. Grant,
+// receipt and activation work commit together without storing plaintext tokens.
 package pairing
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -45,11 +46,14 @@ var (
 
 // Store is the pairing persistence boundary.
 type Store interface {
+	SavePairingOperation(ctx context.Context, op store.PairingOperation) error
+	PairingOperation(ctx context.Context, claimID string) (store.PairingOperation, error)
+	GetRequest(ctx context.Context, requestID string) (store.Request, error)
 	GetHost(ctx context.Context, hostID string) (store.Host, error)
 	CreatePairingToken(ctx context.Context, tokenHash []byte, hostID string, expiresAt time.Time, at time.Time) error
 	PairingTokenByHash(ctx context.Context, tokenHash []byte) (store.PairingToken, error)
 	IncrementPairingFailure(ctx context.Context, tokenHash []byte, at time.Time) (int, error)
-	CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest) (bool, error)
+	CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest, operation *store.PairingOperation) (bool, error)
 	UpdateHostMetadata(ctx context.Context, hostID, fingerprint string, protocolVersion uint32, at time.Time) error
 }
 
@@ -88,23 +92,10 @@ type Dependencies struct {
 	Random    io.Reader
 }
 
-type claimState struct {
-	tokenHash       []byte
-	tokenHashHex    string
-	deviceID        string
-	hostFingerprint string
-	protocolVersion uint32
-	expiresAt       time.Time
-	helloProof      [32]byte
-	helloReply      *whalereinv1.PairingClaimResponse
-}
 type completedClaim struct {
-	tokenHash [32]byte
-	proof     [32]byte
-	response  *whalereinv1.PairingClaimResponse
-	commit    *whalereinv1.HostRequest
-	expiresAt time.Time
-	ready     bool
+	response *whalereinv1.PairingClaimResponse
+	commit   *whalereinv1.HostRequest
+	ready    bool
 }
 
 // Service implements invitation and claim flows.
@@ -118,10 +109,6 @@ type Service struct {
 	logger    *slog.Logger
 	now       func() time.Time
 	random    io.Reader
-
-	claimsMu  sync.Mutex
-	claims    map[string]claimState
-	completed map[string]*completedClaim
 
 	locksMu sync.Mutex
 	locks   map[string]*tokenLock
@@ -163,8 +150,6 @@ func New(deps Dependencies) (*Service, error) {
 		logger:    deps.Logger,
 		now:       deps.Now,
 		random:    deps.Random,
-		claims:    make(map[string]claimState),
-		completed: make(map[string]*completedClaim),
 		locks:     make(map[string]*tokenLock),
 	}, nil
 }
@@ -220,6 +205,12 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	if request.GetProtocolVersion() != s.cfg.ProtocolVersion {
 		return nil, ErrProtocolVersion
 	}
+	if request.Phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH {
+		raw, err := base64.RawURLEncoding.DecodeString(request.DeviceToken)
+		if err != nil || len(raw) != 32 {
+			return nil, ErrInvalidClaim
+		}
+	}
 	phase := request.GetPhase()
 	if phase != whalereinv1.PairingPhase_PAIRING_PHASE_HELLO && phase != whalereinv1.PairingPhase_PAIRING_PHASE_FINISH {
 		return nil, fmt.Errorf("%w: phase is not accepted over HTTP", ErrInvalidClaim)
@@ -241,25 +232,35 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 	defer unlock()
 
-	s.gcClaims(now)
-	proof := sha256.Sum256(request.NoiseMessage)
-	s.claimsMu.Lock()
-	done := s.completed[request.ClaimId]
-	previous, known := s.claims[request.ClaimId]
-	budget := len(s.claims) + len(s.completed)
-	s.claimsMu.Unlock()
-	if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && done != nil {
-		if done.tokenHash != hash || done.proof != proof || done.response.DeviceId != request.DeviceId {
-			return nil, ErrInvalidClaim
+	op, opErr := s.store.PairingOperation(ctx, request.ClaimId)
+	if opErr != nil && !errors.Is(opErr, store.ErrNotFound) {
+		return nil, ErrInternal
+	}
+	if opErr == nil {
+		if !bytes.Equal(op.TokenHash, hash[:]) || op.DeviceID != request.DeviceId || !now.Before(op.ExpiresAt) {
+			return nil, ErrClaimRequired
 		}
-		return s.completeClaim(ctx, done)
+		if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && len(op.FinishHash) > 0 {
+			digest := claimDigest(request)
+			if !bytes.Equal(op.FinishHash, digest) || !op.Active {
+				return nil, ErrInvalidClaim
+			}
+			var response whalereinv1.PairingClaimResponse
+			if proto.Unmarshal(op.FinishResponse, &response) != nil {
+				return nil, ErrInternal
+			}
+			notice, err := s.store.GetRequest(ctx, op.CommitRequestID)
+			if err != nil {
+				return nil, ErrInternal
+			}
+			done := &completedClaim{ready: notice.Status == whalereinv1.OnlineStatus_succeeded, response: &response, commit: &whalereinv1.HostRequest{
+				RequestId: notice.RequestID, HostId: notice.HostID, DeviceId: notice.DeviceID, Kind: notice.Kind,
+				ProtocolVersion: notice.ProtocolVersion, Body: notice.RequestBody, ExpiresAtUnixMs: notice.ExpiresAt.UnixMilli()}}
+			response.DeviceToken = request.DeviceToken
+			return s.completeClaim(ctx, done)
+		}
 	}
-	if phase == whalereinv1.PairingPhase_PAIRING_PHASE_HELLO && known && previous.tokenHashHex == hashHex && previous.deviceID == request.DeviceId && previous.helloProof == proof && previous.helloReply != nil {
-		return proto.Clone(previous.helloReply).(*whalereinv1.PairingClaimResponse), nil
-	}
-	if budget >= 1024 {
-		return nil, ErrFailureBudget
-	}
+
 	token, err := s.store.PairingTokenByHash(ctx, hash[:])
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -276,12 +277,25 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	if s.cfg.MaxFailures > 0 && token.FailureCount >= s.cfg.MaxFailures {
 		return nil, ErrFailureBudget
 	}
-	s.gcClaims(now)
 
 	if phase == whalereinv1.PairingPhase_PAIRING_PHASE_HELLO {
+		if opErr == nil {
+			proof := sha256.Sum256(request.NoiseMessage)
+			if !bytes.Equal(proof[:], op.HelloHash) {
+				return nil, ErrInvalidClaim
+			}
+			var reply whalereinv1.PairingClaimResponse
+			if proto.Unmarshal(op.HelloResponse, &reply) != nil {
+				return nil, ErrInternal
+			}
+			return &reply, nil
+		}
 		return s.hello(ctx, request, token, hashHex, now)
 	}
-	return s.finish(ctx, request, token, hashHex, now)
+	if opErr != nil {
+		return nil, ErrClaimRequired
+	}
+	return s.finish(ctx, request, token, op, now)
 }
 
 func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time) (*whalereinv1.PairingClaimResponse, error) {
@@ -289,9 +303,6 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostOffline
-	}
-	if !s.transport.SupportsPairing(token.HostID) {
-		return nil, ErrProtocolVersion
 	}
 	claim := &whalereinv1.PairingClaim{
 		ClaimId:         request.GetClaimId(),
@@ -312,16 +323,11 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 		return nil, ErrHostRejected
 	}
 
-	s.claimsMu.Lock()
-	s.claims[request.GetClaimId()] = claimState{
-		tokenHash:       append([]byte(nil), token.TokenHash...),
-		tokenHashHex:    hashHex,
-		deviceID:        request.GetDeviceId(),
-		hostFingerprint: claimResult.GetHostFingerprint(),
-		protocolVersion: request.GetProtocolVersion(),
-		expiresAt:       now.Add(s.cfg.ClaimTTL),
+	// HELLO is small enough to bootstrap an unknown peer using legacy framing.
+	// Require verified capability after its reply, before creating a grant.
+	if !s.transport.SupportsPairing(token.HostID) {
+		return nil, ErrProtocolVersion
 	}
-	s.claimsMu.Unlock()
 
 	s.logger.Info("pairing hello relayed",
 		"host", s.masker.Host(token.HostID), "device", s.masker.Device(request.GetDeviceId()))
@@ -336,23 +342,25 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 		ProtocolVersion: request.GetProtocolVersion(),
 	}
-	s.claimsMu.Lock()
-	cached := s.claims[request.ClaimId]
-	cached.helloProof = sha256.Sum256(request.NoiseMessage)
-	cached.helloReply = reply
-	s.claims[request.ClaimId] = cached
-	s.claimsMu.Unlock()
+	encoded, err := proto.Marshal(reply)
+	if err != nil {
+		return nil, ErrInternal
+	}
+	digest := sha256.Sum256(request.NoiseMessage)
+	if err := s.store.SavePairingOperation(ctx, store.PairingOperation{ClaimID: request.ClaimId, TokenHash: token.TokenHash,
+		HostID: token.HostID, DeviceID: request.DeviceId, HelloHash: digest[:], HelloResponse: encoded, ExpiresAt: now.Add(s.cfg.ClaimTTL)}); err != nil {
+		return nil, ErrInternal
+	}
 	return proto.Clone(reply).(*whalereinv1.PairingClaimResponse), nil
 
 }
 
-func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time) (*whalereinv1.PairingClaimResponse, error) {
-	s.claimsMu.Lock()
-	state, ok := s.claims[request.GetClaimId()]
-	s.claimsMu.Unlock()
-	if !ok || state.tokenHashHex != hashHex || state.deviceID != request.GetDeviceId() || !now.Before(state.expiresAt) {
-		return nil, ErrClaimRequired
+func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, operationState store.PairingOperation, now time.Time) (*whalereinv1.PairingClaimResponse, error) {
+	var helloReply whalereinv1.PairingClaimResponse
+	if proto.Unmarshal(operationState.HelloResponse, &helloReply) != nil {
+		return nil, ErrInternal
 	}
+	hashHex := hex.EncodeToString(token.TokenHash)
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostOffline
@@ -366,6 +374,8 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		DeviceId:        request.GetDeviceId(),
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 	}
+	authHash := sha256.Sum256([]byte(request.DeviceToken))
+	claim.DeviceAuthHash = authHash[:]
 	result, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM, claim, now)
 	if err != nil {
 		s.recordFailure(ctx, token.TokenHash, now)
@@ -385,10 +395,10 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		return nil, ErrHostRejected
 	}
 
-	deviceToken, authHash, err := s.newDeviceToken()
-	if err != nil {
-		return nil, err
+	if !bytes.Equal(claimResult.DeviceAuthHash, authHash[:]) {
+		return nil, ErrHostRejected
 	}
+	deviceToken := request.DeviceToken
 	fingerprint := sha256.Sum256(claimResult.GetDevicePublicKey())
 	fingerprintText := hex.EncodeToString(fingerprint[:])
 
@@ -415,7 +425,12 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	commit.TokenHash = ""
 	body, _ := proto.Marshal(commit)
 	notice := &whalereinv1.HostRequest{RequestId: "pair-commit-" + hex.EncodeToString(sha256SumCommit(token.HostID, request.DeviceId, request.ClaimId)), HostId: token.HostID, DeviceId: request.DeviceId, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body, ExpiresAtUnixMs: now.Add(s.cfg.ClaimTTL).UnixMilli(), ProtocolVersion: s.cfg.ProtocolVersion, TraceId: diagnostics.TraceID(ctx)}
-	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash, now, notice)
+	durableResponse := &whalereinv1.PairingClaimResponse{ClaimId: request.ClaimId, HostId: token.HostID,
+		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DeviceId: request.DeviceId,
+		DevicePublicKey: claimResult.DevicePublicKey, ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(), ProtocolVersion: request.ProtocolVersion}
+	encodedResponse, _ := proto.Marshal(durableResponse)
+	operation := &store.PairingOperation{ClaimID: request.ClaimId, FinishHash: claimDigest(request), FinishResponse: encodedResponse}
+	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash[:], now, notice, operation)
 	if err != nil {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, fmt.Errorf("%w: commit pairing", ErrInternal)
@@ -424,12 +439,8 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		return nil, ErrTokenUsed
 	}
 
-	s.claimsMu.Lock()
-	delete(s.claims, request.GetClaimId())
-	s.claimsMu.Unlock()
-
-	if state.hostFingerprint != "" {
-		if err := s.store.UpdateHostMetadata(ctx, token.HostID, state.hostFingerprint, state.protocolVersion, now); err != nil {
+	if helloReply.HostFingerprint != "" {
+		if err := s.store.UpdateHostMetadata(ctx, token.HostID, helloReply.HostFingerprint, helloReply.ProtocolVersion, now); err != nil {
 			s.logger.Warn("host metadata update failed", "host", s.masker.Host(token.HostID), "error", err.Error())
 		}
 	}
@@ -445,10 +456,8 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 		ProtocolVersion: request.GetProtocolVersion(),
 	}
-	done := &completedClaim{tokenHash: sha256.Sum256([]byte(request.Token)), proof: sha256.Sum256(request.NoiseMessage), response: response, commit: notice, expiresAt: now.Add(s.cfg.ClaimTTL)}
-	s.claimsMu.Lock()
-	s.completed[request.ClaimId] = done
-	s.claimsMu.Unlock()
+	done := &completedClaim{response: response, commit: notice}
+
 	return s.completeClaim(ctx, done)
 
 }
@@ -523,29 +532,10 @@ func (s *Service) recordFailure(ctx context.Context, tokenHash []byte, now time.
 	}
 }
 
-func (s *Service) newDeviceToken() (string, []byte, error) {
-	raw := make([]byte, 32)
-	if _, err := io.ReadFull(s.random, raw); err != nil {
-		return "", nil, fmt.Errorf("%w: generate device token", ErrInternal)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	hash := sha256.Sum256([]byte(token))
-	return token, hash[:], nil
-}
-
-func (s *Service) gcClaims(now time.Time) {
-	s.claimsMu.Lock()
-	defer s.claimsMu.Unlock()
-	for id, state := range s.completed {
-		if !now.Before(state.expiresAt) {
-			delete(s.completed, id)
-		}
-	}
-	for id, state := range s.claims {
-		if !now.Before(state.expiresAt) {
-			delete(s.claims, id)
-		}
-	}
+func claimDigest(request *whalereinv1.PairingClaimRequest) []byte {
+	encoded, _ := proto.MarshalOptions{Deterministic: true}.Marshal(request)
+	hash := sha256.Sum256(encoded)
+	return hash[:]
 }
 
 type tokenLock struct {

@@ -140,7 +140,7 @@ func (c *pahoConnector) Connect(ctx context.Context) (Session, error) {
 			return errTransport
 		}
 		return nil
-	}, c.deliver)
+	}, c.deliverFramed)
 	keepAlive := uint16(c.cfg.KeepAlive.D() / time.Second)
 	if keepAlive == 0 {
 		keepAlive = 30
@@ -178,6 +178,20 @@ func (c *pahoConnector) Connect(ctx context.Context) (Session, error) {
 		return nil, errors.New("broker packet budget is below logical transport minimum")
 	}
 	return &pahoSession{client: client, transport: transport, peers: &c.peers}, nil
+}
+
+// A completed, valid framed reply is fresh capability evidence after Access
+// restarts while the Host's broker connection stays alive. ACK/device topics
+// and mismatched identities cannot establish a Host's capability.
+func (c *pahoConnector) deliverFramed(topic string, payload []byte) {
+	if parsed, err := ParseTopic(topic); err == nil && parsed.Kind == KindResult {
+		var result whalereinv1.HostResult
+		if proto.Unmarshal(payload, &result) == nil && result.ProtocolVersion == 1 &&
+			result.RequestId != "" && (result.HostId == "" || result.HostId == parsed.HostID) {
+			c.peers.Store(RequestTopic(parsed.HostID), true)
+		}
+	}
+	c.deliver(topic, payload)
 }
 
 func (c *pahoConnector) deliver(topic string, payload []byte) {

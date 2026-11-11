@@ -98,15 +98,15 @@ The [Compose stack](../deploy/README.md) runs Access, PostgreSQL 18, and EMQX 5.
 with loopback plaintext development ports. The plugin runs on the DSH host.
 Production TLS must be configured separately; clients use advertised endpoints.
 
-## Planned Access redesign
+## Access operating modes
 
 The [Access deployment and identity redesign](architecture/access-evolution.md)
-proposes two operating modes in the same open-source Access program: Standalone
+defines two operating modes in the same open-source Access program: Standalone
 mode with local administration and invitation pairing, and External account mode
 using an official or operator-provided account service through a public protocol.
-Both can be self-hosted. The current redesign release targets Standalone mode in
-one process; external accounts and separate API/relay deployment roles come later.
-These are target capabilities, not properties of the implementation described above.
+Both can be self-hosted. Standalone mode runs in one process with durable pairing
+recovery and versioned local state. External accounts and separate API/relay
+deployment roles are later design targets, not implemented capabilities.
 
 See [security](security.md) for trust/credential rules and [testing](testing.md)
 for validation requirements.

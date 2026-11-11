@@ -56,6 +56,14 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             )
             .await
         }
+        Command::PairResume => match core.resume_pairing().await {
+            Ok(outcome) => Ok(CliOutcome::success(
+                &command,
+                serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})),
+                render_pair(&outcome),
+            )),
+            Err(error) => Err(error),
+        },
         Command::Hosts => match core.hosts().await {
             Ok(hosts) => Ok(CliOutcome::success(
                 &command,

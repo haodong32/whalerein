@@ -85,8 +85,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if derived {
 			source = "derived"
 		}
-		fmt.Fprintf(stdout, "config ok: listen=%s internal_listen=%s protocol=%d mqtt_public_url=%s (%s)\n",
-			cfg.Listen, cfg.InternalListen, cfg.Protocol.Version, mqttURL, source)
+		fmt.Fprintf(stdout, "config ok: mode=%s listen=%s internal_listen=%s protocol=%d mqtt_public_url=%s (%s)\n",
+			cfg.Mode, cfg.Listen, cfg.InternalListen, cfg.Protocol.Version, mqttURL, source)
 		return 0
 	}
 
@@ -387,6 +387,14 @@ func runCleanup(ctx context.Context, db *store.Store, interval, retention time.D
 			logger.Warn("pairing token cleanup failed", "error", err.Error())
 		} else if deleted > 0 {
 			logger.Info("expired pairing tokens deleted", "count", deleted)
+		}
+		// Read-only request identities have a finite window. Control identities
+		// are never part of this sweep, even when their payloads have expired.
+		pruned, err := db.DeleteExpiredQueries(ctx, now.Add(-24*time.Hour))
+		if err != nil {
+			logger.Warn("query record cleanup failed", "error", err.Error())
+		} else if pruned > 0 {
+			logger.Info("expired query records deleted", "count", pruned)
 		}
 	}
 	cleanup()

@@ -199,6 +199,12 @@ impl From<crate::security::SecretError> for CoreError {
 
 impl From<CacheError> for CoreError {
     fn from(error: CacheError) -> Self {
+        if matches!(error, CacheError::HistoryBudget) {
+            return Self::Api {
+                code: Some(ErrorCode::PayloadTooLarge),
+                message: error.to_string(),
+            };
+        }
         Self::Cache(error.to_string())
     }
 }

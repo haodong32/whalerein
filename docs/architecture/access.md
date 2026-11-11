@@ -6,10 +6,10 @@ Access is a Go monolith for transport authorization, pairing registration,
 durable request/status copies, and encrypted relay. PostgreSQL owns durable
 server state; EMQX supplies transport and connection facts.
 
-This page describes the current implementation. The proposed
-[deployment and identity redesign](access-evolution.md) replaces the five-table
-constraint and process-local workflow assumptions to support external identity,
-independent regions and replaceable instances. It is not implemented yet.
+Access implements Standalone mode in one process with installation-scoped resources.
+External account mode, separate API/relay deployments and regional automation
+remain later work in the [deployment and identity design](access-evolution.md).
+Unknown modes fail configuration validation; there is no external-account fallback.
 
 ## Modules
 
@@ -40,18 +40,26 @@ Handlers do not access SQL/MQTT directly. `cmd/server` wires callbacks;
 | PostgreSQL table | Contents |
 |---|---|
 | `hosts` | Host identity, protocol metadata, pinned authorization public key. |
-| `devices` | Device identity/fingerprint and unique transport-token hash. |
+| `devices` | Pinned device identity; credentials have a single authority in `device_credentials`. |
+| `device_credentials` | Independently issued transport-token hashes for a device. |
+| `pairing_operations` | Opaque HELLO reply, FINISH digest, token-free receipt and committed grant generation. |
+| `schema_migrations` | Applied migration names and SHA-256 checksums. |
 | `grants` | Host/device authorization, revocation, replay acknowledgement. |
 | `pairing_tokens` | Invitation hash, expiry, use marker, failure count. |
 | `requests` | Bodies/status, command identity/digest, forwarding lease/retries. |
 
-There are five tables. Idempotent migrations run under an advisory lock.
+Eight tables use checksummed, apply-once migrations under an advisory lock.
+Unversioned installations are adopted without deletion; changed historical
+migrations or a database with unknown newer migrations prevent startup.
 A partial unique `(host_id, device_id, command_id)` index enforces control dedupe.
 Forwarding work stays on the request row; revocation replay stays on the grant.
+Migrations remove the former fixed `local` workspace table and the duplicate
+`devices.auth_hash`; no account/tenant model is pre-installed in Standalone mode.
 
-HELLO correlation, transient MQTT calls, presence caches, and signature replay
-windows are in memory. Access restart loses these; pairing restarts from HELLO,
-and a still-valid host signature can be accepted again.
+Pairing operation receipts are durable. Transient MQTT correlation, presence
+caches and signature replay windows remain in memory. A still-valid host signature
+can be accepted again after restart. Broker REST presence lookup supports discovery
+of Hosts whose non-retained connection events were missed during restart.
 
 ## Forwarding
 
@@ -67,6 +75,11 @@ A crash between publish and recording success can repeat delivery; plugin dedupe
 prevents repeated execution. `published_once` prevents an uncertain delivery from
 being reported as never forwarded after retry exhaustion.
 
+Expired handshake/query records are deleted in batches of 2,000 after a 24-hour
+grace. Command and pairing-activation identities are excluded from that sweep;
+their dedupe/recovery metadata remains even after body cleanup. This deliberately
+retains small control tombstones rather than weakening uncertain-outcome safety.
+
 Final statuses cannot be overwritten; `unknown` may become succeeded/failed.
 Expiry cleanup removes bodies but retains identity, digest, and status. Late
 results cannot restore expired bodies. Access never generates DSH success.
@@ -77,20 +90,31 @@ Invitations accept an admin bearer or a host signature checked against the key
 pinned from authenticated HostReady. Invalid supplied bearers do not fall through
 to signature authentication. Only token hashes are stored.
 
-HELLO checks invitation and host presence. FINISH/AUTHORIZE stage Host peer
-metadata. Access atomically consumes the invitation, writes the pinned device/grant
-and queues an idempotent COMMIT in the existing PostgreSQL outbox. The grant's
+HELLO checks invitation and host presence and saves the opaque reply. Core
+creates a random transport credential, binds its SHA-256 into encrypted FINISH,
+and saves the confirmed FINISH and Host pin in SecretStore before transmission.
+The Host verifies the forwarded credential hash against FINISH and durably stages
+its exact replay binding. FINISH/AUTHORIZE stage Host peer metadata. Access
+atomically consumes the invitation, writes the pinned device/grant, persists a
+token-free operation receipt and queues an idempotent COMMIT in the PostgreSQL
+outbox. The grant's
 monotonic `grant_generation` increments in that transaction; direct delivery and
 the durable COMMIT carry exactly that generation. Failed repair
 never revokes a previously active grant as compensation. The Host activates only
 after COMMIT; revocation also removes pending activation state. Bounded exact
 pairing receipts handle response loss without persisting plaintext credentials.
+`pair-resume` reuses the original FINISH and credential after client/Access restart.
+Recovery checks the exact request, expiry and active grant generation; it cannot
+revive a revoked or superseded grant. Restarting a pre-FINISH Noise exchange may
+require a new attempt; no Noise private state is stored by Access.
 
-Global device revocation commits all affected grants, disconnects the device,
+Global device revocation removes all device credential hashes and commits all
+affected grants, disconnects the device,
 and sends host notices. ACK sets `replayed_at`; pending notices replay on
 HostReady, followed by the final batch that opens the host handshake gate.
 Host-signed revocation removes only that host's grant and attempts the same
-incarnation-bound notice when online. Local settings cleanup uses the generation
+incarnation-bound notice when online. It preserves credentials for other live
+grants; revoking the last grant removes the credentials. Local settings cleanup uses the generation
 observed before its HTTP request, so it cannot remove a concurrently repaired peer.
 
 Revocation notices and ACK updates are bound to each device's grant generation,
@@ -125,3 +149,8 @@ not the normal host's topic permissions or protocol execution.
 See the [wire contract](../../proto/v1/WIRE.md#logical-mqtt-transport) for transport framing.
 
 Conversation payloads remain opaque to Access. The typed v1 Harness contract changes Host/Core domain handling, not grant ownership or server session authority. Bulk MQTT admission waits within bounded count/byte/context limits; controls bypass bulk admission.
+
+Completed v2-framed Host replies re-establish transport capability after an Access
+restart even when the Host stayed connected. A small HELLO can bootstrap an unknown
+peer, but capability must be confirmed before pairing advances to grant creation.
+No persistent capability table or periodic Host heartbeat is required.

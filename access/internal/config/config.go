@@ -43,6 +43,7 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 
 // Config is the complete Access configuration.
 type Config struct {
+	Mode                  string           `yaml:"mode"`
 	Listen                string           `yaml:"listen"`
 	InternalListen        string           `yaml:"internal_listen"`
 	PublicURL             string           `yaml:"public_url"`
@@ -154,6 +155,7 @@ var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`
 // Default returns the baseline configuration used with a YAML overlay.
 func Default() Config {
 	return Config{
+		Mode:           "standalone",
 		Listen:         ":8080",
 		InternalListen: "127.0.0.1:8081",
 		Broker: BrokerConfig{
@@ -270,6 +272,9 @@ func expandEnv(raw []byte, lookup func(string) (string, bool)) ([]byte, error) {
 // secret values.
 func (c Config) Validate() error {
 	var problems []string
+	if c.Mode != "standalone" {
+		problems = append(problems, "mode must be standalone; external account mode is not implemented")
+	}
 	require := func(name, value string) {
 		if strings.TrimSpace(value) == "" {
 			problems = append(problems, name+" is required")
@@ -429,6 +434,7 @@ func (c Config) Redacted() map[string]any {
 	return map[string]any{
 		"listen":            c.Listen,
 		"internal_listen":   c.InternalListen,
+		"mode":              c.Mode,
 		"public_url":        sanitizeURL(c.PublicURL),
 		"broker_url":        sanitizeURL(c.Broker.URL),
 		"broker_public_url": sanitizeURL(c.Broker.PublicURL),

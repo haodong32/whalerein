@@ -409,3 +409,87 @@ def test_host_scoped_revocation_clears_the_committed_host_peer(scenario, paired_
     scenario.revoke_from_host(paired_device)
     wait(lambda: not scenario.host_peer_exists(identity))
     assert paired_device.revoked_access_denied()
+
+
+def test_pairing_receipt_survives_lost_response_and_both_restarts(scenario):
+    """When FINISH commits but its HTTP response is lost, a fresh CLI resumes through restarted Access and Host without re-pairing or leaking credentials into server receipts."""
+    from http.client import HTTPConnection
+    import json
+    import socket
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from environment import Device, http
+
+    lost = threading.Event()
+    allow_finish = threading.Event()
+    errors = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def forward(self):
+            upstream = HTTPConnection("127.0.0.1", 18080, timeout=25)
+            try:
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                headers = {key: value for key, value in self.headers.items() if key.lower() not in {"host", "connection"}}
+                upstream.request(self.command, self.path, body, headers)
+                response = upstream.getresponse()
+                payload = response.read()
+                claim = json.loads(body) if self.path == "/v1/pairing/claims" else {}
+                if claim.get("phase") == "PAIRING_PHASE_FINISH" and response.status == 200 and not allow_finish.is_set():
+                    lost.set()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                self.send_response(response.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except (ConnectionError, OSError, ValueError):
+                errors.append("proxy request failed")
+                self.close_connection = True
+            finally:
+                upstream.close()
+
+        do_POST = forward
+        do_GET = forward
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    try:
+        invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
+        uri = urllib.parse.urlsplit(invitation["pairingUri"])
+        query = dict(urllib.parse.parse_qsl(uri.query))
+        query["access"] = f"http://127.0.0.1:{proxy.server_port}"
+        invitation_uri = urllib.parse.urlunsplit(uri._replace(query=urllib.parse.urlencode(query)))
+        device = Device(scenario.directory)
+        code, _ = device.invoke("pair", invitation_uri, success=False)
+        assert lost.is_set(), "FINISH did not reach committed activation"
+        assert code != 0, "lost response did not preserve an uncertain client operation"
+        scenario.access.close()
+        scenario.plugin.close()
+        scenario.start_access()
+        scenario.start_plugin()
+        allow_finish.set()
+        device.identity = device.call("pair-resume")
+        assert scenario.host_peer_exists(device.identity["device_id"])
+        assert device.sessions(scenario.host) == []
+        import subprocess
+        stored = subprocess.run(["psql","-h","127.0.0.1","-p","55432","-U","postgres","-d","whalerein_test","-tAc",
+            f"SELECT encode(hello_response,'hex'),encode(finish_response,'hex') FROM {scenario.schema}.pairing_operations"],
+            check=True,capture_output=True,text=True,timeout=5)
+        credential = device.transport_token().encode()
+        for line in stored.stdout.splitlines():
+            for blob in line.strip().split("|"):
+                assert credential not in bytes.fromhex(blob), "plaintext credential persisted in pairing receipt"
+        scenario.revoke_from_host(device)
+        assert device.revoked_access_denied()
+        assert not errors, "pairing proxy failed before the intended response loss"
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)

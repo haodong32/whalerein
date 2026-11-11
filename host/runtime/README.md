@@ -74,3 +74,14 @@ Deploy Access and Host together when introducing this fencing contract.
 Watch subscription installation rechecks source ownership after awaiting its
 handle. If channel replacement or shutdown removed that source, the returned
 handle closes immediately instead of becoming an untracked subscription.
+
+## Command result retention
+
+On startup and new command admissions, bounded lazy maintenance removes result
+payloads for succeeded/failed commands whose request expired more than seven days
+ago (up to 1,000 rows per sweep, at most once per minute). Command IDs, digests,
+terminal status and error codes remain for deduplication. Accepted/unknown command
+records and their evidence are not expired. A result recovery can therefore know
+the final outcome after detailed result bytes are unavailable. Control tombstone
+metadata still grows with command count; no finite deduplication window or unsafe
+TTL deletion is implied.

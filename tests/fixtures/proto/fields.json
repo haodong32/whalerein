@@ -1369,6 +1369,12 @@
           "name": "grant_generation",
           "number": "8",
           "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "deviceAuthHash",
+          "name": "device_auth_hash",
+          "number": "9",
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -1416,6 +1422,12 @@
           "name": "confirmed",
           "number": "7",
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "deviceToken",
+          "name": "device_token",
+          "number": "8",
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1527,6 +1539,12 @@
           "name": "authorized",
           "number": "6",
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "deviceAuthHash",
+          "name": "device_auth_hash",
+          "number": "7",
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -1549,6 +1567,12 @@
           "name": "host_fingerprint",
           "number": "3",
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceAuthHash",
+          "name": "device_auth_hash",
+          "number": "4",
+          "type": "TYPE_BYTES"
         }
       ]
     },

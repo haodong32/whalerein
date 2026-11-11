@@ -1567,7 +1567,10 @@ type PairingClaimRequest struct {
 	DeviceId        string `protobuf:"bytes,5,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
 	ProtocolVersion uint32 `protobuf:"varint,6,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// The user confirmed the host fingerprint shown after HELLO.
-	Confirmed     bool `protobuf:"varint,7,opt,name=confirmed,proto3" json:"confirmed,omitempty"`
+	Confirmed bool `protobuf:"varint,7,opt,name=confirmed,proto3" json:"confirmed,omitempty"`
+	// Client-generated random credential; its hash is authenticated inside Noise FINISH.
+	// Never logged or persisted by Access. Required for FINISH.
+	DeviceToken   string `protobuf:"bytes,8,opt,name=device_token,json=deviceToken,proto3" json:"device_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1651,6 +1654,13 @@ func (x *PairingClaimRequest) GetConfirmed() bool {
 	return false
 }
 
+func (x *PairingClaimRequest) GetDeviceToken() string {
+	if x != nil {
+		return x.DeviceToken
+	}
+	return ""
+}
+
 type PairingClaimResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	ClaimId string                 `protobuf:"bytes,1,opt,name=claim_id,json=claimId,proto3" json:"claim_id,omitempty"`
@@ -1662,7 +1672,7 @@ type PairingClaimResponse struct {
 	HostFingerprint string `protobuf:"bytes,6,opt,name=host_fingerprint,json=hostFingerprint,proto3" json:"host_fingerprint,omitempty"`
 	DeviceId        string `protobuf:"bytes,7,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
 	DevicePublicKey []byte `protobuf:"bytes,8,opt,name=device_public_key,json=devicePublicKey,proto3" json:"device_public_key,omitempty"`
-	// Transport credential returned exactly once on successful registration.
+	// Echo of the client-generated credential after confirmed Host activation.
 	DeviceToken     string `protobuf:"bytes,9,opt,name=device_token,json=deviceToken,proto3" json:"device_token,omitempty"`
 	ExpiresAtUnixMs int64  `protobuf:"varint,10,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
 	ProtocolVersion uint32 `protobuf:"varint,11,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
@@ -1791,8 +1801,10 @@ type PairingClaim struct {
 	ExpiresAtUnixMs int64  `protobuf:"varint,7,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
 	// Access-assigned grant incarnation, populated on COMMIT.
 	GrantGeneration uint64 `protobuf:"varint,8,opt,name=grant_generation,json=grantGeneration,proto3" json:"grant_generation,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// SHA-256 of the client transport credential, verified against Noise FINISH.
+	DeviceAuthHash []byte `protobuf:"bytes,9,opt,name=device_auth_hash,json=deviceAuthHash,proto3" json:"device_auth_hash,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PairingClaim) Reset() {
@@ -1881,6 +1893,13 @@ func (x *PairingClaim) GetGrantGeneration() uint64 {
 	return 0
 }
 
+func (x *PairingClaim) GetDeviceAuthHash() []byte {
+	if x != nil {
+		return x.DeviceAuthHash
+	}
+	return nil
+}
+
 // Host -> Access, carried as HostResult.result_body for a pairing claim.
 type PairingClaimResult struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1890,6 +1909,7 @@ type PairingClaimResult struct {
 	DeviceId        string                 `protobuf:"bytes,4,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
 	DevicePublicKey []byte                 `protobuf:"bytes,5,opt,name=device_public_key,json=devicePublicKey,proto3" json:"device_public_key,omitempty"`
 	Authorized      bool                   `protobuf:"varint,6,opt,name=authorized,proto3" json:"authorized,omitempty"`
+	DeviceAuthHash  []byte                 `protobuf:"bytes,7,opt,name=device_auth_hash,json=deviceAuthHash,proto3" json:"device_auth_hash,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1964,6 +1984,13 @@ func (x *PairingClaimResult) GetAuthorized() bool {
 		return x.Authorized
 	}
 	return false
+}
+
+func (x *PairingClaimResult) GetDeviceAuthHash() []byte {
+	if x != nil {
+		return x.DeviceAuthHash
+	}
+	return nil
 }
 
 // Access -> host, carried as the body of a REQUEST_KIND_REVOCATION request.
@@ -2618,6 +2645,7 @@ type PairingFinish struct {
 	DeviceId        string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
 	HostId          string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
 	HostFingerprint string                 `protobuf:"bytes,3,opt,name=host_fingerprint,json=hostFingerprint,proto3" json:"host_fingerprint,omitempty"`
+	DeviceAuthHash  []byte                 `protobuf:"bytes,4,opt,name=device_auth_hash,json=deviceAuthHash,proto3" json:"device_auth_hash,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2671,6 +2699,13 @@ func (x *PairingFinish) GetHostFingerprint() string {
 		return x.HostFingerprint
 	}
 	return ""
+}
+
+func (x *PairingFinish) GetDeviceAuthHash() []byte {
+	if x != nil {
+		return x.DeviceAuthHash
+	}
+	return nil
 }
 
 type RequestPayload struct {
@@ -6131,7 +6166,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12+\n" +
 	"\x12expires_at_unix_ms\x18\x03 \x01(\x03R\x0fexpiresAtUnixMs\x12\x1f\n" +
 	"\vpairing_uri\x18\x04 \x01(\tR\n" +
-	"pairingUri\"\x83\x02\n" +
+	"pairingUri\"\xa6\x02\n" +
 	"\x13PairingClaimRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x19\n" +
 	"\bclaim_id\x18\x02 \x01(\tR\aclaimId\x120\n" +
@@ -6139,7 +6174,8 @@ const file_whalerein_proto_rawDesc = "" +
 	"\rnoise_message\x18\x04 \x01(\fR\fnoiseMessage\x12\x1b\n" +
 	"\tdevice_id\x18\x05 \x01(\tR\bdeviceId\x12)\n" +
 	"\x10protocol_version\x18\x06 \x01(\rR\x0fprotocolVersion\x12\x1c\n" +
-	"\tconfirmed\x18\a \x01(\bR\tconfirmed\"\xb8\x03\n" +
+	"\tconfirmed\x18\a \x01(\bR\tconfirmed\x12!\n" +
+	"\fdevice_token\x18\b \x01(\tR\vdeviceToken\"\xb8\x03\n" +
 	"\x14PairingClaimResponse\x12\x19\n" +
 	"\bclaim_id\x18\x01 \x01(\tR\aclaimId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x120\n" +
@@ -6152,7 +6188,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\fdevice_token\x18\t \x01(\tR\vdeviceToken\x12+\n" +
 	"\x12expires_at_unix_ms\x18\n" +
 	" \x01(\x03R\x0fexpiresAtUnixMs\x12)\n" +
-	"\x10protocol_version\x18\v \x01(\rR\x0fprotocolVersion\"\xc0\x02\n" +
+	"\x10protocol_version\x18\v \x01(\rR\x0fprotocolVersion\"\xea\x02\n" +
 	"\fPairingClaim\x12\x19\n" +
 	"\bclaim_id\x18\x01 \x01(\tR\aclaimId\x12\x1d\n" +
 	"\n" +
@@ -6162,7 +6198,8 @@ const file_whalerein_proto_rawDesc = "" +
 	"\tdevice_id\x18\x05 \x01(\tR\bdeviceId\x12*\n" +
 	"\x11device_public_key\x18\x06 \x01(\fR\x0fdevicePublicKey\x12+\n" +
 	"\x12expires_at_unix_ms\x18\a \x01(\x03R\x0fexpiresAtUnixMs\x12)\n" +
-	"\x10grant_generation\x18\b \x01(\x04R\x0fgrantGeneration\"\xf5\x01\n" +
+	"\x10grant_generation\x18\b \x01(\x04R\x0fgrantGeneration\x12(\n" +
+	"\x10device_auth_hash\x18\t \x01(\fR\x0edeviceAuthHash\"\x9f\x02\n" +
 	"\x12PairingClaimResult\x12#\n" +
 	"\rnoise_message\x18\x01 \x01(\fR\fnoiseMessage\x12&\n" +
 	"\x0fhost_public_key\x18\x02 \x01(\fR\rhostPublicKey\x12)\n" +
@@ -6171,7 +6208,8 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x11device_public_key\x18\x05 \x01(\fR\x0fdevicePublicKey\x12\x1e\n" +
 	"\n" +
 	"authorized\x18\x06 \x01(\bR\n" +
-	"authorized\"\xb9\x02\n" +
+	"authorized\x12(\n" +
+	"\x10device_auth_hash\x18\a \x01(\fR\x0edeviceAuthHash\"\xb9\x02\n" +
 	"\x10RevocationNotice\x12\x1b\n" +
 	"\treplay_id\x18\x01 \x01(\tR\breplayId\x12\x1d\n" +
 	"\n" +
@@ -6228,11 +6266,12 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x03 \x01(\rR\x0fprotocolVersion\x12?\n" +
 	"\fcapabilities\x18\x04 \x01(\v2\x1b.whalerein.v1.CapabilitySetR\fcapabilities\x12\x1d\n" +
 	"\n" +
-	"host_nonce\x18\x05 \x01(\tR\thostNonce\"p\n" +
+	"host_nonce\x18\x05 \x01(\tR\thostNonce\"\x9a\x01\n" +
 	"\rPairingFinish\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12)\n" +
-	"\x10host_fingerprint\x18\x03 \x01(\tR\x0fhostFingerprint\"\xf5\x06\n" +
+	"\x10host_fingerprint\x18\x03 \x01(\tR\x0fhostFingerprint\x12(\n" +
+	"\x10device_auth_hash\x18\x04 \x01(\fR\x0edeviceAuthHash\"\xf5\x06\n" +
 	"\x0eRequestPayload\x12A\n" +
 	"\rlist_sessions\x18\x01 \x01(\v2\x1a.whalerein.v1.ListSessionsH\x00R\flistSessions\x12;\n" +
 	"\vget_session\x18\x02 \x01(\v2\x18.whalerein.v1.GetSessionH\x00R\n" +

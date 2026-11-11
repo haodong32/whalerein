@@ -1,7 +1,7 @@
 # WhaleRein deployment assets
 
-Official and self-hosted deployments use the **same programs and the same five
-PostgreSQL tables**. This directory contains the Docker Compose stack only.
+Standalone self-hosting uses one open-source Access program, PostgreSQL and EMQX.
+External account mode is later work in that same program. This directory contains the Docker Compose stack only.
 Core, Access and the DSH plugin do not read Compose settings.
 
 This is the current standalone stack, not a verified multi-instance deployment.
@@ -62,11 +62,12 @@ docker compose -f deploy/compose/stack.yaml down
 
 ## PostgreSQL
 
-Access owns the schema (`access/internal/store/migrations`, five tables:
-`hosts`, `devices`, `grants`, `pairing_tokens`, `requests`). The Compose
+Access owns its versioned schema in `access/internal/store/migrations`.
+`schema_migrations` records names and checksums. The schema includes the local
+workspace, identities, credential hashes, grants, pairing operations and requests. The Compose
 service uses `postgres:18-alpine` with trust authentication on the Docker
 network and creates `whalerein_dev`. `postgres/init/01-test-db.sql` creates
-`whalerein_test` on a fresh data volume. Access applies `001_init.sql` at
+`whalerein_test` on a fresh data volume. Access applies pending migrations at
 startup before `/readyz` turns green.
 
 ```bash
@@ -126,3 +127,79 @@ Verify interoperability across Access, plugin, and clients before rollout.
 
 Upgrade Access, the plugin, and clients together before lowering any broker
 override. Reconnect clients after changing negotiated transport limits.
+
+## Standalone setup and credential loss
+
+Set `mode: standalone` in the Access YAML. No account registration, official
+service, login key or license server is required. Keep one Access process per
+installation. External account mode is not implemented and is rejected rather
+than falling back to local authorization.
+
+For a deployment beyond the loopback development stack, create independent random
+administrator, Host provisioning, broker and callback credentials using a secret
+manager or `openssl rand -hex 32`. Store them outside Git, protect the configuration
+files, configure TLS and replace the matching EMQX callback/bootstrap values.
+The Host provisioning credential authorizes first registration in this local
+installation. Confirm the Host's Noise fingerprint when pairing each client.
+
+If a FINISH response is lost, keep the same client data directory and SecretStore
+and run `whalerein pair-resume` before `pairing.claim_ttl` expires. This never needs
+the invitation URI on the command line again. If the pending operation expired or
+SecretStore was lost, revoke the old device through Host/admin access, then
+explicitly forget the local identity and use a fresh invitation. Deleting local
+files is not remote revocation. Lost administrator/provisioning secrets are
+replaced by the deployment operator through configuration; Access has no account
+password-reset endpoint.
+
+## Backup and restore
+
+Protect and back up all of these independently:
+
+- PostgreSQL, including the migration ledger, grants, revocations, pairing
+  operations and request/outcome records. Use PostgreSQL backup tools and verify
+  restoration in an isolated installation.
+- Host state, including peer keys, revocation generations and command deduplication
+  records, plus the Host's private identity in its configured credential store.
+- Client SecretStore and configuration if local identity recovery is required.
+  Access backups cannot reconstruct device private keys or plaintext credentials.
+- Deployment secrets and TLS trust material, outside the application database.
+
+For a coordinated backup, stop Access and the Host plugin before taking endpoint
+state snapshots, and preserve their provenance together. Restart recovery with
+retained state is distinct from restoring an older backup: an old database may
+predate a security revocation or a completed command. Never expose such a restore
+to clients immediately or blindly resume its queued requests.
+
+The conservative historical-restore procedure is:
+
+1. Stop Access and the Host plugin; restore PostgreSQL into an isolated target.
+   Restore/preserve Host command deduplication records and identity. Do not use a
+   command journal older than the executions whose outcomes must be recovered.
+2. Before starting Access, invalidate restored credentials and invitations and
+   stop pending forwarding in one transaction, using the SQL below.
+3. Verify configured trust/endpoints and migration history, then start Access and
+   the Host plugin. Revocation replay must complete before new Host channels.
+4. Re-enroll clients using fresh device identities and new invitations. Do not
+   silently lower a Host's stored revocation generation to make an old identity
+   work. Preserve uncertain command records for explicit source-side review;
+   restoring state is not proof that a control never executed.
+
+Run only against the restored Access database/schema, never an active installation:
+
+```sql
+BEGIN;
+UPDATE grants SET revoked_at = COALESCE(revoked_at, now()),
+                  replayed_at = NULL, updated_at = now();
+DELETE FROM device_credentials;
+DELETE FROM pairing_operations;
+UPDATE pairing_tokens SET used_at = COALESCE(used_at, now()), updated_at = now();
+UPDATE requests SET forward_state = 'none',
+    status = CASE WHEN status IN ('received', 'host_accepted') THEN 'unknown' ELSE status END,
+    updated_at = now();
+COMMIT;
+```
+
+Do not edit applied migrations or remove ledger entries to force a binary rollback.
+Use a compatible binary, or restore a coordinated backup with the explicit
+re-enrollment procedure. Production TLS, historical backup recovery and platform
+credential-store behavior require their own environment-specific acceptance.

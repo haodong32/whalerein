@@ -71,6 +71,7 @@ export class CommandService {
 
   /** Crash recovery is intentionally idempotent. */
   recover() {
+    this.store.pruneCommandResults(this.now())
     const count = this.store.recoverAcceptedCommands(this.now())
     if (count > 0) this.#log('warn', 'commands_marked_unknown', { count, code: 'unavailable' })
     return count

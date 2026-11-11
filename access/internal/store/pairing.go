@@ -73,6 +73,9 @@ func (s *Store) MarkPairingTokenUsed(ctx context.Context, tokenHash []byte, at t
 // retention cutoff. Used rows are retained until the same cutoff so a second
 // use of a recently used token is still rejected with its used_at information.
 func (s *Store) DeleteExpiredPairingTokens(ctx context.Context, before time.Time) (int64, error) {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM pairing_operations WHERE expires_at <= $1`, before); err != nil {
+		return 0, err
+	}
 	cmd, err := s.pool.Exec(ctx, `DELETE FROM pairing_tokens WHERE expires_at <= $1`, before)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired pairing tokens: %w", err)

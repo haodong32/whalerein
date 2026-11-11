@@ -1,7 +1,8 @@
 # Access deployment and identity redesign
 
-Status: proposed target architecture. This document does not describe shipped
-capabilities. A clean break in packages, schema and protocol is allowed; no
+Status: Standalone mode is the current implementation scope. External account
+mode, multi-instance hosting and regional automation are future design targets;
+their descriptions are not shipped capability claims. A clean break in packages, schema and protocol is allowed; no
 legacy compatibility layer is required. Existing deployments must explicitly
 choose migration or re-enrollment before an implementation removes old data.
 
@@ -58,6 +59,10 @@ are admitted. A healthy process alone is not evidence of successful recovery.
 
 ## Terms and ownership
 
+Workspace and account enrollment below describe the later external-account model.
+Standalone mode owns resources at installation scope and stores no fixed workspace
+row. Migration adds real external ownership only when that mode is implemented.
+
 | Term | Meaning and authority |
 | --- | --- |
 | Principal | A user or service identity asserted by a configured authority. It is not a device key. |
@@ -97,7 +102,10 @@ commercial-only edition. It uses the same Access program and shared pairing,
 grant, encrypted relay, revocation and recovery implementation; enabling it later
 does not require a fork or custom compilation. Local versus external authority
 must be explicit, with no silent fallback when an external service is unavailable
-or its configuration is invalid. This release implements Standalone mode only;
+or its configuration is invalid. A later mode transition needs an explicit
+ownership/enrollment migration; changing configuration must not silently attach
+local Hosts, device grants or Host pins to an external account. This release
+implements Standalone mode only;
 do not expose an External account mode option before it functions end to end.
 
 ## Deployment shapes
@@ -119,7 +127,7 @@ PostgreSQL + EMQX                    Region A    Region B
                                     PG + EMQX   PG + EMQX
 ```
 
-Standalone mode uses a local authority and one workspace; manual invitations
+Standalone mode uses a local authority scoped to the installation; manual invitations
 provide a complete connection path without registration or login. After pairing,
 clients reconnect using their local device identity and authorization. Operators
 do not have to implement an account system. An operator wanting account-based
@@ -137,8 +145,8 @@ quota allocation local. Cross-region workspace migration is a separate operation
 
 ## Open-source Access and external account services
 
-Access has an identity integration module, not a second account service. It
-validates external authorizations and enforces regional state; it does not
+External account mode will add generic identity integration that validates
+external authorizations and enforces regional state. Access does not
 register users, accept account passwords, implement account recovery or process
 payments. Central account management is the official managed deployment's
 authority, not a mandatory global authority for all WhaleRein installations.
@@ -308,15 +316,16 @@ recoverable through the existing synchronization/snapshot model.
    grant/activation commit. Report ready only after Host activation is confirmed.
    A retry or failed replacement must not revoke an older valid grant.
 
-Persisting pairing status alone is insufficient. The current release must
-handle a committed grant followed by a lost credential response and an Access
-restart. Define a device-key-authenticated credential recovery or replacement
-operation bound to the original pairing operation, service, workspace, Host and
-device keys. It must reject replay, expired recovery authority, changed keys and
-disabled enrollment; an operation ID or consumed invitation alone is not proof.
-Do not persist plaintext transport credentials or silently invalidate unrelated
-grants. Select and test the concrete proof and credential-delivery protocol as
-part of pairing implementation before claiming recovery works.
+Standalone pairing binds a client-generated random credential hash into Noise
+FINISH. Core retains the confirmed request and Host pin in SecretStore before
+sending it. Access persists the exact request digest and a token-free completion
+receipt in the same transaction as the grant and activation outbox. `pair-resume`
+replays that request after a lost response or restart and requires an unexpired,
+active grant generation. Host staging retains its verified FINISH replay binding.
+An operation ID or invitation alone cannot substitute another device or credential.
+No additional credential-encryption scheme or server plaintext secret is needed.
+Historical restore requires explicit credential invalidation and re-enrollment;
+see the [backup and restore procedure](../../deploy/README.md#backup-and-restore).
 
 Account authentication stays outside the cryptographic transport. A client shell
 can complete login and supply an opaque authorization to Core's supported API;
@@ -413,8 +422,11 @@ it must not erase the evidence needed to prevent re-enrollment by a removed devi
 
 ## Persistence and protocol
 
-Replace the exact-five-table constraint with explicit versioned migrations and
-schema ownership. Open-source runtime migrations own workspace/resource bindings,
+The implementation uses explicit versioned migrations and schema ownership.
+Standalone resources belong to their installation; the former fixed `local`
+workspace table and duplicate device hash have been removed. External ownership
+bindings must be added only with a real account-integration implementation.
+Open-source runtime migrations own resource bindings,
 enrollment status/version, grants, pairing operations, request work, management
 inbox/application state, generic usage records/export bookkeeping and later relay
 ownership. All regional Access tables and migrations are open-source and owned
@@ -463,7 +475,7 @@ revocations and reconciling uncertain commands; it is not DNS failover alone.
 
 | Slice | Work | Required evidence |
 | --- | --- | --- |
-| 1. Current: standalone foundation | Small single-process runtime, explicit workspace/enrollment model, versioned migrations, local administration and stable endpoints. | Initial setup, Host enrollment and invitation pairing complete with no central service or official trust root; isolation and migration checks pass. |
+| 1. Current: standalone foundation | Small single-process runtime, installation-scoped identity/enrollment model, versioned migrations, local administration and stable endpoints. | Initial setup, Host enrollment and invitation pairing complete with no central service or official trust root; isolation and migration checks pass. |
 | 2. Current: standalone recovery | Single-process durable pairing operations, credential recovery, queryable status, disable-before-revoke and backup/restore procedures. | Restart or lost responses during pairing/activation recover without changing bound keys, reviving revoked access, invalidating unrelated grants or repeating a control. |
 | 3. Later: external identity | Open-source generic client login/discovery and Access account integration, public management protocol, service identities, atomic management apply operations, minimal identity projections, scoped signed approvals and Core/Host automatic trust. The official account/commerce service remains private. | Stock Access works with an independently implemented compatible account service; same-account login pairs without manual confirmation; wrong region/key/issuer, stale policy and removed devices are rejected; standalone pairing works with no account service. |
 | 4. Later: multi-instance hosting | API/relay deployment roles, readiness/draining, relay fencing, credential rotation and controlled rollout/rollback. | Multi-API admission, paused-old-relay takeover, broker reconnect and rolling replacement preserve revocation gates and outcome recovery. |

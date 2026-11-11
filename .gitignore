@@ -21,7 +21,7 @@ __pycache__/
 .mypy_cache/
 
 # Local state, logs and generated runtime files.
-.data/
+.data
 *.log
 
 # Development TLS material and generated configuration. Never commit keys.

@@ -158,12 +158,13 @@ export class FakeAccessSimulator {
     return this.results.get(requestId) ?? [terminal]
   }
 
-  async pairingClaim({ phase, claimId, tokenHash, noiseMessage, deviceId }) {
+  async pairingClaim({ phase, claimId, tokenHash, noiseMessage, deviceId, deviceAuthHash }) {
     const body = this.codec.encode('whalerein.v1.PairingClaim', {
       claim_id: claimId,
       token_hash: tokenHash,
       phase,
       noise_message: noiseMessage,
+      device_auth_hash: deviceAuthHash,
       device_id: deviceId,
       expires_at_unix_ms: this.now() + 60_000,
     })
@@ -322,10 +323,12 @@ export class DeviceClient {
       device_id: this.deviceId,
       host_id: this.hostId,
       host_fingerprint: hostFingerprint,
+      device_auth_hash: new Uint8Array(32).fill(7),
     })
     const msg3 = this.pairing.noise.writeMessage(finish)
     const result = await this.access.pairingClaim({
       phase: 'PAIRING_PHASE_FINISH',
+      deviceAuthHash: new Uint8Array(32).fill(7),
       claimId: this.pairing.claimId,
       tokenHash: this.pairing.tokenHash,
       noiseMessage: msg3,

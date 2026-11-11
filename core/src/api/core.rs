@@ -538,6 +538,39 @@ impl Core {
             }
         }
         let device_id = identity.device_id.clone();
+        if let Some(pending) = self.load_pending_pairing(&device_id)? {
+            if pending.config.access_url != parsed.access_url.as_str()
+                || pending.config.host_id != parsed.host_id
+                || pending.finish.token != parsed.token
+            {
+                return Err(CoreError::Conflict(
+                    "a pairing is pending; resume it before pairing elsewhere".into(),
+                ));
+            }
+            let fingerprint = pending
+                .config
+                .host_fingerprint
+                .clone()
+                .ok_or(CoreError::NotPaired)?;
+            let decision = decide(&PairingPrompt {
+                host_id: parsed.host_id.clone(),
+                access_url: parsed.access_url.to_string(),
+                fingerprint: fingerprint.clone(),
+                fingerprint_display: crate::util::format_fingerprint(&fingerprint),
+            });
+            if !decision.approve {
+                return Err(CoreError::PairingCancelled);
+            }
+            if let Some(expected) = decision.expected_fingerprint {
+                if crate::util::normalize_fingerprint(&expected) != fingerprint {
+                    return Err(CoreError::FingerprintMismatch {
+                        expected,
+                        actual: fingerprint,
+                    });
+                }
+            }
+            return self.resume_pending_pairing(pending, &identity).await;
+        }
         let (mut session, hello) = PairingInitiator::start_named(
             &parsed,
             &device_id,
@@ -574,42 +607,23 @@ impl Core {
         }
         session.confirm(&decision)?;
         let finish = session.write_finish()?;
-        let finish_response = access.pair_claim(&finish).await?;
-        let completion = session.complete(&finish_response)?;
-
-        load_or_create_cache_key(&self.options.secrets, &device_id)?;
-        if let Err(error) = crate::security::store_device_token(
-            &self.options.secrets,
-            &device_id,
-            &completion.device_token,
-        ) {
-            let _ = self.options.secrets.delete(&keys::device_token(&device_id));
-            return Err(error.into());
-        }
-
-        let mqtt_url = config::mqtt_url_from_env().or(parsed.mqtt_url.clone());
         let mut persisted = PersistedConfig::new(
             parsed.access_url.to_string(),
-            mqtt_url,
+            config::mqtt_url_from_env().or(parsed.mqtt_url.clone()),
             parsed.host_id.clone(),
             device_id.clone(),
         );
-        persisted.host_fingerprint = Some(completion.host_fingerprint.clone());
-        if let Err(error) = self.config_store().save(&persisted) {
-            let _ = self.options.secrets.delete(&keys::device_token(&device_id));
-            return Err(error);
-        }
-        *self.config.write().expect("config lock") = Some(persisted);
-        self.runtime.accept_pairing();
+        persisted.host_fingerprint = Some(confirmation.fingerprint.clone());
+        let pending = pairing_recovery::PendingPairing {
+            config: persisted.clone(),
+            finish: finish.clone(),
+            device_public_key: identity.key.public_key().to_vec(),
+        };
+        self.save_pending_pairing(&pending)?;
+        let finish_response = access.pair_claim(&finish).await?;
+        let completion = session.complete(&finish_response)?;
 
-        let _ = self
-            .runtime
-            .set_state(&parsed.host_id, ConnectionState::Pairing);
-        let _ = self
-            .runtime
-            .set_state(&parsed.host_id, ConnectionState::Disconnected);
-
-        tracing::info!(trace_id = %self.diagnostic_id(), "pairing completed");
+        self.finish_pairing_config(persisted, &completion.device_token)?;
         Ok(PairingOutcome {
             host_id: parsed.host_id,
             device_id,
@@ -1110,3 +1124,5 @@ mod tail_tests;
 
 #[path = "watch.rs"]
 mod watch;
+
+mod pairing_recovery;

@@ -341,7 +341,8 @@ impl FakeHost {
                         host_id: self.host_id.clone(),
                         phase: PairingPhase::Finish as i32,
                         device_id: claim.device_id,
-                        device_token: "device-token".into(),
+                        device_token: claim.device_token.clone(),
+                        device_public_key: noise.remote_static().unwrap().to_vec(),
                         protocol_version: PROTOCOL_VERSION,
                         ..Default::default()
                     },

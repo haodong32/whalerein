@@ -69,6 +69,7 @@ pub fn forget(secrets: &Arc<dyn SecretStore>, profile: &Path) -> Result<(), Secu
         if let Ok(stored) = serde_json::from_slice::<StoredIdentity>(&bytes) {
             secrets.delete(&keys::device_private_key(&stored.device_id))?;
             secrets.delete(&keys::device_token(&stored.device_id))?;
+            secrets.delete(&keys::pending_pairing(&stored.device_id))?;
         }
     }
     secrets.delete(&slot)?;

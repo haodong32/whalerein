@@ -56,6 +56,13 @@ and use result recovery instead of blind execution retries. Confirmed revocation
 clears authorization/cache material but preserves device identity. Explicit forget
 removes identity. Transport, source and decoding errors are not grant revocation.
 
+Before sending pairing FINISH, Core stores the exact confirmed request and Host
+pin in SecretStore. Its locally generated random transport credential is bound by
+hash into the Noise payload. `resume_pairing()` reuses that request after response
+loss or restart, verifies the reply binding and commits local credentials/config.
+It never switches endpoint, Host pin or device key to recover another operation.
+Successful completion removes the pending secret; explicit forget removes it too.
+
 Pairing persists the Noise-authenticated Host fingerprint. Fresh channels check
 that pin after Noise message 2 and before sending the device's message 3. A key
 mismatch keeps pairing, credentials and recovery metadata intact; it never implies
@@ -87,3 +94,14 @@ terminal outcome or timeout. An accepted receipt is not confirmed execution.
 Derived development cache schemas can be rebuilt; credentials and command outcome
 metadata are retained. OS keyring, TLS and real-source behavior require their own
 release acceptance; isolated fixture evidence is not a deployment claim.
+
+Conversation message/staging payloads have a 128 MiB logical cache budget. Cache
+writes evict the oldest stored complete views with their cursors and receipts,
+never individual messages beneath a retained cursor. The view being written is
+protected; an oversized replacement rolls back, discards its staging and reports
+`payload_too_large`, retaining the previous committed view. Opening a cache also
+trims old views. This is a retained-payload budget, not a physical SQLite file-size
+limit; freed pages are reused. Session summaries and durable command recovery
+metadata are separate and are not discarded by history eviction. Offline cached
+messages may therefore be unavailable for an evicted view; online access reloads
+an authoritative snapshot.

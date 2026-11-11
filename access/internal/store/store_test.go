@@ -5,6 +5,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"google.golang.org/protobuf/proto"
@@ -12,14 +13,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/whalerein/whalerein/access/internal/store"
 	"github.com/whalerein/whalerein/access/internal/store/storetest"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
-// When migrations run on an empty schema, PostgreSQL contains exactly five application tables and
+// When migrations run on an empty schema, PostgreSQL contains versioned application tables and
 // the required indexes.
-func TestMigrateCreatesExactlyFiveTablesAndIndexes(t *testing.T) {
+func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	s, db := storetest.New(t)
 	ctx := context.Background()
 
@@ -42,7 +44,7 @@ func TestMigrateCreatesExactlyFiveTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"devices", "grants", "hosts", "pairing_tokens", "requests"}
+	want := []string{"device_credentials", "devices", "grants", "hosts", "pairing_operations", "pairing_tokens", "requests", "schema_migrations"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}
@@ -68,7 +70,7 @@ func TestMigrateCreatesExactlyFiveTablesAndIndexes(t *testing.T) {
 		indexes[name] = def
 	}
 	for _, required := range []string{
-		"devices_auth_hash_key", "requests_pkey", "requests_command_unique",
+		"device_credentials_pkey", "requests_pkey", "requests_command_unique",
 		"requests_forward_due_idx", "grants_pending_revocation_idx",
 	} {
 		if _, ok := indexes[required]; !ok {
@@ -897,7 +899,7 @@ func TestPairingCommitKeepsGrantAtomicAndHostIdentityPinned(t *testing.T) {
 	if err := s.CreatePairingToken(ctx, hash, "h1", now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "different-key", []byte("new-credential"), now, nil); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "different-key", []byte("new-credential"), now, nil, nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("identity was rebound")
 	}
 	token, err := s.PairingTokenByHash(ctx, hash)
@@ -907,17 +909,17 @@ func TestPairingCommitKeepsGrantAtomicAndHostIdentityPinned(t *testing.T) {
 	if _, err := s.ActiveDeviceByAuthHash(ctx, []byte("old-credential")); err != nil {
 		t.Fatal("failed commit rotated existing credential")
 	}
-	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("new-credential"), now, nil); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("new-credential"), now, nil, nil); err != nil || !used {
 		t.Fatal("valid pairing failed")
 	}
-	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("another"), now, nil); err != nil || used {
+	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("another"), now, nil, nil); err != nil || used {
 		t.Fatal("invitation reused")
 	}
 	if _, err := s.ActiveDeviceByAuthHash(ctx, []byte("new-credential")); err != nil {
 		t.Fatal("committed credential missing")
 	}
 	s.Close()
-	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", nil, now, nil); err == nil {
+	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", nil, now, nil, nil); err == nil {
 		t.Fatal("closed database accepted commit")
 	}
 }
@@ -936,11 +938,11 @@ func TestPairingCommitPersistsActivationNoticeAndRollsBackConflicts(t *testing.T
 		t.Fatal(err)
 	}
 	notice := &whalereinv1.HostRequest{RequestId: "activate", HostId: "other", DeviceId: "d", Body: []byte{}, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, ProtocolVersion: 1, ExpiresAtUnixMs: at.Add(time.Minute).UnixMilli()}
-	if _, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("invalid activation route accepted")
 	}
 	notice.HostId = "h"
-	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); err != nil || !used {
 		t.Fatal("activation notice not committed")
 	}
 	row, err := s.GetRequest(ctx, "activate")
@@ -958,7 +960,7 @@ func TestPairingCommitPersistsActivationNoticeAndRollsBackConflicts(t *testing.T
 	if err := s.CreatePairingToken(ctx, next, "h", at.Add(time.Minute), at); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitPairing(ctx, next, "h", "d", "fp", []byte("replacement"), at, notice); err == nil {
+	if _, err := s.CommitPairing(ctx, next, "h", "d", "fp", []byte("replacement"), at, notice, nil); err == nil {
 		t.Fatal("duplicate activation record ignored")
 	}
 	token, err := s.PairingTokenByHash(ctx, next)
@@ -984,7 +986,7 @@ func TestActivationNoticeRetriesPastDeliveryBudgetUntilItsDeadline(t *testing.T)
 		t.Fatal(err)
 	}
 	notice := &whalereinv1.HostRequest{RequestId: "retry-activation", HostId: "h", DeviceId: "d", Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: []byte{}, ExpiresAtUnixMs: at.Add(time.Minute).UnixMilli()}
-	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); err != nil || !used {
 		t.Fatal("commit failed")
 	}
 	for index := 0; index < 6; index++ {
@@ -1068,5 +1070,217 @@ func TestGrantGenerationSurvivesRepairAndFencesRevocationAcknowledgements(t *tes
 	pending, err = s.PendingRevocations(ctx, "h")
 	if err != nil || len(pending) != 0 {
 		t.Fatal("current ACK was not applied")
+	}
+}
+
+// Versioned migrations preserve existing state, reject edited history, and refuse a newer database.
+func TestMigrationLedgerRejectsChangedHistoryAndFutureSchema(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 7 {
+		t.Fatal("migration versions missing")
+	}
+	if _, err := s.Pool().Exec(ctx, "UPDATE schema_migrations SET checksum='modified'::bytea WHERE name='005_standalone.sql'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "checksum changed") {
+		t.Fatal("edited migration accepted")
+	}
+	if _, err := s.Pool().Exec(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES('999_future.sql','future'::bytea)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "newer migration") {
+		t.Fatal("older binary accepted newer schema")
+	}
+}
+
+// Independent Host pairing preserves old credentials, and the last revocation permanently invalidates them.
+func TestCredentialsSurviveAnotherHostButNotGlobalRevocation(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, host := range []string{"a", "b"} {
+		if _, err := s.EnsureHost(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := bytes.Repeat([]byte{1}, 32)
+	next := bytes.Repeat([]byte{2}, 32)
+	if err := s.CreatePairedDevice(ctx, "a", "d", "pinned", old, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreatePairedDevice(ctx, "b", "d", "pinned", next, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActiveDeviceByAuthHash(ctx, old); err != nil {
+		t.Fatal("another Host invalidated an existing credential")
+	}
+	if err := s.RevokeGrant(ctx, "a", "d", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActiveDeviceByAuthHash(ctx, old); err != nil {
+		t.Fatal("scoped revoke invalidated another Host")
+	}
+	if _, _, err := s.RevokeDeviceGrants(ctx, "d", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreatePairedDevice(ctx, "b", "d", "pinned", bytes.Repeat([]byte{3}, 32), now); err != nil {
+		t.Fatal(err)
+	}
+	for _, hash := range [][]byte{old, next} {
+		if _, err := s.ActiveDeviceByAuthHash(ctx, hash); !errors.Is(err, store.ErrNotFound) {
+			t.Fatal("old credential revived")
+		}
+	}
+	var redundant int
+	if err := s.Pool().QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name IN ('hosts','devices','grants')
+        AND column_name IN ('workspace_id','auth_hash')`).Scan(&redundant); err != nil || redundant != 0 {
+		t.Fatal("fixed scope or duplicate credential state remains")
+	}
+}
+
+//go:embed migrations/001_init.sql migrations/002_host_authorization_key.sql migrations/003_client_transport.sql migrations/004_grant_generation.sql
+var legacyMigrations embed.FS
+
+// When a populated unversioned installation is upgraded, migration adoption preserves its identities, credential and active grant.
+func TestMigrationAdoptsPopulatedUnversionedInstallation(t *testing.T) {
+	db := storetest.NewSchema(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, db.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	entries, err := legacyMigrations.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		body, err := legacyMigrations.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO hosts(host_id,fingerprint) VALUES('legacy-host','pinned');
+        INSERT INTO devices(device_id,public_key_fingerprint,auth_hash) VALUES('legacy-device','device-pin','legacy-fixture-hash'::bytea);
+        INSERT INTO grants(host_id,device_id) VALUES('legacy-host','legacy-device');`); err != nil {
+		t.Fatal(err)
+	}
+	s := store.NewWithPool(pool)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	host, err := s.GetHost(ctx, "legacy-host")
+	if err != nil || host.Fingerprint != "pinned" {
+		t.Fatal("Host identity changed during adoption")
+	}
+	device, err := s.ActiveDeviceByAuthHash(ctx, []byte("legacy-fixture-hash"))
+	if err != nil || device.DeviceID != "legacy-device" || device.PublicKeyFingerprint != "device-pin" {
+		t.Fatal("device credential changed during adoption")
+	}
+	if active, err := s.HasActiveGrant(ctx, "legacy-host", "legacy-device"); err != nil || !active {
+		t.Fatal("grant lost during adoption")
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// When a pairing grant is replaced while its credential remains valid for another Host, the old completion receipt cannot recover the replacement grant or persist plaintext credentials.
+func TestPairingReceiptRequiresExactActiveGrantGeneration(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, host := range []string{"receipt-host", "other-host"} {
+		if _, err := s.EnsureHost(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invitationHash := bytes.Repeat([]byte{1}, 32)
+	if err := s.CreatePairingToken(ctx, invitationHash, "receipt-host", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	op := store.PairingOperation{ClaimID: "receipt", HostID: "receipt-host", DeviceID: "receipt-device", TokenHash: invitationHash,
+		HelloHash: bytes.Repeat([]byte{2}, 32), HelloResponse: []byte("opaque fixture reply"), ExpiresAt: now.Add(time.Hour), FinishHash: bytes.Repeat([]byte{3}, 32)}
+	if err := s.SavePairingOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	pub := bytes.Repeat([]byte{4}, 32)
+	response := &whalereinv1.PairingClaimResponse{ClaimId: op.ClaimID, HostId: op.HostID, DeviceId: op.DeviceID,
+		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, DeviceToken: "must-not-persist-fixture"}
+	claimBody, _ := proto.Marshal(&whalereinv1.PairingClaim{ClaimId: op.ClaimID, DeviceId: op.DeviceID,
+		DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT})
+	notice := &whalereinv1.HostRequest{RequestId: "receipt-commit", HostId: op.HostID, DeviceId: op.DeviceID,
+		Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: claimBody, ProtocolVersion: 1, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()}
+	authHash := bytes.Repeat([]byte{5}, 32)
+	op.FinishResponse, _ = proto.Marshal(response)
+	if _, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, "pin", authHash, now, notice, &op); !errors.Is(err, store.ErrConflict) {
+		t.Fatal("plaintext credential receipt accepted")
+	}
+	response.DeviceToken = ""
+	op.FinishResponse, _ = proto.Marshal(response)
+	if used, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, "pin", authHash, now, notice, &op); err != nil || !used {
+		t.Fatal("valid pairing commit failed")
+	}
+	saved, err := s.PairingOperation(ctx, op.ClaimID)
+	if err != nil || !saved.Active {
+		t.Fatal("committed receipt not recoverable")
+	}
+	if err := s.CreatePairedDevice(ctx, "other-host", op.DeviceID, "pin", bytes.Repeat([]byte{6}, 32), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreatePairedDevice(ctx, op.HostID, op.DeviceID, "pin", bytes.Repeat([]byte{7}, 32), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActiveDeviceByAuthHash(ctx, authHash); err != nil {
+		t.Fatal("other Host credential lost")
+	}
+	saved, err = s.PairingOperation(ctx, op.ClaimID)
+	if err != nil || saved.Active {
+		t.Fatal("superseded grant recovered through old receipt")
+	}
+}
+
+// When read-only requests outlive their retention window, cleanup removes only those records and preserves control/activation uncertainty.
+func TestQueryRetentionPreservesAllControlAndActivationIdentities(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seedDevice(t, s, "host", "device")
+	for _, kind := range []whalereinv1.RequestKind{whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE, whalereinv1.RequestKind_REQUEST_KIND_QUERY, whalereinv1.RequestKind_REQUEST_KIND_COMMAND, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE} {
+		id := fmt.Sprintf("kind-%d", kind)
+		commandID := ""
+		if kind == whalereinv1.RequestKind_REQUEST_KIND_COMMAND {
+			commandID = "control"
+		}
+		request := newRequest(id, "host", "device", commandID, []byte("fixture-digest"), whalereinv1.OnlineStatus_unknown, store.ForwardNone, now.Add(-72*time.Hour))
+		request.Kind = kind
+		if _, err := s.CreateRequest(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := newRequest("recent", "host", "device", "", nil, whalereinv1.OnlineStatus_succeeded, store.ForwardNone, now)
+	recent.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
+	if _, err := s.CreateRequest(ctx, recent); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := s.DeleteExpiredQueries(ctx, now.Add(-24*time.Hour)); err != nil || deleted != 2 {
+		t.Fatal("query retention did not isolate read-only records")
+	}
+	for _, id := range []string{"kind-3", "kind-5", "recent"} {
+		if _, err := s.GetRequest(ctx, id); err != nil {
+			t.Fatal("retention deleted protected identity")
+		}
+	}
+	if deleted, err := s.DeleteExpiredQueries(ctx, now.Add(-24*time.Hour)); err != nil || deleted != 0 {
+		t.Fatal("query retention not idempotent")
 	}
 }

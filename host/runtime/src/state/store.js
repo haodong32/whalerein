@@ -8,7 +8,7 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { PluginError } from '../errors.js'
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 function blob(value) {
   if (value === null || value === undefined) return null
@@ -34,6 +34,7 @@ function rowCommand(row) {
 export class StateStore {
   #db
   #now
+  #nextResultPrune = 0
 
   /**
    * @param {object} options
@@ -69,7 +70,7 @@ export class StateStore {
     const hasMeta=this.#db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get()
     if (hasMeta) {
       const current=this.getMeta('schema_version')
-      if (current!==null && current!=='1' && current!=='2' && current!=='3' && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
+      if (current!==null && current!=='1' && current!=='2' && current!=='3' && current!=='4' && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -111,11 +112,18 @@ export class StateStore {
         PRIMARY KEY (device_id, command_id)
       );
       CREATE INDEX IF NOT EXISTS commands_status ON commands (status);
+      CREATE INDEX IF NOT EXISTS commands_result_expiry ON commands(expires_at)
+        WHERE result_payload IS NOT NULL AND status IN ('succeeded','failed');
       CREATE TABLE IF NOT EXISTS pending_peers (
         claim_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, public_key BLOB NOT NULL,
         display_name TEXT NOT NULL, os TEXT NOT NULL, expires_at INTEGER NOT NULL
       );
     `)
+    for (const [name,type] of [['finish_hash','BLOB'],['auth_hash','BLOB'],['token_hash','TEXT']]) {
+      if (!this.#db.prepare('PRAGMA table_info(pending_peers)').all().some(column=>column.name===name)) {
+        this.#db.exec(`ALTER TABLE pending_peers ADD COLUMN ${name} ${type}`)
+      }
+    }
     const peerColumns = this.#db.prepare('PRAGMA table_info(peer_keys)').all()
     if (!peerColumns.some((column) => column.name === 'display_name')) {
       this.#db.exec(`ALTER TABLE peer_keys ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`)
@@ -140,7 +148,7 @@ export class StateStore {
     `)
     this.#db.exec('DROP TABLE IF EXISTS session_seqs; DROP TABLE IF EXISTS session_seq_points;')
     const current = this.getMeta('schema_version')
-    if (current === null || current === '1' || current === '2' || current === '3') this.setMeta('schema_version', String(SCHEMA_VERSION))
+    if (current === null || current === '1' || current === '2' || current === '3' || current === '4') this.setMeta('schema_version', String(SCHEMA_VERSION))
     else if (Number(current) !== SCHEMA_VERSION) {
       throw new PluginError('internal', 'state schema version unsupported')
     }
@@ -202,18 +210,18 @@ export class StateStore {
     }
   }
 
-  stagePeer({ claimId, deviceId, publicKey, displayName = '', os = '', expiresAt }) {
+  stagePeer({ claimId, deviceId, publicKey, displayName = '', os = '', expiresAt, finishHash = null, authHash = null, tokenHash = null }) {
     this.#db.prepare('DELETE FROM pending_peers WHERE expires_at <= ?').run(this.#now())
     const existing = this.getPendingPeer(claimId)
     if (existing && (existing.deviceId !== deviceId || !Buffer.from(existing.publicKey).equals(publicKey))) throw new PluginError('conflict', 'pending pairing identity changed')
     const count = this.#db.prepare('SELECT count(*) AS count FROM pending_peers').get().count
     if (count >= 64 && !this.getPendingPeer(claimId)) throw new PluginError('rate_limited', 'pending pairing budget exhausted')
-    this.#db.prepare(`INSERT INTO pending_peers VALUES (?,?,?,?,?,?) ON CONFLICT(claim_id) DO UPDATE SET expires_at=excluded.expires_at`).run(claimId,deviceId,blob(publicKey),displayName,os,expiresAt)
+    this.#db.prepare(`INSERT INTO pending_peers (claim_id,device_id,public_key,display_name,os,expires_at,finish_hash,auth_hash,token_hash) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(claim_id) DO UPDATE SET expires_at=excluded.expires_at`).run(claimId,deviceId,blob(publicKey),displayName,os,expiresAt,blob(finishHash),blob(authHash),tokenHash)
   }
 
   getPendingPeer(claimId) {
     const row = this.#db.prepare('SELECT * FROM pending_peers WHERE claim_id=? AND expires_at>?').get(claimId,this.#now())
-    return row ? {deviceId:row.device_id,publicKey:Buffer.from(row.public_key),displayName:row.display_name,os:row.os,expiresAt:row.expires_at} : null
+    return row ? {deviceId:row.device_id,publicKey:Buffer.from(row.public_key),displayName:row.display_name,os:row.os,expiresAt:row.expires_at,finishHash:row.finish_hash?Buffer.from(row.finish_hash):null,authHash:row.auth_hash?Buffer.from(row.auth_hash):null,tokenHash:row.token_hash} : null
   }
 
   deletePendingPeer(claimId) { this.#db.prepare('DELETE FROM pending_peers WHERE claim_id=?').run(claimId) }
@@ -322,6 +330,7 @@ export class StateStore {
    * caller compares digests: a different digest is never allowed to execute.
    */
   createOrGetCommand({ deviceId, commandId, requestId, digest, expiresAt, now = this.#now() }) {
+    this.pruneCommandResults(now)
     return this.#tx(() => {
       const existing = this.#db.prepare('SELECT * FROM commands WHERE device_id = ? AND command_id = ?').get(deviceId, commandId)
       if (existing) return { command: rowCommand(existing), created: false }
@@ -353,6 +362,19 @@ export class StateStore {
       WHERE status = 'accepted'
     `).run(now)
     return Number(info.changes)
+  }
+
+  // Expire result details, never execution identity or uncertain outcomes.
+  // Startup/new admissions perform bounded lazy maintenance without a timer.
+  pruneCommandResults(now = this.#now()) {
+    if (now < this.#nextResultPrune) return 0
+    const cutoff = now - 7 * 24 * 60 * 60 * 1000
+    const result = this.#db.prepare(`UPDATE commands SET result_payload=NULL WHERE rowid IN (
+      SELECT rowid FROM commands WHERE result_payload IS NOT NULL
+        AND status IN ('succeeded','failed') AND expires_at > 0 AND expires_at < ?
+      ORDER BY expires_at LIMIT 1000)`).run(cutoff)
+    this.#nextResultPrune = now + 60_000
+    return Number(result.changes)
   }
 
   countCommands(status) {

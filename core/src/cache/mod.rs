@@ -17,6 +17,7 @@ use crate::api::{HostInfo, OnlineStatus, PendingCommand, SessionSummary};
 
 pub const CACHE_NONCE_LEN: usize = 12;
 pub const SCHEMA_VERSION: i64 = 2;
+const HISTORY_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -28,6 +29,8 @@ pub enum CacheError {
     InvalidKey,
     #[error("history cursor does not continue the applied view")]
     HistoryGap,
+    #[error("conversation history exceeds the cache budget")]
+    HistoryBudget,
     #[error("cache payload is corrupt")]
     Corrupt,
 }
@@ -41,6 +44,7 @@ impl From<rusqlite::Error> for CacheError {
 pub struct Cache {
     conn: Mutex<Connection>,
     key: [u8; 32],
+    history_budget_bytes: u64,
 }
 
 impl std::fmt::Debug for Cache {
@@ -58,6 +62,7 @@ impl Cache {
         let cache = Self {
             conn: Mutex::new(conn),
             key,
+            history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
         Ok(cache)
@@ -67,6 +72,7 @@ impl Cache {
         let cache = Self {
             conn: Mutex::new(Connection::open_in_memory()?),
             key,
+            history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
         Ok(cache)
@@ -84,7 +90,8 @@ impl Cache {
         // Separate Core instances must not race after observing the same missing column.
         let result = self
             .initialize()
-            .and_then(|_| self.initialize_conversations());
+            .and_then(|_| self.initialize_conversations())
+            .and_then(|_| self.trim_history_cache(None));
         let conn = self.conn.lock().expect("cache mutex");
         if result.is_ok() {
             conn.execute_batch("COMMIT")?;

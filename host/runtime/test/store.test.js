@@ -230,3 +230,48 @@ test('an old revocation preserves newer peers and its watermark blocks delayed o
   assert.equal(store.isRevoked('d'),false)
  } finally {store.close()}
 })
+
+test('a version-four journal upgrades without losing peer or command identity', () => {
+  const dir=mkdtempSync(join(tmpdir(),'whalerein-v4-'))
+  const path=join(dir,'state.sqlite')
+  try {
+    const first=new StateStore({path})
+    first.upsertPeerKey({deviceId:'fixture-device',publicKey:new Uint8Array([1]),fingerprint:'fixture-pin'})
+    first.createOrGetCommand({deviceId:'fixture-device',commandId:'fixture-command',requestId:'fixture-request',digest:new Uint8Array(32),expiresAt:10000,now:100})
+    first.setMeta('schema_version','4');first.close()
+    const db=new DatabaseSync(path)
+    for(const column of ['finish_hash','auth_hash','token_hash'])db.exec(`ALTER TABLE pending_peers DROP COLUMN ${column}`)
+    db.close()
+    const restored=new StateStore({path})
+    try {
+      assert.equal(restored.getMeta('schema_version'),'5')
+      assert.equal(restored.getPeerKey('fixture-device').fingerprint,'fixture-pin')
+      assert.equal(restored.getCommand('fixture-device','fixture-command').status,'accepted')
+    } finally {restored.close()}
+  } finally {rmSync(dir,{recursive:true,force:true})}
+})
+
+test('expired final result details are bounded while dedupe and uncertain outcomes survive', () => {
+  const store=memoryStore()
+  const digest=new Uint8Array(32).fill(7)
+  try {
+    for (const status of ['succeeded','failed','unknown','accepted']) {
+      store.createOrGetCommand({deviceId:'device',commandId:status,requestId:status,digest,expiresAt:1000,now:100})
+      store.setCommandStatus({deviceId:'device',commandId:status,status,resultPayload:new Uint8Array([1,2]),errorCode:status==='failed'?'forbidden':null,now:200})
+    }
+    const later=8*24*60*60*1000
+    assert.equal(store.pruneCommandResults(later),2)
+    assert.equal(store.pruneCommandResults(later),0)
+    for(const status of ['succeeded','failed']) {
+      const command=store.getCommand('device',status)
+      assert.equal(command.status,status)
+      assert.equal(command.resultPayload,null)
+      assert.deepEqual(command.digest,Buffer.from(digest))
+      const repeated=store.createOrGetCommand({deviceId:'device',commandId:status,requestId:'retry',digest,expiresAt:later+1000,now:later})
+      assert.equal(repeated.created,false)
+      assert.equal(repeated.command.status,status)
+    }
+    assert.equal(store.getCommand('device','failed').errorCode,'forbidden')
+    for(const status of ['accepted','unknown'])assert.deepEqual(store.getCommand('device',status).resultPayload,Buffer.from([1,2]))
+  } finally {store.close()}
+})

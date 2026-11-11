@@ -56,3 +56,17 @@ Exit codes: `0` success, `1` internal, `2` usage/input, `3` not found,
 
 The `file:<dir>` and `memory` secret backends provide no OS keyring protection;
 use them only for tests and the integration harness.
+
+## Resume standalone pairing
+
+If a confirmed pairing loses its FINISH response, run `whalerein pair-resume`
+with the same data directory and SecretStore. The original approved Host identity
+and request are retained securely; this command does not ask for a new invitation
+or create another grant. Recovery is bounded by the Access pairing deadline.
+Expired or lost local secrets require explicit Host/admin revocation and fresh
+pairing. See [standalone recovery](../../access/README.md#pairing-and-recovery).
+
+For live output from separate CLI invocations, send the prompt and then attach
+`tail`. Separate Core processes share a device identity but not in-memory channel
+keys; starting another command may replace the active channel and require watch
+history recovery. Concurrent multi-process channel multiplexing is not provided.

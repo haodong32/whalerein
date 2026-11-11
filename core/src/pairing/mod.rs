@@ -3,6 +3,7 @@
 //! The fingerprint shown to the user is always computed from the Noise remote
 //! static key. Values reported by Access are deliberately ignored.
 
+use base64::Engine;
 use prost::Message;
 use whalerein_proto::{
     Capability, CapabilitySet, PairingClaimRequest, PairingClaimResponse, PairingFinish,
@@ -201,8 +202,8 @@ impl PairingDecision {
     }
 }
 
-/// One-time material returned after FINISH. The token is stored immediately by
-/// the caller and never logged or persisted anywhere else.
+/// Confirmed FINISH result. The token was generated locally before submission
+/// and is retained only in SecretStore; it is never logged.
 pub struct PairingCompletion {
     pub host_id: String,
     pub device_id: String,
@@ -228,6 +229,7 @@ pub struct PairingInitiator {
     device_id: String,
     claim_id: String,
     token: String,
+    device_token: String,
     access_url: String,
     protocol_version: u32,
     fingerprint: Option<String>,
@@ -320,6 +322,7 @@ impl PairingInitiator {
             device_id: device_id.clone(),
             protocol_version: PROTOCOL_VERSION,
             confirmed: false,
+            device_token: String::new(),
         };
 
         Ok((
@@ -329,6 +332,8 @@ impl PairingInitiator {
                 device_id,
                 claim_id,
                 token: uri.token.clone(),
+                device_token: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(crate::util::random_bytes(32)),
                 access_url: uri.access_url.to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 fingerprint: None,
@@ -437,6 +442,7 @@ impl PairingInitiator {
             device_id: self.device_id.clone(),
             host_id: self.host_id.clone(),
             host_fingerprint,
+            device_auth_hash: crate::util::sha256(self.device_token.as_bytes()).to_vec(),
         };
         let noise_message = self.session.write(&finish.encode_to_vec())?;
         self.state = PairingState::AwaitingFinish;
@@ -448,6 +454,7 @@ impl PairingInitiator {
             device_id: self.device_id.clone(),
             protocol_version: self.protocol_version,
             confirmed: true,
+            device_token: self.device_token.clone(),
         })
     }
 
@@ -474,7 +481,7 @@ impl PairingInitiator {
         if !response.device_public_key.is_empty() && response.device_public_key != self.public_key {
             return Err(PairingError::DeviceKeyMismatch);
         }
-        if response.device_token.is_empty() {
+        if response.device_token != self.device_token {
             return Err(PairingError::ResponseMismatch);
         }
         let device_token = response.device_token.clone();
@@ -592,7 +599,7 @@ mod tests {
                 device_id: request.device_id.clone(),
                 // Empty means "not reported"; the client verifies only when present.
                 device_public_key: Vec::new(),
-                device_token: "device-token".into(),
+                device_token: request.device_token.clone(),
                 protocol_version: PROTOCOL_VERSION,
                 ..Default::default()
             }
@@ -692,7 +699,7 @@ mod tests {
 
         let response = host.finish_response(&finish);
         let completion = client.complete(&response).unwrap();
-        assert_eq!(completion.device_token, "device-token");
+        assert_eq!(completion.device_token, finish.device_token);
         assert_eq!(completion.device_id, "device-1");
         assert_eq!(client.state(), PairingState::Complete);
         assert!(!format!("{completion:?}").contains("device-token"));

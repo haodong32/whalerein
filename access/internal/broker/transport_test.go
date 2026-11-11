@@ -317,3 +317,20 @@ func TestBulkAdmissionWaitsAndReleasesCancellationBudget(t *testing.T) {
 	<-transport.bulkSlots
 	<-transport.bulkSlots
 }
+
+func TestCompletedFramedReplyRestoresOnlyItsAuthenticatedHostCapability(t *testing.T) {
+	connector := &pahoConnector{dispatch: func(string, []byte) {}}
+	valid, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "reply", HostId: "host", ProtocolVersion: 1})
+	connector.deliverFramed(ResultTopic("other"), valid)
+	if _, known := connector.peers.Load(RequestTopic("other")); known {
+		t.Fatal("cross-Host result established capability")
+	}
+	connector.deliverFramed(ResultTopic("host"), []byte{0xff})
+	if _, known := connector.peers.Load(RequestTopic("host")); known {
+		t.Fatal("malformed result established capability")
+	}
+	connector.deliverFramed(ResultTopic("host"), valid)
+	if capable, _ := connector.peers.Load(RequestTopic("host")); capable != true {
+		t.Fatal("valid v2 reply did not restore capability")
+	}
+}

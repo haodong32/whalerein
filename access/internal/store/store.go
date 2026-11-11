@@ -1,12 +1,14 @@
 // Package store owns the WhaleRein Access PostgreSQL schema and all SQL.
 //
-// The schema has exactly five tables: hosts, devices, grants, pairing_tokens
-// and requests. Authorization is derived from the live grants rows; no other
+// Versioned migrations own local workspace bindings, devices, grants, pairing
+// operations and requests. Authorization is derived from the live grants rows; no other
 // package keeps an in-memory authorization or request copy.
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"errors"
 	"fmt"
@@ -79,9 +81,8 @@ func (s *Store) Ping(ctx context.Context) error {
 // Pool exposes the underlying pool for component tests.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
-// Migrate applies all embedded idempotent migrations under a transaction-scoped
-// advisory lock. There is no migration metadata table because the Access
-// schema must contain exactly five tables.
+// Migrate applies checksummed migrations once under a transaction-scoped lock.
+// Existing unversioned installations are adopted without deleting their state.
 func (s *Store) Migrate(ctx context.Context) error {
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
@@ -95,6 +96,35 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+ name text PRIMARY KEY, checksum bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		return fmt.Errorf("create migration ledger: %w", err)
+	}
+	// A binary older than the database must not start against an unknown schema.
+	rows, err := tx.Query(ctx, "SELECT name FROM schema_migrations")
+	if err != nil {
+		return err
+	}
+	known := make(map[string]bool)
+	for _, entry := range entries {
+		known[entry.Name()] = true
+	}
+	unknown := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		unknown = unknown || !known[name]
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if unknown {
+		return errors.New("database contains a newer migration; upgrade Access")
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
@@ -103,10 +133,25 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
+		checksum := sha256.Sum256(raw)
+		var applied []byte
+		err = tx.QueryRow(ctx, "SELECT checksum FROM schema_migrations WHERE name=$1", entry.Name()).Scan(&applied)
+		if err == nil {
+			if !bytes.Equal(applied, checksum[:]) {
+				return fmt.Errorf("migration checksum changed: %s", entry.Name())
+			}
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		for _, statement := range splitStatements(string(raw)) {
 			if _, err := tx.Exec(ctx, statement); err != nil {
 				return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 			}
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES ($1,$2)", entry.Name(), checksum[:]); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

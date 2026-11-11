@@ -403,6 +403,10 @@
                 "confirmed": {
                   "type": "bool",
                   "id": 7
+                },
+                "device_token": {
+                  "type": "string",
+                  "id": 8
                 }
               }
             },
@@ -487,6 +491,10 @@
                 "grant_generation": {
                   "type": "uint64",
                   "id": 8
+                },
+                "device_auth_hash": {
+                  "type": "bytes",
+                  "id": 9
                 }
               }
             },
@@ -515,6 +523,10 @@
                 "authorized": {
                   "type": "bool",
                   "id": 6
+                },
+                "device_auth_hash": {
+                  "type": "bytes",
+                  "id": 7
                 }
               }
             },
@@ -722,6 +734,10 @@
                 "host_fingerprint": {
                   "type": "string",
                   "id": 3
+                },
+                "device_auth_hash": {
+                  "type": "bytes",
+                  "id": 4
                 }
               }
             },

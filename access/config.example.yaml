@@ -1,3 +1,4 @@
+mode: standalone
 # WhaleRein Access example configuration.
 #
 # Copy to access/config.yaml and export the referenced environment variables.
