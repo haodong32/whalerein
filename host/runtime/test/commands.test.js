@@ -237,6 +237,27 @@ test('when reply encoding fails after native success, the host preserves a recov
   }
 })
 
+test('a proven lifecycle outcome survives a failed terminal write and recovery reports it', async () => {
+  const { service, store, adapter } = makeService()
+  adapter.describeHostCapabilities = async () => ({ session_create: true })
+  const setCommandStatus = store.setCommandStatus.bind(store)
+  store.setCommandStatus = (fields) => {
+    if (fields.status === 'succeeded') throw new Error('terminal write failed')
+    return setCommandStatus(fields)
+  }
+  adapter.executeHost = async () => ({ entered: true, identity: { session_id: 'created-proven' } })
+  const request = makeRequest({ commandId: 'proven-outcome' })
+  const first = await service.handle({ request, payload: { create_session: {} } })
+  assert.equal(first.status, 'unknown')
+  const operation = store.getLifecycleOperation('device-1', request.command_id)
+  assert.equal(operation?.outcome, 'READY')
+  assert.equal(operation?.sessionId, 'created-proven')
+  const lookup = await service.handle({ request: makeRequest({ kind: 'REQUEST_KIND_QUERY' }), payload: { get_command_result: { command_id: request.command_id } } })
+  const receipt = proto.decode('whalerein.v1.ResponsePayload', lookup.response.command_result.result_payload).lifecycle_receipt
+  assert.equal(receipt.disposition, 'READY')
+  assert.equal(receipt.session_id, 'created-proven')
+})
+
 test('when an interrupt request is valid, the adapter executes it as a control command', async () => {
   const { service, order } = makeService()
   const result = await service.handle({ request: makeRequest(), payload: { interrupt: { session_id: 's1' } } })

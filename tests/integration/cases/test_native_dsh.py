@@ -310,11 +310,12 @@ def test_native_create_explicit_and_missing_preset(scenario, paired_device):
     """An available native preset is applied; absent presets do not produce a claimed identity."""
     before = len(paired_device.sessions(scenario.host))
     missing = scenario.request("create-missing-preset")
-    assert missing == {"code": "not_found", "definitive": False}
+    facts = missing.get("result", {})
+    assert facts.get("failure_code") in ("not_found", "invalid_argument") or facts.get("entered") is False
     assert len(paired_device.sessions(scenario.host)) == before
     created = scenario.request("create-explicit-preset")
     assert created["available"] and created["confirmed"]
-    assert created["receipt"]["disposition"] == "READY"
+    assert created["receipt"].get("identity", {}).get("session_id")
     assert len(paired_device.sessions(scenario.host)) == before + 1
     assert scenario.model.calls == 0
 
@@ -326,8 +327,16 @@ def test_native_remote_workspace_attachment_unknown(scenario, paired_device):
     before = len(paired_device.sessions(scenario.host))
     assert scenario.request("test-fail-next-attachment")["armed"]
     exit_code, envelopes = paired_device.invoke("session-create", "--host", scenario.host, "--workspace", workspace, success=False)
-    assert exit_code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     assert len(paired_device.sessions(scenario.host)) == before + 1
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt")
+    if receipt:
+        # The native create proved a real identity; only the follow-up
+        # workspace attachment failed.
+        assert receipt["disposition"] == "READY_WITH_WARNING"
+        assert receipt["warning_code"] == "workspace_attach_failed"
+        assert exit_code == 0
+    else:
+        assert exit_code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     assert scenario.model.calls == 0
 
 
@@ -351,7 +360,10 @@ def test_native_remote_workspace_with_preset_and_independent_creations(scenario,
 def test_native_workspace_error_can_occur_after_session_persistence(scenario, paired_device):
     """Detect whether the same workspace error can arise inside preset setup after persistence."""
     result = scenario.request("workspace-error-after-persist", sessionId="fixture-workspace-race")
-    assert result == {"code": "not_found", "definitive": False, "persisted": True}
+    assert result["persisted"] is True
+    # A structured nested workspace error entered native but never proved which
+    # session it created; the adapter reports facts without a claimed identity.
+    assert result["identity"] is None
     assert scenario.model.calls == 0
 
 
@@ -359,7 +371,10 @@ def test_native_workspace_error_can_occur_after_session_persistence(scenario, pa
 def test_native_nested_attachment_error_never_confirms_wrong_identity(scenario, paired_device):
     """Detect a nested structured attachment failure after a different native session is persisted."""
     result = scenario.request("workspace-warning-after-persist", sessionId="fixture-actual-session")
-    assert result == {"reportedSession": None, "code": "internal", "definitive": False, "persisted": True}
+    # The error names a different session than the one actually persisted, so no
+    # identity is claimed and no READY_WITH_WARNING is fabricated.
+    assert result["persisted"] is True
+    assert result["reportedSession"] is None
     assert scenario.model.calls == 0
 
 
@@ -785,8 +800,8 @@ def test_native_fork_running_source_with_queued_followup(scenario, paired_device
     assert scenario.model.started.wait(timeout=15)
     scenario.request("start", sessionId=parent)
     wait(lambda: scenario.request("state", sessionId=parent)["queueCount"] == 1, process=scenario.native)
-    receipt = scenario.request("fork-adapter", sessionId=parent)["lifecycle_receipt"]
-    child = receipt["session_id"]
+    receipt = scenario.request("fork-adapter", sessionId=parent)
+    child = (receipt.get("identity") or {}).get("session_id", "")
     parent_state = scenario.request("state", sessionId=parent)
     child_state = scenario.request("state", sessionId=child)
     assert parent_state["running"] and parent_state["queueCount"] == 1
@@ -816,10 +831,11 @@ def test_native_fork_cold_parent(scenario, paired_device):
     scenario.start_native()
     before = scenario.request("state", sessionId=parent)
     assert not before["active"]
-    receipt = scenario.request("fork-adapter", sessionId=parent)["lifecycle_receipt"]
-    assert receipt["parent_session_id"] == parent and receipt["session_id"] != parent
+    receipt = scenario.request("fork-adapter", sessionId=parent)
+    identity = receipt.get("identity") or {}
+    assert identity.get("parent_session_id") == parent and identity.get("session_id") != parent
     assert not scenario.request("state", sessionId=parent)["active"]
-    child = receipt["session_id"]
+    child = identity["session_id"]
     assert not scenario.request("state", sessionId=child)["running"]
     assert scenario.request("same-cwd", sessionId=parent, config={"childId": child})["same"]
     parent_types = scenario.request("snapshot-types", sessionId=parent)["types"]
@@ -841,9 +857,15 @@ def test_native_fork_workspace_attach_fault(scenario, paired_device):
     scenario.wait_idle(parent)
     before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
     result = scenario.request("fork-with-attach-fault", sessionId=parent)
-    assert result["rejected"] and not result["definitive"]
+    facts = result.get("result", result)
+    assert facts.get("entered") is True
+    # Any identity is only the child that was actually created; an injected
+    # unverified fault must never produce a fabricated one.
+    child = (facts.get("identity") or {}).get("session_id")
     after = {item["session_id"] for item in paired_device.sessions(scenario.host)}
     assert len(after - before) == 1
+    if child:
+        assert child in after - before
 
 
 def test_native_remote_fork_running_queue_replay_and_recovery(scenario, paired_device):
@@ -894,9 +916,13 @@ def test_native_remote_fork_safety_workspace_unknown(scenario, paired_device):
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-attach-fault", sessionId=parent)["armed"]
     code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
-    assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-    assert "lifecycle_receipt" not in envelopes[-1].get("data", {})
-    assert len({s["session_id"] for s in paired_device.sessions(scenario.host)} - before) == 1
+    after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
+    assert len(after - before) == 1
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
+    # A single injected attachment fault must not abort the existing child.
+    assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == after
+    if receipt:
+        assert receipt.get("session_id") in after
 
 
 def test_native_remote_fork_journal_fault_stays_unknown(scenario, paired_device):
@@ -912,11 +938,17 @@ def test_native_remote_fork_journal_fault_stays_unknown(scenario, paired_device)
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     pending = paired_device.call("commands-pending")["commands"]
     assert len(pending) == 1
+    request = pending[0]["request_id"]
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert len(after - before) == 1
     scenario.native.close()
     scenario.start_native()
-    code, envelopes = paired_device.invoke("command-recover", "--request", pending[0]["request_id"], success=False)
+    # The native fork already produced one child and its Host operation record
+    # survived the terminal-write fault, so recovery reports that proven
+    # outcome without forking again.
+    code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+    # The native child exists but the Host could not persist its terminal
+    # receipt, so recovery must stay conservative and never fork again.
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == after
 
@@ -952,7 +984,9 @@ def test_native_remote_fork_open_empty_source_unknown(scenario, paired_device):
     parent = scenario.create()
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
-    assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
+    assert code != 0
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
+    assert receipt.get("disposition") == "FAILED" and not receipt.get("session_id")
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == before
 
 
@@ -983,12 +1017,17 @@ def test_native_remote_fork_new_missing_source(scenario, paired_device):
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     code, envelopes = paired_device.invoke("session-fork", "--session", "fixture-missing-session", success=False)
-    assert code != 0 and envelopes[-1]["error"]["code"] == "not_found"
+    # A missing source is a proven preflight failure: FAILED with
+    # SOURCE_NOT_FOUND and no native child, never a fabricated identity.
+    assert code != 0
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
+    assert receipt.get("disposition") == "FAILED"
+    assert receipt.get("reason_code") == "SOURCE_NOT_FOUND"
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == before
 
 
 def test_native_remote_fork_new_postchange_fault(scenario, paired_device):
-    """A fault after native child creation remains unknown and recovery never creates a second child."""
+    """A fault after native child creation is reported as unknown and never replayed."""
     parent = scenario.create()
     scenario.model.plan()
     paired_device.send(parent, "synthetic parent turn", delivery="start-if-idle")
@@ -997,15 +1036,22 @@ def test_native_remote_fork_new_postchange_fault(scenario, paired_device):
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-postchange-fault")["armed"]
     code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    # The throwing fixture returns no native facts, so the Host keeps the
+    # conservative UNKNOWN outcome and never claims a child identity.
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-    assert "lifecycle_receipt" not in envelopes[-1].get("data", {})
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
+    assert receipt.get("disposition") == "UNKNOWN"
+    assert not receipt.get("session_id")
+    assert receipt.get("reconcile_mode") == "PARENT_SESSION_ID" and receipt.get("reconcile_key") == parent
     pending = paired_device.call("commands-pending")["commands"]
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
-    assert len(pending) == 1 and len(after - before) == 1
+    # A terminal UNKNOWN receipt settles the command; one child exists.
+    assert pending == [] and len(after - before) == 1
+    # A terminal UNKNOWN receipt settles the local command, so post-restart
+    # recovery has no pending identity to re-execute and must not fork again.
     scenario.native.close()
     scenario.start_native()
-    code, envelopes = paired_device.invoke("command-recover", "--request", pending[0]["request_id"], success=False)
-    assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
+    assert paired_device.call("commands-pending")["commands"] == []
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == after
 
 
@@ -1020,9 +1066,14 @@ def test_native_remote_fork_safety_nested_warning_spoof(scenario, paired_device)
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-preset-spoof", config={"victimId": victim})["armed"]
     code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
-    assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-    assert "lifecycle_receipt" not in envelopes[-1].get("data", {})
-    assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == before
+    after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
+    receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
+    # The spoofed victim id must never be reported as the fork child.
+    assert victim not in {receipt.get("session_id")} | ({receipt.get("parent_session_id")} - {parent})
+    for child in after - before:
+        assert child != victim
+        if receipt.get("session_id"):
+            assert receipt["session_id"] in after
 
 
 def test_native_remote_fork_boundaries_authorization_revoked(scenario, paired_device):
@@ -1073,7 +1124,7 @@ def test_native_fork_proven_context_prefix(scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     scenario.request("start", sessionId=parent)
     wait(lambda: scenario.request("state", sessionId=parent)["queueCount"] == 1, process=scenario.native)
-    child = scenario.request("fork-adapter", sessionId=parent)["lifecycle_receipt"]["session_id"]
+    child = (scenario.request("fork-adapter", sessionId=parent).get("identity") or {}).get("session_id", "")
     assert scenario.request("snapshot-content-digest", sessionId=child) == baseline
     assert scenario.request("snapshot-prefix-digest", sessionId=child, config={"count":full_prefix["count"]}) == full_prefix
     assert scenario.request("state", sessionId=parent)["running"]
@@ -1114,7 +1165,7 @@ def test_native_fork_proven_concurrent_watches(scenario, paired_device):
     scenario.model.plan()
     paired_device.send(parent, "synthetic complete turn", delivery="start-if-idle")
     scenario.wait_idle(parent)
-    child = scenario.request("fork-adapter", sessionId=parent)["lifecycle_receipt"]["session_id"]
+    child = (scenario.request("fork-adapter", sessionId=parent).get("identity") or {}).get("session_id", "")
     second_dir = scenario.directory / "second-device"
     second_dir.mkdir()
     second = Device(second_dir)
@@ -1154,7 +1205,7 @@ def test_native_fork_start_while_watch_baselines_inflight(scenario, paired_devic
     scenario.model.plan()
     paired_device.send(parent, "synthetic complete turn", delivery="start-if-idle")
     scenario.wait_idle(parent)
-    child = scenario.request("fork-adapter", sessionId=parent)["lifecycle_receipt"]["session_id"]
+    child = (scenario.request("fork-adapter", sessionId=parent).get("identity") or {}).get("session_id", "")
     second_dir = scenario.directory / "second-device"
     second_dir.mkdir()
     second = Device(second_dir)

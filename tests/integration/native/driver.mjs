@@ -205,7 +205,7 @@ let channelQueueBarrier = null
             await workspace.attachSession(sessionId)
             const attach = workspace.attachSession
             workspace.attachSession = async () => { throw new Error('injected fixture fault') }
-            try { await host().adapter.forkSession(sessionId); return {rejected:false} }
+            try { const facts = await host().adapter.forkSession(sessionId); facts.rejected = !facts?.identity; return facts }
             catch (error) { return {rejected:true, code:error.code, definitive:error.name === 'DefinitiveExecutionError'} }
             finally { workspace.attachSession = attach }
           }
@@ -235,7 +235,8 @@ let channelQueueBarrier = null
             const original = defaults.currentSelection
             defaults.currentSelection = () => ({provider:'fixture-default-provider',model:'fixture-default-model'})
             try {
-              const receipt = (await host().adapter.forkSession(sessionId)).lifecycle_receipt
+              const facts = await host().adapter.forkSession(sessionId)
+              const receipt = { session_id: facts.identity?.session_id ?? '' }
               const child = agents.get(receipt.session_id)
               const selected = child?.model?.current()
               return { childId:receipt.session_id, defaultFallback:child?.model?.options?.provider === 'fixture-default-provider' && child?.model?.options?.model === 'fixture-default-model', currentInherited:JSON.stringify(selected) === previous, parentUnchanged:JSON.stringify(parent.model.current()) === previous, inheritedPreset:presets.presetForSession(child.session) === preset }
@@ -662,10 +663,11 @@ let channelQueueBarrier = null
             if (!presets) return {available:false}
             const preset = (await presets.resolve()).id
             const result = await host().adapter.executeHost({create_session:{agent_preset:preset}})
-            return {available:true, confirmed:preset === presets.presetForSession(ctx.sessions.get(result.lifecycle_receipt.session_id)), receipt:result.lifecycle_receipt}
+            const sessionId = result.identity?.session_id ?? ''
+            return {available:true, confirmed:Boolean(sessionId) && preset === presets.presetForSession(ctx.sessions.get(sessionId)), receipt:result}
           }
           if (method === 'create-missing-preset') {
-            try { await host().adapter.executeHost({create_session:{agent_preset:'fixture-nonexistent-preset'}}); return {unexpected:true} }
+            try { return {result:await host().adapter.executeHost({create_session:{agent_preset:'fixture-nonexistent-preset'}})} }
             catch (error) { return {code:error.code, definitive:error.constructor.name === 'DefinitiveExecutionError'} }
           }
           if (method === 'archive-session') {
@@ -701,7 +703,7 @@ let channelQueueBarrier = null
               persisted = observation.header.id === sessionId
               await observation[Symbol.asyncDispose]()
             } catch {}
-            return {reportedSession:outcome?.lifecycle_receipt?.session_id ?? null, code:caught?.code, definitive:caught?.constructor.name === 'DefinitiveExecutionError', persisted}
+            return {reportedSession:outcome?.identity?.session_id ?? null, outcome, code:caught?.code, definitive:caught?.constructor.name === 'DefinitiveExecutionError', persisted}
           }
           if (method === 'workspace-error-after-persist') {
             const presets = ctx.get('agentPresets')
@@ -711,7 +713,8 @@ let channelQueueBarrier = null
             const original = presets.mount
             let caught
             presets.mount = async () => { throw Object.assign(new Error('synthetic nested workspace failure'), {isDSHRemoteError:true, code:'workspace/not-found', details:{workspaceId:workspace.workspaceId}}) }
-            try { await host().adapter.executeHost({create_session:{preferred_session_id:sessionId,workspace_id:workspace.workspaceId,agent_preset:preset}}) }
+            let outcome
+            try { outcome = await host().adapter.executeHost({create_session:{preferred_session_id:sessionId,workspace_id:workspace.workspaceId,agent_preset:preset}}) }
             catch (error) { caught = error }
             finally { presets.mount = original }
             let persisted = false
@@ -720,7 +723,7 @@ let channelQueueBarrier = null
               persisted = observation.header.id === sessionId
               await observation[Symbol.asyncDispose]()
             } catch {}
-            return {code:caught?.code, definitive:caught?.constructor.name === 'DefinitiveExecutionError', persisted}
+            return {code:caught?.code ?? outcome?.failure_code, outcome, identity:outcome?.identity?.session_id ?? null, definitive:caught?.constructor.name === 'DefinitiveExecutionError', persisted}
           }
           if (method === 'create-adapter') return host().adapter.executeHost({create_session:{}})
           if (method === 'create-native-default') return ctx.sessionController.create({})

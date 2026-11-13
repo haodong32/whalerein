@@ -394,7 +394,7 @@ export class StateStore {
     return Number(info.changes) === 1
   }
 
-  updateLifecycleOperation({ deviceId, commandId, phase, entered = true, sessionId = '', parentSessionId = '', now = this.#now() }) {
+  updateLifecycleOperation({ deviceId, commandId, phase, entered = true, sessionId = '', parentSessionId = '', outcome = '', now = this.#now() }) {
     const existing = this.getLifecycleOperation(deviceId, commandId)
     if (!existing) return false
     const state = JSON.stringify({
@@ -403,6 +403,10 @@ export class StateStore {
       entered: Boolean(entered),
       ...(sessionId === '' ? {} : { sessionId }),
       ...(parentSessionId === '' ? {} : { parentSessionId }),
+      // A terminal outcome describes the native action that already happened.
+      // It survives a failed terminal command write so recovery keeps the
+      // proven identity and never repeats the mutation.
+      ...(outcome === '' ? {} : { outcome }),
     })
     const info = this.#db.prepare(`
       UPDATE commands SET operation_state = ?, updated_at = ?

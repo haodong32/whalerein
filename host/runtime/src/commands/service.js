@@ -534,7 +534,20 @@ export class CommandService {
     // A stale in-flight operation read after restart is unresolved. Surface a
     // stable UNKNOWN receipt keyed by the persisted operation identity rather
     // than an empty or success-looking payload.
-    if (command.status === 'unknown' && command.operation) {
+    if (command.status === 'unknown' && command.operation?.outcome) {
+      // The native action completed with a proven outcome, but its terminal
+      // command write failed. Recovery returns that outcome instead of UNKNOWN.
+      resultPayload = this.codec.encode('whalerein.v1.ResponsePayload', {
+        lifecycle_receipt: lifecycleReceipt({
+          operation: command.operation.operation === 'fork' ? 'fork' : 'create',
+          operationId: command.operation.operationId,
+          disposition: command.operation.outcome,
+          phase: command.operation.phase,
+          sessionId: command.operation.sessionId ?? '',
+          parentSessionId: command.operation.parentSessionId ?? '',
+        }),
+      })
+    } else if (command.status === 'unknown' && command.operation) {
       const kind = command.operation.operation === 'fork' ? 'fork' : 'create'
       const preferred = command.operation.preferredSessionId ?? ''
       const parent = command.operation.parentSessionId ?? ''
@@ -848,7 +861,7 @@ export class CommandService {
     return { lifecycle_receipt: normalized }
   }
 
-  #mapNativeFacts(kind, facts, { parentSessionId = '', preferredSessionId = '', context }) {
+  #mapNativeFacts(kind, facts, { parentSessionId = '', preferredSessionId = '', context, setObservedIdentity = () => {} }) {
     const identity = facts?.identity && typeof facts.identity.session_id === 'string'
       ? facts.identity : null
     if (identity && kind === 'fork' && identity.session_id === parentSessionId) {
@@ -863,6 +876,7 @@ export class CommandService {
       }, warning, context)
     }
     if (identity && !facts.failure_code) {
+      setObservedIdentity(identity.session_id)
       return this.#ready(kind, {
         session_id: identity.session_id,
         parent_session_id: kind === 'fork' ? parentSessionId : '',
@@ -907,11 +921,12 @@ export class CommandService {
     throw new DefinitiveExecutionError('internal', 'lifecycle operation record unavailable')
   }
 
-  #persistLifecycleResult(kind, request, phase, identity = null, entered = true) {
+  #persistLifecycleResult(kind, request, phase, identity = null, entered = true, outcome = '') {
     try {
       this.store.updateLifecycleOperation({
         deviceId: request.device_id, commandId: request.command_id, phase, entered,
         sessionId: identity?.session_id ?? '', parentSessionId: identity?.parent_session_id ?? '',
+        outcome,
         now: this.now(),
       })
     } catch {
@@ -930,7 +945,7 @@ export class CommandService {
     const identity = receipt.session_id
       ? { session_id: receipt.session_id, parent_session_id: receipt.parent_session_id ?? '' }
       : null
-    this.#persistLifecycleResult(kind, request, phase, identity, receipt.disposition !== 'FAILED')
+    this.#persistLifecycleResult(kind, request, phase, identity, receipt.disposition !== 'FAILED', receipt.disposition)
     const fields = {
       operation: kind, disposition: receipt.disposition, phase, reason: receipt.reason_code ?? '',
       identity_present: Boolean(receipt.session_id), warning: receipt.warning_code ?? '',
@@ -1012,6 +1027,9 @@ export class CommandService {
       let result
       try {
         result = await this.adapter.execute(parent, { fork_session: operation.fork }, context)
+        if (typeof result?.identity?.session_id === 'string' && result.identity.session_id) {
+          this.#persistLifecycleResult('fork', request, 'NATIVE', result.identity, true)
+        }
       } catch (error) {
         if (error instanceof DefinitiveExecutionError) {
           return this.#failed('fork', preflightReason(error.code), context, undefined, parent)
@@ -1052,6 +1070,9 @@ export class CommandService {
       let result
       try {
         result = await this.adapter.executeHost({ create_session: operation.create }, context)
+        if (typeof result?.identity?.session_id === 'string' && result.identity.session_id) {
+          this.#persistLifecycleResult('create', request, 'NATIVE', result.identity, true)
+        }
       } catch (error) {
         if (error instanceof DefinitiveExecutionError) {
           return this.#failed('create', preflightReason(error.code), context)

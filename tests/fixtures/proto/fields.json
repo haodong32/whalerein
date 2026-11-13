@@ -257,6 +257,14 @@
         {
           "name": "READY_WITH_WARNING",
           "number": 2
+        },
+        {
+          "name": "FAILED",
+          "number": 3
+        },
+        {
+          "name": "UNKNOWN",
+          "number": 4
         }
       ]
     },
@@ -1536,6 +1544,26 @@
           "type": "TYPE_STRING"
         },
         {
+          "json_name": "reconcileMode",
+          "name": "reconcile_mode",
+          "number": "10",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reconcileKey",
+          "name": "reconcile_key",
+          "number": "11",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "warningDetail",
+          "name": "warning_detail",
+          "number": "12",
+          "oneof_index": "0",
+          "proto3_optional": "true",
+          "type": "TYPE_STRING"
+        },
+        {
           "json_name": "operation",
           "name": "operation",
           "number": "2",
@@ -1559,6 +1587,30 @@
           "name": "parent_session_id",
           "number": "5",
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "operationId",
+          "name": "operation_id",
+          "number": "6",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "phase",
+          "name": "phase",
+          "number": "7",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reasonCode",
+          "name": "reason_code",
+          "number": "8",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "retryable",
+          "name": "retryable",
+          "number": "9",
+          "type": "TYPE_BOOL"
         }
       ]
     },
