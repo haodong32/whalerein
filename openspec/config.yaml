@@ -1,0 +1,87 @@
+schema: spec-driven
+
+context: |
+  WhaleRein uses OpenSpec for planning and acceptance records. Committed
+  archives and specs record delivered behavior; drafts stay out of commits.
+  Write artifacts in English. Follow AGENTS.md and the relevant guides in docs/README.md.
+  Read current implementation, tests, configuration, and relevant docs before planning.
+  During planning, surface consequential decisions before committing to an approach.
+  Ask the user about choices affecting business behavior, scope, architecture boundaries,
+  public contracts, compatibility, privacy, external side effects, or acceptance targets
+  unless an existing user decision or explicit project constraint already settles them.
+  Present concrete options, a recommendation, and tradeoffs in small focused batches.
+  Investigate technical unknowns through read-only evidence first; if still unresolved,
+  state what is unknown and propose a bounded feasibility check rather than guessing.
+  Record pending decisions explicitly. Draft dependent sections conditionally and keep
+  affected implementation blocked until the user has answered. Silence is not approval.
+  For the current seven DSH capability plans, the user confirmed native model-selection
+  behavior without extra idle/queue/input or acknowledgement gates; latest-complete-turn
+  forks sharing the working directory without automatic execution; interrupt preserving
+  pending work with separate withdrawal; and an explicit choice of timeout exit policy.
+  The user also confirmed native queue as the default send mode, native idle steering,
+  explicit START_IF_IDLE only, and native create with optional default location and
+  preferred session-ID reuse. Waiting delegates stopping to the adapter's native wait;
+  Core owns remote deadlines, recovery and cancellation, not DSH quiescence inference.
+  Deliver verified capabilities independently, retaining required dependencies, while
+  reporting unverified capabilities as disabled rather than accepted or complete.
+  Reuse verified native and existing protocol limits first. Investigate and separately
+  justify necessary additional limits. Question support follows verified native runtime
+  ownership, not an arbitrary restriction based on durable parent/child lineage.
+  Code and reproducible observations establish current behavior. Local specs describe
+  intended behavior or historical context; reconcile them with code before reusing them.
+  Approved requirements establish the target for the current change. Report deviations
+  and obtain agreement for material scope, architecture, or acceptance changes rather
+  than rewriting criteria to match an incomplete implementation.
+  Humans review architecture and acceptance coverage before implementation, then the
+  acceptance results and architectural deviations after implementation. Keep execution
+  details available to agents without requiring humans to review every task.
+  Tracked OpenSpec artifacts live under openspec/ and are committed with the
+  change they describe: archived change records, specs and the config. Generated
+  OpenSpec agent skills remain local and Git-ignored.
+  Reuse the default artifacts. Reference maintained docs instead of copying them.
+  Read .agents/skills/whalerein-repo/SKILL.md when selecting repository checks.
+  Use ./repo for repository checks and docs/testing.md for validation scope and coverage.
+  Preserve unrelated working-tree changes. Keep secrets and private payloads out of evidence.
+
+rules:
+  proposal:
+    - State the business problem, intended outcome, scope, exclusions, and affected capabilities concisely.
+    - Ground current-state claims in inspected code or configuration; label assumptions and unresolved questions.
+    - Link existing architecture and domain documentation instead of reproducing it.
+    - Surface consequential scope and behavior choices during planning, before presenting them as settled requirements. Identify decisions awaiting user input and their affected capabilities.
+  specs:
+    - Describe observable business behavior, including applicable failure, boundary, authorization, concurrency, and recovery cases.
+    - Give each acceptance scenario a stable change-local AC identifier in its scenario heading, such as AC-01. Preserve these identifiers during implementation.
+    - Make expected outcomes concrete and independently verifiable. Include applicable compatibility and nonfunctional requirements with measurable thresholds.
+    - Treat existing local main specs as a cache to reconcile against implementation, not independent proof of current behavior.
+    - Link behavior depending on unresolved decisions to their pending decision IDs; keep it conditional rather than converting an assumption into an approved requirement. Surface proposed product limits and acceptance thresholds for user confirmation.
+  design:
+    - Always provide a concise architecture review for behavioral changes. Cover responsibilities, dependency direction, boundary contracts, state ownership, and key tradeoffs; reference established patterns for unchanged boundaries.
+    - Record code-grounded feasibility, material unknowns, and applicable rollout, migration, compatibility, and recovery decisions. Resolve blocking unknowns before implementation.
+    - Include an Acceptance Review table with AC ID, scenario and expected outcome, verification method, and source scenario link. It must cover every acceptance scenario in this change's specs and make omissions easy for a human to spot.
+    - Keep the human review focused on architecture and the Acceptance Review table. Put necessary agent execution details after them and avoid speculative code or repeated repository conventions.
+    - Include a concise Decision Review table for consequential choices with stable D IDs, options and tradeoffs, recommendation, status, decision basis, and affected AC IDs. Distinguish CONFIRMED by explicit user input, CONSTRAINED by an existing project rule, and PENDING. Record technical unknowns with evidence gaps and a proposed feasibility check; do not infer approval from earlier agent-written plans.
+    - Define capability acceptance gates with required AC IDs and native evidence. Distinguish independent feature acceptance, partial delivery, and combined-workflow acceptance; shared flags require every covered operation gate.
+  tasks:
+    - Create dependency-ordered tasks with independently verifiable outcomes, concrete repository touchpoints, relevant interfaces or constraints, covered AC IDs, and verification commands or procedures.
+    - Cover every AC ID with implementation and verification work. Keep implementation-task completion separate from acceptance success.
+    - Include a non-checkbox Acceptance Results table with AC ID, status, evidence, and limitations. Initialize each row as NOT RUN; allowed statuses are PASS, FAIL, BLOCKED, and NOT RUN.
+    - Include final tasks to verify acceptance against fresh evidence, assess architectural deviations, and assess whether maintained docs need updating.
+    - Update docs only for durable architecture decisions, public contracts, security boundaries, deployment or operator procedures, or material usage changes supported by the final implementation. Otherwise record that no docs update is needed and why. Keep dated run results and implementation history local.
+    - Link decision-dependent tasks to D IDs and identify them as blocked while the decision is PENDING. Separate read-only feasibility investigation from implementation; changes to runtime state require appropriate authorization.
+    - Include an AC-to-case matrix covering every scenario, its mandatory branches, verification layers and owning implementation/test tasks. Follow openspec/README.md#acceptance-evidence-contract for subcase statuses, exact test/procedure binding and evidence. Suite success or partial branch coverage cannot make an AC pass.
+
+operations:
+  apply:
+    guidance:
+      - Reconcile the case matrix, AC results and capability gates before declaring acceptance. Retain evidence for every mandatory subcase at the tested revision and native version; distinguish partial delivery from full acceptance and combined-workflow readiness.
+      - Read the Decision Review before implementation. Resolve pending decisions with the user before affected work begins; an instruction to implement does not silently select an unresolved option. Reuse already confirmed decisions without asking again.
+      - Reconcile the plan with current code and unrelated in-progress changes before implementation; surface material conflicts.
+      - Keep acceptance identifiers and approved outcomes stable. Record material proposed changes explicitly for human review.
+      - Update Acceptance Results from fresh, relevant verification. Record command or procedure, outcome, evidence location, and environment limitations; code inspection alone does not prove runtime behavior.
+      - Keep failed, skipped, blocked, and unexecuted acceptance checks visible. A checked implementation task is not an acceptance pass.
+      - Before reporting completion, verify all acceptance rows and architecture alignment, and report the maintained-docs decision. Distinguish implementation completion from acceptance completion.
+  archive:
+    guidance:
+      - Review fresh acceptance evidence, unresolved deviations, and the maintained-docs decision before archiving. If the user archives with outstanding work, report it explicitly and preserve incomplete statuses.
+      - Keep the archive and local main specs Git-ignored. OpenSpec sync updates local specs only; edit maintained docs selectively from verified implementation rather than copying planning artifacts.
