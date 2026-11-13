@@ -3,6 +3,7 @@ name = "whalerein-noise-peer"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-only"
 
 # Standalone crate: it verifies the protocol independently of the workspace.
 [workspace]

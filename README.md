@@ -193,3 +193,16 @@ require validation in their target environments. See [testing](docs/testing.md)
 for the validation layers and commands.
 
 Shared Host modules live in [`host/runtime`](host/runtime/README.md). The current DSH connector implements the typed [Harness conversation contract](docs/architecture/harness-contract.md); no Pi connector is included.
+
+## License
+
+WhaleRein is licensed under the GNU Affero General Public License, version 3
+only (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full terms.
+
+Commercial use is permitted. Distribution of covered software requires compliance
+with the license's corresponding-source obligations. If you modify WhaleRein and
+allow users to interact with that version remotely over a network, you must
+prominently offer those users access to its Corresponding Source as required by
+Section 13.
+
+Third-party components retain their respective licenses and notices.

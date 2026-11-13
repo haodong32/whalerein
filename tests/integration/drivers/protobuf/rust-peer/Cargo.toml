@@ -3,6 +3,7 @@ name = "whalerein-proto-peer"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-only"
 
 # Standalone crate: it compiles the same proto/v1 contract against prost+pbjson
 # without depending on the client workspace.
