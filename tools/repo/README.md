@@ -40,6 +40,56 @@ installation, daemon readiness and deployment behavior require separate checks.
 Integration requires host Python/uv and Docker buildx; native compilers run in
 the image. The server stack separately requires Compose.
 
+## CI project selection
+
+GitHub CI compares the PR base with the tested merge revision, or a main push's
+previous revision with its new revision. Deleted/renamed paths participate in
+selection. Documentation-only changes skip product jobs; unknown inputs select
+all projects. Missing history fails selection rather than silently skipping.
+
+`projects.toml` remains the project inventory. Its `depends_on` relationships
+expand affected consumers: Core changes include CLI and noise-peer; Host changes
+include DSH. Rust/Node root manifests and lockfiles select their ecosystem;
+protocol, fixtures, shared tooling, workflow, deployment and integration changes
+select all projects. Selection changes do not change local `./repo test` defaults.
+
+CI runs selected Rust, Go, Node and Python groups in parallel. Projects within
+each group run sequentially; Rust coverage cleanup must not race another Rust
+project in the same checkout. Each group installs only its required toolchains,
+checks supported operations and saves its own coverage reports as an artifact.
+The `CI gate` job requires all selected groups to pass, including on retries.
+
+Inspect selection locally without running tests or contacting GitHub:
+
+```bash
+python3 tools/repo/src/repo/ci.py plan --base BASE_SHA --head HEAD_SHA
+uv run --project tools/repo python -m repo.ci run --projects '["core", "cli"]'
+```
+
+The second command executes selected projects through `./repo check`, applicable
+`./repo build` operations and `./repo test --coverage`. Rust registry/build caches
+and the pinned coverage tool are cached separately. Reports remain downloadable
+Artifacts with seven-day retention; no Summary or Pages publishing is configured.
+
+## Integration CI
+
+The separate Integration workflow provides daily (03:17 Asia/Shanghai), manual
+and reusable release-gate execution. See [CI integration timing](../../docs/testing.md#ci-integration-timing)
+for trigger, evidence, concurrency and report rules. It calls the existing
+`./repo test --suite integration`; it does not require local server services.
+
+Inspect its content fingerprint locally:
+
+```bash
+python3 tools/repo/src/repo/integration_ci.py key --revision HEAD
+```
+
+Only complete successful full-suite reports can create a cached receipt; errors,
+partial selection and discovery-only runs cannot advance the baseline. Manual
+and release callers always rerun; scheduled execution may skip identical inputs.
+The GitHub workflow and receipt helper remain distinct from the native integration
+runner, which owns image building, execution and verified cleanup.
+
 ## Output and exit status
 
 Global `--json` writes one `whalerein/repo/v1` result envelope to stdout; progress

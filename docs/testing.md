@@ -38,6 +38,38 @@ project IDs, case discovery, selector syntax and unsupported combinations.
 The [integration guide](../tests/integration/README.md) describes container and
 fixture ownership. Development services are not prerequisites for integration.
 
+## CI integration timing
+
+Ordinary PR updates and main pushes run affected-project fast checks. Full
+integration is scheduled separately by `.github/workflows/integration.yml` at
+03:17 Asia/Shanghai each day. GitHub scheduling is best-effort; manual dispatch
+can validate a repair or high-risk change without waiting for the next schedule.
+
+The workflow freezes one main commit and fingerprints all tracked inputs except
+Markdown and the documentation/local-planning directories. A scheduled run skips
+heavy execution only when an exact successful input receipt exists. The initial
+run, changed inputs, unknown/missing evidence or evicted cache cause a full run.
+Skipped runs identify the original verified revision; intermediate commits are
+not represented as individually tested. Failed, partial or interrupted runs and
+cleanup errors never establish a passed baseline.
+
+Manual dispatch always executes the full suite, with an optional main revision.
+The same workflow is reusable through `workflow_call` with an exact `revision`
+and returns `tested_revision` only after success. Release callers always run the
+suite, require that output to match the intended release commit, and make upload
+jobs depend on the successful integration job. Publication automation is not yet
+implemented; this is its callable integration gate, not a complete release flow.
+Final package installation acceptance remains a separate release requirement.
+
+Scheduled, manual and reusable invocations share a concurrency group and do not
+cancel an active run. GitHub may replace an older pending run when several queue;
+cancelled callers must never be treated as successful publication gates.
+JSON/HTML reports and successful-input receipts are uploaded as
+`integration-<run-id>-<attempt>` Artifacts with seven-day retention. The cache is
+an optimization, not a permanent evidence archive. No Summary or Pages is used.
+
+These CI triggers do not waive the local change-validation requirements above.
+
 ## Coverage and evidence
 
 Require at least 90% per Rust crate, Go package and Node package. Rust/Node use

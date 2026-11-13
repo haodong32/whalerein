@@ -26,6 +26,7 @@
     "node": ">=22.5"
   },
   "scripts": {
+    "lint": "node ../../tools/repo/js/check-node-syntax.mjs index.js client.js bin src test",
     "test": "node --test --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"index.js\" --test-coverage-include=\"client.js\" --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-functions=90 test/*.test.js",
     "dev": "node --watch bin/dev.js",
     "start": "bash bin/start-real-dsh.sh"

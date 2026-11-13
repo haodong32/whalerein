@@ -1,0 +1,131 @@
+name: Integration
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+      timezone: Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Main commit to verify (empty uses the dispatch commit)'
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      revision:
+        description: 'Exact main commit required by the release caller'
+        required: true
+        type: string
+    outputs:
+      tested_revision:
+        description: 'Commit verified by the full integration suite'
+        value: ${{ jobs.integration.outputs.tested_revision }}
+
+permissions:
+  contents: read
+
+# Shared by daily, manual and reusable release invocations. Never cancel a release check.
+concurrency:
+  group: whalerein-full-integration
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: Full integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      tested_revision: ${{ steps.result.outputs.revision }}
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          fetch-depth: 0
+
+      - name: Freeze and identify inputs
+        id: inputs
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$DEFAULT_BRANCH" = main
+          revision=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$revision" origin/main
+          key=$(python3 tools/repo/src/repo/integration_ci.py key --revision "$revision")
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore successful input record
+        id: baseline
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .data/integration-passed
+          key: integration-pass-ubuntu-24.04-v1-${{ steps.inputs.outputs.key }}
+
+      - name: Decide whether to run
+        id: selection
+        env:
+          EVENT: ${{ github.event_name }}
+          CACHE_HIT: ${{ steps.baseline.outputs.cache-hit }}
+          REVISION: ${{ steps.inputs.outputs.revision }}
+        run: |
+          prior=$(python3 tools/repo/src/repo/integration_ci.py cached --revision "$REVISION" --output .data/integration-passed/receipt.json)
+          if [ "$EVENT" = schedule ] && [ "$CACHE_HIT" = true ] && [ -n "$prior" ]; then
+            echo "verified_revision=$prior" >> "$GITHUB_OUTPUT"
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo 'Full integration skipped: these relevant inputs already passed.'
+          else
+            echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up uv and Python
+        if: steps.selection.outputs.run == 'true'
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: '0.11.7'
+          python-version: '3.11'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Run the complete isolated suite
+        if: steps.selection.outputs.run == 'true'
+        id: tests
+        run: ./repo test --suite integration --output .data/runs/integration
+
+      - name: Record complete success
+        if: steps.tests.outcome == 'success'
+        env:
+          REVISION: ${{ steps.inputs.outputs.revision }}
+        run: >-
+          python3 tools/repo/src/repo/integration_ci.py record
+          --revision "$REVISION"
+          --report .data/runs/integration/report.json
+          --output .data/integration-passed/receipt.json
+
+      - name: Retain successful baseline
+        if: success() && steps.tests.outcome == 'success' && steps.baseline.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .data/integration-passed
+          key: integration-pass-ubuntu-24.04-v1-${{ steps.inputs.outputs.key }}
+
+      - name: Upload reports and verification record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/integration/report.json
+            .data/runs/integration/report.html
+            .data/integration-passed/receipt.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Expose verified revision
+        id: result
+        env:
+          REVISION: ${{ steps.selection.outputs.verified_revision }}
+        run: echo "revision=$REVISION" >> "$GITHUB_OUTPUT"

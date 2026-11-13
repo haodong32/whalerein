@@ -1,0 +1,91 @@
+"""Affected selection must never schedule unrelated project bodies."""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from repo import ci
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        ([], set()),
+        (["docs/testing.md", "README.md", ".local-docs/acceptance/result"], set()),
+        (["core/src/api.rs"], {"core", "cli", "noise-peer"}),
+        (["apps/cli/src/main.rs"], {"cli"}),
+        (["host/runtime/src/host.js"], {"host", "dsh"}),
+        (["host/dsh/client.js"], {"dsh"}),
+        (["access/internal/config/config.go"], {"access"}),
+        (["go.sum"], {"access"}),
+        (["Cargo.lock"], {"core", "cli", "proto", "noise-peer"}),
+        (["pnpm-lock.yaml"], {"host", "dsh"}),
+    ],
+)
+def test_plan_selects_only_affected_consumers(paths, expected):
+    matrix = ci.plan(ROOT, paths)
+    assert {p for job in matrix["include"] for p in job["projects"]} == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "proto/v1/whalerein.proto",
+        "tests/fixtures/proto/fields.json",
+        "tools/repo/src/repo/testing.py",
+        ".github/workflows/ci.yml",
+        "tests/integration/cases/test_chain.py",
+        "deploy/docker/access.Dockerfile",
+        "new-build-config",
+    ],
+)
+def test_shared_and_unknown_inputs_select_every_project(path):
+    matrix = ci.plan(ROOT, [path])
+    assert sum(len(job["projects"]) for job in matrix["include"]) == 8
+
+
+def test_diff_preserves_deleted_and_renamed_paths(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=b"core/old.rs\0apps/cli/new.rs\0")
+
+    monkeypatch.setattr(ci.subprocess, "run", run)
+    assert ci.changed_paths(ROOT, "base", "head") == ["core/old.rs", "apps/cli/new.rs"]
+    assert "--no-renames" in calls[0]
+    monkeypatch.setattr(ci.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=b""))
+    assert ci.changed_paths(ROOT, "base", "head") == []
+    assert ci.changed_paths(ROOT, "", "head") == [".github/workflows/ci.yml"]
+    assert ci.changed_paths(ROOT, "0000", "head") == [".github/workflows/ci.yml"]
+
+
+def test_execution_excludes_unselected_projects_and_unsupported_build(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ci.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+    ci.run_projects(ROOT, ["dsh"])
+    assert calls == [
+        [str(ROOT / "repo"), "check", "--project", "dsh"],
+        [str(ROOT / "repo"), "test", "--project", "dsh", "--coverage"],
+    ]
+    calls.clear()
+    ci.run_projects(ROOT, ["cli"])
+    assert [cmd[1] for cmd in calls] == ["check", "build", "test"]
+    with pytest.raises(ValueError, match="explicit"):
+        ci.run_projects(ROOT, [])
+
+
+def test_cli_plan_and_run(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["ci", "plan", "--base", "base"])
+    monkeypatch.setattr(ci, "changed_paths", lambda *args: ["apps/cli/src/main.rs"])
+    ci.main()
+    assert json.loads(capsys.readouterr().out)["include"][0]["projects"] == ["cli"]
+    calls = []
+    monkeypatch.setattr("sys.argv", ["ci", "run", "--projects", '["cli"]'])
+    monkeypatch.setattr(ci, "run_projects", lambda *args: calls.append(args[1]))
+    ci.main()
+    assert calls == [["cli"]]

@@ -1,10 +1,12 @@
 [[projects]]
 id = "core"
+depends_on = ["proto"]
 path = "core"
 kind = "rust"
 
 [[projects]]
 id = "cli"
+depends_on = ["core"]
 path = "apps/cli"
 kind = "rust"
 
@@ -16,6 +18,7 @@ role = "bindings"
 
 [[projects]]
 id = "noise-peer"
+depends_on = ["core"]
 path = "tools/noise-peer"
 kind = "rust"
 role = "tool"
@@ -34,6 +37,7 @@ kind = "node"
 
 [[projects]]
 id = "dsh"
+depends_on = ["host"]
 path = "host/dsh"
 kind = "node"
 
