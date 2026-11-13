@@ -166,7 +166,8 @@ For Agent task selection, use
 
 ## Contributing
 
-Follow the [commit rules](docs/commits.md).
+Follow the [pull request rules](docs/pull-requests.md) and
+[commit rules](docs/commits.md).
 Run `git config core.hooksPath tools/hooks` once to enable the `commit-msg` check.
 
 ## Security notes
