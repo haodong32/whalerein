@@ -179,6 +179,9 @@ impl SecretStore for KeyringSecretStore {
 
 /// Secret key names. They contain the opaque device id, never secret material.
 pub mod keys {
+    pub fn pairing_history(device_id: &str) -> String {
+        format!("whalerein:v1:pairing-history:{device_id}")
+    }
     pub fn pending_pairing(device_id: &str) -> String {
         format!("whalerein:v1:pending-pairing:{device_id}")
     }

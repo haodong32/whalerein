@@ -120,6 +120,7 @@ validation are required. The command accepts:
 ./repo test --project core --list
 ./repo test --project repo --coverage
 ./repo test --suite integration --group protocol
+./repo test --suite integration --group chain --parallel 2
 ./repo test --suite integration --only test_send
 ./repo test --suite integration --list
 ./repo test --suite all
@@ -132,12 +133,18 @@ literal, case-sensitive substring; no matches fail. Supported combinations are:
 |---|---|---|
 | `--project ID` | unit | Repeatable; exact registered IDs. |
 | `--group GROUP` | integration | One of protocol/storage/transport/chain/native-dsh. |
+| `--integration-timeout SECONDS` | integration, all | Positive execution deadline; defaults to 7200 seconds. Image build has a separate 1800-second limit. |
+| `--parallel N` | integration only | 1-8 independent containers, each with a deterministic hash shard of the selected cases. Defaults to 1 (today's single-container path). Incompatible with `--list`. |
 | `--only TEXT` | unit, integration | Nonempty; unit requires one project; incompatible with coverage. |
 | `--coverage` | unit, all | No `--only` or `--list`; all measures only its unit portion. |
 | `--list` | unit, integration, all | No coverage; Node static listing is unsupported. |
 
-In particular, `--suite all --only TEXT` and
-`--suite integration --coverage` are invalid requests.
+In particular, `--suite all --only TEXT`, `--suite integration --coverage` and
+`--parallel` with the unit/all suites or `--list` are invalid requests.
+`--parallel N` is an integration execution mode, not a selector: the selected
+case set is unchanged and shards are distributed by a stable CRC32 of each
+pytest node ID. The image is built once per invocation and every shard runs that
+immutable image ID in its own container, bind mount and fixed-port namespace.
 
 `--list` discovers cases without executing test bodies. Rust discovery can
 compile tests and integration discovery can build its image. Node static listing
@@ -230,8 +237,15 @@ scripts come from native manifests; new projects require explicit registration.
 The CLI does not mutate its arguments to dispatch another command. Execution is
 sequential. There is no dynamic plugin registry, second discovery catalog or
 implicit development-service startup. The host integration runner owns its
-container and pins it to the built image ID, independently of parallel worktrees; the container exports one version 1 scope for host validation and
-aggregation. See [integration implementation](../../tests/integration/README.md).
+container and pins it to the built image ID, independently of parallel worktrees; each run mounts a private tmpfs at `/tmp`, discarded with the container. With
+`--parallel N`, the same runner builds one image, starts N containers concurrently
+with separate exports, stops and verifies every launched container, then merges
+their version 1 scopes into one report. An interrupted or invalid shard keeps the
+merged result incomplete; duplicate case identities are rejected. The container exports one version 1 scope for host validation and
+aggregation. The container enforces the selected execution deadline and sends
+SIGINT to pytest; the host runner allows a short shutdown grace period, verifies
+container cleanup and retains any exported partial report. A timed-out run is
+marked incomplete and never passes. See [integration implementation](../../tests/integration/README.md).
 
 ## Maintaining the tool
 

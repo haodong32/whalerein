@@ -32,8 +32,10 @@ export class DshHistory {
     const from_cursor=this.#cursor(sessionId,view,from),to_cursor=this.#cursor(sessionId,view,to)
     return {from_cursor,to_cursor,batch_id:createHash('sha256').update(JSON.stringify([from_cursor,to_cursor])).digest('hex'),changes}
   }
-  async head(sessionId) {
-    const head=typeof this.source.nativeHead==='function' ? await this.source.nativeHead(sessionId) : (await this.source.getSessionSnapshot(sessionId)).cursor
+  async head(sessionId,{signal}={}) {
+    if(signal?.aborted)throw new AdapterError('unavailable')
+    const head=typeof this.source.nativeHead==='function' ? await this.source.nativeHead(sessionId,{signal}) : (await this.source.getSessionSnapshot(sessionId,{signal})).cursor
+    if(signal?.aborted)throw new AdapterError('unavailable')
     const view=this.#view(sessionId,head,true)
     return this.#cursor(sessionId,view.id,head)
   }
@@ -43,8 +45,10 @@ export class DshHistory {
     const message=projectMessage(event.sessionId,view.id,event)
     return this.#batch(event.sessionId,view.id,Math.max(-1,event.dshSeq-1),event.dshSeq,message?[{message,...(origin?{origin}:{})}]:[])
   }
-  async read(sessionId,read) {
-    const source=await this.source.getSessionSnapshot(sessionId)
+  async read(sessionId,read,{signal}={}) {
+    if(signal?.aborted)throw new AdapterError('unavailable')
+    const source=await this.source.getSessionSnapshot(sessionId,{signal})
+    if(signal?.aborted)throw new AdapterError('unavailable')
     const head=source.cursor??source.events.at(-1)?.dshSeq??-1
     const view=this.#view(sessionId,head,true)
     const after=read.after_cursor?this.#position(read.after_cursor,sessionId,view.id):-1

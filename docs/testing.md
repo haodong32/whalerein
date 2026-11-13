@@ -13,6 +13,30 @@ integration group adds actual DSH services and headless Chromium with a local
 deterministic model; its pinned Linux configuration does not establish behavior
 for every DSH version, external model, desktop shell or platform SecretStore. An integration or tooling-harness pass is not release validation.
 
+## Platform-specific tests
+
+The local host is not a substitute for every target OS. When a test requires an
+operating system the current host cannot provide, gate it and skip it with an
+explicit platform reason. Do not emulate another OS or run an OS-specific test
+through a different-OS container, and never treat a skip as a pass. The Linux
+container integration suite is intentionally Linux-only, not a substitute for
+macOS or Windows validation.
+
+- Rust: `#[cfg(unix)]`, `#[cfg(windows)]`, `#[cfg(target_os = "...")]`, or an
+  explicit ignored/manual test with the reason in the attribute.
+- Go: build tags or `t.Skip("requires ...")`.
+- Node.js and Python: skip with a platform-specific reason
+  (`pytest.mark.skipif`, `test.skip`).
+- The Linux container integration suite remains Linux-only; it does not establish
+  macOS or Windows behavior.
+- Cross-OS verification belongs to the GitHub Actions matrix: Linux, macOS and
+  Windows VMs run their native unit/platform tests. macOS SecretStore/keychain
+  checks and Windows file-lock/sharing checks run only in their matching jobs.
+  The Linux job owns the container integration suite.
+- Platform-specific tests and the jobs that cover them should be named in the
+  change record; a missing local OS is an environmental limitation, not a reason
+  to fail or silently pass the local run.
+
 ## Choose checks for a change
 
 Run commands from the repository root:
@@ -69,6 +93,19 @@ JSON/HTML reports and successful-input receipts are uploaded as
 an optimization, not a permanent evidence archive. No Summary or Pages is used.
 
 These CI triggers do not waive the local change-validation requirements above.
+
+## Question claim liveness
+
+One-shot CLI commands use the Access HTTP API, not a persistent device MQTT
+session. Access records a non-terminal request claim, renews it on result
+polling and on the CLI `POST /v1/requests/{id}/heartbeat`, and publishes a
+bounded `request_stale` event to the Host presence topic after a 10s silent
+lease. Host aborts the request scope; the adapter `finally` releases the
+native question claim. The CLI heartbeat runs every 1s while a terminal
+command is awaited. MQTT will/keepalive remains only for clients that actually
+hold an MQTT connection. Unit tests cover leases, heartbeat, ACL and Host
+routes; targeted integration covers kill, half-open and reconnect-window
+behavior.(feat: add production DSH capabilities and claim lifecycle)
 
 ## Coverage and evidence
 

@@ -28,14 +28,15 @@ export class WatchedEvents {
     this.#watches.delete(id)
     const source=this.#sources.get(watch.sessionId)
     source?.recipients.delete(id)
-    if(source&&!source.recipients.size){source.buffer?.flush();source.subscription?.close();this.#sources.delete(watch.sessionId)}
+    if(source&&!source.recipients.size){source.controller.abort();source.buffer?.flush();source.subscription?.close();this.#sources.delete(watch.sessionId)}
   }
   #owned(deviceId,channelId,id) {
     this.#expire();const watch=this.#watches.get(id)
     if(!watch||watch.deviceId!==deviceId||watch.channelId!==channelId)throw new PluginError('expired','watch unavailable')
     return watch
   }
-  async watch(deviceId,channelId,sessionId) {
+  async watch(deviceId,channelId,sessionId,signal) {
+    if(signal?.aborted)throw new PluginError('unavailable')
     this.#expire()
     const channel=this.security.getChannel(channelId)
     if(!channel||channel.deviceId!==deviceId)throw new PluginError('unauthorized','channel unavailable')
@@ -47,11 +48,11 @@ export class WatchedEvents {
       this.#watches.set(watch.id,watch)
       let source=this.#sources.get(sessionId)
       if(!source) {
-        source={recipients:new Set(),buffer:new LiveBuffer(update=>this.#fanout(sessionId,update))};this.#sources.set(sessionId,source)
+        source={recipients:new Set(),controller:new AbortController(),buffer:new LiveBuffer(update=>this.#fanout(sessionId,update))};this.#sources.set(sessionId,source)
         source.recipients.add(watch.id)
         try {
           const subscription=await this.adapter.watch(sessionId,update=>this.#receive(sessionId,update))
-          if(this.#sources.get(sessionId)!==source || !source.recipients.size) {
+          if(signal?.aborted || this.#sources.get(sessionId)!==source || !source.recipients.size) {
             subscription.close()
             throw new PluginError('expired','watch cancelled during source registration')
           }
@@ -60,23 +61,25 @@ export class WatchedEvents {
         catch(error){this.#remove(watch.id);throw error}
       } else source.recipients.add(watch.id)
     }
-    try {return await this.#ready(watch)}catch(error){this.#remove(watch.id);throw error}
+    try {return await this.#ready(watch,signal)}catch(error){this.#remove(watch.id);throw error}
   }
-  async #ready(watch) {
-    const state=await this.adapter.readState(watch.sessionId)
+  async #ready(watch,signal) {
+    if(signal?.aborted)throw new PluginError('unavailable')
+    const state=await this.adapter.readState(watch.sessionId,{signal})
+    if(signal?.aborted)throw new PluginError('unavailable')
     if(state.session?.session_id!==watch.sessionId||!state.history_head||!state.live_epoch)throw new PluginError('unavailable','source state unavailable')
     if(!this.#watches.has(watch.id)||!this.security.getChannel(watch.channelId))throw new PluginError('expired','watch expired during state read')
     state.session={host_id:this.hostId,session_id:watch.sessionId}
     watch.expires=this.now()+LEASE
     return {watch_id:watch.id,state,lease_ms:LEASE}
   }
-  async refresh(deviceId,channelId,ids) {
+  async refresh(deviceId,channelId,ids,signal) {
     if(!Array.isArray(ids)||ids.length>8||new Set(ids).size!==ids.length)throw new PluginError('invalid_argument','invalid watch selection')
-    return {watches:await Promise.all(ids.map(id=>this.#ready(this.#owned(deviceId,channelId,id))))}
+    return {watches:await Promise.all(ids.map(id=>this.#ready(this.#owned(deviceId,channelId,id),signal)))}
   }
   unwatch(deviceId,channelId,id) {this.#owned(deviceId,channelId,id);this.#remove(id)}
-  async readHistory(sessionId,read) {
-    const page=await this.adapter.readHistory(sessionId,read)
+  async readHistory(sessionId,read,signal) {
+    const page=await this.adapter.readHistory(sessionId,read,{signal})
     if(page.session?.session_id!==sessionId)throw new PluginError('invalid_argument','source history scope mismatch')
     page.session={host_id:this.hostId,session_id:sessionId}
     validateSessionUpdate({session:page.session,history:page.batch})
@@ -89,7 +92,7 @@ export class WatchedEvents {
       const source=this.#sources.get(sessionId)
       if(!source)return
       if(!source.stateTask) {
-        source.stateTask=this.adapter.readState(sessionId).then(state=>{
+        source.stateTask=this.adapter.readState(sessionId,{signal:source.controller.signal}).then(state=>{
           if(this.#sources.get(sessionId)!==source)return
           if(state.session?.session_id!==sessionId)throw new PluginError('invalid_argument')
           state.session={host_id:this.hostId,session_id:sessionId}

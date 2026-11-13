@@ -32,6 +32,15 @@ deploy/
 
 ## One-command stack
 
+Access connects to EMQX's internal listener on port 1884. That listener is not
+published to the host, disables authentication, and a file ACL allows only the
+`access` service account to use the WhaleRein topics. Access's own broker identity
+therefore never depends on its HTTP auth endpoint; startup order no longer affects
+readiness, and an Access restart during an EMQX auth-resource outage still connects
+immediately. Device and Host clients continue to use the HTTP authenticator/ACL on
+1883. The EMQX data directory is disposable transport state; restart is safe, and
+the container uses `restart: unless-stopped` plus a healthcheck.
+
 ```bash
 docker compose -f deploy/compose/stack.yaml up -d --build
 docker compose -f deploy/compose/stack.yaml ps
@@ -84,6 +93,17 @@ docker compose -f deploy/compose/stack.yaml stop postgres
 - HTTP ACL to `POST /internal/broker/acl`, fail-closed (`no_match = deny`).
 - API key bootstrap from `deploy/compose/emqx/api-keys.csv`. Access uses it to
   disconnect a revoked device.
+
+Device clients connect with a 10s MQTT keepalive and a non-retained QoS 1 last
+will on `whalerein/v1/presence/device/<device_id>`. Access subscribes to
+`whalerein/v1/presence/device/+`, resolves the device to its authorized hosts in
+PostgreSQL, and publishes `device_offline` to
+`whalerein/v1/h/<host_id>/presence`. Hosts subscribe only to their exact presence
+topic; devices may publish only their own will topic, and neither gets a wildcard
+permission. The internal `access` account already covers these topics through
+`whalerein/v1/#`, while Host and Device permissions come from the HTTP ACL
+callback. A clean MQTT DISCONNECT does not publish a will, so normal shutdown
+settles through the existing request path.
 
 The callback token in that file must match `WHALEREIN_INTERNAL_TOKEN` on the
 Access service. The Compose file sets both.

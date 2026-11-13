@@ -12,23 +12,37 @@ import (
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 )
 
+// Presence sources for device lifecycle events. $SYS broker lifecycle messages
+// are the primary source; the device last will is the portable fallback; an
+// explicit broker lifecycle callback is reported as "broker".
+const (
+	PresenceSourceSys    = "sys"
+	PresenceSourceWill   = "will"
+	PresenceSourceBroker = "broker"
+)
+
+// DeviceOfflineHandler runs once for each accepted online -> offline edge.
+// observedAt is the source timestamp used for stale-event rejection.
+type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
+
 type presenceEntry struct {
 	online bool
 	at     time.Time
 }
 
 // Presence is the broker-derived online registry. It is seeded only by EMQX
-// $SYS client lifecycle messages, the EMQX presence webhook, or a host Ready
-// signal. It never queries a database heartbeat.
+// $SYS client lifecycle messages, the EMQX presence webhook, a device last will,
+// or a host Ready signal. It never queries a database heartbeat.
 type Presence struct {
-	mu       sync.RWMutex
-	hosts    map[string]presenceEntry
-	devices  map[string]presenceEntry
-	cacheTTL time.Duration
-	rest     *RESTClient
-	metrics  *diagnostics.Metrics
-	logger   *slog.Logger
-	now      func() time.Time
+	mu                   sync.RWMutex
+	hosts                map[string]presenceEntry
+	devices              map[string]presenceEntry
+	cacheTTL             time.Duration
+	rest                 *RESTClient
+	metrics              *diagnostics.Metrics
+	logger               *slog.Logger
+	now                  func() time.Time
+	deviceOfflineHandler DeviceOfflineHandler
 }
 
 // NewPresence creates an empty broker presence cache.
@@ -90,17 +104,66 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 	p.publishCounts()
 }
 
-// SetDeviceOnline updates broker-derived device presence.
+// SetDeviceOnline updates broker-derived device presence. An online -> offline
+// transition invokes the registered device-offline handler exactly once.
 func (p *Presence) SetDeviceOnline(deviceID string, online bool, at time.Time) {
+	p.applyDevice(deviceID, online, at, PresenceSourceBroker)
+}
+
+// SetDeviceOfflineHandler installs the callback for accepted device-offline
+// transitions. The callback runs outside the presence lock.
+func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
+	p.mu.Lock()
+	p.deviceOfflineHandler = handler
+	p.mu.Unlock()
+}
+
+// applyDevice records device presence and emits at most one offline callback
+// per online -> offline edge. Repeated offline events and stale source events
+// are ignored without emitting another callback.
+func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string) {
+	p.logger.Info("presence device state", "device", deviceID, "online", online, "source", source)
 	if deviceID == "" {
 		return
 	}
 	p.mu.Lock()
-	if previous, exists := p.devices[deviceID]; !exists || !at.Before(previous.at) {
-		p.devices[deviceID] = presenceEntry{online: online, at: at}
+	previous, exists := p.devices[deviceID]
+	if exists && at.Before(previous.at) {
+		p.mu.Unlock()
+		return
 	}
+	transition := false
+	duplicate := false
+	if !online {
+		if !exists || previous.online {
+			transition = true
+		} else {
+			duplicate = true
+		}
+	}
+	p.devices[deviceID] = presenceEntry{online: online, at: at}
+	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
+
 	p.publishCounts()
+	if duplicate {
+		if p.metrics != nil {
+			p.metrics.PresenceDuplicate()
+		}
+		p.logger.Debug("duplicate device offline event ignored", "source", source)
+		return
+	}
+	state := "offline"
+	if online {
+		state = "online"
+	}
+	if p.metrics != nil {
+		p.metrics.PresenceEvent(source, state)
+	}
+	p.logger.Debug("device presence event", "source", source, "state", state)
+	if transition && handler != nil {
+		handler(deviceID, source, at)
+	}
 }
 
 // MarkHostReady treats a ready host result as broker presence.
@@ -120,7 +183,47 @@ func (p *Presence) HandleSysMessage(topic string, payload []byte) {
 	} else if parsed.Username != "" {
 		identity = identityForClient("", parsed.Username)
 	}
-	p.apply(identity, online, p.now())
+	p.apply(identity, online, p.now(), PresenceSourceSys)
+}
+
+// deviceWillHint is the only information Access uses from a last-will payload.
+// Identity always comes from the authenticated connection/topic; the embedded
+// device id is validated against the topic and never trusted on its own.
+type deviceWillHint struct {
+	Event    string `json:"event"`
+	DeviceID string `json:"device_id"`
+}
+
+const deviceOfflineEventName = "device_offline"
+
+// HandleDeviceWill consumes a broker-published device last will. Unknown or
+// invalid payloads are dropped and counted; they never invent a device or host.
+func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
+	deviceID, ok := ParseDeviceWillTopic(topic)
+	if !ok {
+		if p.metrics != nil {
+			p.metrics.PresenceInvalid()
+		}
+		p.logger.Debug("device will on invalid topic dropped")
+		return
+	}
+	var hint deviceWillHint
+	if err := json.Unmarshal(payload, &hint); err != nil || hint.Event != deviceOfflineEventName {
+		if p.metrics != nil {
+			p.metrics.PresenceInvalid()
+		}
+		p.logger.Debug("device will payload dropped")
+		return
+	}
+	if hint.DeviceID != "" && hint.DeviceID != deviceID {
+		if p.metrics != nil {
+			p.metrics.PresenceInvalid()
+		}
+		p.logger.Debug("device will identity mismatch dropped")
+		return
+	}
+	p.logger.Info("device will received", "device", deviceID)
+	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill)
 }
 
 // HandlePresenceWebhook consumes an EMQX client lifecycle webhook payload. An
@@ -174,7 +277,7 @@ func (p *Presence) applyPayload(event presencePayload) {
 	if event.Timestamp > 0 {
 		at = time.UnixMilli(event.Timestamp).UTC()
 	}
-	p.apply(identity, online, at)
+	p.apply(identity, online, at, PresenceSourceBroker)
 }
 
 func lifecycleState(event string) (bool, bool) {
@@ -216,12 +319,12 @@ func identityForClient(clientID, username string) clientIdentity {
 	return clientIdentity{}
 }
 
-func (p *Presence) apply(identity clientIdentity, online bool, at time.Time) {
+func (p *Presence) apply(identity clientIdentity, online bool, at time.Time, source string) {
 	switch identity.kind {
 	case "host":
 		p.SetHostOnline(identity.hostID, online, at)
 	case "device":
-		p.SetDeviceOnline(identity.deviceID, online, at)
+		p.applyDevice(identity.deviceID, online, at, source)
 	}
 }
 

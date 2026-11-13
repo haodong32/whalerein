@@ -5,7 +5,8 @@ import { SourceAdapter, validateSessionUpdate } from '../src/contracts/source.js
 test('a source without optional capabilities rejects operations explicitly and never exposes a credential interface',async()=>{
  const source=new SourceAdapter(),metadata={get(){return null},set(){}}
  await source.open({metadata});assert.equal(source.metadata,metadata)
- for(const operation of ['listSessions','getSession','readHistory','readState','execute','listApprovals','getApproval'])await assert.rejects(source[operation](),e=>e.code==='unsupported_capability')
+ for(const operation of ['listSessions','getSession','readHistory','readState','execute','executeHost','listModels','readSessionModel','readPendingQueue','readWaitState','waitSession','listApprovals','getApproval','listQuestionPage','getQuestion'])await assert.rejects(source[operation](),e=>e.code==='unsupported_capability')
+ assert.deepEqual(await source.describeHostCapabilities(),{})
  assert.throws(()=>source.watch(),e=>e.code==='unsupported_capability')
  assert.equal('getCredential' in source,false);await source.close()
 })

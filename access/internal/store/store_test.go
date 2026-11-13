@@ -5,7 +5,9 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"google.golang.org/protobuf/proto"
@@ -18,6 +20,9 @@ import (
 	"github.com/whalerein/whalerein/access/internal/store/storetest"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
+
+//go:embed migrations/*.sql
+var embeddedMigrations embed.FS
 
 // When migrations run on an empty schema, PostgreSQL contains versioned application tables and
 // the required indexes.
@@ -44,7 +49,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"device_credentials", "devices", "grants", "hosts", "pairing_operations", "pairing_tokens", "requests", "schema_migrations"}
+	want := []string{"device_credentials", "devices", "grants", "hosts", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}
@@ -578,7 +583,7 @@ func TestPublishLifecycleTracksSuccessAndRetryableFailure(t *testing.T) {
 		t.Fatalf("exhausted row requeued: %d", requeued)
 	}
 
-	// A row that was never published becomes host_offline when attempts run out.
+	// An unconfirmed publish remains unknown when attempts run out.
 	other := newRequest("r2", "h1", "d1", "c2", []byte("d"), whalereinv1.OnlineStatus_received, store.ForwardPending, now)
 	if _, err := s.CreateRequest(ctx, other); err != nil {
 		t.Fatal(err)
@@ -591,8 +596,8 @@ func TestPublishLifecycleTracksSuccessAndRetryableFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ = s.GetRequest(ctx, "r2")
-	if got.Status != whalereinv1.OnlineStatus_host_offline || got.ForwardState != store.ForwardNone {
-		t.Fatalf("offline exhaustion row = %+v", got)
+	if got.Status != whalereinv1.OnlineStatus_unknown || got.ErrorCode != whalereinv1.ErrorCode_unavailable || got.ForwardState != store.ForwardNone {
+		t.Fatalf("uncertain exhaustion row = %+v", got)
 	}
 }
 
@@ -883,6 +888,40 @@ func TestAccessRestartKeepsGrantsAndPendingRequests(t *testing.T) {
 	}
 }
 
+// fixturePairingOperation creates the fenced HELLO and a matching opaque FINISH.
+func fixturePairingOperation(t *testing.T, s *store.Store, hash []byte, hostID, deviceID, claimID string, at time.Time, notice *whalereinv1.HostRequest) (store.PairingOperation, *whalereinv1.HostRequest) {
+	t.Helper()
+	ctx := context.Background()
+	deviceGeneration, err := s.DeviceGeneration(ctx, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostGeneration, err := s.HostGeneration(ctx, hostID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := store.PairingOperation{ClaimID: claimID, TokenHash: hash, HostID: hostID, DeviceID: deviceID, HelloHash: bytes.Repeat([]byte{1}, 32), HelloResponse: []byte("fixture"), ExpiresAt: at.Add(time.Minute), DeviceGeneration: deviceGeneration, HostGeneration: hostGeneration, FinishHash: bytes.Repeat([]byte{2}, 32)}
+	if err := s.SavePairingOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	pub := bytes.Repeat([]byte{3}, 32)
+	op.FinishResponse, _ = proto.Marshal(&whalereinv1.PairingClaimResponse{ClaimId: claimID, HostId: hostID, DeviceId: deviceID, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, ProtocolVersion: 1})
+	if notice == nil {
+		notice = &whalereinv1.HostRequest{RequestId: "fixture-" + claimID, HostId: hostID, DeviceId: deviceID, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, ProtocolVersion: 1, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()}
+	}
+	if notice.ProtocolVersion == 0 {
+		notice.ProtocolVersion = 1
+	}
+	notice.Body, _ = proto.Marshal(&whalereinv1.PairingClaim{ClaimId: claimID, DeviceId: deviceID, DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT, ExpiresAtUnixMs: notice.ExpiresAtUnixMs})
+	return op, notice
+}
+
+func fixtureKeyPin(value byte) string {
+	key := bytes.Repeat([]byte{value}, 32)
+	hash := sha256.Sum256(key)
+	return hex.EncodeToString(hash[:])
+}
+
 // When pairing conflicts with a pinned identity, the transaction preserves the invitation and old
 // credential; valid pairing commits once.
 func TestPairingCommitKeepsGrantAtomicAndHostIdentityPinned(t *testing.T) {
@@ -892,14 +931,32 @@ func TestPairingCommitKeepsGrantAtomicAndHostIdentityPinned(t *testing.T) {
 	if _, err := s.EnsureHost(ctx, "h1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreatePairedDevice(ctx, "h1", "d1", "pinned", []byte("old-credential"), now); err != nil {
+	if err := s.CreatePairedDevice(ctx, "h1", "d1", fixtureKeyPin(3), []byte("old-credential"), now); err != nil {
 		t.Fatal(err)
 	}
 	hash := bytes.Repeat([]byte{7}, 32)
 	if err := s.CreatePairingToken(ctx, hash, "h1", now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "different-key", []byte("new-credential"), now, nil, nil); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", fixtureKeyPin(3), []byte("unfenced"), now, nil, nil); !errors.Is(err, store.ErrConflict) {
+		t.Fatal("unfenced pairing accepted")
+	}
+	op, notice := fixturePairingOperation(t, s, hash, "h1", "d1", "atomic", now, nil)
+	differentOp := op
+	var differentResponse whalereinv1.PairingClaimResponse
+	if err := proto.Unmarshal(op.FinishResponse, &differentResponse); err != nil {
+		t.Fatal(err)
+	}
+	differentResponse.DevicePublicKey = bytes.Repeat([]byte{4}, 32)
+	differentOp.FinishResponse, _ = proto.Marshal(&differentResponse)
+	differentNotice := proto.Clone(notice).(*whalereinv1.HostRequest)
+	var differentClaim whalereinv1.PairingClaim
+	if err := proto.Unmarshal(differentNotice.Body, &differentClaim); err != nil {
+		t.Fatal(err)
+	}
+	differentClaim.DevicePublicKey = bytes.Repeat([]byte{4}, 32)
+	differentNotice.Body, _ = proto.Marshal(&differentClaim)
+	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", fixtureKeyPin(4), []byte("new-credential"), now, differentNotice, &differentOp); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("identity was rebound")
 	}
 	token, err := s.PairingTokenByHash(ctx, hash)
@@ -909,17 +966,17 @@ func TestPairingCommitKeepsGrantAtomicAndHostIdentityPinned(t *testing.T) {
 	if _, err := s.ActiveDeviceByAuthHash(ctx, []byte("old-credential")); err != nil {
 		t.Fatal("failed commit rotated existing credential")
 	}
-	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("new-credential"), now, nil, nil); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", fixtureKeyPin(3), []byte("new-credential"), now, notice, &op); err != nil || !used {
 		t.Fatal("valid pairing failed")
 	}
-	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", []byte("another"), now, nil, nil); err != nil || used {
+	if used, err := s.CommitPairing(ctx, hash, "h1", "d1", fixtureKeyPin(3), []byte("another"), now, notice, &op); err != nil || used {
 		t.Fatal("invitation reused")
 	}
 	if _, err := s.ActiveDeviceByAuthHash(ctx, []byte("new-credential")); err != nil {
 		t.Fatal("committed credential missing")
 	}
 	s.Close()
-	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", "pinned", nil, now, nil, nil); err == nil {
+	if _, err := s.CommitPairing(ctx, hash, "h1", "d1", fixtureKeyPin(3), nil, now, notice, &op); err == nil {
 		t.Fatal("closed database accepted commit")
 	}
 }
@@ -938,11 +995,12 @@ func TestPairingCommitPersistsActivationNoticeAndRollsBackConflicts(t *testing.T
 		t.Fatal(err)
 	}
 	notice := &whalereinv1.HostRequest{RequestId: "activate", HostId: "other", DeviceId: "d", Body: []byte{}, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, ProtocolVersion: 1, ExpiresAtUnixMs: at.Add(time.Minute).UnixMilli()}
-	if _, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); !errors.Is(err, store.ErrConflict) {
+	op, notice := fixturePairingOperation(t, s, hash, "h", "d", "activation", at, notice)
+	if _, err := s.CommitPairing(ctx, hash, "h", "d", fixtureKeyPin(3), []byte("credential"), at, notice, &op); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("invalid activation route accepted")
 	}
 	notice.HostId = "h"
-	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, hash, "h", "d", fixtureKeyPin(3), []byte("credential"), at, notice, &op); err != nil || !used {
 		t.Fatal("activation notice not committed")
 	}
 	row, err := s.GetRequest(ctx, "activate")
@@ -960,7 +1018,8 @@ func TestPairingCommitPersistsActivationNoticeAndRollsBackConflicts(t *testing.T
 	if err := s.CreatePairingToken(ctx, next, "h", at.Add(time.Minute), at); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitPairing(ctx, next, "h", "d", "fp", []byte("replacement"), at, notice, nil); err == nil {
+	nextOp, nextNotice := fixturePairingOperation(t, s, next, "h", "d", "activation-next", at, notice)
+	if _, err := s.CommitPairing(ctx, next, "h", "d", fixtureKeyPin(3), []byte("replacement"), at, nextNotice, &nextOp); err == nil {
 		t.Fatal("duplicate activation record ignored")
 	}
 	token, err := s.PairingTokenByHash(ctx, next)
@@ -986,7 +1045,8 @@ func TestActivationNoticeRetriesPastDeliveryBudgetUntilItsDeadline(t *testing.T)
 		t.Fatal(err)
 	}
 	notice := &whalereinv1.HostRequest{RequestId: "retry-activation", HostId: "h", DeviceId: "d", Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: []byte{}, ExpiresAtUnixMs: at.Add(time.Minute).UnixMilli()}
-	if used, err := s.CommitPairing(ctx, hash, "h", "d", "fp", []byte("credential"), at, notice, nil); err != nil || !used {
+	op, notice := fixturePairingOperation(t, s, hash, "h", "d", "activation-retry", at, notice)
+	if used, err := s.CommitPairing(ctx, hash, "h", "d", fixtureKeyPin(3), []byte("credential"), at, notice, &op); err != nil || !used {
 		t.Fatal("commit failed")
 	}
 	for index := 0; index < 6; index++ {
@@ -1080,9 +1140,23 @@ func TestMigrationLedgerRejectsChangedHistoryAndFutureSchema(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	entries, err := embeddedMigrations.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected int
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			expected++
+			var present bool
+			if err := s.Pool().QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)", entry.Name()).Scan(&present); err != nil || !present {
+				t.Fatalf("migration %s missing: %v", entry.Name(), err)
+			}
+		}
+	}
 	var count int
-	if err := s.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 7 {
-		t.Fatal("migration versions missing")
+	if err := s.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != expected {
+		t.Fatalf("migration versions: got %d, expected %d", count, expected)
 	}
 	if _, err := s.Pool().Exec(ctx, "UPDATE schema_migrations SET checksum='modified'::bytea WHERE name='005_standalone.sql'"); err != nil {
 		t.Fatal(err)
@@ -1214,30 +1288,47 @@ func TestPairingReceiptRequiresExactActiveGrantGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := bytes.Repeat([]byte{4}, 32)
+	digest := sha256.Sum256(pub)
+	devicePin := hex.EncodeToString(digest[:])
 	response := &whalereinv1.PairingClaimResponse{ClaimId: op.ClaimID, HostId: op.HostID, DeviceId: op.DeviceID,
-		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, DeviceToken: "must-not-persist-fixture"}
+		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, ProtocolVersion: 1, DeviceToken: "must-not-persist-fixture"}
 	claimBody, _ := proto.Marshal(&whalereinv1.PairingClaim{ClaimId: op.ClaimID, DeviceId: op.DeviceID,
-		DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT})
+		DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()})
 	notice := &whalereinv1.HostRequest{RequestId: "receipt-commit", HostId: op.HostID, DeviceId: op.DeviceID,
 		Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: claimBody, ProtocolVersion: 1, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()}
 	authHash := bytes.Repeat([]byte{5}, 32)
 	op.FinishResponse, _ = proto.Marshal(response)
-	if _, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, "pin", authHash, now, notice, &op); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, devicePin, authHash, now, notice, &op); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("plaintext credential receipt accepted")
 	}
 	response.DeviceToken = ""
 	op.FinishResponse, _ = proto.Marshal(response)
-	if used, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, "pin", authHash, now, notice, &op); err != nil || !used {
+	if used, err := s.CommitPairing(ctx, invitationHash, op.HostID, op.DeviceID, devicePin, authHash, now, notice, &op); err != nil || !used {
 		t.Fatal("valid pairing commit failed")
 	}
 	saved, err := s.PairingOperation(ctx, op.ClaimID)
 	if err != nil || !saved.Active {
 		t.Fatal("committed receipt not recoverable")
 	}
-	if err := s.CreatePairedDevice(ctx, "other-host", op.DeviceID, "pin", bytes.Repeat([]byte{6}, 32), now); err != nil {
+	outcome, err := s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
+	if err != nil || !outcome.Active || !bytes.Equal(outcome.TokenHash, invitationHash) || !bytes.Equal(outcome.FinishHash, op.FinishHash) {
+		t.Fatal("committed outcome mismatch")
+	}
+	if _, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, "wrong-request", now); err == nil {
+		t.Fatal("wrong request confirmed Host")
+	}
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err != nil || !confirmed {
+		t.Fatal("valid Host confirmation not saved")
+	}
+	outcome, err = s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
+	if err != nil || !outcome.HostConfirmed || !bytes.Equal(outcome.DevicePublicKey, pub) || outcome.ProtocolVersion != 1 {
+		t.Fatal("Host confirmation binding lost")
+	}
+
+	if err := s.CreatePairedDevice(ctx, "other-host", op.DeviceID, devicePin, bytes.Repeat([]byte{6}, 32), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreatePairedDevice(ctx, op.HostID, op.DeviceID, "pin", bytes.Repeat([]byte{7}, 32), now); err != nil {
+	if err := s.CreatePairedDevice(ctx, op.HostID, op.DeviceID, devicePin, bytes.Repeat([]byte{7}, 32), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ActiveDeviceByAuthHash(ctx, authHash); err != nil {
@@ -1246,6 +1337,20 @@ func TestPairingReceiptRequiresExactActiveGrantGeneration(t *testing.T) {
 	saved, err = s.PairingOperation(ctx, op.ClaimID)
 	if err != nil || saved.Active {
 		t.Fatal("superseded grant recovered through old receipt")
+	}
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err != nil || confirmed {
+		t.Fatal("superseded grant was confirmed")
+	}
+
+	if _, err := s.DeleteExpiredPairingTokens(ctx, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err = s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
+	if err != nil || outcome.Active || !bytes.Equal(outcome.TokenHash, invitationHash) || !bytes.Equal(outcome.FinishHash, op.FinishHash) {
+		t.Fatal("cleanup lost or changed committed evidence")
+	}
+	if _, err := s.PairingOutcome(ctx, op.ClaimID, "wrong-device"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("outcome disclosed to a different device")
 	}
 }
 
@@ -1282,5 +1387,225 @@ func TestQueryRetentionPreservesAllControlAndActivationIdentities(t *testing.T) 
 	}
 	if deleted, err := s.DeleteExpiredQueries(ctx, now.Add(-24*time.Hour)); err != nil || deleted != 0 {
 		t.Fatal("query retention not idempotent")
+	}
+}
+
+// A global revocation fences HELLOs already in flight but permits a later explicit pairing.
+func TestPairingRevocationFenceOrdersAndPreservesFreshPairing(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, id := range []string{"fence-primary", "fence-secondary"} {
+		if _, err := s.EnsureHost(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreatePairedDevice(ctx, "fence-primary", "fence-device", fixtureKeyPin(4), bytes.Repeat([]byte{9}, 32), now); err != nil {
+		t.Fatal(err)
+	}
+	makeOperation := func(id string, value byte, generation int64) (store.PairingOperation, *whalereinv1.HostRequest, []byte) {
+		hash := bytes.Repeat([]byte{value}, 32)
+		if err := s.CreatePairingToken(ctx, hash, "fence-secondary", now.Add(time.Hour), now); err != nil {
+			t.Fatal(err)
+		}
+		op := store.PairingOperation{ClaimID: id, TokenHash: hash, HostID: "fence-secondary", DeviceID: "fence-device", DeviceGeneration: generation,
+			HelloHash: bytes.Repeat([]byte{2}, 32), HelloResponse: []byte("fixture"), ExpiresAt: now.Add(time.Hour), FinishHash: bytes.Repeat([]byte{3}, 32)}
+		pub := bytes.Repeat([]byte{4}, 32)
+		response := &whalereinv1.PairingClaimResponse{ClaimId: id, HostId: op.HostID, DeviceId: op.DeviceID, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, ProtocolVersion: 1}
+		op.FinishResponse, _ = proto.Marshal(response)
+		body, _ := proto.Marshal(&whalereinv1.PairingClaim{ClaimId: id, DeviceId: op.DeviceID, DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()})
+		notice := &whalereinv1.HostRequest{RequestId: "commit-" + id, HostId: op.HostID, DeviceId: op.DeviceID, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body, ProtocolVersion: 1, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()}
+		return op, notice, hash
+	}
+	generation, err := s.DeviceGeneration(ctx, "fence-device")
+	if err != nil || generation != 0 {
+		t.Fatal("initial fence")
+	}
+	stale, notice, hash := makeOperation("stale", 1, generation)
+	if err := s.SavePairingOperation(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := s.RevokeDeviceGrants(ctx, "fence-device", now); err != nil || !exists {
+		t.Fatal("revoke failed")
+	}
+	if fenced, err := s.PairingFenced(ctx, stale.ClaimID, stale.HostID, stale.DeviceID); err != nil || !fenced {
+		t.Fatal("unfinished pre-revoke claim not proven fenced")
+	}
+	if _, err := s.CommitPairing(ctx, hash, stale.HostID, stale.DeviceID, fixtureKeyPin(4), bytes.Repeat([]byte{5}, 32), now, notice, &stale); !errors.Is(err, store.ErrPairingFenced) {
+		t.Fatal("old finish was not fenced")
+	}
+	if active, err := s.HasActiveGrant(ctx, stale.HostID, stale.DeviceID); err != nil || active {
+		t.Fatal("stale grant became active")
+	}
+	late, _, _ := makeOperation("stale-hello", 2, generation)
+	if err := s.SavePairingOperation(ctx, late); !errors.Is(err, store.ErrPairingFenced) {
+		t.Fatal("late HELLO was not fenced")
+	}
+	generation, err = s.DeviceGeneration(ctx, "fence-device")
+	if err != nil || generation != 1 {
+		t.Fatal("fence did not advance")
+	}
+	fresh, freshNotice, freshHash := makeOperation("fresh", 3, generation)
+	if err := s.SavePairingOperation(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if used, err := s.CommitPairing(ctx, freshHash, fresh.HostID, fresh.DeviceID, fixtureKeyPin(4), bytes.Repeat([]byte{6}, 32), now, freshNotice, &fresh); err != nil || !used {
+		t.Fatal("fresh pairing rejected")
+	}
+	if _, exists, err := s.RevokeDeviceGrants(ctx, fresh.DeviceID, now); err != nil || !exists {
+		t.Fatal("second revoke failed")
+	}
+	if active, err := s.HasActiveGrant(ctx, fresh.HostID, fresh.DeviceID); err != nil || active {
+		t.Fatal("committed-before-revoke grant remained active")
+	}
+	if fenced, err := s.PairingFenced(ctx, fresh.ClaimID, fresh.HostID, fresh.DeviceID); err != nil || fenced {
+		t.Fatal("committed claim was incorrectly declared discardable")
+	}
+	if used, err := s.CommitPairing(ctx, freshHash, fresh.HostID, fresh.DeviceID, fixtureKeyPin(4), bytes.Repeat([]byte{6}, 32), now, freshNotice, &fresh); err != nil || used {
+		t.Fatal("completed claim was falsely classified as fenced")
+	}
+
+}
+
+// A failed global revoke rolls back its fence and leaves the existing credential and grant intact.
+func TestPairingRevocationFenceRollsBackWithFailedRevoke(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := s.EnsureHost(ctx, "fence-host"); err != nil {
+		t.Fatal(err)
+	}
+	auth := []byte("fence-auth")
+	if err := s.CreatePairedDevice(ctx, "fence-host", "fence-device", "pin", auth, now); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Pool().Exec(ctx, `CREATE FUNCTION fail_fence_revoke() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rollback'; END $$;
+       CREATE TRIGGER fail_fence_revoke BEFORE UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION fail_fence_revoke();`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RevokeDeviceGrants(ctx, "fence-device", now); err == nil {
+		t.Fatal("fixture did not fail revoke")
+	}
+	generation, err := s.DeviceGeneration(ctx, "fence-device")
+	if err != nil || generation != 0 {
+		t.Fatal("failed transaction advanced fence")
+	}
+	if active, err := s.HasActiveGrant(ctx, "fence-host", "fence-device"); err != nil || !active {
+		t.Fatal("failed transaction revoked grant")
+	}
+	if _, err := s.ActiveDeviceByAuthHash(ctx, auth); err != nil {
+		t.Fatal("failed transaction removed credential")
+	}
+}
+
+// Migration fences pre-existing unfinished claims while preserving the active grant.
+func TestPairingRevocationFenceMigrationFencesLegacyPendingClaims(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := s.EnsureHost(ctx, "migration-host"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreatePairedDevice(ctx, "migration-host", "migration-device", "pin", []byte("migration-auth"), now); err != nil {
+		t.Fatal(err)
+	}
+	hash := bytes.Repeat([]byte{8}, 32)
+	if err := s.CreatePairingToken(ctx, hash, "migration-host", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Pool().Exec(ctx, `ALTER TABLE pairing_operations DROP COLUMN device_generation;
+      ALTER TABLE pairing_operations DROP COLUMN host_generation;
+      ALTER TABLE grants DROP COLUMN revocation_generation;
+      ALTER TABLE devices DROP COLUMN revocation_generation;
+      DELETE FROM schema_migrations WHERE name='008_device_revocation_fence.sql'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Pool().Exec(ctx, `INSERT INTO pairing_operations(claim_id,token_hash,host_id,device_id,hello_hash,hello_response,expires_at)
+      VALUES('old-pending',$1,'migration-host','migration-device',$2,$3,$4)`, hash, []byte("hash"), []byte("reply"), now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var pending int64
+	if err := s.Pool().QueryRow(ctx, `SELECT device_generation FROM pairing_operations WHERE claim_id='old-pending'`).Scan(&pending); err != nil || pending != -1 {
+		t.Fatal("legacy pending claim not fenced")
+	}
+	generation, err := s.DeviceGeneration(ctx, "migration-device")
+	if err != nil || generation != 0 {
+		t.Fatal("legacy device generation invalid")
+	}
+	if active, err := s.HasActiveGrant(ctx, "migration-host", "migration-device"); err != nil || !active {
+		t.Fatal("legacy grant changed")
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal("migration not idempotent")
+	}
+}
+
+// Host-scoped revocation invalidates only that Host's prior pairing intent.
+func TestPairingRevocationFenceIsScopedToHost(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, host := range []string{"host-a", "host-b"} {
+		if _, err := s.EnsureHost(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreatePairedDevice(ctx, host, "device", fixtureKeyPin(4), []byte("shared-auth"), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := bytes.Repeat([]byte{6}, 32)
+	if err := s.CreatePairingToken(ctx, hash, "host-b", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	op := store.PairingOperation{ClaimID: "host-b-old", TokenHash: hash, HostID: "host-b", DeviceID: "device", HelloHash: bytes.Repeat([]byte{2}, 32), HelloResponse: []byte("fixture"), ExpiresAt: now.Add(time.Hour), FinishHash: bytes.Repeat([]byte{3}, 32)}
+	if err := s.SavePairingOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	pub := bytes.Repeat([]byte{4}, 32)
+	op.FinishResponse, _ = proto.Marshal(&whalereinv1.PairingClaimResponse{ClaimId: op.ClaimID, HostId: op.HostID, DeviceId: op.DeviceID, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, ProtocolVersion: 1})
+	body, _ := proto.Marshal(&whalereinv1.PairingClaim{ClaimId: op.ClaimID, DeviceId: op.DeviceID, DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()})
+	notice := &whalereinv1.HostRequest{RequestId: "host-b-old-commit", HostId: op.HostID, DeviceId: op.DeviceID, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body, ProtocolVersion: 1, ExpiresAtUnixMs: op.ExpiresAt.UnixMilli()}
+	if err := s.RevokeGrant(ctx, "host-b", "device", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitPairing(ctx, hash, op.HostID, op.DeviceID, fixtureKeyPin(4), bytes.Repeat([]byte{9}, 32), now, notice, &op); !errors.Is(err, store.ErrPairingFenced) {
+		t.Fatal("revoked Host accepted old FINISH")
+	}
+	if active, err := s.HasActiveGrant(ctx, "host-a", "device"); err != nil || !active {
+		t.Fatal("unrelated Host grant changed")
+	}
+	if active, err := s.HasActiveGrant(ctx, "host-b", "device"); err != nil || active {
+		t.Fatal("revoked Host grant was restored")
+	}
+	generation, err := s.HostGeneration(ctx, "host-b", "device")
+	if err != nil || generation != 1 {
+		t.Fatal("Host fence not advanced")
+	}
+	hash2 := bytes.Repeat([]byte{7}, 32)
+	if err := s.CreatePairingToken(ctx, hash2, "host-b", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	op2 := store.PairingOperation{ClaimID: "host-b-pending-repeated", TokenHash: hash2, HostID: "host-b", DeviceID: "device", HostGeneration: 1, HelloHash: bytes.Repeat([]byte{2}, 32), HelloResponse: []byte("fixture"), ExpiresAt: now.Add(time.Hour), FinishHash: bytes.Repeat([]byte{3}, 32)}
+	if err := s.SavePairingOperation(ctx, op2); err != nil {
+		t.Fatal(err)
+	}
+	op2.FinishResponse, _ = proto.Marshal(&whalereinv1.PairingClaimResponse{ClaimId: op2.ClaimID, HostId: op2.HostID, DeviceId: op2.DeviceID, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: pub, ProtocolVersion: 1})
+	body2, _ := proto.Marshal(&whalereinv1.PairingClaim{ClaimId: op2.ClaimID, DeviceId: op2.DeviceID, DevicePublicKey: pub, Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT, ExpiresAtUnixMs: op2.ExpiresAt.UnixMilli()})
+	notice2 := &whalereinv1.HostRequest{RequestId: "host-b-repeat-commit", HostId: op2.HostID, DeviceId: op2.DeviceID, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body2, ProtocolVersion: 1, ExpiresAtUnixMs: op2.ExpiresAt.UnixMilli()}
+	if err := s.RevokeGrant(ctx, "host-b", "device", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitPairing(ctx, hash2, op2.HostID, op2.DeviceID, fixtureKeyPin(4), bytes.Repeat([]byte{9}, 32), now, notice2, &op2); !errors.Is(err, store.ErrPairingFenced) {
+		t.Fatal("repeated revoke did not fence pending FINISH")
+	}
+	generation, err = s.HostGeneration(ctx, "host-a", "device")
+	if err != nil || generation != 0 {
+		t.Fatal("unrelated Host fence changed")
 	}
 }

@@ -117,6 +117,24 @@ pub struct SessionCapabilities {
     pub interrupt: bool,
     pub approvals: bool,
     pub delivery_modes: Vec<String>,
+    #[serde(default)]
+    pub model_selection: bool,
+    #[serde(default)]
+    pub pending_queue_read: bool,
+    #[serde(default)]
+    pub pending_queue_edit: bool,
+    #[serde(default)]
+    pub pending_queue_remove: bool,
+    #[serde(default)]
+    pub pending_queue_steer: bool,
+    #[serde(default)]
+    pub questions_read: bool,
+    #[serde(default)]
+    pub questions_answer_open: bool,
+    #[serde(default)]
+    pub questions_answer_continued: bool,
+    #[serde(default)]
+    pub session_fork: bool,
 }
 impl From<whalerein_proto::SourceCapabilities> for SessionCapabilities {
     fn from(c: whalerein_proto::SourceCapabilities) -> Self {
@@ -126,6 +144,15 @@ impl From<whalerein_proto::SourceCapabilities> for SessionCapabilities {
             live_text: c.live_text,
             interrupt: c.interrupt,
             approvals: c.approvals,
+            model_selection: c.model_selection,
+            pending_queue_read: c.pending_queue_read,
+            pending_queue_edit: c.pending_queue_edit,
+            pending_queue_remove: c.pending_queue_remove,
+            pending_queue_steer: c.pending_queue_steer,
+            questions_read: c.questions_read,
+            questions_answer_open: c.questions_answer_open,
+            questions_answer_continued: c.questions_answer_continued,
+            session_fork: c.session_fork,
             delivery_modes: c
                 .delivery_modes
                 .into_iter()
@@ -146,6 +173,15 @@ impl From<SessionCapabilities> for whalerein_proto::SourceCapabilities {
             live_text: c.live_text,
             interrupt: c.interrupt,
             approvals: c.approvals,
+            model_selection: c.model_selection,
+            pending_queue_read: c.pending_queue_read,
+            pending_queue_edit: c.pending_queue_edit,
+            pending_queue_remove: c.pending_queue_remove,
+            pending_queue_steer: c.pending_queue_steer,
+            questions_read: c.questions_read,
+            questions_answer_open: c.questions_answer_open,
+            questions_answer_continued: c.questions_answer_continued,
+            session_fork: c.session_fork,
             delivery_modes: c
                 .delivery_modes
                 .iter()
@@ -233,11 +269,200 @@ impl SessionList {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCapabilities {
+    pub model_catalog: bool,
+    pub model_read: bool,
+}
+impl From<whalerein_proto::HostCapabilities> for HostCapabilities {
+    fn from(value: whalerein_proto::HostCapabilities) -> Self {
+        Self {
+            model_catalog: value.model_catalog,
+            model_read: value.model_read,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    pub provider: String,
+    pub model: String,
+    pub effort: Option<String>,
+}
+impl From<whalerein_proto::ModelChoice> for ModelChoice {
+    fn from(value: whalerein_proto::ModelChoice) -> Self {
+        Self {
+            provider: value.provider,
+            model: value.model,
+            effort: value.effort,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEffort {
+    pub id: String,
+    pub name: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEntry {
+    pub id: String,
+    pub name: String,
+    pub efforts: Vec<ModelEffort>,
+    pub default_effort: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProvider {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<ModelEntry>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProviderFailure {
+    pub id: String,
+    pub name: String,
+    pub code: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalog {
+    pub default_selection: Option<ModelChoice>,
+    pub groups: Vec<ModelProvider>,
+    pub failures: Vec<ModelProviderFailure>,
+    pub effect_scope: String,
+    pub complete: bool,
+}
+impl From<whalerein_proto::ModelCatalog> for ModelCatalog {
+    fn from(value: whalerein_proto::ModelCatalog) -> Self {
+        Self {
+            default_selection: value.default_selection.map(Into::into),
+            effect_scope: value.effect_scope,
+            complete: value.complete,
+            groups: value
+                .groups
+                .into_iter()
+                .map(|group| ModelProvider {
+                    id: group.id,
+                    name: group.name,
+                    models: group
+                        .models
+                        .into_iter()
+                        .map(|model| ModelEntry {
+                            id: model.id,
+                            name: model.name,
+                            efforts: model
+                                .efforts
+                                .into_iter()
+                                .map(|effort| ModelEffort {
+                                    id: effort.id,
+                                    name: effort.name,
+                                })
+                                .collect(),
+                            default_effort: model.default_effort,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            failures: value
+                .failures
+                .into_iter()
+                .map(|failure| ModelProviderFailure {
+                    id: failure.id,
+                    name: failure.name,
+                    code: whalerein_proto::ErrorCode::try_from(failure.code)
+                        .unwrap_or_default()
+                        .as_str_name()
+                        .to_owned(),
+                })
+                .collect(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModel {
+    pub pending: Option<ModelChoice>,
+    pub last_used: Option<ModelChoice>,
+    pub default_selection: Option<ModelChoice>,
+    pub default_is_fallback: bool,
+    pub next: Option<ModelChoice>,
+    pub pending_known: bool,
+}
+impl From<whalerein_proto::SessionModel> for SessionModel {
+    fn from(value: whalerein_proto::SessionModel) -> Self {
+        Self {
+            pending: value.pending.map(Into::into),
+            last_used: value.last_used.map(Into::into),
+            default_selection: value.default_selection.map(Into::into),
+            default_is_fallback: value.default_is_fallback,
+            next: value.next.map(Into::into),
+            pending_known: value.pending_known,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelectionReceipt {
+    pub selected: Option<ModelChoice>,
+    pub effect_scope: String,
+    pub default_persistence: String,
+}
+impl From<whalerein_proto::ModelSelectionReceipt> for ModelSelectionReceipt {
+    fn from(value: whalerein_proto::ModelSelectionReceipt) -> Self {
+        Self {
+            selected: value.selected.map(Into::into),
+            effect_scope: value.effect_scope,
+            default_persistence: value.default_persistence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleReceipt {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub operation: String,
+    pub disposition: String,
+    pub warning_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconcile_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconcile_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CreateSessionInput {
+    pub cwd: Option<String>,
+    pub workspace_id: Option<String>,
+    pub agent_preset: Option<String>,
+    pub preferred_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandHandle {
     pub request_id: String,
     pub command_id: String,
     pub status: OnlineStatus,
     pub message_id: Option<String>,
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<ModelSelectionReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_receipt: Option<LifecycleReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_receipt: Option<QuestionReceiptInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionReceiptInfo {
+    pub batch_id: String,
+    pub phase: String,
 }
 
 /// Local command counts that survive the CLI process. `non_terminal` is the
@@ -301,6 +526,30 @@ pub struct PairingPrompt {
     pub access_url: String,
     pub fingerprint: String,
     pub fingerprint_display: String,
+}
+
+/// Whether unconfirmed command identities could be durably recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationRetention {
+    Recorded,
+    Unverified,
+}
+
+/// Confirmed revocation and its command-identity retention outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationOutcome {
+    pub device_id: String,
+    pub retention: RevocationRetention,
+}
+
+/// Redacted evidence of a pairing requiring review or having a known outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingHistoryRecord {
+    pub claim_id: String,
+    pub host_id: String,
+    pub fingerprint: String,
+    pub status: String,
 }
 
 /// Result of a successful pairing.
@@ -421,4 +670,253 @@ pub struct PendingCommand {
     pub host_id: String,
     pub device_id: String,
     pub status: OnlineStatus,
+}
+
+/// State-only observation returned by a native-backed session wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitObservation {
+    pub session_id: String,
+    pub reason: WaitReason,
+    pub state: WaitState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    Idle,
+    InputRequired,
+    Timeout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitState {
+    pub active: bool,
+    pub running: bool,
+    pub queue_available: bool,
+    pub pending_input: Vec<WaitInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitInput {
+    Approval,
+    Question,
+    Other,
+}
+
+/// An online observation; queue contents are not cached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingQueue {
+    pub session_id: String,
+    pub available: bool,
+    pub running: bool,
+    pub items: Vec<PendingQueueItem>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingQueueItem {
+    pub item_id: String,
+    pub placement: String,
+    pub delivery_id: Option<String>,
+    pub blocks: Vec<PendingQueueBlock>,
+    pub actions: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PendingQueueBlock {
+    Text {
+        text: String,
+    },
+    Attachment {
+        media_type: String,
+        name: String,
+        size: u64,
+        available: bool,
+    },
+    Unavailable,
+}
+impl From<whalerein_proto::PendingQueue> for PendingQueue {
+    fn from(value: whalerein_proto::PendingQueue) -> Self {
+        use whalerein_proto::content_block::Content;
+        Self {
+            session_id: value.session_id,
+            available: value.available,
+            running: value.running,
+            items: value
+                .items
+                .into_iter()
+                .map(|item| PendingQueueItem {
+                    item_id: item.item_id,
+                    placement: whalerein_proto::QueuePlacement::try_from(item.placement)
+                        .unwrap_or_default()
+                        .as_str_name()
+                        .to_owned(),
+                    delivery_id: if item.delivery_id.is_empty() {
+                        None
+                    } else {
+                        Some(item.delivery_id)
+                    },
+                    blocks: item
+                        .blocks
+                        .into_iter()
+                        .map(|block| match block.content {
+                            Some(Content::Text(text)) => {
+                                PendingQueueBlock::Text { text: text.text }
+                            }
+                            Some(Content::Attachment(attachment)) => {
+                                PendingQueueBlock::Attachment {
+                                    media_type: attachment.media_type,
+                                    name: attachment.name,
+                                    size: attachment.size,
+                                    available: attachment.available,
+                                }
+                            }
+                            _ => PendingQueueBlock::Unavailable,
+                        })
+                        .collect(),
+                    actions: item
+                        .actions
+                        .into_iter()
+                        .filter_map(|action| whalerein_proto::QueueAction::try_from(action).ok())
+                        .map(|action| action.as_str_name().to_owned())
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingQueueAction {
+    Edit,
+    Remove,
+    Promote,
+}
+impl From<PendingQueueAction> for whalerein_proto::QueueAction {
+    fn from(value: PendingQueueAction) -> Self {
+        match value {
+            PendingQueueAction::Edit => Self::Edit,
+            PendingQueueAction::Remove => Self::Remove,
+            PendingQueueAction::Promote => Self::Promote,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOptionInfo {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionSubjectInfo {
+    pub name: String,
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionDisplayInfo {
+    pub question: Option<std::collections::HashMap<String, String>>,
+    pub detail: Option<std::collections::HashMap<String, String>>,
+    pub approve: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionIntentInfo {
+    pub kind: String,
+    pub approve: String,
+    pub reject: Option<String>,
+    pub always: Option<String>,
+    pub call_id: Option<String>,
+    pub subject: Option<QuestionSubjectInfo>,
+    pub display: Option<QuestionDisplayInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionItemInfo {
+    pub id: String,
+    pub question: String,
+    pub detail: Option<String>,
+    pub header: Option<String>,
+    pub options: Vec<QuestionOptionInfo>,
+    pub multi_select: bool,
+    pub intent: Option<QuestionIntentInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub id: String,
+    pub selected: Vec<String>,
+    pub custom: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionBatchInfo {
+    pub session_id: String,
+    pub batch_id: String,
+    pub source_epoch: String,
+    pub version: u64,
+    #[serde(with = "hex_bytes")]
+    pub digest: Vec<u8>,
+    pub phase: String,
+    pub questions: Vec<QuestionItemInfo>,
+    pub answerable: bool,
+    pub content_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionPageInfo {
+    pub batches: Vec<QuestionBatchInfo>,
+    pub next_cursor: String,
+}
+
+impl From<whalerein_proto::QuestionBatch> for QuestionBatchInfo {
+    fn from(value: whalerein_proto::QuestionBatch) -> Self {
+        Self {
+            session_id: value.session_id,
+            batch_id: value.batch_id,
+            source_epoch: value.source_epoch,
+            version: value.version,
+            digest: value.digest,
+            phase: whalerein_proto::QuestionPhase::try_from(value.phase)
+                .map(|phase| phase.as_str_name().to_owned())
+                .unwrap_or_else(|_| "QUESTION_PHASE_UNSPECIFIED".into()),
+            questions: value
+                .questions
+                .into_iter()
+                .map(|item| QuestionItemInfo {
+                    id: item.id,
+                    question: item.question,
+                    detail: item.detail,
+                    header: item.header,
+                    options: item
+                        .options
+                        .into_iter()
+                        .map(|option| QuestionOptionInfo {
+                            label: option.label,
+                            description: option.description,
+                        })
+                        .collect(),
+                    multi_select: item.multi_select,
+                    intent: item.intent.map(|intent| QuestionIntentInfo {
+                        kind: intent.kind,
+                        approve: intent.approve,
+                        reject: intent.reject,
+                        always: intent.always,
+                        call_id: intent.call_id,
+                        subject: intent.subject.map(|subject| QuestionSubjectInfo {
+                            name: subject.name,
+                            icon: subject.icon,
+                        }),
+                        display: intent.display.map(|display| QuestionDisplayInfo {
+                            question: display.question.map(|value| value.translations),
+                            detail: display.detail.map(|value| value.translations),
+                            approve: display.approve.map(|value| value.translations),
+                        }),
+                    }),
+                })
+                .collect(),
+            answerable: value.answerable,
+            content_unavailable: value.content_unavailable,
+        }
+    }
 }

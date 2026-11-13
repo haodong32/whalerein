@@ -231,3 +231,16 @@ test('missing broker PUBACK is bounded and interrupts only the MQTT link', async
   await waitFor(()=>!access.connected)
   await access.stop()
 })
+
+test('when a device_offline presence event arrives, Access dispatches it without treating it as a request', async () => {
+  const { broker, access } = makeAccess()
+  const seen = []
+  access.start({ onPresence: (event) => seen.push(event) })
+  await access.waitForConnected(2000)
+  const publisher = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
+  await new Promise((resolve) => publisher.subscribe('whalerein/v1/h/host-1/presence', { qos: 1 }, resolve))
+  await new Promise((resolve) => publisher.publish('whalerein/v1/h/host-1/presence', JSON.stringify({ event: 'device_offline', device_id: 'd1', reason: 'will' }), { qos: 1 }, resolve))
+  await waitFor(() => seen.length === 1)
+  assert.deepEqual(seen[0], { event: 'device_offline', device_id: 'd1', reason: 'will' })
+  await access.stop()
+})

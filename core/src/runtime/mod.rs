@@ -6,7 +6,7 @@
 pub mod channel;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::api::{CoreError, CoreResult};
@@ -120,6 +120,7 @@ struct RuntimeInner {
 
 pub struct Runtime {
     inner: Mutex<RuntimeInner>,
+    channel_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for Runtime {
@@ -137,7 +138,17 @@ impl Runtime {
                 recent_errors: VecDeque::new(),
                 metrics: Metrics::new(),
             }),
+            channel_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn channel_lock(&self, host_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.channel_locks
+            .lock()
+            .expect("channel locks mutex")
+            .entry(host_id.to_owned())
+            .or_default()
+            .clone()
     }
 
     pub fn metrics(&self) -> Vec<crate::diagnostics::MetricSample> {
@@ -191,6 +202,9 @@ impl Runtime {
 
     pub fn set_channel(&self, host_id: &str, channel: SecureChannel) {
         let mut inner = self.inner.lock().expect("runtime mutex");
+        if inner.revoked {
+            return;
+        }
         inner.hosts.entry(host_id.to_owned()).or_default().channel = Some(channel);
     }
 
@@ -213,13 +227,14 @@ impl Runtime {
     }
 
     pub fn set_handshake_phase(&self, host_id: &str, phase: HandshakePhase) {
-        self.inner
-            .lock()
-            .expect("runtime mutex")
-            .hosts
-            .entry(host_id.to_owned())
-            .or_default()
-            .handshake_phase = phase;
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        if !inner.revoked {
+            inner
+                .hosts
+                .entry(host_id.to_owned())
+                .or_default()
+                .handshake_phase = phase;
+        }
     }
 
     #[cfg(test)]
@@ -388,6 +403,9 @@ mod tests {
         assert!(runtime.channel("h").is_none());
         runtime.set_channel("h", channel());
         runtime.revoke();
+        assert!(runtime.channel("h").is_none());
+        // A handshake which finishes after revocation cannot reinstall a key.
+        runtime.set_channel("h", channel());
         assert!(runtime.channel("h").is_none());
     }
 

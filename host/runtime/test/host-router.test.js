@@ -50,7 +50,7 @@ class FakeHostAccess {
   }
 }
 
-function setup(logger = silentLogger) {
+function setup(logger = silentLogger, now = Date.now) {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-router-'))
   const config = testConfig({
     adapter: 'fake',
@@ -63,7 +63,7 @@ function setup(logger = silentLogger) {
   const store = new StateStore({ path: ':memory:' })
   const adapter = new TestSource({ sessions: [{ sessionId: 's1', running: true }] })
   const access = new FakeHostAccess()
-  const host = new HostRuntime({ credentials: new MemoryHostCredentials(), config, adapter, store, access, logger, codec: proto })
+  const host = new HostRuntime({ credentials: new MemoryHostCredentials(), config, adapter, store, access, logger, now, codec: proto })
   return { dir, config, store, adapter, access, host }
 }
 
@@ -356,4 +356,365 @@ test('when an envelope references a missing channel, rejection logs retain trace
     await host.stop()
     rmSync(ctx.dir, { recursive: true, force: true })
   }
+})
+
+test('model read response enforces the full encrypted HostResult transport budget', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.describeHostCapabilities = async () => ({ model_catalog: true })
+    let length = 16 * 1024 * 1024 - 1024
+    ctx.adapter.listModels = async () => ({ groups: [{ id: 'p', name: 'x'.repeat(length), models: [] }] })
+    const query = () => send(ctx.access, encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, payload: { list_models: {} }, overrides: { request_id: 'budget-case' } }))
+    const below = await query()
+    assert.equal(below.status, 'succeeded')
+    const belowBytes = proto.encode('whalerein.v1.HostResult', below).length
+    assert.ok(belowBytes < 16 * 1024 * 1024)
+    length += 16 * 1024 * 1024 - belowBytes
+    const exact = await query()
+    assert.equal(exact.status, 'succeeded')
+    assert.equal(proto.encode('whalerein.v1.HostResult', exact).length, 16 * 1024 * 1024)
+    length++
+    const above = await query()
+    assert.equal(above.status, 'failed')
+    assert.equal(above.error_code, 'payload_too_large')
+    assert.equal(above.result_body?.length ?? 0, 0)
+  } finally {
+    await ctx.host.stop()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('empty sealed frames cannot establish query or command success', async () => {
+  const ctx=setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel=establishChannel({security:ctx.host.security,store:ctx.store,hostId:'host-1',deviceId:'d1',codec:proto})
+    ctx.adapter.sessions.get('s1').sourceCapabilities={pending_queue_read:true,pending_queue_remove:true}
+    ctx.adapter.readPendingQueue=async()=>({session_id:'s1',available:true,items:[]})
+    let calls=0
+    ctx.adapter.execute=async()=>{calls++;return {}}
+    ctx.host.security.sealResult=()=>new Uint8Array(0)
+    await ctx.access.handlers.onRequest(encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload:{read_pending_queue:{session_id:'s1'}}}))
+    assert.equal(ctx.access.lastResult().status,'failed')
+    assert.equal(ctx.access.lastResult().error_code,'internal')
+    const request=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,kind:'REQUEST_KIND_COMMAND',commandId:'empty-seal',payload:{update_pending_queue:{session_id:'s1',item_id:'q1',action:'REMOVE'}}})
+    await ctx.access.handlers.onRequest(request)
+    assert.equal(ctx.access.lastResult().status,'unknown')
+    assert.equal(ctx.access.lastResult().error_code,'internal')
+    assert.equal(calls,1)
+  } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
+})
+
+test('successful query sealing failures publish a sanitized failure rather than false success', async () => {
+  const ctx=setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel=establishChannel({security:ctx.host.security,store:ctx.store,hostId:'host-1',deviceId:'d1',codec:proto})
+    ctx.adapter.sessions.get('s1').sourceCapabilities={pending_queue_read:true}
+    ctx.adapter.readPendingQueue=async()=>({session_id:'s1',available:true,items:[]})
+    ctx.host.security.sealResult=()=>{throw new Error('synthetic sealing failure')}
+    for(const payload of [{read_pending_queue:{session_id:'s1'}},{list_sessions:{}},{ping:{}}]) {
+      await ctx.access.handlers.onRequest(encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload}))
+      const result=ctx.access.lastResult()
+      assert.equal(result.status,'failed')
+      assert.equal(result.error_code,'internal')
+      assert.equal(result.result_body?.length ?? 0,0)
+      assert.equal(JSON.stringify(result).includes('synthetic sealing failure'),false)
+    }
+  } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
+})
+
+test('a command response sealing failure reports unknown and replays the durable receipt without re-executing', async () => {
+  const ctx=setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel=establishChannel({security:ctx.host.security,store:ctx.store,hostId:'host-1',deviceId:'d1',codec:proto})
+    ctx.adapter.sessions.get('s1').sourceCapabilities={pending_queue_remove:true}
+    let calls=0
+    ctx.adapter.execute=async()=>{calls++;return {}}
+    const request=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,kind:'REQUEST_KIND_COMMAND',commandId:'queue-seal',payload:{update_pending_queue:{session_id:'s1',item_id:'q1',action:'REMOVE'}}})
+    const original=ctx.host.security.sealResult.bind(ctx.host.security)
+    ctx.host.security.sealResult=()=>{throw new Error('synthetic sealing failure')}
+    await ctx.access.handlers.onRequest(request)
+    let result=ctx.access.lastResult()
+    assert.equal(result.status,'unknown')
+    assert.equal(result.error_code,'internal')
+    assert.equal(result.result_body?.length ?? 0,0)
+    assert.equal(JSON.stringify(result).includes('synthetic sealing failure'),false)
+    assert.equal(calls,1)
+    ctx.host.security.sealResult=original
+    await ctx.access.handlers.onRequest(request)
+    result=ctx.access.lastResult()
+    assert.equal(result.status,'succeeded')
+    assert.ok(result.result_body?.length)
+    assert.equal(calls,1)
+  } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
+})
+
+test('an oversized complete pending queue fails instead of publishing a partial observation', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security:ctx.host.security, store:ctx.store, hostId:'host-1', deviceId:'d1', codec:proto })
+    ctx.adapter.sessions.get('s1').sourceCapabilities = {pending_queue_read:true}
+    ctx.adapter.readPendingQueue = async () => ({session_id:'s1',available:true,items:[{item_id:'q1',placement:'QUEUED',blocks:[{block_id:'t',text:{text:'x'.repeat(16*1024*1024)}}]}]})
+    const request = encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload:{read_pending_queue:{session_id:'s1'}}})
+    await ctx.access.handlers.onRequest(request)
+    assert.equal(ctx.access.lastResult().status,'failed')
+    assert.equal(ctx.access.lastResult().error_code,'payload_too_large')
+    assert.equal(ctx.access.lastResult().result_body?.length ?? 0,0)
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir,{recursive:true,force:true})
+  }
+})
+
+test('pending queue complete encrypted HostResult uses exact transport boundary', async () => {
+  const ctx=setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel=establishChannel({security:ctx.host.security,store:ctx.store,hostId:'host-1',deviceId:'d1',codec:proto})
+    let textSize=16*1024*1024-4096
+    ctx.adapter.sessions.get('s1').sourceCapabilities = {pending_queue_read:true}
+    ctx.adapter.readPendingQueue=async()=>({session_id:'s1',available:true,items:[{item_id:'q1',placement:'QUEUED',blocks:[{block_id:'t',text:{text:'x'.repeat(textSize)}}]}]})
+    const publish=ctx.access.publishResult.bind(ctx.access)
+    let wireSize=0
+    ctx.access.publishResult=async bytes=>{wireSize=bytes.length;await publish(bytes)}
+    const observe=async()=>{
+      const request=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload:{read_pending_queue:{session_id:'s1'}},overrides:{request_id:'queue-boundary'}})
+      await ctx.access.handlers.onRequest(request)
+      return ctx.access.lastResult()
+    }
+    assert.equal((await observe()).status,'succeeded')
+    const limit=16*1024*1024
+    const exactText=limit-(wireSize-textSize)
+    for(const delta of [-1,0,1]) {
+      textSize=exactText+delta
+      const result=await observe()
+      if(delta<=0) { assert.equal(result.status,'succeeded'); assert.equal(wireSize,limit+delta) }
+      else { assert.equal(result.status,'failed'); assert.equal(result.error_code,'payload_too_large') }
+    }
+  } finally { await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true}) }
+})
+
+test('wait state rejects an oversized encrypted HostResult for a valid request', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({security:ctx.host.security,store:ctx.store,hostId:'host-1',deviceId:'d1',codec:proto})
+    const describe = ctx.adapter.describe.bind(ctx.adapter)
+    ctx.adapter.describe = () => ({...describe(), capabilities:['wait']})
+    ctx.adapter.readWaitState = async () => ({active:true,running:false,queueAvailable:true,pendingInput:[]})
+    ctx.adapter.waitSession = async () => ({reason:'idle',state:{active:true,running:false,queueAvailable:true,pendingInput:[]}})
+    let wireSize = 0
+    const publish = ctx.access.publishResult.bind(ctx.access)
+    ctx.access.publishResult = async bytes => { wireSize=bytes.length; await publish(bytes) }
+    const query = async (size, waiting) => {
+      const payload = waiting ? {wait_session:{session_id:'x'.repeat(size),wait_id:'w',timeout_ms:1000}} : {read_wait_state:{session_id:'x'.repeat(size)}}
+      const request=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload,overrides:{request_id:'wait-boundary'}})
+      const requestSize=proto.encode('whalerein.v1.HostRequest',request).length
+      await ctx.access.handlers.onRequest(request)
+      return {result:ctx.access.lastResult(),requestSize}
+    }
+    const limit=16*1024*1024
+    for (const waiting of [false, true]) {
+      let size=limit-4096
+      assert.equal((await query(size, waiting)).result.status,'succeeded')
+      const exact=limit-(wireSize-size)
+      for (const delta of [-1,0,1]) {
+        const observed=await query(exact+delta, waiting)
+        assert.ok(observed.requestSize <= limit, `request size ${observed.requestSize}`)
+        if (delta <= 0) {
+          assert.equal(observed.result.status,'succeeded')
+          assert.equal(wireSize,limit+delta)
+        } else {
+          assert.equal(observed.result.error_code,'payload_too_large')
+          assert.equal(observed.result.result_body?.length ?? 0,0)
+        }
+      }
+      const recovered = await query(2, waiting)
+      assert.equal(recovered.result.status, 'succeeded')
+      assert.ok(recovered.result.result_body?.length)
+    }
+  } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
+})
+
+test('question reads enforce the complete encrypted HostResult budget without leaking content', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.getSession = async id => ({ sessionId: id, sourceCapabilities: { questions_read: true } })
+    let length = 16 * 1024 * 1024 - 4096
+    ctx.adapter.listQuestionPage = async () => ({ batches: [{ session_id: 's1', batch_id: 'b1', questions: [{ id: 'q1', question: 'x'.repeat(length) }] }] })
+    ctx.adapter.getQuestion = async () => ({ session_id: 's1', batch_id: 'b1', questions: [{ id: 'q1', question: 'x'.repeat(length) }] })
+    let wireSize = 0
+    const publish = ctx.access.publishResult.bind(ctx.access)
+    ctx.access.publishResult = async bytes => { wireSize = bytes.length; await publish(bytes) }
+    for (const payload of [{ list_questions: { session_id: 's1' } }, { get_question: { session_id: 's1', batch_id: 'b1' } }]) {
+      length = 16 * 1024 * 1024 - 4096
+      let lastRequest
+      const query = () => {
+        lastRequest = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, payload, overrides: { request_id: 'question-budget' } })
+        return send(ctx.access, lastRequest)
+      }
+      assert.equal((await query()).status, 'succeeded')
+      const exact = 16 * 1024 * 1024 - (wireSize - length)
+      for (const offset of [-1, 0, 1]) {
+        length = exact + offset
+        const result = await query()
+        if (offset <= 0) { assert.equal(result.status, 'succeeded'); assert.equal(wireSize, 16 * 1024 * 1024 + offset) }
+        else if (payload.list_questions) {
+          assert.equal(result.status, 'succeeded')
+          const aad = requestAad({ requestId: lastRequest.request_id, hostId: 'host-1', deviceId: 'd1',
+            kind: lastRequest.kind, commandId: '', expiresAt: lastRequest.expires_at_unix_ms })
+          const frame = proto.decode('whalerein.v1.EncryptedFrame', result.result_body)
+          const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+          assert.equal(response.question_page.batches[0].content_unavailable, true)
+          assert.equal(response.question_page.batches[0].questions.length, 0)
+        } else { assert.equal(result.status, 'failed'); assert.equal(result.error_code, 'payload_too_large'); assert.equal(result.result_body?.length ?? 0, 0) }
+      }
+    }
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('question pages use authenticated device and snapshot cursors without dropping entries', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start(); ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.getSession = async id => ({ sessionId: id, sourceCapabilities: { questions_read: true } })
+    let revision = 1
+    const huge = 'x'.repeat(9 * 1024 * 1024)
+    ctx.adapter.listQuestionPage = async () => ({ batches: ['one', 'two'].map(id => ({ session_id: 's1', batch_id: id,
+      source_epoch: 'epoch', version: revision, digest: new Uint8Array(32), phase: 'QUESTION_OPEN',
+      questions: [{ id: 'q', question: huge }] })) })
+    const query = async cursor => {
+      const request = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel,
+        payload: { list_questions: { session_id: 's1', cursor } } })
+      const result = await send(ctx.access, request)
+      if (result.status !== 'succeeded') return { result }
+      const aad = requestAad({ requestId: request.request_id, hostId: 'host-1', deviceId: 'd1', kind: request.kind,
+        commandId: '', expiresAt: request.expires_at_unix_ms })
+      const frame = proto.decode('whalerein.v1.EncryptedFrame', result.result_body)
+      return { result, page: proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext)).question_page }
+    }
+    const first = (await query('')).page
+    assert.deepEqual(first.batches.map(batch => batch.batch_id), ['one'])
+    assert.ok(first.next_cursor)
+    const second = (await query(first.next_cursor)).page
+    assert.deepEqual(second.batches.map(batch => batch.batch_id), ['two'])
+    assert.equal(second.next_cursor ?? '', '')
+    revision++
+    assert.equal((await query(first.next_cursor)).result.error_code, 'conflict')
+    assert.equal((await query(first.next_cursor + 'x')).result.error_code, 'conflict')
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+
+test('an authenticated delivery with an omitted envelope host is scoped to the configured Host', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto})
+    let identity
+    ctx.adapter.execute = async (_session, _command, context) => {
+      identity = context.operationId
+      return {command_accepted: {delivery_id: identity}}
+    }
+    const request = encryptedQuery({security: ctx.host.security, store: ctx.store, channel,
+      payload: {send_message: {session_id: 's1', text: 'fixture'}}, kind: 'REQUEST_KIND_COMMAND', commandId: 'same-command'})
+    request.host_id = ''
+    await ctx.access.handlers.onRequest(request)
+    assert.equal(ctx.access.lastResult().status, 'succeeded')
+    const {sha256Text, hex} = await import('../src/security/digest.js')
+    const expected = hex(sha256Text(JSON.stringify(['whalerein/v1/operation', 'host-1', 'd1', 'same-command'])))
+    assert.equal(identity, expected)
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, {recursive: true, force: true})
+  }
+})
+
+test('disconnect releases a stalled model query and discards its late result', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.describeHostCapabilities = async () => ({ model_catalog: true })
+    let release
+    let captured
+    ctx.adapter.listModels = ({ signal }) => { captured = signal; return new Promise(resolve => { release = resolve }) }
+    const request = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, payload: { list_models: {} } })
+    const pending = ctx.access.handlers.onRequest(request)
+    while (!release) await new Promise(resolve => setImmediate(resolve))
+    ctx.access.handlers.onDisconnected()
+    await pending
+    const result = ctx.access.lastResult()
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error_code, 'unavailable')
+    assert.equal(captured.aborted, true)
+    release({ groups: [{ id: 'fixture-private-sentinel', models: [] }] })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(JSON.stringify(ctx.access.lastResult()).includes('fixture-private-sentinel'), false)
+  } finally {
+    await ctx.host.stop()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+
+test('device_offline presence clears that device channel and cancels its scopes', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    assert.equal(ctx.host.security.listChannels().length, 1)
+    ctx.access.handlers.onPresence({ event: 'device_offline', device_id: 'd1', reason: 'will' })
+    assert.equal(ctx.host.security.listChannels().length, 0)
+    assert.equal(ctx.host.security.getChannel(channel.channelId), null)
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+
+test('an expired duplicate can be rejected after the same command already succeeded', async () => {
+  let now = Date.now()
+  const ctx = setup(silentLogger, () => now)
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    ctx.adapter.setRunning('s1', false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const request = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel,
+      payload: { send_message: { session_id: 's1', text: 'fixture' } }, kind: 'REQUEST_KIND_COMMAND', commandId: 'stable-command',
+      overrides: { request_id: 'stable-request', expires_at_unix_ms: now + 1000 } })
+    const completed = await send(ctx.access, request)
+    assert.equal(completed.status, 'succeeded')
+    assert.equal(ctx.adapter.messages.length, 1)
+    now += 2000
+    const delayedDuplicate = await send(ctx.access, request)
+    assert.equal(delayedDuplicate.status, 'rejected')
+    assert.equal(delayedDuplicate.error_code, 'expired')
+    assert.equal(ctx.adapter.messages.length, 1)
+    assert.equal(ctx.store.getCommand('d1', 'stable-command').status, 'succeeded')
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
 })

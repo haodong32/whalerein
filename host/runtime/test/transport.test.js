@@ -147,3 +147,15 @@ test('concurrent bulk sends wait for bounded transport admission instead of fail
  await Promise.all(sends)
  assert.equal(delivered,3)
 })
+
+test('logical transport accepts envelopes at and immediately below its encoded limit', async () => {
+  const delivered = []
+  let sender
+  const receiver = new LogicalTransport({publish: async (topic, bytes) => sender.receive(topic, bytes, '', () => {})})
+  sender = new LogicalTransport({publish: async (topic, bytes) => receiver.receive(topic, bytes, 'ack', body => delivered.push(body.length))})
+  for (const size of [MESSAGE_BYTES - 1, MESSAGE_BYTES]) {
+    await sender.send('data', Buffer.alloc(size), 'ack', true)
+  }
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(delivered, [MESSAGE_BYTES - 1, MESSAGE_BYTES])
+})

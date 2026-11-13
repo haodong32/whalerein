@@ -8,7 +8,7 @@ export function messageId(sessionId, view, seq) {
 export function projectMessage(sessionId, view, event) {
   const type = event.type ?? ''
   if (type.startsWith('session/') || type.startsWith('turn/') || type.startsWith('step/') ||
-      type.startsWith('approval/') || ['request/header','request/context','ignore','system/message','developer/message'].includes(type)) return null
+      type.startsWith('approval/') || ['agent/inbox/spliced','request/header','request/context','ignore','system/message','developer/message'].includes(type)) return null
   const role = type === 'assistant/message' ? 'ASSISTANT' : type === 'user/message' ? 'USER' : type === 'tool/result' ? 'TOOL' : 'NOTICE'
   if (role === 'NOTICE') return {message_id:messageId(sessionId,view,event.dshSeq),role,
     blocks:[{block_id:'notice',notice:{category:type.includes('error')?'source_error':'source_notice',text:type.includes('error')?'Source reported an error':'Source activity'}}],authored_at_unix_ms:event.createdAt??0}

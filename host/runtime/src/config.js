@@ -24,5 +24,6 @@ export function topics(hostId) {
     result: `whalerein/v1/h/${hostId}/result`,
     event: `whalerein/v1/h/${hostId}/event`,
     deviceEvent: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/event`,
+    presence: `whalerein/v1/h/${hostId}/presence`,
   }
 }

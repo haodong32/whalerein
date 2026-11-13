@@ -47,14 +47,66 @@ impl Pump {
 }
 
 impl Core {
-    pub fn session_key(&self, session_id: &str) -> CoreResult<SessionKey> {
+    /// Resolve against a fresh authorized Host listing. A partial discovery cannot prove uniqueness.
+    pub async fn session_key(&self, session_id: &str) -> CoreResult<SessionKey> {
         if session_id.is_empty() {
             return Err(CoreError::InvalidInput("session identity missing".into()));
         }
-        Ok(SessionKey {
-            host_id: self.require_config()?.host_id,
-            session_id: session_id.into(),
-        })
+        let hosts = self.hosts().await.map_err(|error| match error {
+            CoreError::Revoked | CoreError::RevokedRetentionUnverified | CoreError::NotPaired => {
+                error
+            }
+            _ => CoreError::Unavailable(
+                "cannot verify authorized Hosts; specify a Host when available".into(),
+            ),
+        })?;
+        if let Some(host) = &self.session_host {
+            if !hosts.iter().any(|item| &item.host_id == host) {
+                return Err(CoreError::NotFound("Host is not authorized".into()));
+            }
+            return Ok(SessionKey {
+                host_id: host.clone(),
+                session_id: session_id.into(),
+            });
+        }
+        if hosts.len() == 1 {
+            return Ok(SessionKey {
+                host_id: hosts[0].host_id.clone(),
+                session_id: session_id.into(),
+            });
+        }
+        let mut matches = Vec::new();
+        for host in hosts {
+            let list = self.sessions(&host.host_id).await.map_err(|_| {
+                CoreError::Unavailable(
+                    "cannot verify session on every authorized Host; specify a Host".into(),
+                )
+            })?;
+            if list.source != "remote" || !list.complete {
+                return Err(CoreError::Unavailable(
+                    "cannot verify session on every authorized Host; specify a Host".into(),
+                ));
+            }
+            if list
+                .sessions
+                .iter()
+                .any(|item| item.session_id == session_id)
+            {
+                matches.push(host.host_id);
+            }
+        }
+        match matches.as_slice() {
+            [host] => Ok(SessionKey {
+                host_id: host.clone(),
+                session_id: session_id.into(),
+            }),
+            [] => Err(CoreError::NotFound(
+                "session not found on authorized Hosts".into(),
+            )),
+            _ => Err(CoreError::Conflict(
+                "session exists on multiple Hosts; specify a Host".into(),
+            )),
+        }
     }
 
     pub(super) async fn sync_conversation<F>(

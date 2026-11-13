@@ -64,6 +64,14 @@ enum ErrorCode {
   internal = 17;
   unavailable = 18;
   payload_too_large = 19;
+  // An unfinished pairing intent was invalidated and cannot be committed.
+  pairing_fenced = 20;
+  // This exact FINISH committed, but its original grant is no longer active.
+  pairing_committed_unavailable = 21;
+  // Access committed this exact FINISH, but Host confirmation is unavailable.
+  pairing_committed_unconfirmed = 22;
+  // The authenticated Host replaced the channel that owned this observation.
+  channel_replaced = 220;
 }
 
 enum Capability {
@@ -258,7 +266,7 @@ message PairingClaim {
   PairingPhase phase = 3;
   bytes noise_message = 4;
   string device_id = 5;
-  // Present on AUTHORIZE only.
+  // Present on AUTHORIZE and COMMIT to identify the staged device key.
   bytes device_public_key = 6;
   int64 expires_at_unix_ms = 7;
   // Access-assigned grant incarnation, populated on COMMIT.
@@ -393,6 +401,21 @@ message RequestPayload {
     WatchSession watch_session = 12;
     RefreshWatches refresh_watches = 13;
     UnwatchSession unwatch_session = 14;
+    GetHostCapabilities get_host_capabilities = 190;
+    ListModels list_models = 200;
+    ReadSessionModel read_session_model = 201;
+    SelectSessionModel select_session_model = 202;
+    WaitSession wait_session = 220;
+    CancelSessionWait cancel_session_wait = 221;
+    ReadWaitState read_wait_state = 222;
+    CreateSession create_session = 240;
+    ReadPendingQueue read_pending_queue = 280;
+    UpdatePendingQueue update_pending_queue = 281;
+    ListQuestions list_questions = 260;
+    GetQuestion get_question = 261;
+    AnswerQuestion answer_question = 262;
+    CancelQuestionAnswer cancel_question_answer = 263;
+    ForkSession fork_session = 300;
   }
 }
 
@@ -410,13 +433,146 @@ message ResponsePayload {
     WatchReady watch_ready = 12;
     WatchStates watch_states = 13;
     SessionSummary session_info = 14;
+    HostCapabilities host_capabilities = 190;
+    ModelCatalog model_catalog = 200;
+    SessionModel session_model = 201;
+    ModelSelectionReceipt model_selection_receipt = 202;
+    SessionWaitResult session_wait_result = 220;
+    SessionWaitStateResult session_wait_state_result = 221;
+    LifecycleReceipt lifecycle_receipt = 240;
+    PendingQueue pending_queue = 280;
+    QuestionPage question_page = 260;
+    QuestionBatch question_batch = 261;
+    QuestionReceipt question_receipt = 262;
+    QuestionCancelReceipt question_cancel_receipt = 263;
   }
   // Domain failure. HostResult.status carries the online status copy.
   ErrorCode error_code = 8;
   string error_detail = 9;
 }
 
+// Model selection values are owned by the source, never cached as authority.
+message GetHostCapabilities {}
+message HostCapabilities { bool model_catalog = 200; bool model_read = 201; bool session_create = 240; bool session_fork = 300; }
+message ListModels {}
+message ReadSessionModel { string session_id = 1; }
+message ModelChoice { string provider = 1; string model = 2; optional string effort = 3; }
+message ModelEffort { string id = 1; string name = 2; }
+message ModelEntry { string id = 1; string name = 2; repeated ModelEffort efforts = 3; string default_effort = 4; }
+message ModelProvider { string id = 1; string name = 2; repeated ModelEntry models = 3; }
+message ModelProviderFailure { string id = 1; string name = 2; ErrorCode code = 3; }
+message ModelCatalog { ModelChoice default_selection = 1; repeated ModelProvider groups = 2; repeated ModelProviderFailure failures = 3; string effect_scope = 4; bool complete = 5; }
+message SessionModel { ModelChoice pending = 1; ModelChoice last_used = 2; ModelChoice default_selection = 3; bool default_is_fallback = 4; ModelChoice next = 5; bool pending_known = 6; }
+message SelectSessionModel { string session_id = 1; string provider = 2; string model = 3; optional string effort = 4; }
+message ModelSelectionReceipt { ModelChoice selected = 1; string effect_scope = 2; string default_persistence = 3; }
+
+message ForkSession { string session_id = 1; }
+message CreateSession {
+  optional string cwd = 1;
+  optional string workspace_id = 2;
+  optional string agent_preset = 3;
+  optional string preferred_session_id = 4;
+}
+enum LifecycleDisposition {
+  LIFECYCLE_DISPOSITION_UNSPECIFIED = 0;
+  READY = 1;
+  READY_WITH_WARNING = 2;
+  // Proven failure before any native effect.
+  FAILED = 3;
+  // A native effect may have happened; the outcome needs reconciliation.
+  UNKNOWN = 4;
+}
+message LifecycleReceipt {
+  string session_id = 1;
+  string operation = 2;
+  LifecycleDisposition disposition = 3;
+  string warning_code = 4;
+  string parent_session_id = 5;
+  // Stable operation identity, independent of the command journal row.
+  string operation_id = 6;
+  // Coarse phase: PREFLIGHT, NATIVE, ATTACH, PERSIST, or COMPLETE.
+  string phase = 7;
+  // Stable reason code for FAILED and UNKNOWN outcomes.
+  string reason_code = 8;
+  bool retryable = 9;
+  // OPERATION_ID, PREFERRED_SESSION_ID, PARENT_SESSION_ID, or MANUAL.
+  string reconcile_mode = 10;
+  string reconcile_key = 11;
+  // Bounded, redacted warning text; never contains native error details.
+  optional string warning_detail = 12;
+}
+
 message ListSessions {}
+
+// Question contents are source-owned and transmitted only within the encrypted
+// session. A projection may be discoverable without an answerable live handle.
+enum QuestionPhase {
+  QUESTION_PHASE_UNSPECIFIED = 0;
+  QUESTION_OPEN = 1;
+  QUESTION_CONTINUED = 2;
+  QUESTION_REPLY_QUEUED = 3;
+  QUESTION_SETTLED = 4;
+}
+message QuestionOption { string label = 1; optional string description = 2; }
+message QuestionLocalizedText { map<string, string> translations = 1; }
+message QuestionSubject { string name = 1; optional string icon = 2; }
+message QuestionDisplay {
+  QuestionLocalizedText question = 1;
+  QuestionLocalizedText detail = 2;
+  QuestionLocalizedText approve = 3;
+}
+message QuestionIntent {
+  string kind = 1;
+  string approve = 2;
+  optional string reject = 3;
+  optional string always = 4;
+  optional string call_id = 5;
+  QuestionSubject subject = 6;
+  QuestionDisplay display = 7;
+}
+message QuestionItem {
+  string id = 1;
+  string question = 2;
+  optional string detail = 3;
+  optional string header = 4;
+  repeated QuestionOption options = 5;
+  bool multi_select = 6;
+  QuestionIntent intent = 7;
+}
+message QuestionAnswerItem {
+  string id = 1;
+  repeated string selected = 2;
+  optional string custom = 3;
+}
+message QuestionBatch {
+  string session_id = 1;
+  string batch_id = 2;
+  string source_epoch = 3;
+  uint64 version = 4;
+  bytes digest = 5;
+  QuestionPhase phase = 6;
+  repeated QuestionItem questions = 7;
+  bool answerable = 8;
+  bool content_unavailable = 9;
+}
+message ListQuestions { string session_id = 1; string cursor = 2; }
+message GetQuestion { string session_id = 1; string batch_id = 2; }
+message QuestionPage { repeated QuestionBatch batches = 1; string next_cursor = 2; }
+message AnswerQuestion {
+  string session_id = 1;
+  string batch_id = 2;
+  string source_epoch = 3;
+  uint64 expected_version = 4;
+  bytes expected_digest = 5;
+  QuestionPhase expected_phase = 6;
+  repeated QuestionAnswerItem answers = 7;
+}
+message QuestionReceipt { string batch_id = 1; QuestionPhase phase = 2; }
+
+// Cancels only an in-flight open answer belonging to this authenticated device.
+// False means there was no matching active operation; it proves no outcome.
+message CancelQuestionAnswer { string session_id = 1; string command_id = 2; }
+message QuestionCancelReceipt { bool cancellation_requested = 1; }
 
 message GetSession {
   string session_id = 1;
@@ -495,6 +651,8 @@ message SessionList {
 
 message CommandAccepted {
   string message_id = 1;
+  // Opaque identity of the accepted delivery; not a committed message ID.
+  string delivery_id = 180;
 }
 
 message CommandResult {
@@ -564,6 +722,13 @@ message SourceCapabilities {
   bool history = 1; bool resumable_history = 2; bool live_text = 3;
   bool interrupt = 4; bool approvals = 5;
   repeated DeliveryMode delivery_modes = 6;
+  bool model_selection = 200;
+  bool pending_queue_read = 280; bool pending_queue_edit = 281;
+  bool pending_queue_remove = 282; bool pending_queue_steer = 283;
+  bool questions_read = 260;
+  bool questions_answer_open = 261;
+  bool questions_answer_continued = 262;
+  bool session_fork = 300;
 }
 enum DeliveryMode { DELIVERY_MODE_UNSPECIFIED = 0; START_IF_IDLE = 1; ENQUEUE_AFTER_RUN = 2; STEER = 3; }
 enum MessageRole { MESSAGE_ROLE_UNSPECIFIED = 0; USER = 1; ASSISTANT = 2; TOOL = 3; NOTICE = 4; }
@@ -620,3 +785,41 @@ message WatchReady { string watch_id = 1; SessionState state = 2; uint32 lease_m
 message RefreshWatches { repeated string watch_ids = 1; }
 message WatchStates { repeated WatchReady watches = 1; }
 message UnwatchSession { string watch_id = 1; }
+
+// Ephemeral, read-only observations. The enclosing request owns authorization
+// and expiry; wait_id is scoped to its device, channel, and session.
+message WaitSession { string session_id = 1; string wait_id = 2; uint32 timeout_ms = 3; }
+message CancelSessionWait { string session_id = 1; string wait_id = 2; }
+message ReadWaitState { string session_id = 1; }
+enum WaitReason { WAIT_REASON_UNSPECIFIED = 0; WAIT_IDLE = 1; WAIT_INPUT_REQUIRED = 2; WAIT_TIMEOUT = 3; }
+enum InputKind { INPUT_KIND_UNSPECIFIED = 0; INPUT_APPROVAL = 1; INPUT_QUESTION = 2; INPUT_OTHER = 3; }
+message SessionWaitState {
+  bool active = 1;
+  bool running = 2;
+  bool queue_available = 3;
+  repeated InputKind pending_input = 4;
+}
+message SessionWaitResult {
+  string session_id = 1;
+  string wait_id = 2;
+  WaitReason reason = 3;
+  SessionWaitState state = 4;
+}
+message SessionWaitStateResult { string session_id = 1; SessionWaitState state = 2; }
+// Pending work remains owned by the source and is never persisted as history.
+message ReadPendingQueue { string session_id = 1; }
+enum QueuePlacement { QUEUE_PLACEMENT_UNSPECIFIED = 0; QUEUED = 1; STEERING = 2; CONTEXT = 3; }
+enum QueueAction { QUEUE_ACTION_UNSPECIFIED = 0; EDIT = 1; REMOVE = 2; PROMOTE = 3; }
+message PendingQueueItem {
+  string item_id = 1; QueuePlacement placement = 2; string delivery_id = 3;
+  repeated ContentBlock blocks = 4; repeated QueueAction actions = 5;
+}
+message PendingQueue {
+  string session_id = 1; bool available = 2; bool running = 3;
+  repeated PendingQueueItem items = 4;
+}
+message UpdatePendingQueue {
+  string session_id = 1; string item_id = 2; QueueAction action = 3;
+  // Text replaces the complete prior item content, including attachments.
+  string text = 4;
+}

@@ -30,24 +30,31 @@ import (
 
 // Stable pairing failures.
 var (
-	ErrUnauthorized    = errors.New("invalid pairing token")
-	ErrTokenUsed       = errors.New("pairing token already used")
-	ErrTokenExpired    = errors.New("pairing token expired")
-	ErrFailureBudget   = errors.New("pairing token failure budget exhausted")
-	ErrHostOffline     = errors.New("host offline")
-	ErrHostRejected    = errors.New("host rejected pairing")
-	ErrHostUnavailable = errors.New("host unavailable")
-	ErrClaimRequired   = errors.New("pairing HELLO is required before FINISH")
-	ErrInvalidClaim    = errors.New("invalid pairing claim")
-	ErrProtocolVersion = errors.New("protocol version incompatible")
-	ErrHostNotFound    = errors.New("host not found")
-	ErrInternal        = errors.New("pairing internal error")
+	ErrUnauthorized                = errors.New("invalid pairing token")
+	ErrTokenUsed                   = errors.New("pairing token already used")
+	ErrTokenExpired                = errors.New("pairing token expired")
+	ErrFailureBudget               = errors.New("pairing token failure budget exhausted")
+	ErrHostOffline                 = errors.New("host offline")
+	ErrHostRejected                = errors.New("host rejected pairing")
+	ErrHostUnavailable             = errors.New("host unavailable")
+	ErrClaimRequired               = errors.New("pairing HELLO is required before FINISH")
+	ErrInvalidClaim                = errors.New("invalid pairing claim")
+	ErrPairingFenced               = errors.New("pairing intent invalidated")
+	ErrPairingCommittedUnavailable = errors.New("committed pairing is no longer available")
+	ErrPairingCommittedUnconfirmed = errors.New("pairing committed but Host confirmation is unknown")
+	ErrProtocolVersion             = errors.New("protocol version incompatible")
+	ErrHostNotFound                = errors.New("host not found")
+	ErrInternal                    = errors.New("pairing internal error")
 )
 
 // Store is the pairing persistence boundary.
 type Store interface {
+	PairingGenerations(ctx context.Context, tokenHash []byte, deviceID string) (int64, int64, error)
 	SavePairingOperation(ctx context.Context, op store.PairingOperation) error
 	PairingOperation(ctx context.Context, claimID string) (store.PairingOperation, error)
+	PairingFenced(ctx context.Context, claimID, hostID, deviceID string) (bool, error)
+	PairingOutcome(ctx context.Context, claimID, deviceID string) (store.PairingOutcome, error)
+	ConfirmPairingHost(ctx context.Context, claimID, hostID, deviceID, requestID string, at time.Time) (bool, error)
 	GetRequest(ctx context.Context, requestID string) (store.Request, error)
 	GetHost(ctx context.Context, hostID string) (store.Host, error)
 	CreatePairingToken(ctx context.Context, tokenHash []byte, hostID string, expiresAt time.Time, at time.Time) error
@@ -223,27 +230,105 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 
 	hash := sha256.Sum256([]byte(request.GetToken()))
+	var deviceGeneration, hostGeneration int64
+	if phase == whalereinv1.PairingPhase_PAIRING_PHASE_HELLO {
+		var err error
+		deviceGeneration, hostGeneration, err = s.store.PairingGenerations(ctx, hash[:], request.DeviceId)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrUnauthorized
+		}
+		if err != nil {
+			return nil, ErrInternal
+		}
+	}
 	hashHex := hex.EncodeToString(hash[:])
-	now := s.now()
 
 	unlock, lockErr := s.lockToken(ctx, hashHex)
 	if lockErr != nil {
 		return nil, lockErr
 	}
 	defer unlock()
+	now := s.now()
 
 	op, opErr := s.store.PairingOperation(ctx, request.ClaimId)
 	if opErr != nil && !errors.Is(opErr, store.ErrNotFound) {
 		return nil, ErrInternal
 	}
+	if errors.Is(opErr, store.ErrNotFound) && phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH {
+		recovered, outcomeErr := s.committedOutcome(ctx, request, hash[:])
+		if outcomeErr == nil {
+			return recovered, nil
+		}
+		if !errors.Is(outcomeErr, store.ErrNotFound) {
+			return nil, outcomeErr
+		}
+	}
 	if opErr == nil {
-		if !bytes.Equal(op.TokenHash, hash[:]) || op.DeviceID != request.DeviceId || !now.Before(op.ExpiresAt) {
+		if !bytes.Equal(op.TokenHash, hash[:]) || op.DeviceID != request.DeviceId {
+			return nil, ErrClaimRequired
+		}
+		if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && len(op.FinishHash) == 0 {
+			fenced, err := s.store.PairingFenced(ctx, op.ClaimID, op.HostID, op.DeviceID)
+			if err != nil {
+				return nil, ErrInternal
+			}
+			if fenced {
+				return nil, ErrPairingFenced
+			}
+		}
+		if !now.Before(op.ExpiresAt) {
+			if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && len(op.FinishHash) > 0 {
+				recovered, outcomeErr := s.committedOutcome(ctx, request, hash[:])
+				if outcomeErr == nil {
+					return recovered, nil
+				}
+				if !errors.Is(outcomeErr, store.ErrNotFound) {
+					return nil, outcomeErr
+				}
+			}
 			return nil, ErrClaimRequired
 		}
 		if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && len(op.FinishHash) > 0 {
 			digest := claimDigest(request)
-			if !bytes.Equal(op.FinishHash, digest) || !op.Active {
+			if !bytes.Equal(op.FinishHash, digest) {
 				return nil, ErrInvalidClaim
+			}
+			if !op.Active {
+				return nil, ErrPairingCommittedUnavailable
+			}
+			// Never forward a legacy outbox until its persisted COMMIT binding
+			// is proven. A Host may acknowledge AUTHORIZE without activation.
+			outcome, outcomeErr := s.store.PairingOutcome(ctx, request.ClaimId, request.DeviceId)
+			if errors.Is(outcomeErr, store.ErrNotFound) {
+				return nil, ErrPairingCommittedUnconfirmed
+			}
+			if outcomeErr != nil {
+				return nil, ErrInternal
+			}
+			if !bytes.Equal(outcome.TokenHash, hash[:]) || !bytes.Equal(outcome.FinishHash, digest) {
+				return nil, ErrInvalidClaim
+			}
+			if !outcome.Active {
+				return nil, ErrPairingCommittedUnavailable
+			}
+			if outcome.CommitBindingUnproven {
+				return nil, ErrPairingCommittedUnconfirmed
+			}
+			if outcome.HostConfirmed {
+				recovered, recoverErr := s.committedOutcome(ctx, request, hash[:])
+				if recoverErr != nil {
+					return nil, recoverErr
+				}
+				// The retained FINISH response carries the original invitation
+				// expiry. Reuse it only when its identity matches the proof.
+				var retained whalereinv1.PairingClaimResponse
+				if proto.Unmarshal(op.FinishResponse, &retained) == nil && retained.DeviceToken == "" &&
+					retained.ClaimId == recovered.ClaimId && retained.HostId == recovered.HostId && retained.DeviceId == recovered.DeviceId &&
+					retained.Phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && retained.ProtocolVersion == recovered.ProtocolVersion &&
+					bytes.Equal(retained.DevicePublicKey, recovered.DevicePublicKey) {
+					recovered.ExpiresAtUnixMs = retained.ExpiresAtUnixMs
+				}
+				return recovered, nil
 			}
 			var response whalereinv1.PairingClaimResponse
 			if proto.Unmarshal(op.FinishResponse, &response) != nil {
@@ -251,9 +336,17 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			notice, err := s.store.GetRequest(ctx, op.CommitRequestID)
 			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return nil, ErrPairingCommittedUnconfirmed
+				}
 				return nil, ErrInternal
 			}
-			done := &completedClaim{ready: notice.Status == whalereinv1.OnlineStatus_succeeded, response: &response, commit: &whalereinv1.HostRequest{
+			if len(notice.RequestBody) == 0 || !now.Before(notice.ExpiresAt) {
+				return nil, ErrPairingCommittedUnconfirmed
+			}
+			var storedCommit whalereinv1.PairingClaimResult
+			ready := notice.Status == whalereinv1.OnlineStatus_succeeded && proto.Unmarshal(notice.ResultBody, &storedCommit) == nil && storedCommit.Authorized && storedCommit.DeviceId == request.DeviceId
+			done := &completedClaim{ready: ready, response: &response, commit: &whalereinv1.HostRequest{
 				RequestId: notice.RequestID, HostId: notice.HostID, DeviceId: notice.DeviceID, Kind: notice.Kind,
 				ProtocolVersion: notice.ProtocolVersion, Body: notice.RequestBody, ExpiresAtUnixMs: notice.ExpiresAt.UnixMilli()}}
 			response.DeviceToken = request.DeviceToken
@@ -290,7 +383,7 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			return &reply, nil
 		}
-		return s.hello(ctx, request, token, hashHex, now)
+		return s.hello(ctx, request, token, hashHex, now, deviceGeneration, hostGeneration)
 	}
 	if opErr != nil {
 		return nil, ErrClaimRequired
@@ -298,7 +391,34 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	return s.finish(ctx, request, token, op, now)
 }
 
-func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time) (*whalereinv1.PairingClaimResponse, error) {
+// committedOutcome recovers only an exact authenticated FINISH and separately
+// requires a durable Host COMMIT acknowledgement for an active grant.
+func (s *Service) committedOutcome(ctx context.Context, request *whalereinv1.PairingClaimRequest, tokenHash []byte) (*whalereinv1.PairingClaimResponse, error) {
+	outcome, err := s.store.PairingOutcome(ctx, request.ClaimId, request.DeviceId)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, store.ErrNotFound
+		}
+		return nil, ErrInternal
+	}
+	if !bytes.Equal(outcome.TokenHash, tokenHash) || !bytes.Equal(outcome.FinishHash, claimDigest(request)) {
+		return nil, ErrInvalidClaim
+	}
+	if !outcome.Active {
+		return nil, ErrPairingCommittedUnavailable
+	}
+	if outcome.CommitBindingUnproven {
+		return nil, ErrPairingCommittedUnconfirmed
+	}
+	if !outcome.HostConfirmed || len(outcome.DevicePublicKey) != 32 || outcome.ProtocolVersion != request.ProtocolVersion {
+		return nil, ErrPairingCommittedUnconfirmed
+	}
+	return &whalereinv1.PairingClaimResponse{ClaimId: outcome.ClaimID, HostId: outcome.HostID, DeviceId: outcome.DeviceID,
+		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: outcome.DevicePublicKey,
+		DeviceToken: request.DeviceToken, ProtocolVersion: outcome.ProtocolVersion}, nil
+}
+
+func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time, deviceGeneration, hostGeneration int64) (*whalereinv1.PairingClaimResponse, error) {
 
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
 		s.recordFailure(ctx, token.TokenHash, now)
@@ -321,6 +441,13 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 	if err != nil || len(claimResult.GetNoiseMessage()) == 0 {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
+	}
+	observedAt := s.now()
+	if !observedAt.Before(token.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+	if !observedAt.Before(now.Add(s.cfg.ClaimTTL)) {
+		return nil, ErrClaimRequired
 	}
 
 	// HELLO is small enough to bootstrap an unknown peer using legacy framing.
@@ -348,7 +475,16 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 	digest := sha256.Sum256(request.NoiseMessage)
 	if err := s.store.SavePairingOperation(ctx, store.PairingOperation{ClaimID: request.ClaimId, TokenHash: token.TokenHash,
-		HostID: token.HostID, DeviceID: request.DeviceId, HelloHash: digest[:], HelloResponse: encoded, ExpiresAt: now.Add(s.cfg.ClaimTTL)}); err != nil {
+		HostID: token.HostID, DeviceID: request.DeviceId, DeviceGeneration: deviceGeneration, HostGeneration: hostGeneration, HelloHash: digest[:], HelloResponse: encoded, ExpiresAt: now.Add(s.cfg.ClaimTTL)}); err != nil {
+		if errors.Is(err, store.ErrPairingFenced) {
+			return nil, ErrPairingFenced
+		}
+		if errors.Is(err, store.ErrPairingInvitationExpired) {
+			return nil, ErrTokenExpired
+		}
+		if errors.Is(err, store.ErrPairingIntentExpired) {
+			return nil, ErrClaimRequired
+		}
 		return nil, ErrInternal
 	}
 	return proto.Clone(reply).(*whalereinv1.PairingClaimResponse), nil
@@ -420,6 +556,15 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
 	}
+	// FINISH and AUTHORIZE both cross a Host transport boundary. Their reply
+	// cannot extend an invitation, operation, or staged COMMIT deadline.
+	commitAt := s.now()
+	if !commitAt.Before(token.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+	if !commitAt.Before(operationState.ExpiresAt) || commitAt.UnixMilli() >= authorize.ExpiresAtUnixMs {
+		return nil, ErrClaimRequired
+	}
 	commit := proto.Clone(authorize).(*whalereinv1.PairingClaim)
 	commit.Phase = whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT
 	commit.TokenHash = ""
@@ -430,8 +575,17 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		DevicePublicKey: claimResult.DevicePublicKey, ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(), ProtocolVersion: request.ProtocolVersion}
 	encodedResponse, _ := proto.Marshal(durableResponse)
 	operation := &store.PairingOperation{ClaimID: request.ClaimId, FinishHash: claimDigest(request), FinishResponse: encodedResponse}
-	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash[:], now, notice, operation)
+	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash[:], commitAt, notice, operation)
 	if err != nil {
+		if errors.Is(err, store.ErrPairingFenced) {
+			return nil, ErrPairingFenced
+		}
+		if errors.Is(err, store.ErrPairingInvitationExpired) {
+			return nil, ErrTokenExpired
+		}
+		if errors.Is(err, store.ErrPairingIntentExpired) {
+			return nil, ErrClaimRequired
+		}
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, fmt.Errorf("%w: commit pairing", ErrInternal)
 	}
@@ -440,7 +594,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 
 	if helloReply.HostFingerprint != "" {
-		if err := s.store.UpdateHostMetadata(ctx, token.HostID, helloReply.HostFingerprint, helloReply.ProtocolVersion, now); err != nil {
+		if err := s.store.UpdateHostMetadata(ctx, token.HostID, helloReply.HostFingerprint, helloReply.ProtocolVersion, commitAt); err != nil {
 			s.logger.Warn("host metadata update failed", "host", s.masker.Host(token.HostID), "error", err.Error())
 		}
 	}
@@ -474,11 +628,18 @@ func (s *Service) completeClaim(ctx context.Context, done *completedClaim) (*wha
 			return nil, ErrHostUnavailable
 		}
 		committed, err := decodePairingResult(result)
-		if err != nil || !committed.Authorized {
+		if err != nil || result.GetStatus() != whalereinv1.OnlineStatus_succeeded || !committed.Authorized || committed.DeviceId != done.response.DeviceId || result.GetHostId() != done.response.HostId || result.GetDeviceId() != done.response.DeviceId || result.GetRequestId() != done.commit.RequestId {
 			return nil, ErrHostRejected
 		}
 		done.ready = true
 		s.logger.Info("pairing finished", "host", s.masker.Host(done.response.HostId), "device", s.masker.Device(done.response.DeviceId), "trace_id", diagnostics.TraceID(ctx))
+	}
+	confirmed, err := s.store.ConfirmPairingHost(ctx, done.response.ClaimId, done.response.HostId, done.response.DeviceId, done.commit.RequestId, s.now())
+	if err != nil {
+		return nil, ErrHostUnavailable
+	}
+	if !confirmed {
+		return nil, ErrPairingCommittedUnavailable
 	}
 	return proto.Clone(done.response).(*whalereinv1.PairingClaimResponse), nil
 }

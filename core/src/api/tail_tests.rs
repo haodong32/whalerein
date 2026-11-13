@@ -130,7 +130,7 @@ async fn watch_delivers_typed_preview_without_changing_the_committed_cursor() {
         let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
     });
-    let key = core.session_key("session-1").unwrap();
+    let key = core.session_key("session-1").await.unwrap();
     let mut seen = 0;
     let count = core
         .watch_session(&key, Some(Duration::from_secs(2)), |update| {
@@ -168,7 +168,7 @@ async fn invalid_live_ciphertext_is_reported_without_revoking_pairing() {
         let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
     });
-    let key = core.session_key("session-1").unwrap();
+    let key = core.session_key("session-1").await.unwrap();
     let error = core
         .watch_session(&key, Some(Duration::from_secs(2)), |_| true)
         .await
@@ -185,7 +185,7 @@ async fn rejected_subscription_fails_without_forgetting_identity() {
         let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
     });
-    let key = core.session_key("session-1").unwrap();
+    let key = core.session_key("session-1").await.unwrap();
     assert!(core
         .watch_session(&key, Some(Duration::from_secs(1)), |_| true)
         .await
@@ -205,7 +205,7 @@ async fn watch_deadline_cancels_the_mqtt_pump_and_closes_its_connection() {
             }
         }
     });
-    let key = core.session_key("session-1").unwrap();
+    let key = core.session_key("session-1").await.unwrap();
     assert!(matches!(
         core.watch_session(&key, Some(Duration::from_millis(150)), |_| true)
             .await,
@@ -219,7 +219,7 @@ async fn watch_deadline_cancels_the_mqtt_pump_and_closes_its_connection() {
 #[tokio::test]
 async fn host_scoped_sync_is_idempotent_and_summary_refresh_does_not_advance_it() {
     let (_dir, core, _access, _listener) = setup().await;
-    let key = core.session_key("session-1").unwrap();
+    let key = core.session_key("session-1").await.unwrap();
     let before = core.cache().unwrap().history_cursor(&key).unwrap();
     core.sessions("host-1").await.unwrap();
     assert_eq!(core.cache().unwrap().history_cursor(&key).unwrap(), before);
@@ -250,6 +250,7 @@ async fn revocation_while_waiting_for_command_ends_pairing() {
         "expected confirmed revocation: {error:?}"
     );
     assert!(!core.is_paired());
+    assert_eq!(core.unconfirmed_revoked_commands().unwrap().len(), 1);
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
 }
 

@@ -9,6 +9,7 @@ package broker
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,12 +40,17 @@ type ReadyHandler func(ctx context.Context, hostID string) error
 // HostKeyHandler stores the Ed25519 public key carried by HostReady.
 type HostKeyHandler func(ctx context.Context, hostID string, publicKey []byte) error
 
+// DeviceHosts resolves a device to every host holding a live grant. Presence
+// events are scoped per authorized host; a device id never implies a host.
+type DeviceHosts func(ctx context.Context, deviceID string) ([]string, error)
+
 // Dependencies wires a broker service.
 type Dependencies struct {
 	Config       config.BrokerConfig
 	Presence     *Presence
 	Connector    Connector
 	Disconnecter Disconnecter
+	DeviceHosts  DeviceHosts
 	Metrics      *diagnostics.Metrics
 	Masker       *diagnostics.Masker
 	Logger       *slog.Logger
@@ -56,6 +62,7 @@ type Service struct {
 	presence     *Presence
 	connector    Connector
 	disconnecter Disconnecter
+	deviceHosts  DeviceHosts
 	metrics      *diagnostics.Metrics
 	masker       *diagnostics.Masker
 	logger       *slog.Logger
@@ -97,17 +104,22 @@ func New(deps Dependencies) (*Service, error) {
 	if deps.Masker == nil {
 		deps.Masker = diagnostics.NewMasker()
 	}
-	return &Service{
+	service := &Service{
 		cfg:          deps.Config,
 		presence:     deps.Presence,
 		connector:    deps.Connector,
 		disconnecter: deps.Disconnecter,
+		deviceHosts:  deps.DeviceHosts,
 		metrics:      deps.Metrics,
 		masker:       deps.Masker,
 		logger:       deps.Logger,
 		transient:    make(map[string]chan *whalereinv1.HostResult),
 		now:          func() time.Time { return time.Now().UTC() },
-	}, nil
+	}
+	// Presence is shared with HTTP callbacks; the Handler emits one bounded
+	// host-scoped event per accepted device-offline edge.
+	deps.Presence.SetDeviceOfflineHandler(service.handleDeviceOffline)
+	return service, nil
 }
 
 // SetResultHandler installs the permanent result consumer.
@@ -185,7 +197,8 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
-			ResultFilter, EventFilter, DeviceAckFilter, SysConnectedFilter, SysDisconnectedFilter,
+			ResultFilter, EventFilter, DeviceAckFilter, DeviceWillFilter,
+			SysConnectedFilter, SysDisconnectedFilter,
 		}, 1)
 		cancel()
 		if err != nil {
@@ -258,6 +271,10 @@ func (s *Service) baseContext() context.Context {
 // loop, so it performs only validation, a non-blocking transient handoff and
 // bounded handler calls.
 func (s *Service) HandleMessage(topic string, payload []byte) {
+	if _, ok := ParseDeviceWillTopic(topic); ok {
+		s.presence.HandleDeviceWill(topic, payload)
+		return
+	}
 	if _, _, ok := ParseSysClientTopic(topic); ok {
 		s.presence.HandleSysMessage(topic, payload)
 		return
@@ -273,6 +290,11 @@ func (s *Service) HandleMessage(topic string, payload []byte) {
 		s.handleResult(parsed.HostID, payload)
 	case KindEvent:
 		s.handleEvent(parsed.HostID, payload)
+	case KindPresence:
+		// Access publishes host-scoped presence; Hosts consume it. If a
+		// broker/ACL change ever echoes it back, it must not enter result or
+		// event routing.
+		return
 	default:
 		s.metrics.RouteError()
 	}
@@ -514,6 +536,90 @@ func (s *Service) publishTimeout() time.Duration {
 		return s.cfg.PublishTimeout.D()
 	}
 	return 5 * time.Second
+}
+
+// deviceOfflineEvent is the only host-scoped presence payload Access publishes.
+// It never carries message content, credentials, paths or pairing tokens.
+type deviceOfflineEvent struct {
+	Event      string `json:"event"`
+	DeviceID   string `json:"device_id"`
+	Reason     string `json:"reason"`
+	ObservedAt string `json:"observed_at"`
+}
+
+// handleDeviceOffline publishes one device_offline JSON event to each host
+// holding a live grant for the device. Hosts are resolved through the store
+// callback; the client id never implies a host.
+func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.Time) {
+	if !validID(deviceID) {
+		s.metrics.PresenceInvalid()
+		return
+	}
+	if s.deviceHosts == nil {
+		s.metrics.DeviceOfflinePublishFailed()
+		s.logger.Warn("device offline has no host resolver")
+		return
+	}
+	if observedAt.IsZero() {
+		observedAt = s.now()
+	}
+	ctx, cancel := context.WithTimeout(s.baseContext(), 10*time.Second)
+	defer cancel()
+	hostIDs, err := s.deviceHosts(ctx, deviceID)
+	if err != nil {
+		s.metrics.DeviceOfflinePublishFailed()
+		s.logger.Warn("device offline host lookup failed", "device", s.masker.Device(deviceID), "error", err.Error())
+		return
+	}
+	if len(hostIDs) == 0 {
+		s.logger.Debug("device offline has no authorized hosts", "device", s.masker.Device(deviceID))
+		return
+	}
+	payload, err := json.Marshal(deviceOfflineEvent{
+		Event:      deviceOfflineEventName,
+		DeviceID:   deviceID,
+		Reason:     reason,
+		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		s.metrics.DeviceOfflinePublishFailed()
+		return
+	}
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		s.metrics.DeviceOfflinePublishFailed()
+		s.logger.Warn("device offline could not publish without an mqtt session")
+		return
+	}
+	publishCtx, publishCancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer publishCancel()
+	for _, hostID := range hostIDs {
+		if !validID(hostID) {
+			s.metrics.DeviceOfflinePublishFailed()
+			continue
+		}
+		if err := session.Publish(publishCtx, PresenceTopic(hostID), payload, 1); err != nil {
+			s.metrics.DeviceOfflinePublishFailed()
+			s.logger.Warn("device offline publish failed", "host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "error", err.Error())
+			continue
+		}
+		s.logger.Info("device offline published", "host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "reason", reason)
+	}
+}
+
+// PublishPresence publishes a bounded control event to one host's exact
+// presence topic. It is used for request/client liveness, not message content.
+func (s *Service) PublishPresence(ctx context.Context, hostID string, payload []byte) error {
+	if !validID(hostID) || len(payload) == 0 {
+		return errors.New("invalid presence publish")
+	}
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		return errors.New("mqtt session unavailable")
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer cancel()
+	return session.Publish(publishCtx, PresenceTopic(hostID), payload, 1)
 }
 
 // IsHostOnline implements the broker-derived presence boundary used by auth,

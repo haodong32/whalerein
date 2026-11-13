@@ -28,27 +28,80 @@ var ErrNotFound = errors.New("not found")
 // command replay.
 var ErrConflict = errors.New("conflict")
 
+// ErrPairingFenced proves an unfinished pairing intent cannot commit.
+var ErrPairingFenced = errors.New("pairing intent invalidated")
+
+// Pairing deadlines are distinguished so callers do not confuse expiration
+// with a consumed invitation or a proven revocation fence.
+var ErrPairingInvitationExpired = errors.New("pairing invitation expired")
+var ErrPairingIntentExpired = errors.New("pairing intent expired")
+
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
 const migrationLockKey int64 = 0x5748524143434553 // "WHRACCES"
 
+// database is the narrow storage seam the Store needs. It is satisfied by
+// *pgxpool.Pool in production and by a hand-rolled double in unit tests so
+// public Store methods can be exercised without PostgreSQL.
+type database interface {
+	Ping(context.Context) error
+	Close()
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Begin(context.Context) (pgx.Tx, error)
+}
+
 // Store is a PostgreSQL-backed state store. It is safe for concurrent use.
 type Store struct {
-	pool *pgxpool.Pool
+	db database
+}
+
+// newStore binds a storage seam. Tests use it to install a scripted database.
+func newStore(db database) *Store { return &Store{db: db} }
+
+// unavailableRow reports that no database seam is configured. Operations keep
+// their validation-before-database behavior and fail closed instead of panicking.
+type unavailableRow struct{ err error }
+
+func (r unavailableRow) Scan(...any) error { return r.err }
+
+// The helpers below defer seam access until an operation has validated its
+// inputs. They keep a zero Store failing closed rather than panicking.
+func (s *Store) poolBegin(ctx context.Context) (pgx.Tx, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store: no database pool")
+	}
+	return s.db.Begin(ctx)
+}
+
+func (s *Store) poolQuery(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store: no database pool")
+	}
+	return s.db.Query(ctx, sql, args...)
+}
+
+func (s *Store) poolQueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if s == nil || s.db == nil {
+		return unavailableRow{err: errors.New("store: no database pool")}
+	}
+	return s.db.QueryRow(ctx, sql, args...)
 }
 
 // Open parses a DSN, opens a pool and verifies connectivity.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse database_url: %w", err)
+		// pgx parse errors can include user-supplied connection identity.
+		return nil, errors.New("parse database_url: invalid connection configuration")
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	store := &Store{pool: pool}
+	store := newStore(pool)
 	if err := store.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -58,37 +111,50 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 
 // NewWithPool wraps an existing pool. It is intended for component tests and
 // for callers that already own the pool.
-func NewWithPool(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewWithPool(pool *pgxpool.Pool) *Store {
+	if pool == nil {
+		return &Store{}
+	}
+	return newStore(pool)
+}
 
 // Close releases the connection pool.
 func (s *Store) Close() {
-	if s != nil && s.pool != nil {
-		s.pool.Close()
+	if s != nil && s.db != nil {
+		s.db.Close()
 	}
 }
 
 // Ping verifies that the database accepts queries.
 func (s *Store) Ping(ctx context.Context) error {
-	if s == nil || s.pool == nil {
+	if s == nil || s.db == nil {
 		return errors.New("store: no database pool")
 	}
-	if err := s.pool.Ping(ctx); err != nil {
+	if err := s.db.Ping(ctx); err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}
 	return nil
 }
 
 // Pool exposes the underlying pool for component tests.
-func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+func (s *Store) Pool() *pgxpool.Pool {
+	pool, _ := s.db.(*pgxpool.Pool)
+	return pool
+}
 
 // Migrate applies checksummed migrations once under a transaction-scoped lock.
 // Existing unversioned installations are adopted without deleting their state.
 func (s *Store) Migrate(ctx context.Context) error {
+	return migrate(ctx, s.poolBegin)
+}
+
+// migrate applies the embedded ledger and schema atomically under a database lock.
+func migrate(ctx context.Context, begin func(context.Context) (pgx.Tx, error)) error {
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
@@ -298,15 +364,16 @@ type CreateOutcome struct {
 
 // HostResultUpdate is a validated host result targeting one request row.
 type HostResultUpdate struct {
-	RequestID    string
-	HostID       string
-	DeviceID     string
-	Status       whalereinv1.OnlineStatus
-	ResultBody   []byte
-	ErrorCode    whalereinv1.ErrorCode
-	ErrorMessage string
-	ChannelID    string
-	At           time.Time
+	RequestID          string
+	HostID             string
+	DeviceID           string
+	Status             whalereinv1.OnlineStatus
+	TransportPreflight bool
+	ResultBody         []byte
+	ErrorCode          whalereinv1.ErrorCode
+	ErrorMessage       string
+	ChannelID          string
+	At                 time.Time
 }
 
 // Revocation is one pending revocation row.

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
+	"google.golang.org/protobuf/proto"
 )
 
 var requestColumnsR = prefixColumns(requestColumns, "r.")
@@ -24,6 +26,10 @@ func prefixColumns(columns, prefix string) string {
 // CreateRequest inserts a request row or returns the existing row for the same
 // (host, device, command_id). A different digest is reported without writing.
 func (s *Store) CreateRequest(ctx context.Context, req Request) (CreateOutcome, error) {
+	return createRequest(ctx, s.poolQueryRow, req)
+}
+
+func createRequest(ctx context.Context, queryRow func(context.Context, string, ...any) pgx.Row, req Request) (CreateOutcome, error) {
 	if req.ClientTransportVersion != 0 && req.ClientTransportVersion != 2 {
 		return CreateOutcome{}, errors.New("invalid receiver transport capability")
 	}
@@ -84,17 +90,17 @@ func (s *Store) CreateRequest(ctx context.Context, req Request) (CreateOutcome, 
 
 	if req.CommandID != "" {
 		insertSQL := `
-			INSERT INTO requests (` + requestColumns + `)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+			INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,true)
 			ON CONFLICT (host_id, device_id, command_id) WHERE command_id <> '' DO NOTHING
 			RETURNING ` + requestColumns
-		row := s.pool.QueryRow(ctx, insertSQL, args...)
+		row := queryRow(ctx, insertSQL, args...)
 		inserted, err := scanRequest(row)
 		switch {
 		case err == nil:
 			return CreateOutcome{Request: inserted, Created: true}, nil
 		case errors.Is(err, pgx.ErrNoRows):
-			existing, err := s.requestByCommand(ctx, req.HostID, req.DeviceID, req.CommandID)
+			existing, err := requestByCommand(ctx, queryRow, req.HostID, req.DeviceID, req.CommandID)
 			if err != nil {
 				return CreateOutcome{}, err
 			}
@@ -110,10 +116,10 @@ func (s *Store) CreateRequest(ctx context.Context, req Request) (CreateOutcome, 
 	}
 
 	insertSQL := `
-		INSERT INTO requests (` + requestColumns + `)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+		INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,true)
 		RETURNING ` + requestColumns
-	row := s.pool.QueryRow(ctx, insertSQL, args...)
+	row := queryRow(ctx, insertSQL, args...)
 	inserted, err := scanRequest(row)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -124,8 +130,8 @@ func (s *Store) CreateRequest(ctx context.Context, req Request) (CreateOutcome, 
 	return CreateOutcome{Request: inserted, Created: true}, nil
 }
 
-func (s *Store) requestByCommand(ctx context.Context, hostID, deviceID, commandID string) (Request, error) {
-	row := s.pool.QueryRow(ctx, `
+func requestByCommand(ctx context.Context, queryRow func(context.Context, string, ...any) pgx.Row, hostID, deviceID, commandID string) (Request, error) {
+	row := queryRow(ctx, `
 		SELECT `+requestColumns+` FROM requests
 		WHERE host_id = $1 AND device_id = $2 AND command_id = $3`, hostID, deviceID, commandID)
 	req, err := scanRequest(row)
@@ -137,7 +143,7 @@ func (s *Store) requestByCommand(ctx context.Context, hostID, deviceID, commandI
 
 // GetRequest reads one request state copy by primary key.
 func (s *Store) GetRequest(ctx context.Context, requestID string) (Request, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+requestColumns+` FROM requests WHERE request_id = $1`, requestID)
+	row := s.db.QueryRow(ctx, `SELECT `+requestColumns+` FROM requests WHERE request_id = $1`, requestID)
 	req, err := scanRequest(row)
 	if err != nil {
 		return Request{}, wrapRequestScan(err)
@@ -165,7 +171,7 @@ func (s *Store) ClaimDueRequests(ctx context.Context, now time.Time, limit int, 
 		FROM due
 		WHERE r.request_id = due.request_id
 		RETURNING ` + requestColumnsR
-	rows, err := s.pool.Query(ctx, query, now, limit, now.Add(lease))
+	rows, err := s.db.Query(ctx, query, now, limit, now.Add(lease))
 	if err != nil {
 		return nil, fmt.Errorf("claim due requests: %w", err)
 	}
@@ -189,7 +195,7 @@ func (s *Store) ClaimDueRequests(ctx context.Context, now time.Time, limit int, 
 // RequeueDuePublished makes still-received published rows due again so an
 // unacknowledged command can be retried. Terminal rows are never requeued.
 func (s *Store) RequeueDuePublished(ctx context.Context, now time.Time, maxAttempts int) (int64, error) {
-	cmd, err := s.pool.Exec(ctx, `
+	cmd, err := s.db.Exec(ctx, `
 		UPDATE requests
 		SET forward_state = 'pending', forward_after = $1, updated_at = $1
 		WHERE status = 'received'
@@ -206,7 +212,7 @@ func (s *Store) RequeueDuePublished(ctx context.Context, now time.Time, maxAttem
 // MarkPublished records a successful MQTT publish. A later retry re-publishes
 // the same row until the host writes a result or attempts are exhausted.
 func (s *Store) MarkPublished(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 		UPDATE requests
 		SET forward_state = 'published', published_once = true,
 		    forward_after = $2, updated_at = $3
@@ -218,16 +224,19 @@ func (s *Store) MarkPublished(ctx context.Context, requestID string, now time.Ti
 	return nil
 }
 
-// MarkPublishFailure either schedules another attempt or, for a request that
-// was never published, moves it to host_offline after the attempt budget. A
-// row that was published at least once stays received until expiry.
+// MarkPublishFailure schedules another attempt or leaves an unconfirmed
+// publication unknown after the attempt budget. A row known to have been
+// published stays received until expiry and can still accept a Host result.
 func (s *Store) MarkPublishFailure(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration, maxAttempts int) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 		UPDATE requests
 		SET status = CASE
                 WHEN kind = 5 THEN status
-		        WHEN forward_attempts >= $2 AND NOT published_once THEN 'host_offline'
+		        WHEN forward_attempts >= $2 AND NOT published_once THEN 'unknown'
 		        ELSE status END,
+		    error_code = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN $5
+		        ELSE error_code END,
 		    forward_state = CASE
                 WHEN kind = 5 THEN 'pending'
 		        WHEN forward_attempts >= $2 AND published_once THEN 'published'
@@ -239,7 +248,7 @@ func (s *Store) MarkPublishFailure(ctx context.Context, requestID string, now ti
 		        ELSE $3 END,
 		    updated_at = $4
 		WHERE request_id = $1 AND status = 'received'`,
-		requestID, maxAttempts, now.Add(retryAfter), now)
+		requestID, maxAttempts, now.Add(retryAfter), now, int32(whalereinv1.ErrorCode_unavailable))
 	if err != nil {
 		return fmt.Errorf("mark request publish failure: %w", err)
 	}
@@ -249,21 +258,64 @@ func (s *Store) MarkPublishFailure(ctx context.Context, requestID string, now ti
 // ApplyHostResult conditionally updates the same request row. The WHERE clause
 // encodes exactly the allowed online status transitions.
 func (s *Store) ApplyHostResult(ctx context.Context, update HostResultUpdate) (bool, error) {
+	return applyHostResult(ctx, s.poolBegin, update)
+}
+
+// applyHostResult atomically records the Host result and any valid pairing acknowledgement.
+func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, error), update HostResultUpdate) (bool, error) {
 	if !validStatus(update.Status) {
 		return false, fmt.Errorf("apply host result: invalid status %q", update.Status)
+	}
+	if update.TransportPreflight && (update.Status != whalereinv1.OnlineStatus_rejected ||
+		(update.ErrorCode != whalereinv1.ErrorCode_protocol_version_incompatible && update.ErrorCode != whalereinv1.ErrorCode_payload_too_large)) {
+		return false, errors.New("apply host result: invalid transport preflight")
 	}
 	if update.ResultBody == nil {
 		update.ResultBody = []byte{}
 	}
-	cmd, err := s.pool.Exec(ctx, `
+	var acknowledgement whalereinv1.PairingClaimResult
+	candidate := update.Status == whalereinv1.OnlineStatus_succeeded && proto.Unmarshal(update.ResultBody, &acknowledgement) == nil && acknowledgement.Authorized && acknowledgement.DeviceId == update.DeviceID
+	tx, err := begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if candidate {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, update.DeviceID); err != nil {
+			return false, err
+		}
+	}
+	// Acquire the request row after the device fence. Sampling time in an
+	// UPDATE expression is insufficient: PostgreSQL may evaluate it before
+	// waiting for the row lock.
+	var expiresAt time.Time
+	var bodiesCleared, legacyRetentionUnknown bool
+	var requestBodyLength int64
+	err = tx.QueryRow(ctx, `SELECT expires_at,COALESCE(bodies_cleared,false),bodies_cleared IS NULL,octet_length(request_body) FROM requests WHERE request_id=$1 AND host_id=$2 AND device_id=$3 FOR UPDATE`, update.RequestID, update.HostID, update.DeviceID).Scan(&expiresAt, &bodiesCleared, &legacyRetentionUnknown, &requestBodyLength)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock request for host result: %w", err)
+	}
+	var databaseNow time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
+		return false, err
+	}
+	applicationNow := time.Now().UTC()
+	// Old empty rows cannot prove whether cleanup already occurred. A nonempty
+	// legacy request body is safe: only cleanup clears it, and no path restores it.
+	retentionKnown := !legacyRetentionUnknown || requestBodyLength > 0
+	retainBody := !bodiesCleared && retentionKnown && update.At.Before(expiresAt) && applicationNow.Before(expiresAt) && databaseNow.Before(expiresAt)
+	cmd, err := tx.Exec(ctx, `
 		UPDATE requests
-		SET status = $4,
-		    result_body = CASE WHEN expires_at > $9 THEN $5 ELSE result_body END,
-		    error_code = $6,
+		SET status = CASE WHEN $13 AND (NOT forward_provenance_known OR published_once OR forward_attempts <> 1) THEN 'unknown' ELSE $4 END,
+		    result_body = CASE WHEN $10 THEN $5 ELSE result_body END,
+		    error_code = CASE WHEN $13 AND (NOT forward_provenance_known OR published_once OR forward_attempts <> 1) THEN $14::integer ELSE $6::integer END,
 		    error_message = $7,
 		    channel_id = CASE WHEN $8 <> '' THEN $8 ELSE channel_id END,
 		    forward_state = 'none',
-		    updated_at = $9
+		    updated_at = GREATEST(updated_at,$9,$11,$12)
 		WHERE request_id = $1 AND host_id = $2 AND device_id = $3
 		  AND (
 		      (status = 'received' AND $4 IN ('host_offline','rejected','host_accepted','succeeded','failed','unknown'))
@@ -279,21 +331,45 @@ func (s *Store) ApplyHostResult(ctx context.Context, update HostResultUpdate) (b
 		update.ErrorMessage,
 		update.ChannelID,
 		update.At,
+		retainBody,
+		applicationNow,
+		databaseNow,
+		update.TransportPreflight,
+		int32(whalereinv1.ErrorCode_unavailable),
 	)
 	if err != nil {
 		return false, fmt.Errorf("apply host result: %w", err)
 	}
-	return cmd.RowsAffected() == 1, nil
+	applied := cmd.RowsAffected() == 1
+	if applied && candidate {
+		var claimID string
+		err = tx.QueryRow(ctx, `SELECT o.claim_id FROM pairing_outcomes o JOIN requests r ON r.request_id=o.commit_request_id
+          WHERE o.commit_request_id=$1 AND o.host_id=$2 AND o.device_id=$3 AND r.kind=$4 AND r.expires_at>$5`, update.RequestID, update.HostID, update.DeviceID, int32(whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE), update.At).Scan(&claimID)
+		if err == nil {
+			if _, err = confirmPairingHostTx(ctx, tx, claimID, update.HostID, update.DeviceID, update.RequestID, update.At, true); err != nil {
+				return false, err
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return false, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return applied, nil
 }
 
 // ClearExpiredBodies drops request and result bodies after expiry while
 // preserving the routing identity and terminal status copy.
 func (s *Store) ClearExpiredBodies(ctx context.Context, now time.Time) (int64, error) {
-	cmd, err := s.pool.Exec(ctx, `
+	if err := s.reconcilePairingOutcomes(ctx, now, false); err != nil {
+		return 0, fmt.Errorf("reconcile pairing outcomes: %w", err)
+	}
+	cmd, err := s.db.Exec(ctx, `
 		UPDATE requests
-		SET request_body = ''::bytea, result_body = ''::bytea, updated_at = $1
+		SET request_body = ''::bytea, result_body = ''::bytea, bodies_cleared=true, updated_at = GREATEST(updated_at,$1)
 		WHERE expires_at <= $1
-		  AND (request_body <> ''::bytea OR result_body <> ''::bytea)`, now)
+		  AND (request_body <> ''::bytea OR result_body <> ''::bytea OR bodies_cleared IS DISTINCT FROM true)`, now)
 	if err != nil {
 		return 0, fmt.Errorf("clear expired request bodies: %w", err)
 	}
@@ -303,7 +379,7 @@ func (s *Store) ClearExpiredBodies(ctx context.Context, now time.Time) (int64, e
 // CountRequests is a component-test helper.
 func (s *Store) CountRequests(ctx context.Context) (int, error) {
 	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM requests`).Scan(&count); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM requests`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count requests: %w", err)
 	}
 	return count, nil
@@ -312,7 +388,7 @@ func (s *Store) CountRequests(ctx context.Context) (int, error) {
 // DeleteExpiredQueries removes a bounded batch of old, non-control records.
 // Command and activation identities remain available for dedupe and recovery.
 func (s *Store) DeleteExpiredQueries(ctx context.Context, before time.Time) (int64, error) {
-	result, err := s.pool.Exec(ctx, `DELETE FROM requests WHERE request_id IN (
+	result, err := s.db.Exec(ctx, `DELETE FROM requests WHERE request_id IN (
         SELECT request_id FROM requests WHERE expires_at <= $1 AND command_id=''
         AND kind IN (1,2) ORDER BY expires_at,request_id LIMIT 2000)`, before)
 	if err != nil {

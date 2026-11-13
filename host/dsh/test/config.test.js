@@ -20,6 +20,8 @@ test('when configuration values are supplied or omitted, explicit values and saf
   assert.equal(config.outboxPerDeviceLimit, 100)
   assert.equal(config.outboxTotalLimit, 1000)
   assert.equal(config.approvalMode, 'claim')
+  assert.equal(config.pendingQueueEnabled, true)
+  assert.equal(config.enableOpenQuestionBroker, true)
   assert.equal(config.protocolVersion, 1)
 })
 
@@ -139,3 +141,17 @@ test('when resolving topic templates, only the four wire topics are produced', (
   assert.equal(t.deviceEvent('device-1'), 'whalerein/v1/h/host-1/d/device-1/event')
 })
 
+
+test('production capability switches default open and accept an explicit opt-out', () => {
+  const config = resolveConfig(base)
+  assert.equal(config.pendingQueueEnabled, true)
+  assert.equal(config.enableOpenQuestionBroker, true)
+  const off = resolveConfig({ ...base, pending_queue_enabled: false, enable_open_question_broker: false })
+  assert.equal(off.pendingQueueEnabled, false)
+  assert.equal(off.enableOpenQuestionBroker, false)
+  const on = resolveConfig({ ...base, pending_queue_enabled: 'true', enable_open_question_broker: '1' })
+  assert.equal(on.pendingQueueEnabled, true)
+  assert.equal(on.enableOpenQuestionBroker, true)
+  assert.throws(() => resolveConfig({ ...base, pending_queue_enabled: 'maybe' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, enable_open_question_broker: 'maybe' }), ConfigError)
+})

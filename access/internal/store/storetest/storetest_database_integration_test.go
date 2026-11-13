@@ -8,8 +8,6 @@ import (
 
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // When a test schema is created and reopened, each store connects to that same isolated schema.
@@ -77,7 +75,7 @@ func TestSchemaSetupReturnsRandomAndExecFailures(t *testing.T) {
 		t.Fatalf("random = %v", err)
 	}
 	ops = defaultSchemaOps()
-	ops.exec = func(context.Context, *pgxpool.Pool, string) error { return errors.New("exec failed") }
+	ops.exec = func(context.Context, schemaAdmin, string) error { return errors.New("exec failed") }
 	if _, _, err := newSchemaWithOps(defaultDSNForTest(), ops); err == nil || !strings.Contains(err.Error(), "create schema") {
 		t.Fatalf("exec = %v", err)
 	}

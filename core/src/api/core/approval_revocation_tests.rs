@@ -19,7 +19,7 @@ async fn fake_host_accepts_approval_submissions_then_self_revocation_clears_loca
     assert_eq!(access.host.lock().unwrap().commands_seen, 2);
     assert_eq!(core.cache().unwrap().command_counts().unwrap(), (2, 0));
     let revoked = core.revoke().await.unwrap();
-    assert_eq!(revoked, outcome.device_id);
+    assert_eq!(revoked.device_id, outcome.device_id);
     assert!(!core.is_paired());
     assert!(matches!(core.hosts().await, Err(CoreError::NotPaired)));
     assert!(!dir.path().join("config.json").exists());

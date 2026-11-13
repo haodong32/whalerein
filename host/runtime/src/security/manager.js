@@ -74,6 +74,7 @@ export class SecurityManager {
    * @param {number} [options.pendingTtlMs]
    * @param {number} [options.protocolVersion]
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
+   * @param {(channels: Array<{deviceId: string, channelId: string}>) => void} [options.onRevokedChannels]
    */
   constructor({
     hostId,
@@ -85,6 +86,7 @@ export class SecurityManager {
     protocolVersion = 1,
     maxPending = 32,
     codec = defaultCodec,
+    onRevokedChannels = () => {},
   }) {
     this.hostId = hostId
     this.identity = identity
@@ -95,6 +97,7 @@ export class SecurityManager {
     this.protocolVersion = protocolVersion
     this.maxPending = maxPending
     this.codec = resolveCodec(codec)
+    this.onRevokedChannels = onRevokedChannels
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
     this.hostFingerprintDisplay = formatFingerprint(identity.publicKey)
   }
@@ -139,6 +142,26 @@ export class SecurityManager {
     if (closed.length > 0) {
       this.logger?.info('channels_cleared', { count: closed.length })
     }
+    return closed
+  }
+
+  /**
+   * Drop the live channel and any in-progress handshake for one device.
+   * @param {string} deviceId
+   * @returns {Array<{deviceId: string, channelId: string}>} closed channels.
+   */
+  clearDeviceChannels(deviceId) {
+    const closed = []
+    for (const [channelId, channel] of this.#channels) {
+      if (channel.deviceId !== deviceId) continue
+      closed.push({ deviceId, channelId })
+      this.#channels.delete(channelId)
+      this.#deviceChannels.delete(deviceId)
+    }
+    for (const [key, pending] of this.#pendingHandshakes) {
+      if (pending.deviceId === deviceId) this.#pendingHandshakes.delete(key)
+    }
+    if (closed.length > 0) this.logger?.info('device_channels_cleared', { count: closed.length, device: deviceId })
     return closed
   }
 
@@ -562,6 +585,7 @@ export class SecurityManager {
       this.logger?.info('revocation_applied', { device: deviceId, replay: replayId, source: replayId ? 'access_notice' : 'host_settings', revokedAt: notice.revoked_at_unix_ms, final: notice.final === true })
     }
     if (notice.final === true) this.setRevocationsPending(false)
+    this.onRevokedChannels(closed)
     return {
       ack: { replay_id: replayId, device_ids: deviceIds },
       applied,

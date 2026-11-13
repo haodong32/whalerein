@@ -9,9 +9,11 @@ package requests
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/broker"
@@ -48,6 +50,7 @@ type Store interface {
 // Broker publishes one HostRequest after the transaction commits.
 type Broker interface {
 	PublishRequest(ctx context.Context, hostID string, request *whalereinv1.HostRequest) error
+	PublishPresence(ctx context.Context, hostID string, payload []byte) error
 }
 
 // Presence is broker-derived host connectivity.
@@ -88,7 +91,20 @@ type Service struct {
 	masker   *diagnostics.Masker
 	logger   *slog.Logger
 	now      func() time.Time
+	claimsMu sync.Mutex
+	claims   map[string]clientClaim
 }
+
+// clientClaim is an in-memory liveness lease for a device that polls a
+// non-terminal request over HTTP. Polling renews it; silence means the client
+// is gone. TTL remains the fallback when a request never polls.
+type clientClaim struct {
+	hostID   string
+	deviceID string
+	seen     time.Time
+}
+
+const clientPollLease = 10 * time.Second
 
 // SubmitInput identifies the authenticated device and the request body.
 type SubmitInput struct {
@@ -129,6 +145,7 @@ func New(deps Dependencies) (*Service, error) {
 		masker:   deps.Masker,
 		logger:   deps.Logger,
 		now:      deps.Now,
+		claims:   make(map[string]clientClaim),
 	}, nil
 }
 
@@ -164,6 +181,7 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 			"host", s.masker.Host(input.HostID), "device", s.masker.Device(input.DeviceID))
 		return outcome.Request, false, ErrDigestMismatch
 	}
+	s.recordClientClaim(outcome.Request)
 	if !outcome.Created {
 		// Same command id and digest: return the existing row without a
 		// second publish.
@@ -280,14 +298,22 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 		}
 		if err := s.broker.PublishRequest(ctx, row.HostID, envelope); err != nil {
 			if errors.Is(err, broker.ErrPeerTransportUnsupported) || errors.Is(err, broker.ErrMessageBudget) {
+				// Pairing COMMIT is a durable outbox item and must keep retrying
+				// until its deadline, including across transient peer capability.
+				if row.Kind == whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE {
+					if markErr := s.store.MarkPublishFailure(ctx, row.RequestID, now, s.cfg.RetryInterval, s.cfg.MaxAttempts); markErr != nil {
+						return markErr
+					}
+					continue
+				}
 				code := whalereinv1.ErrorCode_protocol_version_incompatible
 				if errors.Is(err, broker.ErrMessageBudget) {
 					code = whalereinv1.ErrorCode_payload_too_large
 				}
-				if _, applyErr := s.store.ApplyHostResult(ctx, store.HostResultUpdate{RequestID: row.RequestID, HostID: row.HostID, DeviceID: row.DeviceID, Status: whalereinv1.OnlineStatus_rejected, ErrorCode: code, At: now}); applyErr != nil {
+				if _, applyErr := s.store.ApplyHostResult(ctx, store.HostResultUpdate{RequestID: row.RequestID, HostID: row.HostID, DeviceID: row.DeviceID, Status: whalereinv1.OnlineStatus_rejected, TransportPreflight: true, ErrorCode: code, At: now}); applyErr != nil {
 					return applyErr
 				}
-				s.logger.Warn("logical transport rejected request", "trace_id", row.TraceID, "code", code.String(), "bytes", len(row.RequestBody))
+				s.logger.Warn("logical transport preflight failed", "trace_id", row.TraceID, "code", code.String(), "bytes", len(row.RequestBody))
 				continue
 			}
 			s.metrics.RouteError()
@@ -313,6 +339,106 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 	return nil
 }
 
+func terminalStatus(status whalereinv1.OnlineStatus) bool {
+	switch status {
+	case whalereinv1.OnlineStatus_succeeded, whalereinv1.OnlineStatus_failed,
+		whalereinv1.OnlineStatus_rejected, whalereinv1.OnlineStatus_host_offline,
+		whalereinv1.OnlineStatus_unknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) recordClientClaim(req store.Request) {
+	if req.RequestID == "" || req.HostID == "" || terminalStatus(req.Status) {
+		return
+	}
+	s.claimsMu.Lock()
+	for id, entry := range s.claims {
+		if entry.deviceID == req.DeviceID {
+			entry.seen = s.now()
+			s.claims[id] = entry
+		}
+	}
+	s.claims[req.RequestID] = clientClaim{hostID: req.HostID, deviceID: req.DeviceID, seen: s.now()}
+	s.claimsMu.Unlock()
+}
+
+// Touch renews the HTTP polling lease for one non-terminal request. A terminal
+// request is removed from the lease map.
+func (s *Service) Touch(deviceID, requestID string, status whalereinv1.OnlineStatus) {
+	if requestID == "" {
+		return
+	}
+	s.claimsMu.Lock()
+	defer s.claimsMu.Unlock()
+	if terminalStatus(status) {
+		delete(s.claims, requestID)
+	}
+	// Any successful HTTP call from this device proves it is still alive, so
+	// renew every non-terminal claim owned by the device. The answer claim may
+	// be waiting while the CLI polls a different result/query request id.
+	for id, entry := range s.claims {
+		if entry.deviceID == deviceID {
+			entry.seen = s.now()
+			s.claims[id] = entry
+		}
+	}
+}
+
+// SweepClientClaims releases requests whose device stopped polling. The event
+// is a bounded control message; Host aborts the request scope and the adapter
+// finally releases the native claim.
+func (s *Service) SweepClientClaims(ctx context.Context) {
+	now := s.now()
+	type staleClaim struct {
+		id string
+		clientClaim
+	}
+	s.claimsMu.Lock()
+	stale := make([]staleClaim, 0)
+	for id, entry := range s.claims {
+		if now.Sub(entry.seen) >= clientPollLease {
+			stale = append(stale, staleClaim{id, entry})
+			delete(s.claims, id)
+		}
+	}
+	s.claimsMu.Unlock()
+	for _, item := range stale {
+		row, err := s.store.GetRequest(ctx, item.id)
+		if err != nil || terminalStatus(row.Status) {
+			continue
+		}
+		payload, err := json.Marshal(map[string]string{
+			"event":       "request_stale",
+			"request_id":  item.id,
+			"host_id":     item.hostID,
+			"device_id":   item.deviceID,
+			"reason":      "client_poll_expired",
+			"observed_at": now.UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			continue
+		}
+		if err := s.broker.PublishPresence(ctx, item.hostID, payload); err != nil {
+			if s.metrics != nil {
+				s.metrics.RequestClaimStale()
+			}
+			s.logger.Warn("request stale publish failed",
+				"host", s.masker.Host(item.hostID), "device", s.masker.Device(item.deviceID),
+				"request", s.masker.Request(item.id), "error", err.Error())
+			continue
+		}
+		if s.metrics != nil {
+			s.metrics.RequestClaimStale()
+		}
+		s.logger.Info("request stale released",
+			"host", s.masker.Host(item.hostID), "device", s.masker.Device(item.deviceID),
+			"request", s.masker.Request(item.id))
+	}
+}
+
 // Run drives the forwarding retry loop until ctx is cancelled.
 func (s *Service) Run(ctx context.Context) error {
 	interval := s.cfg.ForwardInterval
@@ -329,6 +455,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if err := s.ForwardDue(ctx); err != nil && ctx.Err() == nil {
 				s.logger.Warn("forward loop failed", "error", err.Error())
 			}
+			s.SweepClientClaims(ctx)
 		}
 	}
 }

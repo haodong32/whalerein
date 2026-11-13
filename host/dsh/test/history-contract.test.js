@@ -77,21 +77,20 @@ test('native view replacement resets live identity and stale or unretained curso
  await adapter.close()
 })
 
-test('when DSH advertises live text, unsupported STEER delivery and sending into a running session fail without adding messages',async()=>{
+test('delivery modes preserve default queue, explicit start checks, and stable receipts',async()=>{
  const adapter=await source();const session=await adapter.getSession('s')
  assert.equal(session.sourceCapabilities.live_text,true)
- assert.deepEqual(session.sourceCapabilities.delivery_modes,['START_IF_IDLE'])
- const before=(await adapter.getSessionSnapshot('s')).events.length
- await assert.rejects(adapter.execute('s',{send_message:{text:'x',delivery_mode:'STEER'}}),e=>e.code==='unsupported_capability')
+ assert.deepEqual(session.sourceCapabilities.delivery_modes,['START_IF_IDLE','ENQUEUE_AFTER_RUN','STEER'])
  adapter.setRunning('s',true)
- await assert.rejects(adapter.execute('s',{send_message:{text:'x'}}),e=>e.code==='conflict')
- await assert.rejects(adapter.getSession('missing'),e=>e.code==='not_found')
+ await assert.rejects(adapter.execute('s',{send_message:{text:'x',delivery_mode:'START_IF_IDLE'}}),e=>e.code==='conflict')
+ await assert.rejects(adapter.execute('s',{send_message:{text:'x',delivery_mode:99}}),e=>e.code==='invalid_argument')
  await assert.rejects(adapter.execute('s',{}),e=>e.code==='unsupported_capability')
- assert.equal((await adapter.getSessionSnapshot('s')).events.length,before)
- adapter.setRunning('s',false)
- const accepted=await adapter.execute('s',{send_message:{text:'fixture visible text',delivery_mode:'START_IF_IDLE'}})
- assert.ok(accepted.command_accepted.message_id)
- assert.equal((await adapter.getSessionSnapshot('s')).events.filter(event=>event.type==='user/message').length,1)
+ const accepted=await adapter.execute('s',{send_message:{text:'x'}},{operationId:'delivery-1'})
+ assert.equal(accepted.command_accepted.delivery_id,'delivery-1')
+ const unspecified=await adapter.execute('s',{send_message:{text:'x',delivery_mode:'DELIVERY_MODE_UNSPECIFIED'}},{operationId:'delivery-default'})
+ assert.equal(unspecified.command_accepted.delivery_id,'delivery-default')
+ const steer=await adapter.execute('s',{send_message:{text:'x',delivery_mode:'STEER'}},{operationId:'delivery-2'})
+ assert.equal(steer.command_accepted.delivery_id,'delivery-2')
  await adapter.close()
 })
 
@@ -124,5 +123,34 @@ test('a source-native record at position zero advances from the empty history po
  const batch=adapter.conversation.history.notification({sessionId:'s',dshSeq:0,type:'assistant/message',data:{text:'x'},createdAt:1})
  assert.notEqual(batch.from_cursor,batch.to_cursor)
  assert.equal(batch.changes.length,1)
+ await adapter.close()
+})
+
+test('fake queue retains a delivery while running and admits it after the current turn', async () => {
+ const adapter=await source()
+ adapter.setRunning('s',true)
+ const receipt=await adapter.execute('s',{send_message:{text:'fixture',delivery_mode:'ENQUEUE_AFTER_RUN'}},{operationId:'queued-1'})
+ assert.equal(receipt.command_accepted.delivery_id,'queued-1')
+ await adapter.execute('s',{send_message:{text:'fixture',delivery_mode:'ENQUEUE_AFTER_RUN'}},{operationId:'queued-2'})
+ await adapter.execute('s',{send_message:{text:'fixture',delivery_mode:'STEER'}},{operationId:'steer-1'})
+ assert.equal((await adapter.getSession('s')).running,true)
+ assert.equal((await adapter.getSession('s')).queuedPrompts,3)
+ assert.equal((await adapter.getSessionSnapshot('s')).events.filter(event=>event.type==='user/message').length,0)
+ adapter.setRunning('s',false)
+ await new Promise(resolve=>setImmediate(resolve))
+ assert.equal((await adapter.getSession('s')).queuedPrompts,0)
+ assert.equal((await adapter.getSessionSnapshot('s')).events.filter(event=>event.type==='user/message').length,3)
+ await adapter.close()
+})
+
+test('a legacy-only source rejects queue and steer without fallback', async () => {
+ const adapter=await source()
+ adapter.deliveryModes=['START_IF_IDLE']
+ const before=(await adapter.getSessionSnapshot('s')).events.length
+ await assert.rejects(adapter.execute('s',{send_message:{text:'fixture'}}),error=>error.code==='unsupported_capability')
+ await assert.rejects(adapter.execute('s',{send_message:{text:'fixture',delivery_mode:'STEER'}}),error=>error.code==='unsupported_capability')
+ assert.equal((await adapter.getSessionSnapshot('s')).events.length,before)
+ const accepted=await adapter.execute('s',{send_message:{text:'fixture',delivery_mode:'START_IF_IDLE'}})
+ assert.ok(accepted.command_accepted.delivery_id)
  await adapter.close()
 })

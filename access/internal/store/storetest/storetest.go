@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/whalerein/whalerein/access/internal/store"
 )
@@ -29,12 +30,20 @@ type DB struct {
 	BaseDSN string
 	Schema  string
 	DSN     string
+
+	// openStore is the seam used to turn a schema DSN into a migrated store.
+	// Production uses openStoreWithPool; unit tests inject a scripted opener.
+	openStore func(context.Context, string) (*store.Store, func(), error)
 }
 
 // New creates a fresh schema, migrates it and returns the store.
 func New(t *testing.T) (*store.Store, *DB) {
+	return newStore(t, newSchema)
+}
+
+func newStore(t *testing.T, factory func() (*DB, func(), error)) (*store.Store, *DB) {
 	t.Helper()
-	db := NewSchema(t)
+	db := newSchemaFor(t, factory)
 	return db.Open(t), db
 }
 
@@ -42,8 +51,12 @@ var errUnavailable = errors.New("test database unavailable")
 
 // NewSchema creates a fresh empty schema.
 func NewSchema(t *testing.T) *DB {
+	return newSchemaFor(t, newSchema)
+}
+
+func newSchemaFor(t *testing.T, factory func() (*DB, func(), error)) *DB {
 	t.Helper()
-	db, cleanup, err := newSchema()
+	db, cleanup, err := factory()
 	if err != nil {
 		if errors.Is(err, errUnavailable) {
 			t.Skipf("PostgreSQL test database unavailable: %v", err)
@@ -55,22 +68,33 @@ func NewSchema(t *testing.T) *DB {
 }
 
 func newSchema() (*DB, func(), error) {
-	base := os.Getenv("WHALEREIN_TEST_DATABASE_URL")
+	return newSchemaBaseWithOps(os.Getenv("WHALEREIN_TEST_DATABASE_URL"), defaultSchemaOps())
+}
+
+func newSchemaBaseWithOps(base string, ops schemaOps) (*DB, func(), error) {
 	if base == "" {
 		base = defaultDSN
 	}
-	return newSchemaWith(base)
+	return newSchemaWithOps(base, ops)
+}
+
+type schemaAdmin interface {
+	Ping(context.Context) error
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Close()
 }
 
 type schemaOps struct {
+	open   func(context.Context, string) (schemaAdmin, error)
 	random func([]byte) (int, error)
-	exec   func(context.Context, *pgxpool.Pool, string) error
+	exec   func(context.Context, schemaAdmin, string) error
 }
 
 func defaultSchemaOps() schemaOps {
 	return schemaOps{
+		open:   func(ctx context.Context, dsn string) (schemaAdmin, error) { return pgxpool.New(ctx, dsn) },
 		random: rand.Read,
-		exec: func(ctx context.Context, admin *pgxpool.Pool, statement string) error {
+		exec: func(ctx context.Context, admin schemaAdmin, statement string) error {
 			_, err := admin.Exec(ctx, statement)
 			return err
 		},
@@ -85,13 +109,13 @@ func newSchemaWithOps(base string, ops schemaOps) (*DB, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	admin, err := pgxpool.New(ctx, base)
+	admin, err := ops.open(ctx, base)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w at %s: %v", errUnavailable, redactDSN(base), err)
+		return nil, nil, fmt.Errorf("%w at %s", errUnavailable, redactDSN(base))
 	}
 	if err := admin.Ping(ctx); err != nil {
 		admin.Close()
-		return nil, nil, fmt.Errorf("%w at %s: %v", errUnavailable, redactDSN(base), err)
+		return nil, nil, fmt.Errorf("%w at %s", errUnavailable, redactDSN(base))
 	}
 
 	suffix := make([]byte, 6)
@@ -129,13 +153,24 @@ func (db *DB) Open(t *testing.T) *store.Store {
 func (db *DB) open() (*store.Store, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cfg, err := pgxpool.ParseConfig(db.DSN)
+	open := db.openStore
+	if open == nil {
+		open = openStoreWithPool
+	}
+	return open(ctx, db.DSN)
+}
+
+// openStoreWithPool opens an independent pool and applies migrations before
+// handing the store out. A migration failure closes the pool and returns no
+// usable store.
+func openStoreWithPool(ctx context.Context, dsn string) (*store.Store, func(), error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse test DSN: %w", err)
+		return nil, nil, errors.New("parse test DSN: invalid connection configuration")
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open test pool: %w", err)
+		return nil, nil, errors.New("open test pool: unavailable")
 	}
 	s := store.NewWithPool(pool)
 	if err := s.Migrate(ctx); err != nil {
@@ -167,5 +202,7 @@ func redactDSN(dsn string) string {
 	}
 	u.User = nil
 	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
 	return u.String()
 }

@@ -33,6 +33,10 @@ pub enum CacheError {
     HistoryBudget,
     #[error("cache payload is corrupt")]
     Corrupt,
+    #[error("cache database is missing")]
+    Missing,
+    #[error("cache database is temporarily busy")]
+    Busy,
 }
 
 impl From<rusqlite::Error> for CacheError {
@@ -41,8 +45,106 @@ impl From<rusqlite::Error> for CacheError {
     }
 }
 
+pub(crate) struct CommandIntent<'a> {
+    pub request_id: &'a str,
+    pub command_id: &'a str,
+    pub host_id: &'a str,
+    pub device_id: &'a str,
+    pub access_url: &'a str,
+    pub host_fingerprint: &'a str,
+    pub command_kind: &'a str,
+    pub command_parent_session_id: &'a str,
+}
+
+/// Holds SQLite's transaction until revocation has removed the cache.
+#[cfg(unix)]
+pub(crate) struct LockedPendingSnapshot<'a> {
+    pub pending: Vec<PendingCommand>,
+    conn: std::sync::MutexGuard<'a, Connection>,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn profile_entry_stat(directory: &std::fs::File, name: &str) -> std::io::Result<libc::stat> {
+    use std::os::fd::AsRawFd;
+    let name = std::ffi::CString::new(name)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(unix)]
+fn sqlite_has_moved(conn: &Connection) -> Result<bool, CacheError> {
+    let mut moved = 0i32;
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            std::ptr::null(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&mut moved as *mut i32).cast(),
+        )
+    };
+    if status != rusqlite::ffi::SQLITE_OK {
+        return Err(CacheError::Database);
+    }
+    Ok(moved != 0)
+}
+
+#[cfg(unix)]
+impl LockedPendingSnapshot<'_> {
+    #[allow(clippy::unnecessary_cast)] // libc stat field widths differ by platform.
+    pub(crate) fn matches_name(&self, directory: &std::fs::File) -> bool {
+        match profile_entry_stat(directory, "cache.sqlite3") {
+            Ok(actual) => {
+                (actual.st_mode & libc::S_IFMT) == libc::S_IFREG
+                    && actual.st_nlink == 1
+                    && self.device == actual.st_dev as u64
+                    && self.inode == actual.st_ino as u64
+                    && matches!(sqlite_has_moved(&self.conn), Ok(false))
+            }
+            Err(_) => false,
+        }
+    }
+    pub(crate) fn removed_from_profile(&self, directory: &std::fs::File) -> bool {
+        matches!(profile_entry_stat(directory,"cache.sqlite3"),Err(error) if error.kind()==std::io::ErrorKind::NotFound)
+            && matches!(sqlite_has_moved(&self.conn), Ok(true))
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CacheProvenance {
+    profile_device: u64,
+    profile_inode: u64,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl Drop for LockedPendingSnapshot<'_> {
+    fn drop(&mut self) {
+        let _ = self.conn.execute_batch("ROLLBACK");
+    }
+}
+
 pub struct Cache {
     conn: Mutex<Connection>,
+    #[cfg(unix)]
+    provenance: Option<CacheProvenance>,
+    #[cfg(unix)]
+    revocation_only: bool,
     key: [u8; 32],
     history_budget_bytes: u64,
 }
@@ -54,23 +156,62 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    #[cfg(all(test, unix))]
+    pub(crate) fn sqlite_connection_identity(&self) -> usize {
+        let conn = self.conn.lock().expect("cache lock");
+        unsafe { conn.handle() as usize }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn has_revocation_provenance(&self) -> bool {
+        self.provenance.is_some()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn is_revocation_only(&self) -> bool {
+        self.revocation_only
+    }
+
+    pub(crate) fn has_key(&self, key: &[u8]) -> bool {
+        self.key == key
+    }
+
     pub fn open(path: &Path, key: [u8; 32]) -> Result<Self, CacheError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| CacheError::Database)?;
         }
         let conn = Connection::open(path)?;
-        let cache = Self {
+        // A revoked profile may have been replaced after this connection was
+        // opened. Closing it must not checkpoint a potentially foreign WAL.
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )?;
+        #[allow(unused_mut)] // Unix records provenance after initialization.
+        let mut cache = Self {
             conn: Mutex::new(conn),
+            #[cfg(unix)]
+            provenance: None,
+            #[cfg(unix)]
+            revocation_only: false,
             key,
             history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
+        #[cfg(unix)]
+        {
+            cache.provenance = cache.capture_provenance(path);
+        }
         Ok(cache)
     }
 
     pub fn open_in_memory(key: [u8; 32]) -> Result<Self, CacheError> {
         let cache = Self {
             conn: Mutex::new(Connection::open_in_memory()?),
+            #[cfg(unix)]
+            provenance: None,
+            #[cfg(unix)]
+            revocation_only: false,
             key,
             history_budget_bytes: HISTORY_CACHE_BYTES,
         };
@@ -154,7 +295,14 @@ impl Cache {
             .prepare("PRAGMA table_info(commands)")?
             .query_map([], |row| row.get(1))?
             .collect::<Result<_, _>>()?;
-        for column in ["host_id", "device_id", "access_url", "host_fingerprint"] {
+        for column in [
+            "host_id",
+            "device_id",
+            "access_url",
+            "host_fingerprint",
+            "command_kind",
+            "command_parent_session_id",
+        ] {
             if !columns.iter().any(|name| name == column) {
                 conn.execute_batch(&format!(
                     "ALTER TABLE commands ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
@@ -316,6 +464,7 @@ impl Cache {
         .transpose()
     }
 
+    #[cfg(test)]
     pub(crate) fn record_command_intent(
         &self,
         request_id: &str,
@@ -325,9 +474,41 @@ impl Cache {
         access_url: &str,
         host_fingerprint: &str,
     ) -> Result<(), CacheError> {
+        self.record_typed_command_intent(CommandIntent {
+            request_id,
+            command_id,
+            host_id,
+            device_id,
+            access_url,
+            host_fingerprint,
+            command_kind: "",
+            command_parent_session_id: "",
+        })
+    }
+
+    pub(crate) fn record_typed_command_intent(
+        &self,
+        intent: CommandIntent<'_>,
+    ) -> Result<(), CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
-        conn.execute("INSERT INTO commands(request_id, command_id, host_id, device_id, access_url, host_fingerprint, status, updated_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'unknown', ?7)", params![request_id, command_id, host_id, device_id, access_url, host_fingerprint, crate::util::now_unix_ms()])?;
+        conn.execute("INSERT INTO commands(request_id, command_id, host_id, device_id, access_url, host_fingerprint, command_kind, command_parent_session_id, status, updated_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unknown', ?9)", params![intent.request_id, intent.command_id, intent.host_id, intent.device_id, intent.access_url, intent.host_fingerprint, intent.command_kind, intent.command_parent_session_id, crate::util::now_unix_ms()])?;
         Ok(())
+    }
+
+    pub(crate) fn command_identity(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<(String, String)>, CacheError> {
+        self.conn
+            .lock()
+            .expect("cache mutex")
+            .query_row(
+                "SELECT command_kind, command_parent_session_id FROM commands WHERE request_id=?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub(crate) fn remove_unsent_command(&self, request_id: &str) -> Result<(), CacheError> {
@@ -340,6 +521,10 @@ impl Cache {
 
     pub(crate) fn pending_commands(&self) -> Result<Vec<PendingCommand>, CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
+        Self::read_pending_commands(&conn)
+    }
+
+    fn read_pending_commands(conn: &Connection) -> Result<Vec<PendingCommand>, CacheError> {
         let mut statement = conn.prepare("SELECT request_id, command_id, host_id, device_id, status, access_url, host_fingerprint FROM commands WHERE status IN ('unknown', 'received', 'host_accepted') ORDER BY updated_at_unix_ms, request_id")?;
         let rows = statement
             .query_map([], |row| {
@@ -360,6 +545,166 @@ impl Cache {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast)]
+    fn capture_provenance(&self, path: &Path) -> Option<CacheProvenance> {
+        use std::os::unix::fs::MetadataExt;
+        let parent = std::fs::symlink_metadata(path.parent()?).ok()?;
+        let db = std::fs::symlink_metadata(path).ok()?;
+        if !parent.is_dir()
+            || parent.mode() & 0o022 != 0
+            || parent.uid() != unsafe { libc::geteuid() }
+            || !db.is_file()
+            || db.nlink() != 1
+        {
+            return None;
+        }
+        let conn = self.conn.try_lock().ok()?;
+        if !matches!(sqlite_has_moved(&conn), Ok(false)) {
+            return None;
+        }
+        Some(CacheProvenance {
+            profile_device: parent.dev(),
+            profile_inode: parent.ino(),
+            device: db.dev(),
+            inode: db.ino(),
+        })
+    }
+
+    /// Initialize a Cache around an already existing database without creating
+    /// or migrating it; business rows are not read until provenance is checked.
+    #[cfg(unix)]
+    pub(crate) fn open_existing_verified(
+        path: &Path,
+        key: [u8; 32],
+        directory: &std::fs::File,
+    ) -> Result<Self, CacheError> {
+        use std::os::unix::fs::MetadataExt;
+        let parent = std::fs::symlink_metadata(path.parent().ok_or(CacheError::Database)?)
+            .map_err(|_| CacheError::Database)?;
+        let held = directory.metadata().map_err(|_| CacheError::Database)?;
+        if !parent.is_dir()
+            || parent.mode() & 0o022 != 0
+            || parent.uid() != unsafe { libc::geteuid() }
+            || parent.dev() != held.dev()
+            || parent.ino() != held.ino()
+        {
+            return Err(CacheError::Corrupt);
+        }
+        let initial = profile_entry_stat(directory, "cache.sqlite3").map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CacheError::Missing
+            } else {
+                CacheError::Database
+            }
+        })?;
+        if (initial.st_mode & libc::S_IFMT) != libc::S_IFREG || initial.st_nlink != 1 {
+            return Err(CacheError::Corrupt);
+        }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )?;
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        let mut cache = Self {
+            conn: Mutex::new(conn),
+            provenance: None,
+            revocation_only: true,
+            key,
+            history_budget_bytes: HISTORY_CACHE_BYTES,
+        };
+        let provenance = cache.capture_provenance(path).ok_or(CacheError::Corrupt)?;
+        #[allow(clippy::unnecessary_cast)]
+        if provenance.profile_device != held.dev()
+            || provenance.profile_inode != held.ino()
+            || provenance.device != initial.st_dev as u64
+            || provenance.inode != initial.st_ino as u64
+        {
+            return Err(CacheError::Corrupt);
+        }
+        cache.provenance = Some(provenance);
+        Ok(cache)
+    }
+
+    /// Snapshot through this Cache's existing SQLite connection. The caller
+    /// holds the profile guard and keeps this transaction until cleanup ends.
+    #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast)]
+    pub(crate) fn pending_commands_from_existing<'a>(
+        &'a self,
+        directory: &std::fs::File,
+        profile: &Path,
+    ) -> Result<LockedPendingSnapshot<'a>, CacheError> {
+        use std::os::unix::fs::MetadataExt;
+        fn no_sidecars(directory: &std::fs::File) -> Result<(), CacheError> {
+            for name in [
+                "cache.sqlite3-journal",
+                "cache.sqlite3-wal",
+                "cache.sqlite3-shm",
+            ] {
+                match profile_entry_stat(directory, name) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) if name == "cache.sqlite3-journal" => return Err(CacheError::Busy),
+                    _ => return Err(CacheError::Corrupt),
+                }
+            }
+            Ok(())
+        }
+        let provenance = self.provenance.ok_or(CacheError::Corrupt)?;
+        let held = directory.metadata().map_err(|_| CacheError::Database)?;
+        let current = std::fs::symlink_metadata(profile).map_err(|_| CacheError::Database)?;
+        if !current.is_dir()
+            || current.mode() & 0o022 != 0
+            || current.uid() != unsafe { libc::geteuid() }
+            || held.dev() != provenance.profile_device
+            || held.ino() != provenance.profile_inode
+            || current.dev() != provenance.profile_device
+            || current.ino() != provenance.profile_inode
+        {
+            return Err(CacheError::Corrupt);
+        }
+        no_sidecars(directory)?;
+        let conn = self.conn.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => CacheError::Busy,
+            std::sync::TryLockError::Poisoned(_) => CacheError::Database,
+        })?;
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| match error.sqlite_error_code() {
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                    CacheError::Busy
+                }
+                _ => CacheError::Database,
+            })?;
+        let mut snapshot = LockedPendingSnapshot {
+            pending: Vec::new(),
+            conn,
+            device: provenance.device,
+            inode: provenance.inode,
+        };
+        if !snapshot.matches_name(directory) {
+            return Err(CacheError::Corrupt);
+        }
+        no_sidecars(directory)?;
+        let mode: String = snapshot
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(CacheError::Corrupt);
+        }
+        snapshot.pending = Self::read_pending_commands(&snapshot.conn)?;
+        no_sidecars(directory)?;
+        let current = std::fs::symlink_metadata(profile).map_err(|_| CacheError::Database)?;
+        if current.dev() != provenance.profile_device
+            || current.ino() != provenance.profile_inode
+            || !snapshot.matches_name(directory)
+        {
+            return Err(CacheError::Corrupt);
+        }
+        Ok(snapshot)
     }
 
     pub fn put_command(
@@ -419,6 +764,7 @@ impl Cache {
         Ok((non_terminal as u64, unknown as u64))
     }
 
+    #[cfg(any(not(unix), test))]
     pub fn clear(&self) -> Result<(), CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(

@@ -3,7 +3,24 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Delivery {
+    StartIfIdle,
+    EnqueueAfterRun,
+    Steer,
+}
+
+impl From<Delivery> for whalerein_core::api::DeliveryMode {
+    fn from(value: Delivery) -> Self {
+        match value {
+            Delivery::StartIfIdle => Self::StartIfIdle,
+            Delivery::EnqueueAfterRun => Self::EnqueueAfterRun,
+            Delivery::Steer => Self::Steer,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,6 +41,10 @@ pub struct Cli {
     /// Override the local data directory (also WHALEREIN_DATA_DIR).
     #[arg(long, global = true, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
+
+    /// Scope session operations to one authorized Host (placed before the command).
+    #[arg(long, value_name = "HOST_ID")]
+    pub host: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -46,6 +67,9 @@ pub enum Command {
     /// Resume a confirmed pairing after a lost response or process restart.
     PairResume,
 
+    /// Show redacted records of committed pairings whose original grants are unavailable.
+    PairingHistory,
+
     /// List hosts authorized for this device.
     Hosts,
 
@@ -53,6 +77,48 @@ pub enum Command {
     Sessions {
         #[arg(long, value_name = "HOST_ID")]
         host: String,
+    },
+
+    /// List currently available source models.
+    Models {
+        #[arg(long, value_name = "HOST_ID")]
+        host: String,
+    },
+
+    /// Inspect or change a session's model.
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+
+    /// Create or reuse a session according to the host's DSH rules.
+    SessionCreate {
+        #[arg(long, value_name = "HOST_ID")]
+        host: String,
+        #[arg(long, conflicts_with = "workspace")]
+        cwd: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        preset: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+
+    /// List unfinished command identities available for recovery.
+    CommandsPending,
+
+    /// Recover a previously submitted command without repeating the action.
+    #[command(name = "command-recover")]
+    Recover {
+        #[arg(long, value_name = "REQUEST_ID")]
+        request: String,
+    },
+
+    /// Fork the latest completed turn; the child shares the working directory.
+    SessionFork {
+        #[arg(long, value_name = "SESSION_ID")]
+        session: String,
     },
 
     /// Stream session output events.
@@ -67,6 +133,18 @@ pub enum Command {
         timeout: Option<u64>,
     },
 
+    /// Wait for native session quiescence or pending input.
+    Wait {
+        #[arg(long, value_name = "SESSION_ID")]
+        session: String,
+        /// Overall deadline in seconds, with millisecond precision.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<String>,
+        /// Return exit code 7 when the observation times out.
+        #[arg(long)]
+        fail_on_timeout: bool,
+    },
+
     /// Fill the local event cache from the host (gap fill or snapshot).
     Sync {
         #[arg(long, value_name = "SESSION_ID")]
@@ -77,6 +155,9 @@ pub enum Command {
     Send {
         #[arg(long, value_name = "SESSION_ID")]
         session: String,
+        /// Delivery mode. start-if-idle checks a sampled state and is not atomic.
+        #[arg(long, value_enum, default_value = "enqueue-after-run")]
+        delivery: Delivery,
         /// Message text. It is sent, never logged or echoed.
         text: String,
     },
@@ -85,6 +166,43 @@ pub enum Command {
     Approvals {
         #[arg(long, value_name = "SESSION_ID")]
         session: String,
+    },
+
+    /// List pending human questions for a session.
+    Questions {
+        #[arg(long, value_name = "SESSION_ID")]
+        session: String,
+        #[arg(long, default_value = "", value_name = "CURSOR")]
+        cursor: String,
+    },
+
+    /// Submit a complete structured answer from a file or standard input (-).
+    Answer {
+        #[arg(long, value_name = "SESSION_ID")]
+        session: String,
+        #[arg(long, value_name = "BATCH_ID")]
+        batch: String,
+        #[arg(long, value_name = "EPOCH")]
+        epoch: String,
+        #[arg(long, value_name = "VERSION")]
+        version: u64,
+        #[arg(long, value_name = "DIGEST")]
+        digest: String,
+        #[arg(long, value_name = "PHASE")]
+        phase: String,
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+        /// Stable command identity for explicit cancellation and recovery.
+        #[arg(long, value_name = "COMMAND_ID")]
+        command_id: Option<String>,
+    },
+
+    /// Request cancellation of an in-flight open question answer.
+    QuestionCancel {
+        #[arg(long, value_name = "SESSION_ID")]
+        session: String,
+        #[arg(long, value_name = "COMMAND_ID")]
+        command: String,
     },
 
     /// Approve a pending tool request.
@@ -106,6 +224,12 @@ pub enum Command {
         digest: String,
         #[arg(long, value_name = "VERSION")]
         version: i64,
+    },
+
+    /// Inspect or change pending source work.
+    Queue {
+        #[command(subcommand)]
+        action: QueueCommand,
     },
 
     /// Interrupt a session.
@@ -136,20 +260,112 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Clone, Subcommand)]
+pub enum ModelAction {
+    /// Read the recorded session choice and source fallback.
+    Get {
+        #[arg(long)]
+        session: String,
+    },
+    /// Select a session model and attempt to update the source default.
+    Set {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        effort: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum QueueCommand {
+    /// Read the current source queue without activating a cold session.
+    List {
+        #[arg(long)]
+        session: String,
+    },
+    /// Replace the entire content of an item; attachments are removed.
+    Edit {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        item: String,
+        text: String,
+    },
+    /// Withdraw one queued item.
+    Remove {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        item: String,
+    },
+    /// Promote an eligible item into the currently running turn.
+    Steer {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        item: String,
+    },
+}
+
 impl Command {
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::SessionFork { session }
+            | Self::Sync { session }
+            | Self::Send { session, .. }
+            | Self::Approvals { session }
+            | Self::Questions { session, .. }
+            | Self::Answer { session, .. }
+            | Self::QuestionCancel { session, .. }
+            | Self::Interrupt { session } => Some(session),
+            Self::Model {
+                action: ModelAction::Get { session } | ModelAction::Set { session, .. },
+            } => Some(session),
+            Self::Queue {
+                action:
+                    QueueCommand::List { session }
+                    | QueueCommand::Edit { session, .. }
+                    | QueueCommand::Remove { session, .. }
+                    | QueueCommand::Steer { session, .. },
+            } => Some(session),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::Pair { .. } => "pair",
             Self::PairResume => "pair-resume",
+            Self::PairingHistory => "pairing-history",
             Self::Hosts => "hosts",
             Self::Sessions { .. } => "sessions",
+            Self::Models { .. } => "models",
+            Self::Model {
+                action: ModelAction::Get { .. },
+            } => "model-get",
+            Self::Model {
+                action: ModelAction::Set { .. },
+            } => "model-set",
+            Self::SessionCreate { .. } => "session-create",
+            Self::SessionFork { .. } => "session-fork",
+            Self::CommandsPending => "commands-pending",
+            Self::Recover { .. } => "command-recover",
             Self::Tail { .. } => "tail",
+            Self::Wait { .. } => "wait",
             Self::Sync { .. } => "sync",
             Self::Send { .. } => "send",
             Self::Approvals { .. } => "approvals",
+            Self::Questions { .. } => "questions",
+            Self::Answer { .. } => "answer",
+            Self::QuestionCancel { .. } => "question-cancel",
             Self::Approve { .. } => "approve",
             Self::Reject { .. } => "reject",
             Self::Interrupt { .. } => "interrupt",
+            Self::Queue { .. } => "queue",
             Self::Revoke => "revoke",
             Self::Forget { .. } => "forget",
             Self::Doctor { .. } => "doctor",
@@ -164,6 +380,113 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[test]
+    fn session_host_scope_does_not_replace_host_scoped_commands() {
+        let cli = parse(&[
+            "whalerein",
+            "--host",
+            "host-2",
+            "send",
+            "--session",
+            "shared",
+            "fixture",
+        ]);
+        assert_eq!(cli.host.as_deref(), Some("host-2"));
+        assert!(matches!(cli.command, Command::Send { .. }));
+        let cli = parse(&["whalerein", "sessions", "--host", "host-1"]);
+        assert!(cli.host.is_none());
+        assert!(matches!(cli.command, Command::Sessions { host } if host == "host-1"));
+    }
+
+    #[test]
+    fn parses_model_commands_without_acknowledgement() {
+        assert!(matches!(
+            parse(&["whalerein", "models", "--host", "h"]).command,
+            Command::Models { .. }
+        ));
+        assert!(matches!(
+            parse(&["whalerein", "model", "get", "--session", "s"]).command,
+            Command::Model {
+                action: ModelAction::Get { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&[
+                "whalerein",
+                "model",
+                "set",
+                "--session",
+                "s",
+                "--provider",
+                "p",
+                "--model",
+                "m"
+            ])
+            .command,
+            Command::Model {
+                action: ModelAction::Set { effort: None, .. }
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "model",
+            "set",
+            "--session",
+            "s",
+            "--provider",
+            "p",
+            "--model",
+            "m",
+            "--acknowledge-default-effect"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn session_create_arguments_leave_remote_paths_unmodified_and_conflict() {
+        let cli = parse(&[
+            "whalerein",
+            "session-create",
+            "--host",
+            "h",
+            "--cwd",
+            "relative",
+            "--session-id",
+            "id",
+        ]);
+        assert!(
+            matches!(cli.command, Command::SessionCreate { cwd: Some(cwd), session_id: Some(id), .. } if cwd == "relative" && id == "id")
+        );
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session-create",
+            "--host",
+            "h",
+            "--cwd",
+            "/a",
+            "--workspace",
+            "w"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn fork_rejects_explicit_native_cut() {
+        assert!(matches!(
+            parse(&["whalerein", "session-fork", "--session", "s"]).command,
+            Command::SessionFork { .. }
+        ));
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session-fork",
+            "--session",
+            "s",
+            "--at-seq",
+            "2"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -200,7 +523,46 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["whalerein", "send", "--session", "s", "hello"]).command,
-            Command::Send { session, text } if session == "s" && text == "hello"
+            Command::Send { session, text, .. } if session == "s" && text == "hello"
+        ));
+        assert!(matches!(
+            parse(&["whalerein", "send", "--session", "s", "hello"]).command,
+            Command::Send {
+                delivery: Delivery::EnqueueAfterRun,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&[
+                "whalerein",
+                "send",
+                "--session",
+                "s",
+                "--delivery",
+                "steer",
+                "hello"
+            ])
+            .command,
+            Command::Send {
+                delivery: Delivery::Steer,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&[
+                "whalerein",
+                "send",
+                "--session",
+                "s",
+                "--delivery",
+                "start-if-idle",
+                "hello"
+            ])
+            .command,
+            Command::Send {
+                delivery: Delivery::StartIfIdle,
+                ..
+            }
         ));
         assert!(matches!(
             parse(&[

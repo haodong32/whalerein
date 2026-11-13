@@ -22,13 +22,14 @@ class FakeMqttClient extends EventEmitter {
 
   subscribe(topic, options, callback) {
     const cb = typeof options === 'function' ? options : callback
+    const topics = Array.isArray(topic) ? topic : [topic]
     queueMicrotask(() => {
       if (this.closed || !this.connected) {
         cb?.(new Error('client closed'))
         return
       }
-      this.broker.subscribe(this, topic)
-      cb?.(null, [{ topic, qos: 1 }])
+      for (const item of topics) this.broker.subscribe(this, item)
+      cb?.(null, topics.map((item) => ({ topic: item, qos: 1 })))
     })
     return this
   }

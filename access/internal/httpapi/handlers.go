@@ -182,6 +182,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, err)
 		return
 	}
+	s.deps.Requests.Touch(identity.DeviceID, row.RequestID, row.Status)
 	s.writeProto(w, http.StatusOK, &whalereinv1.RequestState{
 		RequestId:       row.RequestID,
 		HostId:          row.HostID,
@@ -196,6 +197,21 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		UpdatedAtUnixMs: row.UpdatedAt.UnixMilli(),
 		ChannelId:       row.ChannelID,
 	})
+}
+
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	identity, err := s.requireDevice(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, params["request_id"])
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.deps.Requests.Touch(identity.DeviceID, row.RequestID, row.Status)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, params map[string]string) {

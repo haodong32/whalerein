@@ -275,3 +275,29 @@ test('expired final result details are bounded while dedupe and uncertain outcom
     for(const status of ['accepted','unknown'])assert.deepEqual(store.getCommand('device',status).resultPayload,Buffer.from([1,2]))
   } finally {store.close()}
 })
+
+test('an in-flight lifecycle operation survives status changes and reopen without a second registry', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-lifecycle-'))
+  const path = join(dir, 'state.sqlite')
+  try {
+    const first = new StateStore({ path })
+    const digest = new Uint8Array(32).fill(9)
+    first.createOrGetCommand({ deviceId: 'd', commandId: 'c', requestId: 'r', digest, expiresAt: 10_000, now: 100 })
+    assert.equal(first.beginLifecycleOperation({ deviceId: 'd', commandId: 'c', operationId: 'op-1', operation: 'create',
+      phase: 'NATIVE', preferredSessionId: 'wanted', now: 110 }), true)
+    assert.equal(first.getLifecycleOperation('d', 'c').operationId, 'op-1')
+    assert.equal(first.getCommand('d', 'c').status, 'accepted')
+    assert.equal(first.updateLifecycleOperation({ deviceId: 'd', commandId: 'c', phase: 'COMPLETE',
+      sessionId: 'child', parentSessionId: 'parent', now: 120 }), true)
+    first.close()
+    const restored = new StateStore({ path })
+    try {
+      const operation = restored.getLifecycleOperation('d', 'c')
+      assert.equal(operation.operation, 'create')
+      assert.equal(operation.phase, 'COMPLETE')
+      assert.equal(operation.sessionId, 'child')
+      assert.equal(operation.entered, true)
+      assert.equal(restored.updateLifecycleOperation({ deviceId: 'd', commandId: 'missing', phase: 'NATIVE' }), false)
+    } finally { restored.close() }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

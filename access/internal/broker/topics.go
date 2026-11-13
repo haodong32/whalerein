@@ -7,13 +7,17 @@ import (
 
 // MQTT topics and filters from proto/v1/WIRE.md.
 const (
-	topicRoot = "whalerein/v1/h/"
+	topicRoot    = "whalerein/v1/h/"
+	presenceRoot = "whalerein/v1/presence/device/"
 
 	// ResultFilter receives HostResult messages from every host.
 	ResultFilter = "whalerein/v1/h/+/result"
 	// EventFilter receives event envelopes from every host.
 	EventFilter     = "whalerein/v1/h/+/event"
 	DeviceAckFilter = "whalerein/v1/h/+/d/+/ack"
+	// DeviceWillFilter receives non-retained MQTT last wills published by the
+	// broker for disconnected device connections.
+	DeviceWillFilter = presenceRoot + "+"
 	// SysConnectedFilter receives broker client-connected events.
 	SysConnectedFilter = "$SYS/brokers/+/clients/+/connected"
 	// SysDisconnectedFilter receives broker client-disconnected events.
@@ -30,6 +34,7 @@ const (
 	KindEvent       TopicKind = "event"
 	KindDeviceEvent TopicKind = "device_event"
 	KindDeviceAck   TopicKind = "device_ack"
+	KindPresence    TopicKind = "presence"
 )
 
 // ErrInvalidTopic is returned for topics outside the four wire templates.
@@ -64,6 +69,26 @@ func DeviceAckTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/ack"
 }
 
+// PresenceTopic is the Access -> host device-presence topic.
+func PresenceTopic(hostID string) string { return topicRoot + hostID + "/presence" }
+
+// DeviceWillTopic is the device-scoped MQTT last-will topic. It carries no
+// host scope because one device may be authorized by more than one host.
+func DeviceWillTopic(deviceID string) string { return presenceRoot + deviceID }
+
+// ParseDeviceWillTopic parses a concrete device last-will topic. Broadcast
+// filters and wildcard characters are rejected.
+func ParseDeviceWillTopic(topic string) (string, bool) {
+	if !strings.HasPrefix(topic, presenceRoot) {
+		return "", false
+	}
+	deviceID := strings.TrimPrefix(topic, presenceRoot)
+	if !validID(deviceID) || strings.Contains(deviceID, "/") {
+		return "", false
+	}
+	return deviceID, true
+}
+
 // ParseTopic parses one concrete wire topic. Wildcards are rejected.
 func ParseTopic(topic string) (Topic, error) {
 	if !strings.HasPrefix(topic, topicRoot) {
@@ -76,7 +101,7 @@ func ParseTopic(topic string) (Topic, error) {
 			return Topic{}, ErrInvalidTopic
 		}
 		switch TopicKind(parts[1]) {
-		case KindRequest, KindResult, KindEvent:
+		case KindRequest, KindResult, KindEvent, KindPresence:
 			return Topic{HostID: parts[0], Kind: TopicKind(parts[1])}, nil
 		default:
 			return Topic{}, ErrInvalidTopic

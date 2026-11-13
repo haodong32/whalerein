@@ -113,3 +113,25 @@ test('when a custom descriptor path is supplied, the codec loads it independentl
   const custom = new ProtoCodec(DEFAULT_PROTO_PATH)
   assert.equal(custom.decode('whalerein.v1.Ping', custom.encode('whalerein.v1.Ping', { client_time_unix_ms: 5 })).client_time_unix_ms, 5)
 })
+
+test('model selection preserves absent effort, receipts and absent capability defaults', () => {
+  const proto = codec()
+  const request = { select_session_model: { session_id: 's', provider: 'p', model: 'm' } }
+  const decoded = proto.decode('whalerein.v1.RequestPayload', proto.encode('whalerein.v1.RequestPayload', request))
+  assert.equal(decoded.select_session_model.model, 'm')
+  assert.equal(Object.hasOwn(decoded.select_session_model, 'effort'), false)
+  const receipt = { model_selection_receipt: { selected: { provider: 'p', model: 'm', effort: 'high' }, effect_scope: 'session_and_source_default_attempt', default_persistence: 'unconfirmed' } }
+  assert.deepEqual(proto.decode('whalerein.v1.ResponsePayload', proto.encode('whalerein.v1.ResponsePayload', receipt)), receipt)
+  const caps = proto.decode('whalerein.v1.SourceCapabilities', proto.encode('whalerein.v1.SourceCapabilities', {}))
+  assert.equal(Boolean(caps.model_selection), false)
+})
+
+test('old source capability bytes leave all question operations disabled', () => {
+  // Fields 1 and 5 are history and approvals in the older wire message.
+  const old = codec().decode('whalerein.v1.SourceCapabilities', Buffer.from([8, 1, 40, 1]))
+  assert.equal(old.history, true)
+  assert.equal(old.approvals, true)
+  for (const key of ['questions_read', 'questions_answer_open', 'questions_answer_continued']) {
+    assert.equal(Boolean(old[key]), false)
+  }
+})

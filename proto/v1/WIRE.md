@@ -19,10 +19,17 @@ diagnostic id.
 | `trace_id` | client | Diagnostic correlation only. Never business, never idempotency. |
 | History cursor | Source | Opaque, session/view-bound committed position. |
 | Attempt reference | Source adapter | Live epoch plus Attempt ID, independent of Message identity. |
+| `delivery_id` | Source adapter | Opaque acceptance identity; it does not establish execution or a committed Message. |
 
 Access preserves `command_id` and `payload_digest` after a request expires and
 drops only the bodies. The same `command_id` with a different digest is
 rejected and is never forwarded.
+
+Once expiry cleanup has cleared a request's bodies, later Host results do not
+restore them, even if a clock moves backwards. Status and independently verified
+pairing confirmation may still advance. For a pre-upgrade row with unknown
+retention history and an empty request body, Access conservatively withholds
+the result body; callers must not infer business failure from that absence.
 
 ## Topics
 
@@ -301,6 +308,16 @@ bodies are the messages above; `POST /requests` returns `RequestReceipt`.
 9  unsupported capability or incompatible protocol version
 ```
 
+`channel_replaced` (exit 8 if recovery fails) identifies an observation whose
+Host channel was replaced. Read-only waits may establish a fresh channel and
+retry within their original deadline; source unavailability, device revocation,
+explicit cancellation and request expiry retain their own error semantics.
+
+Source failures from an authenticated wait or passive state read are carried
+inside the encrypted response. They retain their source error code and do not
+by themselves revoke the device or authorize a channel-replacement retry. If
+the response cannot be authenticated, the Host reports unavailability instead.
+
 `--json` emits a stable object with at least `schema: "whalerein/v1"`, the
 command name, and either `data` or `error: {code, message}`. Explicit conversation
 output shows normalized visible content to its requesting user. Diagnostics and
@@ -400,3 +417,74 @@ execution.
 `payload_too_large` is an explicit logical resource-budget failure (CLI exit 5),
 not an authorization failure. Transport-v2 requires at least a 64 KiB broker
 packet budget and rejects smaller negotiated budgets before sending frames.
+
+## Model operations
+
+The encrypted payload has separate catalog and passive session-model queries,
+and a journaled `select_session_model` command. A `ModelChoice` distinguishes
+an absent effort from an explicitly supplied value. The selection receipt
+carries the accepted choice, its source-default attempt scope, and an
+`unconfirmed` persistence value; it does not indicate that a prompt ran.
+Missing `SourceCapabilities.model_selection` means selection is unsupported.
+The shared `get_host_capabilities` query returns `HostCapabilities`; absent
+`model_catalog` and `model_read` fields mean unsupported. Clients treat an
+older Host that rejects the query as having neither operation. Catalog and
+passive reads are independently gated by the Host. Native DSH exposes `next`
+and `last_used`; `pending_known=false` means that projection cannot prove
+whether a pending record exists, even when a next choice is present.
+For model queries, the complete encoded `HostResult`, including the encrypted
+response envelope, is checked against the existing 16 MiB logical-transport
+limit; an oversized result fails with `payload_too_large`.
+### Session lifecycle receipts
+
+`ForkSession` is a session-scoped control with a source session ID and no native
+history boundary. Creation and fork return a `LifecycleReceipt` with one of four
+dispositions:
+
+- `READY` requires a confirmed `session_id` and carries no warning.
+- `READY_WITH_WARNING` requires a confirmed `session_id` and a `warning_code`;
+  the operation succeeded and must not be retried or deleted.
+- `FAILED` proves no native effect; it carries `reason_code`, `retryable`, and
+  no identity.
+- `UNKNOWN` means a native effect may have happened. It never carries identity
+  and always names a `reconcile_mode` (`OPERATION_ID`, `PREFERRED_SESSION_ID`,
+  `PARENT_SESSION_ID`, or `MANUAL`) plus an optional `reconcile_key`.
+
+`phase` is coarse (`PREFLIGHT`, `NATIVE`, `ATTACH`, `PERSIST`, `COMPLETE`).
+`operation_id` is a stable correlation identity independent of the command
+journal. The warning code `workspace_attach_failed` preserves a child identity
+when native workspace attachment failed after creation. Neither working
+directory, workspace data, nor raw native diagnostics belong in the stored
+receipt. Host and source capabilities must both advertise fork support before
+invocation; absent fields mean unsupported.
+
+`pairing_fenced` (exit 8) is an Access rejection proving that an unfinished
+pairing intent cannot commit. Revocation or migration of an older unfinished
+intent can invalidate it. A client may discard that exact pending FINISH and
+start a newly confirmed invitation. Transport errors and other pairing failures
+do not establish this fact.
+
+`pairing_committed_unavailable` (exit 8) proves the exact FINISH was committed,
+but its original grant/credential is no longer active. It does not identify why
+the grant became unavailable. Clients retain a redacted completion record before
+replacing the pending FINISH; it is distinct from an uncommitted fenced intent.
+
+`pairing_committed_unconfirmed` (exit 8) proves Access committed the exact FINISH
+and the original grant remains active, but its Host COMMIT confirmation is not
+available. It does not assert Host activation. The client retains its original
+pending FINISH and credential, as well as redacted evidence, for user review.
+If neither a durable matching proof nor sufficient retained evidence exists,
+the client does not automatically start a new pairing.
+
+After Access has durably recorded an authenticated Host COMMIT acknowledgement
+for the exact grant and public key, with its persisted COMMIT binding verified,
+a matching original FINISH may be recovered
+after cleanup while that original grant remains active. This does not resubmit
+a new grant. If confirmation was never durably recorded, the outcome remains
+`pairing_committed_unconfirmed`.
+
+An old active outcome whose retained data cannot prove its COMMIT binding and
+matching, timely authorized Host acknowledgement also remains
+`pairing_committed_unconfirmed`; its prior confirmation flag alone is not
+sufficient. The binding record is derived in the Access database under its
+device fence, not an independent cryptographic signature.

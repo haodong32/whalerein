@@ -48,6 +48,12 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid argument"}
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, pairing.ErrHostNotFound), errors.Is(err, requests.ErrNotFound), errors.Is(err, store.ErrNotFound):
 		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "not found"}
+	case errors.Is(err, pairing.ErrPairingCommittedUnconfirmed):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unconfirmed, "committed pairing Host confirmation unknown"}
+	case errors.Is(err, pairing.ErrPairingCommittedUnavailable):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unavailable, "committed pairing is no longer available"}
+	case errors.Is(err, pairing.ErrPairingFenced):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_fenced, "pairing intent invalidated"}
 	case errors.Is(err, pairing.ErrTokenUsed):
 		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing token already used"}
 	case errors.Is(err, pairing.ErrTokenExpired):

@@ -37,6 +37,8 @@ export const Config = z.object({
   access_url: z.string().default('').volatile(),
   log_level: z.string().default('info').volatile(),
   allow_insecure_mqtt: z.boolean().default(false).volatile(),
+  pending_queue_enabled: z.boolean().default(true).volatile(),
+  enable_open_question_broker: z.boolean().default(true).volatile(),
 })
 
 function configValue(raw, key) {
@@ -59,6 +61,8 @@ function materializeConfig(raw) {
     'access_url',
     'log_level',
     'allow_insecure_mqtt',
+    'pending_queue_enabled',
+    'enable_open_question_broker',
   ]
   const out = {}
   for (const key of keys) {

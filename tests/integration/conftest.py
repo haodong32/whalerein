@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from environment import ROOT, Process, Scenario, wait
+from sharding import parse_shard, partition
 
 pytest_plugins = ("integration_report",)
 
@@ -18,6 +19,11 @@ def pytest_addoption(parser):
         choices=["protocol", "storage", "transport", "chain", "native-dsh"],
     )
     parser.addoption("--only", help="Select a pytest case by substring")
+    parser.addoption(
+        "--shard",
+        metavar="INDEX/COUNT",
+        help="run only the 0-based deterministic hash shard INDEX of COUNT",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -31,6 +37,12 @@ def pytest_collection_modifyitems(config, items):
     only = config.getoption("--only")
     if only is not None and not only.strip():
         raise pytest.UsageError("--only requires nonempty text")
+    shard = config.getoption("--shard")
+    if shard is not None:
+        try:
+            index, count = parse_shard(shard)
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from error
     selected = []
     deselected = []
     for item in items:
@@ -43,7 +55,15 @@ def pytest_collection_modifyitems(config, items):
         ).append(item)
     if len({item.nodeid for item in items}) != len(items):
         raise pytest.UsageError("Duplicate integration case identity")
-    if not selected:
+    sharded = bool(shard is not None)
+    if sharded:
+        # Sharding applies after --group/--only and distributes the remaining
+        # selection; an empty shard is a legitimate result when COUNT exceeds
+        # the number of selected cases.
+        selected = partition(selected, index, count)
+        selected_ids = {item.nodeid for item in selected}
+        deselected = [item for item in items if item.nodeid not in selected_ids]
+    if not selected and not sharded:
         raise pytest.UsageError("No integration cases match the selection")
     config.hook.pytest_deselected(items=deselected)
     items[:] = selected
@@ -129,8 +149,74 @@ def postgres(tmp_path_factory):
         process.close()
 
 
+class Broker:
+    """One disposable EMQX per container, supervised across cases.
+
+    The broker is transport only: its data directory lives under the
+    container's tmpfs, sessions are clean-start, and Access's service account
+    uses an internal no-authn listener with a file ACL. A crash is therefore
+    recoverable; the next case restarts it instead of cascading failures.
+    """
+
+    url = "mqtt://127.0.0.1:1883"
+
+    def __init__(self, config, directory):
+        self.config = config
+        self.directory = directory
+        self.process = None
+        self.restarts = 0
+
+    def start(self):
+        if self.process is not None:
+            return
+        Path("/opt/emqx/etc/emqx.conf").write_text(self.config)
+        Path("/opt/emqx/etc/api-keys.csv").write_text(
+            (ROOT / "deploy/compose/emqx/api-keys.csv").read_text()
+        )
+        Path("/opt/emqx/etc/acl.conf").write_text(
+            (ROOT / "deploy/compose/emqx/acl.conf").read_text()
+        )
+        from integration_report import progress
+
+        progress({"event": "detail", "description": "Waiting for broker readiness"})
+        self.process = Process(["/opt/emqx/bin/emqx", "foreground"], self.directory)
+        wait(
+            lambda: (
+                subprocess.run(
+                    ["/opt/emqx/bin/emqx", "ctl", "status"],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                ).returncode
+                == 0
+            ),
+            process=self.process,
+        )
+
+    def ensure_started(self):
+        """Restart a broker that exited, then wait for readiness."""
+        if self.process is not None and self.process.child.poll() is not None:
+            self.process.close()
+            self.process = None
+            self.restarts += 1
+            from integration_report import progress
+
+            progress(
+                {
+                    "event": "detail",
+                    "description": f"Restarting broker after exit (restart {self.restarts})",
+                }
+            )
+        self.start()
+
+    def close(self):
+        if self.process is not None:
+            self.process.close()
+            self.process = None
+
+
 @pytest.fixture
-def broker(tmp_path, request):
+def broker_control(tmp_path, request):
     transport = (
         request.node.path.name == "test_transport.py"
         and request.node.callspec.params["case"] != "routes"
@@ -145,34 +231,49 @@ def broker(tmp_path, request):
         'data_dir = "/opt/emqx/data"', f'data_dir = "{tmp_path / "broker"}"'
     )
     config += "\nauthorization.cache.enable = false\n"
-    Path("/opt/emqx/etc/emqx.conf").write_text(config)
-    Path("/opt/emqx/etc/api-keys.csv").write_text(
-        (ROOT / "deploy/compose/emqx/api-keys.csv").read_text()
-    )
-    from integration_report import progress
+    fixture = Broker(config, tmp_path)
+    yield fixture
+    fixture.close()
 
-    progress({"event": "detail", "description": "Waiting for broker readiness"})
-    process = Process(["/opt/emqx/bin/emqx", "foreground"], tmp_path)
-    try:
-        wait(
-            lambda: (
-                subprocess.run(
-                    ["/opt/emqx/bin/emqx", "ctl", "status"],
-                    capture_output=True,
-                    check=False,
-                    timeout=5,
-                ).returncode
-                == 0
-            ),
-            process=process,
-        )
-        yield "mqtt://127.0.0.1:1883"
-    finally:
-        process.close()
+
+def _base_broker_config(tmp_path):
+    source = ROOT / "deploy/compose/emqx/emqx.conf"
+    config = source.read_text().replace("http://access:8081", "http://127.0.0.1:18081")
+    return config.replace(
+        'data_dir = "/opt/emqx/data"', f'data_dir = "{tmp_path / "broker"}"'
+    ) + "\nauthorization.cache.enable = false\n"
+
+
+@pytest.fixture(scope="session")
+def shared_broker(tmp_path_factory):
+    """Opt-in container-warm broker shared by scenario cases.
+
+    Clean-start MQTT clients and non-retained publishes make a warm broker
+    reusable in principle, but case isolation must be proven per feature group
+    before this becomes the default. Transport cases still stop it first.
+    """
+    # Shared by default; set WHALEREIN_INTEGRATION_SHARED_BROKER=0 to keep a
+    # broker per case (for example while investigating broker-state isolation).
+    if os.environ.get("WHALEREIN_INTEGRATION_SHARED_BROKER", "1") != "1":
+        yield None
+        return
+    directory = tmp_path_factory.mktemp("shared-broker")
+    fixture = Broker(_base_broker_config(directory), directory)
+    yield fixture
+    fixture.close()
 
 
 @pytest.fixture
-def scenario(tmp_path, postgres, broker, request):
+def broker(broker_control, shared_broker):
+    """Direct broker consumers get a started instance and its MQTT URL."""
+    if shared_broker is not None:
+        shared_broker.close()
+    broker_control.ensure_started()
+    yield broker_control.url
+
+
+@pytest.fixture
+def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     schema = "case_" + uuid.uuid4().hex
     command = [
         "psql",
@@ -198,9 +299,13 @@ def scenario(tmp_path, postgres, broker, request):
     if native:
         from native_environment import NativeScenario
 
-        value = NativeScenario(tmp_path, schema)
+        value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
     else:
         value = Scenario(tmp_path, schema)
+    if request.node.get_closest_marker("privacy_access_info_logging") is not None:
+        config = value.config.read_text()
+        assert config.count("log:\n  level: error") == 1
+        value.config.write_text(config.replace("log:\n  level: error", "log:\n  level: info", 1))
     try:
         from integration_report import progress
 
@@ -212,12 +317,20 @@ def scenario(tmp_path, postgres, broker, request):
                 else "Preparing FakeDSH, Access and plugin",
             }
         )
+        broker = shared_broker if shared_broker is not None else broker_control
         if native:
-            value.start_access()
+            # Access first: its internal auth endpoint must answer EMQX's
+            # initial authenticator health check. Waiting for /readyz here
+            # would deadlock until the broker exists.
+            value.start_access_process()
+            broker.ensure_started()
+            value.wait_access_ready()
             value.start_native()
         else:
             value.start_dsh()
-            value.start_access()
+            value.start_access_process()
+            broker.ensure_started()
+            value.wait_access_ready()
             value.start_plugin()
         yield value
     finally:

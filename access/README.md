@@ -34,6 +34,61 @@ PostgreSQL or MQTT directly.
 
 ## PostgreSQL schema
 
+All Access replicas must run the same version during a schema upgrade. Stop old
+replicas before applying migration 008 and start only versions that enforce its
+pairing fences; older binaries do not honor those fences. The migration invalidates
+unfinished pre-upgrade pairing intents whose ordering cannot be proven; clients
+must use a fresh invitation after receiving the explicit invalidation response.
+Already committed pairing receipts keep their existing recovery rules.
+
+Before migration 010, stop all older Access processes; older code does not
+verify the durable COMMIT binding before trusting Host confirmation. Do not
+run old and new Access binaries together. The migration ledger prevents an
+older binary from starting against the newer schema. There is no lossless
+downgrade procedure for the new proof state; do not remove the migration or
+proof columns to bypass that check.
+
+Pairing admission checks the original invitation, pending intent and COMMIT
+deadlines again after Host replies and database lock waits. Its final transaction
+check uses the later of the current Access and PostgreSQL clocks; FINISH also
+preserves its earlier Access observation. A clock that runs ahead can cause early rejection;
+the check does not promise that the physical database commit finishes before the
+deadline.
+
+Migration 010 also records whether request/result bodies have been cleared.
+New rows start uncleared; expiry cleanup marks every eligible row even when both
+bodies were already empty. Older rows have unknown retention history. A legacy
+row with a nonempty request body can still accept an in-deadline result; when
+the legacy request body is empty, Access withholds the result body because it
+cannot distinguish an originally empty request from one already cleaned. The
+status and independently verified pairing confirmation can still advance, but
+the client may have to report an unknown result. The marker does not delete
+credentials or infer a failed business operation.
+
+Access retains minimal completed-pairing outcome evidence independently of
+invitation, operation and Host-request cleanup. It includes only opaque IDs,
+token and credential hashes, FINISH digest and grant generation. No automatic
+outcome deletion endpoint is provided; records remain until an explicit
+operator-controlled data removal. Global or Host-scoped revocation does not
+delete them. An active grant alone does not establish Host COMMIT confirmation.
+After validating a Host COMMIT acknowledgement, Access records its confirmation
+under the same device revocation fence. A matching original FINISH can be
+recovered after cleanup only while that original grant is active and the Host
+confirmation and public-key binding are durable. The proof is derived by Access
+from its trusted database state inside the device-fenced transaction; it is not
+an independent cryptographic signature. Broker topic and request/result identity
+checks authenticate the Host result before confirmation is recorded. COMMIT
+binding and Host acknowledgement have separate durable proof flags. A legacy
+confirmation is trusted only if both the retained outbox and a matching timely
+Host acknowledgement can be verified, or their proofs were recorded before the
+bodies were cleaned. If a valid COMMIT remains but its ACK was not recorded,
+Access can retry that same COMMIT without creating another grant.
+If that evidence is missing, the active outcome remains unconfirmed and the
+client keeps its pending FINISH. Existing credentials and records are not
+deleted merely because proof is missing.
+Uncommitted legacy intents without a previously authenticated FINISH commitment
+cannot be reconstructed after cleanup and remain unknown to the client.
+
 `store.Migrate` applies checksummed migrations once under an advisory lock.
 It adopts existing unversioned installations without deleting their data and
 rejects modified migration history or a newer database schema. Tables:

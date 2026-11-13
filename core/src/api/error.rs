@@ -19,6 +19,10 @@ pub enum CoreError {
     Unauthorized,
     #[error("device is revoked")]
     Revoked,
+    #[error(
+        "device is revoked; unable to verify whether unconfirmed command or pairing identities were retained"
+    )]
+    RevokedRetentionUnverified,
     #[error("host is offline")]
     HostOffline,
     #[error("host rejected the request")]
@@ -35,6 +39,12 @@ pub enum CoreError {
     ProtocolIncompatible,
     #[error("pairing was cancelled")]
     PairingCancelled,
+    #[error("pairing intent was invalidated before commit")]
+    PairingFenced,
+    #[error("pairing committed but its original grant is unavailable")]
+    PairingCommittedUnavailable,
+    #[error("pairing committed but Host confirmation is unknown")]
+    PairingCommittedUnconfirmed,
     #[error("host fingerprint does not match")]
     FingerprintMismatch { expected: String, actual: String },
     #[error("client is not paired")]
@@ -48,6 +58,11 @@ pub enum CoreError {
     },
     #[error("Host error: {message}")]
     Host {
+        code: Option<ErrorCode>,
+        message: String,
+    },
+    #[error("Source error: {message}")]
+    Source {
         code: Option<ErrorCode>,
         message: String,
     },
@@ -75,7 +90,7 @@ impl CoreError {
             Self::InvalidInput(_) => "invalid_argument",
             Self::NotFound(_) => "not_found",
             Self::Unauthorized => "unauthorized",
-            Self::Revoked => "revoked",
+            Self::Revoked | Self::RevokedRetentionUnverified => "revoked",
             Self::HostOffline => "host_offline",
             Self::HostRejected => "rejected",
             Self::Timeout => "timeout",
@@ -84,16 +99,24 @@ impl CoreError {
             Self::Unsupported => "unsupported_capability",
             Self::ProtocolIncompatible => "protocol_version_incompatible",
             Self::PairingCancelled => "cancelled",
+            Self::PairingFenced => "pairing_fenced",
+            Self::PairingCommittedUnavailable => "pairing_committed_unavailable",
+            Self::PairingCommittedUnconfirmed => "pairing_committed_unconfirmed",
             Self::FingerprintMismatch { .. } => "host_fingerprint_mismatch",
             Self::NotPaired => "not_paired",
             Self::ChannelMismatch | Self::StaleCommand { .. } => "channel_mismatch",
             Self::Host {
                 code: Some(code), ..
             }
+            | Self::Source {
+                code: Some(code), ..
+            }
             | Self::Api {
                 code: Some(code), ..
             } => error_code_name(*code),
-            Self::Host { code: None, .. } | Self::Api { code: None, .. } => "internal",
+            Self::Host { code: None, .. }
+            | Self::Source { code: None, .. }
+            | Self::Api { code: None, .. } => "internal",
             Self::Unavailable(_) => "unavailable",
             Self::Cache(_) => "cache_error",
             Self::Security(_) => "security_error",
@@ -105,12 +128,16 @@ impl CoreError {
     /// The boundary that produced this error, independent of its wire code.
     pub fn source_layer(&self) -> &'static str {
         match self {
-            Self::Api { .. } => "access",
+            Self::Api { .. }
+            | Self::PairingFenced
+            | Self::PairingCommittedUnavailable
+            | Self::PairingCommittedUnconfirmed => "access",
             Self::Host { .. } | Self::HostRejected => "host",
+            Self::Source { .. } => "source",
             Self::Security(_) | Self::FingerprintMismatch { .. } => "security",
             Self::Cache(_) => "storage",
             Self::Unavailable(_) => "transport",
-            Self::Revoked => "access",
+            Self::Revoked | Self::RevokedRetentionUnverified => "access",
             _ => "core",
         }
     }
@@ -121,23 +148,34 @@ impl CoreError {
             Self::Host {
                 code: Some(code), ..
             }
+            | Self::Source {
+                code: Some(code), ..
+            }
             | Self::Api {
                 code: Some(code), ..
             } => error_code_exit_code(*code),
             Self::InvalidInput(_) | Self::Config(_) => 2,
             Self::NotFound(_) => 3,
-            Self::Unauthorized | Self::Revoked | Self::NotPaired => 4,
+            Self::Unauthorized
+            | Self::Revoked
+            | Self::RevokedRetentionUnverified
+            | Self::NotPaired => 4,
             Self::HostOffline | Self::Unavailable(_) => 5,
             Self::HostRejected => 6,
             Self::Timeout | Self::UnknownResult => 7,
             Self::Conflict(_)
+            | Self::PairingFenced
+            | Self::PairingCommittedUnavailable
+            | Self::PairingCommittedUnconfirmed
             | Self::FingerprintMismatch { .. }
             | Self::ChannelMismatch
             | Self::StaleCommand { .. } => 8,
             Self::Unsupported | Self::ProtocolIncompatible => 9,
             Self::PairingCancelled => 2,
             Self::Cache(_) | Self::Security(_) | Self::Internal(_) => 1,
-            Self::Host { code: None, .. } | Self::Api { code: None, .. } => 1,
+            Self::Host { code: None, .. }
+            | Self::Source { code: None, .. }
+            | Self::Api { code: None, .. } => 1,
         }
     }
 
@@ -158,6 +196,67 @@ impl CoreError {
             } => matches!(code, ErrorCode::Unauthorized | ErrorCode::Forbidden),
             _ => false,
         }
+    }
+
+    pub(crate) fn from_pairing_hello_access(error: AccessError) -> Self {
+        match error.code {
+            Some(ErrorCode::PairingFenced)
+                if error.kind == AccessErrorKind::Http && error.status == Some(409) =>
+            {
+                Self::PairingFenced
+            }
+            Some(
+                ErrorCode::PairingFenced
+                | ErrorCode::PairingCommittedUnavailable
+                | ErrorCode::PairingCommittedUnconfirmed,
+            ) => Self::Security("invalid pairing HELLO response".into()),
+            _ => Self::from(error),
+        }
+    }
+
+    pub(crate) fn from_pairing_access(error: AccessError) -> Self {
+        if matches!(
+            error.code,
+            Some(
+                ErrorCode::PairingFenced
+                    | ErrorCode::PairingCommittedUnavailable
+                    | ErrorCode::PairingCommittedUnconfirmed
+            )
+        ) {
+            if error.kind == AccessErrorKind::Http && error.status == Some(409) {
+                match error.code {
+                    Some(ErrorCode::PairingFenced) => Self::PairingFenced,
+                    Some(ErrorCode::PairingCommittedUnavailable) => {
+                        Self::PairingCommittedUnavailable
+                    }
+                    Some(ErrorCode::PairingCommittedUnconfirmed) => {
+                        Self::PairingCommittedUnconfirmed
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                Self::Security("invalid pairing terminal response".into())
+            }
+        } else {
+            Self::from(error)
+        }
+    }
+
+    pub(crate) fn pairing_closed(&self) -> bool {
+        matches!(
+            self,
+            Self::PairingFenced | Self::PairingCommittedUnavailable
+        )
+    }
+
+    pub(crate) fn host_channel_replaced(&self) -> bool {
+        matches!(
+            self,
+            Self::Host {
+                code: Some(ErrorCode::ChannelReplaced),
+                ..
+            }
+        )
     }
 }
 
@@ -259,6 +358,10 @@ pub fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Internal => "internal",
         ErrorCode::Unavailable => "unavailable",
         ErrorCode::PayloadTooLarge => "payload_too_large",
+        ErrorCode::PairingFenced => "pairing_fenced",
+        ErrorCode::PairingCommittedUnavailable => "pairing_committed_unavailable",
+        ErrorCode::PairingCommittedUnconfirmed => "pairing_committed_unconfirmed",
+        ErrorCode::ChannelReplaced => "channel_replaced",
     }
 }
 
@@ -270,6 +373,10 @@ pub fn error_code_exit_code(code: ErrorCode) -> u8 {
         ErrorCode::Unauthorized | ErrorCode::Forbidden => 4,
         ErrorCode::Unavailable | ErrorCode::PayloadTooLarge => 5,
         ErrorCode::Conflict
+        | ErrorCode::PairingFenced
+        | ErrorCode::PairingCommittedUnavailable
+        | ErrorCode::PairingCommittedUnconfirmed
+        | ErrorCode::ChannelReplaced
         | ErrorCode::PayloadDigestMismatch
         | ErrorCode::ApprovalVersionMismatch
         | ErrorCode::ApprovalAlreadyResolved
@@ -297,6 +404,7 @@ mod tests {
             (ErrorCode::Forbidden, 4),
             (ErrorCode::Unavailable, 5),
             (ErrorCode::Conflict, 8),
+            (ErrorCode::ChannelReplaced, 8),
             (ErrorCode::PayloadDigestMismatch, 8),
             (ErrorCode::ApprovalAlreadyResolved, 8),
             (ErrorCode::Expired, 7),
@@ -365,6 +473,12 @@ mod tests {
         assert_eq!(CoreError::NotFound("x".into()).exit_code(), 3);
         assert_eq!(CoreError::Unauthorized.exit_code(), 4);
         assert_eq!(CoreError::Revoked.exit_code(), 4);
+        assert_eq!(CoreError::RevokedRetentionUnverified.exit_code(), 4);
+        assert_eq!(CoreError::RevokedRetentionUnverified.code(), "revoked");
+        assert_eq!(
+            CoreError::RevokedRetentionUnverified.source_layer(),
+            "access"
+        );
         assert_eq!(CoreError::HostOffline.exit_code(), 5);
         assert_eq!(CoreError::HostRejected.exit_code(), 6);
         assert_eq!(CoreError::Timeout.exit_code(), 7);
@@ -500,6 +614,7 @@ mod exhaustive_tests {
             (ErrorCode::Internal, "internal", 1),
             (ErrorCode::Unavailable, "unavailable", 5),
             (ErrorCode::PayloadTooLarge, "payload_too_large", 5),
+            (ErrorCode::ChannelReplaced, "channel_replaced", 8),
         ];
         for (code, name, exit) in cases {
             assert_eq!(error_code_name(code), name);
@@ -520,6 +635,7 @@ mod exhaustive_tests {
             CoreError::NotFound("x".into()),
             CoreError::Unauthorized,
             CoreError::Revoked,
+            CoreError::RevokedRetentionUnverified,
             CoreError::HostOffline,
             CoreError::HostRejected,
             CoreError::Timeout,
@@ -609,5 +725,24 @@ mod exhaustive_tests {
             assert_eq!(core.code(), code);
             assert_eq!(core.exit_code(), exit);
         }
+    }
+
+    #[test]
+    fn replacement_signal_is_accepted_only_from_host_result() {
+        assert!(CoreError::Host {
+            code: Some(ErrorCode::ChannelReplaced),
+            message: String::new()
+        }
+        .host_channel_replaced());
+        assert!(!CoreError::Api {
+            code: Some(ErrorCode::ChannelReplaced),
+            message: String::new()
+        }
+        .host_channel_replaced());
+        assert!(!CoreError::Host {
+            code: Some(ErrorCode::Unavailable),
+            message: String::new()
+        }
+        .host_channel_replaced());
     }
 }

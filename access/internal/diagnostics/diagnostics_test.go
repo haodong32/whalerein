@@ -133,6 +133,12 @@ func TestMetricsExposeExpectedSeriesWithoutIdentityLabels(t *testing.T) {
 	metrics.EventDropped()
 	metrics.SetConnected(2, 3)
 	metrics.ObserveRevocation(100 * time.Millisecond)
+	metrics.PresenceEvent("sys", "offline")
+	metrics.PresenceEvent("will", "online")
+	metrics.PresenceEvent("unexpected", "unexpected")
+	metrics.PresenceDuplicate()
+	metrics.PresenceInvalid()
+	metrics.DeviceOfflinePublishFailed()
 
 	if value := testutil.ToFloat64(metrics.HTTPRequestErrors.WithLabelValues("invalid_argument")); value != 1 {
 		t.Fatalf("http errors = %v", value)
@@ -145,6 +151,24 @@ func TestMetricsExposeExpectedSeriesWithoutIdentityLabels(t *testing.T) {
 	}
 	if count := testutil.CollectAndCount(metrics.RevocationLatency); count != 1 {
 		t.Fatalf("revocation metric count = %d", count)
+	}
+	if value := testutil.ToFloat64(metrics.DevicePresenceEvents.WithLabelValues("sys", "offline")); value != 1 {
+		t.Fatalf("sys offline presence = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.DevicePresenceEvents.WithLabelValues("will", "online")); value != 1 {
+		t.Fatalf("will online presence = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.DevicePresenceEvents.WithLabelValues("unknown", "unknown")); value != 1 {
+		t.Fatalf("unknown presence = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.PresenceDuplicatesIgnored); value != 1 {
+		t.Fatalf("duplicates = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.PresenceInvalidPayloads); value != 1 {
+		t.Fatalf("invalid payloads = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.DeviceOfflinePublishFail); value != 1 {
+		t.Fatalf("publish failures = %v", value)
 	}
 
 	families, err := metrics.Registry.Gather()
@@ -238,4 +262,8 @@ func TestTraceContextCorrelatesHostResultMetrics(t *testing.T) {
 	}
 	var absent *Metrics
 	absent.ObserveHostResult(0, 0)
+	absent.PresenceEvent("sys", "offline")
+	absent.PresenceDuplicate()
+	absent.PresenceInvalid()
+	absent.DeviceOfflinePublishFailed()
 }

@@ -5,15 +5,30 @@ import { AdapterError, DefinitiveExecutionError } from '../errors.js'
 export class SourceAdapter {
   async open({metadata}={}) { this.metadata=metadata }
   async close() {}
+  async describeHostCapabilities() { return {} }
+  async executeHost() { throw new DefinitiveExecutionError('unsupported_capability') }
   async listSessions() { throw new AdapterError('unsupported_capability') }
   async getSession() { throw new AdapterError('unsupported_capability') }
   watch() { throw new AdapterError('unsupported_capability') }
   async readHistory() { throw new AdapterError('unsupported_capability') }
+  async listModels() { throw new AdapterError('unsupported_capability') }
+  async readSessionModel() { throw new AdapterError('unsupported_capability') }
+  async readPendingQueue() { throw new AdapterError('unsupported_capability') }
   async readState() { throw new AdapterError('unsupported_capability') }
+  async readWaitState() { throw new AdapterError('unsupported_capability') }
+  // Wait observes execution only. Aborting the signal must not interrupt it.
+  async waitSession() { throw new AdapterError('unsupported_capability') }
   async listApprovals() { throw new AdapterError('unsupported_capability') }
   async getApproval() { throw new AdapterError('unsupported_capability') }
+  async listQuestionPage() { throw new AdapterError('unsupported_capability') }
+  async getQuestion() { throw new AdapterError('unsupported_capability') }
   // Resolve with a confirmed native receipt. Only DefinitiveExecutionError
   // establishes failure; any other exception can follow an executed action.
+  // An optional third argument carries an opaque operationId stable for the
+  // journaled Host/device/command identity. It contains no command payload.
+  // Implementations must check context.signal after asynchronous prechecks and
+  // before native mutation. Cancellation after native entry does not prove
+  // that the mutation failed.
   async execute() { throw new DefinitiveExecutionError('unsupported_capability') }
 }
 

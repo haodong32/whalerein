@@ -18,6 +18,9 @@ pub struct PersistedConfig {
     pub access_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_fingerprint: Option<String>,
+    /// Additional Host pins explicitly confirmed during pairing.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub host_fingerprints: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt_url: Option<String>,
     pub host_id: String,
@@ -36,6 +39,7 @@ impl PersistedConfig {
             schema: CONFIG_SCHEMA.into(),
             access_url,
             host_fingerprint: None,
+            host_fingerprints: std::collections::BTreeMap::new(),
             mqtt_url,
             host_id,
             device_id,
@@ -53,6 +57,13 @@ impl PersistedConfig {
             .is_some_and(|pin| pin.len() != 64 || !pin.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             return Err(CoreError::Config("invalid Host fingerprint".into()));
+        }
+        if self.host_fingerprints.iter().any(|(host, pin)| {
+            host.is_empty() || pin.len() != 64 || !pin.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(CoreError::Config(
+                "invalid additional Host fingerprint".into(),
+            ));
         }
         if self.host_id.is_empty() || self.device_id.is_empty() {
             return Err(CoreError::Config(
@@ -92,7 +103,7 @@ impl ConfigStore {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -126,6 +137,7 @@ impl ConfigStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn delete(&self) -> CoreResult<()> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -137,12 +149,12 @@ impl ConfigStore {
     }
 }
 
-pub fn set_private_permissions(path: &Path) -> CoreResult<()> {
+pub fn set_private_permissions(_path: &Path) -> CoreResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
+        std::fs::set_permissions(_path, permissions)
             .map_err(|_| CoreError::Config("file permissions could not be set".into()))?;
     }
     Ok(())

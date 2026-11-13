@@ -85,6 +85,7 @@ Full reference: tools/repo/README.md""",
             "  ./repo test --project core --list\n"
             "  ./repo test --project repo --coverage\n"
             "  ./repo test --suite integration --group protocol\n"
+            "  ./repo test --suite integration --group chain --parallel 2\n"
             "  ./repo test --suite all"
         ),
         "report": "  ./repo report .data/runs/my-check/report.json --output /tmp/test-report.html",
@@ -98,6 +99,8 @@ Full reference: tools/repo/README.md""",
                 "  --project is unit-only; --group is integration-only.\n"
                 "  Unit --only requires exactly one project; --only cannot use suite all.\n"
                 "  --coverage cannot combine with --only, --list or suite integration.\n"
+                "  --parallel requires integration, is incompatible with --list,\n"
+                "  and accepts 1..8.\n"
                 "  With suite all, coverage measures only the unit portion.\n"
                 "  --list may compile tests or build an image;\n"
                 "  Node static listing is unsupported.\n\n"
@@ -146,6 +149,12 @@ Full reference: tools/repo/README.md""",
                 help="select one integration group (default: all groups)",
             )
             sub.add_argument(
+                "--integration-timeout",
+                type=int,
+                metavar="SECONDS",
+                help="integration execution deadline in seconds (default: 7200; build is separate)",
+            )
+            sub.add_argument(
                 "--only",
                 metavar="TEXT",
                 help="literal, case-sensitive substring of case IDs; no matches fail",
@@ -160,6 +169,14 @@ Full reference: tools/repo/README.md""",
                 dest="list_only",
                 action="store_true",
                 help="discover case IDs without executing test bodies",
+            )
+            sub.add_argument(
+                "--parallel",
+                type=int,
+                default=None,
+                metavar="N",
+                help="integration only: run N independent containers with deterministic "
+                "hash shards (1-8, default 1); incompatible with --list",
             )
             sub.add_argument(
                 "--output",
@@ -218,6 +235,8 @@ def dispatch(args, root, runner):
             args.group,
             args.coverage,
             args.list_only,
+            args.integration_timeout,
+            args.parallel,
         )
         request.validate(bool(args.project))
         return testing.run(root, selected, runner, request, args.output)

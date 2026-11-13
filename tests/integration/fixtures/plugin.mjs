@@ -1,4 +1,7 @@
 import { FixtureAdapter } from './adapter.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import { codec } from '../../../host/runtime/src/protocol.js'
 // Start the real WhaleRein DSH plugin runtime with FakeDSH for the integration
 // harness. All settings come from WHALEREIN_* environment variables:
 //
@@ -32,6 +35,44 @@ const host = createHost(config, { adapter, credentials: { getCredential: (...arg
 const keepAlive = setInterval(() => {}, 1 << 30)
 try {
   await host.start()
+  // Isolated fixture fault: fail exactly one terminal success journal write.
+  const updateCommand = host.store.setCommandStatus.bind(host.store)
+  host.store.setCommandStatus = fields => {
+    const marker = path.join(process.env.WHALEREIN_STATE_DIR, 'gx-fail-terminal')
+    if (fields.status === 'succeeded' && fs.existsSync(marker)) {
+      fs.unlinkSync(marker)
+      throw new Error('synthetic GX journal failure')
+    }
+    return updateCommand(fields)
+  }
+  // Drop exactly one terminal command result after its journal commit.
+  const publishResult = host.access.publishResult.bind(host.access)
+  const protocol = codec()
+  host.access.publishResult = async bytes => {
+    const marker = path.join(process.env.WHALEREIN_STATE_DIR, 'gx-drop-terminal')
+    const result = protocol.decode('whalerein.v1.HostResult', bytes)
+    // Test-only metadata for exact encrypted response budget assertions; no body is persisted.
+    const budgetMarker = path.join(process.env.WHALEREIN_STATE_DIR, 'test-queue-wire-size')
+    if (fs.existsSync(budgetMarker) && !result.command_id) {
+      fs.writeFileSync(budgetMarker, JSON.stringify({size:bytes.length,status:result.status,bodySize:result.result_body?.length ?? 0}))
+    }
+    if (result.command_id && result.status === 'succeeded' && fs.existsSync(marker)) {
+      fs.unlinkSync(marker)
+      return
+    }
+    // Test-only expiry of one completed read-only request after a valid slice.
+    const waitExpiry = path.join(process.env.WHALEREIN_STATE_DIR, 'test-wait-expire-result')
+    if (fs.existsSync(waitExpiry) && result.request_id && result.status === 'succeeded' && !result.command_id) {
+      fs.unlinkSync(waitExpiry)
+      result.status = 'failed'
+      result.error_code = 'expired'
+      result.error_message = 'expired'
+      result.result_body = new Uint8Array()
+      return publishResult(protocol.encode('whalerein.v1.HostResult', result))
+    }
+    return publishResult(bytes)
+  }
+
   // Do not call the host ready before its broker connection and subscription
   // exist; the pairing flow requires broker presence.
   await host.access.waitForConnected(30_000)

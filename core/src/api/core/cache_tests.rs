@@ -39,7 +39,7 @@ async fn returns_runtime_state_and_populates_host_session_and_event_cache() {
     let emitted = core.sync_session("session-1").await.unwrap();
     assert_eq!(emitted, 1);
     assert_eq!(
-        core.cached_messages(&core.session_key("session-1").unwrap())
+        core.cached_messages(&core.session_key("session-1").await.unwrap())
             .unwrap()[0]
             .message_id,
         "message-1"
@@ -182,6 +182,103 @@ async fn an_accepted_send_returns_the_later_failure_instead_of_success() {
         .pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
-    assert!(client.send_message("session-1", "").await.is_err());
+    let error = client.send_message("session-1", "").await.unwrap_err();
+    assert!(!matches!(error, CoreError::UnknownResult));
     assert_eq!(access.host.lock().unwrap().pending_result_polls, 0);
+}
+
+#[tokio::test]
+async fn session_scope_checks_live_authorization_after_reopen() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert_eq!(
+        core.session_key("session-1").await.unwrap().host_id,
+        "host-1"
+    );
+    assert!(matches!(
+        core.with_session_host("other")
+            .unwrap()
+            .session_key("session-1")
+            .await,
+        Err(CoreError::NotFound(_))
+    ));
+    drop(core);
+    let reopened = Core::new(CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened.session_key("session-1").await.unwrap().host_id,
+        "host-1"
+    );
+    assert!(matches!(
+        reopened
+            .with_session_host("other")
+            .unwrap()
+            .session_key("session-1")
+            .await,
+        Err(CoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn routing_requires_live_unique_match_across_authorized_hosts() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    access.host.lock().unwrap().extra_host = true;
+    let mut config = core.current_config().unwrap();
+    config
+        .host_fingerprints
+        .insert("host-2".into(), config.host_fingerprint.clone().unwrap());
+    core.config_store().save(&config).unwrap();
+    *core.config.write().unwrap() = Some(config);
+    assert!(matches!(
+        core.session_key("session-1").await,
+        Err(CoreError::Conflict(_))
+    ));
+    drop(core);
+    let reopen = || {
+        Core::new(CoreOptions {
+            data_dir: dir.path().to_path_buf(),
+            secrets: secrets.clone(),
+        })
+        .unwrap()
+    };
+    let core = reopen();
+    assert!(matches!(
+        core.get_session("session-1").await,
+        Err(CoreError::Conflict(_))
+    ));
+    drop(core);
+    let core = reopen();
+    assert_eq!(
+        core.with_session_host("host-2")
+            .unwrap()
+            .session_key("session-1")
+            .await
+            .unwrap()
+            .host_id,
+        "host-2"
+    );
+    access.host.lock().unwrap().extra_host_session = "different".into();
+    assert_eq!(
+        core.session_key("session-1").await.unwrap().host_id,
+        "host-1"
+    );
+    drop(core);
+    let core = reopen();
+    access.host.lock().unwrap().extra_host_online = false;
+    assert!(matches!(
+        core.session_key("session-1").await,
+        Err(CoreError::Unavailable(_))
+    ));
 }

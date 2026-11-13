@@ -149,6 +149,8 @@ func (f *fakeRequests) Get(_ context.Context, deviceID, requestID string) (store
 	return f.row, f.getErr
 }
 
+func (f *fakeRequests) Touch(_ string, _ string, _ whalereinv1.OnlineStatus) {}
+
 type fakePresence struct {
 	err   error
 	calls int
@@ -280,16 +282,19 @@ func TestPublicClaimRoutesPairingPhasesAndErrors(t *testing.T) {
 		status int
 		code   whalereinv1.ErrorCode
 	}{
-		"maps used invitation to conflict response":                   {pairing.ErrTokenUsed, http.StatusConflict, whalereinv1.ErrorCode_conflict},
-		"maps expired invitation to gone response":                    {pairing.ErrTokenExpired, http.StatusGone, whalereinv1.ErrorCode_expired},
-		"maps exhausted invitation failures to rate limited response": {pairing.ErrFailureBudget, http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited},
-		"maps offline host claim to unavailable response":             {pairing.ErrHostOffline, http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable},
-		"maps host transport failure to unavailable response":         {pairing.ErrHostUnavailable, http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable},
-		"maps host claim rejection to forbidden response":             {pairing.ErrHostRejected, http.StatusForbidden, whalereinv1.ErrorCode_forbidden},
-		"maps missing prior HELLO to conflict response":               {pairing.ErrClaimRequired, http.StatusConflict, whalereinv1.ErrorCode_conflict},
-		"maps unsupported claim version to protocol error response":   {pairing.ErrProtocolVersion, http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible},
-		"maps invalid claim to bad request response":                  {pairing.ErrInvalidClaim, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument},
-		"maps claim service failure to internal error response":       {pairing.ErrInternal, http.StatusInternalServerError, whalereinv1.ErrorCode_internal},
+		"maps used invitation to conflict response":                           {pairing.ErrTokenUsed, http.StatusConflict, whalereinv1.ErrorCode_conflict},
+		"maps expired invitation to gone response":                            {pairing.ErrTokenExpired, http.StatusGone, whalereinv1.ErrorCode_expired},
+		"maps exhausted invitation failures to rate limited response":         {pairing.ErrFailureBudget, http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited},
+		"maps offline host claim to unavailable response":                     {pairing.ErrHostOffline, http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable},
+		"maps host transport failure to unavailable response":                 {pairing.ErrHostUnavailable, http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable},
+		"maps host claim rejection to forbidden response":                     {pairing.ErrHostRejected, http.StatusForbidden, whalereinv1.ErrorCode_forbidden},
+		"maps missing prior HELLO to conflict response":                       {pairing.ErrClaimRequired, http.StatusConflict, whalereinv1.ErrorCode_conflict},
+		"maps unsupported claim version to protocol error response":           {pairing.ErrProtocolVersion, http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible},
+		"maps committed unconfirmed pairing to an explicit terminal response": {pairing.ErrPairingCommittedUnconfirmed, http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unconfirmed},
+		"maps completed unavailable pairing to an explicit terminal response": {pairing.ErrPairingCommittedUnavailable, http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unavailable},
+		"maps fenced pairing to an explicit terminal response":                {pairing.ErrPairingFenced, http.StatusConflict, whalereinv1.ErrorCode_pairing_fenced},
+		"maps invalid claim to bad request response":                          {pairing.ErrInvalidClaim, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument},
+		"maps claim service failure to internal error response":               {pairing.ErrInternal, http.StatusInternalServerError, whalereinv1.ErrorCode_internal},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAPIFixture(t)

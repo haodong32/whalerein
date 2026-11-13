@@ -156,16 +156,33 @@ def measure(project, runner):
         project.root,
         timeout=1800,
     )
+    if not run.ok:
+        failures = sorted(
+            set(
+                re.findall(
+                    r"(?m)^test ([A-Za-z_][A-Za-z0-9_:]*) \.\.\. FAILED(?:,.*)?$", run.output
+                )
+            )
+        )
+        if failures:
+            detail = "failed tests: " + ", ".join(failures[:20])
+        else:
+            # libtest prints captured test output after failures; exposing a raw
+            # tail here could leak message contents. Report only the stage.
+            detail = (
+                "failed test names unavailable (compile or runner failure); "
+                "captured output suppressed"
+            )
+        result.error = (
+            f"cargo llvm-cov exited {run.returncode}; coverage is not trustworthy: {detail}"
+        )
+        return result
     try:
         covered, total, percent = parse_llvm_cov_json(extract_json(run.stdout))
     except ValueError as exc:
         result.error = f"could not parse cargo llvm-cov output: {exc}; {run.tail(500)}"
         return result
     result.covered, result.total, result.percent = (covered, total, percent)
-    if not run.ok:
-        result.error = (
-            f"cargo llvm-cov exited {run.returncode}; coverage is not trustworthy: " + run.tail(500)
-        )
     return result
 
 

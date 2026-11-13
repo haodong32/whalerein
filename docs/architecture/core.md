@@ -28,7 +28,13 @@ while watch orchestration and its focused tests remain in `api/watch.rs` and
 `api/tail_tests.rs`. Facade tests are grouped by cache, command recovery, pairing,
 diagnostics and approval/revocation behavior, with shared setup in `test_support.rs`.
 
-A SessionKey is `(host_id, session_id)`. Source history cursors are opaque strings;
+A SessionKey is `(host_id, session_id)`. Resolve an unqualified session ID
+against the current authorized Host set. With multiple Hosts, every source
+session list must be available and complete; multiple matches are ambiguous,
+and an unavailable list cannot prove uniqueness. An explicit Host is checked
+against current authorization. Each independently paired Host has its own
+confirmed fingerprint; discovery cannot replace a pinned identity.
+Source history cursors are opaque strings;
 Core checks continuity and never interprets DSH sequence numbers or native JSON.
 Committed changes and cursors update atomically. Snapshot pages stage separately
 and replace a complete view only on successful completion. Source branch/reset
@@ -54,7 +60,26 @@ Multi-session MQTT multiplexing is deferred until required by a real consumer.
 Queries may retry after channel loss. Controls keep their original command IDs
 and use result recovery instead of blind execution retries. Confirmed revocation
 clears authorization/cache material but preserves device identity. Explicit forget
-removes identity. Transport, source and decoding errors are not grant revocation.
+removes identity. A successful `revoke()` returns `RevocationOutcome` with the
+device ID and an explicit `Recorded` or `Unverified` status for retained
+unconfirmed command or pairing identities. A confirmed passive revocation with unverified
+retention returns `RevokedRetentionUnverified` (wire code `revoked`). A missing
+cache can mean either no cache was ever created or its identities were lost;
+Core does not infer which. The snapshot uses the same initialized SQLite
+connection only after checking profile provenance; an unavailable or unproven
+connection is not read. Token and cache-key entries are removed from SecretStore
+before waiting for transient database contention; an already-live Cache may keep
+its in-memory key copy until its references are released. Transport, source and
+decoding errors are not grant revocation.
+
+Confirmed global revocation removes any retained pairing FINISH credential after
+saving only its redacted identity. The profile also retains an opaque revocation
+epoch after transient cleanup markers are removed. Pairing captures this epoch
+before HELLO and checks it under admission both before retaining FINISH and before
+installing credentials; a late result from a prior epoch cannot overwrite a newer
+pairing. A pending record bound to the same completed pre-epoch marker is migrated
+under admission; unproven records are not assigned a later epoch. Stop older local
+clients before relying on the epoch: older binaries do not check it.
 
 Before sending pairing FINISH, Core stores the exact confirmed request and Host
 pin in SecretStore. Its locally generated random transport credential is bound by

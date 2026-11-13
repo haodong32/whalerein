@@ -59,4 +59,65 @@ and message/tool content never enter diagnostics.
 No Pi entry, launcher, runtime registry or dependency is implemented. Another
 Harness supplies its own SourceAdapter and credential binding to the shared Host.
 Actual DSH lifecycle, credential behavior and local/remote approval races remain
-native release gates beyond FakeDSH tests.
+target-environment verification work beyond FakeDSH tests.
+
+## Production capabilities
+
+Model catalog/read/select, pending-queue read/edit/remove/steer, session create,
+fork, wait, question read/open/continued and delivery queue/steer are advertised
+by default. Advertisement is feature detection: the real adapter inspects the
+native services bound to its Cordis context and advertises an operation group
+only when the corresponding native service support is present. It is not tied
+to an allowlisted DSH package version or platform. Missing native support
+reports `unsupported_capability`; it never silently degrades to another
+operation or fabricates a result.
+
+The shipped profile schema exposes two switches, both defaulting to true.
+`pending_queue_enabled` gates the pending-queue read/edit/remove/steer group.
+`enable_open_question_broker` gates the open-question broker used to answer
+open questions. Setting either key to false stops the guarded operations from
+being advertised; other groups are unaffected. Question discovery and continued
+answers follow native service support independently of the open-question
+broker.
+
+Queue and steer delivery are advertised whenever the native prompt service is
+callable. The exact-runtime check is no longer an advertisement condition and
+does not select a fallback delivery mode; the adapter advertises the modes the
+native source actually provides.
+
+Model selection still uses the native controller and returns its selected value
+with the source-default save attempt marked unconfirmed. The Host journals
+command results and never retries a possibly executed selection as a new action.
+
+Native evidence is scoped, not universal. Strong queue/steer evidence exists
+only for the standard DSH CLI runtime on Linux or macOS arm64 with Node 25.9.0,
+DSH launcher/session-controller/app-boot 0.2.2-rc.1 and Cordis 4.1.0. Other
+platforms and versions are open but unverified, including Windows native
+behavior; a repeatable macOS runner has not been established. Isolated adapter,
+model and question tests or fixtures are not platform validation. "Advertised"
+therefore means usable when the native services exist; it does not assert
+verified behavior on every environment.
+
+
+## Presence and claim release
+
+Access resolves a device last will or `$SYS` disconnect into a host-scoped
+`whalerein/v1/h/<host_id>/presence` event. Host subscribes only to its exact
+presence topic; on `device_offline` it clears that device's live channel and
+aborts its request/model/question scopes. The adapter's existing `finally`
+releases the native question `attachWait`; there is no separate claim registry,
+lease, token or protocol claim field. TTL remains the fallback when presence is
+absent. The broker-to-Access presence edge is unit-tested but not yet verified
+end-to-end against EMQX in the integration harness.
+
+
+## HTTP claim lease
+
+One-shot CLI commands submit and poll through the Access HTTP API; they do not
+hold a device MQTT session. Access therefore treats a non-terminal request's
+result polling as the client liveness signal: `Submit` records a claim, every
+`GET /v1/requests/{id}` renews it, and a 10s silent lease renewed by the CLI 5s heartbeat publishes a bounded
+`request_stale` event on the host's exact presence topic. Host aborts the
+matching request scope; the adapter `finally` releases the native question
+claim. MQTT will/keepalive remains for long-lived event connections only. TTL
+is still the fallback.

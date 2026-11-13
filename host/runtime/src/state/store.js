@@ -15,6 +15,17 @@ function blob(value) {
   return Buffer.from(value)
 }
 
+function parseOperationState(value) {
+  if (typeof value !== 'string' || value === '') return null
+  try {
+    const parsed = JSON.parse(value)
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.operationId !== 'string' || parsed.operationId === '') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 function rowCommand(row) {
   if (!row) return null
   return {
@@ -25,6 +36,7 @@ function rowCommand(row) {
     status: row.status,
     resultPayload: row.result_payload ? Buffer.from(row.result_payload) : null,
     errorCode: row.error_code ?? null,
+    operation: parseOperationState(row.operation_state),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresAt: row.expires_at,
@@ -123,6 +135,11 @@ export class StateStore {
       if (!this.#db.prepare('PRAGMA table_info(pending_peers)').all().some(column=>column.name===name)) {
         this.#db.exec(`ALTER TABLE pending_peers ADD COLUMN ${name} ${type}`)
       }
+    }
+    // Lifecycle operations reuse the command journal row; no second registry.
+    // The JSON is bounded, redacted, and carries no prompts, paths, or payloads.
+    if (!this.#db.prepare('PRAGMA table_info(commands)').all().some((column) => column.name === 'operation_state')) {
+      this.#db.exec('ALTER TABLE commands ADD COLUMN operation_state TEXT')
     }
     const peerColumns = this.#db.prepare('PRAGMA table_info(peer_keys)').all()
     if (!peerColumns.some((column) => column.name === 'display_name')) {
@@ -353,6 +370,50 @@ export class StateStore {
       WHERE device_id = ? AND command_id = ?
     `).run(status, blob(resultPayload), errorCode, now, deviceId, commandId)
     return Number(info.changes) === 1
+  }
+
+  /**
+   * Persist the in-flight lifecycle operation before native entry. This reuses
+   * the admitted command row; it is not a second operation registry and never
+   * rewrites command status.
+   */
+  beginLifecycleOperation({ deviceId, commandId, operationId, operation, phase = 'NATIVE', preferredSessionId = '', parentSessionId = '', now = this.#now() }) {
+    const state = JSON.stringify({
+      operationId,
+      operation,
+      phase,
+      entered: false,
+      sessionId: '',
+      parentSessionId,
+      preferredSessionId,
+    })
+    const info = this.#db.prepare(`
+      UPDATE commands SET operation_state = ?, updated_at = ?
+      WHERE device_id = ? AND command_id = ?
+    `).run(state, now, deviceId, commandId)
+    return Number(info.changes) === 1
+  }
+
+  updateLifecycleOperation({ deviceId, commandId, phase, entered = true, sessionId = '', parentSessionId = '', now = this.#now() }) {
+    const existing = this.getLifecycleOperation(deviceId, commandId)
+    if (!existing) return false
+    const state = JSON.stringify({
+      ...existing,
+      phase,
+      entered: Boolean(entered),
+      ...(sessionId === '' ? {} : { sessionId }),
+      ...(parentSessionId === '' ? {} : { parentSessionId }),
+    })
+    const info = this.#db.prepare(`
+      UPDATE commands SET operation_state = ?, updated_at = ?
+      WHERE device_id = ? AND command_id = ?
+    `).run(state, now, deviceId, commandId)
+    return Number(info.changes) === 1
+  }
+
+  getLifecycleOperation(deviceId, commandId) {
+    const row = this.#db.prepare('SELECT operation_state FROM commands WHERE device_id = ? AND command_id = ?').get(deviceId, commandId)
+    return parseOperationState(row?.operation_state)
   }
 
   /** Crash recovery: accepted-but-unfinished commands become unknown, never success. */

@@ -9,7 +9,7 @@ admin_token: "${WHALEREIN_ADMIN_TOKEN}"
 host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
 
 broker:
-  url: "mqtt://emqx:1883"
+  url: "mqtt://emqx:1884"
   public_url: "mqtt://127.0.0.1:1883"
   client_id: "whalerein-access"
   username: "access"

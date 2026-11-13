@@ -5,6 +5,7 @@ import { RealDshAdapter } from '../src/adapter/real.js'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { generateKeypair } from 'whalerein-host/security/noise.js'
 import { approvalDigest } from 'whalerein-host/security/digest.js'
+import { codec } from 'whalerein-host/protocol.js'
 
 function makeLiveSession({
   sessionId = 's1',
@@ -639,7 +640,7 @@ for (const operation of ['prompt', 'cancel']) {
     const adapter = new RealDshAdapter({ ctx, config: {} })
     await adapter.open()
     try {
-      const command = operation === 'prompt' ? { send_message: { text: 'fixture message' } } : { interrupt: {} }
+      const command = operation === 'prompt' ? { send_message: { text: 'fixture message', delivery_mode: 'START_IF_IDLE' } } : { interrupt: {} }
       await assert.rejects(adapter.execute('s1', command), error =>
         error instanceof AdapterError && error.code === 'unavailable' && !(error instanceof DefinitiveExecutionError))
       assert.equal(nativeCalls, 1)
@@ -662,7 +663,7 @@ for (const operation of ['prompt', 'cancel']) {
     const adapter = new RealDshAdapter({ ctx, config: {} })
     await adapter.open()
     try {
-      const command = operation === 'prompt' ? { send_message: { text: 'fixture message' } } : { interrupt: {} }
+      const command = operation === 'prompt' ? { send_message: { text: 'fixture message', delivery_mode: 'START_IF_IDLE' } } : { interrupt: {} }
       await assert.rejects(adapter.execute('s1', command), error =>
         error instanceof AdapterError && error.code === 'unavailable' && !(error instanceof DefinitiveExecutionError))
     } finally {
@@ -731,4 +732,682 @@ test('Agent-scoped native approvals reach the remote adapter through Cordis rout
   } finally {
     await adapter.close()
   }
+})
+
+test('delivery modes are open by default and native prompt mapping retains operation identity', async () => {
+  const ctx = makeCtx({ live: new Map([['s1', makeLiveSession({ running: false })]]) })
+  const calls = []
+  ctx.sessionController.prompt = async request => { calls.push(request); return {accepted: true} }
+  const adapter = new RealDshAdapter({ ctx, config: {} })
+  await adapter.open()
+  try {
+    assert.deepEqual((await adapter.getSession('s1')).sourceCapabilities.delivery_modes, ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER'])
+    const queued = await adapter.sendUserMessage('s1', 'fixture', 'queue', 'op-1')
+    const steered = await adapter.sendUserMessage('s1', 'fixture', 'steer', 'op-2')
+    assert.deepEqual(calls.map(({mode, requestId}) => ({mode, requestId})), [{mode: 'queue', requestId: 'op-1'}, {mode: 'steer', requestId: 'op-2'}])
+    assert.equal(queued.deliveryId, 'op-1')
+    assert.equal(steered.deliveryId, 'op-2')
+  } finally { await adapter.close() }
+})
+
+test('a native prompt without explicit acceptance remains uncertain after source entry', async () => {
+  for (const outcome of [undefined, null, {}, {accepted: false}, {accepted: 'true'}, {accepted: 1}]) {
+    const ctx = makeCtx({live: new Map([['s1', makeLiveSession({running: false})]])})
+    let calls = 0
+    ctx.sessionController.prompt = async () => { calls++; return outcome }
+    const adapter = new RealDshAdapter({ctx, config: {}})
+    await adapter.open()
+    try {
+      await assert.rejects(
+        adapter.execute('s1', {send_message: {text: 'fixture', delivery_mode: 'START_IF_IDLE'}}, {operationId: 'unconfirmed'}),
+        error => error instanceof AdapterError && !(error instanceof DefinitiveExecutionError),
+      )
+      assert.equal(calls, 1)
+    } finally { await adapter.close() }
+  }
+})
+
+test('a real adapter without native prompt advertises no delivery mode and fails closed', async () => {
+  const ctx = makeCtx({live: new Map([['s1', makeLiveSession({running: false})]])})
+  delete ctx.sessionController.prompt
+  const adapter = new RealDshAdapter({ctx, config: {}})
+  await adapter.open()
+  try {
+    assert.deepEqual((await adapter.getSession('s1')).sourceCapabilities.delivery_modes, ['START_IF_IDLE'])
+    await assert.rejects(adapter.execute('s1', {send_message: {text: 'fixture'}}), error => error.code === 'unsupported_capability')
+    await assert.rejects(adapter.execute('s1', {send_message: {text: 'fixture', delivery_mode: 'STEER'}}), error => error.code === 'unsupported_capability')
+  } finally { await adapter.close() }
+})
+
+test('start-if-idle uses only a sampled state and reports the actual later native receipt', async () => {
+  const session = makeLiveSession({running: true})
+  const ctx = makeCtx({live: new Map([['s1', session]])})
+  let calls = 0
+  ctx.sessionController.prompt = async () => { calls++; return {accepted: true} }
+  const adapter = new RealDshAdapter({ctx, config: {}})
+  await adapter.open()
+  try {
+    await assert.rejects(adapter.execute('s1', {send_message: {text: 'fixture', delivery_mode: 'START_IF_IDLE'}}), error => error.code === 'conflict')
+    assert.equal(calls, 0)
+    session.running = false
+    const list = ctx.sessionController.list.bind(ctx.sessionController)
+    ctx.sessionController.list = async () => {
+      const sampled = await list()
+      session.running = true
+      return sampled
+    }
+    const receipt = await adapter.execute('s1', {send_message: {text: 'fixture', delivery_mode: 'START_IF_IDLE'}}, {operationId: 'race-1'})
+    assert.equal(calls, 1)
+    assert.equal(receipt.command_accepted.delivery_id, 'race-1')
+  } finally { await adapter.close() }
+})
+
+test('native wait discards output and preserves cold idle state', async () => {
+  const ctx = makeCtx()
+  ctx.sessionController.wait = async (request, signal) => {
+    assert.equal(request.sessionId, 's1')
+    assert.ok(request.timeoutMs > 0 && request.timeoutMs <= 1000)
+    assert.equal(signal.aborted, false)
+    return { reason: 'idle', state: { active: false, running: false, queue: null, pendingInput: [] }, output: { private: 'synthetic' } }
+  }
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  assert.deepEqual(await adapter.waitSession('s1', 1000, new AbortController().signal), {
+    reason: 'idle', state: { active: false, running: false, queueAvailable: false, pendingInput: [] },
+  })
+  await adapter.close()
+})
+
+test('native wait wakes for claimed approval and cancellation never interrupts the agent', async () => {
+  const session = makeLiveSession()
+  const ctx = makeCtx({ live: new Map([['s1', session]]) })
+  ctx.sessionController.wait = async (_request, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+  const adapter = new RealDshAdapter({ ctx, config: { approvalMode: 'claim' } })
+  await adapter.open()
+  const wait = adapter.waitSession('s1', 1000, new AbortController().signal)
+  const approval = ctx.emit('approval/request', { agent: { session }, toolName: 'fixture' }, async () => 'unavailable')[0]
+  const passive = await adapter.readWaitState('s1', new AbortController().signal)
+  assert.deepEqual(passive.pendingInput, ['approval'])
+  const otherSession = await adapter.readWaitState('s2', new AbortController().signal)
+  assert.deepEqual(otherSession.pendingInput, [])
+  const result = await wait
+  assert.equal(result.reason, 'input-required')
+  assert.deepEqual(result.state.pendingInput, ['approval'])
+  await adapter.close()
+  await approval
+  assert.deepEqual(ctx.calls.cancel, [])
+})
+
+test('native wait forwards cancellation and source failure without exposing output', async () => {
+  const ctx = makeCtx()
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  await assert.rejects(adapter.waitSession('s1', 1000, new AbortController().signal), error => error.code === 'unsupported_capability')
+  ctx.sessionController.wait = async (_request, signal) => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  adapter.listClaimedQuestions = () => []
+  adapter.subscribeQuestions = undefined
+  await assert.rejects(adapter.waitSession('s1', 1000, new AbortController().signal), error => error.code === 'unsupported_capability')
+  delete adapter.listClaimedQuestions
+  delete adapter.subscribeQuestions
+  const abort = new AbortController()
+  const pending = adapter.waitSession('s1', 1000, abort.signal)
+  abort.abort()
+  await assert.rejects(pending)
+  ctx.sessionController.wait = async () => { throw new Error('native failure') }
+  await assert.rejects(adapter.waitSession('s1', 1000, new AbortController().signal), AdapterError)
+  assert.deepEqual(ctx.calls.cancel, [])
+  await adapter.close()
+})
+
+test('native session creation preserves optional inputs and confirmed identity without private receipt fields', async () => {
+  const ctx = makeCtx()
+  const calls = []
+  ctx.sessionController.create = async request => { calls.push(request); return {sessionId: 'created-1', agentPreset: 'private'} }
+  const adapter = new RealDshAdapter({ ctx })
+  assert.deepEqual(await adapter.describeHostCapabilities(), {model_catalog: false, model_read: false, session_create: true, session_fork: false})
+  assert.deepEqual(await adapter.executeHost({create_session:{}}), {entered:true, identity:{session_id:'created-1'}})
+  assert.deepEqual(await adapter.executeHost({create_session:{cwd:'/synthetic',agent_preset:'p',preferred_session_id:'preferred'}}), {entered:true, identity:{session_id:'created-1'}})
+  assert.deepEqual(calls, [{}, {cwd:'/synthetic',agentPreset:'p',sessionId:'preferred'}])
+  for (const input of [{cwd:'relative'},{cwd:'/x',workspace_id:'w'},{workspace_id:' '},{preferred_session_id:''}]) {
+    await assert.rejects(adapter.executeHost({create_session:input}), error => error instanceof DefinitiveExecutionError && error.code === 'invalid_argument')
+  }
+  assert.equal(calls.length, 2)
+})
+
+test('native structured attachment failure without verified identity remains unresolved facts', async () => {
+  const ctx = makeCtx()
+  ctx.sessionController.create = async () => { throw {isDSHRemoteError:true,code:'session/workspace-attach-failed',details:{sessionId:'child',workspaceId:'private'},message:'private'} }
+  const adapter = new RealDshAdapter({ctx})
+  // Error details alone are not identity proof; the list projection has no child.
+  assert.deepEqual(await adapter.executeHost({create_session:{workspace_id:'private'}}), {entered:true, failure_code:'workspace_attach_failed'})
+  ctx.sessionController.create = async () => { throw {isDSHRemoteError:true,code:'workspace/not-found',details:{}} }
+  assert.deepEqual(await adapter.executeHost({create_session:{workspace_id:'missing'}}), {entered:true, failure_code:'not_found'})
+  ctx.sessionController.create = async () => { throw new Error('private diagnostic') }
+  assert.deepEqual(await adapter.executeHost({create_session:{}}), {entered:true, failure_code:'internal'})
+})
+
+test('verified workspace attach failure reports warning facts with observed identity', async () => {
+  const live = new Map([['s1', makeLiveSession({sessionId:'s1'})]])
+  const ctx = makeCtx({live})
+  ctx.sessionController.create = async () => {
+    live.set('child', makeLiveSession({sessionId:'child'}))
+    throw {isDSHRemoteError:true,code:'session/workspace-attach-failed',details:{sessionId:'child',workspaceId:'w'},message:'private'}
+  }
+  const adapter = new RealDshAdapter({ctx})
+  assert.deepEqual(await adapter.executeHost({create_session:{workspace_id:'w'}}),
+    {entered:true, identity:{session_id:'child'}, attach_error:'workspace_attach_failed'})
+})
+
+test('creation preflight reports registry facts without invoking native create', async () => {
+  const live = new Map([['preferred', makeLiveSession({sessionId:'preferred', blank:true, running:false})]])
+  const ctx = makeCtx({live})
+  let calls = 0
+  ctx.sessionController.create = async () => { calls++; return {sessionId:'native'} }
+  ctx.agentPresets = { resolve: async id => {
+    if (id === 'known') return { id }
+    throw Object.assign(new Error('agent-preset/not-found'), {code:'agent-preset/not-found'})
+  } }
+  ctx.workspaceRegistry = { get: id => id === 'w' ? { attachSession: async () => {} } : undefined, archivedSessionIds: [] }
+  const adapter = new RealDshAdapter({ctx})
+  assert.deepEqual(await adapter.preflightCreateSession({create_session:{workspace_id:'missing'}}), {workspace:'missing', preset:'not_configured', reuse:''})
+  assert.deepEqual(await adapter.preflightCreateSession({create_session:{workspace_id:'w',agent_preset:'missing'}}), {workspace:'present', preset:'missing', reuse:''})
+  assert.deepEqual(await adapter.preflightCreateSession({create_session:{workspace_id:'w',agent_preset:'known'}}), {workspace:'present', preset:'present', reuse:''})
+  assert.equal(calls, 0)
+})
+
+test('creation preflight claims reuse only for a proven blank unarchived identity', async () => {
+  const live = new Map([['preferred', makeLiveSession({sessionId:'preferred', blank:true, running:false})]])
+  const ctx = makeCtx({live})
+  ctx.sessionController.create = async () => ({sessionId:'native'})
+  const workspaces = { 'w': { attachSession: async () => {}, sessionIds: ['preferred'] }, 'other': { attachSession: async () => {}, sessionIds: [] } }
+  ctx.workspaceRegistry = { get: id => workspaces[id], archivedSessionIds: [] }
+  const adapter = new RealDshAdapter({ctx})
+  assert.equal((await adapter.preflightCreateSession({create_session:{preferred_session_id:'preferred',workspace_id:'w'}})).reuse, 'preferred')
+  ctx.workspaceRegistry.archivedSessionIds = ['preferred']
+  assert.equal((await adapter.preflightCreateSession({create_session:{preferred_session_id:'preferred',workspace_id:'w'}})).reuse, '')
+  ctx.workspaceRegistry.archivedSessionIds = []
+  assert.equal((await adapter.preflightCreateSession({create_session:{preferred_session_id:'preferred',workspace_id:'other'}})).reuse, '')
+  // Without an archived projection the reuse cannot be proved.
+  delete ctx.workspaceRegistry.archivedSessionIds
+  assert.equal((await adapter.preflightCreateSession({create_session:{preferred_session_id:'preferred'}})).reuse, '')
+})
+
+test('fork preflight proves a completed turn only from readable native projection', async () => {
+  const complete = new Map([['parent', makeLiveSession({sessionId:'parent', events:[
+    {type:'user/message',seq:1,time:1,data:{text:'x'}},
+    {type:'turn/end',seq:2,time:2,data:{running:false}},
+  ]})]])
+  const ctx = makeCtx({live: complete})
+  const adapter = new RealDshAdapter({ctx})
+  assert.deepEqual(await adapter.preflightForkSession('parent'), {completed_turn:true})
+  const empty = new Map([['parent', makeLiveSession({sessionId:'parent', events:[]})]])
+  assert.deepEqual(await new RealDshAdapter({ctx:makeCtx({live:empty})}).preflightForkSession('parent'), {completed_turn:false})
+  const unreadable = new RealDshAdapter({ctx:makeCtx({live:complete})})
+  unreadable.getSessionSnapshot = async () => { throw new AdapterError('unavailable') }
+  assert.deepEqual(await unreadable.preflightForkSession('parent'), {completed_turn:'unknown'})
+})
+
+test('pending queue distinguishes cold state and protects unowned content', async () => {
+  let state = {running:false,queue:null}
+  const ctx = makeCtx({stateFor:()=>state})
+  const adapter = new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  assert.deepEqual(await adapter.readPendingQueue('s1'), {session_id:'s1',available:false,running:false,items:[]})
+  state = {running:true,queue:[
+    {id:'a',placement:'queued',rpcId:'delivery',content:[{type:'text',text:'fixture'}, {type:'image',attachment:{attachmentId:'private',mediaType:'image/png',bytes:42,name:'fixture.png'}}, {type:'file',attachment:{attachmentId:'private',bytes:7,name:'../untrusted'}}]},
+    {id:'b',placement:'context',content:[{type:'text',text:'private'}]},
+    {id:'c',placement:'future-kind',rpcId:'request',content:[{type:'text',text:'private'}]},
+  ]}
+  const queue = await adapter.readPendingQueue('s1')
+  assert.equal(queue.available,true)
+  assert.deepEqual(queue.items[0].actions,['EDIT','REMOVE','PROMOTE'])
+  assert.equal(queue.items[0].delivery_id,'delivery')
+  assert.equal(queue.items[1].delivery_id,'')
+  assert.deepEqual(queue.items[0].blocks[1].attachment,{media_type:'image/png',name:'fixture.png',size:42,available:false})
+  assert.deepEqual(queue.items[0].blocks[2].attachment,{media_type:'',name:'',size:7,available:false})
+  assert.deepEqual(queue.items[1].actions,[])
+  assert.deepEqual(queue.items[2].actions,[])
+  assert.equal(queue.items[2].delivery_id,'')
+  assert.equal(JSON.stringify(queue).includes('private'),false)
+})
+
+test('pending queue mutations require known ownership and preserve uncertain promotion', async () => {
+  const ctx = makeCtx({stateFor:()=>({running:true,queue:[{id:'a',placement:'queued',rpcId:'r',content:[{type:'text',text:'fixture'}]}]})})
+  const calls=[]
+  ctx.sessionController.updateQueue = async (request) => { calls.push(request); if(request.action.kind==='steer') throw new Error('late failure') }
+  const adapter = new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  await adapter.updatePendingQueue('s1',{item_id:'a',action:'EDIT',text:'replacement'})
+  assert.deepEqual(calls[0].action,{kind:'edit',content:[{type:'text',text:'replacement'}]})
+  await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'a',action:'PROMOTE'}),error=>error instanceof AdapterError && !(error instanceof DefinitiveExecutionError))
+  await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'missing',action:'REMOVE'}),error=>error.code==='not_found')
+  await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'a',action:'EDIT',text:'  '}),error=>error.code==='invalid_argument')
+  const disabled = new RealDshAdapter({ctx,config:{pendingQueueEnabled:false}})
+  await assert.rejects(disabled.readPendingQueue('s1'),error=>error.code==='unsupported_capability')
+})
+
+
+test('fork delegates the completed boundary and preserves confirmed identities', async () => {
+  const ctx = makeCtx()
+  let request
+  ctx.sessionController.fork = async input => { request = input; return {sessionId:'child'} }
+  const adapter = new RealDshAdapter({ctx})
+  assert.deepEqual(await adapter.forkSession('parent'), {entered:true, identity:{session_id:'child',parent_session_id:'parent'}})
+  assert.deepEqual(request, {sessionId:'parent'})
+  const nativeError = (code, details = {}) => Object.assign(new Error('synthetic'), {isDSHRemoteError:true,code,details})
+  for (const [code, expected] of [
+    ['session/workspace-attach-failed', {entered:true, failure_code:'workspace_attach_failed'}],
+    ['session/not-found', {entered:false, failure_code:'not_found'}],
+    ['session/fork-unavailable', {entered:false, failure_code:'conflict'}],
+  ]) {
+    ctx.sessionController.fork = async () => { throw nativeError(code, {sessionId:'unrelated'}) }
+    assert.deepEqual(await adapter.forkSession('parent'), expected, code)
+  }
+  ctx.sessionController.fork = async () => { throw nativeError('gateway/internal') }
+  assert.deepEqual(await adapter.forkSession('parent'), {entered:true, failure_code:'internal'})
+})
+
+test('verified fork attach failure retains child and parent identities', async () => {
+  const live = new Map([['parent', makeLiveSession({sessionId:'parent'})]])
+  const ctx = makeCtx({live})
+  ctx.sessionController.fork = async () => {
+    live.set('child', makeLiveSession({sessionId:'child'}))
+    throw {isDSHRemoteError:true,code:'session/workspace-attach-failed',details:{sessionId:'child'},message:'private'}
+  }
+  const adapter = new RealDshAdapter({ctx})
+  assert.deepEqual(await adapter.forkSession('parent'),
+    {entered:true, identity:{session_id:'child',parent_session_id:'parent'}, attach_error:'workspace_attach_failed'})
+})
+
+test('native wait reconciles scoped claimed-question lifecycle without exposing question content', async () => {
+  const ctx = makeCtx()
+  ctx.sessionController.wait = async (_request, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+  const adapter = new RealDshAdapter({ ctx })
+  const handles = new Map()
+  const subscribers = new Set()
+  adapter.listClaimedQuestions = sessionId => handles.has(sessionId) ? [{ sessionId, batchId: handles.get(sessionId) }] : []
+  adapter.subscribeQuestions = callback => { subscribers.add(callback); return () => subscribers.delete(callback) }
+  await adapter.open()
+  const pending = adapter.waitSession('s1', 3000, new AbortController().signal)
+  handles.set('s2', 'foreign')
+  for (const callback of subscribers) callback({ type: 'requested', sessionId: 's2', batchId: 'foreign' })
+  assert.equal((await adapter.readWaitState('s1', new AbortController().signal)).pendingInput.length, 0)
+  handles.set('s1', 'owned')
+  for (const callback of subscribers) callback({ type: 'requested', sessionId: 's1', batchId: 'owned' })
+  const result = await pending
+  assert.equal(result.reason, 'input-required')
+  assert.deepEqual(result.state.pendingInput, ['question'])
+  assert.deepEqual(Object.keys(result.state).sort(), ['active', 'pendingInput', 'queueAvailable', 'running'])
+  handles.delete('s1')
+  assert.deepEqual((await adapter.readWaitState('s1', new AbortController().signal)).pendingInput, [])
+  assert.equal(subscribers.size, 0)
+  await adapter.close()
+})
+
+
+test('a blocked native wait can be cancelled without cancelling another observation', async () => {
+  const ctx = makeCtx()
+  const entered = []
+  ctx.sessionController.wait = async (_request, signal) => {
+    entered.push(signal)
+    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  }
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  const firstAbort = new AbortController()
+  const secondAbort = new AbortController()
+  const first = adapter.waitSession('s1', 1000, firstAbort.signal)
+  const second = adapter.waitSession('s1', 1000, secondAbort.signal)
+  firstAbort.abort()
+  await assert.rejects(first)
+  assert.equal(entered.length, 2)
+  assert.equal(entered[0].aborted, true)
+  assert.equal(entered[1].aborted, false)
+  secondAbort.abort()
+  await assert.rejects(second)
+  assert.deepEqual(ctx.calls.cancel, [])
+  await adapter.close()
+})
+
+
+test('a question released before reconciliation does not produce stale input', async () => {
+  const ctx = makeCtx()
+  let calls = 0
+  ctx.sessionController.wait = async (_request, signal) => {
+    if (++calls > 1) return { reason: 'idle', state: { active: true, running: false, queue: [], pendingInput: [] } }
+    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  }
+  const adapter = new RealDshAdapter({ ctx })
+  const subscribers = new Set()
+  let active = false
+  adapter.listClaimedQuestions = id => active && id === 's1' ? [{ sessionId: id, batchId: 'short-lived' }] : []
+  adapter.subscribeQuestions = callback => { subscribers.add(callback); return () => subscribers.delete(callback) }
+  await adapter.open()
+  const pending = adapter.waitSession('s1', 1000, new AbortController().signal)
+  active = true
+  for (const callback of subscribers) callback({ type: 'requested', sessionId: 's1', batchId: 'short-lived' })
+  active = false
+  const result = await pending
+  assert.equal(result.reason, 'idle')
+  assert.deepEqual(result.state.pendingInput, [])
+  assert.equal(calls, 2)
+  assert.equal(subscribers.size, 0)
+  await adapter.close()
+})
+
+
+test('native source failure is not swallowed by a simultaneous claimed-question wake', async () => {
+  const ctx = makeCtx()
+  let fail
+  ctx.sessionController.wait = async () => new Promise((_resolve, reject) => { fail = reject })
+  const adapter = new RealDshAdapter({ ctx })
+  const subscribers = new Set()
+  let active = false
+  adapter.listClaimedQuestions = id => active && id === 's1' ? [{ sessionId: id, batchId: 'q' }] : []
+  adapter.subscribeQuestions = callback => { subscribers.add(callback); return () => subscribers.delete(callback) }
+  await adapter.open()
+  const waiting = adapter.waitSession('s1', 1000, new AbortController().signal)
+  active = true
+  for (const callback of subscribers) callback({ type: 'requested', sessionId: 's1', batchId: 'q' })
+  fail(new Error('synthetic source failure'))
+  await assert.rejects(waiting, error => error instanceof AdapterError && error.code === 'internal')
+  assert.equal(subscribers.size, 0)
+  await adapter.close()
+})
+
+test('native inbox splices advance the source cursor without creating conversation messages', async () => {
+  const session=makeLiveSession({events:[
+    {type:'user/message',seq:1,time:1,data:{text:'fixture'}},
+    {type:'agent/inbox/spliced',seq:2,time:2,data:{target:'next-turn',inserted:[{content:'synthetic-private'}]}},
+    {type:'assistant/message',seq:3,time:3,data:{text:'fixture'}},
+  ]})
+  const ctx=makeCtx({live:new Map([['s1',session]])})
+  const adapter=new RealDshAdapter({ctx})
+  const snapshot=await adapter.getSessionSnapshot('s1')
+  assert.equal(snapshot.cursor,3)
+  assert.deepEqual(snapshot.events.map(event=>event.type),['user/message','agent/inbox/spliced','assistant/message'])
+  assert.equal(snapshot.events[1].data,null)
+  assert.equal(JSON.stringify(snapshot).includes('synthetic-private'),false)
+  const notice=adapter.conversation.history.notification(snapshot.events[1])
+  assert.deepEqual(notice.changes,[])
+  assert.equal(JSON.parse(Buffer.from(notice.from_cursor,'base64url').toString())[2],1)
+  assert.equal(JSON.parse(Buffer.from(notice.to_cursor,'base64url').toString())[2],2)
+  const history=await adapter.readHistory('s1',{snapshot:true})
+  assert.equal(history.batch.changes.length,2)
+})
+
+test('queue deadline expiring during native precheck prevents the mutation', async () => {
+  let now=1000,updates=0
+  const ctx=makeCtx({stateFor:()=>{now=2000;return {running:true,queue:[{id:'q',placement:'queued',rpcId:'r',content:[{type:'text',text:'fixture'}]}]}}})
+  ctx.sessionController.updateQueue=async()=>{updates++}
+  const adapter=new RealDshAdapter({ctx,now:()=>now,config:{pendingQueueEnabled:true}})
+  await assert.rejects(adapter.execute('s1',{update_pending_queue:{item_id:'q',action:'REMOVE'}},{expiresAt:1500}),error=>error instanceof DefinitiveExecutionError && error.code==='expired')
+  assert.equal(updates,0)
+})
+
+test('queue projection replaces unknown blocks with safe metadata without exposing tool parameters', async () => {
+  const ctx=makeCtx({stateFor:()=>({running:true,queue:[{id:'q',placement:'queued',rpcId:'r',content:[{type:'tool-call',name:'fixture',arguments:{value:'synthetic-private-parameter'}}]}]})})
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  const queue=await adapter.readPendingQueue('s1')
+  assert.equal(queue.items[0].blocks[0].notice.category,'unsupported_content')
+  assert.equal(JSON.stringify(queue).includes('synthetic-private-parameter'),false)
+  assert.equal(JSON.stringify(queue).includes('arguments'),false)
+})
+
+test('a future non-text wire field without text cannot edit a native queued item', async () => {
+  const ctx=makeCtx({stateFor:()=>({running:true,queue:[{id:'q',placement:'queued',rpcId:'r',content:[{type:'text',text:'fixture'}]}]})})
+  let nativeUpdates=0
+  ctx.sessionController.updateQueue=async()=>{nativeUpdates++}
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  const wire=codec()
+  const edit=wire.encode('whalerein.v1.UpdatePendingQueue',{session_id:'s1',item_id:'q',action:'EDIT'})
+  // Field 5 is unknown to the current schema; no supported non-text field exists.
+  const unknown=Buffer.from([0x2a,0x05,0x69,0x6d,0x61,0x67,0x65])
+  const decoded=wire.decode('whalerein.v1.UpdatePendingQueue',Buffer.concat([edit,unknown]))
+  await assert.rejects(adapter.updatePendingQueue('s1',decoded),error=>error instanceof DefinitiveExecutionError && error.code==='invalid_argument')
+  assert.equal(nativeUpdates,0)
+})
+
+test('pending queue concurrent edits follow source order and consumed items are not recreated', async () => {
+  let queue=[{id:'q',placement:'queued',rpcId:'request',content:[{type:'text',text:'initial'}]}]
+  let releaseFirst
+  let firstEntered
+  const firstBlocked=new Promise(resolve=>{releaseFirst=resolve})
+  const started=new Promise(resolve=>{firstEntered=resolve})
+  const ctx=makeCtx({stateFor:()=>({running:true,queue})})
+  ctx.sessionController.updateQueue=async request=>{
+    if(request.action.content?.[0]?.text==='first') {firstEntered();await firstBlocked}
+    const item=queue.find(value=>value.id===request.itemId)
+    if(!item) throw Object.assign(new Error('fixture race'),{code:'session/queue-item-not-found'})
+    item.content=request.action.content
+  }
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  const first=adapter.updatePendingQueue('s1',{item_id:'q',action:'EDIT',text:'first'})
+  await started
+  await adapter.updatePendingQueue('s1',{item_id:'q',action:'EDIT',text:'second'})
+  releaseFirst();await first
+  assert.equal((await adapter.readPendingQueue('s1')).items[0].blocks[0].text.text,'first')
+  ctx.sessionController.updateQueue=async()=>{queue=[];throw Object.assign(new Error('fixture consumed'),{code:'session/queue-item-not-found'})}
+  await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'q',action:'EDIT',text:'third'}),error=>error instanceof AdapterError && !(error instanceof DefinitiveExecutionError))
+  assert.deepEqual((await adapter.readPendingQueue('s1')).items,[])
+  await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'q',action:'REMOVE'}),error=>error instanceof DefinitiveExecutionError && error.code==='not_found')
+})
+
+
+test('queue mutation does not infer prechange failure from a nested native code', async () => {
+  let queue=[{id:'q',placement:'queued',rpcId:'request',content:[{type:'text',text:'fixture'}]}]
+  const ctx=makeCtx({stateFor:()=>({running:true,queue})})
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  for(const code of ['session/steer-unavailable','session/queue-item-not-found']) {
+    queue=[{id:'q',placement:'queued',rpcId:'request',content:[{type:'text',text:'fixture'}]}]
+    ctx.sessionController.updateQueue=async()=>{queue=[];throw {isDSHRemoteError:true,code,details:{itemId:'q'}}}
+    await assert.rejects(adapter.updatePendingQueue('s1',{item_id:'q',action:'PROMOTE'}),error=>error instanceof AdapterError && !(error instanceof DefinitiveExecutionError))
+    assert.equal(queue.length,0)
+  }
+})
+
+test('a start-if-idle send expiring during session lookup does not invoke native prompt', async () => {
+  let now = 1000
+  const ctx = makeCtx()
+  const adapter = new RealDshAdapter({ctx,now:() => now})
+  adapter.getSession = async () => { now = 2100; return {running:false} }
+  await assert.rejects(adapter.execute('s1', {send_message:{text:'synthetic',delivery_mode:'START_IF_IDLE'}}, {expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  assert.equal(ctx.calls.prompt.length, 0)
+})
+
+test('a pending approval expiring during native state lookup remains unsettled', async () => {
+  let now = 1000
+  const session = makeLiveSession()
+  const ctx = makeCtx({live:new Map([['s1',session]]),stateFor:() => {now=2100;return {active:true,running:true}}})
+  const adapter = new RealDshAdapter({ctx,config:{approvalTtlMs:60000},now:() => now})
+  await adapter.open()
+  let approval
+  adapter.subscribeApprovals(event => {if(event.type === 'requested')approval=event.approval})
+  const outcome = ctx.emit('approval/request',{agent:{session},toolName:'fixture'},async () => 'unavailable')[0]
+  const command = {resolve_approval:{approval_id:approval.approvalId,decision:'APPROVAL_DECISION_APPROVE',expected_digest:approval.digest,expected_version:approval.version}}
+  await assert.rejects(adapter.execute('s1',command,{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  assert.equal((await adapter.getApproval(approval.approvalId)).state,'pending')
+  await adapter.resolveApproval(approval.approvalId,'reject',approval.digest,approval.version,{expiresAt:5000})
+  assert.equal(await outcome,'rejected')
+  await adapter.close()
+})
+
+test('expired create, fork, model and interrupt commands do not invoke native entry points', async () => {
+  const ctx = makeCtx()
+  let created=0,forked=0,selected=0
+  ctx.sessionController.create=async () => {created++;return {sessionId:'child'}}
+  ctx.sessionController.fork=async () => {forked++;return {sessionId:'child'}}
+  ctx.sessionController.selectModel=async () => {selected++;return {selected:{provider:'p',model:'m'}}}
+  const adapter = new RealDshAdapter({ctx,now:() => 2100})
+  await assert.rejects(adapter.executeHost({create_session:{}},{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  await assert.rejects(adapter.execute('s1',{fork_session:{}},{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  await assert.rejects(adapter.execute('s1',{select_session_model:{provider:'p',model:'m'}},{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  await assert.rejects(adapter.execute('s1',{interrupt:{}},{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
+  assert.deepEqual([created,forked,selected,ctx.calls.cancel.length],[0,0,0,0])
+})
+
+test('channel lifecycle prevents queue mutation after native-state precheck', async () => {
+  let release,entered,updates=0
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  const ctx=makeCtx({stateFor:async()=>{entered();await barrier;return {running:true,queue:[{id:'q',placement:'queued',rpcId:'r',content:[{type:'text',text:'fixture'}]}]}}})
+  ctx.sessionController.updateQueue=async()=>{updates++}
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  const abort=new AbortController()
+  const pending=adapter.execute('s1',{update_pending_queue:{item_id:'q',action:'REMOVE'}},{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error instanceof DefinitiveExecutionError && error.code==='unavailable')
+  assert.equal(updates,0)
+})
+
+test('channel lifecycle prevents start-if-idle delivery after session precheck', async () => {
+  let release,entered,sends=0
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  const ctx=makeCtx()
+  const adapter=new RealDshAdapter({ctx})
+  adapter.getSession=async()=>{entered();await barrier;return {running:false}}
+  adapter.sendUserMessage=async()=>{sends++;return {}}
+  const abort=new AbortController()
+  const pending=adapter.execute('s1',{send_message:{text:'fixture',delivery_mode:'START_IF_IDLE'}},{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error instanceof DefinitiveExecutionError && error.code==='unavailable')
+  assert.equal(sends,0)
+})
+
+test('channel lifecycle prevents approval settlement after native state precheck', async () => {
+  let release,entered
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  const session=makeLiveSession()
+  const ctx=makeCtx({live:new Map([['s1',session]]),stateFor:async()=>{entered();await barrier;return {active:true,running:true}}})
+  const adapter=new RealDshAdapter({ctx,config:{approvalTtlMs:60_000}})
+  await adapter.open()
+  const requests=[]
+  adapter.subscribeApprovals(event=>{if(event.type==='requested')requests.push(event.approval)})
+  const outcome=ctx.emit('approval/request',{agent:{session},toolName:'fixture'},async()=> 'unavailable')[0]
+  const approval=requests[0]
+  const abort=new AbortController()
+  const pending=adapter.resolveApproval(approval.approvalId,'approve',approval.digest,approval.version,{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error instanceof DefinitiveExecutionError && error.code==='unavailable')
+  assert.equal((await adapter.getApproval(approval.approvalId)).state,'pending')
+  await adapter.close()
+  assert.equal(await outcome,'unavailable')
+})
+
+test('channel lifecycle suppresses a queue observation completed after cancellation', async () => {
+  let release,entered
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  const ctx=makeCtx({stateFor:async()=>{entered();await barrier;return {running:true,queue:[{id:'q',placement:'queued',rpcId:'r',content:[{type:'text',text:'synthetic-private'}]}]}}})
+  const adapter=new RealDshAdapter({ctx,config:{pendingQueueEnabled:true}})
+  const abort=new AbortController()
+  const pending=adapter.readPendingQueue('s1',{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error instanceof AdapterError && error.code==='unavailable')
+})
+
+test('channel lifecycle stops cold history pagination after cancellation', async () => {
+  let entered,release,pages=0,summaries=0
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  const ctx=makeCtx()
+  ctx.sessionController.events=async()=>{pages++;entered();await barrier;return {records:[{event:{type:'assistant/message',seq:1,time:1,data:{text:'fixture'}}}],hasMore:true}}
+  ctx.sessionController.list=async()=>{summaries++;return {items:[]}}
+  const adapter=new RealDshAdapter({ctx})
+  const abort=new AbortController()
+  const pending=adapter.readHistory('s1',{snapshot:true},{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error instanceof AdapterError && error.code==='unavailable')
+  assert.equal(pages,1)
+  assert.equal(summaries,0)
+})
+
+test('channel lifecycle stops watch state before the next native read', async () => {
+  const adapter=new RealDshAdapter({ctx:makeCtx()})
+  let entered,release,heads=0,approvals=0
+  const barrier=new Promise(resolve=>{release=resolve})
+  const started=new Promise(resolve=>{entered=resolve})
+  adapter.listSessions=async()=>{entered();await barrier;return [{sessionId:'s1',running:true}]}
+  adapter.nativeHead=async()=>{heads++;return 1}
+  adapter.listApprovals=async()=>{approvals++;return []}
+  const abort=new AbortController()
+  const pending=adapter.readState('s1',{signal:abort.signal})
+  await started
+  abort.abort('unavailable')
+  release()
+  await assert.rejects(pending,error=>error.code==='unavailable')
+  assert.equal(heads,0)
+  assert.equal(approvals,0)
+})
+
+test('production capabilities are advertised from native methods without test switches', async () => {
+  const ctx = makeCtx()
+  Object.assign(ctx.sessionController, {
+    updateQueue: async () => {},
+    modelCatalog: async () => ({ default: null, groups: [], failures: [] }),
+    projections: async () => ({ kind: 'sequenced', values: {} }),
+    selectModel: async ({ provider, model }) => ({ selected: { provider, model } }),
+    wait: async () => ({ reason: 'idle', state: { active: false, running: false, queue: null, pendingInput: [] } }),
+    create: async () => ({ sessionId: 'created-1' }),
+    fork: async () => ({ sessionId: 'child-1' }),
+  })
+  ctx.agents = { get: () => undefined, roots: () => [] }
+  ctx.userQuestions = { answer: async () => true }
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  try {
+    const capabilities = adapter.describe().capabilities
+    for (const capability of [
+      'sessions', 'events', 'messages', 'approvals', 'interrupt', 'sync', 'snapshot',
+      'pending-queue-read', 'pending-queue-edit', 'pending-queue-remove', 'pending-queue-steer',
+      'model-catalog', 'model-read', 'model-select', 'wait',
+      'questions-read', 'questions-answer-open', 'questions-answer-continued', 'session-fork',
+    ]) assert.ok(capabilities.includes(capability), capability)
+    assert.deepEqual(await adapter.describeHostCapabilities(), {
+      model_catalog: true, model_read: true, session_create: true, session_fork: true,
+    })
+    assert.deepEqual(adapter.supportedDeliveryModes(), ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER'])
+  } finally { await adapter.close() }
+})
+
+test('production capabilities stay closed when the native method or service is absent', async () => {
+  const ctx = { sessionController: {}, sessions: {} }
+  const adapter = new RealDshAdapter({ ctx })
+  assert.deepEqual(adapter.describe().capabilities, [])
+  assert.deepEqual(await adapter.describeHostCapabilities(), {
+    model_catalog: false, model_read: false, session_create: false, session_fork: false,
+  })
+  assert.deepEqual(adapter.supportedDeliveryModes(), ['START_IF_IDLE'])
+})
+
+test('pending queue and open question broker can be opted out without closing delivery', async () => {
+  const ctx = makeCtx()
+  ctx.sessionController.updateQueue = async () => {}
+  ctx.sessionController.projections = async () => ({ kind: 'sequenced', values: {} })
+  ctx.agents = { get: () => undefined, roots: () => [] }
+  ctx.userQuestions = { answer: async () => true }
+  const adapter = new RealDshAdapter({ ctx, config: { pendingQueueEnabled: false, enableOpenQuestionBroker: false } })
+  await adapter.open()
+  try {
+    const capabilities = adapter.describe().capabilities
+    for (const capability of ['pending-queue-read', 'pending-queue-edit', 'pending-queue-remove', 'pending-queue-steer', 'questions-answer-open']) {
+      assert.equal(capabilities.includes(capability), false, capability)
+    }
+    assert.deepEqual(adapter.supportedDeliveryModes(), ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER'])
+    await assert.rejects(adapter.readPendingQueue('s1'), error => error.code === 'unsupported_capability')
+  } finally { await adapter.close() }
 })

@@ -174,3 +174,44 @@ test('when adapter mode is auto, native session services select real DSH and abs
     assert.equal(createAdapter({ mode: 'auto', ctx }).describe().mode, 'fake')
   }
 })
+
+test('pending queue fixture preserves source-owned mutation semantics', async () => {
+  const adapter = new FakeDshAdapter({behavior:{pendingQueueEnabled:true},sessions:[{sessionId:'s1',running:true,queue:[{id:'q1',text:'fixture',attachments:[{}]},{id:'q2',text:'second'}]}]})
+  const initial = await adapter.readPendingQueue('s1')
+  assert.equal(initial.items.length,2)
+  await adapter.execute('s1',{update_pending_queue:{session_id:'s1',item_id:'q1',action:'EDIT',text:'replacement'}})
+  assert.equal((await adapter.readPendingQueue('s1')).items[0].blocks[0].text.text,'replacement')
+  await adapter.execute('s1',{update_pending_queue:{session_id:'s1',item_id:'q1',action:'PROMOTE'}})
+  assert.equal((await adapter.readPendingQueue('s1')).items[0].placement,'STEERING')
+  await adapter.execute('s1',{update_pending_queue:{session_id:'s1',item_id:'q2',action:'REMOVE'}})
+  assert.equal((await adapter.readPendingQueue('s1')).items.length,1)
+  await assert.rejects(adapter.execute('s1',{update_pending_queue:{session_id:'s1',item_id:'q2',action:'REMOVE'}}),error=>error.code==='not_found')
+})
+
+
+test('fork copies the latest completed prefix without running the child', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{sessionId:'source',cwd:'/synthetic',running:true}] })
+  await assert.rejects(adapter.forkSession('source'), error => error.code === 'conflict')
+  adapter.emit('source', {type:'user/message',data:{text:'synthetic'}})
+  adapter.emit('source', {type:'turn/end'})
+  adapter.emit('source', {type:'system/message',data:{text:'synthetic'}})
+  adapter.emit('source', {type:'turn/start'})
+  adapter.emit('source', {type:'user/message',data:{text:'queued'}})
+  const receipt = (await adapter.forkSession('source')).lifecycle_receipt
+  const child = await adapter.getSessionSnapshot(receipt.session_id)
+  assert.equal(receipt.parent_session_id, 'source')
+  assert.notEqual(receipt.session_id, 'source')
+  assert.equal(child.summary.cwd, '/synthetic')
+  assert.equal(child.summary.running, false)
+  assert.deepEqual(child.events.map(event => event.type), ['user/message','turn/end','system/message'])
+  assert.equal((await adapter.getSessionSnapshot('source')).events.length, 5)
+})
+
+test('fork excludes native inbox splice and subsequent queued work', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{sessionId:'source'}] })
+  adapter.emit('source', {type:'turn/end'})
+  adapter.emit('source', {type:'agent/inbox/spliced'})
+  adapter.emit('source', {type:'system/message',data:{text:'synthetic'}})
+  const child = (await adapter.forkSession('source')).lifecycle_receipt.session_id
+  assert.deepEqual((await adapter.getSessionSnapshot(child)).events.map(event => event.type), ['turn/end'])
+})

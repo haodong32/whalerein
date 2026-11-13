@@ -21,11 +21,14 @@ import (
 )
 
 type fakeStore struct {
-	operations map[string]store.PairingOperation
-	notices    map[string]store.Request
-	hosts      map[string]store.Host
-	tokens     map[string]store.PairingToken
-	devices    map[string]struct {
+	operations   map[string]store.PairingOperation
+	outcomes     map[string]store.PairingOutcome
+	outcomeErr   error
+	confirmCalls int
+	notices      map[string]store.Request
+	hosts        map[string]store.Host
+	tokens       map[string]store.PairingToken
+	devices      map[string]struct {
 		fingerprint string
 		authHash    []byte
 	}
@@ -40,12 +43,13 @@ type fakeStore struct {
 	useResult *bool
 	deviceErr error
 	metaErr   error
+	saveErr   error
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		hosts:      map[string]store.Host{},
-		operations: map[string]store.PairingOperation{}, notices: map[string]store.Request{},
+		operations: map[string]store.PairingOperation{}, outcomes: map[string]store.PairingOutcome{}, notices: map[string]store.Request{},
 		tokens: map[string]store.PairingToken{},
 		devices: map[string]struct {
 			fingerprint string
@@ -150,6 +154,11 @@ func (f *fakeStore) CommitPairing(ctx context.Context, tokenHash []byte, hostID,
 		op.CommitRequestID = notice.RequestId
 		op.Active = true
 		f.operations[op.ClaimID] = op
+		var response whalereinv1.PairingClaimResponse
+		if err := proto.Unmarshal(operation.FinishResponse, &response); err != nil {
+			return false, err
+		}
+		f.outcomes[op.ClaimID] = store.PairingOutcome{ClaimID: op.ClaimID, HostID: hostID, DeviceID: deviceID, TokenHash: append([]byte(nil), tokenHash...), FinishHash: append([]byte(nil), operation.FinishHash...), DevicePublicKey: append([]byte(nil), response.DevicePublicKey...), ProtocolVersion: response.ProtocolVersion, Active: true}
 		f.notices[notice.RequestId] = store.Request{RequestID: notice.RequestId, HostID: hostID, DeviceID: deviceID, Kind: notice.Kind,
 			RequestBody: notice.Body, ProtocolVersion: notice.ProtocolVersion, ExpiresAt: time.UnixMilli(notice.ExpiresAtUnixMs)}
 	}
@@ -849,6 +858,7 @@ func TestPairingReplayAndCommitRecoveryPreserveIdentity(t *testing.T) {
 	before = len(f.transport.requests)
 	for id, r := range f.store.notices {
 		r.Status = whalereinv1.OnlineStatus_succeeded
+		r.ResultBody, _ = proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "d1"})
 		f.store.notices[id] = r
 	}
 	replay, err := f.service.Claim(ctx, finish)
@@ -861,10 +871,122 @@ func TestPairingReplayAndCommitRecoveryPreserveIdentity(t *testing.T) {
 		t.Fatal("different finish proof reused receipt")
 	}
 	f.now = f.now.Add(2 * time.Minute)
-	if _, err := f.service.Claim(ctx, finish); !errors.Is(err, ErrClaimRequired) {
-		t.Fatal("expired receipt recovered")
+	if recovered, err := f.service.Claim(ctx, finish); err != nil || recovered.DeviceId != response.DeviceId {
+		t.Fatal("verified durable outcome was not recoverable after operation expiry")
 	}
 
+}
+
+func TestLegacyUnprovenActiveCommitIsNotRepublished(t *testing.T) {
+	f := newFixture(t)
+	_, token := f.invite(t)
+	ctx := context.Background()
+	if _, err := f.service.Claim(ctx, helloRequest(token, "unproven", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	finish := finishRequest(token, "unproven", "d1")
+	if _, err := f.service.Claim(ctx, finish); err != nil {
+		t.Fatal(err)
+	}
+	outcome := f.store.outcomes["unproven"]
+	outcome.CommitBindingUnproven = true
+	f.store.outcomes["unproven"] = outcome
+	before := len(f.transport.requests)
+	if _, err := f.service.Claim(ctx, finish); !errors.Is(err, ErrPairingCommittedUnconfirmed) {
+		t.Fatal("unproven active outcome was not held unconfirmed")
+	}
+	if len(f.transport.requests) != before || !f.store.grants["h1|d1"] {
+		t.Fatal("unproven outbox was republished or the grant was removed")
+	}
+	// An inactive exact FINISH is independently known unavailable; it does not
+	// claim a prior Host activation and retains existing revocation semantics.
+	f.store.grants["h1|d1"] = false
+	if _, err := f.service.Claim(ctx, finish); !errors.Is(err, ErrPairingCommittedUnavailable) {
+		t.Fatal("inactive exact FINISH lost unavailable semantics")
+	}
+	if len(f.transport.requests) != before {
+		t.Fatal("inactive outbox was republished")
+	}
+}
+
+func TestCommittedPairingRecoveryFailsClosedOnIncompleteEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*fixture)
+		want   error
+	}{
+		{"outcome missing", func(f *fixture) { delete(f.store.outcomes, "proof") }, ErrPairingCommittedUnconfirmed},
+		{"outcome store failure", func(f *fixture) { f.store.outcomeErr = errors.New("synthetic database failure") }, ErrInternal},
+		{"token binding changed", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.TokenHash = bytes.Repeat([]byte{0}, 32)
+			f.store.outcomes["proof"] = o
+		}, ErrInvalidClaim},
+		{"finish binding changed", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.FinishHash = bytes.Repeat([]byte{0}, 32)
+			f.store.outcomes["proof"] = o
+		}, ErrInvalidClaim},
+		{"grant became inactive", func(f *fixture) { o := f.store.outcomes["proof"]; o.Active = false; f.store.outcomes["proof"] = o }, ErrPairingCommittedUnavailable},
+		{"proof unavailable", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.CommitBindingUnproven = true
+			f.store.outcomes["proof"] = o
+		}, ErrPairingCommittedUnconfirmed},
+		{"finish response damaged", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.HostConfirmed = false
+			f.store.outcomes["proof"] = o
+			op := f.store.operations["proof"]
+			op.FinishResponse = []byte{0xff}
+			f.store.operations["proof"] = op
+		}, ErrInternal},
+		{"outbox missing", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.HostConfirmed = false
+			f.store.outcomes["proof"] = o
+			delete(f.store.notices, f.store.operations["proof"].CommitRequestID)
+		}, ErrPairingCommittedUnconfirmed},
+		{"outbox body unavailable", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.HostConfirmed = false
+			f.store.outcomes["proof"] = o
+			id := f.store.operations["proof"].CommitRequestID
+			n := f.store.notices[id]
+			n.RequestBody = nil
+			f.store.notices[id] = n
+		}, ErrPairingCommittedUnconfirmed},
+		{"outbox expired", func(f *fixture) {
+			o := f.store.outcomes["proof"]
+			o.HostConfirmed = false
+			f.store.outcomes["proof"] = o
+			id := f.store.operations["proof"].CommitRequestID
+			n := f.store.notices[id]
+			n.ExpiresAt = f.now
+			f.store.notices[id] = n
+		}, ErrPairingCommittedUnconfirmed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			_, token := f.invite(t)
+			ctx := context.Background()
+			if _, err := f.service.Claim(ctx, helloRequest(token, "proof", "d1")); err != nil {
+				t.Fatal(err)
+			}
+			finish := finishRequest(token, "proof", "d1")
+			if _, err := f.service.Claim(ctx, finish); err != nil {
+				t.Fatal(err)
+			}
+			before := len(f.transport.requests)
+			tc.change(f)
+			if _, err := f.service.Claim(ctx, finish); !errors.Is(err, tc.want) {
+				t.Fatalf("unexpected recovery error: %v", err)
+			}
+			if len(f.transport.requests) != before || !f.store.grants["h1|d1"] {
+				t.Fatal("unproven recovery republished or changed the grant")
+			}
+		})
+	}
 }
 
 func TestFailedRepairDoesNotRevokeExistingGrant(t *testing.T) {
@@ -936,7 +1058,37 @@ func TestMalformedDevicePublicKeyCannotCreatePinnedIdentity(t *testing.T) {
 	}
 }
 
+func (f *fakeStore) PairingGenerations(ctx context.Context, hash []byte, _ string) (int64, int64, error) {
+	_, err := f.PairingTokenByHash(ctx, hash)
+	return 0, 0, err
+}
+
+func (f *fakeStore) ConfirmPairingHost(_ context.Context, claimID, _, _, _ string, _ time.Time) (bool, error) {
+	f.confirmCalls++
+	if outcome, ok := f.outcomes[claimID]; ok {
+		outcome.HostConfirmed = true
+		f.outcomes[claimID] = outcome
+	}
+	return true, nil
+}
+
+func (f *fakeStore) PairingOutcome(_ context.Context, claimID, deviceID string) (store.PairingOutcome, error) {
+	if f.outcomeErr != nil {
+		return store.PairingOutcome{}, f.outcomeErr
+	}
+	value, ok := f.outcomes[claimID]
+	if !ok || value.DeviceID != deviceID {
+		return store.PairingOutcome{}, store.ErrNotFound
+	}
+	return value, nil
+}
+
+func (f *fakeStore) PairingFenced(_ context.Context, _, _, _ string) (bool, error) { return false, nil }
+
 func (f *fakeStore) SavePairingOperation(_ context.Context, op store.PairingOperation) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	if _, ok := f.operations[op.ClaimID]; ok {
 		return store.ErrConflict
 	}
@@ -997,8 +1149,11 @@ func TestDurablePairingRecoversAfterServiceRestartWithoutPersistingCredential(t 
 		t.Fatal("changed credential reused receipt")
 	}
 	f.store.grants["h1|d1"] = false
-	if _, err := restarted.Claim(ctx, finish); !errors.Is(err, ErrInvalidClaim) {
-		t.Fatal("revoked grant recovered")
+	if _, err := restarted.Claim(ctx, finish); !errors.Is(err, ErrPairingCommittedUnavailable) {
+		t.Fatal("committed unavailable pairing was not identified")
+	}
+	if _, err := restarted.Claim(ctx, changed); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("changed FINISH gained committed proof")
 	}
 }
 
@@ -1054,5 +1209,135 @@ func TestHelloBootstrapsCapabilityButRejectsAnUnsupportedHost(t *testing.T) {
 	}
 	if len(f.store.grants) != 0 {
 		t.Fatal("HELLO activated a grant")
+	}
+}
+
+type delayedHostFenceStore struct {
+	*fakeStore
+	captured   chan struct{}
+	generation int64
+}
+
+func (f *delayedHostFenceStore) PairingGenerations(_ context.Context, _ []byte, _ string) (int64, int64, error) {
+	snapshot := f.generation
+	close(f.captured)
+	return 0, snapshot, nil
+}
+func (f *delayedHostFenceStore) SavePairingOperation(ctx context.Context, op store.PairingOperation) error {
+	if op.HostGeneration != f.generation {
+		return store.ErrPairingFenced
+	}
+	return f.fakeStore.SavePairingOperation(ctx, op)
+}
+
+// An already-arrived HELLO must not adopt a Host revocation that commits while it waits for its token lock.
+func TestPairingHelloWaitingOnTokenLockCannotAdoptLaterHostRevoke(t *testing.T) {
+	f := newFixture(t)
+	_, token := f.invite(t)
+	observed := &delayedHostFenceStore{fakeStore: f.store, captured: make(chan struct{})}
+	f.service.store = observed
+	digest := sha256.Sum256([]byte(token))
+	unlock, err := f.service.lockToken(context.Background(), hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := f.service.Claim(context.Background(), helloRequest(token, "held-hello", "d1"))
+		result <- err
+	}()
+	<-observed.captured
+	observed.generation = 1
+	unlock()
+	if err := <-result; !errors.Is(err, ErrPairingFenced) {
+		t.Fatal("HELLO adopted a later Host revocation")
+	}
+}
+
+// Cleaned outcomes require an exact FINISH and do not claim Host activation.
+func TestCleanedPairingOutcomeAuthenticatesExactFinishAndDistinguishesState(t *testing.T) {
+	f := newFixture(t)
+	_, token := f.invite(t)
+	finish := finishRequest(token, "outcome", "d1")
+	hash := sha256.Sum256([]byte(token))
+	outcome := store.PairingOutcome{ClaimID: "outcome", HostID: "h1", DeviceID: "d1", TokenHash: hash[:], FinishHash: claimDigest(finish), Active: true}
+	f.store.outcomes[outcome.ClaimID] = outcome
+	if _, err := f.service.Claim(context.Background(), finish); !errors.Is(err, ErrPairingCommittedUnconfirmed) {
+		t.Fatal("active outcome falsely confirmed or lost")
+	}
+	outcome.HostConfirmed = true
+	outcome.DevicePublicKey = bytes.Repeat([]byte{4}, 32)
+	outcome.ProtocolVersion = finish.ProtocolVersion
+	f.store.outcomes[outcome.ClaimID] = outcome
+	recovered, err := f.service.Claim(context.Background(), finish)
+	if err != nil || recovered.HostId != "h1" || recovered.DeviceId != "d1" || recovered.DeviceToken != finish.DeviceToken || !bytes.Equal(recovered.DevicePublicKey, outcome.DevicePublicKey) {
+		t.Fatal("confirmed active outcome did not recover exact binding")
+	}
+	outcome.CommitBindingUnproven = true
+	f.store.outcomes[outcome.ClaimID] = outcome
+	if _, err := f.service.Claim(context.Background(), finish); !errors.Is(err, ErrPairingCommittedUnconfirmed) {
+		t.Fatal("unproven active legacy flag was trusted")
+	}
+	outcome.Active = false
+	f.store.outcomes[outcome.ClaimID] = outcome
+	if _, err := f.service.Claim(context.Background(), finish); !errors.Is(err, ErrPairingCommittedUnavailable) {
+		t.Fatal("unavailable outcome not distinguished")
+	}
+	changed := proto.Clone(finish).(*whalereinv1.PairingClaimRequest)
+	changed.DeviceToken = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	if _, err := f.service.Claim(context.Background(), changed); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("changed FINISH authenticated")
+	}
+	changed = proto.Clone(finish).(*whalereinv1.PairingClaimRequest)
+	changed.Token = "different-token"
+	if _, err := f.service.Claim(context.Background(), changed); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatal("changed token authenticated")
+	}
+	changed = proto.Clone(finish).(*whalereinv1.PairingClaimRequest)
+	changed.DeviceId = "other-device"
+	if _, err := f.service.Claim(context.Background(), changed); errors.Is(err, ErrPairingCommittedUnavailable) || errors.Is(err, ErrPairingCommittedUnconfirmed) {
+		t.Fatal("different device obtained proof")
+	}
+	f.store.outcomeErr = errors.New("fixture storage failure")
+	if _, err := f.service.Claim(context.Background(), finish); !errors.Is(err, ErrInternal) {
+		t.Fatal("storage error treated as proof")
+	}
+}
+
+// Host COMMIT evidence must match the authorized result and the original Host, device and request.
+func TestHostCommitConfirmationRejectsMismatchedOrFailedAcknowledgement(t *testing.T) {
+	for _, variant := range []string{"status", "host", "device", "request", "body-device"} {
+		t.Run(variant, func(t *testing.T) {
+			f := newFixture(t)
+			claim := &whalereinv1.PairingClaim{ClaimId: "claim", DeviceId: "d1", Phase: whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT}
+			body, _ := proto.Marshal(claim)
+			commit := &whalereinv1.HostRequest{RequestId: "commit", HostId: "h1", DeviceId: "d1", Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body}
+			done := &completedClaim{response: &whalereinv1.PairingClaimResponse{ClaimId: "claim", HostId: "h1", DeviceId: "d1"}, commit: commit}
+			f.transport.awaitFn = func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+				result, err := defaultPairingAnswers(req)
+				if err != nil {
+					return nil, err
+				}
+				switch variant {
+				case "status":
+					result.Status = whalereinv1.OnlineStatus_failed
+				case "host":
+					result.HostId = "other"
+				case "device":
+					result.DeviceId = "other"
+				case "request":
+					result.RequestId = "other"
+				case "body-device":
+					result.ResultBody, _ = proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "other"})
+				}
+				return result, nil
+			}
+			if _, err := f.service.completeClaim(context.Background(), done); !errors.Is(err, ErrHostRejected) {
+				t.Fatal("invalid acknowledgement accepted")
+			}
+			if f.store.confirmCalls != 0 {
+				t.Fatal("invalid acknowledgement persisted")
+			}
+		})
 	}
 }

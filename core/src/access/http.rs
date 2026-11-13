@@ -3,6 +3,7 @@
 //! All bodies use the proto3 JSON encoding of `proto/v1`. The client never
 //! exposes these DTOs outside Core.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -98,6 +99,23 @@ impl std::fmt::Display for AccessError {
 
 impl std::error::Error for AccessError {}
 
+/// Latest observed transport state of one in-flight read-only request.
+/// A successful HTTP exchange clears an earlier transient error.
+#[derive(Default)]
+pub(crate) struct TransportObservation(Mutex<Option<AccessError>>);
+
+impl TransportObservation {
+    pub(crate) fn recovered(&self) {
+        *self.0.lock().expect("transport observation") = None;
+    }
+    pub(crate) fn failed(&self, error: &AccessError) {
+        *self.0.lock().expect("transport observation") = Some(error.clone());
+    }
+    pub(crate) fn latest_error(&self) -> Option<AccessError> {
+        self.0.lock().expect("transport observation").clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct AccessClient {
     http: Client,
@@ -106,6 +124,7 @@ pub struct AccessClient {
     request_timeout: Duration,
     poll_interval: Duration,
     trace_id: String,
+    transport_observation: Option<Arc<TransportObservation>>,
 }
 
 impl std::fmt::Debug for AccessClient {
@@ -167,6 +186,7 @@ impl AccessClient {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
             trace_id: crate::util::random_id(16),
+            transport_observation: None,
         })
     }
 
@@ -178,6 +198,22 @@ impl AccessClient {
 
     pub fn trace_id(&self) -> &str {
         &self.trace_id
+    }
+
+    pub(crate) fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    pub(crate) fn with_transport_observation(
+        mut self,
+        observation: Arc<TransportObservation>,
+    ) -> Self {
+        self.transport_observation = Some(observation);
+        self
+    }
+
+    pub(crate) fn has_token(&self, token: &str) -> bool {
+        self.token.as_deref() == Some(token)
     }
 
     pub fn base_url(&self) -> &Url {
@@ -242,14 +278,22 @@ impl AccessClient {
         let started = std::time::Instant::now();
         let response = builder.send().await.map_err(|error| {
             tracing::warn!(event = "http_transport_failed", trace_id = %self.trace_id, layer = "access", code = "unavailable");
-            if error.is_connect() || error.is_builder() {
+            let error = if error.is_connect() || error.is_builder() {
                 AccessError::not_sent()
             } else {
                 AccessError::transport("Access request failed")
-            }
+            };
+            if let Some(observation) = &self.transport_observation { observation.failed(&error); }
+            error
         })?;
         let status = response.status().as_u16();
         let result = parse_response(response).await;
+        if let Some(observation) = &self.transport_observation {
+            match &result {
+                Err(error) if error.is_retryable_transport() => observation.failed(error),
+                _ => observation.recovered(),
+            }
+        }
         tracing::debug!(event = "http_result", trace_id = %self.trace_id, layer = "access", status, ms = started.elapsed().as_millis() as u64, code = ?result.as_ref().err().and_then(|error| error.code));
         result
     }
@@ -273,6 +317,21 @@ impl AccessClient {
             .json(request);
         tracing::info!(event = "request_submitted", trace_id = %request.trace_id, request_id = %request.request_id, kind = request.kind, bytes = request.body.len());
         self.send(builder).await
+    }
+
+    /// Renew the Access client-poll lease without reading the result.
+    pub async fn heartbeat_request(&self, request_id: &str) -> Result<(), AccessError> {
+        let url = self.endpoint(&["v1", "requests", request_id, "heartbeat"])?;
+        let response = self
+            .request(reqwest::Method::POST, url, None)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .map_err(|_| AccessError::transport("Access heartbeat failed"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(parse_error_response(response).await)
     }
 
     pub async fn get_request(&self, request_id: &str) -> Result<RequestState, AccessError> {
@@ -322,10 +381,23 @@ impl AccessClient {
         request_id: &str,
         allow_host_accepted: bool,
     ) -> Result<RequestState, AccessError> {
+        self.wait_for_request_observed(request_id, allow_host_accepted, None)
+            .await
+    }
+
+    pub(crate) async fn wait_for_request_observed(
+        &self,
+        request_id: &str,
+        allow_host_accepted: bool,
+        observation: Option<&TransportObservation>,
+    ) -> Result<RequestState, AccessError> {
         let deadline = now_unix_ms() + self.request_timeout.as_millis() as i64;
         loop {
             match self.get_request(request_id).await {
                 Ok(state) => {
+                    if let Some(observation) = observation {
+                        observation.recovered();
+                    }
                     if is_terminal(state.status)
                         || (allow_host_accepted
                             && state.status == OnlineStatus::HostAccepted as i32)
@@ -333,7 +405,11 @@ impl AccessClient {
                         return Ok(state);
                     }
                 }
-                Err(error) if error.is_retryable_transport() => {}
+                Err(error) if error.is_retryable_transport() => {
+                    if let Some(observation) = observation {
+                        observation.failed(&error);
+                    }
+                }
                 Err(error) => return Err(error),
             }
             if now_unix_ms() >= deadline {
@@ -709,6 +785,62 @@ mod transport_tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn wait_transport_observation_clears_only_after_a_successful_poll() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let seen = calls.clone();
+        let server = MockServer::start(Arc::new(move |_| {
+            let mut count = seen.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                return MockResponse {
+                    status: 0,
+                    body: Vec::new(),
+                    delay_ms: 0,
+                };
+            }
+            MockResponse::json(
+                200,
+                &RequestState {
+                    request_id: "r".into(),
+                    status: OnlineStatus::Received as i32,
+                    ..Default::default()
+                },
+            )
+        }))
+        .await;
+        let mut client = AccessClient::new(server.url(), None).unwrap();
+        client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
+        let observation = TransportObservation::default();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.wait_for_request_observed("r", false, Some(&observation)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(*calls.lock().unwrap() >= 2);
+        assert!(observation.latest_error().is_none());
+
+        let unavailable = MockServer::start(Arc::new(|_| MockResponse {
+            status: 0,
+            body: Vec::new(),
+            delay_ms: 0,
+        }))
+        .await;
+        let mut client = AccessClient::new(unavailable.url(), None).unwrap();
+        client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
+        let observation = TransportObservation::default();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            client.wait_for_request_observed("r", false, Some(&observation))
+        )
+        .await
+        .is_err());
+        assert!(observation
+            .latest_error()
+            .is_some_and(|error| error.is_retryable_transport()));
     }
 
     #[test]

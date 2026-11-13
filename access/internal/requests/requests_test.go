@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,12 +106,18 @@ func (f *fakeStore) ApplyHostResult(_ context.Context, update store.HostResultUp
 type fakeBroker struct {
 	published []*whalereinv1.HostRequest
 	hosts     []string
+	presence  []string
 	err       error
 }
 
 func (f *fakeBroker) PublishRequest(_ context.Context, hostID string, request *whalereinv1.HostRequest) error {
 	f.hosts = append(f.hosts, hostID)
 	f.published = append(f.published, request)
+	return f.err
+}
+
+func (f *fakeBroker) PublishPresence(_ context.Context, hostID string, payload []byte) error {
+	f.presence = append(f.presence, hostID+"|"+string(payload))
 	return f.err
 }
 
@@ -588,5 +595,72 @@ func TestReceiverCapabilitySurvivesDurableForwardingAndRejectsUnknownVersions(t 
 	request.ClientTransportVersion = ^uint32(0)
 	if _, _, err := f.service.Submit(context.Background(), input(request)); !errors.Is(err, ErrProtocolVersion) {
 		t.Fatal("unknown capability poisoned durable queue")
+	}
+}
+
+func TestClientPollLeaseReleasesStaleNonTerminalRequest(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{RequestID: "req-lease", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
+	f.store.rows[row.RequestID] = row
+	f.service.recordClientClaim(row)
+	f.now = f.now.Add(9 * time.Second)
+	f.service.Touch("d1", row.RequestID, whalereinv1.OnlineStatus_received)
+	f.now = f.now.Add(2 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatalf("renewed claim swept early: %v", f.broker.presence)
+	}
+	f.now = f.now.Add(11 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 1 {
+		t.Fatalf("stale claim not published: %v", f.broker.presence)
+	}
+	if !strings.Contains(f.broker.presence[0], "request_stale") || !strings.Contains(f.broker.presence[0], "req-lease") {
+		t.Fatalf("presence payload = %q", f.broker.presence[0])
+	}
+}
+
+func TestClientPollLeaseIgnoresTerminalRequest(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{RequestID: "req-done", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_succeeded}
+	f.store.rows[row.RequestID] = row
+	f.service.recordClientClaim(row)
+	f.now = f.now.Add(11 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatalf("terminal claim published: %v", f.broker.presence)
+	}
+}
+
+func TestClientPollTouchIgnoresUnknownWrongDeviceAndTerminal(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{RequestID: "req-touch", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
+	f.store.rows[row.RequestID] = row
+	f.service.recordClientClaim(row)
+	f.service.Touch("other", row.RequestID, whalereinv1.OnlineStatus_received)
+	f.service.Touch("d1", "missing", whalereinv1.OnlineStatus_received)
+	f.now = f.now.Add(9 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatalf("ignored touch renewed or swept: %v", f.broker.presence)
+	}
+	f.service.Touch("d1", row.RequestID, whalereinv1.OnlineStatus_succeeded)
+	f.now = f.now.Add(11 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatalf("terminal touch not removed: %v", f.broker.presence)
+	}
+}
+
+func TestClientPollSweepPublishFailureIsCounted(t *testing.T) {
+	f := newFixture(t)
+	f.broker.err = errors.New("offline")
+	row := store.Request{RequestID: "req-fail", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
+	f.store.rows[row.RequestID] = row
+	f.service.recordClientClaim(row)
+	f.now = f.now.Add(11 * time.Second)
+	f.service.SweepClientClaims(context.Background())
+	if len(f.broker.presence) != 1 {
+		t.Fatalf("publish attempt missing: %v", f.broker.presence)
 	}
 }

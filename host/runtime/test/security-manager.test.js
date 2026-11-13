@@ -32,6 +32,7 @@ function makeSecurity(overrides = {}) {
     now: overrides.now ?? (() => 1000),
     pendingTtlMs: overrides.pendingTtlMs ?? 60_000,
     maxPending: overrides.maxPending ?? 32,
+    onRevokedChannels: overrides.onRevokedChannels,
   })
   return { store, identity, security }
 }
@@ -387,11 +388,13 @@ test('when revocation notices arrive, peers/channels are removed and replay ends
 })
 
 test('after Access-confirmed host revocation, local peer cleanup closes its channel and marks it revoked without ending replay', () => {
-  const { security, store } = makeSecurity()
+  const notifications = []
+  const { security, store } = makeSecurity({ onRevokedChannels: channels => notifications.push(channels) })
   const channel = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
   security.setRevocationsPending(true)
   const dropped = security.forgetPairedDevice('device-1')
   assert.deepEqual(dropped.closed, [{ deviceId: 'device-1', channelId: channel.channelId }])
+  assert.deepEqual(notifications, [dropped.closed])
   assert.equal(store.getPeerKey('device-1'), null)
   assert.equal(store.isRevoked('device-1'), true)
   assert.equal(security.revocationsPending, true)
@@ -521,4 +524,19 @@ test('Noise FINISH cannot authorize a substituted transport credential', () => {
       device_id:start.deviceId,phase:'PAIRING_PHASE_FINISH',noise_message:start.noise.writeMessage(finish),device_auth_hash:new Uint8Array(32).fill(9)}}),/binding mismatch/)
     assert.equal(store.getPendingPeer(start.claimId),null)
   } finally {store.close()}
+})
+
+test('an expired staged peer cannot be activated by a late COMMIT after restart', () => {
+  let now = 1000
+  const first = makeSecurity({now:()=>now, pendingTtlMs:50})
+  const start = pairingStart()
+  const request = {device_id:start.deviceId,protocol_version:1}
+  const hello = first.security.handlePairingClaim({request,claim:helloClaim(start)})
+  start.noise.readMessage(hello.noise_message)
+  finishPairing({security:first.security,start})
+  const commit = {claim_id:start.claimId,phase:'PAIRING_PHASE_COMMIT',device_id:start.deviceId,device_public_key:start.identity.publicKey,grant_generation:1}
+  now += 51
+  const restarted = new SecurityManager({hostId,identity:first.identity,store:first.store,codec,now:()=>now})
+  assert.throws(()=>restarted.handlePairingClaim({request,claim:commit}), error=>error.code==='unauthorized')
+  assert.equal(first.store.getPeerKey(start.deviceId), null)
 })

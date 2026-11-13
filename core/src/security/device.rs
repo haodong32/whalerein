@@ -27,6 +27,23 @@ fn storage_key(profile: &Path) -> Result<String, SecurityError> {
     ))
 }
 
+pub(crate) fn existing_device_id(
+    secrets: &Arc<dyn SecretStore>,
+    profile: &Path,
+) -> Result<Option<String>, SecurityError> {
+    match secrets.load(&storage_key(profile)?)? {
+        Some(bytes) => {
+            let stored: StoredIdentity =
+                serde_json::from_slice(&bytes).map_err(|_| SecurityError::InvalidKey)?;
+            if stored.device_id.is_empty() {
+                return Err(SecurityError::InvalidKey);
+            }
+            Ok(Some(stored.device_id))
+        }
+        None => Ok(None),
+    }
+}
+
 pub fn load_or_create(
     secrets: &Arc<dyn SecretStore>,
     profile: &Path,
@@ -70,6 +87,7 @@ pub fn forget(secrets: &Arc<dyn SecretStore>, profile: &Path) -> Result<(), Secu
             secrets.delete(&keys::device_private_key(&stored.device_id))?;
             secrets.delete(&keys::device_token(&stored.device_id))?;
             secrets.delete(&keys::pending_pairing(&stored.device_id))?;
+            secrets.delete(&keys::pairing_history(&stored.device_id))?;
         }
     }
     secrets.delete(&slot)?;
@@ -79,22 +97,172 @@ pub fn forget(secrets: &Arc<dyn SecretStore>, profile: &Path) -> Result<(), Secu
 /// OS-released profile lock: crashes cannot leave a stale exclusive lock.
 pub struct ProfileLock {
     _file: std::fs::File,
+    directory: std::fs::File,
 }
+pub(crate) fn retryable_admission_error(error: &std::io::Error) -> bool {
+    let busy = error.kind() == std::io::ErrorKind::WouldBlock;
+    #[cfg(windows)]
+    let busy = busy || error.raw_os_error() == Some(32);
+    busy
+}
+
+/// A bounded wait for a lock that is briefly held by another operation or by a
+/// duplicated descriptor in a forked child. `O_CLOEXEC` closes such descriptors
+/// on the far side of `exec`, but not during the fork-to-exec window, so a
+/// genuinely retryable `WouldBlock` can outlive the original holder.
+const LOCK_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+const LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+
 impl ProfileLock {
+    /// Test-only direct acquisition; production callers use the bounded-waiting
+    /// variants so transient fork-inherited contention is retried.
+    #[cfg(test)]
     pub fn acquire(profile: &Path) -> std::io::Result<Self> {
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
+        Self::acquire_file(profile, "identity.lock", false, false)
+    }
+
+    pub(crate) fn acquire_admission(profile: &Path) -> std::io::Result<Self> {
+        Self::acquire_file(profile, "admission.lock", false, false)
+    }
+
+    #[cfg(all(unix, test))]
+    pub(crate) fn acquire_admission_shared(profile: &Path) -> std::io::Result<Self> {
+        Self::acquire_file(profile, "admission.lock", false, true)
+    }
+
+    /// Identity operation guarded by a bounded wait for transient lock
+    /// contention. A persistent holder still fails after the budget.
+    pub(crate) fn acquire_identity_waiting(profile: &Path) -> std::io::Result<Self> {
+        Self::acquire_file_waiting(profile, "identity.lock", false, LOCK_RETRY_BUDGET)
+    }
+
+    /// Admission operation guarded by a bounded wait for transient contention.
+    pub(crate) fn acquire_admission_waiting(profile: &Path) -> std::io::Result<Self> {
+        Self::acquire_file_waiting(profile, "admission.lock", false, LOCK_RETRY_BUDGET)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn acquire_admission_shared_waiting(profile: &Path) -> std::io::Result<Self> {
+        Self::acquire_file_waiting(profile, "admission.lock", true, LOCK_RETRY_BUDGET)
+    }
+
+    fn acquire_file_waiting(
+        profile: &Path,
+        name: &str,
+        shared: bool,
+        budget: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match Self::acquire_file(profile, name, false, shared) {
+                Ok(guard) => return Ok(guard),
+                Err(error)
+                    if retryable_admission_error(&error)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(LOCK_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub(crate) async fn acquire_admission_async(
+        profile: &Path,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<Self> {
+        loop {
+            match Self::acquire_admission(profile) {
+                Ok(guard) => return Ok(guard),
+                Err(error)
+                    if retryable_admission_error(&error)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub(crate) fn directory(&self) -> &std::fs::File {
+        &self.directory
+    }
+
+    fn acquire_file(
+        profile: &Path,
+        name: &str,
+        _blocking: bool,
+        _shared: bool,
+    ) -> std::io::Result<Self> {
         #[cfg(unix)]
-        {
+        let (directory, file) = {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            let directory = options.open(profile)?;
+            if !directory.metadata()?.is_dir() {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
+            let name = CString::new(name)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_CLOEXEC,
+                    0o600u32,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            (directory, unsafe { std::fs::File::from_raw_fd(fd) })
+        };
+        #[cfg(windows)]
+        let (directory, file) = {
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            let mut parent = std::fs::OpenOptions::new();
+            parent
+                .read(true)
+                .share_mode(3)
+                .custom_flags(0x02000000 | 0x00200000);
+            let directory = parent.open(profile)?;
+            let parent_metadata = directory.metadata()?;
+            if !parent_metadata.is_dir() || parent_metadata.file_attributes() & 0x400 != 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .custom_flags(0x00200000);
+            (directory, options.open(profile.join(name))?)
+        };
+        #[cfg(not(any(unix, windows)))]
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
         }
-        let file = options.open(profile.join("identity.lock"))?;
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -105,16 +273,44 @@ impl ProfileLock {
                 ) -> std::os::raw::c_int;
             }
             // LOCK_EX | LOCK_NB. The file descriptor owns the lock lifetime.
-            if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
+            if unsafe {
+                flock(
+                    file.as_raw_fd(),
+                    (if _shared { 1 } else { 2 }) | (if _blocking { 0 } else { 4 }),
+                )
+            } != 0
+            {
                 return Err(std::io::Error::last_os_error());
             }
         }
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: file,
+            directory,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_violation_is_retryable_admission_contention() {
+        assert!(super::retryable_admission_error(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_epipe_is_not_retryable_admission_contention() {
+        assert!(!super::retryable_admission_error(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+        assert!(super::retryable_admission_error(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+    }
+
     use super::*;
     use crate::security::MemorySecretStore;
 
@@ -164,5 +360,51 @@ mod lock_tests {
         drop(first);
         assert!(ProfileLock::acquire(dir.path()).is_ok());
         assert!(ProfileLock::acquire(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn bounded_retry_still_reports_a_persistent_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = ProfileLock::acquire_admission(dir.path()).unwrap();
+        let started = std::time::Instant::now();
+        let error = match ProfileLock::acquire_file_waiting(
+            dir.path(),
+            "admission.lock",
+            false,
+            std::time::Duration::from_millis(30),
+        ) {
+            Ok(_) => panic!("a held lock must not be acquired"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(25));
+        drop(held);
+    }
+
+    /// A fork child inherits a duplicate of the parent's open file description;
+    /// `O_CLOEXEC` releases it only at exec, so the parent must tolerate a
+    /// bounded WouldBlock after it dropped its own descriptor. `dup(2)` creates
+    /// the same shared-description condition deterministically without forking
+    /// (a real fork in the parallel test harness would contaminate sibling
+    /// tests by inheriting their lock descriptors, which would be its own bug).
+    #[cfg(unix)]
+    #[test]
+    fn an_open_file_description_kept_by_another_descriptor_is_retried() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let dir = tempfile::tempdir().unwrap();
+        let held = ProfileLock::acquire_admission(dir.path()).unwrap();
+        let duplicate = unsafe { libc::dup(held._file.as_raw_fd()) };
+        assert!(duplicate >= 0);
+        let duplicate = unsafe { std::fs::File::from_raw_fd(duplicate) };
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(duplicate);
+        });
+        drop(held);
+        let started = std::time::Instant::now();
+        let guard = ProfileLock::acquire_admission_waiting(dir.path()).unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+        drop(guard);
+        releaser.join().unwrap();
     }
 }

@@ -51,7 +51,11 @@
                 "rate_limited": 16,
                 "internal": 17,
                 "unavailable": 18,
-                "payload_too_large": 19
+                "payload_too_large": 19,
+                "pairing_fenced": 20,
+                "pairing_committed_unavailable": 21,
+                "pairing_committed_unconfirmed": 22,
+                "channel_replaced": 220
               }
             },
             "Capability": {
@@ -757,7 +761,22 @@
                     "read_history",
                     "watch_session",
                     "refresh_watches",
-                    "unwatch_session"
+                    "unwatch_session",
+                    "get_host_capabilities",
+                    "list_models",
+                    "read_session_model",
+                    "select_session_model",
+                    "wait_session",
+                    "cancel_session_wait",
+                    "read_wait_state",
+                    "create_session",
+                    "read_pending_queue",
+                    "update_pending_queue",
+                    "list_questions",
+                    "get_question",
+                    "answer_question",
+                    "cancel_question_answer",
+                    "fork_session"
                   ]
                 }
               },
@@ -813,6 +832,66 @@
                 "unwatch_session": {
                   "type": "UnwatchSession",
                   "id": 14
+                },
+                "get_host_capabilities": {
+                  "type": "GetHostCapabilities",
+                  "id": 190
+                },
+                "list_models": {
+                  "type": "ListModels",
+                  "id": 200
+                },
+                "read_session_model": {
+                  "type": "ReadSessionModel",
+                  "id": 201
+                },
+                "select_session_model": {
+                  "type": "SelectSessionModel",
+                  "id": 202
+                },
+                "wait_session": {
+                  "type": "WaitSession",
+                  "id": 220
+                },
+                "cancel_session_wait": {
+                  "type": "CancelSessionWait",
+                  "id": 221
+                },
+                "read_wait_state": {
+                  "type": "ReadWaitState",
+                  "id": 222
+                },
+                "create_session": {
+                  "type": "CreateSession",
+                  "id": 240
+                },
+                "read_pending_queue": {
+                  "type": "ReadPendingQueue",
+                  "id": 280
+                },
+                "update_pending_queue": {
+                  "type": "UpdatePendingQueue",
+                  "id": 281
+                },
+                "list_questions": {
+                  "type": "ListQuestions",
+                  "id": 260
+                },
+                "get_question": {
+                  "type": "GetQuestion",
+                  "id": 261
+                },
+                "answer_question": {
+                  "type": "AnswerQuestion",
+                  "id": 262
+                },
+                "cancel_question_answer": {
+                  "type": "CancelQuestionAnswer",
+                  "id": 263
+                },
+                "fork_session": {
+                  "type": "ForkSession",
+                  "id": 300
                 }
               }
             },
@@ -829,7 +908,19 @@
                     "history_page",
                     "watch_ready",
                     "watch_states",
-                    "session_info"
+                    "session_info",
+                    "host_capabilities",
+                    "model_catalog",
+                    "session_model",
+                    "model_selection_receipt",
+                    "session_wait_result",
+                    "session_wait_state_result",
+                    "lifecycle_receipt",
+                    "pending_queue",
+                    "question_page",
+                    "question_batch",
+                    "question_receipt",
+                    "question_cancel_receipt"
                   ]
                 }
               },
@@ -874,6 +965,54 @@
                   "type": "SessionSummary",
                   "id": 14
                 },
+                "host_capabilities": {
+                  "type": "HostCapabilities",
+                  "id": 190
+                },
+                "model_catalog": {
+                  "type": "ModelCatalog",
+                  "id": 200
+                },
+                "session_model": {
+                  "type": "SessionModel",
+                  "id": 201
+                },
+                "model_selection_receipt": {
+                  "type": "ModelSelectionReceipt",
+                  "id": 202
+                },
+                "session_wait_result": {
+                  "type": "SessionWaitResult",
+                  "id": 220
+                },
+                "session_wait_state_result": {
+                  "type": "SessionWaitStateResult",
+                  "id": 221
+                },
+                "lifecycle_receipt": {
+                  "type": "LifecycleReceipt",
+                  "id": 240
+                },
+                "pending_queue": {
+                  "type": "PendingQueue",
+                  "id": 280
+                },
+                "question_page": {
+                  "type": "QuestionPage",
+                  "id": 260
+                },
+                "question_batch": {
+                  "type": "QuestionBatch",
+                  "id": 261
+                },
+                "question_receipt": {
+                  "type": "QuestionReceipt",
+                  "id": 262
+                },
+                "question_cancel_receipt": {
+                  "type": "QuestionCancelReceipt",
+                  "id": 263
+                },
                 "error_code": {
                   "type": "ErrorCode",
                   "id": 8
@@ -884,8 +1023,724 @@
                 }
               }
             },
+            "GetHostCapabilities": {
+              "fields": {}
+            },
+            "HostCapabilities": {
+              "fields": {
+                "model_catalog": {
+                  "type": "bool",
+                  "id": 200
+                },
+                "model_read": {
+                  "type": "bool",
+                  "id": 201
+                },
+                "session_create": {
+                  "type": "bool",
+                  "id": 240
+                },
+                "session_fork": {
+                  "type": "bool",
+                  "id": 300
+                }
+              }
+            },
+            "ListModels": {
+              "fields": {}
+            },
+            "ReadSessionModel": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "ModelChoice": {
+              "oneofs": {
+                "_effort": {
+                  "oneof": [
+                    "effort"
+                  ]
+                }
+              },
+              "fields": {
+                "provider": {
+                  "type": "string",
+                  "id": 1
+                },
+                "model": {
+                  "type": "string",
+                  "id": 2
+                },
+                "effort": {
+                  "type": "string",
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "ModelEffort": {
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "ModelEntry": {
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "efforts": {
+                  "rule": "repeated",
+                  "type": "ModelEffort",
+                  "id": 3
+                },
+                "default_effort": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "ModelProvider": {
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "models": {
+                  "rule": "repeated",
+                  "type": "ModelEntry",
+                  "id": 3
+                }
+              }
+            },
+            "ModelProviderFailure": {
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "code": {
+                  "type": "ErrorCode",
+                  "id": 3
+                }
+              }
+            },
+            "ModelCatalog": {
+              "fields": {
+                "default_selection": {
+                  "type": "ModelChoice",
+                  "id": 1
+                },
+                "groups": {
+                  "rule": "repeated",
+                  "type": "ModelProvider",
+                  "id": 2
+                },
+                "failures": {
+                  "rule": "repeated",
+                  "type": "ModelProviderFailure",
+                  "id": 3
+                },
+                "effect_scope": {
+                  "type": "string",
+                  "id": 4
+                },
+                "complete": {
+                  "type": "bool",
+                  "id": 5
+                }
+              }
+            },
+            "SessionModel": {
+              "fields": {
+                "pending": {
+                  "type": "ModelChoice",
+                  "id": 1
+                },
+                "last_used": {
+                  "type": "ModelChoice",
+                  "id": 2
+                },
+                "default_selection": {
+                  "type": "ModelChoice",
+                  "id": 3
+                },
+                "default_is_fallback": {
+                  "type": "bool",
+                  "id": 4
+                },
+                "next": {
+                  "type": "ModelChoice",
+                  "id": 5
+                },
+                "pending_known": {
+                  "type": "bool",
+                  "id": 6
+                }
+              }
+            },
+            "SelectSessionModel": {
+              "oneofs": {
+                "_effort": {
+                  "oneof": [
+                    "effort"
+                  ]
+                }
+              },
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "provider": {
+                  "type": "string",
+                  "id": 2
+                },
+                "model": {
+                  "type": "string",
+                  "id": 3
+                },
+                "effort": {
+                  "type": "string",
+                  "id": 4,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "ModelSelectionReceipt": {
+              "fields": {
+                "selected": {
+                  "type": "ModelChoice",
+                  "id": 1
+                },
+                "effect_scope": {
+                  "type": "string",
+                  "id": 2
+                },
+                "default_persistence": {
+                  "type": "string",
+                  "id": 3
+                }
+              }
+            },
+            "ForkSession": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "CreateSession": {
+              "oneofs": {
+                "_cwd": {
+                  "oneof": [
+                    "cwd"
+                  ]
+                },
+                "_workspace_id": {
+                  "oneof": [
+                    "workspace_id"
+                  ]
+                },
+                "_agent_preset": {
+                  "oneof": [
+                    "agent_preset"
+                  ]
+                },
+                "_preferred_session_id": {
+                  "oneof": [
+                    "preferred_session_id"
+                  ]
+                }
+              },
+              "fields": {
+                "cwd": {
+                  "type": "string",
+                  "id": 1,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 2,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "agent_preset": {
+                  "type": "string",
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "preferred_session_id": {
+                  "type": "string",
+                  "id": 4,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "LifecycleDisposition": {
+              "values": {
+                "LIFECYCLE_DISPOSITION_UNSPECIFIED": 0,
+                "READY": 1,
+                "READY_WITH_WARNING": 2,
+                "FAILED": 3,
+                "UNKNOWN": 4
+              }
+            },
+            "LifecycleReceipt": {
+              "oneofs": {
+                "_warning_detail": {
+                  "oneof": [
+                    "warning_detail"
+                  ]
+                }
+              },
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "operation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "disposition": {
+                  "type": "LifecycleDisposition",
+                  "id": 3
+                },
+                "warning_code": {
+                  "type": "string",
+                  "id": 4
+                },
+                "parent_session_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "operation_id": {
+                  "type": "string",
+                  "id": 6
+                },
+                "phase": {
+                  "type": "string",
+                  "id": 7
+                },
+                "reason_code": {
+                  "type": "string",
+                  "id": 8
+                },
+                "retryable": {
+                  "type": "bool",
+                  "id": 9
+                },
+                "reconcile_mode": {
+                  "type": "string",
+                  "id": 10
+                },
+                "reconcile_key": {
+                  "type": "string",
+                  "id": 11
+                },
+                "warning_detail": {
+                  "type": "string",
+                  "id": 12,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
             "ListSessions": {
               "fields": {}
+            },
+            "QuestionPhase": {
+              "values": {
+                "QUESTION_PHASE_UNSPECIFIED": 0,
+                "QUESTION_OPEN": 1,
+                "QUESTION_CONTINUED": 2,
+                "QUESTION_REPLY_QUEUED": 3,
+                "QUESTION_SETTLED": 4
+              }
+            },
+            "QuestionOption": {
+              "oneofs": {
+                "_description": {
+                  "oneof": [
+                    "description"
+                  ]
+                }
+              },
+              "fields": {
+                "label": {
+                  "type": "string",
+                  "id": 1
+                },
+                "description": {
+                  "type": "string",
+                  "id": 2,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "QuestionLocalizedText": {
+              "fields": {
+                "translations": {
+                  "keyType": "string",
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "QuestionSubject": {
+              "oneofs": {
+                "_icon": {
+                  "oneof": [
+                    "icon"
+                  ]
+                }
+              },
+              "fields": {
+                "name": {
+                  "type": "string",
+                  "id": 1
+                },
+                "icon": {
+                  "type": "string",
+                  "id": 2,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "QuestionDisplay": {
+              "fields": {
+                "question": {
+                  "type": "QuestionLocalizedText",
+                  "id": 1
+                },
+                "detail": {
+                  "type": "QuestionLocalizedText",
+                  "id": 2
+                },
+                "approve": {
+                  "type": "QuestionLocalizedText",
+                  "id": 3
+                }
+              }
+            },
+            "QuestionIntent": {
+              "oneofs": {
+                "_reject": {
+                  "oneof": [
+                    "reject"
+                  ]
+                },
+                "_always": {
+                  "oneof": [
+                    "always"
+                  ]
+                },
+                "_call_id": {
+                  "oneof": [
+                    "call_id"
+                  ]
+                }
+              },
+              "fields": {
+                "kind": {
+                  "type": "string",
+                  "id": 1
+                },
+                "approve": {
+                  "type": "string",
+                  "id": 2
+                },
+                "reject": {
+                  "type": "string",
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "always": {
+                  "type": "string",
+                  "id": 4,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "call_id": {
+                  "type": "string",
+                  "id": 5,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "subject": {
+                  "type": "QuestionSubject",
+                  "id": 6
+                },
+                "display": {
+                  "type": "QuestionDisplay",
+                  "id": 7
+                }
+              }
+            },
+            "QuestionItem": {
+              "oneofs": {
+                "_detail": {
+                  "oneof": [
+                    "detail"
+                  ]
+                },
+                "_header": {
+                  "oneof": [
+                    "header"
+                  ]
+                }
+              },
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "question": {
+                  "type": "string",
+                  "id": 2
+                },
+                "detail": {
+                  "type": "string",
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "header": {
+                  "type": "string",
+                  "id": 4,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "options": {
+                  "rule": "repeated",
+                  "type": "QuestionOption",
+                  "id": 5
+                },
+                "multi_select": {
+                  "type": "bool",
+                  "id": 6
+                },
+                "intent": {
+                  "type": "QuestionIntent",
+                  "id": 7
+                }
+              }
+            },
+            "QuestionAnswerItem": {
+              "oneofs": {
+                "_custom": {
+                  "oneof": [
+                    "custom"
+                  ]
+                }
+              },
+              "fields": {
+                "id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "selected": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 2
+                },
+                "custom": {
+                  "type": "string",
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "QuestionBatch": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "batch_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "source_epoch": {
+                  "type": "string",
+                  "id": 3
+                },
+                "version": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "digest": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "phase": {
+                  "type": "QuestionPhase",
+                  "id": 6
+                },
+                "questions": {
+                  "rule": "repeated",
+                  "type": "QuestionItem",
+                  "id": 7
+                },
+                "answerable": {
+                  "type": "bool",
+                  "id": 8
+                },
+                "content_unavailable": {
+                  "type": "bool",
+                  "id": 9
+                }
+              }
+            },
+            "ListQuestions": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "cursor": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "GetQuestion": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "batch_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "QuestionPage": {
+              "fields": {
+                "batches": {
+                  "rule": "repeated",
+                  "type": "QuestionBatch",
+                  "id": 1
+                },
+                "next_cursor": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "AnswerQuestion": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "batch_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "source_epoch": {
+                  "type": "string",
+                  "id": 3
+                },
+                "expected_version": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "expected_digest": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "expected_phase": {
+                  "type": "QuestionPhase",
+                  "id": 6
+                },
+                "answers": {
+                  "rule": "repeated",
+                  "type": "QuestionAnswerItem",
+                  "id": 7
+                }
+              }
+            },
+            "QuestionReceipt": {
+              "fields": {
+                "batch_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "phase": {
+                  "type": "QuestionPhase",
+                  "id": 2
+                }
+              }
+            },
+            "CancelQuestionAnswer": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "QuestionCancelReceipt": {
+              "fields": {
+                "cancellation_requested": {
+                  "type": "bool",
+                  "id": 1
+                }
+              }
             },
             "GetSession": {
               "fields": {
@@ -1058,6 +1913,10 @@
                 "message_id": {
                   "type": "string",
                   "id": 1
+                },
+                "delivery_id": {
+                  "type": "string",
+                  "id": 180
                 }
               }
             },
@@ -1251,6 +2110,42 @@
                   "rule": "repeated",
                   "type": "DeliveryMode",
                   "id": 6
+                },
+                "model_selection": {
+                  "type": "bool",
+                  "id": 200
+                },
+                "pending_queue_read": {
+                  "type": "bool",
+                  "id": 280
+                },
+                "pending_queue_edit": {
+                  "type": "bool",
+                  "id": 281
+                },
+                "pending_queue_remove": {
+                  "type": "bool",
+                  "id": 282
+                },
+                "pending_queue_steer": {
+                  "type": "bool",
+                  "id": 283
+                },
+                "questions_read": {
+                  "type": "bool",
+                  "id": 260
+                },
+                "questions_answer_open": {
+                  "type": "bool",
+                  "id": 261
+                },
+                "questions_answer_continued": {
+                  "type": "bool",
+                  "id": 262
+                },
+                "session_fork": {
+                  "type": "bool",
+                  "id": 300
                 }
               }
             },
@@ -1697,6 +2592,202 @@
                 "watch_id": {
                   "type": "string",
                   "id": 1
+                }
+              }
+            },
+            "WaitSession": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "wait_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "timeout_ms": {
+                  "type": "uint32",
+                  "id": 3
+                }
+              }
+            },
+            "CancelSessionWait": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "wait_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "ReadWaitState": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "WaitReason": {
+              "values": {
+                "WAIT_REASON_UNSPECIFIED": 0,
+                "WAIT_IDLE": 1,
+                "WAIT_INPUT_REQUIRED": 2,
+                "WAIT_TIMEOUT": 3
+              }
+            },
+            "InputKind": {
+              "values": {
+                "INPUT_KIND_UNSPECIFIED": 0,
+                "INPUT_APPROVAL": 1,
+                "INPUT_QUESTION": 2,
+                "INPUT_OTHER": 3
+              }
+            },
+            "SessionWaitState": {
+              "fields": {
+                "active": {
+                  "type": "bool",
+                  "id": 1
+                },
+                "running": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "queue_available": {
+                  "type": "bool",
+                  "id": 3
+                },
+                "pending_input": {
+                  "rule": "repeated",
+                  "type": "InputKind",
+                  "id": 4
+                }
+              }
+            },
+            "SessionWaitResult": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "wait_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "reason": {
+                  "type": "WaitReason",
+                  "id": 3
+                },
+                "state": {
+                  "type": "SessionWaitState",
+                  "id": 4
+                }
+              }
+            },
+            "SessionWaitStateResult": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "state": {
+                  "type": "SessionWaitState",
+                  "id": 2
+                }
+              }
+            },
+            "ReadPendingQueue": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "QueuePlacement": {
+              "values": {
+                "QUEUE_PLACEMENT_UNSPECIFIED": 0,
+                "QUEUED": 1,
+                "STEERING": 2,
+                "CONTEXT": 3
+              }
+            },
+            "QueueAction": {
+              "values": {
+                "QUEUE_ACTION_UNSPECIFIED": 0,
+                "EDIT": 1,
+                "REMOVE": 2,
+                "PROMOTE": 3
+              }
+            },
+            "PendingQueueItem": {
+              "fields": {
+                "item_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "placement": {
+                  "type": "QueuePlacement",
+                  "id": 2
+                },
+                "delivery_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "blocks": {
+                  "rule": "repeated",
+                  "type": "ContentBlock",
+                  "id": 4
+                },
+                "actions": {
+                  "rule": "repeated",
+                  "type": "QueueAction",
+                  "id": 5
+                }
+              }
+            },
+            "PendingQueue": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "available": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "running": {
+                  "type": "bool",
+                  "id": 3
+                },
+                "items": {
+                  "rule": "repeated",
+                  "type": "PendingQueueItem",
+                  "id": 4
+                }
+              }
+            },
+            "UpdatePendingQueue": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "item_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "action": {
+                  "type": "QueueAction",
+                  "id": 3
+                },
+                "text": {
+                  "type": "string",
+                  "id": 4
                 }
               }
             }

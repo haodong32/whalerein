@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
@@ -17,7 +20,7 @@ func (s *Store) EnsureHost(ctx context.Context, hostID string) (Host, error) {
 	if hostID == "" {
 		return Host{}, errors.New("host_id is required")
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if _, err := s.db.Exec(ctx, `
 		INSERT INTO hosts (host_id) VALUES ($1)
 		ON CONFLICT (host_id) DO NOTHING`, hostID); err != nil {
 		return Host{}, fmt.Errorf("ensure host: %w", err)
@@ -27,7 +30,7 @@ func (s *Store) EnsureHost(ctx context.Context, hostID string) (Host, error) {
 
 // GetHost reads one host.
 func (s *Store) GetHost(ctx context.Context, hostID string) (Host, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := s.db.QueryRow(ctx, `
 		SELECT host_id, fingerprint, protocol_version, created_at, updated_at
 		FROM hosts WHERE host_id = $1`, hostID)
 	return scanHost(row)
@@ -36,7 +39,7 @@ func (s *Store) GetHost(ctx context.Context, hostID string) (Host, error) {
 // UpdateHostMetadata stores the host fingerprint and protocol version observed
 // during a completed pairing flow.
 func (s *Store) UpdateHostMetadata(ctx context.Context, hostID, fingerprint string, protocolVersion uint32, at time.Time) error {
-	cmd, err := s.pool.Exec(ctx, `
+	cmd, err := s.db.Exec(ctx, `
 		UPDATE hosts SET fingerprint = $2, protocol_version = $3, updated_at = $4
 		WHERE host_id = $1`, hostID, fingerprint, int32(protocolVersion), at)
 	if err != nil {
@@ -54,7 +57,7 @@ func (s *Store) SetHostAuthorizationKey(ctx context.Context, hostID string, publ
 	if hostID == "" || len(publicKey) != 32 {
 		return fmt.Errorf("set host authorization key: %w", ErrNotFound)
 	}
-	cmd, err := s.pool.Exec(ctx, `
+	cmd, err := s.db.Exec(ctx, `
 		UPDATE hosts SET authorization_public_key = $2
 		WHERE host_id = $1 AND authorization_public_key IS NULL`, hostID, publicKey)
 	if err != nil {
@@ -64,7 +67,7 @@ func (s *Store) SetHostAuthorizationKey(ctx context.Context, hostID string, publ
 		return nil
 	}
 	var existing []byte
-	err = s.pool.QueryRow(ctx, `
+	err = s.db.QueryRow(ctx, `
 		SELECT authorization_public_key FROM hosts WHERE host_id = $1`, hostID).Scan(&existing)
 	if err != nil {
 		if errors.Is(wrapRequestScan(err), ErrNotFound) {
@@ -79,7 +82,7 @@ func (s *Store) SetHostAuthorizationKey(ctx context.Context, hostID string, publ
 // A missing host or a host that has not registered a key returns ErrNotFound.
 func (s *Store) HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error) {
 	var key []byte
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT authorization_public_key FROM hosts WHERE host_id = $1`, hostID).Scan(&key)
 	if err != nil {
 		if errors.Is(wrapRequestScan(err), ErrNotFound) {
@@ -106,7 +109,7 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 
 // ListAuthorizedHosts returns every host with a live grant for the device.
 func (s *Store) ListAuthorizedHosts(ctx context.Context, deviceID string) ([]Host, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT h.host_id, h.fingerprint, h.protocol_version, h.created_at, h.updated_at
 		FROM hosts h
 		JOIN grants g ON g.host_id = h.host_id
@@ -130,10 +133,24 @@ func (s *Store) ListAuthorizedHosts(ctx context.Context, deviceID string) ([]Hos
 	return hosts, nil
 }
 
+// ListAuthorizedHostIDs returns the ids of every host with a live grant for the
+// device. Broker presence uses it to publish one event per authorized host.
+func (s *Store) ListAuthorizedHostIDs(ctx context.Context, deviceID string) ([]string, error) {
+	hosts, err := s.ListAuthorizedHosts(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	hostIDs := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		hostIDs = append(hostIDs, host.HostID)
+	}
+	return hostIDs, nil
+}
+
 // ActiveDeviceByAuthHash finds a device by the SHA-256 of its transport token,
 // requiring at least one live grant.
 func (s *Store) ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (Device, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := s.db.QueryRow(ctx, `
 		SELECT d.device_id, d.public_key_fingerprint, c.auth_hash, d.created_at, d.updated_at
         FROM device_credentials c JOIN devices d ON d.device_id=c.device_id
         WHERE c.auth_hash=$1
@@ -144,7 +161,7 @@ func (s *Store) ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (De
 
 // DeviceByID reads a device regardless of grant state.
 func (s *Store) DeviceByID(ctx context.Context, deviceID string) (Device, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := s.db.QueryRow(ctx, `
 		SELECT d.device_id, d.public_key_fingerprint,
             (SELECT c.auth_hash FROM device_credentials c WHERE c.device_id=d.device_id ORDER BY c.created_at DESC,c.auth_hash LIMIT 1),
             d.created_at,d.updated_at FROM devices d WHERE d.device_id=$1`, deviceID)
@@ -164,7 +181,7 @@ func scanDevice(row interface{ Scan(...any) error }) (Device, error) {
 // HasActiveGrant reports whether the device currently may access the host.
 func (s *Store) HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error) {
 	var exists bool
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM grants
 			WHERE host_id = $1 AND device_id = $2 AND revoked_at IS NULL
@@ -179,7 +196,7 @@ func (s *Store) HasActiveGrant(ctx context.Context, hostID, deviceID string) (bo
 // host confirmed FINISH. Each pairing adds a credential without invalidating
 // other live Host enrollments and explicitly renews this Host/device grant.
 func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, publicKeyFingerprint string, authHash []byte, at time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin register device: %w", err)
 	}
@@ -198,18 +215,25 @@ func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, public
 // RevokeGrant marks one host's grant revoked after an authorized owner action.
 // Failed pairing transactions roll back and never invoke this operation.
 func (s *Store) RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	return revokeGrant(ctx, s.poolBegin, hostID, deviceID, at)
+}
+
+func revokeGrant(ctx context.Context, begin func(context.Context) (pgx.Tx, error), hostID, deviceID string, at time.Time) error {
+	tx, err := begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, deviceID); err != nil {
+		return err
+	}
 	var lockedID string
 	if err := tx.QueryRow(ctx, "SELECT device_id FROM devices WHERE device_id=$1 FOR UPDATE", deviceID).Scan(&lockedID); err != nil {
 		return wrapRequestScan(err)
 	}
 	cmd, err := tx.Exec(ctx, `
-		UPDATE grants SET revoked_at = $3, updated_at = $3
-		WHERE host_id = $1 AND device_id = $2 AND revoked_at IS NULL`, hostID, deviceID, at)
+		UPDATE grants SET revoked_at = COALESCE(revoked_at, $3), updated_at = $3, revocation_generation = revocation_generation + 1
+		WHERE host_id = $1 AND device_id = $2`, hostID, deviceID, at)
 	if err != nil {
 		return fmt.Errorf("revoke grant: %w", err)
 	}
@@ -235,12 +259,20 @@ func (s *Store) RevokeGrant(ctx context.Context, hostID, deviceID string, at tim
 // It returns the affected host ids and whether the device exists. The ACL is
 // database-derived, so the revocation is effective at commit.
 func (s *Store) RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	return revokeDeviceGrants(ctx, s.poolBegin, deviceID, at)
+}
+
+func revokeDeviceGrants(ctx context.Context, begin func(context.Context) (pgx.Tx, error), deviceID string, at time.Time) ([]string, bool, error) {
+	tx, err := begin(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("begin revoke device: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// All pairing and global-revocation paths acquire the same device fence first.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, deviceID); err != nil {
+		return nil, false, err
+	}
 	var lockedID string
 	if err := tx.QueryRow(ctx, `SELECT device_id FROM devices WHERE device_id=$1 FOR UPDATE`, deviceID).Scan(&lockedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -249,6 +281,9 @@ func (s *Store) RevokeDeviceGrants(ctx context.Context, deviceID string, at time
 		return nil, false, fmt.Errorf("check device: %w", err)
 	}
 
+	if _, err := tx.Exec(ctx, `UPDATE devices SET revocation_generation=revocation_generation+1 WHERE device_id=$1`, deviceID); err != nil {
+		return nil, true, err
+	}
 	rows, err := tx.Query(ctx, `
 		WITH revoked AS (
 			UPDATE grants SET revoked_at = $2, updated_at = $2
@@ -283,7 +318,7 @@ func (s *Store) RevokeDeviceGrants(ctx context.Context, deviceID string, at time
 
 // PendingRevocations returns every unacknowledged revocation for a host.
 func (s *Store) PendingRevocations(ctx context.Context, hostID string) ([]Revocation, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT device_id, revoked_at, grant_generation FROM grants
 		WHERE host_id = $1 AND revoked_at IS NOT NULL AND replayed_at IS NULL
 		ORDER BY revoked_at, device_id`, hostID)
@@ -314,7 +349,7 @@ func (s *Store) MarkRevocationsReplayed(ctx context.Context, hostID string, devi
 		return nil
 	}
 	for _, deviceID := range deviceIDs {
-		_, err := s.pool.Exec(ctx, `UPDATE grants SET replayed_at=$4,updated_at=$4
+		_, err := s.db.Exec(ctx, `UPDATE grants SET replayed_at=$4,updated_at=$4
             WHERE host_id=$1 AND device_id=$2 AND revoked_at IS NOT NULL
               AND replayed_at IS NULL AND revoked_at <= $3 AND grant_generation=$5`,
 			hostID, deviceID, revokedBefore, at, generations[deviceID])
@@ -328,7 +363,7 @@ func (s *Store) MarkRevocationsReplayed(ctx context.Context, hostID string, devi
 // CountActiveGrants is a small component-test and diagnostics helper.
 func (s *Store) CountActiveGrants(ctx context.Context, deviceID string) (int, error) {
 	var count int
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT count(*) FROM grants WHERE device_id = $1 AND revoked_at IS NULL`, deviceID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active grants: %w", err)
@@ -379,25 +414,74 @@ func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicK
 	return nil
 }
 
+func verifyPairingFences(ctx context.Context, tx pgx.Tx, operation *PairingOperation, hostID, deviceID string) (bool, error) {
+	var err error
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, deviceID); err != nil {
+		return false, err
+	}
+	var generation, captured, hostGeneration, hostCaptured int64
+	var finished []byte
+	err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT revocation_generation FROM devices WHERE device_id=$1),0)`, deviceID).Scan(&generation)
+	if err != nil {
+		return false, err
+	}
+	err = tx.QueryRow(ctx, `SELECT device_generation,host_generation,finish_hash FROM pairing_operations WHERE claim_id=$1 AND device_id=$2 AND host_id=$3`, operation.ClaimID, deviceID, hostID).Scan(&captured, &hostCaptured, &finished)
+	if err != nil {
+		return false, err
+	}
+	if len(finished) != 0 {
+		return false, nil
+	}
+	err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT revocation_generation FROM grants WHERE host_id=$1 AND device_id=$2),0)`, hostID, deviceID).Scan(&hostGeneration)
+	if err != nil {
+		return false, err
+	}
+	if generation != captured || hostGeneration != hostCaptured {
+		return false, ErrPairingFenced
+	}
+	return true, nil
+}
+
 // CommitPairing consumes the invitation and activates the device/grant in one
 // transaction. Failure never rotates an existing credential or revokes a grant.
 // On success, notice.Body is filled with the same generation bound into its durable outbox row.
 func (s *Store) CommitPairing(ctx context.Context, tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest, operation *PairingOperation) (bool, error) {
+	return commitPairing(ctx, s.poolBegin, tokenHash, hostID, deviceID, fingerprint, authHash, at, notice, operation)
+}
+
+func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, error), tokenHash []byte, hostID, deviceID, fingerprint string, authHash []byte, at time.Time, notice *whalereinv1.HostRequest, operation *PairingOperation) (bool, error) {
+	// Every durable grant must derive from a fenced HELLO operation.
+	if operation == nil {
+		return false, ErrConflict
+	}
+	var response whalereinv1.PairingClaimResponse
 	if operation != nil {
-		var response whalereinv1.PairingClaimResponse
 		var claim whalereinv1.PairingClaim
 		if notice == nil || proto.Unmarshal(operation.FinishResponse, &response) != nil || proto.Unmarshal(notice.Body, &claim) != nil ||
 			response.DeviceToken != "" || len(operation.FinishHash) != 32 || response.ClaimId != operation.ClaimID ||
 			claim.ClaimId != operation.ClaimID || response.HostId != hostID || response.DeviceId != deviceID ||
-			response.Phase != whalereinv1.PairingPhase_PAIRING_PHASE_FINISH || len(response.DevicePublicKey) != 32 {
+			response.Phase != whalereinv1.PairingPhase_PAIRING_PHASE_FINISH || len(response.DevicePublicKey) != 32 ||
+			claim.Phase != whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT || claim.DeviceId != deviceID ||
+			claim.TokenHash != "" || !bytes.Equal(claim.DevicePublicKey, response.DevicePublicKey) ||
+			notice.RequestId == "" || notice.ExpiresAtUnixMs <= at.UnixMilli() || claim.ExpiresAtUnixMs < notice.ExpiresAtUnixMs ||
+			notice.ProtocolVersion == 0 || notice.ProtocolVersion != response.ProtocolVersion {
+			return false, ErrConflict
+		}
+		keyHash := sha256.Sum256(response.DevicePublicKey)
+		if fingerprint != hex.EncodeToString(keyHash[:]) {
 			return false, ErrConflict
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	proceed, err := verifyPairingFences(ctx, tx, operation, hostID, deviceID)
+	if err != nil || !proceed {
+		return false, err
+	}
+
 	command, err := tx.Exec(ctx, `UPDATE pairing_tokens SET used_at=$2,updated_at=$2 WHERE token_hash=$1 AND host_id=$3 AND used_at IS NULL AND expires_at>$2`, tokenHash, at, hostID)
 	if err != nil {
 		return false, err
@@ -446,6 +530,33 @@ func (s *Store) CommitPairing(ctx context.Context, tokenHash []byte, hostID, dev
 		if cmd.RowsAffected() != 1 {
 			return false, ErrConflict
 		}
+		_, err = tx.Exec(ctx, `INSERT INTO pairing_outcomes(claim_id,token_hash,host_id,device_id,finish_hash,grant_generation,auth_hash,commit_request_id,device_public_key,protocol_version,commit_binding_verified)
+		  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)`, op.ClaimID, tokenHash, hostID, deviceID, op.FinishHash, generation, authHash, notice.RequestId, response.DevicePublicKey, response.ProtocolVersion)
+		if err != nil {
+			return false, err
+		}
+	}
+	// The device fence and other PostgreSQL row locks may have delayed this
+	// transaction after the caller sampled its clock. Check real database time
+	// immediately before commit so the original deadlines cannot be extended.
+	var databaseNow, tokenExpiry, operationExpiry time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp(),t.expires_at,p.expires_at
+		FROM pairing_tokens t JOIN pairing_operations p ON p.token_hash=t.token_hash
+		WHERE t.token_hash=$1 AND t.host_id=$2 AND p.claim_id=$3 AND p.host_id=$2 AND p.device_id=$4`, tokenHash, hostID, operation.ClaimID, deviceID).Scan(&databaseNow, &tokenExpiry, &operationExpiry); err != nil {
+		return false, err
+	}
+	if databaseNow.Before(at) {
+		databaseNow = at
+	}
+	// A database clock behind Access must not extend the caller's deadline.
+	if applicationNow := time.Now().UTC(); databaseNow.Before(applicationNow) {
+		databaseNow = applicationNow
+	}
+	if !databaseNow.Before(tokenExpiry) {
+		return false, ErrPairingInvitationExpired
+	}
+	if !databaseNow.Before(operationExpiry) || databaseNow.UnixMilli() >= notice.ExpiresAtUnixMs {
+		return false, ErrPairingIntentExpired
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err

@@ -22,6 +22,7 @@ export const ERROR_CODES = Object.freeze([
   'internal',
   'unavailable',
   'payload_too_large',
+  'channel_replaced',
 ])
 
 export const ONLINE_STATUSES = Object.freeze([
@@ -120,6 +121,8 @@ export function publicMessage(code) {
       return 'logical message exceeds transfer resource budget'
     case 'unavailable':
       return 'unavailable'
+    case 'channel_replaced':
+      return 'channel replaced'
     default:
       return 'internal error'
   }

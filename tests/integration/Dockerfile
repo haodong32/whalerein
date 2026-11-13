@@ -22,12 +22,15 @@ RUN --mount=type=cache,id=whalerein-cargo-registry-${TARGETARCH},target=/usr/loc
     --mount=type=cache,id=whalerein-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=whalerein-cargo-target-${TARGETARCH},target=/cache/target,sharing=locked \
     export CARGO_TARGET_DIR=/cache/target && \
-    cargo build --locked --workspace && \
+    cargo clean -p whalerein-proto && \
+    cargo build --locked --workspace --features whalerein-core/protocol-testing && \
     cargo build --locked --example mqtt_transport_driver -p whalerein-core --features protocol-testing && \
+    cargo build --locked --example delivery_budget_driver -p whalerein-core --features protocol-testing && \
+    cargo build --locked --example wait_concurrency_driver -p whalerein-core && \
     cargo build --locked --manifest-path tests/integration/drivers/noise/rust-peer/Cargo.toml && \
     cargo build --locked --manifest-path tests/integration/drivers/protobuf/rust-peer/Cargo.toml && \
     mkdir -p /out && \
-    cp /cache/target/debug/whalerein /cache/target/debug/whalerein-noise-peer /cache/target/debug/whalerein-proto-peer /cache/target/debug/examples/mqtt_transport_driver /out/
+    cp /cache/target/debug/whalerein /cache/target/debug/whalerein-noise-peer /cache/target/debug/whalerein-proto-peer /cache/target/debug/examples/mqtt_transport_driver /cache/target/debug/examples/delivery_budget_driver /cache/target/debug/examples/wait_concurrency_driver /out/
 
 FROM go AS go-build
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
@@ -95,6 +98,8 @@ COPY --from=node-build /workspace/host/runtime host/runtime
 COPY --from=node-build /workspace/node_modules node_modules
 COPY --from=rust-build /out/whalerein target/debug/whalerein
 COPY --from=rust-build /out/mqtt_transport_driver target/debug/examples/mqtt_transport_driver
+COPY --from=rust-build /out/delivery_budget_driver target/debug/examples/delivery_budget_driver
+COPY --from=rust-build /out/wait_concurrency_driver target/debug/examples/wait_concurrency_driver
 COPY proto/v1 proto/v1
 COPY tests/integration tests/integration
 COPY tests/fixtures tests/fixtures
@@ -104,4 +109,4 @@ COPY --from=rust-build /out/whalerein-proto-peer tests/integration/drivers/proto
 COPY --from=go-build /workspace/tests/integration/fixtures/store-cases.txt /workspace/tests/integration/fixtures/store-support-cases.txt /workspace/tests/integration/fixtures/server-cases.txt tests/integration/fixtures/
 COPY --from=go-build /workspace/tests/integration/fixtures/*-descriptions.json tests/integration/fixtures/
 RUN mkdir -p access/cmd/server access/internal/broker && node --version && ./target/debug/whalerein --version && /usr/lib/postgresql/18/bin/postgres --version && psql --version
-ENTRYPOINT ["timeout", "--signal=INT", "--kill-after=30s", "1800s", "python3", "-m", "pytest", "-c", "tests/integration/pytest.ini", "tests/integration/cases"]
+ENTRYPOINT ["sh", "-c", "exec timeout --signal=INT --kill-after=30s \"${WHALEREIN_INTEGRATION_TIMEOUT:-7200}s\" python3 -m pytest -c tests/integration/pytest.ini tests/integration/cases \"$@\"", "integration"]

@@ -164,6 +164,9 @@ export function resolveConfig(raw = {}) {
     // Approvals
     approvalMode,
     approvalTtlMs: integer(raw.approval_ttl_ms, 300_000, { min: 1000, max: 86_400_000, name: 'approval_ttl_ms' }),
+    // Native entry points. Both are open by default and can be opted out.
+    pendingQueueEnabled: boolean(pick(raw, ['pending_queue_enabled'], true), true),
+    enableOpenQuestionBroker: boolean(pick(raw, ['enable_open_question_broker'], true), true),
     // MQTT reconnect
     reconnectMinMs: integer(raw.reconnect_min_ms, 500, { min: 50, max: 60_000, name: 'reconnect_min_ms' }),
     reconnectMaxMs: integer(raw.reconnect_max_ms, 30_000, { min: 100, max: 600_000, name: 'reconnect_max_ms' }),

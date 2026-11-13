@@ -334,3 +334,44 @@ func TestCompletedFramedReplyRestoresOnlyItsAuthenticatedHostCapability(t *testi
 		t.Fatal("valid v2 reply did not restore capability")
 	}
 }
+
+func TestForwardedEncryptedRequestHonorsLogicalEnvelopeBudget(t *testing.T) {
+	var sender *logicalTransport
+	var delivered atomic.Int32
+	receiver := newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
+		_, err := sender.receive(topic, payload, "")
+		return err
+	}, func(string, []byte) { delivered.Add(1) })
+	sender = newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
+		_, err := receiver.receive(topic, payload, "ack")
+		return err
+	}, func(string, []byte) {})
+	request := &whalereinv1.HostRequest{
+		RequestId: "fixture-request", HostId: "fixture-host", DeviceId: "fixture-device",
+		CommandId: "fixture-command", Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
+		PayloadDigest: make([]byte, 32), RelayTransportVersion: 2,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	request.Body = make([]byte, transportMessageBytes-4096)
+	overhead := proto.Size(request) - len(request.Body)
+	atLimit := transportMessageBytes - overhead
+	for _, delta := range []int{-1, 0, 1} {
+		request.Body = make([]byte, atLimit+delta)
+		payload, err := proto.Marshal(request)
+		if err != nil || len(payload) != transportMessageBytes+delta {
+			t.Fatalf("incorrect encoded size: %d (%v)", len(payload), err)
+		}
+		err = sender.send(ctx, "data", payload, "ack", true)
+		if delta > 0 {
+			if !errors.Is(err, ErrMessageBudget) {
+				t.Fatalf("oversized envelope error: %v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("valid envelope rejected: %v", err)
+		}
+	}
+	if delivered.Load() != 2 {
+		t.Fatalf("received %d envelopes, expected 2", delivered.Load())
+	}
+}

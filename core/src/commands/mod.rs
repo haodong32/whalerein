@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use prost::Message;
 use whalerein_proto::{
@@ -13,11 +14,12 @@ use whalerein_proto::{
     RequestPayload, RequestReceipt, RequestState, ResponsePayload,
 };
 
-use crate::access::AccessClient;
+use crate::access::{http::TransportObservation, AccessClient};
 use crate::api::{
-    error_code_name, CommandHandle, CoreError, CoreResult, OnlineStatus as DomainStatus,
+    error_code_name, CommandHandle, CoreError, CoreResult, LifecycleReceipt,
+    OnlineStatus as DomainStatus, QuestionReceiptInfo,
 };
-use crate::cache::Cache;
+use crate::cache::{Cache, CommandIntent};
 use crate::pairing::PROTOCOL_VERSION;
 use crate::security::{decode_frame, encode_frame, RequestAad, SecureChannel};
 use crate::util::{now_unix_ms, random_id, sha256};
@@ -30,10 +32,16 @@ struct SubmitFailure {
     definitely_unsent: bool,
 }
 
+struct Admission {
+    profile: std::path::PathBuf,
+    secrets: std::sync::Arc<dyn crate::security::SecretStore>,
+}
+
 pub struct CommandService {
     access: Arc<AccessClient>,
     cache: Arc<Cache>,
     host_fingerprint: Option<String>,
+    admission: Option<Admission>,
 }
 
 impl CommandService {
@@ -42,7 +50,17 @@ impl CommandService {
             access,
             cache,
             host_fingerprint: None,
+            admission: None,
         }
+    }
+
+    pub(crate) fn with_admission(
+        mut self,
+        profile: std::path::PathBuf,
+        secrets: std::sync::Arc<dyn crate::security::SecretStore>,
+    ) -> Self {
+        self.admission = Some(Admission { profile, secrets });
+        self
     }
 
     pub(crate) fn with_host_fingerprint(mut self, fingerprint: Option<String>) -> Self {
@@ -58,7 +76,28 @@ impl CommandService {
         channel: &SecureChannel,
         payload: RequestPayload,
     ) -> CoreResult<ResponsePayload> {
-        self.query_inner(host_id, device_id, channel, payload).await
+        self.query_inner(host_id, device_id, channel, payload, None, None)
+            .await
+    }
+
+    pub(crate) async fn query_wait(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        channel: &SecureChannel,
+        payload: RequestPayload,
+        deadline: Instant,
+        observation: &TransportObservation,
+    ) -> CoreResult<ResponsePayload> {
+        self.query_inner(
+            host_id,
+            device_id,
+            channel,
+            payload,
+            Some(deadline),
+            Some(observation),
+        )
+        .await
     }
 
     async fn query_inner(
@@ -66,10 +105,43 @@ impl CommandService {
         host_id: &str,
         device_id: &str,
         channel: &SecureChannel,
-        payload: RequestPayload,
+        mut payload: RequestPayload,
+        wait_deadline: Option<Instant>,
+        transport: Option<&TransportObservation>,
     ) -> CoreResult<ResponsePayload> {
+        let source_sensitive = matches!(
+            payload.payload.as_ref(),
+            Some(whalerein_proto::request_payload::Payload::WaitSession(_))
+                | Some(whalerein_proto::request_payload::Payload::ReadWaitState(_))
+        );
         let request_id = random_id(16);
         let expires_at = now_unix_ms() + REQUEST_TTL_MS;
+        if let Some(deadline) = wait_deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // The caller owns the overall deadline and distinguishes it
+                // from a transport error; let its timeout resolve this case.
+                return std::future::pending().await;
+            }
+            let remaining_ms = remaining.as_nanos().div_ceil(1_000_000) as u64;
+            let transport_ms = (expires_at - now_unix_ms()).max(0) as u64;
+            let poll_ms = self.access.request_timeout().as_millis() as u64;
+            let available_ms = transport_ms.min(poll_ms).saturating_sub(2_000);
+            if available_ms == 0 {
+                return Err(CoreError::Timeout);
+            }
+            let response_allowance = (remaining_ms / 5).min(500);
+            let slice_ms = remaining_ms
+                .saturating_sub(response_allowance)
+                .min(available_ms)
+                .max(1);
+            let Some(whalerein_proto::request_payload::Payload::WaitSession(wait)) =
+                payload.payload.as_mut()
+            else {
+                return Err(CoreError::InvalidInput("wait payload missing".into()));
+            };
+            wait.timeout_ms = slice_ms as u32;
+        }
         let aad = RequestAad {
             request_id: &request_id,
             host_id,
@@ -92,7 +164,7 @@ impl CommandService {
         );
         request.trace_id = self.access.trace_id().to_owned();
         let receipt = self
-            .submit(&request)
+            .submit_observed(&request, transport)
             .await
             .map_err(|failure| failure.error)?;
         if let Some(status) = DomainStatus::from_proto(receipt.status) {
@@ -100,15 +172,42 @@ impl CommandService {
                 return Err(status_error(status, None));
             }
         }
-        let state = self.access.wait_for_request(&request_id, false).await?;
+        let state = self
+            .access
+            .wait_for_request_observed(&request_id, false, transport)
+            .await?;
+        validate_request_state_identity(&request, &state)?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
-        let result = decrypt_response(channel, &aad, &state);
+        let result = decrypt_response_raw(channel, &aad, &state).map_err(|error| {
+            if source_sensitive
+                && !state.result_body.is_empty()
+                && matches!(error, CoreError::ChannelMismatch)
+            {
+                CoreError::Security("wait response channel could not be verified".into())
+            } else {
+                error
+            }
+        });
         match status {
-            DomainStatus::Succeeded => result,
+            DomainStatus::Succeeded => result.and_then(|payload| {
+                if payload.error_code == 0 {
+                    Ok(payload)
+                } else if source_sensitive {
+                    Err(source_response_error(&payload))
+                } else {
+                    Err(response_error(&payload))
+                }
+            }),
             DomainStatus::Failed | DomainStatus::Rejected | DomainStatus::HostOffline => {
                 // A failed result may still carry an encrypted domain error.
                 match result {
+                    Ok(payload) if source_sensitive && payload.error_code != 0 => {
+                        Err(source_response_error(&payload))
+                    }
                     Ok(payload) => Err(response_error(&payload)),
+                    // Any non-empty encrypted error body claims authentication;
+                    // never mask corruption with its cleartext status copy.
+                    Err(error) if !state.result_body.is_empty() => Err(error),
                     Err(_) => Err(status_error(status, error_code_of(&state))),
                 }
             }
@@ -129,7 +228,34 @@ impl CommandService {
         channel: &SecureChannel,
         payload: RequestPayload,
     ) -> CoreResult<CommandHandle> {
-        let command_id = random_id(16);
+        self.control_with_id(host_id, device_id, channel, payload, None)
+            .await
+    }
+
+    pub async fn control_with_id(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        channel: &SecureChannel,
+        payload: RequestPayload,
+        supplied_id: Option<&str>,
+    ) -> CoreResult<CommandHandle> {
+        let (command_kind, command_parent_session_id) = match &payload.payload {
+            Some(whalerein_proto::request_payload::Payload::CreateSession(_)) => ("create", ""),
+            Some(whalerein_proto::request_payload::Payload::ForkSession(request)) => {
+                ("fork", request.session_id.as_str())
+            }
+            _ => ("", ""),
+        };
+        let command_id = match supplied_id {
+            Some("") => {
+                return Err(CoreError::InvalidInput(
+                    "command identity is required".into(),
+                ))
+            }
+            Some(value) => value.to_owned(),
+            None => random_id(16),
+        };
         let request_id = random_id(16);
         let expires_at = now_unix_ms() + REQUEST_TTL_MS;
         let aad = RequestAad {
@@ -155,14 +281,65 @@ impl CommandService {
             body,
         );
         request.trace_id = self.access.trace_id().to_owned();
-        self.cache.record_command_intent(
-            &request_id,
-            &command_id,
+        ensure_forwardable(&request)?;
+        let admission_guard = if let Some(admission) = &self.admission {
+            #[cfg(feature = "protocol-testing")]
+            if let Some(path) = std::env::var_os("WHALEREIN_TEST_ADMISSION_READY") {
+                std::fs::write(path, b"waiting")
+                    .map_err(|_| CoreError::Internal("test barrier failed".into()))?;
+            }
+            let guard = crate::security::device::ProfileLock::acquire_admission_async(
+                &admission.profile,
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(
+                        expires_at.saturating_sub(now_unix_ms()).max(0) as u64,
+                    ),
+            )
+            .await
+            .map_err(|_| CoreError::Unavailable("profile admission lock unavailable".into()))?;
+            if now_unix_ms() >= expires_at {
+                return Err(CoreError::Unavailable(
+                    "request expired before admission".into(),
+                ));
+            }
+            let config = crate::api::config::ConfigStore::new(&admission.profile)
+                .load()?
+                .ok_or(CoreError::NotPaired)?;
+            let token = crate::security::load_device_token(&admission.secrets, device_id)?
+                .ok_or(CoreError::NotPaired)?;
+            let key = admission
+                .secrets
+                .load(&crate::security::keys::cache_key(device_id))?
+                .ok_or(CoreError::NotPaired)?;
+            if let Some(state) = crate::api::core::revoked_commands::marker_in(guard.directory())? {
+                return Err(if state.starts_with("confirmed") {
+                    CoreError::Revoked
+                } else {
+                    CoreError::Unavailable("authorization verification is pending; inspect the pairing or retry revocation".into())
+                });
+            }
+            if config.device_id != device_id
+                || url::Url::parse(&config.access_url).ok().as_ref() != Some(self.access.base_url())
+                || !self.access.has_token(&token)
+                || !self.cache.has_key(&key)
+            {
+                return Err(CoreError::Revoked);
+            }
+            Some(guard)
+        } else {
+            None
+        };
+        self.cache.record_typed_command_intent(CommandIntent {
+            request_id: &request_id,
+            command_id: &command_id,
             host_id,
             device_id,
-            self.access.base_url().as_str(),
-            self.host_fingerprint.as_deref().unwrap_or(""),
-        )?;
+            access_url: self.access.base_url().as_str(),
+            host_fingerprint: self.host_fingerprint.as_deref().unwrap_or(""),
+            command_kind,
+            command_parent_session_id,
+        })?;
+        drop(admission_guard);
         let receipt = match self.submit(&request).await {
             Ok(receipt) => receipt,
             Err(failure) => {
@@ -174,39 +351,69 @@ impl CommandService {
         };
         let receipt_status =
             DomainStatus::from_proto(receipt.status).unwrap_or(DomainStatus::Unknown);
-        // A receipt can report an already completed retry, but cannot replace
-        // authenticating and decoding that command's result.
-        if receipt_status != DomainStatus::Succeeded {
-            self.project(&request_id, &command_id, receipt_status, None)?;
-        }
-        if receipt_status.is_terminal() && receipt_status != DomainStatus::Succeeded {
-            return Err(status_error(receipt_status, None));
+        // A terminal copy can describe a previously attempted command. In
+        // particular, an MQTT completion ACK may be lost after delivery, so
+        // host_offline is not by itself proof that the command was unsent.
+        match receipt_status {
+            DomainStatus::Unknown => {
+                self.project(&request_id, &command_id, receipt_status, None)?;
+                return Err(CoreError::UnknownResult);
+            }
+            DomainStatus::Received | DomainStatus::HostAccepted => {
+                self.project(&request_id, &command_id, receipt_status, None)?;
+            }
+            DomainStatus::Succeeded
+            | DomainStatus::Failed
+            | DomainStatus::Rejected
+            | DomainStatus::HostOffline => {}
         }
 
         let state = self.access.wait_for_request(&request_id, true).await?;
+        validate_request_state_identity(&request, &state)?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
-        if status != DomainStatus::Succeeded {
+        if matches!(
+            status,
+            DomainStatus::Received | DomainStatus::HostAccepted | DomainStatus::Unknown
+        ) {
             self.project(&request_id, &command_id, status, error_code_of(&state))?;
         }
 
         let decrypted = decrypt_response(channel, &aad, &state);
         match status {
             DomainStatus::HostAccepted | DomainStatus::Succeeded => {
-                let message_id = match decrypted {
-                    Ok(payload) => message_id_of(&payload),
-                    Err(CoreError::ChannelMismatch) => {
-                        return Err(CoreError::StaleCommand {
-                            request_id: request_id.clone(),
-                            command_id: command_id.clone(),
-                        })
-                    }
-                    Err(CoreError::UnknownResult)
-                        if status == DomainStatus::HostAccepted && state.result_body.is_empty() =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(error),
-                };
+                let (message_id, delivery_id, model_selection, lifecycle_receipt, question_receipt) =
+                    match decrypted {
+                        Ok(payload) => (
+                            message_id_of(&payload),
+                            delivery_id_of(&payload),
+                            model_selection_of(&payload),
+                            lifecycle_receipt_of(&payload)?,
+                            question_receipt_of(&payload),
+                        ),
+                        Err(CoreError::ChannelMismatch) => {
+                            return Err(CoreError::StaleCommand {
+                                request_id: request_id.clone(),
+                                command_id: command_id.clone(),
+                            })
+                        }
+                        Err(CoreError::UnknownResult)
+                            if status == DomainStatus::HostAccepted
+                                && state.result_body.is_empty() =>
+                        {
+                            (None, None, None, None, None)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                if status == DomainStatus::Succeeded
+                    && !command_kind.is_empty()
+                    && !lifecycle_receipt_matches(
+                        lifecycle_receipt.as_ref(),
+                        command_kind,
+                        command_parent_session_id,
+                    )
+                {
+                    return Err(CoreError::UnknownResult);
+                }
                 if status == DomainStatus::Succeeded {
                     self.project(&request_id, &command_id, status, error_code_of(&state))?;
                 }
@@ -215,17 +422,31 @@ impl CommandService {
                     command_id,
                     status,
                     message_id,
+                    delivery_id,
+                    model_selection,
+                    lifecycle_receipt,
+                    question_receipt,
                 })
             }
             DomainStatus::Failed | DomainStatus::Rejected | DomainStatus::HostOffline => {
                 match decrypted {
-                    Ok(payload) => Err(response_error(&payload)),
-                    Err(CoreError::ChannelMismatch) => Err(CoreError::StaleCommand {
+                    // An authenticated success payload contradicts the outer
+                    // negative status; recover from the Host journal.
+                    Ok(_) | Err(CoreError::ChannelMismatch) => Err(CoreError::StaleCommand {
                         request_id: request_id.clone(),
                         command_id: command_id.clone(),
                     }),
+                    Err(error @ CoreError::Host { .. }) => {
+                        self.project(&request_id, &command_id, status, error_code_of(&state))?;
+                        Err(error)
+                    }
+                    // A bodyless negative status is not source proof. Ask the
+                    // Host journal about this same identity without replaying it.
                     Err(CoreError::UnknownResult) if state.result_body.is_empty() => {
-                        Err(status_error(status, error_code_of(&state)))
+                        Err(CoreError::StaleCommand {
+                            request_id: request_id.clone(),
+                            command_id: command_id.clone(),
+                        })
                     }
                     Err(error) => Err(error),
                 }
@@ -270,7 +491,19 @@ impl CommandService {
                 Err(CoreError::UnknownResult) if attempt < 49 => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                Err(error) => return Err(error),
+                Err(error)
+                    if matches!(
+                        error,
+                        CoreError::ChannelMismatch
+                            | CoreError::FingerprintMismatch { .. }
+                            | CoreError::Security(_)
+                    ) || error.device_authorization_lost() =>
+                {
+                    return Err(error)
+                }
+                // A failure of the observation is not a rejection of the
+                // already-admitted original control; keep its identity pending.
+                Err(_) => return Err(CoreError::UnknownResult),
             }
         }
         Err(CoreError::Timeout)
@@ -345,6 +578,26 @@ impl CommandService {
         }
         let payload = Self::decode_command_result(result)?;
         let message_id = payload.as_ref().and_then(message_id_of);
+        let delivery_id = payload.as_ref().and_then(delivery_id_of);
+        let model_selection = payload.as_ref().and_then(model_selection_of);
+        let lifecycle_receipt = payload
+            .as_ref()
+            .map(lifecycle_receipt_of)
+            .transpose()?
+            .flatten();
+        let question_receipt = payload.as_ref().and_then(question_receipt_of);
+        let (expected_kind, expected_parent) =
+            self.cache.command_identity(request_id)?.unwrap_or_default();
+        if status == DomainStatus::Succeeded
+            && !expected_kind.is_empty()
+            && !lifecycle_receipt_matches(
+                lifecycle_receipt.as_ref(),
+                &expected_kind,
+                &expected_parent,
+            )
+        {
+            return Err(CoreError::UnknownResult);
+        }
         self.project_status(request_id, command_id, status, code)?;
         match status {
             DomainStatus::Succeeded | DomainStatus::HostAccepted => Ok(CommandHandle {
@@ -352,9 +605,29 @@ impl CommandService {
                 command_id: command_id.to_owned(),
                 status,
                 message_id,
+                delivery_id,
+                model_selection,
+                lifecycle_receipt,
+                question_receipt,
             }),
             DomainStatus::Failed | DomainStatus::Rejected | DomainStatus::HostOffline => {
                 Err(status_error(status, code))
+            }
+            DomainStatus::Unknown
+                if lifecycle_receipt
+                    .as_ref()
+                    .is_some_and(|receipt| matches!(receipt.disposition.as_str(), "FAILED" | "UNKNOWN")) =>
+            {
+                Ok(CommandHandle {
+                    request_id: request_id.to_owned(),
+                    command_id: command_id.to_owned(),
+                    status,
+                    message_id,
+                    delivery_id,
+                    model_selection,
+                    lifecycle_receipt,
+                    question_receipt,
+                })
             }
             DomainStatus::Unknown => Err(CoreError::UnknownResult),
             other => Err(CoreError::Internal(format!(
@@ -389,12 +662,34 @@ impl CommandService {
     }
 
     async fn submit(&self, request: &HostRequest) -> Result<RequestReceipt, SubmitFailure> {
+        self.submit_observed(request, None).await
+    }
+
+    async fn submit_observed(
+        &self,
+        request: &HostRequest,
+        observation: Option<&TransportObservation>,
+    ) -> Result<RequestReceipt, SubmitFailure> {
         let mut last_error = None;
         let mut definitely_unsent = true;
         for attempt in 0..MAX_SUBMIT_ATTEMPTS {
             match self.access.submit_request(&request.host_id, request).await {
-                Ok(receipt) => return Ok(receipt),
+                Ok(receipt) => {
+                    if let Err(error) = validate_request_receipt_identity(request, &receipt) {
+                        return Err(SubmitFailure {
+                            error,
+                            definitely_unsent: false,
+                        });
+                    }
+                    if let Some(observation) = observation {
+                        observation.recovered();
+                    }
+                    return Ok(receipt);
+                }
                 Err(error) if error.is_retryable_transport() => {
+                    if let Some(observation) = observation {
+                        observation.failed(&error);
+                    }
                     definitely_unsent &= error.definitely_not_sent();
                     last_error = Some(error);
                     if attempt + 1 < MAX_SUBMIT_ATTEMPTS {
@@ -406,6 +701,15 @@ impl CommandService {
                     // The previous attempt may have reached Access before the
                     // connection failed. Read the same request id back.
                     if let Ok(state) = self.access.get_request(&request.request_id).await {
+                        if let Err(error) = validate_request_state_identity(request, &state) {
+                            return Err(SubmitFailure {
+                                error,
+                                definitely_unsent: false,
+                            });
+                        }
+                        if let Some(observation) = observation {
+                            observation.recovered();
+                        }
                         return Ok(RequestReceipt {
                             request_id: state.request_id,
                             status: state.status,
@@ -431,6 +735,31 @@ impl CommandService {
             definitely_unsent,
         })
     }
+}
+
+fn validate_request_receipt_identity(
+    request: &HostRequest,
+    receipt: &RequestReceipt,
+) -> CoreResult<()> {
+    if receipt.request_id != request.request_id || receipt.command_id != request.command_id {
+        return Err(CoreError::Security(
+            "request receipt identity mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_request_state_identity(request: &HostRequest, state: &RequestState) -> CoreResult<()> {
+    if state.request_id != request.request_id
+        || state.host_id != request.host_id
+        || state.device_id != request.device_id
+        || state.command_id != request.command_id
+    {
+        return Err(CoreError::Security(
+            "request status identity mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -462,7 +791,33 @@ fn build_request(
     }
 }
 
+// Access adds its relay transport version before forwarding the complete
+// authenticated envelope. Reject the actual encoded size before journaling or I/O.
+fn ensure_forwardable(request: &HostRequest) -> CoreResult<()> {
+    let mut forwarded = request.clone();
+    forwarded.relay_transport_version = 2;
+    if forwarded.encoded_len() > crate::access::transport::MESSAGE_BYTES {
+        return Err(CoreError::Api {
+            code: Some(ErrorCode::PayloadTooLarge),
+            message: "logical request exceeds transport budget".into(),
+        });
+    }
+    Ok(())
+}
+
 fn decrypt_response(
+    channel: &SecureChannel,
+    aad: &RequestAad<'_>,
+    state: &RequestState,
+) -> CoreResult<ResponsePayload> {
+    let payload = decrypt_response_raw(channel, aad, state)?;
+    if payload.error_code != 0 {
+        return Err(response_error(&payload));
+    }
+    Ok(payload)
+}
+
+fn decrypt_response_raw(
     channel: &SecureChannel,
     aad: &RequestAad<'_>,
     state: &RequestState,
@@ -474,9 +829,6 @@ fn decrypt_response(
     let plaintext = channel.open_request(aad, &frame)?;
     let payload = ResponsePayload::decode(plaintext.as_slice())
         .map_err(|_| CoreError::Internal("invalid response payload".into()))?;
-    if payload.error_code != 0 {
-        return Err(response_error(&payload));
-    }
     Ok(payload)
 }
 
@@ -494,13 +846,140 @@ fn response_error(payload: &ResponsePayload) -> CoreError {
     }
 }
 
+fn source_response_error(payload: &ResponsePayload) -> CoreError {
+    let CoreError::Host { code, message } = response_error(payload) else {
+        unreachable!()
+    };
+    CoreError::Source { code, message }
+}
+
+fn delivery_id_of(payload: &ResponsePayload) -> Option<String> {
+    match &payload.payload {
+        Some(whalerein_proto::response_payload::Payload::CommandAccepted(accepted))
+            if !accepted.delivery_id.is_empty() =>
+        {
+            Some(accepted.delivery_id.clone())
+        }
+        _ => None,
+    }
+}
+
+fn lifecycle_receipt_matches(receipt: Option<&LifecycleReceipt>, kind: &str, parent: &str) -> bool {
+    receipt.is_some_and(|receipt| {
+        if receipt.operation != kind {
+            return false
+        }
+        if kind != "fork" {
+            return true
+        }
+        if parent.is_empty() {
+            return false
+        }
+        if receipt.parent_session_id.as_deref() == Some(parent) {
+            return true
+        }
+        // FAILED/UNKNOWN fork receipts have no claimed child identity. The
+        // requested parent is carried only as the reconcile key.
+        matches!(receipt.disposition.as_str(), "FAILED" | "UNKNOWN")
+            && receipt.reconcile_key.as_deref() == Some(parent)
+    })
+}
+
+fn lifecycle_receipt_of(payload: &ResponsePayload) -> CoreResult<Option<LifecycleReceipt>> {
+    let Some(whalerein_proto::response_payload::Payload::LifecycleReceipt(receipt)) =
+        &payload.payload
+    else {
+        return Ok(None);
+    };
+    let disposition = match whalerein_proto::LifecycleDisposition::try_from(receipt.disposition) {
+        Ok(whalerein_proto::LifecycleDisposition::Ready) if receipt.warning_code.is_empty() => {
+            "READY"
+        }
+        Ok(whalerein_proto::LifecycleDisposition::ReadyWithWarning)
+            if receipt.warning_code == "workspace_attach_failed" =>
+        {
+            "READY_WITH_WARNING"
+        }
+        Ok(whalerein_proto::LifecycleDisposition::Failed) => "FAILED",
+        Ok(whalerein_proto::LifecycleDisposition::Unknown) => "UNKNOWN",
+        _ => return Err(CoreError::UnknownResult),
+    };
+    if !matches!(receipt.operation.as_str(), "create" | "fork") {
+        return Err(CoreError::UnknownResult);
+    }
+    let has_identity = !receipt.session_id.trim().is_empty();
+    match disposition {
+        "READY" | "READY_WITH_WARNING" if !has_identity => return Err(CoreError::UnknownResult),
+        "FAILED" | "UNKNOWN" if has_identity => return Err(CoreError::UnknownResult),
+        _ => {}
+    }
+    if has_identity
+        && (receipt.operation == "fork"
+            && (receipt.parent_session_id.trim().is_empty()
+                || receipt.parent_session_id == receipt.session_id))
+    {
+        return Err(CoreError::UnknownResult);
+    }
+    if has_identity
+        && receipt.operation == "create"
+        && !receipt.parent_session_id.is_empty()
+    {
+        return Err(CoreError::UnknownResult);
+    }
+    if disposition == "UNKNOWN"
+        && !matches!(
+            receipt.reconcile_mode.as_str(),
+            "OPERATION_ID" | "PREFERRED_SESSION_ID" | "PARENT_SESSION_ID" | "MANUAL"
+        )
+    {
+        return Err(CoreError::UnknownResult);
+    }
+    Ok(Some(LifecycleReceipt {
+        session_id: receipt.session_id.clone(),
+        parent_session_id: (!receipt.parent_session_id.is_empty())
+            .then(|| receipt.parent_session_id.clone()),
+        operation: receipt.operation.clone(),
+        disposition: disposition.into(),
+        warning_code: (!receipt.warning_code.is_empty()).then(|| receipt.warning_code.clone()),
+        operation_id: (!receipt.operation_id.is_empty()).then(|| receipt.operation_id.clone()),
+        phase: (!receipt.phase.is_empty()).then(|| receipt.phase.clone()),
+        reason_code: (!receipt.reason_code.is_empty()).then(|| receipt.reason_code.clone()),
+        retryable: receipt.retryable,
+        reconcile_mode: (!receipt.reconcile_mode.is_empty()).then(|| receipt.reconcile_mode.clone()),
+        reconcile_key: (!receipt.reconcile_key.is_empty()).then(|| receipt.reconcile_key.clone()),
+        warning_detail: receipt.warning_detail.clone().filter(|value| !value.is_empty()),
+    }))
+}
+
 fn message_id_of(payload: &ResponsePayload) -> Option<String> {
     match &payload.payload {
         Some(whalerein_proto::response_payload::Payload::CommandAccepted(CommandAccepted {
             message_id,
+            ..
         })) => Some(message_id.clone()),
         _ => None,
     }
+}
+
+fn question_receipt_of(payload: &ResponsePayload) -> Option<QuestionReceiptInfo> {
+    let Some(whalerein_proto::response_payload::Payload::QuestionReceipt(receipt)) =
+        &payload.payload
+    else {
+        return None;
+    };
+    let phase = whalerein_proto::QuestionPhase::try_from(receipt.phase).ok()?;
+    if !matches!(
+        phase,
+        whalerein_proto::QuestionPhase::QuestionSettled
+            | whalerein_proto::QuestionPhase::QuestionReplyQueued
+    ) || receipt.batch_id.is_empty()
+    {
+        return None;
+    }
+    Some(QuestionReceiptInfo {
+        batch_id: receipt.batch_id.clone(),
+        phase: phase.as_str_name().to_owned(),
+    })
 }
 
 fn error_code_of(state: &RequestState) -> Option<ErrorCode> {
@@ -593,6 +1072,228 @@ mod tests {
             updated_at_unix_ms: 0,
             channel_id: channel.channel_id().into(),
         }
+    }
+
+    #[test]
+    fn encrypted_send_envelope_fits_its_actual_wire_budget_at_the_boundary() {
+        use crate::access::transport::MESSAGE_BYTES;
+        use whalerein_proto::{request_payload::Payload, DeliveryMode, SendMessage};
+
+        let channel = channel();
+        let aad = RequestAad {
+            request_id: "r",
+            host_id: "h-1",
+            device_id: "d-1",
+            kind: RequestKind::Command,
+            command_id: "c",
+            expires_at_unix_ms: 5,
+        };
+        let encoded_size = |text_len| {
+            let payload = RequestPayload {
+                payload: Some(Payload::SendMessage(SendMessage {
+                    session_id: "s".into(),
+                    text: "x".repeat(text_len),
+                    delivery_mode: DeliveryMode::EnqueueAfterRun as i32,
+                })),
+            };
+            let frame = channel
+                .seal_request(&aad, &payload.encode_to_vec())
+                .unwrap();
+            let body = encode_frame(&frame);
+            let mut request = build_request(
+                "r",
+                "h-1",
+                "d-1",
+                RequestKind::Command,
+                "c",
+                sha256(&body).to_vec(),
+                5,
+                channel.channel_id(),
+                body,
+            );
+            // Access sets this field before encoding the forwarded MQTT envelope.
+            request.relay_transport_version = 2;
+            request.encoded_len()
+        };
+        let sample = MESSAGE_BYTES - 4096;
+        let overhead = encoded_size(sample) - sample;
+        let text_at_limit = MESSAGE_BYTES - overhead;
+        assert_eq!(encoded_size(text_at_limit - 1), MESSAGE_BYTES - 1);
+        assert_eq!(encoded_size(text_at_limit), MESSAGE_BYTES);
+        assert_eq!(encoded_size(text_at_limit + 1), MESSAGE_BYTES + 1);
+    }
+
+    #[test]
+    fn lifecycle_receipts_preserve_identity_and_reject_ambiguous_data() {
+        use whalerein_proto::{LifecycleDisposition, LifecycleReceipt as WireReceipt};
+        let make = |session_id: &str, operation: &str, disposition: i32, warning_code: &str| {
+            response(
+                whalerein_proto::response_payload::Payload::LifecycleReceipt(WireReceipt {
+                    parent_session_id: String::new(),
+                    session_id: session_id.into(),
+                    operation: operation.into(),
+                    disposition,
+                    warning_code: warning_code.into(),
+                    operation_id: String::new(),
+                    phase: String::new(),
+                    reason_code: String::new(),
+                    retryable: false,
+                    reconcile_mode: String::new(),
+                    reconcile_key: String::new(),
+                    warning_detail: None,
+                }),
+            )
+        };
+        let ready = make("session", "create", LifecycleDisposition::Ready as i32, "");
+        assert_eq!(
+            lifecycle_receipt_of(&ready).unwrap().unwrap().session_id,
+            "session"
+        );
+        let warning = make(
+            "session",
+            "create",
+            LifecycleDisposition::ReadyWithWarning as i32,
+            "workspace_attach_failed",
+        );
+        assert_eq!(
+            lifecycle_receipt_of(&warning).unwrap().unwrap().disposition,
+            "READY_WITH_WARNING"
+        );
+        for bad in [
+            make("", "create", 1, ""),
+            make("session", "fork", 1, ""),
+            make("session", "create", 2, "private"),
+            make("session", "create", 0, ""),
+        ] {
+            assert!(matches!(
+                lifecycle_receipt_of(&bad),
+                Err(CoreError::UnknownResult)
+            ));
+        }
+        assert!(
+            lifecycle_receipt_of(&response(whalerein_proto::response_payload::Payload::Pong(
+                Default::default()
+            )))
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn fork_receipt_requires_distinct_parent_and_child() {
+        use whalerein_proto::{LifecycleDisposition, LifecycleReceipt as WireReceipt};
+        let receipt = |parent: &str, child: &str| {
+            response(
+                whalerein_proto::response_payload::Payload::LifecycleReceipt(WireReceipt {
+                    session_id: child.into(),
+                    parent_session_id: parent.into(),
+                    operation: "fork".into(),
+                    disposition: LifecycleDisposition::Ready as i32,
+                    warning_code: String::new(),
+                    operation_id: String::new(),
+                    phase: String::new(),
+                    reason_code: String::new(),
+                    retryable: false,
+                    reconcile_mode: String::new(),
+                    reconcile_key: String::new(),
+                    warning_detail: None,
+                }),
+            )
+        };
+        let valid = lifecycle_receipt_of(&receipt("parent", "child"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(valid.parent_session_id.as_deref(), Some("parent"));
+        assert!(matches!(
+            lifecycle_receipt_of(&receipt("", "child")),
+            Err(CoreError::UnknownResult)
+        ));
+        assert!(matches!(
+            lifecycle_receipt_of(&receipt("same", "same")),
+            Err(CoreError::UnknownResult)
+        ));
+    }
+
+    #[test]
+    fn session_create_uses_complete_encrypted_forwarded_envelope_budget() {
+        use whalerein_proto::{request_payload::Payload, CreateSession};
+        let channel = channel();
+        let aad = RequestAad {
+            request_id: "r",
+            host_id: "h-1",
+            device_id: "d-1",
+            kind: RequestKind::Command,
+            command_id: "c",
+            expires_at_unix_ms: 5,
+        };
+        let request_for = |length| {
+            let payload = RequestPayload {
+                payload: Some(Payload::CreateSession(CreateSession {
+                    workspace_id: Some("x".repeat(length)),
+                    ..Default::default()
+                })),
+            };
+            let frame = channel
+                .seal_request(&aad, &payload.encode_to_vec())
+                .unwrap();
+            let body = encode_frame(&frame);
+            build_request(
+                "r",
+                "h-1",
+                "d-1",
+                RequestKind::Command,
+                "c",
+                sha256(&body).to_vec(),
+                5,
+                channel.channel_id(),
+                body,
+            )
+        };
+        let target = crate::access::transport::MESSAGE_BYTES;
+        let sample = target - 4096;
+        let mut probe = request_for(sample);
+        probe.relay_transport_version = 2;
+        let at = target - (probe.encoded_len() - sample);
+        for delta in [-1isize, 0, 1] {
+            let request = request_for(at.checked_add_signed(delta).unwrap());
+            let mut forwarded = request.clone();
+            forwarded.relay_transport_version = 2;
+            assert_eq!(
+                forwarded.encoded_len(),
+                target.checked_add_signed(delta).unwrap()
+            );
+            assert_eq!(ensure_forwardable(&request).is_ok(), delta <= 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_session_create_is_rejected_before_journal_or_io() {
+        let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
+        let fake = crate::api::test_support::FakeAccess::start().await;
+        let access = Arc::new(AccessClient::new(fake.url().clone(), None).unwrap());
+        let service = CommandService::new(access, cache.clone());
+        let payload = RequestPayload {
+            payload: Some(whalerein_proto::request_payload::Payload::CreateSession(
+                whalerein_proto::CreateSession {
+                    workspace_id: Some("x".repeat(crate::access::transport::MESSAGE_BYTES)),
+                    ..Default::default()
+                },
+            )),
+        };
+        let error = service
+            .control("h-1", "d-1", &channel(), payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::Api {
+                code: Some(ErrorCode::PayloadTooLarge),
+                ..
+            }
+        ));
+        assert!(cache.pending_commands().unwrap().is_empty());
+        assert!(fake.host.lock().unwrap().request_traces.is_empty());
+        assert_eq!(fake.host.lock().unwrap().commands_seen, 0);
     }
 
     #[test]
@@ -762,11 +1463,22 @@ mod tests {
             if mock.method == "POST" {
                 let request: HostRequest = serde_json::from_slice(&mock.body).unwrap();
                 let receipt = RequestReceipt {
-                    request_id: request.request_id.clone(),
-                    command_id: request.command_id.clone(),
+                    request_id: if mode == "wrong-receipt-request" {
+                        "wrong-request".into()
+                    } else {
+                        request.request_id.clone()
+                    },
+                    command_id: if mode == "wrong-receipt-command" {
+                        "wrong-command".into()
+                    } else {
+                        request.command_id.clone()
+                    },
                     status: match mode {
                         "lost-result" => OnlineStatus::Succeeded as i32,
-                        "rejected-receipt" => OnlineStatus::Rejected as i32,
+                        "rejected-receipt"
+                        | "wrong-receipt-request"
+                        | "wrong-receipt-command"
+                        | "receipt-negative-state-success" => OnlineStatus::Rejected as i32,
                         "unknown-receipt" => OnlineStatus::Unknown as i32,
                         "offline-receipt" => OnlineStatus::HostOffline as i32,
                         _ => OnlineStatus::Received as i32,
@@ -774,6 +1486,9 @@ mod tests {
                     expires_at_unix_ms: request.expires_at_unix_ms,
                 };
                 *saved.lock().unwrap() = Some(request);
+                if mode == "conflict-wrong-state-host" {
+                    return MockResponse::empty(409);
+                }
                 return MockResponse::json(200, &receipt);
             }
             if mode == "lost-result" {
@@ -789,12 +1504,22 @@ mod tests {
                 response(whalerein_proto::response_payload::Payload::CommandAccepted(
                     CommandAccepted {
                         message_id: "fixture-message".into(),
+                        ..Default::default()
                     },
                 ))
             };
             let status = match mode {
                 "accepted-empty" => DomainStatus::HostAccepted,
-                "failed-domain" | "failed-empty" | "failed-frame" => DomainStatus::Failed,
+                "rejected-receipt" => DomainStatus::Rejected,
+                "offline-receipt" => DomainStatus::HostOffline,
+                "failed-domain"
+                | "failed-empty"
+                | "failed-frame"
+                | "state-negative-authenticated-success"
+                | "wrong-state-request"
+                | "wrong-state-host"
+                | "wrong-state-device"
+                | "wrong-state-command" => DomainStatus::Failed,
                 _ => DomainStatus::Succeeded,
             };
             let mut result = state_with(
@@ -807,7 +1532,25 @@ mod tests {
                 &request.command_id,
             );
             match mode {
-                "accepted-empty" | "succeeded-empty" => result.result_body.clear(),
+                "wrong-state-request" => {
+                    result.request_id = "wrong-request".into();
+                    result.result_body.clear();
+                }
+                "wrong-state-host" | "conflict-wrong-state-host" => {
+                    result.host_id = "wrong-host".into();
+                    result.result_body.clear();
+                }
+                "wrong-state-device" => {
+                    result.device_id = "wrong-device".into();
+                    result.result_body.clear();
+                }
+                "wrong-state-command" => {
+                    result.command_id = "wrong-command".into();
+                    result.result_body.clear();
+                }
+                "accepted-empty" | "succeeded-empty" | "rejected-receipt" | "offline-receipt" => {
+                    result.result_body.clear()
+                }
                 "failed-empty" => {
                     result.result_body.clear();
                     result.error_code = ErrorCode::Conflict as i32;
@@ -863,6 +1606,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonempty_corrupt_query_failure_cannot_be_masked_by_cleartext_status() {
+        use crate::api::test_support::{MockResponse, MockServer};
+        use std::sync::Mutex;
+        for nonempty in [true, false] {
+            let saved = Arc::new(Mutex::new(None::<HostRequest>));
+            let shared = saved.clone();
+            let channel = channel();
+            let remote = channel.clone();
+            let server = MockServer::start(Arc::new(move |mock| {
+                if mock.method == "POST" {
+                    let request: HostRequest = serde_json::from_slice(&mock.body).unwrap();
+                    let receipt = RequestReceipt {
+                        request_id: request.request_id.clone(),
+                        command_id: request.command_id.clone(),
+                        status: OnlineStatus::Received as i32,
+                        expires_at_unix_ms: request.expires_at_unix_ms,
+                    };
+                    *shared.lock().unwrap() = Some(request);
+                    return MockResponse::json(200, &receipt);
+                }
+                let request = shared.lock().unwrap().clone().unwrap();
+                let mut result = state_with(
+                    &remote,
+                    &request,
+                    response(whalerein_proto::response_payload::Payload::Pong(
+                        Default::default(),
+                    )),
+                    DomainStatus::Failed,
+                    &request.request_id,
+                    request.expires_at_unix_ms,
+                    &request.command_id,
+                );
+                result.result_body = if nonempty { vec![255] } else { vec![] };
+                result.error_code = ErrorCode::Unavailable as i32;
+                MockResponse::json(200, &result)
+            }))
+            .await;
+            let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
+            let service = CommandService::new(
+                Arc::new(AccessClient::new(server.url(), None).unwrap()),
+                cache,
+            );
+            let payload = RequestPayload {
+                payload: Some(whalerein_proto::request_payload::Payload::GetSession(
+                    whalerein_proto::GetSession {
+                        session_id: "fixture".into(),
+                    },
+                )),
+            };
+            let result = service.query("h-1", "d-1", &channel, payload).await;
+            if nonempty {
+                assert!(matches!(result, Err(CoreError::Security(_))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CoreError::Host {
+                        code: Some(ErrorCode::Unavailable),
+                        ..
+                    })
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn an_authenticated_initial_success_settles_with_the_exact_message_identity() {
         let (result, cache) = control_with_result_fixture("valid-success").await;
         let handle = result.unwrap();
@@ -876,23 +1684,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn definitive_failures_keep_their_domain_or_security_error_without_becoming_success() {
+    async fn authenticated_failures_settle_but_unproven_or_invalid_results_remain_pending() {
         for mode in ["failed-domain", "failed-empty", "failed-frame"] {
             let (result, cache) = control_with_result_fixture(mode).await;
-            if mode == "failed-frame" {
-                assert!(matches!(result, Err(CoreError::Security(_))));
-            } else {
-                assert!(matches!(
-                    result,
-                    Err(CoreError::Host {
-                        code: Some(ErrorCode::Conflict),
-                        ..
-                    })
-                ));
+            match mode {
+                "failed-domain" => {
+                    assert!(matches!(
+                        result,
+                        Err(CoreError::Host {
+                            code: Some(ErrorCode::Conflict),
+                            ..
+                        })
+                    ));
+                    assert!(cache.pending_commands().unwrap().is_empty());
+                }
+                "failed-empty" => {
+                    assert!(matches!(result, Err(CoreError::StaleCommand { .. })));
+                    assert_eq!(cache.pending_commands().unwrap().len(), 1);
+                }
+                _ => {
+                    assert!(matches!(result, Err(CoreError::Security(_))));
+                    assert_eq!(cache.pending_commands().unwrap().len(), 1);
+                }
             }
-            assert!(cache.pending_commands().unwrap().is_empty());
-            assert_eq!(cache.command_counts().unwrap(), (0, 0));
         }
+    }
+
+    #[tokio::test]
+    async fn initial_control_rejects_mismatched_receipt_and_state_identity_without_settlement() {
+        for mode in [
+            "wrong-receipt-request",
+            "wrong-receipt-command",
+            "wrong-state-request",
+            "wrong-state-host",
+            "wrong-state-device",
+            "wrong-state-command",
+            "conflict-wrong-state-host",
+        ] {
+            let (result, cache) = control_with_result_fixture(mode).await;
+            assert!(matches!(result, Err(CoreError::Security(_))), "{mode}");
+            assert_eq!(cache.pending_commands().unwrap().len(), 1, "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_success_is_not_discarded_by_negative_receipt_status() {
+        let (result, cache) = control_with_result_fixture("receipt-negative-state-success").await;
+        let handle = result.unwrap();
+        assert_eq!(handle.status, DomainStatus::Succeeded);
+        assert_eq!(handle.message_id.as_deref(), Some("fixture-message"));
+        assert!(cache.pending_commands().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authenticated_success_with_negative_status_requires_host_recovery() {
+        let (result, cache) =
+            control_with_result_fixture("state-negative-authenticated-success").await;
+        assert!(matches!(result, Err(CoreError::StaleCommand { .. })));
+        assert_eq!(cache.pending_commands().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_negative_terminal_result_preserves_recovery_intent() {
+        let (result, cache) = control_with_result_fixture("failed-frame").await;
+        assert!(matches!(result, Err(CoreError::Security(_))));
+        assert_eq!(cache.pending_commands().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -913,18 +1769,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_rejection_and_offline_are_terminal_while_uncertainty_stays_pending() {
+    async fn unverified_negative_receipts_preserve_intent_and_require_recovery() {
         for mode in ["rejected-receipt", "offline-receipt", "unknown-receipt"] {
             let (result, cache) = control_with_result_fixture(mode).await;
-            match mode {
-                "rejected-receipt" => assert!(matches!(result, Err(CoreError::HostRejected))),
-                "offline-receipt" => assert!(matches!(result, Err(CoreError::HostOffline))),
-                _ => assert!(matches!(result, Err(CoreError::UnknownResult))),
+            if mode == "unknown-receipt" {
+                assert!(matches!(result, Err(CoreError::UnknownResult)));
+            } else {
+                assert!(matches!(result, Err(CoreError::StaleCommand { .. })));
             }
-            assert_eq!(
-                cache.pending_commands().unwrap().len(),
-                usize::from(mode == "unknown-receipt")
-            );
+            assert_eq!(cache.pending_commands().unwrap().len(), 1);
         }
     }
 
@@ -984,6 +1837,137 @@ mod tests {
     }
 
     #[test]
+    fn unknown_status_with_an_unknown_lifecycle_receipt_is_recoverable() {
+        let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
+        let access = Arc::new(
+            AccessClient::new(url::Url::parse("http://127.0.0.1:1").unwrap(), None).unwrap(),
+        );
+        let service = CommandService::new(access, cache);
+        let payload = ResponsePayload {
+            payload: Some(whalerein_proto::response_payload::Payload::LifecycleReceipt(
+                whalerein_proto::LifecycleReceipt {
+                    session_id: String::new(),
+                    parent_session_id: String::new(),
+                    operation: "create".into(),
+                    disposition: whalerein_proto::LifecycleDisposition::Unknown as i32,
+                    warning_code: String::new(),
+                    operation_id: "operation-1".into(),
+                    phase: "NATIVE".into(),
+                    reason_code: "NATIVE_OUTCOME_UNKNOWN".into(),
+                    retryable: false,
+                    reconcile_mode: "OPERATION_ID".into(),
+                    reconcile_key: "operation-1".into(),
+                    warning_detail: None,
+                },
+            )),
+            ..Default::default()
+        };
+        let result = CommandResult {
+            found: true,
+            status: OnlineStatus::Unknown as i32,
+            error_code: 0,
+            result_payload: payload.encode_to_vec(),
+        };
+        let handle = service.handle_from_command_result("r", "c", &result).unwrap();
+        assert_eq!(handle.status, DomainStatus::Unknown);
+        let receipt = handle.lifecycle_receipt.unwrap();
+        assert_eq!(receipt.disposition, "UNKNOWN");
+        assert_eq!(receipt.operation_id.as_deref(), Some("operation-1"));
+    }
+
+    #[test]
+    fn lifecycle_recovery_validates_kind_after_reopening_the_command_journal() {
+        for (kind, wrong_kind) in [("create", "fork"), ("fork", "create")] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("commands.sqlite");
+            let cache = Cache::open(&path, [1; 32]).unwrap();
+            cache
+                .record_typed_command_intent(CommandIntent {
+                    request_id: "r",
+                    command_id: "c",
+                    host_id: "h",
+                    device_id: "d",
+                    access_url: "http://127.0.0.1:1/",
+                    host_fingerprint: "fingerprint",
+                    command_kind: kind,
+                    command_parent_session_id: if kind == "fork" { "parent" } else { "" },
+                })
+                .unwrap();
+            drop(cache);
+            let cache = Arc::new(Cache::open(&path, [1; 32]).unwrap());
+            let access = Arc::new(
+                AccessClient::new(url::Url::parse("http://127.0.0.1:1").unwrap(), None).unwrap(),
+            );
+            let service = CommandService::new(access, cache.clone());
+            let mut result = CommandResult {
+                found: true,
+                status: OnlineStatus::Succeeded as i32,
+                result_payload: vec![],
+                error_code: 0,
+            };
+            assert!(matches!(
+                service.handle_from_command_result("r", "c", &result),
+                Err(CoreError::UnknownResult)
+            ));
+            let encode = |operation: &str| {
+                ResponsePayload {
+                    payload: Some(
+                        whalerein_proto::response_payload::Payload::LifecycleReceipt(
+                            whalerein_proto::LifecycleReceipt {
+                                session_id: "child".into(),
+                                parent_session_id: if operation == "fork" {
+                                    "parent".into()
+                                } else {
+                                    String::new()
+                                },
+                                operation: operation.into(),
+                                disposition: whalerein_proto::LifecycleDisposition::Ready as i32,
+                                warning_code: String::new(),
+                                operation_id: String::new(),
+                                phase: String::new(),
+                                reason_code: String::new(),
+                                retryable: false,
+                                reconcile_mode: String::new(),
+                                reconcile_key: String::new(),
+                                warning_detail: None,
+                            },
+                        ),
+                    ),
+                    ..Default::default()
+                }
+                .encode_to_vec()
+            };
+            result.result_payload = encode(wrong_kind);
+            assert!(matches!(
+                service.handle_from_command_result("r", "c", &result),
+                Err(CoreError::UnknownResult)
+            ));
+            assert_eq!(cache.pending_commands().unwrap().len(), 1);
+            if kind == "fork" {
+                let mut wrong_parent = ResponsePayload::decode(encode("fork").as_slice()).unwrap();
+                if let Some(whalerein_proto::response_payload::Payload::LifecycleReceipt(
+                    ref mut receipt,
+                )) = wrong_parent.payload
+                {
+                    receipt.parent_session_id = "different-parent".into();
+                }
+                result.result_payload = wrong_parent.encode_to_vec();
+                assert!(matches!(
+                    service.handle_from_command_result("r", "c", &result),
+                    Err(CoreError::UnknownResult)
+                ));
+                assert_eq!(cache.pending_commands().unwrap().len(), 1);
+            }
+            result.result_payload = encode(kind);
+            let handle = service
+                .handle_from_command_result("r", "c", &result)
+                .unwrap();
+            assert_eq!(handle.lifecycle_receipt.unwrap().operation, kind);
+            assert!(cache.pending_commands().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn recovered_definitive_failure_settles_the_intent_before_returning_its_domain_error() {
         let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
         cache
@@ -1035,9 +2019,11 @@ mod tests {
         let payload = response(whalerein_proto::response_payload::Payload::CommandAccepted(
             CommandAccepted {
                 message_id: "m-1".into(),
+                delivery_id: "d-1".into(),
             },
         ));
         assert_eq!(message_id_of(&payload).as_deref(), Some("m-1"));
+        assert_eq!(delivery_id_of(&payload).as_deref(), Some("d-1"));
         assert!(
             message_id_of(&response(whalerein_proto::response_payload::Payload::Pong(
                 Default::default()
@@ -1375,5 +2361,99 @@ mod host_tests {
             .unwrap_err();
         assert!(matches!(error, CoreError::Unavailable(_)));
         assert_eq!(cache.command_counts().unwrap(), (0, 0));
+    }
+    #[tokio::test]
+    async fn oversized_question_answer_is_rejected_before_journal_or_io() {
+        let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
+        let fake = crate::api::test_support::FakeAccess::start().await;
+        let access = Arc::new(AccessClient::new(fake.url().clone(), None).unwrap());
+        let service = CommandService::new(access, cache.clone());
+        let payload = RequestPayload {
+            payload: Some(whalerein_proto::request_payload::Payload::AnswerQuestion(
+                whalerein_proto::AnswerQuestion {
+                    session_id: "s".into(),
+                    batch_id: "b".into(),
+                    answers: vec![whalerein_proto::QuestionAnswerItem {
+                        id: "q".into(),
+                        custom: Some("x".repeat(crate::access::transport::MESSAGE_BYTES)),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )),
+        };
+        let test_channel =
+            SecureChannel::from_handshake(&[9u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let error = service
+            .control("h-1", "d-1", &test_channel, payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::Api {
+                code: Some(ErrorCode::PayloadTooLarge),
+                ..
+            }
+        ));
+        assert!(cache.pending_commands().unwrap().is_empty());
+        assert!(fake.host.lock().unwrap().request_traces.is_empty());
+        assert_eq!(fake.host.lock().unwrap().commands_seen, 0);
+    }
+    #[tokio::test]
+    async fn accepted_command_result_query_rejection_remains_unknown() {
+        use crate::api::test_support::{MockResponse, MockServer};
+
+        let server = MockServer::start(Arc::new(|request| {
+            let query: HostRequest = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(query.kind, RequestKind::Query as i32);
+            MockResponse::json(
+                202,
+                &RequestReceipt {
+                    request_id: query.request_id,
+                    command_id: String::new(),
+                    status: whalerein_proto::OnlineStatus::Rejected as i32,
+                    expires_at_unix_ms: query.expires_at_unix_ms,
+                },
+            )
+        }))
+        .await;
+        let cache = Arc::new(Cache::open_in_memory([4; 32]).unwrap());
+        cache
+            .record_command_intent(
+                "original-request",
+                "original-command",
+                "h-1",
+                "d-1",
+                server.url().as_str(),
+                "",
+            )
+            .unwrap();
+        let service = CommandService::new(
+            Arc::new(AccessClient::new(server.url(), None).unwrap()),
+            cache.clone(),
+        );
+        let result = service
+            .await_command_result(
+                "h-1",
+                "d-1",
+                &SecureChannel::from_handshake(&[5u8; 32], "p", "chan", "h-1", "d-1").unwrap(),
+                "original-request",
+                "original-command",
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code(), "unknown");
+        let pending = cache.pending_commands().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_id, "original-request");
+        assert_eq!(pending[0].command_id, "original-command");
+    }
+}
+
+fn model_selection_of(payload: &ResponsePayload) -> Option<crate::api::ModelSelectionReceipt> {
+    match &payload.payload {
+        Some(whalerein_proto::response_payload::Payload::ModelSelectionReceipt(receipt)) => {
+            Some(receipt.clone().into())
+        }
+        _ => None,
     }
 }

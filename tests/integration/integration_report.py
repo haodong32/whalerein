@@ -5,9 +5,8 @@ import os
 from pathlib import Path
 from time import monotonic
 
-from repo.test_timing import record_phase, finish_interrupted
-
 import pytest
+from repo.test_timing import finish_interrupted, record_phase
 
 _RESULTS = {}
 _PHASES = {}
@@ -98,6 +97,11 @@ def pytest_runtest_logreport(report):
 def pytest_sessionfinish(session, exitstatus):
     if os.environ.get("WHALEREIN_INTEGRATION_CONTAINER") != "1":
         return
+    shard = getattr(session.config.option, "shard", None)
+    if shard and not session.items and session.exitstatus == 5:
+        # An intentional empty shard is a successful (empty) selection, not
+        # pytest's "no tests collected" failure.
+        session.exitstatus = 0
     for item in session.items:
         _RESULTS.setdefault(
             item.nodeid,
@@ -130,6 +134,13 @@ def pytest_sessionfinish(session, exitstatus):
         and session.exitstatus == 0
     ):
         session.exitstatus = 1
+    # With --shard, deselecting the other shards is distribution rather than a
+    # narrowed user selection. --group/--only still make the selection partial.
+    partial = (
+        bool(session.config.getoption("--group") or session.config.getoption("--only"))
+        if shard
+        else _DESELECTED
+    )
     scope = {
         "project": "integration",
         "kind": "integration",
@@ -138,15 +149,19 @@ def pytest_sessionfinish(session, exitstatus):
         "coverage": [],
         "checks": [],
         "completeness": "complete"
-        if session.items and not _COLLECTION_ERRORS
+        if (session.items or shard)
+        and not _COLLECTION_ERRORS
+        and session.exitstatus in (0, 1)
+        and (session.config.option.collectonly or all(
+            r["status"] not in ("interrupted", "not_run") for r in _RESULTS.values()
+        ))
         else "incomplete",
         "exit_code": int(session.exitstatus),
-        "selection": "partial"
-        if _DESELECTED
-        or session.config.getoption("--group")
-        or session.config.getoption("--only")
-        else "full",
+        "selection": "partial" if partial else "full",
     }
+    if shard:
+        # Sharding distributes an existing selection; it does not narrow it.
+        scope["shard"] = shard
     Path("/reports").mkdir(exist_ok=True)
     tests = scope["tests"]
     for case in tests:

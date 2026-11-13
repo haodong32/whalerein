@@ -365,6 +365,56 @@ mod tests {
             .is_none());
     }
     #[test]
+    fn parent_and_child_with_same_message_id_and_batch_id_keep_independent_views() {
+        let cache = Cache::open_in_memory([1; 32]).unwrap();
+        let parent = SessionKey {
+            host_id: "host".into(),
+            session_id: "parent".into(),
+        };
+        let child = SessionKey {
+            host_id: "host".into(),
+            session_id: "child".into(),
+        };
+        let mut original = page("host", "start", "cut", "cut", true, true, "same-id");
+        original.session = Some(parent.clone());
+        cache.apply_history_page(&original).unwrap();
+        let mut inherited = original.clone();
+        inherited.session = Some(child.clone());
+        cache.apply_history_page(&inherited).unwrap();
+        let mut child_delta = page(
+            "host",
+            "cut",
+            "child-next",
+            "child-next",
+            true,
+            false,
+            "same-id",
+        );
+        child_delta.session = Some(child.clone());
+        child_delta.batch.as_mut().unwrap().changes[0]
+            .message
+            .as_mut()
+            .unwrap()
+            .blocks[0]
+            .content = Some(content_block::Content::Text(TextContent {
+            text: "child".into(),
+        }));
+        cache.apply_history_page(&child_delta).unwrap();
+        assert_eq!(
+            cache.history_cursor(&parent).unwrap().as_deref(),
+            Some("cut")
+        );
+        assert_eq!(
+            cache.history_cursor(&child).unwrap().as_deref(),
+            Some("child-next")
+        );
+        let parent_message = &cache.history_messages(&parent).unwrap()[0];
+        let child_message = &cache.history_messages(&child).unwrap()[0];
+        assert_eq!(parent_message.message_id, child_message.message_id);
+        assert_ne!(parent_message.blocks, child_message.blocks);
+    }
+
+    #[test]
     fn duplicate_batches_are_idempotent_and_conflicting_receipts_are_rejected() {
         let cache = Cache::open_in_memory([1; 32]).unwrap();
         cache

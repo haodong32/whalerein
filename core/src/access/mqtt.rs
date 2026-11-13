@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rumqttc::v5::mqttbytes::v5::{Packet, SubscribeReasonCode};
+use rumqttc::v5::mqttbytes::v5::{LastWill, LastWillProperties, Packet, SubscribeReasonCode};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions, StateError};
 use rumqttc::{TlsConfiguration, Transport};
@@ -21,10 +21,13 @@ use whalerein_proto::EventEnvelope;
 use super::AccessError;
 
 pub const EVENT_TOPIC_PREFIX: &str = "whalerein/v1/h";
+pub const PRESENCE_TOPIC_PREFIX: &str = "whalerein/v1/presence/device";
 pub const DEFAULT_MQTT_PORT: u16 = 8883;
 /// Matches the deployed broker packet budget, including MQTT framing.
 pub const MAX_MQTT_PACKET_BYTES: u32 = super::transport::PACKET_BYTES as u32;
-pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(30);
+/// A hard-disconnected device must be observable promptly. Access treats the
+/// broker last will as a fallback for missing `$SYS` lifecycle events.
+pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const BACKOFF_BASE: Duration = Duration::from_millis(500);
 pub const BACKOFF_CAP: Duration = Duration::from_secs(30);
 
@@ -150,7 +153,8 @@ impl MqttSettings {
             .set_credentials(device_username(device_id), token)
             .set_keep_alive(self.keep_alive)
             .set_clean_start(true)
-            .set_max_packet_size(Some(MAX_MQTT_PACKET_BYTES));
+            .set_max_packet_size(Some(MAX_MQTT_PACKET_BYTES))
+            .set_last_will(device_last_will(device_id));
         if self.tls {
             options.set_transport(Transport::Tls(TlsConfiguration::Rustls(self.tls_config()?)));
         } else {
@@ -170,6 +174,47 @@ pub fn device_username(device_id: &str) -> String {
 
 pub fn device_event_topic(host_id: &str, device_id: &str) -> String {
     format!("{EVENT_TOPIC_PREFIX}/{host_id}/d/{device_id}/event")
+}
+
+/// Device-scoped last-will topic. It carries no host id because one device may
+/// be authorized by several hosts; Access fans the event out to each grant.
+pub fn device_presence_topic(device_id: &str) -> String {
+    format!("{PRESENCE_TOPIC_PREFIX}/{device_id}")
+}
+
+#[derive(serde::Serialize)]
+struct DeviceWill<'a> {
+    event: &'static str,
+    device_id: &'a str,
+}
+
+/// Compact, content-free last-will payload. It contains only the fixed event
+/// name and the device identity; never a token, host id or message content.
+fn device_will_payload(device_id: &str) -> Vec<u8> {
+    let will = DeviceWill {
+        event: "device_offline",
+        device_id,
+    };
+    serde_json::to_vec(&will).unwrap_or_else(|_| Vec::new())
+}
+
+/// Non-retained QoS 1 last will. A clean DISCONNECT does not publish it.
+fn device_last_will(device_id: &str) -> LastWill {
+    LastWill::new(
+        device_presence_topic(device_id),
+        device_will_payload(device_id),
+        QoS::AtLeastOnce,
+        false,
+        Some(LastWillProperties {
+            delay_interval: Some(3),
+            payload_format_indicator: None,
+            message_expiry_interval: None,
+            content_type: None,
+            response_topic: None,
+            correlation_data: None,
+            user_properties: Vec::new(),
+        }),
+    )
 }
 
 /// Exponential backoff with a bounded jitter fraction.
@@ -454,6 +499,10 @@ mod tests {
             device_event_topic("h-1", "d-1"),
             "whalerein/v1/h/h-1/d/d-1/event"
         );
+        assert_eq!(
+            device_presence_topic("d-1"),
+            "whalerein/v1/presence/device/d-1"
+        );
         assert_eq!(device_client_id("d-1"), "whalerein-device-d-1");
         assert_eq!(device_username("d-1"), "device:d-1");
     }
@@ -522,11 +571,34 @@ mod tests {
         let options = settings.options("d-1", "token").unwrap();
         assert_eq!(options.client_id(), device_client_id("d-1"));
         assert_eq!(options.max_packet_size(), Some(MAX_MQTT_PACKET_BYTES));
+        assert_eq!(options.keep_alive(), DEFAULT_KEEP_ALIVE);
         let login = options.credentials().unwrap();
         assert_eq!(login.username, device_username("d-1"));
         assert_eq!(login.password, "token");
         let client = DeviceMqttClient::new(settings, "h-1", "d-1", "token");
         assert_eq!(client.topic(), "whalerein/v1/h/h-1/d/d-1/event");
+    }
+
+    #[test]
+    fn configures_a_short_keepalive_and_content_free_device_scoped_will() {
+        let settings = MqttSettings::parse("mqtt://broker.test:1884").unwrap();
+        assert_eq!(DEFAULT_KEEP_ALIVE, Duration::from_secs(10));
+        let options = settings.options("d-1", "secret-token").unwrap();
+        assert_eq!(options.keep_alive(), Duration::from_secs(10));
+
+        let will = options.last_will().expect("last will is configured");
+        assert_eq!(
+            will.topic.as_ref(),
+            b"whalerein/v1/presence/device/d-1".as_slice()
+        );
+        assert_eq!(will.qos, QoS::AtLeastOnce);
+        assert!(!will.retain);
+
+        let payload = String::from_utf8(will.message.to_vec()).unwrap();
+        assert_eq!(payload, r#"{"event":"device_offline","device_id":"d-1"}"#);
+        assert!(!payload.contains("secret-token"));
+        assert!(!payload.contains("h-1"));
+        assert!(!payload.contains("password"));
     }
 
     #[test]

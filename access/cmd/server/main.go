@@ -65,6 +65,10 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runWith(ctx, args, stdout, stderr, defaultStartupStoreOps(), runServer)
+}
+
+func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, ops startupStoreOps, serve func(context.Context, config.Config, *slog.Logger) error) int {
 	opts, err := parseOptions(args, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "access: %v\n", err)
@@ -92,36 +96,55 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	logger := diagnostics.NewLogger(cfg.Log.Level, stderr)
 	if opts.migrateOnly {
-		db, err := store.Open(ctx, cfg.DatabaseURL)
+		db, err := ops.open(ctx, cfg.DatabaseURL)
 		if err != nil {
 			logger.Error("migration failed", "error", err.Error())
 			return 1
 		}
-		defer db.Close()
-		if err := db.Migrate(ctx); err != nil {
+		defer ops.close(db)
+		if err := ops.migrate(ctx, db); err != nil {
 			logger.Error("migration failed", "error", err.Error())
 			return 1
 		}
 		logger.Info("migration complete")
 		return 0
 	}
-	if err := runServer(ctx, cfg, logger); err != nil {
+	if err := serve(ctx, cfg, logger); err != nil {
 		logger.Error("access stopped with error", "error", err.Error())
 		return 1
 	}
 	return 0
 }
 
+type startupStoreOps struct {
+	open    func(context.Context, string) (*store.Store, error)
+	migrate func(context.Context, *store.Store) error
+	close   func(*store.Store)
+}
+
+func defaultStartupStoreOps() startupStoreOps {
+	return startupStoreOps{
+		open:    store.Open,
+		migrate: func(ctx context.Context, db *store.Store) error { return db.Migrate(ctx) },
+		close:   func(db *store.Store) { db.Close() },
+	}
+}
+
 func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	return runServerWithStore(ctx, cfg, logger, defaultStartupStoreOps())
+}
+
+// runServerWithStore permits deterministic startup failure and cleanup checks.
+func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) error {
 	metrics := diagnostics.NewMetrics()
 	masker := diagnostics.NewMasker()
 
-	db, err := store.Open(ctx, cfg.DatabaseURL)
+	db, err := ops.open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer db.Close()
-	if err := db.Migrate(ctx); err != nil {
+	defer ops.close(db)
+	if err := ops.migrate(ctx, db); err != nil {
 		return fmt.Errorf("migrate store: %w", err)
 	}
 
@@ -153,6 +176,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 		Presence:     presence,
 		Connector:    connector,
 		Disconnecter: disconnecter,
+		DeviceHosts:  db.ListAuthorizedHostIDs,
 		Metrics:      metrics,
 		Masker:       masker,
 		Logger:       logger,
@@ -287,6 +311,16 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 		IdleTimeout:       cfg.HTTP.IdleTimeout.D(),
 	}
 
+	return runServices(ctx, publicServer, internalServer, publicListener, internalListener,
+		service.Run, requestService.Run,
+		func(runCtx context.Context) {
+			runCleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger)
+		}, logger, 10*time.Second)
+}
+
+// runServices owns server and worker shutdown after resources are initialized.
+func runServices(ctx context.Context, publicServer, internalServer *http.Server, publicListener, internalListener net.Listener,
+	runBroker, runForwarder func(context.Context) error, cleanup func(context.Context), logger *slog.Logger, shutdownTimeout time.Duration) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -305,17 +339,17 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		if err := service.Run(runCtx); err != nil {
+		if err := runBroker(runCtx); err != nil {
 			logger.Warn("broker loop stopped", "error", err.Error())
 		}
 	}()
 	go func() {
 		defer workers.Done()
-		if err := requestService.Run(runCtx); err != nil {
+		if err := runForwarder(runCtx); err != nil {
 			logger.Warn("forward loop stopped", "error", err.Error())
 		}
 	}()
-	go runCleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger)
+	go cleanup(runCtx)
 
 	var runErr error
 	select {
@@ -324,7 +358,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 		cancel()
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 	shutdownErr := errors.Join(
 		publicServer.Shutdown(shutdownCtx),
@@ -365,7 +399,13 @@ func waitWithTimeout(group *sync.WaitGroup, timeout time.Duration) {
 	}
 }
 
-func runCleanup(ctx context.Context, db *store.Store, interval, retention time.Duration, logger *slog.Logger) {
+type cleanupStore interface {
+	ClearExpiredBodies(context.Context, time.Time) (int64, error)
+	DeleteExpiredPairingTokens(context.Context, time.Time) (int64, error)
+	DeleteExpiredQueries(context.Context, time.Time) (int64, error)
+}
+
+func runCleanup(ctx context.Context, db cleanupStore, interval, retention time.Duration, logger *slog.Logger) {
 	if interval <= 0 {
 		interval = time.Minute
 	}

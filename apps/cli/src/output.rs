@@ -75,16 +75,40 @@ impl CliOutcome {
         }
     }
 
+    /// A lifecycle outcome is a terminal domain result. FAILED and UNKNOWN keep
+    /// their data payload for JSON while still returning a non-zero exit.
+    pub fn lifecycle(
+        command: &Command,
+        handle: &CommandHandle,
+        code: &str,
+        human: String,
+        exit: u8,
+    ) -> Self {
+        Self {
+            command: command.name().to_owned(),
+            data: Some(command_data(handle)),
+            error: (exit != 0).then(|| CliError::new(code, human.clone())),
+            human,
+            exit,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         let mut value = match &self.error {
-            Some(error) => json!({
-                "schema": "whalerein/v1",
-                "command": self.command,
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
+            Some(error) => {
+                let mut value = json!({
+                    "schema": "whalerein/v1",
+                    "command": self.command,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                    }
+                });
+                if let Some(data) = &self.data {
+                    value["data"] = data.clone();
                 }
-            }),
+                value
+            }
             None => json!({
                 "schema": "whalerein/v1",
                 "command": self.command,
@@ -105,6 +129,9 @@ impl CliOutcome {
     }
 
     pub fn render(&self) -> String {
+        if !self.human.is_empty() {
+            return self.human.clone();
+        }
         if let Some(error) = &self.error {
             let mut text = format!("error: {} ({})\n", error.message, error.code);
             if let Some(id) = &error.diagnostic_id {
@@ -150,7 +177,15 @@ fn error_exit_code(code: &str) -> u8 {
 pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -> CliOutcome {
     let code = error.code().to_owned();
     let exit = error.exit_code();
-    let mut cli_error = CliError::new(code, error.to_string());
+    let message = if matches!(command, Command::Send { .. }) && code == "unsupported_capability" {
+        format!(
+            "{}; the selected delivery mode is unavailable on this Host; check its runtime compatibility",
+            error
+        )
+    } else {
+        error.to_string()
+    };
+    let mut cli_error = CliError::new(code, message);
     cli_error.layer = Some(error.source_layer().to_owned());
     CliOutcome {
         command: command.name().to_owned(),
@@ -217,18 +252,161 @@ pub fn render_command(handle: &CommandHandle) -> String {
         handle.status.as_str()
     );
     if let Some(message_id) = &handle.message_id {
-        out.push_str(&format!("message: {message_id}\n"));
+        out.push_str(&format!("legacy receipt: {message_id}\n"));
+    }
+    if let Some(receipt) = &handle.model_selection {
+        if let Some(selection) = &receipt.selected {
+            out.push_str(&format!(
+                "provider: {}\nmodel: {}\n",
+                selection.provider, selection.model
+            ));
+            if let Some(effort) = &selection.effort {
+                out.push_str(&format!("effort: {effort}\n"));
+            }
+        }
+        out.push_str(&format!(
+            "effect: {}\ndefault persistence: {}\n",
+            receipt.effect_scope, receipt.default_persistence
+        ));
+    }
+    if let Some(delivery_id) = &handle.delivery_id {
+        out.push_str(&format!("delivery: {delivery_id}\n"));
+    }
+    if let Some(receipt) = &handle.question_receipt {
+        out.push_str(&format!(
+            "question: {}\nquestion outcome: {}\n",
+            receipt.batch_id, receipt.phase
+        ));
+    }
+    if let Some(receipt) = &handle.lifecycle_receipt {
+        out.push_str(&format!(
+            "operation: {}\ndisposition: {}\n",
+            receipt.operation, receipt.disposition
+        ));
+        if !receipt.session_id.is_empty() {
+            out.push_str(&format!("session: {}\n", receipt.session_id));
+        }
+        if let Some(parent) = &receipt.parent_session_id {
+            out.push_str(&format!("parent: {parent}\n"));
+        }
+        if let Some(phase) = &receipt.phase {
+            out.push_str(&format!("phase: {phase}\n"));
+        }
+        if let Some(code) = &receipt.warning_code {
+            out.push_str(&format!("warning: {code}\n"));
+        }
+        if let Some(reason) = &receipt.reason_code {
+            out.push_str(&format!("reason: {reason}\n"));
+        }
+        if receipt.retryable {
+            out.push_str("retryable: yes\n");
+        }
+        if let Some(id) = &receipt.operation_id {
+            out.push_str(&format!("operation id: {id}\n"));
+        }
+        if let Some(mode) = &receipt.reconcile_mode {
+            out.push_str(&format!("reconcile: {mode}"));
+            if let Some(key) = &receipt.reconcile_key {
+                out.push_str(&format!(" {key}"));
+            }
+            out.push('\n');
+        }
     }
     out
 }
 
+/// Human rendering for the four lifecycle dispositions. UNKNOWN never claims
+/// that a session was or was not created; FAILED never prints identity.
+pub fn render_lifecycle_outcome(handle: &CommandHandle) -> Option<String> {
+    let receipt = handle.lifecycle_receipt.as_ref()?;
+    let subject = if receipt.operation == "fork" { "Child session" } else { "Session" };
+    match receipt.disposition.as_str() {
+        "READY" => Some(if receipt.session_id.is_empty() {
+            "Operation completed.\n".to_owned()
+        } else {
+            format!("{subject} {} is ready.\n", receipt.session_id)
+        }),
+        "READY_WITH_WARNING" => {
+            let warning = receipt.warning_code.as_deref().unwrap_or("workspace attach incomplete");
+            Some(format!(
+                "{subject} {} exists, with a warning: {warning}.\nThe session was created; do not retry or delete it.\n",
+                receipt.session_id
+            ))
+        }
+        "FAILED" => {
+            let reason = receipt.reason_code.as_deref().unwrap_or("FAILED");
+            Some(format!(
+                "Operation failed before any native effect.\nreason: {reason}\nretryable: {}\n",
+                if receipt.retryable { "yes" } else { "no" }
+            ))
+        }
+        "UNKNOWN" => {
+            let mut text = String::from(
+                "Outcome unknown: this operation may have happened. The session may or may not exist.\nDo not retry automatically.\n",
+            );
+            if let Some(id) = &receipt.operation_id {
+                text.push_str(&format!("operation id: {id}\n"));
+            }
+            if let Some(mode) = &receipt.reconcile_mode {
+                text.push_str(&format!("reconcile: {mode}"));
+                if let Some(key) = &receipt.reconcile_key {
+                    text.push_str(&format!(" {key}"));
+                }
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "Reconcile with: whalerein command-recover --request {}\n",
+                handle.request_id
+            ));
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+/// FAILED is a usable, retryable decision; UNKNOWN requires reconciliation and
+/// must not look like success to a script.
+pub fn lifecycle_exit_code(handle: &CommandHandle) -> u8 {
+    let Some(receipt) = &handle.lifecycle_receipt else { return 0 };
+    match receipt.disposition.as_str() {
+        "FAILED" => match receipt.reason_code.as_deref() {
+            Some("INVALID_ARGUMENT") | Some("PREFLIGHT_INVALID_ARGUMENT") => 2,
+            Some("WORKSPACE_NOT_FOUND") | Some("PRESET_NOT_FOUND") | Some("SOURCE_NOT_FOUND") => 3,
+            Some("WORKSPACE_UNAVAILABLE")
+            | Some("PRESET_UNAVAILABLE")
+            | Some("SOURCE_NO_COMPLETE_TURN")
+            | Some("PREFLIGHT_UNSUPPORTED_CAPABILITY") => 8,
+            _ => 5,
+        },
+        "UNKNOWN" => 7,
+        _ => 0,
+    }
+}
+
+pub fn lifecycle_error_code(handle: &CommandHandle) -> &'static str {
+    match handle.lifecycle_receipt.as_ref().map(|receipt| receipt.disposition.as_str()) {
+        Some("FAILED") => "operation_failed",
+        Some("UNKNOWN") => "unknown",
+        _ => "internal",
+    }
+}
+
 pub fn command_data(handle: &CommandHandle) -> Value {
-    json!({
+    let mut value = json!({
         "request_id": handle.request_id,
         "command_id": handle.command_id,
         "status": handle.status.as_str(),
         "message_id": handle.message_id,
-    })
+        "delivery_id": handle.delivery_id,
+        "question_receipt": handle.question_receipt,
+    });
+    if let Some(receipt) = &handle.model_selection {
+        value["model_selection"] = json!(receipt);
+    }
+    if let Some(receipt) = &handle.lifecycle_receipt {
+        value["lifecycle_receipt"] = json!(receipt);
+    }
+    value
 }
 
 pub fn render_doctor(report: &DoctorReport) -> String {
@@ -410,7 +588,7 @@ pub fn render_approvals(approvals: &[whalerein_core::api::ApprovalInfo]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use whalerein_core::api::{CommandDiagnostics, OnlineStatus};
+    use whalerein_core::api::{CommandDiagnostics, LifecycleReceipt, OnlineStatus};
 
     fn command() -> Command {
         Command::Hosts
@@ -421,7 +599,38 @@ mod tests {
             request_id: "r-1".into(),
             command_id: "c-1".into(),
             status: OnlineStatus::HostAccepted,
+            model_selection: None,
             message_id: Some("m-1".into()),
+            delivery_id: Some("d-1".into()),
+            lifecycle_receipt: None,
+            question_receipt: None,
+        }
+    }
+
+    fn lifecycle_handle(disposition: &str) -> CommandHandle {
+        let failed = matches!(disposition, "FAILED" | "UNKNOWN");
+        CommandHandle {
+            request_id: "r-1".into(),
+            command_id: "c-1".into(),
+            status: OnlineStatus::Succeeded,
+            model_selection: None,
+            message_id: None,
+            delivery_id: None,
+            lifecycle_receipt: Some(LifecycleReceipt {
+                session_id: if failed { String::new() } else { "session-1".into() },
+                parent_session_id: if failed { None } else { Some("parent".into()) },
+                operation: "create".into(),
+                disposition: disposition.into(),
+                warning_code: (disposition == "READY_WITH_WARNING").then(|| "workspace_attach_failed".into()),
+                operation_id: Some("op-1".into()),
+                phase: Some(if failed { "NATIVE".into() } else { "COMPLETE".into() }),
+                reason_code: failed.then(|| if disposition == "FAILED" { "WORKSPACE_NOT_FOUND".into() } else { "NATIVE_INTERNAL".into() }),
+                retryable: disposition == "FAILED",
+                reconcile_mode: (disposition == "UNKNOWN").then(|| "OPERATION_ID".into()),
+                reconcile_key: (disposition == "UNKNOWN").then(|| "op-1".into()),
+                warning_detail: None,
+            }),
+            question_receipt: None,
         }
     }
 
@@ -484,6 +693,21 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_send_includes_a_runtime_compatibility_hint() {
+        let command = Command::Send {
+            session: "fixture".into(),
+            delivery: crate::cli::Delivery::EnqueueAfterRun,
+            text: "synthetic".into(),
+        };
+        let outcome = core_error_outcome(&command, whalerein_core::CoreError::Unsupported);
+        let error = outcome.error.unwrap();
+        assert_eq!(error.code, "unsupported_capability");
+        assert_eq!(outcome.exit, 9);
+        assert!(error.message.contains("runtime compatibility"));
+        assert!(!error.message.contains("synthetic"));
+    }
+
+    #[test]
     fn renders_host_presence_and_session_summaries() {
         let hosts = vec![HostInfo {
             host_id: "h-1".into(),
@@ -527,12 +751,44 @@ mod tests {
     }
 
     #[test]
+    fn renders_model_selection_receipt_in_human_and_json_output() {
+        let mut command = handle();
+        command.model_selection = Some(whalerein_core::api::ModelSelectionReceipt {
+            selected: Some(whalerein_core::api::ModelChoice {
+                provider: "fixture-provider".into(),
+                model: "fixture-model".into(),
+                effort: Some("high".into()),
+            }),
+            effect_scope: "session_and_source_default_attempt".into(),
+            default_persistence: "unconfirmed".into(),
+        });
+        let text = render_command(&command);
+        for expected in [
+            "provider: fixture-provider",
+            "model: fixture-model",
+            "effort: high",
+            "effect: session_and_source_default_attempt",
+            "default persistence: unconfirmed",
+        ] {
+            assert!(text.contains(expected));
+        }
+        let data = command_data(&command);
+        assert_eq!(data["model_selection"]["selected"]["effort"], "high");
+        assert_eq!(
+            data["model_selection"]["default_persistence"],
+            "unconfirmed"
+        );
+    }
+
+    #[test]
     fn renders_command_status_without_sensitive_payload() {
         let handle = handle();
         let text = render_command(&handle);
         assert!(text.contains("host_accepted"));
         assert!(text.contains("m-1"));
+        assert!(text.contains("delivery: d-1"));
         let data = command_data(&handle);
+        assert_eq!(data["delivery_id"], "d-1");
         assert_eq!(data["request_id"], "r-1");
         assert_eq!(data["status"], "host_accepted");
     }
@@ -562,6 +818,65 @@ mod tests {
         assert!(text.contains("address"));
         assert!(text.contains("private keys"));
         assert_eq!(manifest_data(&manifest)["bytes"], 10);
+    }
+    #[test]
+    fn renders_every_lifecycle_disposition_without_claiming_unproven_identity() {
+        let ready = render_lifecycle_outcome(&lifecycle_handle("READY")).unwrap();
+        assert!(ready.contains("session-1"));
+        assert!(ready.contains("is ready"));
+
+        let warning = render_lifecycle_outcome(&lifecycle_handle("READY_WITH_WARNING")).unwrap();
+        assert!(warning.contains("session-1"));
+        assert!(warning.contains("workspace_attach_failed"));
+        assert!(warning.contains("do not retry"));
+        assert!(!warning.contains("Operation failed"));
+
+        let failed = render_lifecycle_outcome(&lifecycle_handle("FAILED")).unwrap();
+        assert!(failed.contains("failed before any native effect"));
+        assert!(failed.contains("WORKSPACE_NOT_FOUND"));
+        assert!(failed.contains("retryable: yes"));
+        assert!(!failed.contains("session-1"));
+        assert!(!render_command(&lifecycle_handle("FAILED")).contains("session:"));
+
+        let unknown = render_lifecycle_outcome(&lifecycle_handle("UNKNOWN")).unwrap();
+        assert!(unknown.contains("Outcome unknown"));
+        assert!(unknown.contains("may have happened"));
+        assert!(unknown.contains("operation id: op-1"));
+        assert!(unknown.contains("reconcile: OPERATION_ID op-1"));
+        assert!(unknown.contains("command-recover --request r-1"));
+        assert!(!unknown.contains("was created"));
+        assert!(!unknown.contains("not created"));
+        assert!(!render_command(&lifecycle_handle("UNKNOWN")).contains("session:"));
+    }
+
+    #[test]
+    fn lifecycle_json_carries_all_four_states_and_machine_fields() {
+        for disposition in ["READY", "READY_WITH_WARNING", "FAILED", "UNKNOWN"] {
+            let outcome = CliOutcome::lifecycle(
+                &command(),
+                &lifecycle_handle(disposition),
+                lifecycle_error_code(&lifecycle_handle(disposition)),
+                "human\n".to_owned(),
+                lifecycle_exit_code(&lifecycle_handle(disposition)),
+            );
+            let value = outcome.to_json();
+            assert_eq!(value["data"]["lifecycle_receipt"]["disposition"], disposition);
+            assert_eq!(value["data"]["lifecycle_receipt"]["operation"], "create");
+            assert_eq!(value["data"]["lifecycle_receipt"]["operation_id"], "op-1");
+            if disposition == "UNKNOWN" {
+                assert_eq!(outcome.exit, 7);
+                assert_eq!(value["error"]["code"], "unknown");
+                assert_eq!(value["data"]["lifecycle_receipt"]["reconcile_mode"], "OPERATION_ID");
+            } else if disposition == "FAILED" {
+                assert_eq!(outcome.exit, 3);
+                assert_eq!(value["error"]["code"], "operation_failed");
+                assert_eq!(value["data"]["lifecycle_receipt"]["reason_code"], "WORKSPACE_NOT_FOUND");
+            } else {
+                assert_eq!(outcome.exit, 0);
+                assert!(value.get("error").is_none());
+            }
+            assert_eq!(outcome.render(), "human\n");
+        }
     }
 }
 
@@ -775,4 +1090,5 @@ mod typed_content_tests {
             format!("a fixture version=3 digest={} review\n", "01".repeat(32))
         );
     }
+
 }

@@ -2897,6 +2897,7 @@ dependencies = [
  "hex",
  "hkdf",
  "keyring",
+ "libc",
  "prost",
  "rand 0.9.5",
  "reqwest",

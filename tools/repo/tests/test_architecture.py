@@ -11,7 +11,7 @@ from conftest import FakeRunner, ok, report_facts
 from repo import cli, testing, toolchain
 from repo.errors import RepoError, UsageError
 from repo.projects import Project, load_projects, select_projects
-from repo.reports.model import atomic_write, read_report, validate
+from repo.reports.model import atomic_write, read_report, summary, validate
 from repo.runners import integration, rust
 
 
@@ -126,6 +126,9 @@ def test_json_projects_and_errors(registry, monkeypatch, capsys):
         (testing.TestRequest(suite="bad"), False),
         (testing.TestRequest(suite="integration"), True),
         (testing.TestRequest(group="protocol"), False),
+        (testing.TestRequest(integration_timeout=5), False),
+        (testing.TestRequest(suite="integration", integration_timeout=0), False),
+        (testing.TestRequest(suite="integration", integration_timeout=-1), False),
         (testing.TestRequest(coverage=True, only="case"), False),
         (testing.TestRequest(coverage=True, list_only=True), False),
         (testing.TestRequest(coverage=True, suite="integration"), False),
@@ -355,6 +358,7 @@ def test_container_ownership_and_export(tmp_path, mode, out, group):
         run = next(args for args, _ in runner.calls if args[1] == "run")
         name = run[run.index("--name") + 1]
         assert name.startswith("whalerein-test-")
+        assert run[run.index("--tmpfs") + 1] == "/tmp:rw,exec,size=1024m,mode=1777"
         assert any(args[1] == "rm" and args[-1] == name for args, _ in runner.calls)
         assert run[run.index("--group") + 1] == group
         assert run[run.index("--only") + 1] == "chosen"
@@ -731,3 +735,84 @@ def test_parallel_builds_run_their_own_immutable_image_id(tmp_path):
     result = integration.collect(tmp_path, Docker("a"), request, tmp_path / "a")
     assert result["exit_code"] == 0
     assert observed == {label: "sha256:" + label * 64 for label in ("a", "b")}
+
+
+@pytest.mark.parametrize("requested,expected", [(None, 7200), (37, 37)])
+def test_integration_execution_deadline_and_timeout_cleanup(tmp_path, requested, expected):
+    timeouts = {}
+    calls = []
+
+    class Docker(FakeRunner):
+        def run(self, argv, cwd, **kwargs):
+            args = tuple(map(str, argv))
+            calls.append(args)
+            if args[1:3] == ("buildx", "build"):
+                timeouts["build"] = kwargs["timeout"]
+                Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "a" * 64)
+            if args[1] == "run":
+                timeouts["run"] = kwargs["timeout"]
+                return ok(returncode=124)
+            if args[1] == "stop":
+                assert args[args.index("--signal") + 1] == "SIGINT"
+                (tmp_path / "container/integration.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "scope": {
+                                **scope("interrupted", 130),
+                                "suite_id": "integration",
+                                "project": "integration",
+                            },
+                        }
+                    )
+                )
+            return ok()
+
+    request = testing.TestRequest(suite="integration", integration_timeout=requested)
+    request.validate()
+    result = integration.collect(tmp_path, Docker(), request, tmp_path)
+    assert timeouts == {"build": 1800, "run": expected + 40}
+    run_args = next(args for args in calls if args[1] == "run")
+    assert f"WHALEREIN_INTEGRATION_TIMEOUT={expected}" in run_args
+    assert result["exit_code"] == 124
+    assert result["completeness"] == "incomplete"
+    assert summary([result])["total_cases"] is None
+    assert result["tests"][0]["status"] == "interrupted"
+    assert any("timed out" in error for error in result["errors"])
+    assert any(args[1] == "rm" for args in calls)
+    assert any(args[1] == "ps" for args in calls)
+
+
+def test_integration_docker_entrypoint_uses_the_supplied_execution_deadline():
+    root = Path(__file__).resolve().parents[3]
+    dockerfile = (root / "tests/integration/Dockerfile").read_text()
+    entrypoint = next(line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT "))
+    assert "pytest" in entrypoint
+    assert "${WHALEREIN_INTEGRATION_TIMEOUT:-7200}" in entrypoint
+    assert '"1800s"' not in entrypoint
+
+
+@pytest.mark.parametrize("failure_stream", ["stdout", "stderr"])
+def test_rust_coverage_failure_reports_failed_test_without_exposing_output(
+    tmp_path, failure_stream
+):
+    project = Project("sample", "rust", tmp_path, tmp_path / "Cargo.toml", tmp_path, "sample")
+    failure = "test run::tests::connect_profile ... FAILED\nmessage_content=synthetic-private\n"
+    stdout = failure if failure_stream == "stdout" else ""
+    stderr = failure + "x" * 1200 if failure_stream == "stderr" else "x" * 1200
+    runner = FakeRunner(responses=[ok(), ok(), ok(stdout, returncode=101, stderr=stderr)])
+    measured = rust.measure(project, runner)
+    assert not measured.ok
+    assert "run::tests::connect_profile" in measured.error
+    assert "synthetic-private" not in measured.error
+
+
+def test_rust_coverage_failure_fallback_suppresses_captured_output(tmp_path):
+    project = Project("sample", "rust", tmp_path, tmp_path / "Cargo.toml", tmp_path, "sample")
+    runner = FakeRunner(
+        responses=[ok(), ok(), ok("message_content=synthetic-private\n", returncode=101)]
+    )
+    measured = rust.measure(project, runner)
+    assert not measured.ok
+    assert "101" in measured.error
+    assert "synthetic-private" not in measured.error

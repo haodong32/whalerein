@@ -25,6 +25,7 @@ export class DshAdapter extends SourceAdapter {
     this.now = now
     this.logger = logger
     this.opened = false
+    this.deliveryModes = ['START_IF_IDLE']
     this.conversation = new DshConversation(this)
   }
 
@@ -41,34 +42,74 @@ export class DshAdapter extends SourceAdapter {
     this.#scheduled=false
   }
 
-  async listSessions() {
+  async describeHostCapabilities() {
     const source = this.describe().capabilities ?? []
-    const capabilities = {history:source.includes('snapshot'),resumable_history:source.includes('sync'),live_text:source.includes('events'),interrupt:source.includes('interrupt'),approvals:source.includes('approvals')&&this.approvalMode!=='delegate',delivery_modes:['START_IF_IDLE']}
-    return (await this.listNativeSessions()).map(({cursor,...session})=>({...session,historyCursor:'',sourceCapabilities:capabilities}))
+    return { model_catalog: source.includes('model-catalog'), model_read: source.includes('model-read') }
   }
 
-  async getSession(sessionId) {
-    const sessions = await this.listSessions()
+  async listSessions(options = {}) {
+    const source = this.describe().capabilities ?? []
+    const capabilities = {history:source.includes('snapshot'),resumable_history:source.includes('sync'),live_text:source.includes('events'),interrupt:source.includes('interrupt'),approvals:source.includes('approvals')&&this.approvalMode!=='delegate',model_selection:source.includes('model-select'),delivery_modes:this.supportedDeliveryModes(),pending_queue_read:source.includes('pending-queue-read'),pending_queue_edit:source.includes('pending-queue-edit'),pending_queue_remove:source.includes('pending-queue-remove'),pending_queue_steer:source.includes('pending-queue-steer'),questions_read:source.includes('questions-read'),questions_answer_open:source.includes('questions-answer-open'),questions_answer_continued:source.includes('questions-answer-continued'),session_fork:source.includes('session-fork')}
+    const sessions=await this.listNativeSessions(options)
+    if(options.signal?.aborted) throw new AdapterError('unavailable')
+    return sessions.map(({cursor,...session})=>({...session,historyCursor:'',sourceCapabilities:capabilities}))
+  }
+
+  supportedDeliveryModes() { return this.deliveryModes }
+
+  async getSession(sessionId, options) {
+    const sessions = await this.listSessions(options)
     const summary = sessions.find(session => session.sessionId === sessionId)
     if (!summary) throw new AdapterError('not_found', 'session unavailable')
     return summary
   }
 
-  async execute(sessionId, command) {
+  assertCommandFresh(context = {}) {
+    if (context.signal?.aborted) throw new DefinitiveExecutionError(context.signal.reason === 'expired' ? 'expired' : 'unavailable')
+    if (context.expiresAt > 0 && context.expiresAt <= this.now()) throw new DefinitiveExecutionError('expired')
+  }
+
+  async execute(sessionId, command, context = {}) {
+    this.assertCommandFresh(context)
+    if (command.fork_session) return this.forkSession(sessionId)
     if (command.send_message) {
-      const mode = command.send_message.delivery_mode || 'START_IF_IDLE'
-      if (mode !== 'START_IF_IDLE') throw new DefinitiveExecutionError('unsupported_capability', 'delivery mode unavailable')
-      let session
-      try { session = await this.getSession(sessionId) }
-      catch (error) { throw new DefinitiveExecutionError(mapAdapterError(error)) }
-      if (session.running) throw new DefinitiveExecutionError('conflict', 'session busy')
-      const result = await this.sendUserMessage(sessionId, command.send_message.text)
-      return {command_accepted:{message_id:result?.messageId??''}}
+      const raw = command.send_message.delivery_mode
+      const mode = raw == null || raw === 0 || raw === 'DELIVERY_MODE_UNSPECIFIED' ? 'ENQUEUE_AFTER_RUN' : raw
+      if (!['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER'].includes(mode)) {
+        throw new DefinitiveExecutionError('invalid_argument', 'delivery mode invalid')
+      }
+      if (!this.supportedDeliveryModes().includes(mode)) throw new DefinitiveExecutionError('unsupported_capability', 'delivery mode unavailable')
+      if (mode === 'START_IF_IDLE') {
+        let session
+        try { session = await this.getSession(sessionId, {signal:context.signal}) }
+        catch (error) { throw new DefinitiveExecutionError(mapAdapterError(error)) }
+        if (session.running) throw new DefinitiveExecutionError('conflict', 'session busy')
+      }
+      this.assertCommandFresh(context)
+      if (!this.supportedDeliveryModes().includes(mode)) throw new DefinitiveExecutionError('unsupported_capability', 'delivery mode unavailable')
+      const result = await this.sendUserMessage(sessionId, command.send_message.text, mode === 'STEER' ? 'steer' : 'queue', context.operationId)
+      return {command_accepted:{message_id:result?.messageId??'', delivery_id:result?.deliveryId??''}}
     }
+    if (command.select_session_model) {
+      const receipt = await this.selectSessionModel(sessionId, command.select_session_model)
+      return { model_selection_receipt: receipt }
+    }
+    if (command.update_pending_queue) return this.updatePendingQueue(sessionId, command.update_pending_queue, context)
     if (command.interrupt) { await this.interrupt(sessionId); return {} }
+    if (command.answer_question) {
+      const request = command.answer_question
+      if (request.session_id !== sessionId) throw new DefinitiveExecutionError('invalid_argument')
+      if (request.expected_phase === 'QUESTION_OPEN' && this.describe().capabilities?.includes('questions-answer-open')) {
+        return { question_receipt: await this.answerOpenQuestion(request, context.signal, context) }
+      }
+      if (request.expected_phase !== 'QUESTION_CONTINUED' || !this.describe().capabilities?.includes('questions-answer-continued')) {
+        throw new DefinitiveExecutionError('unsupported_capability')
+      }
+      return { question_receipt: await this.answerContinuedQuestion(request, context) }
+    }
     if (command.resolve_approval) {
       const approval = command.resolve_approval
-      await this.resolveApproval(approval.approval_id, approval.decision === 'APPROVAL_DECISION_APPROVE'?'approve':'reject', approval.expected_digest, Number(approval.expected_version))
+      await this.resolveApproval(approval.approval_id, approval.decision === 'APPROVAL_DECISION_APPROVE'?'approve':'reject', approval.expected_digest, Number(approval.expected_version), context)
       return {}
     }
     throw new DefinitiveExecutionError('unsupported_capability')
@@ -111,8 +152,8 @@ export class DshAdapter extends SourceAdapter {
     }
   }
 
-  readHistory(sessionId, read) { return this.conversation.history.read(sessionId, read) }
-  readState(sessionId) { return this.conversation.state(sessionId) }
+  readHistory(sessionId, read, options) { return this.conversation.history.read(sessionId, read, options) }
+  readState(sessionId, options) { return this.conversation.state(sessionId, options) }
 
   async listNativeSessions() {
     throw new AdapterError('unsupported_capability', 'sessions unavailable')
@@ -136,8 +177,16 @@ export class DshAdapter extends SourceAdapter {
     throw new AdapterError('unsupported_capability', 'approvals unavailable')
   }
 
+  async forkSession() {
+    throw new DefinitiveExecutionError('unsupported_capability')
+  }
+
   async sendUserMessage() {
     throw new AdapterError('unsupported_capability', 'messages unavailable')
+  }
+
+  async updatePendingQueue() {
+    throw new DefinitiveExecutionError('unsupported_capability')
   }
 
   async interrupt() {

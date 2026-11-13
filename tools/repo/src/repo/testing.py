@@ -26,6 +26,8 @@ class TestRequest:
     group: str | None = None
     coverage: bool = False
     list_only: bool = False
+    integration_timeout: int | None = None
+    parallel: int | None = None
 
     def validate(self, explicit=False):
         if self.suite not in ("unit", "integration", "all"):
@@ -34,6 +36,18 @@ class TestRequest:
             raise UsageError("--project requires the unit suite")
         if self.group and self.suite != "integration":
             raise UsageError("--group requires the integration suite")
+        if self.parallel is not None:
+            if self.suite != "integration":
+                raise UsageError("--parallel requires the integration suite")
+            if self.list_only:
+                raise UsageError("--parallel cannot combine with --list")
+            if not 1 <= self.parallel <= 8:
+                raise UsageError("--parallel must be between 1 and 8")
+        if self.integration_timeout is not None:
+            if self.suite not in ("integration", "all"):
+                raise UsageError("--integration-timeout requires the integration or all suite")
+            if self.integration_timeout <= 0:
+                raise UsageError("--integration-timeout must be a positive number of seconds")
         if self.coverage and (
             self.only is not None or self.list_only or self.suite == "integration"
         ):
@@ -200,10 +214,16 @@ def run(root, projects, runner, request, output=None):
         runner.progress = None
     if request.only and not any(request.only in c["id"] for s in scopes for c in s["tests"]):
         scopes[0].setdefault("errors", []).append("No test cases match --only")
+    configuration = asdict(request)
+    configuration["parallel"] = request.parallel or 1
+    if request.suite in ("integration", "all"):
+        configuration["integration_timeout"] = (
+            request.integration_timeout or integration.DEFAULT_EXECUTION_TIMEOUT_SECONDS
+        )
     document = {
         "schema_version": VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
-        "configuration": asdict(request),
+        "configuration": configuration,
         "scope": "partial" if request.only or request.group or request.suite != "all" else "full",
         "completeness": "complete"
         if all(s["completeness"] == "complete" for s in scopes)

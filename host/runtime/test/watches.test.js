@@ -154,3 +154,45 @@ test('when channel replacement cancels watch installation, its eventual handle c
   assert.equal(ctx.events.describe().sessions,0)
  } finally {await ctx.events.stop();ctx.store.close()}
 })
+
+test('channel lifecycle aborts watch setup after source-state precheck', async () => {
+ const ctx=fixture()
+ let release,entered,seenSignal
+ const barrier=new Promise(resolve=>{release=resolve})
+ const started=new Promise(resolve=>{entered=resolve})
+ const original=ctx.source.readState.bind(ctx.source)
+ ctx.source.readState=async(id,{signal}={})=>{seenSignal=signal;entered();await barrier;return original(id)}
+ const abort=new AbortController()
+ const pending=ctx.events.watch('d',ctx.channel.channelId,'s',abort.signal)
+ await started
+ abort.abort('unavailable')
+ assert.equal(seenSignal.aborted,true)
+ release()
+ await assert.rejects(pending,error=>error.code==='unavailable')
+ assert.equal(ctx.events.describe().watches,0)
+ assert.equal(ctx.source.closed,1)
+ await ctx.events.stop()
+})
+
+test('channel lifecycle stops shared watch refresh only after the last recipient leaves', async () => {
+ const ctx=fixture()
+ const other=establishChannel({hostId:'h',deviceId:'second',security:ctx.security,store:ctx.store})
+ await ctx.events.watch('d',ctx.channel.channelId,'s')
+ await ctx.events.watch('second',other.channelId,'s')
+ let entered,release,seenSignal
+ const barrier=new Promise(resolve=>{release=resolve})
+ const started=new Promise(resolve=>{entered=resolve})
+ const original=ctx.source.readState.bind(ctx.source)
+ ctx.source.readState=async(id,{signal}={})=>{seenSignal=signal;entered();await barrier;return original(id)}
+ ctx.source.sinks.get('s')({session:{session_id:'s'},state_changed:true})
+ await started
+ ctx.events.onChannelReplaced('d',ctx.channel.channelId)
+ assert.equal(seenSignal.aborted,false)
+ ctx.events.onChannelReplaced('second',other.channelId)
+ assert.equal(seenSignal.aborted,true)
+ release()
+ await settle()
+ assert.equal(ctx.access.published.length,0)
+ assert.equal(ctx.events.describe().watches,0)
+ await ctx.events.stop()
+})

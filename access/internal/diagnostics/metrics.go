@@ -29,6 +29,12 @@ type Metrics struct {
 	ConnectedDevices      prometheus.Gauge
 	RevocationLatency     prometheus.Histogram
 	RequestForwardRetries prometheus.Counter
+
+	DevicePresenceEvents      *prometheus.CounterVec
+	PresenceDuplicatesIgnored prometheus.Counter
+	PresenceInvalidPayloads   prometheus.Counter
+	DeviceOfflinePublishFail  prometheus.Counter
+	ClientPollStale           prometheus.Counter
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -80,6 +86,26 @@ func NewMetrics() *Metrics {
 			Name: "request_forward_retries_total",
 			Help: "Request forwarding attempts after the first attempt.",
 		}),
+		DevicePresenceEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "device_presence_events_total",
+			Help: "Accepted device presence events by bounded source and state.",
+		}, []string{"source", "state"}),
+		PresenceDuplicatesIgnored: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "presence_duplicates_ignored_total",
+			Help: "Repeated device offline events ignored without a new callback.",
+		}),
+		PresenceInvalidPayloads: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "presence_invalid_payloads_total",
+			Help: "Presence payloads or topics dropped as unknown or invalid.",
+		}),
+		DeviceOfflinePublishFail: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "device_offline_publish_failures_total",
+			Help: "Device offline events that could not be published to a host.",
+		}),
+		ClientPollStale: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "request_client_stale_total",
+			Help: "HTTP-polling clients that stopped renewing a non-terminal request claim.",
+		}),
 	}
 	registry.MustRegister(
 		m.HostResults,
@@ -93,6 +119,11 @@ func NewMetrics() *Metrics {
 		m.ConnectedDevices,
 		m.RevocationLatency,
 		m.RequestForwardRetries,
+		m.DevicePresenceEvents,
+		m.PresenceDuplicatesIgnored,
+		m.PresenceInvalidPayloads,
+		m.DeviceOfflinePublishFail,
+		m.ClientPollStale,
 	)
 	return m
 }
@@ -153,6 +184,56 @@ func (m *Metrics) ObserveRevocation(duration time.Duration) {
 		return
 	}
 	m.RevocationLatency.Observe(float64(duration.Milliseconds()))
+}
+
+// PresenceEvent records one accepted broker/device presence event. Labels are
+// bounded: an unknown source or state collapses to "unknown" so a malformed
+// caller cannot grow metric cardinality.
+func (m *Metrics) PresenceEvent(source, state string) {
+	if m == nil {
+		return
+	}
+	switch source {
+	case "sys", "will", "broker":
+	default:
+		source = "unknown"
+	}
+	switch state {
+	case "online", "offline":
+	default:
+		state = "unknown"
+	}
+	m.DevicePresenceEvents.WithLabelValues(source, state).Inc()
+}
+
+// PresenceDuplicate records a repeated device offline event.
+func (m *Metrics) PresenceDuplicate() {
+	if m != nil {
+		m.PresenceDuplicatesIgnored.Inc()
+	}
+}
+
+// PresenceInvalid records a presence topic or payload that was dropped.
+func (m *Metrics) PresenceInvalid() {
+	if m != nil {
+		m.PresenceInvalidPayloads.Inc()
+	}
+}
+
+// DeviceOfflinePublishFailed records a device offline event that did not reach
+// every authorized host.
+// RequestClaimStale records one request released after its HTTP client
+// stopped polling.
+func (m *Metrics) RequestClaimStale() {
+	if m != nil && m.ClientPollStale != nil {
+		m.ClientPollStale.Inc()
+	}
+}
+
+func (m *Metrics) DeviceOfflinePublishFailed() {
+	if m != nil {
+		m.DeviceOfflinePublishFail.Inc()
+	}
 }
 
 // ObserveHostResult counts host-level results separately from HTTP success.

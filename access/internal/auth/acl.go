@@ -16,11 +16,13 @@ const (
 )
 
 const (
-	topicPrefix     = "whalerein/v1/h/"
-	accessResult    = "whalerein/v1/h/+/result"
-	accessEvent     = "whalerein/v1/h/+/event"
-	sysConnected    = "$SYS/brokers/+/clients/+/connected"
-	sysDisconnected = "$SYS/brokers/+/clients/+/disconnected"
+	topicPrefix      = "whalerein/v1/h/"
+	accessResult     = "whalerein/v1/h/+/result"
+	accessEvent      = "whalerein/v1/h/+/event"
+	accessDeviceWill = "whalerein/v1/presence/device/+"
+	deviceWillPrefix = "whalerein/v1/presence/device/"
+	sysConnected     = "$SYS/brokers/+/clients/+/connected"
+	sysDisconnected  = "$SYS/brokers/+/clients/+/disconnected"
 )
 
 // AuthorizeACL evaluates the exact topic rules for the authenticated broker
@@ -46,15 +48,19 @@ func (s *Service) AuthorizeACL(ctx context.Context, identity BrokerIdentity, act
 func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 	switch action {
 	case ActionSubscribe:
-		// Access needs results, events and broker presence system topics.
+		// Access needs results, events, device receipts, device last wills and
+		// broker presence system topics.
 		return topic == accessResult || topic == accessEvent ||
-			topic == sysConnected || topic == sysDisconnected || topic == "whalerein/v1/h/+/d/+/ack"
+			topic == sysConnected || topic == sysDisconnected ||
+			topic == accessDeviceWill || topic == "whalerein/v1/h/+/d/+/ack"
 	case ActionPublish:
 		parsed, ok := parseTopic(topic)
 		if !ok {
 			return false
 		}
-		return parsed.kind == "request" || (parsed.kind == "device_event" && parsed.hostID != "")
+		return parsed.kind == "request" ||
+			(parsed.kind == "device_event" && parsed.hostID != "") ||
+			parsed.kind == "presence"
 	}
 	return false
 }
@@ -69,7 +75,7 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 	}
 	switch action {
 	case ActionSubscribe:
-		return parsed.kind == "request"
+		return parsed.kind == "request" || parsed.kind == "presence"
 	case ActionPublish:
 		return parsed.kind == "result" || parsed.kind == "event"
 	}
@@ -79,6 +85,13 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 func (s *Service) authorizeDeviceACL(ctx context.Context, identity BrokerIdentity, action ACLAction, topic string) (bool, error) {
 	if strings.ContainsAny(topic, "+#") {
 		return false, nil
+	}
+	// A device may publish only its own non-retained last will. This does not
+	// depend on a grant: the event cannot name another device or host.
+	if action == ActionPublish {
+		if deviceID, ok := parseDeviceWillTopic(topic); ok {
+			return identity.DeviceID != "" && deviceID == identity.DeviceID, nil
+		}
 	}
 	parsed, ok := parseTopic(topic)
 	if !ok || !((action == ActionSubscribe && parsed.kind == "device_event") || (action == ActionPublish && parsed.kind == "device_ack")) {
@@ -119,7 +132,7 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{}, false
 		}
 		switch leaf {
-		case "request", "result", "event":
+		case "request", "result", "event", "presence":
 			return parsedTopic{hostID: hostID, kind: leaf}, true
 		default:
 			return parsedTopic{}, false
@@ -140,4 +153,18 @@ func parseTopic(topic string) (parsedTopic, bool) {
 	default:
 		return parsedTopic{}, false
 	}
+}
+
+// parseDeviceWillTopic parses the device-scoped last-will topic:
+//
+//	whalerein/v1/presence/device/{device_id}
+func parseDeviceWillTopic(topic string) (string, bool) {
+	if !strings.HasPrefix(topic, deviceWillPrefix) {
+		return "", false
+	}
+	deviceID := strings.TrimPrefix(topic, deviceWillPrefix)
+	if deviceID == "" || strings.ContainsAny(deviceID, "/+#") {
+		return "", false
+	}
+	return deviceID, true
 }

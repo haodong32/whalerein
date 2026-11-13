@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { DshHistory } from './history.js'
+import { AdapterError } from 'whalerein-host/errors.js'
 
 // This normalization state belongs to the DSH adapter, never the Host or CLI.
 export class DshConversation {
@@ -7,13 +8,18 @@ export class DshConversation {
   #origins=new Map()
   #settlements=new Map()
   constructor(source) { this.source=source;this.history=new DshHistory(source);this.epoch=randomUUID() }
-  async state(sessionId) {
-    const sessions=await this.source.listSessions()
+  async state(sessionId,{signal}={}) {
+    if(signal?.aborted)throw new AdapterError('unavailable')
+    const sessions=await this.source.listSessions({signal})
+    if(signal?.aborted)throw new AdapterError('unavailable')
     const summary=sessions.find(s=>s.sessionId===sessionId)
-    const head=await this.history.head(sessionId)
+    const head=await this.history.head(sessionId,{signal})
+    if(signal?.aborted)throw new AdapterError('unavailable')
+    const approvals=await this.source.listApprovals(sessionId)
+    if(signal?.aborted)throw new AdapterError('unavailable')
     return {session:{session_id:sessionId},live_epoch:this.epoch,revision:++this.revision,
       history_head:head,run_phase:summary?.running?'RUNNING':'IDLE',
-      approvals:(await this.source.listApprovals(sessionId)).map(a=>({approval_id:a.approvalId,session_id:a.sessionId,tool_name:a.toolName,call_id:a.callId,reason:a.reason,digest:a.digest,version:a.version,expires_at_unix_ms:a.expiresAt,state:`APPROVAL_STATE_${a.state.toUpperCase()}`,decision:a.decision?`APPROVAL_DECISION_${a.decision.toUpperCase()}`:'APPROVAL_DECISION_UNSPECIFIED'}))}
+      approvals:approvals.map(a=>({approval_id:a.approvalId,session_id:a.sessionId,tool_name:a.toolName,call_id:a.callId,reason:a.reason,digest:a.digest,version:a.version,expires_at_unix_ms:a.expiresAt,state:`APPROVAL_STATE_${a.state.toUpperCase()}`,decision:a.decision?`APPROVAL_DECISION_${a.decision.toUpperCase()}`:'APPROVAL_DECISION_UNSPECIFIED'}))}
   }
   revision=0
   changeView(){this.epoch=randomUUID();this.#streams.clear();this.#origins.clear();this.#settlements.clear()}

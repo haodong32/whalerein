@@ -26,8 +26,70 @@ pub async fn ensure_channel(
     force_new: bool,
     expected_fingerprint: Option<&str>,
 ) -> CoreResult<SecureChannel> {
+    let stale = force_new.then(|| {
+        runtime
+            .channel(host_id)
+            .map(|channel| channel.channel_id().to_owned())
+    });
+    ensure_channel_guarded(
+        runtime,
+        access,
+        identity,
+        host_id,
+        device_id,
+        force_new,
+        stale,
+        expected_fingerprint,
+    )
+    .await
+}
+
+/// Refresh only if the channel which failed is still current. If another
+/// observation has already reconnected, reuse its replacement.
+pub(crate) async fn ensure_channel_after(
+    runtime: &Runtime,
+    access: &AccessClient,
+    identity: &StaticIdentity,
+    host_id: &str,
+    device_id: &str,
+    stale_channel_id: &str,
+    expected_fingerprint: Option<&str>,
+) -> CoreResult<SecureChannel> {
+    ensure_channel_guarded(
+        runtime,
+        access,
+        identity,
+        host_id,
+        device_id,
+        true,
+        Some(Some(stale_channel_id.to_owned())),
+        expected_fingerprint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_channel_guarded(
+    runtime: &Runtime,
+    access: &AccessClient,
+    identity: &StaticIdentity,
+    host_id: &str,
+    device_id: &str,
+    mut force_new: bool,
+    stale_channel_id: Option<Option<String>>,
+    expected_fingerprint: Option<&str>,
+) -> CoreResult<SecureChannel> {
+    let lock = runtime.channel_lock(host_id);
+    let _guard = lock.lock().await;
     if runtime.is_revoked() {
         return Err(CoreError::Revoked);
+    }
+    if force_new {
+        if let (Some(observed), Some(current)) = (&stale_channel_id, runtime.channel(host_id)) {
+            if observed.as_deref() != Some(current.channel_id()) {
+                force_new = false;
+            }
+        }
     }
     if !force_new {
         if let Some(channel) = runtime.channel(host_id) {

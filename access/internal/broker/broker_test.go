@@ -69,6 +69,24 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 	if ClientIDForHost("h1") != "whalerein-host-h1" || ClientIDForDevice("d1") != "whalerein-device-d1" {
 		t.Fatal("client id helpers")
 	}
+	if PresenceTopic("h1") != "whalerein/v1/h/h1/presence" {
+		t.Fatalf("presence topic = %q", PresenceTopic("h1"))
+	}
+	if DeviceWillTopic("d1") != "whalerein/v1/presence/device/d1" || DeviceWillFilter != "whalerein/v1/presence/device/+" {
+		t.Fatalf("device will topics = %q %q", DeviceWillTopic("d1"), DeviceWillFilter)
+	}
+	if deviceID, ok := ParseDeviceWillTopic(DeviceWillTopic("d1")); !ok || deviceID != "d1" {
+		t.Fatalf("parse device will = %q %v", deviceID, ok)
+	}
+	for _, bad := range []string{"", DeviceWillFilter, "whalerein/v1/presence/device/", "whalerein/v1/presence/device/d1/x", "whalerein/v1/presence/device/#"} {
+		if _, ok := ParseDeviceWillTopic(bad); ok {
+			t.Fatalf("expected invalid device will topic %q", bad)
+		}
+	}
+	parsed, err := ParseTopic(PresenceTopic("h1"))
+	if err != nil || parsed.HostID != "h1" || parsed.Kind != KindPresence {
+		t.Fatalf("parse presence = %+v %v", parsed, err)
+	}
 }
 
 func TestParseSysClientTopicRecognizesConnectionEvents(t *testing.T) {
@@ -463,6 +481,7 @@ func (f *fakeDisconnecter) Disconnect(_ context.Context, clientID string) error 
 type fakeSession struct {
 	mu           sync.Mutex
 	published    []string
+	payloads     [][]byte
 	subscribed   []string
 	publishErr   error
 	subscribeErr error
@@ -479,6 +498,7 @@ func newFakeSession() *fakeSession {
 func (f *fakeSession) Publish(_ context.Context, topic string, payload []byte, qos byte) error {
 	f.mu.Lock()
 	f.published = append(f.published, topic)
+	f.payloads = append(f.payloads, append([]byte(nil), payload...))
 	f.qos = append(f.qos, qos)
 	f.mu.Unlock()
 	if f.onPublish != nil {
@@ -529,11 +549,14 @@ func (f *fakeConnector) Connect(context.Context) (Session, error) {
 
 func testService(t *testing.T, connector Connector) *Service {
 	t.Helper()
+	metrics := diagnostics.NewMetrics()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	presence := NewPresence(50*time.Millisecond, nil, metrics, logger)
 	service, err := New(Dependencies{
 		Config:   config.BrokerConfig{PublishTimeout: config.Duration(time.Second), ReconnectMin: config.Duration(time.Millisecond), ReconnectMax: config.Duration(5 * time.Millisecond)},
-		Presence: newPresence(), Connector: connector,
-		Metrics: diagnostics.NewMetrics(), Masker: diagnostics.NewMaskerWithKey([]byte("broker")),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Presence: presence, Connector: connector,
+		Metrics: metrics, Masker: diagnostics.NewMaskerWithKey([]byte("broker")),
+		Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -567,8 +590,11 @@ func TestBrokerReconnectsAfterFailureAndStopsOnCancellation(t *testing.T) {
 	session.mu.Lock()
 	subscribed := append([]string(nil), session.subscribed...)
 	session.mu.Unlock()
-	if len(subscribed) != 5 {
+	if len(subscribed) != 6 {
 		t.Fatalf("subscribed = %v", subscribed)
+	}
+	if subscribed[3] != DeviceWillFilter {
+		t.Fatalf("device will filter not subscribed: %v", subscribed)
 	}
 	close(session.done)
 	time.Sleep(5 * time.Millisecond)
@@ -1049,5 +1075,22 @@ func TestPahoSessionPreservesRequestedQoSAndReportsBrokerRejections(t *testing.T
 	}
 	if err := (&pahoSession{}).Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPahoSessionPublishesPresenceJsonAsRawMqtt(t *testing.T) {
+	client := &fakeMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0}}
+	peers := &sync.Map{}
+	transport := newLogicalTransport(func(ctx context.Context, topic string, payload []byte) error {
+		_, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Payload: payload})
+		return err
+	}, func(string, []byte) {})
+	session := &pahoSession{client: client, transport: transport, peers: peers}
+	payload := []byte(`{"event":"device_offline","device_id":"d1","reason":"will","observed_at":"2026-11-13T12:00:00Z"}`)
+	if err := session.Publish(context.Background(), PresenceTopic("h1"), payload, 1); err != nil {
+		t.Fatal(err)
+	}
+	if client.publishTopic != "whalerein/v1/h/h1/presence" || client.publishQoS != 1 || !bytes.Equal(client.publishPayload, payload) {
+		t.Fatalf("publish topic=%q qos=%d payload=%q", client.publishTopic, client.publishQoS, client.publishPayload)
 	}
 }

@@ -11,8 +11,10 @@ import { StateStore } from './state/store.js'
 import { SecurityManager } from './security/manager.js'
 import { authorizationPublicKey } from './security/host-auth.js'
 import { CommandService } from './commands/service.js'
+import { questionResponseBudget } from './commands/question-pager.js'
 import { WatchedEvents } from './events/watches.js'
 import { MqttAccess } from './access/mqtt.js'
+import { MESSAGE_BYTES } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
 
 const EMPTY = new Uint8Array(0)
@@ -30,6 +32,7 @@ export class HostRuntime {
   #security = null
   #events = null
   #commands = null
+  presenceEvents = 0
   #access = null
   #codec = null
   #config
@@ -124,6 +127,10 @@ export class HostRuntime {
         now: this.now,
         protocolVersion: PROTOCOL_VERSION,
         codec: this.#codec,
+        onRevokedChannels: channels => {
+          this.#events?.onChannelsCleared(channels)
+          for (const { deviceId, channelId } of channels) this.#commands?.cancelChannel(deviceId, channelId, 'revoked')
+        },
       })
       this.#access = this.injectedAccess ?? new MqttAccess({
         url: this.#config.mqttUrl,
@@ -149,6 +156,7 @@ export class HostRuntime {
         codec: this.#codec,
       })
       this.#commands = new CommandService({
+        hostId: this.#config.hostId,
         store: this.#store,
         adapter: this.#adapter,
         events: this.#events,
@@ -173,6 +181,7 @@ export class HostRuntime {
           this.#clearChannels()
           this.#logger?.warn('host_offline', { code: 'unavailable' })
         },
+        onPresence: (event) => this.#handleDeviceOffline(event),
       })
       this.#started = true
       this.#logger.info('plugin_started', { status: 'started' })
@@ -184,9 +193,32 @@ export class HostRuntime {
     }
   }
 
+  /** Normalized presence entry point (also used by the integration fixture). */
+  notifyPresence(event) { this.#handleDeviceOffline(event) }
+
+
+  #handleDeviceOffline(event) {
+    if (event?.event === 'request_stale') {
+      const requestId = event?.request_id
+      if (typeof requestId !== 'string' || !requestId) return
+      this.#commands?.cancelRequest(requestId, 'client_poll_expired')
+      this.presenceEvents += 1
+      this.#logger?.info('request_stale', { request: requestId, reason: String(event?.reason ?? '').slice(0, 32) })
+      return
+    }
+    const deviceId = event?.device_id
+    if (typeof deviceId !== 'string' || !deviceId) return
+    const closed = this.#security?.clearDeviceChannels(deviceId) ?? []
+    this.#events?.onChannelsCleared(closed)
+    this.#commands?.cancelDevice(deviceId, 'device_offline')
+    this.presenceEvents += 1
+    this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32), closed: closed.length })
+  }
+
   #clearChannels() {
     const closed = this.#security?.clearChannels() ?? []
     this.#events?.onChannelsCleared(closed)
+    for (const { deviceId, channelId } of closed) this.#commands?.cancelChannel(deviceId, channelId)
     return closed
   }
 
@@ -218,6 +250,10 @@ export class HostRuntime {
   }
 
   async #teardown({ closeStore, force }) {
+    this.#commands?.closeRequests()
+    this.#commands?.closeWaits()
+    this.#commands?.closeQuestionAnswers()
+    this.#commands?.closeModelQueries()
     try {
       await this.#access?.stop()
     } catch {
@@ -345,6 +381,7 @@ export class HostRuntime {
       const outcome = this.#security.handleChannelHandshake({ request, message: request.body })
       if (outcome.established && outcome.replacedChannelId) {
         this.#events.onChannelReplaced(request.device_id, outcome.replacedChannelId)
+        this.#commands.cancelChannel(request.device_id, outcome.replacedChannelId, 'channel_replaced')
       }
       return await this.#reply(request, { status: 'succeeded', resultBody: outcome.noiseMessage })
     } catch (error) {
@@ -383,12 +420,27 @@ export class HostRuntime {
     } catch {
       return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
     }
-    const result = await this.#commands.handle({ request, payload })
+    let completedAt
+    const questionBudget = payload.list_questions ? () => {
+      completedAt = this.now()
+      return questionResponseBudget(this.#codec, request, this.#config.hostId, completedAt, PROTOCOL_VERSION)
+    } : undefined
+    const result = await this.#commands.handle({ request, payload, questionResponseBudget: questionBudget })
     const responseBody = this.#encryptResult(request, result)
+    if (result.sourceFailure && (!(responseBody instanceof Uint8Array) || responseBody.length === 0)) {
+      return await this.#reply(request, { status: 'failed', errorCode: 'unavailable' })
+    }
+    if (result.status === 'succeeded' && (!(responseBody instanceof Uint8Array) || responseBody.length === 0)) {
+      // A query cannot succeed without an authenticated response; for a
+      // completed command the effect may already exist, so retain uncertainty.
+      return this.#reply(request, { status:request.kind === 'REQUEST_KIND_QUERY' ? 'failed' : 'unknown', errorCode:'internal', completedAt })
+    }
     return await this.#reply(request, {
       status: result.status,
       resultBody: responseBody ?? undefined,
       errorCode: result.errorCode,
+      enforceResponseBudget: Boolean(payload.list_models || payload.read_session_model || payload.read_pending_queue || payload.list_questions || payload.get_question || payload.wait_session || payload.read_wait_state),
+      completedAt,
     })
   }
 
@@ -401,13 +453,15 @@ export class HostRuntime {
         const encoded = this.#codec.encode('whalerein.v1.ResponsePayload', result.response)
         return this.#security.sealResult({ request, plaintext: encoded })
       }
-    } catch {
+    } catch (error) {
+      // Keep the failure attributable without logging payloads or sizes.
+      this.#logger?.warn('host_result_encrypt_failed', { code: error?.code ?? 'internal', kind: request.kind })
       return null
     }
     return null
   }
 
-  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified' }) {
+  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, completedAt }) {
     const error = isErrorCode(errorCode) ? errorCode : 'internal'
     const result = {
       request_id: request.request_id ?? '',
@@ -420,13 +474,20 @@ export class HostRuntime {
       error_code: error,
       trace_id: request.trace_id ?? '',
       error_message: error === 'error_code_unspecified' ? '' : publicMessage(error),
-      completed_at_unix_ms: this.now(),
+      completed_at_unix_ms: completedAt ?? this.now(),
       protocol_version: PROTOCOL_VERSION,
       channel_id: request.channel_id ?? '',
     }
-    const encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+    let encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+    if (enforceResponseBudget && encoded.length > MESSAGE_BYTES) {
+      result.status = 'failed'
+      result.result_body = EMPTY
+      result.error_code = 'payload_too_large'
+      result.error_message = publicMessage('payload_too_large')
+      encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+    }
     await this.#access.publishResult(encoded)
-    this.#logger?.info('host_result', { status, code: error, request: request.request_id, trace: request.trace_id, kind: request.kind, bytes: encoded.length, layer: 'host' })
+    this.#logger?.info('host_result', { status: result.status, code: result.error_code, request: request.request_id, trace: request.trace_id, kind: request.kind, bytes: encoded.length, layer: 'host' })
     return result
   }
 

@@ -55,6 +55,7 @@ type PairingService interface {
 type RequestService interface {
 	Submit(ctx context.Context, input requests.SubmitInput) (store.Request, bool, error)
 	Get(ctx context.Context, deviceID, requestID string) (store.Request, error)
+	Touch(deviceID, requestID string, status whalereinv1.OnlineStatus)
 }
 
 // PresenceSink accepts EMQX presence webhooks.
@@ -125,6 +126,7 @@ func (s *Server) publicRoutes() []routeSpec {
 		{method: http.MethodGet, pattern: "/v1/hosts", handler: s.handleHosts},
 		{method: http.MethodPost, pattern: "/v1/hosts/{host_id}/requests", handler: s.handleSubmit},
 		{method: http.MethodGet, pattern: "/v1/requests/{request_id}", handler: s.handleGetRequest},
+		{method: http.MethodPost, pattern: "/v1/requests/{request_id}/heartbeat", handler: s.handleHeartbeat},
 		{method: http.MethodDelete, pattern: "/v1/devices/{device_id}", handler: s.handleDeleteDevice},
 		{method: http.MethodPost, pattern: "/v1/hosts/{host_id}/devices/{device_id}/revocation", handler: s.handleHostRevocation},
 		{method: http.MethodGet, pattern: "/healthz", handler: s.handleHealth},

@@ -1,6 +1,7 @@
 // MQTT 5 over TLS transport. This is the plugin's only network connection:
-// no HTTP server and no inbound listener. It subscribes only to its own
-// request topic and publishes only its own result/event topics.
+// no HTTP server and no inbound listener. It subscribes to its own request
+// topic and its exact host presence topic, and publishes only its own
+// result/event topics.
 
 import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
@@ -236,7 +237,7 @@ export class MqttAccess {
     this.logger?.info('mqtt_connected', { reconnects: this.#reconnects, generation })
     try {
       await new Promise((resolve, reject) => {
-        client.subscribe(this.topics.request, { qos: 1 }, (error, grants) => (error || grants?.some((grant) => grant.qos >= 128) ? reject(error ?? new Error('subscription rejected')) : resolve()))
+        client.subscribe([this.topics.request, this.topics.presence], { qos: 1 }, (error, grants) => (error || grants?.some((grant) => grant.qos >= 128) ? reject(error ?? new Error('subscription rejected')) : resolve()))
       })
     } catch {
       this.#lastErrorCode = 'unavailable'
@@ -284,6 +285,15 @@ export class MqttAccess {
   }
 
   #onMessage(topic, payload) {
+    if (topic === this.topics.presence) {
+      let event
+      try { event = JSON.parse(payload.toString('utf8')) } catch { return }
+      if (!['device_offline', 'request_stale'].includes(event?.event)) return
+      if (event.event === 'device_offline' && (typeof event?.device_id !== 'string' || !event.device_id)) return
+      if (event.event === 'request_stale' && (typeof event?.request_id !== 'string' || !event.request_id)) return
+      try { this.#handlers.onPresence?.(event) } catch { /* presence must not break the MQTT loop */ }
+      return
+    }
     if (topic !== this.topics.request) return
     this.#transport.receive(topic, payload, this.topics.result, (bytes) => this.#dispatchRequest(bytes))
       .then((consumed) => { if (!consumed) this.#dispatchRequest(payload) })

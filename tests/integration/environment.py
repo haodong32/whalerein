@@ -85,7 +85,7 @@ class Process:
         raise TimeoutError("Fixture control timed out")
 
 
-def http(path, body=None, token=None, *, return_status=False):
+def http(path, body=None, token=None, *, return_status=False, include_conflict_code=False):
     request = urllib.request.Request(
         "http://127.0.0.1:18080" + path,
         data=json.dumps(body).encode() if body is not None else None,
@@ -99,6 +99,8 @@ def http(path, body=None, token=None, *, return_status=False):
             payload = json.load(response)
             return (response.status, payload) if return_status else payload
     except urllib.error.HTTPError as error:
+        if error.code == 409 and include_conflict_code:
+            return 409, {"code": json.load(error).get("code")}
         raise RuntimeError(f"Access returned HTTP {error.code}") from None
 
 
@@ -151,8 +153,9 @@ class Device:
     def sessions(self, host):
         return self.call("sessions", "--host", host)["sessions"]
 
-    def send(self, session, message):
-        return self.call("send", "--session", session, message)
+    def send(self, session, message, delivery=None):
+        options = ["--delivery", delivery] if delivery else []
+        return self.call("send", "--session", session, *options, message)
 
     def approvals(self, session):
         return self.call("approvals", "--session", session)["approvals"]
@@ -250,7 +253,10 @@ class Scenario:
         self.schema = schema
         self.processes = []
         self.admin = uuid.uuid4().hex
-        self.host = "host-integration-1"
+        # Case-unique namespace: no broker session, subscription or topic can
+        # collide with another case even when a warm broker is shared.
+        self.host = "host-" + uuid.uuid4().hex[:16]
+        self.access_client_id = "access-" + uuid.uuid4().hex[:16]
         self.env = {
             "WHALEREIN_DATABASE_URL": f"postgres://postgres@127.0.0.1:55432/whalerein_test?sslmode=disable&search_path={schema}",
             "WHALEREIN_ADMIN_TOKEN": self.admin,
@@ -269,8 +275,9 @@ database_url: "${WHALEREIN_DATABASE_URL}"
 admin_token: "${WHALEREIN_ADMIN_TOKEN}"
 host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
 broker:
-  url: "mqtt://127.0.0.1:1883"
+  url: "mqtt://127.0.0.1:1884"
   public_url: "mqtt://127.0.0.1:1883"
+  client_id: "__ACCESS_CLIENT_ID__"
   username: access
   password: "${WHALEREIN_BROKER_PASSWORD}"
 emqx:
@@ -282,7 +289,7 @@ internal:
   callback_token: "${WHALEREIN_INTERNAL_TOKEN}"
 log:
   level: error
-""")
+""".replace("__ACCESS_CLIENT_ID__", self.access_client_id))
 
     def start_dsh(self):
         authority = Process(
@@ -295,14 +302,27 @@ log:
         self.dsh = FakeDsh(authority)
         wait(lambda: self.socket.exists(), process=authority)
 
-    def start_access(self):
+    def start_access_process(self):
+        """Start Access without waiting for readiness.
+
+        The internal auth listener is up in well under a second, while the
+        broker starts later. Starting Access first lets EMQX's HTTP
+        authenticator initialize against a live endpoint instead of marking
+        the resource unhealthy and waiting for its 15 second health check.
+        """
         self.access = Process(
             ["/usr/local/bin/whalerein-access", "--config", str(self.config)],
             self.directory,
             self.env,
         )
         self.processes.append(self.access)
+
+    def wait_access_ready(self):
         wait(lambda: http("/readyz"), process=self.access)
+
+    def start_access(self):
+        self.start_access_process()
+        self.wait_access_ready()
 
     def start_plugin(self):
         self.plugin = Process(
@@ -348,7 +368,7 @@ log:
         if result.returncode != 0 or result.stdout.strip() != "host-revoke-ok":
             raise AssertionError("Signed host revocation failed")
 
-    def replay_command(self, device, changed=False):
+    def replay_command(self, device, changed=False, token_override=None, route_host_override=None, include_conflict_code=False):
         import base64
         import hashlib
 
@@ -390,13 +410,14 @@ log:
             payload["payloadDigest"] = base64.b64encode(
                 hashlib.sha256(body).digest()
             ).decode()
-        token = device.transport_token()
+        token = token_override if token_override is not None else device.transport_token()
         try:
             return http(
-                "/v1/hosts/" + self.host + "/requests",
+                "/v1/hosts/" + (route_host_override or self.host) + "/requests",
                 payload,
                 token,
                 return_status=True,
+                include_conflict_code=include_conflict_code,
             )
         except RuntimeError as error:
             if "HTTP 409" in str(error):

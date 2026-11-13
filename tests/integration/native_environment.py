@@ -58,21 +58,24 @@ class Model:
                             "usage": {"input_tokens": 10, "output_tokens": 0},
                         },
                     )
-                    if kind == "tool" and call == 1:
+                    if kind in {"tool", "tool-sensitive", "question", "question-long", "question-multiple"} and call == 1:
                         emit(
                             "content_block_start",
                             index=0,
                             content_block={
                                 "type": "tool_use",
                                 "id": "native-fixture-call",
-                                "name": "native_fixture",
+                                "name": "ask_user_question" if kind in {"question", "question-long", "question-multiple"} else "native_fixture",
                                 "input": {},
                             },
                         )
                         emit(
                             "content_block_delta",
                             index=0,
-                            delta={"type": "input_json_delta", "partial_json": "{}"},
+                            delta={"type": "input_json_delta", "partial_json": json.dumps({
+                                "questions": ([{"id": "q1", "question": "Fixture question", "multi_select": True, "options": [{"label": "A"}, {"label": "B"}]}, {"id": "q2", "question": "Second fixture", "options": [{"label": "Yes"}, {"label": "No"}]}] if kind == "question-multiple" else [{"id": "q1", "question": "Fixture question", "options": [{"label": "Yes"}, {"label": "No"}]}]),
+                                "timeout": 3 if kind == "question-long" else 1,
+                            }) if kind in {"question", "question-long", "question-multiple"} else (json.dumps({"note": "fork-synthetic-tool-parameter-b4821"}) if kind == "tool-sensitive" else "{}")},
                         )
                         reason = "tool_use"
                     else:
@@ -131,13 +134,18 @@ class Model:
 
 
 class NativeScenario(Scenario):
-    def __init__(self, directory, schema):
+    def __init__(self, directory, schema, timed_questions=False, debug_logging=False, wrapper_launcher=False, external_launcher=False):
         super().__init__(directory, schema)
         self.model = None
         self.native = None
         self.prepared = False
+        self.timed_questions = timed_questions
+        self.debug_logging = debug_logging
+        self.wrapper_launcher = wrapper_launcher
+        self.external_launcher = external_launcher
         self.socket = directory / "native.sock"
         self.home = directory / "dsh-home"
+        self.http_port = 3109
         self.work = directory / "work"
         self.work.mkdir()
         self.overlay = directory / "native-overlay.yml"
@@ -164,15 +172,27 @@ class NativeScenario(Scenario):
             connection.close()
 
     def _boot(self):
+        launcher = ["/opt/native/node_modules/.bin/dsh"]
+        if self.wrapper_launcher:
+            wrapper = self.work / "wrapped-dsh.mjs"
+            wrapper.write_text("const {runCli} = await import('/opt/native/node_modules/@deepseek-ai/dsh/lib/bin.js'); await runCli()\n")
+            launcher = ["node", str(wrapper)]
+        elif self.external_launcher:
+            bin_dir = self.work / "external-bin"
+            bin_dir.mkdir(exist_ok=True)
+            link = bin_dir / "dsh"
+            if not link.is_symlink():
+                link.symlink_to("/opt/native/node_modules/.bin/dsh")
+            launcher = [str(link)]
         self.native = Process(
             [
-                "/opt/native/node_modules/.bin/dsh",
+                *launcher,
                 "--profile",
                 "web",
                 "--patch",
                 str(self.overlay),
                 "--port",
-                "3109",
+                str(self.http_port),
             ],
             self.work,
             {
@@ -221,6 +241,10 @@ class NativeScenario(Scenario):
             "    - id: native-integration-driver",
             f"      name: {json.dumps((ROOT / 'tests/integration/native/driver.mjs').as_uri())}",
         ]
+        if self.timed_questions:
+            lines += ["- id: preset-standard", "  config:", "    id: standard", "    order: 1",
+                      "    plugins:", "      - id: tool-ask-user", "        name: '@deepseek-ai/dsh-tool-ask-user'",
+                      "        config:", "          mode: timed"]
         self.overlay.write_text("\n".join(lines) + "\n")
         if not self.prepared:
             self._boot()
@@ -239,7 +263,7 @@ class NativeScenario(Scenario):
                 "state_dir": str(self.directory / "plugin"),
                 "adapter": "real",
                 "allow_insecure_mqtt": True,
-                "log_level": "silent",
+                "log_level": "debug" if self.debug_logging else "silent",
             }
             assert self.request("seed", config=config)["seeded"]
             self.native.close()
@@ -273,7 +297,7 @@ class NativeScenario(Scenario):
             process=self.native,
         )
 
-    def tail(self, device, session):
+    def tail(self, device, session, baseline=False):
         process = Process(
             [
                 str(ROOT / "target/debug/whalerein"),
@@ -295,6 +319,27 @@ class NativeScenario(Scenario):
         )
         self.processes.append(process)
         wait(lambda: self.request("watches") > 0, process=process)
+        if baseline:
+            # This case mutates history immediately after starting the watch;
+            # wait for the initial snapshot so a late first reset cannot be
+            # mistaken for a later reset. The barrier-based watch tests need
+            # their baselines to remain in flight and pass baseline=False.
+            def baseline_ready():
+                try:
+                    lines = Path(process.output.name).read_text().splitlines()
+                except OSError:
+                    return False
+                for line in lines:
+                    if not line.startswith('{"command"'):
+                        continue
+                    try:
+                        event = json.loads(line).get("data", {}).get("event", {})
+                    except ValueError:
+                        continue
+                    if event.get("type") == "reset":
+                        return True
+                return False
+            wait(baseline_ready, process=process)
         return process
 
     def preview_ready(self, process):
@@ -359,7 +404,7 @@ class NativeScenario(Scenario):
                     browser.result()
                 session = json.loads(Path(paths["readyFile"]).read_text())["sessionId"]
                 self.model.plan("tool")
-                device.send(session, "native browser ownership fixture")
+                device.send(session, "native browser ownership fixture", delivery="start-if-idle")
                 wait(lambda: bool(device.approvals(session)), process=self.native)
                 Path(paths["pendingFile"]).touch(mode=0o600)
                 wait(

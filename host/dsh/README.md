@@ -65,6 +65,8 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 | `ca_file` | none | TLS CA bundle. Empty uses the system trust store |
 | `state_dir` | `~/.whalerein/dsh` | Not shown in settings. SQLite directory |
 | `adapter` | `auto` | Not shown in settings. Inside DSH, `auto` uses the real adapter. `fake` and `real` stay for tests and standalone runs |
+| `pending_queue_enabled` | `true` | Not shown in settings. When false, pending-queue read/edit/remove/steer are not advertised |
+| `enable_open_question_broker` | `true` | Not shown in settings. When false, the open-question broker is not installed and open-question answer is not advertised |
 | `access_url` | none | legacy Access origin, used when `server` is empty |
 | `proto_path` | repo descriptor | protobuf JSON descriptor |
 | `approval_mode` | `claim` | `claim` answers `approval/request`; `delegate` calls `next()` |
@@ -78,6 +80,8 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 | `log_level` | `info` | `debug`, `info`, `warn`, `error`, or `silent` |
 
 `allow_insecure_mqtt` defaults to false and is not shown in settings. Turn it on in the profile only for a trusted plaintext broker.
+
+`pending_queue_enabled` and `enable_open_question_broker` default to true and are not shown in settings. Setting either false in the profile withdraws that capability group from advertisement; native service support still determines the remaining groups.
 
 MQTT identity is fixed by WIRE.md:
 
@@ -236,8 +240,9 @@ dsh --profile whalerein-debug web --port 3099 --no-open
 
 `WHALEREIN_ADAPTER=fake` is useful to isolate protocol/plugin bugs from DSH API
 bugs; `real` exercises `src/adapter/real.js`. The real DSH APIs are internal and
-were only verified against fake contexts, so treat adapter failures as the
-primary debugging target.
+native coverage is scoped as described under [Native DSH validation and
+remaining limits](#native-dsh-validation-and-remaining-limits), so treat
+adapter failures as the primary debugging target.
 
 ## Local run with FakeDSH
 
@@ -522,3 +527,20 @@ Current code paths, ownership and native verification limits are documented in
 [the DSH architecture guide](../../docs/architecture/dsh-plugin.md). No other
 Harness connector or Pi package is shipped. Update Access, Host and CLI local
 builds together; no published-version compatibility path is retained.
+
+The real DSH connector advertises model catalog/read/select, pending-queue
+read/edit/remove/steer, creation, fork, wait, question read/open/continued and
+delivery queue/steer by default when the bound native services provide them.
+No test-only switch is required: the entry points open from feature detection,
+and `pending_queue_enabled` / `enable_open_question_broker` can only opt out.
+Test fixtures may opt in independently.
+
+The only currently verified queue/steer and native entry-point evidence is the
+standard DSH CLI runtime on Linux or macOS arm64 with Node 25.9.0, DSH
+launcher/session-controller/app-boot `0.2.2-rc.1`, and Cordis `4.1.0`, as
+recorded in [the DSH architecture
+guide](../../docs/architecture/dsh-plugin.md#production-capabilities). Other
+DSH versions, operating systems, CPU architectures, and Node versions are open
+but unverified; advertisement there is feature detection, not a claim that the
+operation works. Windows native behavior and a repeatable macOS runner remain
+unverified.

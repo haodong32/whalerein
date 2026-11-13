@@ -49,6 +49,7 @@ services:
     volumes:
       - ../compose/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ../compose/emqx/api-keys.csv:/opt/emqx/etc/api-keys.csv:ro
+      - ../compose/emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
       - ../../.data/docker/emqx:/opt/emqx/data
     healthcheck:
       test: ["CMD-SHELL", "emqx ctl status"]
@@ -64,10 +65,14 @@ services:
       dockerfile: deploy/docker/access.Dockerfile
     container_name: whalerein-access
     restart: unless-stopped
+    # Do not gate Access on EMQX readiness: EMQX evaluates its HTTP
+    # authenticator resource at startup, and Access must already be serving
+    # the internal auth endpoint then. If EMQX wins that race it marks the
+    # resource unhealthy for a 15 second health-check interval, and Access
+    # spends the same interval in exponential reconnect backoff. Both services
+    # only require PostgreSQL here so Access can listen first.
     depends_on:
       postgres:
-        condition: service_healthy
-      emqx:
         condition: service_healthy
     environment:
       WHALEREIN_DATABASE_URL: "postgres://postgres@postgres:5432/whalerein_dev?sslmode=disable"
