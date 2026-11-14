@@ -177,3 +177,50 @@ func TestPairingRechecksInvitationDeadlineAfterTokenLock(t *testing.T) {
 		t.Fatal("expired invitation reached the Host or persisted an intent")
 	}
 }
+
+// Token serialization must not hold a public claim past its own deadlines: a
+// concurrent holder of the same invitation cannot make a FINISH wait indefinitely.
+func TestPairingClaimDoesNotWaitOnTokenLockPastDeadlines(t *testing.T) {
+	f := newFixture(t)
+	_, token := f.invite(t)
+	ctx := context.Background()
+	if _, err := f.service.Claim(ctx, helloRequest(token, "locked-finish", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte(token))
+	current := f.store.tokens[hashKey(hash[:])]
+	current.ExpiresAt = f.now.Add(30 * time.Second)
+	f.store.tokens[hashKey(hash[:])] = current
+	hashHex := hex.EncodeToString(hash[:])
+	unlock, err := f.service.lockToken(context.Background(), hashHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	f.service.cfg.ClaimTimeout = 200 * time.Millisecond
+	claimCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, claimErr := f.service.Claim(claimCtx, finishRequest(token, "locked-finish", "d1"))
+		done <- claimErr
+	}()
+	select {
+	case claimErr := <-done:
+		if !errors.Is(claimErr, ErrClaimBusy) {
+			t.Fatalf("blocked finish did not fail retryably: %v", claimErr)
+		}
+		if claimCtx.Err() != nil {
+			t.Fatal("caller deadline, not the lock deadline, ended the wait")
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("blocked finish waited %s for the token lock", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pairing claim waited on the token lock past its deadline")
+	}
+	if len(f.store.used) != 0 || len(f.store.grants) != 0 || len(f.store.notices) != 0 {
+		t.Fatal("blocked finish changed durable state")
+	}
+}

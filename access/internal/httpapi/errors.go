@@ -70,6 +70,8 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "service unavailable"}
 	case errors.Is(err, pairing.ErrClaimRequired):
 		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing HELLO is required before FINISH"}
+	case errors.Is(err, pairing.ErrClaimBusy):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "another claim on this invitation is in progress"}
 	case errors.Is(err, pairing.ErrProtocolVersion), errors.Is(err, requests.ErrProtocolVersion):
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible, "protocol version incompatible"}
 	case errors.Is(err, requests.ErrDigestMismatch):

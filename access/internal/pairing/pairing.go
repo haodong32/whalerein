@@ -44,7 +44,11 @@ var (
 	ErrPairingCommittedUnconfirmed = errors.New("pairing committed but Host confirmation is unknown")
 	ErrProtocolVersion             = errors.New("protocol version incompatible")
 	ErrHostNotFound                = errors.New("host not found")
-	ErrInternal                    = errors.New("pairing internal error")
+	// ErrClaimBusy reports that another claim on the same invitation still holds
+	// its in-process serialization past this caller's deadline. The caller may
+	// retry; no Host transport failed and no durable state changed.
+	ErrClaimBusy = errors.New("pairing claim is busy")
+	ErrInternal  = errors.New("pairing internal error")
 )
 
 // Store is the pairing persistence boundary.
@@ -243,9 +247,17 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 	hashHex := hex.EncodeToString(hash[:])
 
-	unlock, lockErr := s.lockToken(ctx, hashHex)
+	// One invitation is serialized in-process, but contention must not hold a
+	// public claim past the deadline the caller can still observe. Fail
+	// retryably instead of completing after the waiting period.
+	waitCtx, cancelWait := context.WithTimeout(ctx, s.cfg.ClaimTimeout)
+	unlock, lockErr := s.lockToken(waitCtx, hashHex)
+	cancelWait()
 	if lockErr != nil {
-		return nil, lockErr
+		if ctx.Err() != nil {
+			return nil, lockErr
+		}
+		return nil, ErrClaimBusy
 	}
 	defer unlock()
 	now := s.now()

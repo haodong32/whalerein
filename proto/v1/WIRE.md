@@ -113,7 +113,9 @@ host binding, expiry and failure budget, requires the host to be online, and
 forwards a `HostRequest{kind=PAIRING_CLAIM, body=PairingClaim{HELLO,
 token_hash, noise_message}}` to the host. The host consumes msg1, returns
 `PairingClaimResult{noise_message=msg2, host_public_key,
-host_fingerprint}`. Access persists the public reply and request digest in
+host_fingerprint}`. HELLO is relayed with legacy framing so an unknown peer can
+bootstrap; Access then requires the host to advertise pairing support before
+it will create a grant. Access persists the public reply and request digest in
 `pairing_operations`; no device or grant is activated yet.
 
 The client completes the XX read of msg2, obtains the host static public key
@@ -142,14 +144,30 @@ confirmed COMMIT completes pairing. FINISH responses echo the credential already
 held by the client; Access never persists its plaintext. A failed pre-commit
 attempt rolls back rather than revoking an older valid grant.
 
+Access commits the grant before it forwards COMMIT, and it persists the exact
+FINISH digest with the grant in that same transaction. The sequence is
+therefore: Access transaction commits, then COMMIT reaches the Host, then the
+Host ACK is stored. A lost FINISH response, a lost COMMIT ACK, or an Access
+restart between those steps leaves an outcome that `pair-resume` can still
+classify as committed, unconfirmed, or unavailable.
+
 An exact FINISH retry after restart recovers the same receipt and COMMIT, subject
 to operation expiry, current credential validity and the exact active grant
 generation. The request digest covers every FINISH field, including the supplied
 credential. A consumed invitation alone is insufficient to recover or create a
 new grant. Revocation and grant replacement invalidate old completion receipts.
+A FINISH that fails before the commit consumes the invitation, so the same
+Device can only retry with a new invitation; nothing about the earlier Device's
+grants has changed.
 The client command `pair-resume` reloads the request from SecretStore; it never
 reconstructs a credential from the operation ID. A lost SecretStore requires
 explicit operator revocation and a fresh enrollment.
+
+Concurrent pairing for the same invitation is serialized in Access. There is no
+Host-side retry ticket for an authenticated FINISH: the Host refuses to decrypt
+ciphertext again once its pending handshake is consumed, so a client that reuses
+the original Noise message without Access replaying the recorded result receives
+a Host rejection rather than a deduplicated success.
 
 This credential-binding requirement is a coordinated protocol cutover: upgrade
 Access, Core/CLI and Host together. Missing or mismatched hashes fail pairing.
@@ -537,3 +555,11 @@ matching, timely authorized Host acknowledgement also remains
 `pairing_committed_unconfirmed`; its prior confirmation flag alone is not
 sufficient. The binding record is derived in the Access database under its
 device fence, not an independent cryptographic signature.
+
+Access serializes pairing, acknowledgement, and revocation for one Device under
+a database device fence, and it rechecks the invitation and operation deadlines
+after a fence wait so contention cannot extend them. A claim that cannot take
+its in-process invitation serialization before its own deadline fails with
+`conflict` (HTTP 409) and changes no durable state; it never reports a Host
+transport failure. The Core CLI maps `unavailable` to exit 5 and `conflict` to
+exit 8.
