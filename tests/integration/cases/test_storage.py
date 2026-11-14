@@ -12,7 +12,7 @@ pytestmark = pytest.mark.storage
 
 def native_cases():
     # The image build records native discovery without executing a case.
-    for package in ("store", "store-support", "server"):
+    for package in ("store", "store-support", "server", "external"):
         manifest = ROOT / "tests/integration/fixtures" / f"{package}-cases.txt"
         if not manifest.is_file():
             raise RuntimeError(

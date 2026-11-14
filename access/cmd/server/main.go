@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/events"
+	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/requests"
@@ -128,6 +131,33 @@ func defaultStartupStoreOps() startupStoreOps {
 		migrate: func(ctx context.Context, db *store.Store) error { return db.Migrate(ctx) },
 		close:   func(db *store.Store) { db.Close() },
 	}
+}
+
+// externalTrust converts the configured issuer keys into the verification
+// trust the external service uses.
+func externalTrust(cfg config.Config) (external.Trust, error) {
+	trust := external.Trust{
+		Issuer:          cfg.External.Issuer,
+		ServiceIdentity: cfg.External.ServiceIdentity,
+		Region:          cfg.External.Region,
+		ClockSkew:       cfg.External.ClockSkew.D(),
+	}
+	for _, key := range cfg.External.VerificationKeys {
+		material, err := base64.RawURLEncoding.DecodeString(key.PublicKey)
+		if err != nil {
+			return external.Trust{}, fmt.Errorf("external key %s: %w", key.ID, err)
+		}
+		if len(material) != ed25519.PublicKeySize {
+			return external.Trust{}, fmt.Errorf("external key %s is not an Ed25519 public key", key.ID)
+		}
+		trust.Keys = append(trust.Keys, external.VerificationKey{
+			ID:        key.ID,
+			PublicKey: ed25519.PublicKey(material),
+			NotBefore: time.Unix(0, 0).Add(key.NotBefore.D()),
+			NotAfter:  time.Unix(0, 0).Add(key.NotAfter.D()),
+		})
+	}
+	return trust, nil
 }
 
 func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
@@ -268,6 +298,16 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return nil
 	})
 
+	var externalService httpapi.ExternalService
+	if cfg.Mode == "external" {
+		trust, err := externalTrust(cfg)
+		if err != nil {
+			return err
+		}
+		externalService = external.New(trust, db, cfg.External.MQTTURL)
+		logger.Info("external account mode enabled", "issuer", trust.Issuer, "region", trust.Region)
+	}
+
 	api, err := httpapi.New(httpapi.Dependencies{
 		Auth:          authService,
 		Pairing:       pairingService,
@@ -279,6 +319,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Logger:        logger,
 		InternalToken: cfg.Internal.CallbackToken,
 		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
+		External:      externalService,
 	})
 	if err != nil {
 		return err

@@ -44,6 +44,12 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized"}
 	case errors.Is(err, auth.ErrForbidden), errors.Is(err, pairing.ErrHostRejected):
 		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden"}
+	case errors.Is(err, errAuthorizationExpired):
+		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "authorization expired"}
+	case errors.Is(err, errAuthorizationRefused), errors.Is(err, errExternalNotConfigured):
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization refused"}
+	case errors.Is(err, errOperationConflict):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "operation conflict"}
 	case errors.Is(err, auth.ErrBadRequest), errors.Is(err, pairing.ErrInvalidClaim), errors.Is(err, requests.ErrInvalidRequest):
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid argument"}
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, pairing.ErrHostNotFound), errors.Is(err, requests.ErrNotFound), errors.Is(err, store.ErrNotFound):

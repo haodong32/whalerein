@@ -24,6 +24,7 @@ def export(root):
     packages = {
         "store": "access/internal/store",
         "store-support": "access/internal/store/storetest",
+        "external": "access/internal/external",
         "server": "access/cmd/server",
     }
     output = root / "tests/integration/fixtures"

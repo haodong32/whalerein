@@ -51,11 +51,13 @@ RUN --mount=type=cache,id=whalerein-go-mod,target=/go/pkg/mod,sharing=locked \
     go test -c -tags=integration -o /out/server-tests ./access/cmd/server && \
     go test -c -tags=integration -o /out/store-tests ./access/internal/store && \
     go test -c -tags=integration -o /out/store-support-tests ./access/internal/store/storetest && \
+    go test -c -tags=integration -o /out/external-tests ./access/internal/external && \
     go test -c -o /tmp/store-unit-tests ./access/internal/store && \
     go test -c -o /tmp/server-unit-tests ./access/cmd/server && \
     go test -c -o /tmp/store-support-unit-tests ./access/internal/store/storetest && \
+    go test -c -o /tmp/external-unit-tests ./access/internal/external && \
     mkdir -p tests/integration/fixtures && \
-    python3 -c "import subprocess,pathlib; root=pathlib.Path('tests/integration/fixtures'); names=lambda p:set(subprocess.check_output([p,'-test.list','^Test'],text=True).splitlines()); [(root/(p+'-cases.txt')).write_text('\\n'.join(sorted(names('/out/'+p+'-tests')-names('/tmp/'+p+'-unit-tests')))) for p in ('store','store-support','server')]"
+    python3 -c "import subprocess,pathlib; root=pathlib.Path('tests/integration/fixtures'); names=lambda p:set(subprocess.check_output([p,'-test.list','^Test'],text=True).splitlines()); [(root/(p+'-cases.txt')).write_text('\\n'.join(sorted(names('/out/'+p+'-tests')-names('/tmp/'+p+'-unit-tests')))) for p in ('store','store-support','server','external')]"
 COPY tests/integration/drivers/go_descriptions.py tests/integration/drivers/go_descriptions.py
 RUN python3 tests/integration/drivers/go_descriptions.py
 
@@ -92,7 +94,7 @@ COPY --from=postgres /usr/lib/postgresql/18 /usr/lib/postgresql/18
 COPY --from=postgres /usr/share/postgresql/18 /usr/share/postgresql/18
 COPY --from=postgres /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/postgresql.conf.sample
 COPY --from=postgres /usr/lib/*-linux-gnu/libpq.so* /usr/local/lib/
-COPY --from=go-build /out/whalerein-access /out/broker-tests /out/server-tests /out/store-tests /out/store-support-tests /usr/local/bin/
+COPY --from=go-build /out/whalerein-access /out/broker-tests /out/server-tests /out/store-tests /out/store-support-tests /out/external-tests /usr/local/bin/
 COPY tools/repo/src/repo/__init__.py tools/repo/src/repo/test_timing.py /workspace/tools/repo/src/repo/
 ENV PYTHONPATH=/workspace/tools/repo/src
 WORKDIR /workspace
@@ -109,7 +111,7 @@ COPY tests/fixtures tests/fixtures
 COPY deploy/compose/emqx deploy/compose/emqx
 COPY --from=rust-build /out/whalerein-noise-peer tests/integration/drivers/noise/rust-peer/target/debug/whalerein-noise-peer
 COPY --from=rust-build /out/whalerein-proto-peer tests/integration/drivers/protobuf/rust-peer/target/debug/whalerein-proto-peer
-COPY --from=go-build /workspace/tests/integration/fixtures/store-cases.txt /workspace/tests/integration/fixtures/store-support-cases.txt /workspace/tests/integration/fixtures/server-cases.txt tests/integration/fixtures/
+COPY --from=go-build /workspace/tests/integration/fixtures/store-cases.txt /workspace/tests/integration/fixtures/store-support-cases.txt /workspace/tests/integration/fixtures/server-cases.txt /workspace/tests/integration/fixtures/external-cases.txt tests/integration/fixtures/
 COPY --from=go-build /workspace/tests/integration/fixtures/*-descriptions.json tests/integration/fixtures/
 RUN mkdir -p access/cmd/server access/internal/broker && node --version && ./target/debug/whalerein --version && /usr/lib/postgresql/18/bin/postgres --version && psql --version
 ENTRYPOINT ["sh", "-c", "exec timeout --signal=INT --kill-after=30s \"${WHALEREIN_INTEGRATION_TIMEOUT:-7200}s\" python3 -m pytest -c tests/integration/pytest.ini tests/integration/cases \"$@\"", "integration"]
