@@ -85,6 +85,26 @@ def test_open_question_client_cancel(scenario, paired_device, session_id):
             process.communicate(timeout=5)
 
 
+def test_answer_reads_stdin_and_rejects_unusable_input(scenario, paired_device, session_id):
+    """An answer reads its payload from stdin, and empty or malformed stdin is a usage error that submits nothing."""
+    scenario.dsh.process.control("request_question_open", session_id=session_id)
+    batch = paired_device.call("questions", "--session", session_id)["batches"][0]
+    guard = ["--session", session_id, "--batch", batch["batch_id"],
+             "--epoch", batch["source_epoch"], "--version", str(batch["version"]),
+             "--digest", batch["digest"], "--phase", batch["phase"], "--input", "-"]
+    for invalid in ("", "{not json"):
+        code, values = paired_device.invoke("answer", *guard, stdin_text=invalid, success=False)
+        assert code == 2 and values[-1]["error"]["code"] == "invalid_argument"
+        assert values[-1].get("data") is None
+    still_open = paired_device.call("questions", "--session", session_id)["batches"]
+    assert [entry["batch_id"] for entry in still_open] == [batch["batch_id"]]
+    receipt = paired_device.invoke(
+        "answer", *guard, stdin_text=json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]})
+    )[1][-1]["data"]
+    assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
+    assert paired_device.call("questions", "--session", session_id)["batches"] == []
+
+
 def test_question_payload_pages_and_oversized_detail(scenario, paired_device, session_id):
     """Large complete question pages keep every batch and oversized detail is explicitly unavailable."""
     scenario.dsh.process.control("request_question_pages", session_id=session_id)

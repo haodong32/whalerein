@@ -134,12 +134,13 @@ class Model:
 
 
 class NativeScenario(Scenario):
-    def __init__(self, directory, schema, timed_questions=False, debug_logging=False, wrapper_launcher=False, external_launcher=False):
+    def __init__(self, directory, schema, timed_questions=False, short_approvals=False, debug_logging=False, wrapper_launcher=False, external_launcher=False):
         super().__init__(directory, schema)
         self.model = None
         self.native = None
         self.prepared = False
         self.timed_questions = timed_questions
+        self.short_approvals = short_approvals
         self.debug_logging = debug_logging
         self.wrapper_launcher = wrapper_launcher
         self.external_launcher = external_launcher
@@ -265,6 +266,8 @@ class NativeScenario(Scenario):
                 "allow_insecure_mqtt": True,
                 "log_level": "debug" if self.debug_logging else "silent",
             }
+            if self.short_approvals:
+                config["approval_ttl_ms"] = 3000
             assert self.request("seed", config=config)["seeded"]
             self.native.close()
             self.prepared = True

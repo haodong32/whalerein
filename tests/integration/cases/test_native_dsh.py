@@ -514,6 +514,58 @@ def test_native_question_remote_cancel_releases_claim(scenario, paired_device):
             process.kill(); process.communicate(timeout=5)
 
 
+def test_native_question_cancel_scopes_cancellation_to_the_owner(scenario, paired_device):
+    """A foreign device cannot cancel a held answer, and the owner's next command releases its own claim without settling."""
+    from environment import Device, http
+
+    session = scenario.create()
+    scenario.request("question-enable-remote-fixture")
+    scenario.request("question-start-remote-fixture", sessionId=session)
+    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    answer = scenario.directory / "answer.json"
+    answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
+    second = Device(scenario.directory / "cancel-second-device")
+    invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
+    second.identity = second.call("pair", invitation["pairingUri"])
+    assert second.identity["device_id"] != paired_device.identity["device_id"]
+    assert second.call("hosts")["hosts"]
+    scenario.request("question-hold-native-claim")
+    command_id = "native-cancel-command-fixture"
+    process = subprocess.Popen([
+        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
+        "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+        "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"],
+        "--input", str(answer), "--command-id", command_id,
+    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
+                       "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        wait(lambda: scenario.request("question-native-claim-status")["held"] == 1, timeout=15, process=scenario.native)
+        assert second.call("question-cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
+        assert scenario.request("question-native-claim-status")["held"] == 1
+        # A second process for the owning device opens a new channel, and the
+        # Host replaces the answering channel before it dispatches the cancel
+        # payload. The claim is released either way; the reported boolean races
+        # with that replacement, so it is deliberately not asserted here.
+        paired_device.call("question-cancel", "--session", session, "--command", command_id)
+        wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=15, process=scenario.native)
+        output, _ = process.communicate(timeout=30)
+        # The exact failure code depends on how the source surfaces the abort;
+        # what must hold is that the cancelled answer never settled the question.
+        assert process.returncode != 0 and "QUESTION_SETTLED" not in output
+        assert paired_device.call("question-cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
+        assert scenario.request("question-restore-native-claim")["restored"]
+        current = paired_device.call("questions", "--session", session)["batches"][0]
+        assert current["batch_id"] == batch["batch_id"]
+        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+            "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
+            "--phase", batch["phase"], "--input", str(answer), "--command-id", "native-cancel-after")
+        assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
+        assert scenario.request("question-result-remote-fixture", sessionId=session)["selected"] == "Yes"
+    finally:
+        if process.poll() is None:
+            process.kill(); process.communicate(timeout=5)
+
+
 def test_native_question_abrupt_client_exit_releases_by_request_expiry(scenario, paired_device):
     """A killed client leaves no answer; an unobservable disconnect releases its claim by the existing request deadline."""
     session = scenario.create()
@@ -1379,6 +1431,49 @@ def test_native_approval(scenario, paired_device, decision, expected, effects):
         success=False,
     )
     assert code != 0 and scenario.request("effects")["count"] == effects
+
+
+def test_native_approval_refuses_a_stale_guard(scenario, paired_device):
+    """A wrong digest or version authorizes nothing, and the same approval still resolves with its exact guard."""
+    session = scenario.create()
+    scenario.model.plan("tool")
+    paired_device.send(session, "native stale approval guard fixture", delivery="start-if-idle")
+    wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
+    approval = paired_device.approvals(session)[0]
+    for digest, version in (
+        ("00" * 32, approval["version"]),
+        (approval["digest"], approval["version"] + 1),
+    ):
+        code, values = paired_device.invoke(
+            "approve", "--request", approval["approval_id"], "--digest", digest,
+            "--version", str(version), success=False)
+        # The Host rejects an admission guard before journaling the command, so
+        # the client receives no authenticated result and reports the outcome as
+        # unknown. The definitive approval codes remain the adapter contract.
+        assert code == 7 and values[-1]["error"]["code"] == "unknown"
+        assert values[-1].get("data") is None
+    assert scenario.request("effects")["count"] == 0
+    paired_device.resolve("approve", approval)
+    scenario.wait_idle(session)
+    assert scenario.request("effects")["count"] == 1
+
+
+@pytest.mark.short_approvals
+def test_native_approval_refuses_an_expired_guard(scenario, paired_device):
+    """An approval past its lifetime authorizes nothing even with its exact digest and version."""
+    session = scenario.create()
+    scenario.model.plan("tool")
+    paired_device.send(session, "native expired approval fixture", delivery="start-if-idle")
+    wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
+    approval = paired_device.approvals(session)[0]
+    # This case shortens the approval lifetime to three seconds.
+    time.sleep(3.5)
+    code, values = paired_device.invoke(
+        "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
+        "--version", str(approval["version"]), success=False)
+    assert code == 7 and values[-1]["error"]["code"] == "unknown"
+    assert values[-1].get("data") is None
+    assert scenario.request("effects")["count"] == 0
 
 
 def test_native_interrupt_cancels_approval(scenario, paired_device):
