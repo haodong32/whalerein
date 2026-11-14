@@ -9,6 +9,57 @@ const adapter=new FakeDshAdapter({behavior:{modelOperations:true,pendingQueueEna
 let queueReadCount=0
 const readQueue=adapter.readPendingQueue.bind(adapter)
 adapter.readPendingQueue=(...args)=>{queueReadCount++;return readQueue(...args)}
+// Benchmark script: the fixture drives its own reply from acceptance of the
+// measured CLI send, on fixed relative times. Nothing here reads CLI output, so
+// the observer can neither advance nor delay the schedule.
+const benchSends=new Map()
+const benchArmed=new Map()
+const acceptance=session=>{
+  benchSends.set(session,(benchSends.get(session)??0)+1)
+  const plan=benchArmed.get(session)
+  if(!plan)return
+  benchArmed.delete(session)
+  // Resume in a timer phase, outside the send's own call stack. A script
+  // failure is reported on stderr; it never changes the process-wide
+  // rejection/uncaught behaviour other harness cases rely on.
+  setImmediate(()=>{
+    runScript(session,plan).catch(error=>process.stderr.write('benchmark script failed: '+(error?.stack??error)+'\n'))
+  })
+}
+const rawSendUserMessage=adapter.sendUserMessage.bind(adapter)
+adapter.sendUserMessage=(...args)=>{const result=rawSendUserMessage(...args);acceptance(args[0]);return result}
+const emitPreview=(session,stream,revision,frame)=>adapter.emit(session,{
+  type:'assistant/preview',kind:'output',ephemeral:true,
+  data:{stream_id:stream,revision,reply_id:stream,...frame}})
+const emitFinal=(session,stream,text)=>adapter.emit(session,{
+  type:'assistant/message',kind:'output',
+  data:{reply_id:stream,message:{content:[{type:'text',text}]}}})
+const runScript=(session,plan)=>{
+  const {stream,updates,gapMs,startMs,finalMs,delayMs,duplicateAfterMs,fault}=plan
+  const started=Date.now()
+  const at=ms=>new Promise(resolve=>setTimeout(resolve,Math.max(0,started+ms+delayMs-Date.now())))
+  let revision=1
+  const settle=async text=>{
+    const event=emitFinal(session,stream,text)
+    emitPreview(session,stream,++revision,{phase:'end',outcome:'committed',committed_seq:event.seq})
+    if(duplicateAfterMs!=null){
+      await at(finalMs+duplicateAfterMs)
+      emitFinal(session,stream,text)
+    }
+  }
+  const script=async()=>{
+    if(fault==='silent')return
+    emitPreview(session,stream,++revision,{phase:'start'})
+    for(let index=0;index<updates.length;index++){
+      await at(startMs+index*gapMs)
+      emitPreview(session,stream,++revision,{phase:'chunk',index,text:updates[index]})
+    }
+    if(fault==='partial')return
+    await at(finalMs)
+    await settle(fault==='incorrect'?'incorrect final reply':updates.join(''))
+  }
+  return script()
+}
 const credentials=new MemoryHostCredentials()
 const answerControllers=new Map()
 let questionAnswerCalls = 0
@@ -55,7 +106,7 @@ net.createServer(socket=>{
 }).listen(process.env.WHALEREIN_DSH_SOCKET)
 createInterface({input:process.stdin}).on('line',async line=>{
   try {
-    const {id,method,approval_id,session_id,size}=JSON.parse(line)
+    const {id,method,approval_id,session_id,size,count,attempt_id,index,text,duplicate,stream_id,updates,gap_ms,start_ms,final_ms,delay_ms,duplicate_after_ms,fault}=JSON.parse(line)
     let value
     if(method==='fail_next_session_refresh') { adapter.failNext('listSessions'); value=true }
     else if(method==='queue_read_count') value=queueReadCount
@@ -94,6 +145,18 @@ createInterface({input:process.stdin}).on('line',async line=>{
     }
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})
     else if(method==='emit')value=adapter.output(session_id,'fixture output')
+    // Node's internal `send` command: acceptance is counted by the wrapper above,
+    // then the armed schedule resumes in a timer phase without polling. The
+    // fixture mirror reply is suppressed so the script is the only reply source.
+    else if(method==='bench_schedule') {
+      // The scripted reply is the only reply source for a measured attempt. The
+      // fixture's immediate echo would commit out of script order and make the
+      // watch observe a history gap.
+      adapter.behavior.emitOutputOnMessage=false
+      benchArmed.set(session_id,{stream:stream_id,updates,gapMs:gap_ms,startMs:start_ms,finalMs:final_ms,delayMs:delay_ms,duplicateAfterMs:duplicate_after_ms,fault})
+      value=true
+    }
+    else if(method==='bench_send_count') value=benchSends.get(session_id)??0
     else throw new Error('unsupported control')
     process.stdout.write(JSON.stringify({id,value})+'\n')
   }catch{process.stdout.write('{"error":"fixture control failed"}\n')}

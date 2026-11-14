@@ -114,4 +114,6 @@ COPY --from=rust-build /out/whalerein-proto-peer tests/integration/drivers/proto
 COPY --from=go-build /workspace/tests/integration/fixtures/store-cases.txt /workspace/tests/integration/fixtures/store-support-cases.txt /workspace/tests/integration/fixtures/server-cases.txt /workspace/tests/integration/fixtures/external-cases.txt tests/integration/fixtures/
 COPY --from=go-build /workspace/tests/integration/fixtures/*-descriptions.json tests/integration/fixtures/
 RUN mkdir -p access/cmd/server access/internal/broker && node --version && ./target/debug/whalerein --version && /usr/lib/postgresql/18/bin/postgres --version && psql --version
-ENTRYPOINT ["sh", "-c", "exec timeout --signal=INT --kill-after=30s \"${WHALEREIN_INTEGRATION_TIMEOUT:-7200}s\" python3 -m pytest -c tests/integration/pytest.ini tests/integration/cases \"$@\"", "integration"]
+# Two entry points share one image: the correctness suite (default) and the
+# opt-in benchmark, which never runs as part of the suite.
+ENTRYPOINT ["sh", "-c", "if [ \"$1\" = benchmark ]; then shift; exec timeout --signal=INT --kill-after=10s \"${WHALEREIN_BENCHMARK_TIMEOUT:-900}s\" python3 tests/integration/benchmark/main.py; fi; exec timeout --signal=INT --kill-after=30s \"${WHALEREIN_INTEGRATION_TIMEOUT:-7200}s\" python3 -m pytest -c tests/integration/pytest.ini tests/integration/cases \"$@\"", "integration"]

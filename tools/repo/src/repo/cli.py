@@ -6,9 +6,13 @@ import argparse
 import signal
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from . import __version__, doctor, proto, testing, toolchain
+from .benchmark import runner as benchmark
+from .diagnostics import sanitize
 from .errors import RepoError, UsageError
 from .output import Output
 from .paths import find_root
@@ -70,6 +74,8 @@ Full reference: tools/repo/README.md""",
         "check": "Check formatting and static analysis without modifying source or running tests.",
         "build": "Build applicable projects.",
         "test": "Run native unit tests by default; integration tests are opt-in.",
+        "bench": "Run the opt-in streaming-reply product benchmark in an isolated container.",
+        "bench-compare": "Compare saved benchmark runs under the predeclared protocol.",
         "report": "Render saved JSON test results as offline HTML without running tests.",
         "proto": "Generate committed Go/JS protocol bindings, or check their consistency.",
     }
@@ -90,6 +96,15 @@ Full reference: tools/repo/README.md""",
         ),
         "report": "  ./repo report .data/runs/my-check/report.json --output /tmp/test-report.html",
         "proto": "  ./repo proto\n  ./repo proto --check",
+        "bench": (
+            "  ./repo bench\n"
+            "  ./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline\n"
+            "  ./repo bench --delay 50 --output .data/benchmarks/delayed-50"
+        ),
+        "bench-compare": (
+            "  ./repo bench-compare --baseline .data/benchmarks/a --candidate .data/benchmarks/b\n"
+            "  ./repo bench-compare -b a1 -b a2 -c b1 -c b2 --json"
+        ),
     }
     for name, description in descriptions.items():
         notes = ""
@@ -205,6 +220,94 @@ Full reference: tools/repo/README.md""",
                 action="store_true",
                 help="check binding consistency instead of writing generated files",
             )
+        if name == "bench":
+            sub.add_argument(
+                "--attempts",
+                type=int,
+                default=30,
+                metavar="N",
+                help="measured attempts after warmup (default: 30)",
+            )
+            sub.add_argument(
+                "--warmup",
+                type=int,
+                default=3,
+                metavar="N",
+                help="warmup attempts excluded from results (default: 3)",
+            )
+            sub.add_argument(
+                "--delay",
+                type=int,
+                default=0,
+                metavar="MS",
+                help="injected delay on the scripted reply in milliseconds (default: 0)",
+            )
+            sub.add_argument(
+                "--deadline",
+                type=int,
+                default=5000,
+                metavar="MS",
+                help="per-attempt deadline from dispatch in milliseconds (default: 5000)",
+            )
+            sub.add_argument(
+                "--observation-window",
+                type=int,
+                default=1000,
+                metavar="MS",
+                help="window after the final reply used to detect duplicates (default: 1000)",
+            )
+            sub.add_argument(
+                "--seed",
+                type=int,
+                default=0,
+                metavar="N",
+                help="scenario seed recorded in the report (default: 0)",
+            )
+            sub.add_argument(
+                "--concurrency",
+                type=int,
+                default=1,
+                metavar="N",
+                help="active conversations; only the sequential value 1 is supported",
+            )
+            sub.add_argument(
+                "--benchmark-timeout",
+                type=int,
+                metavar="SECONDS",
+                help="execution deadline in seconds (default: 900; build is separate)",
+            )
+            sub.add_argument(
+                "--output",
+                type=Path,
+                metavar="DIR",
+                help="save benchmark.json (default: unique .data/benchmarks/ directory); "
+                "must not already contain a benchmark report",
+            )
+        if name == "bench-compare":
+            sub.add_argument(
+                "-b",
+                "--baseline",
+                action="append",
+                type=Path,
+                required=True,
+                metavar="DIR",
+                help="saved baseline run directory or benchmark.json (repeatable, ordered)",
+            )
+            sub.add_argument(
+                "-c",
+                "--candidate",
+                action="append",
+                type=Path,
+                required=True,
+                metavar="DIR",
+                help="saved candidate run directory or benchmark.json (repeatable, ordered)",
+            )
+            sub.add_argument(
+                "--output",
+                type=Path,
+                metavar="FILE",
+                help="also save the comparison as JSON at this path",
+            )
     return parser
 
 
@@ -212,6 +315,51 @@ def dispatch(args, root, runner):
     if args.command == "report":
         atomic_write(args.output, render(read_report(args.input)))
         return {"html": str(args.output)}, 0
+    if args.command == "bench-compare":
+        from .benchmark import compare as benchmark_compare
+        from .benchmark import summary as benchmark_summary
+
+        result = benchmark_compare.compare(
+            [benchmark_compare.load(path) for path in args.baseline],
+            [benchmark_compare.load(path) for path in args.candidate],
+        )
+        for line in benchmark_summary.comparison(result).splitlines():
+            runner.out.info(line)
+        if args.output:
+            benchmark_compare.save(args.output, result)
+            runner.out.info("Comparison: " + str(args.output))
+        return {"comparison": result, "output": str(args.output) if args.output else None}, 0
+    if args.command == "bench":
+        from .benchmark import summary as benchmark_summary
+
+        request = benchmark.BenchRequest(
+            attempts=args.attempts,
+            warmup=args.warmup,
+            delay_ms=args.delay,
+            deadline_ms=args.deadline,
+            observation_window_ms=args.observation_window,
+            seed=args.seed,
+            concurrency=args.concurrency,
+            timeout=args.benchmark_timeout,
+        )
+        directory = args.output or root / ".data/benchmarks" / (
+            datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
+        )
+        runner.out.info("Benchmark: preparing isolated container")
+        result = benchmark.run(root, runner, request, directory)
+        text = benchmark_summary.render(result.document)
+        for line in text.splitlines():
+            runner.out.info(line)
+        if result.path:
+            runner.out.info("Report: " + str(result.path))
+        return {
+            "report": str(result.path) if result.path else None,
+            "status": result.document["status"]["state"],
+            "outcomes": result.document["outcomes"],
+            "latency": result.document["latency"]["samples"],
+            "snapshot": result.document["environment"]["artifacts"],
+            "errors": [sanitize(entry) for entry in result.errors],
+        }, result.exit_code
     if args.command == "proto":
         return proto.run(runner, runner.out, root, check=args.check), 0
     if args.command == "doctor":
