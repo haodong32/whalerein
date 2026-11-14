@@ -91,6 +91,26 @@ project IDs, case discovery, selector syntax and unsupported combinations.
 The [integration guide](../tests/integration/README.md) describes container and
 fixture ownership. Development services are not prerequisites for integration.
 
+## Local integration timing
+
+The Mosquitto broker binds in well under a second, and a full stack start
+(pytest, Access, broker, FakeDSH) takes roughly 2–3 seconds once per session.
+Wall time is dominated by per-case pairing setup (about 0.5 s), real command
+round trips, and deliberate deadline waits.
+
+Measured on the development host for the `chain` group (83 cases):
+
+| Invocation | Wall time |
+|---|---|
+| `./repo test --suite integration --group chain` | ~200 s |
+| `./repo test --suite integration --group chain --parallel 4` | ~64 s |
+
+Shard large groups (`chain`, `native-dsh`) with `--parallel 4`. Keep small,
+startup-dominated groups (`protocol`, `transport`) serial. `--parallel 8`
+oversubscribes a 4–6 vCPU host and can fail timing-sensitive cases, so raise
+the shard count only with more CPU. Readiness polling runs at 20 ms, which
+roughly halves the wall time spent in fixture waits.
+
 ## CI integration timing
 
 Ordinary PR updates and main pushes run affected-project fast checks. Full
