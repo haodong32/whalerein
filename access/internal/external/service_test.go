@@ -311,3 +311,57 @@ func TestStoreFailureIsSurfaced(t *testing.T) {
 		t.Fatal("a store failure must be surfaced")
 	}
 }
+
+func TestEnrollmentStatusReportsADisabledEnrollment(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	disabled := time.Now().UTC()
+	enrollment := h.data.enrollments[request.GetHostId()]
+	enrollment.State = "enrollment_disabled"
+	enrollment.DisabledAt = &disabled
+	h.data.enrollments[request.GetHostId()] = enrollment
+
+	status, err := h.service.EnrollmentStatus(context.Background(), request.GetHostId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.GetState() != whalereinv1.EnrollmentState_enrollment_disabled {
+		t.Fatalf("expected a disabled state, got %v", status.GetState())
+	}
+}
+
+func TestOperationStatusCarriesTheCommitTimeWhenRecorded(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	created, err := h.service.EnrollHost(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedAt := time.Now().UTC()
+	operation := h.data.operations[created.GetStatus().GetOperationId()]
+	operation.CommittedAt = &committedAt
+	h.data.operations[created.GetStatus().GetOperationId()] = operation
+
+	status, err := h.service.OperationStatus(context.Background(), created.GetStatus().GetOperationId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.GetCommittedAtUnixMs() != committedAt.UnixMilli() {
+		t.Fatalf("expected the commit time, got %d", status.GetCommittedAtUnixMs())
+	}
+}
+
+func TestEnrollHostRefusesAProofForAnotherHost(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	request.HostId = "host-other"
+	if _, err := h.service.EnrollHost(context.Background(), request); !errors.Is(err, ErrAuthorizationMismatch) {
+		t.Fatalf("expected a host mismatch, got %v", err)
+	}
+	if h.data.commits != 0 {
+		t.Fatal("a mismatched host must not commit")
+	}
+}
