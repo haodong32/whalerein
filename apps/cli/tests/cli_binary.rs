@@ -187,3 +187,92 @@ async fn unauthorized_pairing_has_one_terminal_error_and_keeps_failure_record() 
     assert!(stderr.contains(record["trace_id"].as_str().unwrap()));
     assert_eq!(record["events"][0]["code"], "unauthorized");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_accepts_a_matching_fingerprint_without_yes() {
+    use whalerein_core::api::test_support::FakeAccess;
+
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = format!("file:{}", dir.path().join("secrets").display());
+    let output = binary()
+        .args([
+            "--json",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "pair",
+            &access.pairing_uri(),
+            "--fingerprint",
+            &access.fingerprint(),
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", &secrets)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["command"], "pair");
+    assert!(value["data"]["device_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert!(dir.path().join("config.json").exists());
+
+    let hosts = binary()
+        .args([
+            "--json",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "hosts",
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", &secrets)
+        .output()
+        .unwrap();
+    assert!(hosts.status.success(), "{hosts:?}");
+    let hosts: serde_json::Value = serde_json::from_slice(&hosts.stdout).unwrap();
+    assert_eq!(hosts["data"]["hosts"][0]["host_id"], "host-1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_rejects_a_mismatched_fingerprint_even_with_yes() {
+    use whalerein_core::api::test_support::FakeAccess;
+
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = format!("file:{}", dir.path().join("secrets").display());
+    let output = binary()
+        .args([
+            "--json",
+            "--yes",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "pair",
+            &access.pairing_uri(),
+            "--fingerprint",
+            &"00".repeat(32),
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", &secrets)
+        .env_remove("WHALEREIN_LOG")
+        .env_remove("RUST_LOG")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "host_fingerprint_mismatch");
+    assert!(!dir.path().join("config.json").exists());
+
+    // A refused fingerprint must leave no authorization behind.
+    let hosts = binary()
+        .args([
+            "--json",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "hosts",
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", &secrets)
+        .output()
+        .unwrap();
+    assert_eq!(hosts.status.code(), Some(4), "{hosts:?}");
+    let value: serde_json::Value = serde_json::from_slice(&hosts.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "not_paired");
+}

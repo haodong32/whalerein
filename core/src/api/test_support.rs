@@ -1335,6 +1335,11 @@ impl FakeAccess {
         )
     }
 
+    /// The fingerprint the pairing prompt shows for this Host.
+    pub fn fingerprint(&self) -> String {
+        sha256_hex(self.host.lock().unwrap().identity.public_key())
+    }
+
     pub fn revoke(&self) {
         self.host.lock().unwrap().revoked = true;
     }
