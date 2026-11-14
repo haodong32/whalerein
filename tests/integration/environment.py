@@ -81,6 +81,10 @@ class Process:
             except ValueError:
                 continue
             if result.get("id") == identity:
+                if "value" not in result:
+                    # The fixture rejected the control; surface the reason
+                    # instead of failing later on a missing field.
+                    raise RuntimeError(f"Fixture control {method} failed: {result.get('error')}")
                 return result["value"]
         raise TimeoutError("Fixture control timed out")
 

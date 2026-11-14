@@ -24,6 +24,8 @@ without executing a task.
 | `test` | Run native unit tests by default; see selection below. |
 | `report FILE --output FILE` | Render saved JSON facts to offline HTML. |
 | `proto [--check]` | Generate committed Go/JS bindings, or check their consistency. |
+| `bench` | Run the opt-in streaming-reply product benchmark in an isolated container. |
+| `bench-compare -b DIR -c DIR` | Compare saved benchmark runs under the predeclared protocol. |
 
 `--project` accepts exact IDs and is repeatable. Defaults select all applicable
 registered projects. Explicitly selecting an unsupported operation fails before
@@ -110,6 +112,155 @@ codes are retained in results; the CLI reports:
 
 There is no global dry-run or native argument passthrough. Use native tools for
 specialized options that the repository interface does not expose.
+
+## Product benchmark
+
+`./repo bench` measures one client-observable workflow: a user sends a message
+while the conversation is open, and the benchmark records how long the first
+visible reply text and the correct final reply take. It runs in the same
+isolated container image as the integration suite, through the real CLI, Access,
+Host and plugin against FakeDSH. It is opt-in and never runs as part of
+`./repo test`.
+
+```bash
+./repo bench
+./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline
+./repo bench --attempts 20 --delay 50 --output .data/benchmarks/delayed-50
+./repo bench-compare -b .data/benchmarks/baseline -c .data/benchmarks/delayed-50
+```
+
+| Option | Meaning |
+|---|---|
+| `--attempts N` | Measured attempts after warmup (default 30). |
+| `--warmup N` | Setup-quality attempts excluded from every result (default 3). |
+| `--delay MS` | Injected delay on the scripted reply, for calibration (default 0). |
+| `--cadence MS` | Spacing between scripted visible updates (default 100). Values at or below the product's 20 ms coalescing window make that window observable. |
+| `--deadline MS` | Per-attempt deadline measured from dispatch (default 5000). |
+| `--observation-window MS` | Window after the final reply used to detect duplicates (default 1000). |
+| `--seed N` | Recorded scenario seed (default 0). |
+| `--concurrency N` | Only the sequential value `1` is supported. |
+| `--benchmark-timeout SECONDS` | Container execution deadline (default 900). |
+| `--output DIR` | Report directory; one that already holds `benchmark.json` is rejected. |
+
+### Measurement surface
+
+The observation surface is **CLI stdout**, recorded by one monotonic clock in
+the driver process. Each attempt:
+
+1. creates a fresh session and syncs it,
+2. starts `whalerein --json tail` and waits for the watch-ready marker,
+3. arms the fixture's scripted reply, then invokes `whalerein send`,
+4. reads tail output and records milestones.
+
+Dispatch is taken immediately before the send process starts, so first-text and
+final latency include send start-up. The fixture drives its reply schedule from
+the *acceptance* of that send on fixed relative times; nothing reads CLI output
+to decide when to emit, so the observer cannot advance or delay the schedule.
+
+Two paired devices are used per run: the observer holds the live watch and the
+sender performs the measured send. A single device cannot do both, because the
+sending CLI displaces the watching CLI's live delivery.
+
+The first-text milestone requires non-empty reply text from the current attempt.
+Lifecycle markers, empty previews, and replies carrying another attempt's
+identity never satisfy it. Attempt identity is unique per attempt, which is what
+distinguishes a reply from a previous attempt's streams.
+
+### Cadence and the coalescing window
+
+Core coalesces adjacent deltas for up to 20 ms or an 8 KiB target before they
+reach the client. A 100 ms cadence sits well above that window, so the measured
+update gaps describe delivery jitter; a cadence at or below it turns the
+coalescing window itself into the measurement. Use a short cadence to look for
+batch-shaped gaps (multiples of the window) rather than smooth jitter:
+
+```bash
+./repo bench --cadence 20 --output .data/benchmarks/cadence-20
+./repo bench --cadence 10 --output .data/benchmarks/cadence-10
+```
+
+The recorded `scenario.workload.gap_ms` and `run.configuration.cadence_ms` must
+agree; a report whose cadence cannot settle before its deadline is rejected as
+a usage error before any container starts.
+
+### Outcomes
+
+Every measured attempt records exactly one outcome:
+
+| Outcome | Meaning |
+|---|---|
+| `completed` | Correct final content observed within the deadline. |
+| `product_error` | The send command failed. |
+| `timeout_before_text` | No reply text before the deadline. |
+| `timeout_after_text` | Text appeared, but no correct final reply by the deadline. Partial timing is kept. |
+| `incorrect_content` | A final reply arrived with the wrong content. |
+| `duplicate_final` | A second final reply arrived inside the observation window. |
+| `late_reply` | A final reply was observed only after the deadline; it is never a completion. |
+
+The success share is `completed` over all measured attempts. Warmup attempts are
+reported separately and excluded from every count and sample.
+
+### Artifacts
+
+`benchmark.json` is written atomically and validated before publication. It
+carries the schema version, scenario identity and parameters, observation
+surface, build and environment metadata, per-attempt timings and outcomes,
+outcome counts, latency samples, and the run status with cleanup verification.
+
+Timings are recorded from dispatch, so `first_text_ms` and `final_ms` include CLI
+process start-up. `send_exit_ms` is when the send process exits after collecting
+its result, not a start-up or reply time. The start-up share of an attempt can be
+read back from the report's own constants: because the scripted final reply is
+emitted `scenario.response.final_ms` after acceptance, `final_ms` minus that
+constant is the dispatch-to-acceptance interval. For the default scenario that is
+roughly 290 ms, against roughly 5 ms from acceptance to first visible text, so the
+headline first-text number is dominated by process start-up rather than by
+delivery.
+
+Latency samples cover only correctly completed attempts and report nearest-rank
+median, p95, and p99 with the actual sample count. A quantile that the sample
+count cannot support is labelled unavailable with its reason instead of being
+invented. Raw credentials, pairing material, and conversation contents are never
+exported; the report holds sanitized timings and outcome labels.
+
+A run is `complete` only when setup, execution, and cleanup all succeeded. On
+interruption, failed setup, an invalid export, or unverified cleanup the runner
+exits non-zero, keeps the observations it already holds, labels the evidence
+`incomplete` or `invalid` with the reason, and removes only the container it
+started.
+
+Exit status for `bench`: `0` when the run completed and every measured attempt
+succeeded; `1` for failed attempts, invalid execution, or an incomplete run;
+`2` for usage errors; `3` for a missing prerequisite; `130` for interruption.
+
+### Comparison protocol
+
+Comparisons use the declaration in `repo/benchmark/analysis.py`: primary metrics
+`first_text_ms` and `final_ms`, a ±25 ms tolerance, a floor of 20 attempts per
+run and 5 matched run pairs, and a two-sided 95% t interval over the paired
+run-level differences. Declare any change to these numbers before measuring
+candidates.
+
+`./repo bench-compare` pairs runs in the order given, so alternate or randomize
+the order yourself and restore each run's declared initial state. It reports the
+estimate and interval per metric and classifies it as `improvement`,
+`regression`, `within_tolerance`, or `inconclusive`. Too few pairs, any run
+below the declared minimums, or an interval crossing a tolerance boundary is
+`inconclusive`; a latency improvement is only accepted when the correctness
+floor also holds.
+
+Run an A/A pilot (the same build in both arms) before trusting any tolerance.
+On a shared 4 vCPU container host, five matched pairs of the same build showed
+paired differences from about -45 ms to -130 ms, so the default ±25 ms tolerance
+is tighter than that host's run-to-run noise. A five-pair comparison there
+correctly refuses a verdict; raise the pair count or use a quieter, dedicated
+host before treating a 25 ms tolerance as resolvable. The benchmark reports this
+honestly as `inconclusive` rather than as a change.
+
+Injected-delay calibration is monotone by construction: adding a known delay to
+the scripted reply shifts both first-text and final latency by that amount plus
+common send start-up. Use it to confirm the measurement path on a host before
+comparing releases.
 
 ## Test selection
 
