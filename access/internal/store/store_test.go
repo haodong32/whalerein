@@ -49,7 +49,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"device_credentials", "devices", "grants", "hosts", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
+	want := []string{"device_credentials", "devices", "external_enrollments", "external_operations", "grants", "hosts", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}
@@ -77,6 +77,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	for _, required := range []string{
 		"device_credentials_pkey", "requests_pkey", "requests_command_unique",
 		"requests_forward_due_idx", "grants_pending_revocation_idx",
+		"external_enrollments_workspace", "external_operations_authorization_id_key",
 	} {
 		if _, ok := indexes[required]; !ok {
 			t.Errorf("missing index %s; have %v", required, indexes)
