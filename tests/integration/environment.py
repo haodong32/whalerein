@@ -109,7 +109,10 @@ class Device:
         self.directory = directory
         self.identity = None
 
-    def invoke(self, *args, success=True):
+    def invoke(self, *args, success=True, stdin_text=None):
+        # `stdin_text` is an explicit pipe: passing nothing must not inherit the
+        # terminal, and an empty string must still close the stream.
+        streams = {} if stdin_text is None else {"input": stdin_text}
         try:
             result = subprocess.run(
                 [
@@ -131,6 +134,7 @@ class Device:
                 text=True,
                 timeout=90,
                 check=False,
+                **streams,
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError("CLI operation timed out") from None
