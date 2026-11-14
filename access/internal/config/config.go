@@ -81,12 +81,51 @@ type ExternalConfig struct {
 }
 
 // ExternalVerificationKey is one pinned issuer key with its validity window.
+//
+// The window bounds are RFC 3339 timestamps. An omitted bound means unbounded on
+// that side: a key with neither bound is trusted for any issue time, which is
+// what "pinned by the operator" already implies. Durations are not accepted
+// because a bound is a wall-clock instant, and a duration from the epoch made an
+// omitted not_after read as "ended in 1970".
 type ExternalVerificationKey struct {
-	ID        string   `yaml:"id"`
-	PublicKey string   `yaml:"public_key"`
-	NotBefore Duration `yaml:"not_before"`
-	NotAfter  Duration `yaml:"not_after"`
+	ID        string    `yaml:"id"`
+	PublicKey string    `yaml:"public_key"`
+	NotBefore Timestamp `yaml:"not_before"`
+	NotAfter  Timestamp `yaml:"not_after"`
 }
+
+// Timestamp is an RFC 3339 instant; the empty string means unbounded.
+type Timestamp time.Time
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (t *Timestamp) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("timestamp must be a string")
+	}
+	trimmed := strings.TrimSpace(value.Value)
+	if trimmed == "" {
+		*t = Timestamp(time.Time{})
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp %q: use RFC 3339, or leave it empty for unbounded", value.Value)
+	}
+	*t = Timestamp(parsed.UTC())
+	return nil
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (t Timestamp) MarshalYAML() (any, error) {
+	instant := time.Time(t)
+	if instant.IsZero() {
+		return "", nil
+	}
+	return instant.UTC().Format(time.RFC3339), nil
+}
+
+// Time returns the instant, or the zero time when the bound is open.
+func (t Timestamp) Time() time.Time { return time.Time(t) }
 
 // BrokerConfig describes the MQTT 5 broker connection.
 type BrokerConfig struct {
@@ -335,8 +374,8 @@ func (c Config) validateExternal() []string {
 		if _, err := base64.RawURLEncoding.DecodeString(key.PublicKey); err != nil {
 			problems = append(problems, label+".public_key must be raw URL base64")
 		}
-		if key.NotBefore != 0 && key.NotAfter != 0 &&
-			time.Duration(key.NotBefore) >= time.Duration(key.NotAfter) {
+		if !key.NotBefore.Time().IsZero() && !key.NotAfter.Time().IsZero() &&
+			!key.NotBefore.Time().Before(key.NotAfter.Time()) {
 			problems = append(problems, label+".not_before must precede not_after")
 		}
 	}

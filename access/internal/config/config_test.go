@@ -308,8 +308,8 @@ func TestFullyConfiguredExternalModeIsAccepted(t *testing.T) {
 		VerificationKeys: []ExternalVerificationKey{{
 			ID:        "issuer-1",
 			PublicKey: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
-			NotBefore: Duration(0),
-			NotAfter:  Duration(0),
+			NotBefore: Timestamp(time.Time{}),
+			NotAfter:  Timestamp(time.Time{}),
 		}},
 	}
 	if err := c.Validate(); err != nil {
@@ -342,8 +342,8 @@ func TestExternalVerificationKeysAreValidated(t *testing.T) {
 		"missing id": func(c *Config) { c.External.VerificationKeys[0].ID = "" },
 		"not base64": func(c *Config) { c.External.VerificationKeys[0].PublicKey = "not base64!" },
 		"inverted window": func(c *Config) {
-			c.External.VerificationKeys[0].NotBefore = Duration(time.Hour)
-			c.External.VerificationKeys[0].NotAfter = Duration(time.Minute)
+			c.External.VerificationKeys[0].NotBefore = Timestamp(time.Date(2040, 1, 1, 0, 0, 0, 0, time.UTC))
+			c.External.VerificationKeys[0].NotAfter = Timestamp(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 		},
 		"service identity": func(c *Config) { c.External.ServiceIdentity = "not-a-url" },
 	} {
@@ -352,6 +352,80 @@ func TestExternalVerificationKeysAreValidated(t *testing.T) {
 			mutate(&c)
 			if err := c.Validate(); err == nil {
 				t.Fatal("expected a validation error")
+			}
+		})
+	}
+}
+
+func TestExternalKeyWindowUsesTimestamps(t *testing.T) {
+	base := validConfig(t)
+	base.Mode = "external"
+	base.External = ExternalConfig{
+		ServiceIdentity: "https://access.fixture.test",
+		Issuer:          "fixture://issuer/a",
+		Region:          "fixture-a",
+		MQTTURL:         "mqtts://access.fixture.test:8883",
+		VerificationKeys: []ExternalVerificationKey{{
+			ID:        "issuer-1",
+			PublicKey: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		}},
+	}
+
+	// An omitted window is open on both sides: the operator pins the key, not
+	// an expiry that was never written down.
+	if err := base.Validate(); err != nil {
+		t.Fatalf("an open window was refused: %v", err)
+	}
+
+	yaml := minimalYAML + `
+mode: external
+external:
+  service_identity: "https://access.fixture.test"
+  issuer: "fixture://issuer/a"
+  region: "fixture-a"
+  mqtt_url: "mqtts://access.fixture.test:8883"
+  verification_keys:
+    - id: k
+      public_key: ` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `
+      not_after: 2040-01-01T00:00:00Z
+`
+	parsed, err := Parse([]byte(yaml), env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := parsed.External.VerificationKeys[0]
+	if got := key.NotAfter.Time().UTC().Format(time.RFC3339); got != "2040-01-01T00:00:00Z" {
+		t.Fatalf("not_after = %q", got)
+	}
+	if !key.NotBefore.Time().IsZero() {
+		t.Fatalf("an omitted not_before must stay open: %v", key.NotBefore.Time())
+	}
+}
+
+func TestExternalKeyWindowRejectsDurationsAndInvertedWindows(t *testing.T) {
+	t.Setenv("WA_ACCEPTANCE", "1")
+	for name, window := range map[string]string{
+		"duration": "      not_after: 613620h\n",
+		"inverted": "      not_before: 2040-01-01T00:00:00Z\n      not_after: 2030-01-01T00:00:00Z\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			yaml := minimalYAML + `
+mode: external
+external:
+  service_identity: "https://access.fixture.test"
+  issuer: "fixture://issuer/a"
+  region: "fixture-a"
+  mqtt_url: "mqtts://access.fixture.test:8883"
+  verification_keys:
+    - id: k
+      public_key: ` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `
+` + window
+			cfg, err := Parse([]byte(yaml), env(validEnv()))
+			if err != nil {
+				return // a duration fails at unmarshal time, which is correct
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("an invalid window was accepted")
 			}
 		})
 	}
