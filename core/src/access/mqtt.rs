@@ -631,7 +631,19 @@ mod tests {
 
     #[test]
     fn fixture_ca_is_always_parsed_and_builds_tls_options() {
-        let pem = include_bytes!("../../test-fixtures/ca.pem").to_vec();
+        // Self-signed test certificate. The signing key was discarded.
+        let pem = b"-----BEGIN CERTIFICATE-----
+MIIBazCCARKgAwIBAgIUCYEJf6AWvrWHzQnqALYWDNrwYfgwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRV2hhbGVSZWluIFRlc3QgQ0EwHhcNMjYxMTE0MDQzMDA2WhcN
+MzYxMTExMDQzMDA2WjAcMRowGAYDVQQDDBFXaGFsZVJlaW4gVGVzdCBDQTBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABIDzEtmehsRaR0Vx65NWD4y1kflMTDFblTA8
+64kOENsLgnPx+O1z8BV4JzL5+wqRd/gcxvR5WULQOuxjCoDpm4ejMjAwMB0GA1Ud
+DgQWBBQ0nEJTr/TR1J9+vLqmx9euDviHNzAPBgNVHRMBAf8EBTADAQH/MAoGCCqG
+SM49BAMCA0cAMEQCIEyFy7p0NegnWrzl41pLP89cCp9itTXSeJ8I13iKpm28AiAR
+kg3kmwrRgJT2uxIVgusk+cBIKzWjxMwkC7uvy8RsrQ==
+-----END CERTIFICATE-----
+"
+        .to_vec();
         let certs = parse_certificates(&pem).unwrap();
         assert_eq!(certs.len(), 1);
         let settings = MqttSettings::parse("mqtts://localhost:8883")
