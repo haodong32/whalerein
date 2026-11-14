@@ -319,7 +319,11 @@ pub fn render_command(handle: &CommandHandle) -> String {
 /// that a session was or was not created; FAILED never prints identity.
 pub fn render_lifecycle_outcome(handle: &CommandHandle) -> Option<String> {
     let receipt = handle.lifecycle_receipt.as_ref()?;
-    let subject = if receipt.operation == "fork" { "Child session" } else { "Session" };
+    let subject = if receipt.operation == "fork" {
+        "Child session"
+    } else {
+        "Session"
+    };
     match receipt.disposition.as_str() {
         "READY" => Some(if receipt.session_id.is_empty() {
             "Operation completed.\n".to_owned()
@@ -327,7 +331,10 @@ pub fn render_lifecycle_outcome(handle: &CommandHandle) -> Option<String> {
             format!("{subject} {} is ready.\n", receipt.session_id)
         }),
         "READY_WITH_WARNING" => {
-            let warning = receipt.warning_code.as_deref().unwrap_or("workspace attach incomplete");
+            let warning = receipt
+                .warning_code
+                .as_deref()
+                .unwrap_or("workspace attach incomplete");
             Some(format!(
                 "{subject} {} exists, with a warning: {warning}.\nThe session was created; do not retry or delete it.\n",
                 receipt.session_id
@@ -367,7 +374,9 @@ pub fn render_lifecycle_outcome(handle: &CommandHandle) -> Option<String> {
 /// FAILED is a usable, retryable decision; UNKNOWN requires reconciliation and
 /// must not look like success to a script.
 pub fn lifecycle_exit_code(handle: &CommandHandle) -> u8 {
-    let Some(receipt) = &handle.lifecycle_receipt else { return 0 };
+    let Some(receipt) = &handle.lifecycle_receipt else {
+        return 0;
+    };
     match receipt.disposition.as_str() {
         "FAILED" => match receipt.reason_code.as_deref() {
             Some("INVALID_ARGUMENT") | Some("PREFLIGHT_INVALID_ARGUMENT") => 2,
@@ -384,7 +393,11 @@ pub fn lifecycle_exit_code(handle: &CommandHandle) -> u8 {
 }
 
 pub fn lifecycle_error_code(handle: &CommandHandle) -> &'static str {
-    match handle.lifecycle_receipt.as_ref().map(|receipt| receipt.disposition.as_str()) {
+    match handle
+        .lifecycle_receipt
+        .as_ref()
+        .map(|receipt| receipt.disposition.as_str())
+    {
         Some("FAILED") => "operation_failed",
         Some("UNKNOWN") => "unknown",
         _ => "internal",
@@ -617,14 +630,29 @@ mod tests {
             message_id: None,
             delivery_id: None,
             lifecycle_receipt: Some(LifecycleReceipt {
-                session_id: if failed { String::new() } else { "session-1".into() },
+                session_id: if failed {
+                    String::new()
+                } else {
+                    "session-1".into()
+                },
                 parent_session_id: if failed { None } else { Some("parent".into()) },
                 operation: "create".into(),
                 disposition: disposition.into(),
-                warning_code: (disposition == "READY_WITH_WARNING").then(|| "workspace_attach_failed".into()),
+                warning_code: (disposition == "READY_WITH_WARNING")
+                    .then(|| "workspace_attach_failed".into()),
                 operation_id: Some("op-1".into()),
-                phase: Some(if failed { "NATIVE".into() } else { "COMPLETE".into() }),
-                reason_code: failed.then(|| if disposition == "FAILED" { "WORKSPACE_NOT_FOUND".into() } else { "NATIVE_INTERNAL".into() }),
+                phase: Some(if failed {
+                    "NATIVE".into()
+                } else {
+                    "COMPLETE".into()
+                }),
+                reason_code: failed.then(|| {
+                    if disposition == "FAILED" {
+                        "WORKSPACE_NOT_FOUND".into()
+                    } else {
+                        "NATIVE_INTERNAL".into()
+                    }
+                }),
                 retryable: disposition == "FAILED",
                 reconcile_mode: (disposition == "UNKNOWN").then(|| "OPERATION_ID".into()),
                 reconcile_key: (disposition == "UNKNOWN").then(|| "op-1".into()),
@@ -860,17 +888,26 @@ mod tests {
                 lifecycle_exit_code(&lifecycle_handle(disposition)),
             );
             let value = outcome.to_json();
-            assert_eq!(value["data"]["lifecycle_receipt"]["disposition"], disposition);
+            assert_eq!(
+                value["data"]["lifecycle_receipt"]["disposition"],
+                disposition
+            );
             assert_eq!(value["data"]["lifecycle_receipt"]["operation"], "create");
             assert_eq!(value["data"]["lifecycle_receipt"]["operation_id"], "op-1");
             if disposition == "UNKNOWN" {
                 assert_eq!(outcome.exit, 7);
                 assert_eq!(value["error"]["code"], "unknown");
-                assert_eq!(value["data"]["lifecycle_receipt"]["reconcile_mode"], "OPERATION_ID");
+                assert_eq!(
+                    value["data"]["lifecycle_receipt"]["reconcile_mode"],
+                    "OPERATION_ID"
+                );
             } else if disposition == "FAILED" {
                 assert_eq!(outcome.exit, 3);
                 assert_eq!(value["error"]["code"], "operation_failed");
-                assert_eq!(value["data"]["lifecycle_receipt"]["reason_code"], "WORKSPACE_NOT_FOUND");
+                assert_eq!(
+                    value["data"]["lifecycle_receipt"]["reason_code"],
+                    "WORKSPACE_NOT_FOUND"
+                );
             } else {
                 assert_eq!(outcome.exit, 0);
                 assert!(value.get("error").is_none());
@@ -1090,5 +1127,4 @@ mod typed_content_tests {
             format!("a fixture version=3 digest={} review\n", "01".repeat(32))
         );
     }
-
 }

@@ -614,9 +614,9 @@ impl CommandService {
                 Err(status_error(status, code))
             }
             DomainStatus::Unknown
-                if lifecycle_receipt
-                    .as_ref()
-                    .is_some_and(|receipt| matches!(receipt.disposition.as_str(), "FAILED" | "UNKNOWN")) =>
+                if lifecycle_receipt.as_ref().is_some_and(|receipt| {
+                    matches!(receipt.disposition.as_str(), "FAILED" | "UNKNOWN")
+                }) =>
             {
                 Ok(CommandHandle {
                     request_id: request_id.to_owned(),
@@ -867,16 +867,16 @@ fn delivery_id_of(payload: &ResponsePayload) -> Option<String> {
 fn lifecycle_receipt_matches(receipt: Option<&LifecycleReceipt>, kind: &str, parent: &str) -> bool {
     receipt.is_some_and(|receipt| {
         if receipt.operation != kind {
-            return false
+            return false;
         }
         if kind != "fork" {
-            return true
+            return true;
         }
         if parent.is_empty() {
-            return false
+            return false;
         }
         if receipt.parent_session_id.as_deref() == Some(parent) {
-            return true
+            return true;
         }
         // FAILED/UNKNOWN fork receipts have no claimed child identity. The
         // requested parent is carried only as the reconcile key.
@@ -920,10 +920,7 @@ fn lifecycle_receipt_of(payload: &ResponsePayload) -> CoreResult<Option<Lifecycl
     {
         return Err(CoreError::UnknownResult);
     }
-    if has_identity
-        && receipt.operation == "create"
-        && !receipt.parent_session_id.is_empty()
-    {
+    if has_identity && receipt.operation == "create" && !receipt.parent_session_id.is_empty() {
         return Err(CoreError::UnknownResult);
     }
     if disposition == "UNKNOWN"
@@ -945,9 +942,13 @@ fn lifecycle_receipt_of(payload: &ResponsePayload) -> CoreResult<Option<Lifecycl
         phase: (!receipt.phase.is_empty()).then(|| receipt.phase.clone()),
         reason_code: (!receipt.reason_code.is_empty()).then(|| receipt.reason_code.clone()),
         retryable: receipt.retryable,
-        reconcile_mode: (!receipt.reconcile_mode.is_empty()).then(|| receipt.reconcile_mode.clone()),
+        reconcile_mode: (!receipt.reconcile_mode.is_empty())
+            .then(|| receipt.reconcile_mode.clone()),
         reconcile_key: (!receipt.reconcile_key.is_empty()).then(|| receipt.reconcile_key.clone()),
-        warning_detail: receipt.warning_detail.clone().filter(|value| !value.is_empty()),
+        warning_detail: receipt
+            .warning_detail
+            .clone()
+            .filter(|value| !value.is_empty()),
     }))
 }
 
@@ -1844,22 +1845,24 @@ mod tests {
         );
         let service = CommandService::new(access, cache);
         let payload = ResponsePayload {
-            payload: Some(whalerein_proto::response_payload::Payload::LifecycleReceipt(
-                whalerein_proto::LifecycleReceipt {
-                    session_id: String::new(),
-                    parent_session_id: String::new(),
-                    operation: "create".into(),
-                    disposition: whalerein_proto::LifecycleDisposition::Unknown as i32,
-                    warning_code: String::new(),
-                    operation_id: "operation-1".into(),
-                    phase: "NATIVE".into(),
-                    reason_code: "NATIVE_OUTCOME_UNKNOWN".into(),
-                    retryable: false,
-                    reconcile_mode: "OPERATION_ID".into(),
-                    reconcile_key: "operation-1".into(),
-                    warning_detail: None,
-                },
-            )),
+            payload: Some(
+                whalerein_proto::response_payload::Payload::LifecycleReceipt(
+                    whalerein_proto::LifecycleReceipt {
+                        session_id: String::new(),
+                        parent_session_id: String::new(),
+                        operation: "create".into(),
+                        disposition: whalerein_proto::LifecycleDisposition::Unknown as i32,
+                        warning_code: String::new(),
+                        operation_id: "operation-1".into(),
+                        phase: "NATIVE".into(),
+                        reason_code: "NATIVE_OUTCOME_UNKNOWN".into(),
+                        retryable: false,
+                        reconcile_mode: "OPERATION_ID".into(),
+                        reconcile_key: "operation-1".into(),
+                        warning_detail: None,
+                    },
+                ),
+            ),
             ..Default::default()
         };
         let result = CommandResult {
@@ -1868,7 +1871,9 @@ mod tests {
             error_code: 0,
             result_payload: payload.encode_to_vec(),
         };
-        let handle = service.handle_from_command_result("r", "c", &result).unwrap();
+        let handle = service
+            .handle_from_command_result("r", "c", &result)
+            .unwrap();
         assert_eq!(handle.status, DomainStatus::Unknown);
         let receipt = handle.lifecycle_receipt.unwrap();
         assert_eq!(receipt.disposition, "UNKNOWN");

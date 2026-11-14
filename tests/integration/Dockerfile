@@ -6,7 +6,10 @@ FROM postgres:18-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c
 
 FROM rust AS rust-build
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates git protobuf-compiler libprotobuf-dev pkg-config libssl-dev libdbus-1-dev && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=tools/repo/linux-rust-packages.txt,target=/tmp/linux-rust-packages.txt \
+    apt-get update && \
+    xargs -r apt-get install -y --no-install-recommends build-essential ca-certificates git libprotobuf-dev libssl-dev < /tmp/linux-rust-packages.txt && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=4
 ARG TARGETARCH

@@ -14,10 +14,10 @@ use whalerein_core::{Core, CoreError, CoreOptions};
 
 use crate::cli::{Cli, Command, ModelAction, QueueCommand};
 use crate::output::{
-    command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output, lifecycle_error_code,
-    lifecycle_exit_code, manifest_data, render_approvals, render_command, render_doctor,
-    render_hosts, render_lifecycle_outcome, render_manifest, render_pair, render_sessions,
-    sessions_data, tail_event_json, CliError, CliOutcome, TailRenderer,
+    command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
+    lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approvals, render_command,
+    render_doctor, render_hosts, render_lifecycle_outcome, render_manifest, render_pair,
+    render_sessions, sessions_data, tail_event_json, CliError, CliOutcome, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);

@@ -369,6 +369,7 @@ def test_container_ownership_and_export(tmp_path, mode, out, group):
 @pytest.mark.parametrize("kind", ["go", "python", "node"])
 @pytest.mark.parametrize("mode", ["success", "missing", "failed"])
 def test_combined_coverage_has_one_native_execution(tmp_path, out, kind, mode):
+    raw_profile = "mode: set\nsample/pkg/a.go:1.1,1.2 1 1\n"
     manifest = tmp_path / (
         "package.json" if kind == "node" else "pyproject.toml" if kind == "python" else "go.mod"
     )
@@ -421,9 +422,7 @@ def test_combined_coverage_has_one_native_execution(tmp_path, out, kind, mode):
             if kind == "go":
                 flag = next(a for a in argv if a.startswith("-coverprofile="))
                 if mode != "missing":
-                    Path(flag.split("=", 1)[1]).write_text(
-                        "mode: set\nsample/pkg/a.go:1.1,1.2 1 1\n"
-                    )
+                    Path(flag.split("=", 1)[1]).write_text(raw_profile)
                 return ok(
                     "\n".join(
                         json.dumps(e)
@@ -453,7 +452,20 @@ def test_combined_coverage_has_one_native_execution(tmp_path, out, kind, mode):
 
     runner = Native()
     runner.out = out
-    result = toolchain.RUNNERS[kind].collect(project, runner, True, coverage=True)
+    if kind == "go":
+        output = tmp_path / "report"
+        data, exit_code = testing.run(
+            tmp_path, [project], runner, testing.TestRequest(coverage=True), output
+        )
+        result = read_report(Path(data["json"]))["scopes"][0]
+        profile = output / "coverage-sample.coverprofile"
+        assert exit_code == (mode != "success")
+        if mode == "missing":
+            assert not profile.exists()
+        else:
+            assert profile.read_text() == raw_profile
+    else:
+        result = toolchain.RUNNERS[kind].collect(project, runner, True, coverage=True)
     assert len(runner.calls) == 1
     assert result["coverage"][0]["ok"] == (mode == "success")
     assert result["tests"][0]["status"] == "passed"
