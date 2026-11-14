@@ -50,6 +50,21 @@ External account mode is configured explicitly (`mode: external`) with a service
 identity and issuer keys. Unknown issuer, region, version or capability is
 rejected; the runtime never falls back to Standalone.
 
+Each pinned issuer key may carry a validity window as RFC 3339 timestamps:
+
+```yaml
+external:
+  verification_keys:
+    - id: "issuer-2026"
+      public_key: "..."
+      not_before: "2026-01-01T00:00:00Z"   # optional
+      not_after: "2030-01-01T00:00:00Z"    # optional
+```
+
+An omitted bound is open on that side, so a key with neither bound accepts any
+issue time and a rotation window needs only the bounds that matter. Bounds are
+instants, not durations, and an inverted window is a configuration error.
+
 ## Operations (proposed)
 
 | Operation | Purpose | Auth | Idempotency | Status reported |

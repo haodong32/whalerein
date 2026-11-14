@@ -343,3 +343,58 @@ func signProof(t *testing.T, original *whalereinv1.HostEnrollmentRequest, auth *
 	}
 	return ed25519.Sign(private, []byte(ProofInput(auth, changed.GetOperationId(), changed.GetHostSigningPublicKey())))
 }
+
+func TestVerifyTreatsAnOmittedBoundAsOpen(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := ed25519.PrivateKey(private)
+	auth := &whalereinv1.ExternalAuthorization{
+		AuthVersion:     AuthVersion,
+		AuthorizationId: "auth-window",
+		Purpose:         PurposeHostEnrollment,
+		Issuer:          "fixture://issuer/a",
+		Audience:        "https://access.fixture.test",
+		RegionId:        "fixture-a",
+		HostId:          "host-1",
+		IssuedAtUnixMs:  time.Now().UnixMilli(),
+		ExpiresAtUnixMs: time.Now().Add(time.Minute).UnixMilli(),
+		Nonce:           []byte("0123456789abcdef"),
+		KeyId:           "issuer-1",
+	}
+	auth.Signature = ed25519.Sign(signer, []byte(CanonicalInput(auth)))
+
+	base := Trust{
+		Issuer:          "fixture://issuer/a",
+		ServiceIdentity: "https://access.fixture.test",
+		Region:          "fixture-a",
+	}
+
+	open := base
+	open.Keys = []VerificationKey{{ID: "issuer-1", PublicKey: public}}
+	if err := open.Verify(auth, PurposeHostEnrollment, time.Now()); err != nil {
+		t.Fatalf("an open window must be accepted: %v", err)
+	}
+
+	future := base
+	future.Keys = []VerificationKey{{ID: "issuer-1", PublicKey: public,
+		NotBefore: time.Now().Add(time.Hour)}}
+	if err := future.Verify(auth, PurposeHostEnrollment, time.Now()); !errors.Is(err, ErrKeyNotValid) {
+		t.Fatalf("a future not_before must refuse: %v", err)
+	}
+
+	expired := base
+	expired.Keys = []VerificationKey{{ID: "issuer-1", PublicKey: public,
+		NotAfter: time.Now().Add(-time.Hour)}}
+	if err := expired.Verify(auth, PurposeHostEnrollment, time.Now()); !errors.Is(err, ErrKeyNotValid) {
+		t.Fatalf("a past not_after must refuse: %v", err)
+	}
+
+	bounded := base
+	bounded.Keys = []VerificationKey{{ID: "issuer-1", PublicKey: public,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}}
+	if err := bounded.Verify(auth, PurposeHostEnrollment, time.Now()); err != nil {
+		t.Fatalf("a valid window must be accepted: %v", err)
+	}
+}
