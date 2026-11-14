@@ -567,3 +567,92 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 	}
 	return true, nil
 }
+
+// AdmissionGrant is the authorization record the realtime admission cache
+// needs. Generation values let callers detect superseded loads and revocations.
+type AdmissionGrant struct {
+	HostID                     string
+	DeviceID                   string
+	Active                     bool
+	GrantGeneration            uint64
+	RevocationGeneration       uint64
+	DeviceRevocationGeneration uint64
+}
+
+// AdmissionGrantFor reads one grant revision, including revoked rows so a
+// stale cache entry cannot be mistaken for current authority.
+func (s *Store) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (AdmissionGrant, error) {
+	row := s.db.QueryRow(ctx, `
+		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		       g.revocation_generation, d.revocation_generation
+		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		WHERE g.host_id = $1 AND g.device_id = $2`, hostID, deviceID)
+	grant, err := scanAdmissionGrant(row)
+	if err != nil {
+		return AdmissionGrant{}, err
+	}
+	return grant, nil
+}
+
+// ListAdmissionGrants reads every grant revision for startup and periodic
+// reconciliation. Rows are ordered for deterministic tests.
+func (s *Store) ListAdmissionGrants(ctx context.Context) ([]AdmissionGrant, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		       g.revocation_generation, d.revocation_generation
+		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		ORDER BY g.host_id, g.device_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list admission grants: %w", err)
+	}
+	defer rows.Close()
+	grants := make([]AdmissionGrant, 0)
+	for rows.Next() {
+		grant, err := scanAdmissionGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list admission grants: %w", err)
+	}
+	return grants, nil
+}
+
+func scanAdmissionGrant(row interface{ Scan(...any) error }) (AdmissionGrant, error) {
+	var grant AdmissionGrant
+	err := row.Scan(&grant.HostID, &grant.DeviceID, &grant.Active, &grant.GrantGeneration,
+		&grant.RevocationGeneration, &grant.DeviceRevocationGeneration)
+	if err != nil {
+		return AdmissionGrant{}, wrapRequestScan(err)
+	}
+	return grant, nil
+}
+
+// ListDeviceGrants reads every grant revision for one device. Broker policy
+// projection uses it when a device connects.
+func (s *Store) ListDeviceGrants(ctx context.Context, deviceID string) ([]AdmissionGrant, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		       g.revocation_generation, d.revocation_generation
+		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		WHERE g.device_id = $1
+		ORDER BY g.host_id`, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("list device grants: %w", err)
+	}
+	defer rows.Close()
+	grants := make([]AdmissionGrant, 0)
+	for rows.Next() {
+		grant, err := scanAdmissionGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list device grants: %w", err)
+	}
+	return grants, nil
+}

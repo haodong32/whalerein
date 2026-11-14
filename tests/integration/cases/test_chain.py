@@ -590,27 +590,38 @@ def test_probe_login(scenario, paired_device):
     """When a probe signs in, credentials are checked and topics denied without creating a
     host or displacing the existing host connection.
     """
-    import base64
     import json
     import os
     import subprocess
-    import urllib.request
 
     from environment import ROOT
 
+    def broker_clients():
+        result = subprocess.run(
+            ["node", "tests/integration/drivers/transport/broker-snapshot.mjs"],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "WHALEREIN_MQTT_URL": "mqtt://127.0.0.1:1883",
+                "WHALEREIN_BROKER_PASSWORD": scenario.env["WHALEREIN_BROKER_PASSWORD"],
+            },
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, "Broker snapshot query failed"
+        return json.loads(result.stdout)["clients"]
+
     def live_connection():
-        request = urllib.request.Request(
-            "http://127.0.0.1:18083/api/v5/clients/whalerein-host-" + scenario.host
-        )
-        credential = ":".join(
-            scenario.env[key]
-            for key in ("WHALEREIN_EMQX_API_KEY", "WHALEREIN_EMQX_API_SECRET")
-        )
-        request.add_header(
-            "Authorization", "Basic " + base64.b64encode(credential.encode()).decode()
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return json.load(response)["connected_at"]
+        clients = broker_clients()
+        match = [
+            client
+            for client in clients
+            if client["client_id"] == "whalerein-host-" + scenario.host
+        ]
+        assert match, "Host connection missing from the broker registry"
+        return match[0]["conn"]
 
     before = live_connection()
     result = subprocess.run(

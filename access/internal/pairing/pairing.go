@@ -90,9 +90,15 @@ type Config struct {
 	ProtocolVersion uint32
 }
 
+// PolicySink applies a confirmed pairing to Access admission and broker policy.
+type PolicySink interface {
+	ApplyPairing(ctx context.Context, hostID, deviceID string) error
+}
+
 // Dependencies wires the pairing service.
 type Dependencies struct {
 	Store     Store
+	Policy    PolicySink
 	Transport Transport
 	Presence  Presence
 	Config    Config
@@ -112,6 +118,7 @@ type completedClaim struct {
 // Service implements invitation and claim flows.
 type Service struct {
 	store     Store
+	policy    PolicySink
 	transport Transport
 	presence  Presence
 	cfg       Config
@@ -129,6 +136,9 @@ type Service struct {
 func New(deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
 		return nil, errors.New("pairing: store is required")
+	}
+	if deps.Policy == nil {
+		return nil, errors.New("pairing: policy sink is required")
 	}
 	if deps.Transport == nil {
 		return nil, errors.New("pairing: transport is required")
@@ -153,6 +163,7 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	return &Service{
 		store:     deps.Store,
+		policy:    deps.Policy,
 		transport: deps.Transport,
 		presence:  deps.Presence,
 		cfg:       deps.Config,
@@ -603,6 +614,13 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 	if !used {
 		return nil, ErrTokenUsed
+	}
+	// The pairing is usable only after Access admission and broker policy are
+	// ready for this exact grant.
+	if err := s.policy.ApplyPairing(ctx, token.HostID, request.GetDeviceId()); err != nil {
+		s.logger.Warn("pairing policy application failed",
+			"host", s.masker.Host(token.HostID), "device", s.masker.Device(request.GetDeviceId()), "error", err.Error())
+		return nil, ErrInternal
 	}
 
 	if helloReply.HostFingerprint != "" {

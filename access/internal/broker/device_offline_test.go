@@ -65,7 +65,7 @@ func TestDeviceOfflineUnknownDeviceHasNoHostsAndPublishesNothing(t *testing.T) {
 	service, session := offlineService(t, func(context.Context, string) ([]string, error) {
 		return nil, nil
 	})
-	service.handleDeviceOffline("missing", PresenceSourceSys, time.Now())
+	service.handleDeviceOffline("missing", PresenceSourceBroker, time.Now())
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if len(session.published) != 0 {
@@ -77,13 +77,13 @@ func TestDeviceOfflineFailurePathsAreBoundedAndCounted(t *testing.T) {
 	lookupErr, _ := offlineService(t, func(context.Context, string) ([]string, error) {
 		return nil, errors.New("database unavailable")
 	})
-	lookupErr.handleDeviceOffline("d1", PresenceSourceSys, time.Now())
+	lookupErr.handleDeviceOffline("d1", PresenceSourceBroker, time.Now())
 	if got := testutil.ToFloat64(lookupErr.metrics.DeviceOfflinePublishFail); got != 1 {
 		t.Fatalf("lookup failure metric = %v", got)
 	}
 
 	noResolver, noResolverSession := offlineService(t, nil)
-	noResolver.handleDeviceOffline("d1", PresenceSourceSys, time.Now())
+	noResolver.handleDeviceOffline("d1", PresenceSourceBroker, time.Now())
 	if got := testutil.ToFloat64(noResolver.metrics.DeviceOfflinePublishFail); got != 1 {
 		t.Fatalf("missing resolver metric = %v", got)
 	}
@@ -94,7 +94,7 @@ func TestDeviceOfflineFailurePathsAreBoundedAndCounted(t *testing.T) {
 	noResolverSession.mu.Unlock()
 
 	invalidID, invalidSession := offlineService(t, nil)
-	invalidID.handleDeviceOffline("bad/id", PresenceSourceSys, time.Now())
+	invalidID.handleDeviceOffline("bad/id", PresenceSourceBroker, time.Now())
 	if got := testutil.ToFloat64(invalidID.metrics.PresenceInvalidPayloads); got != 1 {
 		t.Fatalf("invalid device metric = %v", got)
 	}
@@ -165,18 +165,20 @@ func TestRepeatedDeviceWillOnlyPublishesOnceUntilDeviceReconnects(t *testing.T) 
 	}
 }
 
-func TestSysDisconnectPublishesHostScopedJsonOnce(t *testing.T) {
+func TestBrokerDisconnectNotificationPublishesHostScopedJsonOnce(t *testing.T) {
 	service, session := offlineService(t, func(context.Context, string) ([]string, error) {
 		return []string{"h1"}, nil
 	})
-	service.HandleMessage("$SYS/brokers/n/clients/whalerein-device-d1/connected", nil)
+	connected := []byte("whalerein/1\nseq 10\nevent connected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 1000\n")
+	disconnected := []byte("whalerein/1\nseq 11\nevent disconnected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 2000\n")
+	service.HandleMessage(ControlEventFilter, connected)
 	session.mu.Lock()
 	if len(session.published) != 0 {
 		t.Fatalf("connected published = %v", session.published)
 	}
 	session.mu.Unlock()
 
-	service.HandleMessage("$SYS/brokers/n/clients/whalerein-device-d1/disconnected", nil)
+	service.HandleMessage(ControlEventFilter, disconnected)
 	session.mu.Lock()
 	if len(session.published) != 1 || session.published[0] != "whalerein/v1/h/h1/presence" {
 		t.Fatalf("published = %v", session.published)
@@ -186,15 +188,15 @@ func TestSysDisconnectPublishesHostScopedJsonOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	session.mu.Unlock()
-	if event.Event != "device_offline" || event.DeviceID != "d1" || event.Reason != PresenceSourceSys {
+	if event.Event != "device_offline" || event.DeviceID != "d1" || event.Reason != PresenceSourceBroker {
 		t.Fatalf("event = %+v", event)
 	}
 
-	service.HandleMessage("$SYS/brokers/n/clients/whalerein-device-d1/disconnected", nil)
+	service.HandleMessage(ControlEventFilter, []byte("whalerein/1\nseq 12\nevent disconnected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 3000\n"))
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if len(session.published) != 1 {
-		t.Fatalf("duplicate sys disconnect published = %v", session.published)
+		t.Fatalf("duplicate disconnect published = %v", session.published)
 	}
 	if got := testutil.ToFloat64(service.Presence().metrics.PresenceDuplicatesIgnored); got != 1 {
 		t.Fatalf("duplicate metric = %v", got)

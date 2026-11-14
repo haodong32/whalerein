@@ -94,7 +94,7 @@ func TestDeviceWillUnknownEntryFiresAndInvalidPayloadsAreDropped(t *testing.T) {
 	}
 }
 
-func TestSysDisconnectIsPrimaryAndDeduplicatesTheFollowingWill(t *testing.T) {
+func TestBrokerDisconnectIsPrimaryAndDeduplicatesTheFollowingWill(t *testing.T) {
 	presence := newPresence()
 	presence.now = func() time.Time { return time.Unix(3000, 0) }
 	var transitions []presenceTransition
@@ -102,17 +102,17 @@ func TestSysDisconnectIsPrimaryAndDeduplicatesTheFollowingWill(t *testing.T) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-device-d1/connected", nil)
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-device-d1/disconnected", nil)
-	if len(transitions) != 1 || transitions[0].source != PresenceSourceSys {
-		t.Fatalf("sys transition = %+v", transitions)
+	presence.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 1000})
+	presence.HandleNotification(&Notification{Sequence: 2, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 2000})
+	if len(transitions) != 1 || transitions[0].source != PresenceSourceBroker {
+		t.Fatalf("broker transition = %+v", transitions)
 	}
 	presence.HandleDeviceWill(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
 	if len(transitions) != 1 {
-		t.Fatalf("will duplicated sys transition: %+v", transitions)
+		t.Fatalf("will duplicated broker transition: %+v", transitions)
 	}
-	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceSys, "offline")); got != 1 {
-		t.Fatalf("sys offline metric = %v", got)
+	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceBroker, "offline")); got != 1 {
+		t.Fatalf("broker offline metric = %v", got)
 	}
 	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceWill, "offline")); got != 0 {
 		t.Fatalf("will offline metric = %v", got)

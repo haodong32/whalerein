@@ -23,12 +23,22 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string) error {
 		return ErrBadRequest
 	}
 	at := s.now()
+	// Fence every realtime admission before the durable write. A later
+	// confirmed per-grant denial narrows the provisional device fence.
+	s.admission.DenyDevice(deviceID)
 	hostIDs, exists, err := s.store.RevokeDeviceGrants(ctx, deviceID, at)
 	if err != nil {
 		return fmt.Errorf("revoke device: %w", err)
 	}
 	if !exists {
 		return ErrNotFound
+	}
+	for _, hostID := range hostIDs {
+		s.admission.Deny(hostID, deviceID)
+	}
+	s.admission.CompleteDeviceRevoke(deviceID)
+	if err := s.enforcer.RevokeDevice(ctx, deviceID); err != nil {
+		return fmt.Errorf("revoke device policy: %w", err)
 	}
 
 	s.logger.Info("revocation committed", "source", "device_request", "trace_id", diagnostics.TraceID(ctx), "device", s.masker.Device(deviceID), "count", len(hostIDs), "revoked_at_unix_ms", at.UnixMilli())

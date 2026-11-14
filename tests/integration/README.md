@@ -1,7 +1,7 @@
 # Linux integration tests
 
-All cases, pytest, product processes, PostgreSQL 18, and EMQX 5.8.8 run in one
-Docker container. The host Python/uv runner uses Docker buildx to build and start
+All cases, pytest, product processes, PostgreSQL 18, and Mosquitto 2.1.2 with
+the WhaleRein plugin run in one Docker container. The host Python/uv runner uses Docker buildx to build and start
 the container, collect its export and verify cleanup. The container receives no
 Docker socket and publishes no host ports; product builds do not use host native
 compilers or development services. See the [testing policy](../../docs/testing.md).
@@ -42,11 +42,12 @@ also lives here rather than in the package unit glob.
 
 PostgreSQL is acquired once per run when required. Each chain case owns a schema,
 Access, plugin state, a file SecretStore, and a separate FakeDSH process. One warm
-EMQX is shared per container by default; transport cases temporarily use a
-case-scoped authentication-disabled broker instead, so those configurations cannot
-mix. Access's service account uses a dedicated internal listener with a file ACL,
-so its startup never waits on its own HTTP auth resource. No case depends on a
-preceding case's pairing, session, or topic namespace.
+Mosquitto line is shared per container by default; transport cases temporarily
+stop it and own a case-scoped broker plus the deferred CONNECT policy callback,
+so those configurations cannot mix. Access's service account authenticates
+locally against the plugin password file, so its startup never waits on its own
+HTTP callback. No case depends on a preceding case's pairing, session, or topic
+namespace.
 The default runner is sequential; `--parallel N` starts N independent containers
 with deterministic `--shard INDEX/COUNT` hash partitions. PostgreSQL, ports,
 processes and schemas stay container-local, so per-case isolation is unchanged
@@ -60,17 +61,17 @@ A warm broker is shared by default for local/CI speed:
 WHALEREIN_INTEGRATION_SHARED_BROKER=0 ./repo test --suite integration --group chain  # per-case broker
 ```
 
-It starts one broker per container and reuses it across cases. MQTT clients use
-clean-start sessions and publications are non-retained, so no case inherits
-subscriptions or retained state; the transport cases stop the warm broker and
-start their authentication-disabled broker per case. Use the `=0` opt-out while
+It starts one Mosquitto broker per container and reuses it across cases. MQTT
+clients use clean-start sessions and publications are non-retained, so no case
+inherits subscriptions or retained state; the transport cases stop the warm
+broker and start their case-scoped broker per case. Use the `=0` opt-out while
 investigating broker-state isolation.
 
-Access uses an internal no-authn listener and a file ACL for its service
-account, plus a case-unique host/client-id namespace, so a shared broker does not
-couple Access startup to its own HTTP auth resource and cannot reuse another
-case's session. A broker that exits between cases is restarted by the fixture
-supervisor; its data directory is on the container tmpfs.
+Access authenticates locally against the plugin password file and uses a
+case-unique host/client-id namespace, so a shared broker does not couple Access
+startup to its own HTTP callback and cannot reuse another case's session. A
+broker that exits between cases is restarted by the fixture supervisor; its
+plugin state and data directory live on the container tmpfs.
 
 `scenario` supplies an unpaired environment without sessions or approvals.
 `session_id` creates a unique session; `pending_approval` explicitly prepares a
@@ -145,7 +146,7 @@ an empty shard is valid when N exceeds the selected case count.
 
 N is a resource tradeoff, not a promise of linear scaling. The acceptance VM is
 4 vCPU/8 GB; two to three containers is the recommended range there. Each shard
-still starts PostgreSQL, EMQX, DSH and browser tooling, so CPU, memory and image
+still starts PostgreSQL, Mosquitto, DSH and browser tooling, so CPU, memory and image
 build cache contention can dominate and additional shards may not reduce wall
 time. Case durations are uneven, so the slowest shard bounds merged wall time.
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// ACLAction is the EMQX HTTP ACL action.
+// ACLAction is the broker policy action projected to a connection.
 type ACLAction string
 
 // Supported ACL actions.
@@ -100,7 +100,7 @@ func (s *Service) authorizeDeviceACL(ctx context.Context, identity BrokerIdentit
 	if parsed.deviceID != identity.DeviceID {
 		return false, nil
 	}
-	active, err := s.store.HasActiveGrant(ctx, parsed.hostID, identity.DeviceID)
+	active, err := s.admission.Authorize(ctx, parsed.hostID, identity.DeviceID)
 	if err != nil {
 		return false, fmt.Errorf("authorize device topic: %w", err)
 	}

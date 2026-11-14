@@ -35,6 +35,12 @@ type Metrics struct {
 	PresenceInvalidPayloads   prometheus.Counter
 	DeviceOfflinePublishFail  prometheus.Counter
 	ClientPollStale           prometheus.Counter
+
+	AdmissionHits            prometheus.Counter
+	AdmissionLoads           prometheus.Counter
+	AdmissionLoadErrors      prometheus.Counter
+	AdmissionDenied          prometheus.Counter
+	AdmissionReconcileErrors prometheus.Counter
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -106,6 +112,26 @@ func NewMetrics() *Metrics {
 			Name: "request_client_stale_total",
 			Help: "HTTP-polling clients that stopped renewing a non-terminal request claim.",
 		}),
+		AdmissionHits: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "grant_admission_hits_total",
+			Help: "Realtime authorization decisions served from local grant state.",
+		}),
+		AdmissionLoads: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "grant_admission_loads_total",
+			Help: "Cold grant loads against PostgreSQL.",
+		}),
+		AdmissionLoadErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "grant_admission_load_errors_total",
+			Help: "Cold grant loads that failed closed.",
+		}),
+		AdmissionDenied: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "grant_admission_denied_total",
+			Help: "Realtime authorization decisions denied by missing, revoked or fenced grants.",
+		}),
+		AdmissionReconcileErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "grant_admission_reconcile_errors_total",
+			Help: "Grant reconciliation passes that could not read durable state.",
+		}),
 	}
 	registry.MustRegister(
 		m.HostResults,
@@ -124,6 +150,11 @@ func NewMetrics() *Metrics {
 		m.PresenceInvalidPayloads,
 		m.DeviceOfflinePublishFail,
 		m.ClientPollStale,
+		m.AdmissionHits,
+		m.AdmissionLoads,
+		m.AdmissionLoadErrors,
+		m.AdmissionDenied,
+		m.AdmissionReconcileErrors,
 	)
 	return m
 }

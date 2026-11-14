@@ -3,22 +3,19 @@ package broker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 )
 
-// Presence sources for device lifecycle events. $SYS broker lifecycle messages
-// are the primary source; the device last will is the portable fallback; an
-// explicit broker lifecycle callback is reported as "broker".
+// Presence sources for device lifecycle events. Native broker notifications
+// are the primary source; the device last will and HostReady are the existing
+// fallbacks when a notification is lost.
 const (
-	PresenceSourceSys    = "sys"
-	PresenceSourceWill   = "will"
 	PresenceSourceBroker = "broker"
+	PresenceSourceWill   = "will"
 )
 
 // DeviceOfflineHandler runs once for each accepted online -> offline edge.
@@ -28,25 +25,28 @@ type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
 type presenceEntry struct {
 	online bool
 	at     time.Time
+	connID uint64
 }
 
-// Presence is the broker-derived online registry. It is seeded only by EMQX
-// $SYS client lifecycle messages, the EMQX presence webhook, a device last will,
-// or a host Ready signal. It never queries a database heartbeat.
+// Presence is the broker-derived online registry. It is seeded by ordered
+// broker connection notifications, a broker snapshot, the device last will or
+// a Host Ready signal. It never queries a database heartbeat.
 type Presence struct {
 	mu                   sync.RWMutex
 	hosts                map[string]presenceEntry
 	devices              map[string]presenceEntry
 	cacheTTL             time.Duration
-	rest                 *RESTClient
+	available            bool
+	lastSeq              uint64
 	metrics              *diagnostics.Metrics
 	logger               *slog.Logger
 	now                  func() time.Time
 	deviceOfflineHandler DeviceOfflineHandler
 }
 
-// NewPresence creates an empty broker presence cache.
-func NewPresence(cacheTTL time.Duration, rest *RESTClient, metrics *diagnostics.Metrics, logger *slog.Logger) *Presence {
+// NewPresence creates an empty broker presence cache. Presence stays
+// unavailable until the first snapshot establishes the current broker state.
+func NewPresence(cacheTTL time.Duration, metrics *diagnostics.Metrics, logger *slog.Logger) *Presence {
 	if cacheTTL <= 0 {
 		cacheTTL = 15 * time.Second
 	}
@@ -57,7 +57,6 @@ func NewPresence(cacheTTL time.Duration, rest *RESTClient, metrics *diagnostics.
 		hosts:    make(map[string]presenceEntry),
 		devices:  make(map[string]presenceEntry),
 		cacheTTL: cacheTTL,
-		rest:     rest,
 		metrics:  metrics,
 		logger:   logger,
 		now:      func() time.Time { return time.Now().UTC() },
@@ -66,27 +65,39 @@ func NewPresence(cacheTTL time.Duration, rest *RESTClient, metrics *diagnostics.
 	return p
 }
 
-// IsHostOnline returns broker presence. A fresh cache entry wins; otherwise the
-// optional EMQX REST query refreshes it. Stale values are used only when the
-// REST client is unavailable, so a broker outage cannot invent an online host.
+// SetAvailable marks whether broker state is currently established. While
+// unavailable, presence reports offline rather than inventing connectivity.
+func (p *Presence) SetAvailable(available bool) {
+	p.mu.Lock()
+	p.available = available
+	p.mu.Unlock()
+	if !available {
+		p.publishCounts()
+	}
+}
+
+// Available reports whether a snapshot or a live notification established
+// broker state since the current Access session started.
+func (p *Presence) Available() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.available
+}
+
+// IsHostOnline returns broker presence. A missing or unavailable presence view
+// reports offline.
 func (p *Presence) IsHostOnline(ctx context.Context, hostID string) bool {
 	if hostID == "" {
 		return false
 	}
 	p.mu.RLock()
-	entry, ok := p.hosts[hostID]
-	p.mu.RUnlock()
-	now := p.now()
-	if ok && now.Sub(entry.at) < p.cacheTTL {
-		return entry.online
+	defer p.mu.RUnlock()
+	if !p.available {
+		return false
 	}
-	if p.rest != nil && p.rest.Enabled() {
-		online, err := p.rest.ClientConnected(ctx, ClientIDForHost(hostID))
-		if err == nil {
-			p.SetHostOnline(hostID, online, now)
-			return online
-		}
-		p.logger.Debug("EMQX presence query failed", "error", err.Error())
+	entry, ok := p.hosts[hostID]
+	if !ok {
+		return false
 	}
 	return entry.online
 }
@@ -98,8 +109,9 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 	}
 	p.mu.Lock()
 	if previous, exists := p.hosts[hostID]; !exists || !at.Before(previous.at) {
-		p.hosts[hostID] = presenceEntry{online: online, at: at}
+		p.hosts[hostID] = presenceEntry{online: online, at: at, connID: previous.connID}
 	}
+	p.available = true
 	p.mu.Unlock()
 	p.publishCounts()
 }
@@ -107,7 +119,7 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 // SetDeviceOnline updates broker-derived device presence. An online -> offline
 // transition invokes the registered device-offline handler exactly once.
 func (p *Presence) SetDeviceOnline(deviceID string, online bool, at time.Time) {
-	p.applyDevice(deviceID, online, at, PresenceSourceBroker)
+	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0)
 }
 
 // SetDeviceOfflineHandler installs the callback for accepted device-offline
@@ -119,10 +131,9 @@ func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
 }
 
 // applyDevice records device presence and emits at most one offline callback
-// per online -> offline edge. Repeated offline events and stale source events
-// are ignored without emitting another callback.
-func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string) {
-	p.logger.Info("presence device state", "device", deviceID, "online", online, "source", source)
+// per online -> offline edge. A non-zero connID limits the transition to its
+// own connection so a delayed disconnect cannot affect a newer one.
+func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64) {
 	if deviceID == "" {
 		return
 	}
@@ -130,6 +141,11 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 	previous, exists := p.devices[deviceID]
 	if exists && at.Before(previous.at) {
 		p.mu.Unlock()
+		return
+	}
+	if connID != 0 && previous.connID != 0 && previous.connID != connID {
+		p.mu.Unlock()
+		p.logger.Debug("presence event for a superseded connection ignored", "source", source)
 		return
 	}
 	transition := false
@@ -141,7 +157,11 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			duplicate = true
 		}
 	}
-	p.devices[deviceID] = presenceEntry{online: online, at: at}
+	next := presenceEntry{online: online, at: at, connID: previous.connID}
+	if connID != 0 {
+		next.connID = connID
+	}
+	p.devices[deviceID] = next
 	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
 
@@ -150,7 +170,6 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 		if p.metrics != nil {
 			p.metrics.PresenceDuplicate()
 		}
-		p.logger.Debug("duplicate device offline event ignored", "source", source)
 		return
 	}
 	state := "offline"
@@ -160,7 +179,6 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 	if p.metrics != nil {
 		p.metrics.PresenceEvent(source, state)
 	}
-	p.logger.Debug("device presence event", "source", source, "state", state)
 	if transition && handler != nil {
 		handler(deviceID, source, at)
 	}
@@ -171,24 +189,84 @@ func (p *Presence) MarkHostReady(hostID string, at time.Time) {
 	p.SetHostOnline(hostID, true, at)
 }
 
-// HandleSysMessage consumes an EMQX $SYS client lifecycle message.
-func (p *Presence) HandleSysMessage(topic string, payload []byte) {
-	clientID, online, ok := ParseSysClientTopic(topic)
-	if !ok {
+// HandleNotification applies one ordered broker connection notification.
+func (p *Presence) HandleNotification(notification *Notification) {
+	if notification == nil || notification.Sequence == 0 {
 		return
 	}
-	identity := identityForClient(clientID, "")
-	if parsed := parsePresencePayload(payload); parsed.ClientID != "" {
-		identity = identityForClient(parsed.ClientID, parsed.Username)
-	} else if parsed.Username != "" {
-		identity = identityForClient("", parsed.Username)
+	at := p.now()
+	if notification.AtUnixMilli > 0 {
+		at = time.UnixMilli(notification.AtUnixMilli).UTC()
 	}
-	p.apply(identity, online, p.now(), PresenceSourceSys)
+	p.mu.Lock()
+	if notification.Sequence <= p.lastSeq {
+		p.mu.Unlock()
+		return
+	}
+	p.lastSeq = notification.Sequence
+	online := notification.Event == "connected"
+	switch notification.Kind {
+	case "host":
+		if notification.HostID != "" {
+			previous, exists := p.hosts[notification.HostID]
+			superseded := !online && exists && previous.connID != 0 &&
+				previous.connID != notification.ConnID
+			p.logger.Debug("host presence notification", "online", online, "seq", notification.Sequence,
+				"last_seq", p.lastSeq, "conn", notification.ConnID, "previous_conn", previous.connID,
+				"superseded", superseded, "stale", exists && at.Before(previous.at))
+			if !superseded && (!exists || !at.Before(previous.at)) {
+				p.hosts[notification.HostID] = presenceEntry{online: online, at: at, connID: notification.ConnID}
+			}
+		}
+		p.available = true
+	case "device":
+		if notification.DeviceID != "" {
+			p.mu.Unlock()
+			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, notification.ConnID)
+			return
+		}
+	}
+	p.mu.Unlock()
+	p.publishCounts()
+}
+
+// ApplySnapshot replaces presence with the broker's current connection set at
+// the returned sequence boundary.
+func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
+	p.mu.Lock()
+	hosts := make(map[string]presenceEntry, len(p.hosts))
+	devices := make(map[string]presenceEntry, len(p.devices))
+	now := p.now()
+	for _, client := range clients {
+		if client.State != "connected" {
+			continue
+		}
+		at := now
+		if client.Connected > 0 {
+			at = time.UnixMilli(client.Connected).UTC()
+		}
+		switch client.Kind {
+		case "host":
+			if client.HostID != "" {
+				hosts[client.HostID] = presenceEntry{online: true, at: at, connID: client.ConnID}
+			}
+		case "device":
+			if client.DeviceID != "" {
+				devices[client.DeviceID] = presenceEntry{online: true, at: at, connID: client.ConnID}
+			}
+		}
+	}
+	p.hosts = hosts
+	p.devices = devices
+	if boundary > p.lastSeq {
+		p.lastSeq = boundary
+	}
+	p.available = true
+	p.mu.Unlock()
+	p.publishCounts()
 }
 
 // deviceWillHint is the only information Access uses from a last-will payload.
-// Identity always comes from the authenticated connection/topic; the embedded
-// device id is validated against the topic and never trusted on its own.
 type deviceWillHint struct {
 	Event    string `json:"event"`
 	DeviceID string `json:"device_id"`
@@ -204,7 +282,6 @@ func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
 		if p.metrics != nil {
 			p.metrics.PresenceInvalid()
 		}
-		p.logger.Debug("device will on invalid topic dropped")
 		return
 	}
 	var hint deviceWillHint
@@ -212,126 +289,24 @@ func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
 		if p.metrics != nil {
 			p.metrics.PresenceInvalid()
 		}
-		p.logger.Debug("device will payload dropped")
 		return
 	}
 	if hint.DeviceID != "" && hint.DeviceID != deviceID {
 		if p.metrics != nil {
 			p.metrics.PresenceInvalid()
 		}
-		p.logger.Debug("device will identity mismatch dropped")
 		return
 	}
-	p.logger.Info("device will received", "device", deviceID)
-	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill)
-}
-
-// HandlePresenceWebhook consumes an EMQX client lifecycle webhook payload. An
-// object or an array of objects is accepted.
-func (p *Presence) HandlePresenceWebhook(body []byte) error {
-	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" {
-		return errors.New("empty presence payload")
-	}
-	if strings.HasPrefix(trimmed, "[") {
-		var events []presencePayload
-		if err := json.Unmarshal(body, &events); err != nil {
-			return err
-		}
-		for _, event := range events {
-			p.applyPayload(event)
-		}
-		return nil
-	}
-	var event presencePayload
-	if err := json.Unmarshal(body, &event); err != nil {
-		return err
-	}
-	p.applyPayload(event)
-	return nil
-}
-
-type presencePayload struct {
-	Event     string `json:"event"`
-	ClientID  string `json:"clientid"`
-	Username  string `json:"username"`
-	Timestamp int64  `json:"timestamp"`
-}
-
-func parsePresencePayload(payload []byte) presencePayload {
-	var event presencePayload
-	_ = json.Unmarshal(payload, &event)
-	return event
-}
-
-func (p *Presence) applyPayload(event presencePayload) {
-	identity := identityForClient(event.ClientID, event.Username)
-	if identity.kind == "" {
-		return
-	}
-	online, ok := lifecycleState(event.Event)
-	if !ok {
-		return
-	}
-	at := p.now()
-	if event.Timestamp > 0 {
-		at = time.UnixMilli(event.Timestamp).UTC()
-	}
-	p.apply(identity, online, at, PresenceSourceBroker)
-}
-
-func lifecycleState(event string) (bool, bool) {
-	name := strings.ToLower(event)
-	switch {
-	case strings.Contains(name, "disconnected"):
-		return false, true
-	case strings.Contains(name, "connected"):
-		return true, true
-	default:
-		return false, false
-	}
-}
-
-type clientIdentity struct {
-	kind     string
-	hostID   string
-	deviceID string
-}
-
-func identityForClient(clientID, username string) clientIdentity {
-	// Probe sessions must never become host/device presence, even when a
-	// lifecycle callback omits either the username or the client ID.
-	if strings.HasPrefix(username, "probe:") || strings.HasPrefix(clientID, "whalerein-probe-") {
-		return clientIdentity{}
-	}
-	if strings.HasPrefix(username, "host:") {
-		return clientIdentity{kind: "host", hostID: strings.TrimPrefix(username, "host:")}
-	}
-	if strings.HasPrefix(username, "device:") {
-		return clientIdentity{kind: "device", deviceID: strings.TrimPrefix(username, "device:")}
-	}
-	if strings.HasPrefix(clientID, "whalerein-host-") {
-		return clientIdentity{kind: "host", hostID: strings.TrimPrefix(clientID, "whalerein-host-")}
-	}
-	if strings.HasPrefix(clientID, "whalerein-device-") {
-		return clientIdentity{kind: "device", deviceID: strings.TrimPrefix(clientID, "whalerein-device-")}
-	}
-	return clientIdentity{}
-}
-
-func (p *Presence) apply(identity clientIdentity, online bool, at time.Time, source string) {
-	switch identity.kind {
-	case "host":
-		p.SetHostOnline(identity.hostID, online, at)
-	case "device":
-		p.applyDevice(identity.deviceID, online, at, source)
-	}
+	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0)
 }
 
 // ConnectedCounts returns the last broker-derived online counts.
 func (p *Presence) ConnectedCounts() (hosts, devices int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	if !p.available {
+		return 0, 0
+	}
 	for _, entry := range p.hosts {
 		if entry.online {
 			hosts++

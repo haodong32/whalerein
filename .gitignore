@@ -46,3 +46,6 @@ certs/
 #   proto/v1/bindings/** (Go bindings and Rust build/test scaffolding are committed)
 #   Cargo.lock, go.sum, uv.lock, package-lock.json
 #   deploy/**/*.example and *.template
+
+# Native plugin build output.
+deploy/mosquitto/plugin/*.so

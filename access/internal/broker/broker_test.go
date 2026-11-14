@@ -3,15 +3,10 @@ package broker
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -91,73 +86,8 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 	}
 }
 
-func TestParseSysClientTopicRecognizesConnectionEvents(t *testing.T) {
-	clientID, online, ok := ParseSysClientTopic("$SYS/brokers/emqx@127.0.0.1/clients/whalerein-host-h1/connected")
-	if !ok || !online || clientID != "whalerein-host-h1" {
-		t.Fatalf("connected = %q %v %v", clientID, online, ok)
-	}
-	clientID, online, ok = ParseSysClientTopic("$SYS/brokers/n/clients/whalerein-device-d1/disconnected")
-	if !ok || online || clientID != "whalerein-device-d1" {
-		t.Fatalf("disconnected = %q %v %v", clientID, online, ok)
-	}
-	for _, bad := range []string{"", "$SYS/brokers/n/clients/x", "$SYS/brokers/n/clients/x/other", "whalerein/v1/h/h1/event"} {
-		if _, _, ok := ParseSysClientTopic(bad); ok {
-			t.Fatalf("expected invalid topic %q", bad)
-		}
-	}
-}
-
-func identityFor(t *testing.T, clientID, username, kind, id string) {
-	t.Helper()
-	identity := identityForClient(clientID, username)
-	if identity.kind != kind {
-		t.Fatalf("identity = %+v", identity)
-	}
-	if kind == "host" && identity.hostID != id {
-		t.Fatalf("host = %q", identity.hostID)
-	}
-	if kind == "device" && identity.deviceID != id {
-		t.Fatalf("device = %q", identity.deviceID)
-	}
-}
-
-func TestIdentityForClientParsesKnownClientCredentials(t *testing.T) {
-	identityFor(t, "", "host:h1", "host", "h1")
-	identityFor(t, "", "device:d1", "device", "d1")
-	identityFor(t, "whalerein-host-h1", "", "host", "h1")
-	identityFor(t, "whalerein-device-d1", "", "device", "d1")
-	if identity := identityForClient("other", ""); identity.kind != "" {
-		t.Fatalf("identity = %+v", identity)
-	}
-}
-
-func TestProbeLifecycleDoesNotChangePresence(t *testing.T) {
-	clientID := "whalerein-probe-0123456789abcdef0123456789abcdef"
-	for _, pair := range [][2]string{
-		{clientID, "probe:h1"}, {clientID, ""}, {"", "probe:h1"},
-		{clientID, "host:h1"}, {"whalerein-host-h1", "probe:h1"},
-	} {
-		if identity := identityForClient(pair[0], pair[1]); identity.kind != "" {
-			t.Fatalf("probe became presence: %+v", identity)
-		}
-	}
-	presence := newPresence()
-	presence.SetHostOnline("h1", true, time.Now())
-	presence.HandleSysMessage("$SYS/brokers/n/clients/"+clientID+"/disconnected", []byte(`{"username":"probe:h1"}`))
-	if !presence.IsHostOnline(context.Background(), "h1") {
-		t.Fatal("probe disconnected the host presence")
-	}
-	presence.SetHostOnline("h1", false, time.Now())
-	if err := presence.HandlePresenceWebhook([]byte(`{"event":"client.connected","clientid":"` + clientID + `","username":"probe:h1"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if hosts, devices := presence.ConnectedCounts(); hosts != 0 || devices != 0 {
-		t.Fatal("probe added an online principal")
-	}
-}
-
 func newPresence() *Presence {
-	return NewPresence(50*time.Millisecond, nil, diagnostics.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewPresence(50*time.Millisecond, diagnostics.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestPresenceCacheTracksConnectionCountsAndExpiry(t *testing.T) {
@@ -188,296 +118,6 @@ func TestPresenceCacheTracksConnectionCountsAndExpiry(t *testing.T) {
 	if presence.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("host should be offline")
 	}
-}
-
-func TestPresenceUsesStaleCacheFallbackAndRESTLookup(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "whalerein-host-h1") {
-			_, _ = io.WriteString(w, `{"connected":false}`)
-			return
-		}
-		_, _ = io.WriteString(w, `{"connected":true}`)
-	}))
-	defer server.Close()
-	rest := &RESTClient{base: mustURL(t, server.URL), key: "k", secret: "s", client: server.Client()}
-	presence := NewPresence(time.Hour, rest, diagnostics.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if !presence.IsHostOnline(context.Background(), "h2") {
-		t.Fatal("REST host should be online")
-	}
-	// A fresh cache entry wins over REST.
-	presence.SetHostOnline("h1", true, time.Now())
-	if !presence.IsHostOnline(context.Background(), "h1") {
-		t.Fatal("cache host should be online")
-	}
-	// Make the cache stale and let REST report offline.
-	presence.cacheTTL = time.Nanosecond
-	time.Sleep(time.Millisecond)
-	if presence.IsHostOnline(context.Background(), "h1") {
-		t.Fatal("stale REST host should be offline")
-	}
-	// The stale value is used when the REST query fails.
-	presence.SetHostOnline("h3", true, time.Now().Add(-time.Hour))
-	presence.rest = &RESTClient{base: mustURL(t, "http://127.0.0.1:1"), key: "k", secret: "s", client: &http.Client{Timeout: time.Millisecond}}
-	if !presence.IsHostOnline(context.Background(), "h3") {
-		t.Fatal("stale fallback should be used")
-	}
-}
-
-func mustURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return parsed
-}
-
-func TestPresenceUpdatesFromSysEventsAndWebhook(t *testing.T) {
-	presence := newPresence()
-	connected := []byte(`{"clientid":"whalerein-host-h1","username":"host:h1","timestamp":1000}`)
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-host-h1/connected", connected)
-	if !presence.IsHostOnline(context.Background(), "h1") {
-		t.Fatal("host not online")
-	}
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-device-d1/connected", []byte(`{}`))
-	if hosts, devices := presence.ConnectedCounts(); hosts != 1 || devices != 1 {
-		t.Fatalf("counts = %d/%d", hosts, devices)
-	}
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-host-h1/connected", []byte(`{"username":"host:h2"}`))
-	if !presence.IsHostOnline(context.Background(), "h2") {
-		t.Fatal("payload username not used")
-	}
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-host-h1/disconnected", nil)
-	if !presence.IsHostOnline(context.Background(), "h2") {
-		t.Fatal("h2 should be unaffected")
-	}
-	presence.HandleSysMessage("not-a-sys-topic", nil)
-	presence.HandleSysMessage("$SYS/brokers/n/clients/whalerein-host-h1/other", nil)
-
-	webhook := []byte(`{"event":"client.connected","clientid":"whalerein-host-h3","timestamp":1700000000000}`)
-	if err := presence.HandlePresenceWebhook(webhook); err != nil {
-		t.Fatal(err)
-	}
-	if !presence.IsHostOnline(context.Background(), "h3") {
-		t.Fatal("webhook host not online")
-	}
-	if err := presence.HandlePresenceWebhook([]byte(`[{"event":"client.disconnected","clientid":"whalerein-host-h3"}]`)); err != nil {
-		t.Fatal(err)
-	}
-	if presence.IsHostOnline(context.Background(), "h3") {
-		t.Fatal("webhook disconnect not applied")
-	}
-	if err := presence.HandlePresenceWebhook([]byte(`{"event":"session.subscribed","clientid":"whalerein-host-h4"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := presence.HandlePresenceWebhook([]byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := presence.HandlePresenceWebhook(nil); err == nil {
-		t.Fatal("empty webhook")
-	}
-	if err := presence.HandlePresenceWebhook([]byte(`{`)); err == nil {
-		t.Fatal("malformed webhook")
-	}
-	if online, ok := lifecycleState("client.disconnected"); ok && online {
-		t.Fatal("disconnected state")
-	}
-	if online, ok := lifecycleState("client.connected"); !ok || !online {
-		t.Fatal("connected state")
-	}
-	if _, ok := lifecycleState("other"); ok {
-		t.Fatal("unknown state")
-	}
-}
-
-func TestRESTClientListsClientsAndDisconnectsDevices(t *testing.T) {
-	if client, err := NewRESTClient(config.EMQXConfig{}); err != nil || client != nil {
-		t.Fatalf("empty config = %v %v", client, err)
-	}
-	if _, err := NewRESTClient(config.EMQXConfig{RESTURL: ":::"}); err == nil {
-		t.Fatal("bad URL")
-	}
-	if _, err := NewRESTClient(config.EMQXConfig{RESTURL: "https://example.com", CAFile: filepath.Join(t.TempDir(), "missing")}); err == nil {
-		t.Fatal("missing CA")
-	}
-	emptyCA := filepath.Join(t.TempDir(), "empty.pem")
-	if err := os.WriteFile(emptyCA, []byte("not a cert"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewRESTClient(config.EMQXConfig{RESTURL: "https://example.com", CAFile: emptyCA}); err == nil {
-		t.Fatal("invalid CA")
-	}
-	if _, err := tlsConfigFor("", true, "x"); err != nil {
-		t.Fatal(err)
-	}
-
-	var gotAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		switch {
-		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "gone"):
-			w.WriteHeader(http.StatusNotFound)
-		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "fail"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		case strings.Contains(r.URL.Path, "missing"):
-			w.WriteHeader(http.StatusNotFound)
-		case strings.Contains(r.URL.Path, "fail"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "malformed"):
-			_, _ = io.WriteString(w, `{`)
-		case strings.Contains(r.URL.Path, "data"):
-			_, _ = io.WriteString(w, `{"data":{"connected":true}}`)
-		default:
-			_, _ = io.WriteString(w, `{"connected":true}`)
-		}
-	}))
-	defer server.Close()
-	client := &RESTClient{base: mustURL(t, server.URL), key: "key", secret: "secret", client: server.Client()}
-	if !client.Enabled() {
-		t.Fatal("client should be enabled")
-	}
-	connected, err := client.ClientConnected(context.Background(), "client")
-	if err != nil || !connected || !strings.HasPrefix(gotAuth, "Basic ") {
-		t.Fatalf("connected = %v err=%v auth=%q", connected, err, gotAuth)
-	}
-	if connected, err := client.ClientConnected(context.Background(), "data"); err != nil || !connected {
-		t.Fatalf("data = %v err=%v", connected, err)
-	}
-	if connected, err := client.ClientConnected(context.Background(), "missing"); err != nil || connected {
-		t.Fatalf("missing = %v err=%v", connected, err)
-	}
-	if _, err := client.ClientConnected(context.Background(), "fail"); err == nil {
-		t.Fatal("expected HTTP error")
-	}
-	if _, err := client.ClientConnected(context.Background(), "malformed"); err == nil {
-		t.Fatal("expected decode error")
-	}
-	if err := client.DisconnectClient(context.Background(), "client"); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Disconnect(context.Background(), "gone"); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.DisconnectClient(context.Background(), "fail"); err == nil {
-		t.Fatal("expected disconnect error")
-	}
-	disabled := &RESTClient{}
-	if disabled.Enabled() {
-		t.Fatal("disabled")
-	}
-	if _, err := disabled.ClientConnected(context.Background(), "x"); err == nil {
-		t.Fatal("disabled query")
-	}
-	if err := disabled.DisconnectClient(context.Background(), "x"); err == nil {
-		t.Fatal("disabled disconnect")
-	}
-	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"connected":true}`)
-	}))
-	defer tlsServer.Close()
-	caFile := filepath.Join(t.TempDir(), "ca.pem")
-	cert := tlsServer.Certificate()
-	pem := pemEncode(cert.Raw)
-	if err := os.WriteFile(caFile, pem, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tlsClient, err := NewRESTClient(config.EMQXConfig{RESTURL: tlsServer.URL, CAFile: caFile, APIKey: "k", APISecret: "s"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsClient.client = tlsServer.Client()
-	if connected, err := tlsClient.ClientConnected(context.Background(), "x"); err != nil || !connected {
-		t.Fatalf("TLS connected = %v err=%v", connected, err)
-	}
-}
-
-func pemEncode(der []byte) []byte {
-	return []byte("-----BEGIN CERTIFICATE-----\n" + base64Wrap(der) + "\n-----END CERTIFICATE-----\n")
-}
-
-func base64Wrap(data []byte) string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var out strings.Builder
-	for i := 0; i < len(data); i += 3 {
-		var chunk [3]byte
-		n := copy(chunk[:], data[i:])
-		value := int(chunk[0])<<16 | int(chunk[1])<<8 | int(chunk[2])
-		for j := 0; j < 4; j++ {
-			if j > n {
-				out.WriteByte('=')
-				continue
-			}
-			out.WriteByte(alphabet[(value>>(18-6*j))&0x3f])
-		}
-	}
-	return out.String()
-}
-
-func TestDisconnectersUseConfiguredMechanisms(t *testing.T) {
-	if _, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "ctl"}, nil, nil); err == nil {
-		t.Fatal("empty ctl path")
-	}
-	var got []string
-	runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
-		got = append([]string{name}, args...)
-		return []byte("ok"), nil
-	}
-	disconnecter, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "ctl", CTLPath: "emqx"}, nil, runner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := disconnecter.Disconnect(context.Background(), "whalerein-device-d1"); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 5 || got[0] != "emqx" || got[3] != "kick" || got[4] != "whalerein-device-d1" {
-		t.Fatalf("command = %v", got)
-	}
-	runner = func(context.Context, string, ...string) ([]byte, error) {
-		return []byte("client not found"), errors.New("exit 1")
-	}
-	disconnecter, _ = NewDisconnecter(config.EMQXConfig{DisconnectMode: "ctl", CTLPath: "emqx"}, nil, runner)
-	if err := disconnecter.Disconnect(context.Background(), "x"); err != nil {
-		t.Fatal("not found should be idempotent")
-	}
-	runner = func(context.Context, string, ...string) ([]byte, error) { return []byte("boom"), errors.New("exit 1") }
-	disconnecter, _ = NewDisconnecter(config.EMQXConfig{DisconnectMode: "ctl", CTLPath: "emqx"}, nil, runner)
-	if err := disconnecter.Disconnect(context.Background(), "x"); err == nil {
-		t.Fatal("expected error")
-	}
-	if err := disconnecter.Disconnect(context.Background(), ""); err == nil {
-		t.Fatal("empty client id")
-	}
-	if _, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "rest"}, nil, nil); err == nil {
-		t.Fatal("rest without client")
-	}
-	if _, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "bad"}, nil, nil); err == nil {
-		t.Fatal("bad mode")
-	}
-	disabledREST := &RESTClient{}
-	if _, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "rest"}, disabledREST, nil); err == nil {
-		t.Fatal("disabled rest client")
-	}
-	enabledREST := &RESTClient{key: "k", secret: "s"}
-	if _, err := NewDisconnecter(config.EMQXConfig{DisconnectMode: "rest"}, enabledREST, nil); err != nil {
-		t.Fatal(err)
-	}
-	service := &Service{}
-	if err := service.DisconnectDevice(context.Background(), "d1"); err == nil {
-		t.Fatal("no disconnecter")
-	}
-	service.disconnecter = &fakeDisconnecter{}
-	if err := service.DisconnectDevice(context.Background(), "d1"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-type fakeDisconnecter struct{ ids []string }
-
-func (f *fakeDisconnecter) Disconnect(_ context.Context, clientID string) error {
-	f.ids = append(f.ids, clientID)
-	return nil
 }
 
 type fakeSession struct {
@@ -553,7 +193,7 @@ func testService(t *testing.T, connector Connector) *Service {
 	t.Helper()
 	metrics := diagnostics.NewMetrics()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	presence := NewPresence(50*time.Millisecond, nil, metrics, logger)
+	presence := NewPresence(50*time.Millisecond, metrics, logger)
 	service, err := New(Dependencies{
 		Config:   config.BrokerConfig{PublishTimeout: config.Duration(time.Second), ReconnectMin: config.Duration(time.Millisecond), ReconnectMax: config.Duration(5 * time.Millisecond)},
 		Presence: presence, Connector: connector,
@@ -780,7 +420,7 @@ func TestHandleMessageRoutesResultsAndEvents(t *testing.T) {
 	service.HandleMessage(EventTopic("h1"), []byte("event"))
 }
 
-func TestHostReadyRegistersHostAndUpdatesSysPresence(t *testing.T) {
+func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	ready := make(chan string, 1)
 	service.SetReadyHandler(func(_ context.Context, hostID string) error {
@@ -822,15 +462,6 @@ func TestHostReadyRegistersHostAndUpdatesSysPresence(t *testing.T) {
 	// Ready host id must match the topic.
 	mismatch, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h2")})
 	service.HandleMessage(ResultTopic("h1"), mismatch)
-
-	service.HandleMessage("$SYS/brokers/n/clients/whalerein-host-h9/connected", []byte(`{}`))
-	if !service.Presence().IsHostOnline(context.Background(), "h9") {
-		t.Fatal("sys presence not applied")
-	}
-	service.HandleMessage("$SYS/brokers/n/clients/whalerein-host-h9/disconnected", []byte(`{}`))
-	if service.Presence().IsHostOnline(context.Background(), "h9") {
-		t.Fatal("sys disconnect not applied")
-	}
 }
 
 func mustMarshalHostReady(t *testing.T, hostID string) []byte {
@@ -923,16 +554,6 @@ func TestHandleReadyIgnoresMissingResultHandler(t *testing.T) {
 	service.HandleMessage(ResultTopic("h1"), result)
 }
 
-func TestJSONPresencePayloadParsesConnectionState(t *testing.T) {
-	var payload presencePayload
-	if err := json.Unmarshal([]byte(`{"event":"client.connected","clientid":"x"}`), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.ClientID != "x" {
-		t.Fatalf("payload = %+v", payload)
-	}
-}
-
 func TestBrokerDefaultsToFiveSecondPublishAndFifteenSecondPresenceTTL(t *testing.T) {
 	presence := newPresence()
 	service, err := New(Dependencies{Connector: &fakeConnector{}, Presence: presence})
@@ -955,7 +576,7 @@ func TestBrokerDefaultsToFiveSecondPublishAndFifteenSecondPresenceTTL(t *testing
 	if service.baseContext() == nil {
 		t.Fatal("base context")
 	}
-	empty := NewPresence(0, nil, nil, nil)
+	empty := NewPresence(0, nil, nil)
 	if empty.cacheTTL != 15*time.Second {
 		t.Fatalf("cache ttl = %v", empty.cacheTTL)
 	}
@@ -1019,25 +640,6 @@ func TestReadyUsesBaseContextWhenRequestContextIsNil(t *testing.T) {
 	case <-ready:
 	case <-time.After(time.Second):
 		t.Fatal("ready handler not called")
-	}
-}
-
-func TestPresenceIgnoresUnknownWebhookAndParsesConnectedClientPayload(t *testing.T) {
-	presence := newPresence()
-	if err := presence.HandlePresenceWebhook([]byte(`{"event":"client.connected","clientid":"other"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if connected, err := parseConnected([]byte(`{"data":{"connected":true}}`)); err != nil || !connected {
-		t.Fatalf("data = %v %v", connected, err)
-	}
-	if connected, err := parseConnected([]byte(`{"data":[]}`)); err != nil || connected {
-		t.Fatalf("bad data = %v %v", connected, err)
-	}
-	if _, err := parseConnected([]byte(`{`)); err == nil {
-		t.Fatal("malformed")
-	}
-	if connected, err := parseConnected([]byte(`{}`)); err != nil || connected {
-		t.Fatalf("empty = %v %v", connected, err)
 	}
 }
 

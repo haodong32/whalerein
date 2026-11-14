@@ -57,7 +57,36 @@ Run commands from the repository root:
 - `./repo test` runs all registered unit projects. Integration is slow and opt-in.
   Use `./repo test --suite all` for one report containing both suites.
 
-See the [repo command reference](../tools/repo/README.md#test-selection) for exact
+For the Mosquitto line, two opt-in fixtures back the replacement acceptance
+record. The native broker fixture needs the pinned Mosquitto 2.1.2 headers and
+broker binary:
+
+```bash
+MOSQUITTO_INCLUDE=$(brew --prefix)/include \
+  go test -tags mosquitto ./deploy/mosquitto/test -run TestNativeBrokerCapabilities -v
+```
+
+The stack acceptance suite runs against the Compose stack and needs its
+restart commands so it can exercise restarts:
+
+```bash
+WHALEREIN_ACCEPTANCE=1 \
+WHALEREIN_ACCEPTANCE_RESTART_ACCESS='docker restart whalerein-access' \
+WHALEREIN_ACCEPTANCE_RESTART_BROKER='docker restart whalerein-mosquitto' \
+  go test -tags acceptance ./tests/acceptance -run TestMosquittoLineAcceptance -v
+```
+
+The target-line benchmark is part of the same acceptance binary and needs the
+TLS listener and seeded fixture:
+
+```bash
+WHALEREIN_BENCH=1 WHALEREIN_BENCH_DEVICES=2000 \
+WHALEREIN_BENCH_MQTT=<host>:8883 WHALEREIN_BENCH_ACCESS=http://127.0.0.1:8080 \
+  go test -tags acceptance ./tests/acceptance -run TestMosquittoLineBenchmark -v
+```
+
+Both fixtures stay outside the default unit suite; record their output under
+`.local-docs/acceptance/`. See the [repo command reference](../tools/repo/README.md#test-selection) for exact
 project IDs, case discovery, selector syntax and unsupported combinations.
 The [integration guide](../tests/integration/README.md) describes container and
 fixture ownership. Development services are not prerequisites for integration.

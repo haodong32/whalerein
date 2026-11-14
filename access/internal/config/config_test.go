@@ -57,8 +57,11 @@ func TestParseMinimalConfigurationAppliesDefaults(t *testing.T) {
 	if cfg.HTTP.MaxBodyBytes != 24<<20 || cfg.Protocol.Version != 1 || cfg.Log.Level != "info" {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
-	if cfg.EMQX.DisconnectMode != "ctl" {
-		t.Fatalf("disconnect mode = %q", cfg.EMQX.DisconnectMode)
+	if cfg.Line.PolicyTTL.D() != 10*time.Second || cfg.Line.HeartbeatInterval.D() != 5*time.Second {
+		t.Fatalf("line defaults not applied: %+v", cfg.Line)
+	}
+	if cfg.Admission.MaxEntries != 10000 || cfg.Admission.TTL.D() != 5*time.Minute || cfg.Admission.MaxBackgroundLoads != 64 {
+		t.Fatalf("admission defaults not applied: %+v", cfg.Admission)
 	}
 }
 
@@ -152,7 +155,13 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects callback token matching admin token", func(c *Config) { c.Internal.CallbackToken = c.AdminToken }, "must differ from admin_token"},
 		{"rejects nonpositive HTTP body limit", func(c *Config) { c.HTTP.MaxBodyBytes = 0 }, "max_body_bytes"},
 		{"rejects nonpositive HTTP timeout", func(c *Config) { c.HTTP.ReadTimeout = 0 }, "http timeouts"},
-		{"rejects unsupported EMQX REST URL scheme", func(c *Config) { c.EMQX.RESTURL = "ftp://emqx" }, "emqx.rest_url"},
+		{"rejects nonpositive line policy TTL", func(c *Config) { c.Line.PolicyTTL = 0 }, "line durations"},
+		{"rejects nonpositive line reconcile interval", func(c *Config) { c.Line.ReconcileInterval = 0 }, "line durations"},
+		{"rejects heartbeat not shorter than policy TTL", func(c *Config) { c.Line.HeartbeatInterval = c.Line.PolicyTTL }, "heartbeat_interval must be shorter"},
+		{"rejects nonpositive admission entries", func(c *Config) { c.Admission.MaxEntries = 0 }, "admission tunables"},
+		{"rejects nonpositive admission TTL", func(c *Config) { c.Admission.TTL = 0 }, "admission tunables"},
+		{"rejects nonpositive admission load timeout", func(c *Config) { c.Admission.LoadTimeout = 0 }, "admission tunables"},
+		{"rejects nonpositive background loads", func(c *Config) { c.Admission.MaxBackgroundLoads = 0 }, "admission tunables"},
 		{"rejects nonpositive pairing failure limit", func(c *Config) { c.Pairing.MaxFailures = 0 }, "max_failures"},
 		{"rejects nonpositive request batch size", func(c *Config) { c.Requests.BatchSize = 0 }, "requests tunables"},
 		{"rejects nonpositive revocation acknowledgement timeout", func(c *Config) { c.Revocation.AckTimeout = 0 }, "ack_timeout"},
@@ -160,9 +169,6 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects nonpositive cleanup interval", func(c *Config) { c.Cleanup.Interval = 0 }, "cleanup durations"},
 		{"rejects unsupported protocol version", func(c *Config) { c.Protocol.Version = 0 }, "protocol.version"},
 		{"rejects nonpositive broker keepalive", func(c *Config) { c.Broker.KeepAlive = 0 }, "broker durations"},
-		{"rejects unsupported EMQX disconnect mode", func(c *Config) { c.EMQX.DisconnectMode = "ssh" }, "disconnect_mode"},
-		{"requires REST settings when REST disconnect is selected", func(c *Config) { c.EMQX.DisconnectMode = "rest" }, "emqx.rest_url is required"},
-		{"requires ctl path when ctl disconnect is selected", func(c *Config) { c.EMQX.CTLPath = "" }, "emqx.ctl_path is required"},
 		{"rejects unsupported log level", func(c *Config) { c.Log.Level = "trace" }, "log.level"},
 		{"rejects missing database URL", func(c *Config) { c.DatabaseURL = "" }, "database_url is required"},
 	}

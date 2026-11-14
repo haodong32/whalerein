@@ -1,0 +1,29 @@
+--- src/plugin_tick.c	2026-11-14 21:08:11
++++ src/plugin_tick.c	2026-11-14 21:08:11
+@@ -52,6 +52,26 @@
+ 			}
+ 		}
+ 	}
++
++	/* Keep the loop timer armed for the earliest pending tick. The main loop
++	 * resets its timeout each iteration, so a network event processed before
++	 * the next due tick would otherwise leave the broker asleep until an
++	 * unrelated event arrives; deferred plugin work would stall for seconds. */
++	if(opts->plugin_callbacks.tick){
++		time_t now_s = 0;
++		long now_ns = 0;
++
++		mosquitto_time_ns(&now_s, &now_ns);
++		DL_FOREACH(opts->plugin_callbacks.tick, cb_base){
++			time_t diff_ms = (cb_base->data.next_tick.tv_sec - now_s) * 1000 +
++				(cb_base->data.next_tick.tv_nsec - now_ns) / 1000000;
++
++			if(diff_ms < 1){
++				diff_ms = 1;
++			}
++			loop__update_next_event(diff_ms);
++		}
++	}
+ }
+ 
+ 

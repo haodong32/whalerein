@@ -46,26 +46,26 @@ type DeviceHosts func(ctx context.Context, deviceID string) ([]string, error)
 
 // Dependencies wires a broker service.
 type Dependencies struct {
-	Config       config.BrokerConfig
-	Presence     *Presence
-	Connector    Connector
-	Disconnecter Disconnecter
-	DeviceHosts  DeviceHosts
-	Metrics      *diagnostics.Metrics
-	Masker       *diagnostics.Masker
-	Logger       *slog.Logger
+	Config      config.BrokerConfig
+	Presence    *Presence
+	Connector   Connector
+	DeviceHosts DeviceHosts
+	Metrics     *diagnostics.Metrics
+	Masker      *diagnostics.Masker
+	Logger      *slog.Logger
 }
 
 // Service owns the Access MQTT session and routes inbound broker messages.
 type Service struct {
-	cfg          config.BrokerConfig
-	presence     *Presence
-	connector    Connector
-	disconnecter Disconnecter
-	deviceHosts  DeviceHosts
-	metrics      *diagnostics.Metrics
-	masker       *diagnostics.Masker
-	logger       *slog.Logger
+	cfg         config.BrokerConfig
+	presence    *Presence
+	connector   Connector
+	control     *Control
+	readyHook   func(ctx context.Context) error
+	deviceHosts DeviceHosts
+	metrics     *diagnostics.Metrics
+	masker      *diagnostics.Masker
+	logger      *slog.Logger
 
 	handlersMu    sync.RWMutex
 	resultHandler ResultHandler
@@ -105,19 +105,22 @@ func New(deps Dependencies) (*Service, error) {
 		deps.Masker = diagnostics.NewMasker()
 	}
 	service := &Service{
-		cfg:          deps.Config,
-		presence:     deps.Presence,
-		connector:    deps.Connector,
-		disconnecter: deps.Disconnecter,
-		deviceHosts:  deps.DeviceHosts,
-		metrics:      deps.Metrics,
-		masker:       deps.Masker,
-		logger:       deps.Logger,
-		transient:    make(map[string]chan *whalereinv1.HostResult),
-		now:          func() time.Time { return time.Now().UTC() },
+		cfg:         deps.Config,
+		presence:    deps.Presence,
+		connector:   deps.Connector,
+		deviceHosts: deps.DeviceHosts,
+		metrics:     deps.Metrics,
+		masker:      deps.Masker,
+		logger:      deps.Logger,
+		transient:   make(map[string]chan *whalereinv1.HostResult),
+		now:         func() time.Time { return time.Now().UTC() },
 	}
-	// Presence is shared with HTTP callbacks; the Handler emits one bounded
-	// host-scoped event per accepted device-offline edge.
+	control, err := NewControl(service.publishControl)
+	if err != nil {
+		return nil, err
+	}
+	service.control = control
+	control.SetNotification(deps.Presence.HandleNotification)
 	deps.Presence.SetDeviceOfflineHandler(service.handleDeviceOffline)
 	return service, nil
 }
@@ -152,6 +155,31 @@ func (s *Service) SetHostKeyHandler(handler HostKeyHandler) {
 
 // Presence returns the broker-derived presence source.
 func (s *Service) Presence() *Presence { return s.presence }
+
+// Control returns the authenticated management client for the broker policy,
+// snapshot and disconnect operations.
+func (s *Service) Control() *Control { return s.control }
+
+// SetReadyHook installs the work that must finish before the line admits
+// external traffic: policy reconciliation and presence snapshot application.
+func (s *Service) SetReadyHook(hook func(ctx context.Context) error) {
+	s.sessionMu.Lock()
+	s.readyHook = hook
+	s.sessionMu.Unlock()
+}
+
+func (s *Service) publishControl(ctx context.Context, topic string, payload []byte) error {
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		return ErrUnavailable
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer cancel()
+	if err := session.Publish(publishCtx, topic, payload, 1); err != nil {
+		return fmt.Errorf("publish control: %w", err)
+	}
+	return nil
+}
 
 // Ready reports whether Access has an established, subscribed MQTT session.
 func (s *Service) Ready() bool {
@@ -198,7 +226,7 @@ func (s *Service) Run(ctx context.Context) error {
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
 			ResultFilter, EventFilter, DeviceAckFilter, DeviceWillFilter,
-			SysConnectedFilter, SysDisconnectedFilter,
+			ControlReplyFilter, ControlEventFilter,
 		}, 1)
 		cancel()
 		if err != nil {
@@ -215,6 +243,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.setSession(session, true)
 		backoff = reconnectMin
 		s.logger.Info("mqtt connected")
+		s.presence.SetAvailable(false)
+		s.sessionMu.RLock()
+		hook := s.readyHook
+		s.sessionMu.RUnlock()
+		if hook != nil {
+			hookCtx, hookCancel := context.WithTimeout(ctx, 15*time.Second)
+			if err := hook(hookCtx); err != nil {
+				s.logger.Warn("broker readiness work failed", "error", err.Error())
+			}
+			hookCancel()
+		}
 
 		select {
 		case <-ctx.Done():
@@ -223,6 +262,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return nil
 		case <-session.Done():
 			s.setSession(nil, false)
+			s.presence.SetAvailable(false)
 			s.logger.Warn("mqtt disconnected")
 			if !sleepContext(ctx, reconnectMin) {
 				return nil
@@ -271,12 +311,11 @@ func (s *Service) baseContext() context.Context {
 // loop, so it performs only validation, a non-blocking transient handoff and
 // bounded handler calls.
 func (s *Service) HandleMessage(topic string, payload []byte) {
-	if _, ok := ParseDeviceWillTopic(topic); ok {
-		s.presence.HandleDeviceWill(topic, payload)
+	if s.control != nil && s.control.HandleMessage(topic, payload) {
 		return
 	}
-	if _, _, ok := ParseSysClientTopic(topic); ok {
-		s.presence.HandleSysMessage(topic, payload)
+	if _, ok := ParseDeviceWillTopic(topic); ok {
+		s.presence.HandleDeviceWill(topic, payload)
 		return
 	}
 	parsed, err := ParseTopic(topic)
@@ -626,4 +665,15 @@ func (s *Service) PublishPresence(ctx context.Context, hostID string, payload []
 // pairing and requests.
 func (s *Service) IsHostOnline(ctx context.Context, hostID string) bool {
 	return s.presence.IsHostOnline(ctx, hostID)
+}
+
+// DisconnectDevice implements auth.Transport's explicit device disconnect.
+// One targeted kick covers every connection of the device username; the reply
+// confirms whether such a connection still existed.
+func (s *Service) DisconnectDevice(ctx context.Context, deviceID string) error {
+	if deviceID == "" {
+		return errors.New("device id is required")
+	}
+	_, err := s.control.Request(ctx, "kick", []string{"username device:" + deviceID})
+	return err
 }

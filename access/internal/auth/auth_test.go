@@ -33,6 +33,9 @@ type fakeStore struct {
 	ensureErr    error
 	activeErr    error
 	grantErr     error
+	listGrantErr error
+	listCalls    int
+	events       *[]string
 }
 
 func newFakeStore() *fakeStore {
@@ -116,7 +119,28 @@ func (f *fakeStore) HasActiveGrant(_ context.Context, hostID, deviceID string) (
 	return f.grants[grantKey(hostID, deviceID)], nil
 }
 
+func (f *fakeStore) ListDeviceGrants(_ context.Context, deviceID string) ([]store.AdmissionGrant, error) {
+	f.listCalls++
+	if f.listGrantErr != nil {
+		return nil, f.listGrantErr
+	}
+	var grants []store.AdmissionGrant
+	for key, active := range f.grants {
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 || parts[1] != deviceID {
+			continue
+		}
+		grants = append(grants, store.AdmissionGrant{
+			HostID: parts[0], DeviceID: deviceID, Active: active, GrantGeneration: 1,
+		})
+	}
+	return grants, nil
+}
+
 func (f *fakeStore) RevokeDeviceGrants(_ context.Context, deviceID string, at time.Time) ([]string, bool, error) {
+	if f.events != nil {
+		*f.events = append(*f.events, "store.revoke_device")
+	}
 	if f.revokeErr != nil {
 		return nil, false, f.revokeErr
 	}
@@ -166,6 +190,9 @@ func (f *fakeStore) HostAuthorizationKey(_ context.Context, hostID string) ([]by
 }
 
 func (f *fakeStore) RevokeGrant(_ context.Context, hostID, deviceID string, _ time.Time) error {
+	if f.events != nil {
+		*f.events = append(*f.events, "store.revoke_grant")
+	}
 	key := grantKey(hostID, deviceID)
 	if _, ok := f.grants[key]; !ok {
 		return store.ErrNotFound
@@ -218,6 +245,80 @@ func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
 	return f.online[hostID]
 }
 
+// fakeAdmission mimics the bounded local grant authority.
+type fakeAdmission struct {
+	store        *fakeStore
+	err          error
+	allowErr     error
+	denied       map[string]bool
+	deviceDenied map[string]bool
+	allowCalls   []string
+	events       *[]string
+}
+
+func newFakeAdmission(store *fakeStore) *fakeAdmission {
+	return &fakeAdmission{store: store, denied: map[string]bool{}, deviceDenied: map[string]bool{}}
+}
+
+func (f *fakeAdmission) record(event string) {
+	if f.events != nil {
+		*f.events = append(*f.events, event)
+	}
+}
+
+func (f *fakeAdmission) Authorize(_ context.Context, hostID, deviceID string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	key := grantKey(hostID, deviceID)
+	if f.denied[key] || f.deviceDenied[deviceID] {
+		f.record("admission.authorize_denied")
+		return false, nil
+	}
+	return f.store.HasActiveGrant(context.Background(), hostID, deviceID)
+}
+
+func (f *fakeAdmission) Deny(hostID, deviceID string) {
+	f.record("admission.deny")
+	f.denied[grantKey(hostID, deviceID)] = true
+}
+
+func (f *fakeAdmission) DenyDevice(deviceID string) {
+	f.record("admission.deny_device")
+	f.deviceDenied[deviceID] = true
+}
+
+func (f *fakeAdmission) CompleteDeviceRevoke(deviceID string) {
+	f.record("admission.complete_device_revoke")
+	delete(f.deviceDenied, deviceID)
+}
+
+func (f *fakeAdmission) Allow(_ context.Context, hostID, deviceID string) error {
+	if f.allowErr != nil {
+		return f.allowErr
+	}
+	f.record("admission.allow")
+	f.allowCalls = append(f.allowCalls, grantKey(hostID, deviceID))
+	delete(f.denied, grantKey(hostID, deviceID))
+	f.store.grants[grantKey(hostID, deviceID)] = true
+	return nil
+}
+
+type fakeEnforcer struct {
+	err   error
+	calls []string
+}
+
+func (f *fakeEnforcer) RevokeGrant(_ context.Context, hostID, deviceID string) error {
+	f.calls = append(f.calls, "grant:"+hostID+":"+deviceID)
+	return f.err
+}
+
+func (f *fakeEnforcer) RevokeDevice(_ context.Context, deviceID string) error {
+	f.calls = append(f.calls, "device:"+deviceID)
+	return f.err
+}
+
 type fakeTransport struct {
 	publishErr    error
 	awaitErr      error
@@ -254,12 +355,21 @@ func (f *fakeTransport) DisconnectDevice(_ context.Context, deviceID string) err
 
 func newService(t *testing.T) (*Service, *fakeStore, *fakePresence, *fakeTransport) {
 	t.Helper()
+	service, fs, _, presence, transport, _ := newServiceWithFakes(t)
+	return service, fs, presence, transport
+}
+
+func newServiceWithFakes(t *testing.T) (*Service, *fakeStore, *fakeAdmission, *fakePresence, *fakeTransport, *fakeEnforcer) {
+	t.Helper()
 	fs := newFakeStore()
+	admission := newFakeAdmission(fs)
+	enforcer := &fakeEnforcer{}
 	presence := &fakePresence{online: map[string]bool{}}
 	transport := &fakeTransport{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service, err := New(Dependencies{
-		Store: fs, Presence: presence, Transport: transport,
+		Store: fs, Admission: admission, Enforcer: enforcer,
+		Presence: presence, Transport: transport,
 		Config: Config{
 			AdminToken: "admin-token", HostProvisioningToken: "host-token",
 			AccessUsername: "access", AccessPassword: "access-pass",
@@ -272,7 +382,7 @@ func newService(t *testing.T) (*Service, *fakeStore, *fakePresence, *fakeTranspo
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, fs, presence, transport
+	return service, fs, admission, presence, transport, enforcer
 }
 
 func TestNewRejectsMissingRequiredDependencies(t *testing.T) {
@@ -280,9 +390,15 @@ func TestNewRejectsMissingRequiredDependencies(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if _, err := New(Dependencies{Store: newFakeStore()}); err == nil {
+		t.Fatal("expected admission error")
+	}
+	if _, err := New(Dependencies{Store: newFakeStore(), Admission: newFakeAdmission(newFakeStore())}); err == nil {
+		t.Fatal("expected enforcer error")
+	}
+	if _, err := New(Dependencies{Store: newFakeStore(), Admission: newFakeAdmission(newFakeStore()), Enforcer: &fakeEnforcer{}}); err == nil {
 		t.Fatal("expected presence error")
 	}
-	if _, err := New(Dependencies{Store: newFakeStore(), Presence: &fakePresence{}}); err == nil {
+	if _, err := New(Dependencies{Store: newFakeStore(), Admission: newFakeAdmission(newFakeStore()), Enforcer: &fakeEnforcer{}, Presence: &fakePresence{}}); err == nil {
 		t.Fatal("expected transport error")
 	}
 }

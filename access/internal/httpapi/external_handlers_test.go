@@ -46,7 +46,6 @@ func newExternalFixture(t *testing.T, fake *fakeExternal) *Server {
 		Auth:          &fakeAuth{adminToken: "admin-token"},
 		Pairing:       &fakePairing{},
 		Requests:      &fakeRequests{},
-		Presence:      &fakePresence{},
 		Readiness:     diagnostics.NewReadiness(),
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		InternalToken: "internal",

@@ -108,7 +108,7 @@ aborts its request/model/question scopes. The adapter's existing `finally`
 releases the native question `attachWait`; there is no separate claim registry,
 lease, token or protocol claim field. TTL remains the fallback when presence is
 absent. The broker-to-Access presence edge is unit-tested but not yet verified
-end-to-end against EMQX in the integration harness.
+end-to-end against Mosquitto in the integration harness.
 
 
 ## HTTP claim lease

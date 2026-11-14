@@ -1,15 +1,16 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -255,14 +256,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request, _ map[str
 	s.deps.Metrics.Handler().ServeHTTP(w, r)
 }
 
-func (s *Server) requireAdmin(r *http.Request) error {
-	token, err := bearerToken(r)
-	if err != nil {
-		return err
-	}
-	return s.deps.Auth.AuthenticateAdmin(token)
-}
-
 func (s *Server) requireDevice(r *http.Request) (auth.Identity, error) {
 	token, err := bearerToken(r)
 	if err != nil {
@@ -335,95 +328,49 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	})
 }
 
-type brokerAuthPayload struct {
-	ClientID string `json:"clientid"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type brokerACLPayload struct {
-	ClientID string `json:"clientid"`
-	Username string `json:"username"`
-	Topic    string `json:"topic"`
-	Action   string `json:"action"`
-	// Some EMQX versions name the field "access"; accept both.
-	Access string `json:"access"`
-}
-
-type callbackResponse struct {
-	Result      string `json:"result"`
-	IsSuperuser bool   `json:"is_superuser"`
-}
-
-func (s *Server) handleBrokerAuth(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	var payload brokerAuthPayload
-	if err := s.decodeJSON(w, r, &payload); err != nil {
-		// EMQX treats a non-200 response as a denial; answer with a stable
-		// deny body so misconfiguration fails closed and visibly.
-		writeCallbackResult(w, http.StatusOK, false, false)
+// handleBrokerConnect answers one deferred Mosquitto CONNECT validation. The
+// response is the versioned broker policy for this connection: it carries the
+// principal, its complete local ACL set and the monotonic policy revision.
+func (s *Server) handleBrokerConnect(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	// Read at most the 64 KiB contract bound plus one byte so an oversized
+	// request is detected without buffering the whole body. The response stays
+	// the versioned text protocol, so a plain deny is written instead of an
+	// HTTP 413.
+	body, err := io.ReadAll(io.LimitReader(r.Body, (64<<10)+1))
+	if err != nil || len(body) > 64<<10 {
+		writeBrokerPolicy(w, []byte("whalerein/1\ndeny malformed_request\n"))
 		return
 	}
-	if _, err := s.deps.Auth.AuthenticateBroker(r.Context(), payload.ClientID, payload.Username, payload.Password); err != nil {
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		writeBrokerPolicy(w, []byte("whalerein/1\ndeny malformed_request\n"))
+		return
+	}
+	clientID := form.Get("clientid")
+	username := form.Get("username")
+	password := form.Get("password")
+	will := form.Get("will")
+	identity, err := s.deps.Auth.AuthenticateBroker(r.Context(), clientID, username, password)
+	if err != nil {
 		s.deps.Logger.Debug("broker authentication denied")
-		writeCallbackResult(w, http.StatusOK, false, false)
+		writeBrokerPolicy(w, []byte("whalerein/1\ndeny unauthorized\n"))
 		return
 	}
-	writeCallbackResult(w, http.StatusOK, true, false)
-}
-
-func (s *Server) handleBrokerACL(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	var payload brokerACLPayload
-	if err := s.decodeJSON(w, r, &payload); err != nil {
-		writeCallbackResult(w, http.StatusOK, false, false)
-		return
-	}
-	identity, err := s.deps.Auth.IdentityFromCredentials(payload.ClientID, payload.Username)
+	connection, err := s.deps.Auth.BrokerPolicy(r.Context(), identity)
 	if err != nil {
-		writeCallbackResult(w, http.StatusOK, false, false)
+		s.deps.Logger.Warn("broker policy projection failed", "error", err.Error())
+		writeBrokerPolicy(w, []byte("whalerein/1\ndeny unavailable\n"))
 		return
 	}
-	action := payload.Action
-	if action == "" {
-		action = payload.Access
-	}
-	allowed, err := s.deps.Auth.AuthorizeACL(r.Context(), identity, auth.ACLAction(action), payload.Topic)
-	if err != nil {
-		s.deps.Logger.Warn("broker ACL check failed", "error", err.Error())
-		writeCallbackResult(w, http.StatusOK, false, false)
+	if !connection.WillAllowed(will) {
+		writeBrokerPolicy(w, []byte("whalerein/1\ndeny will_not_authorized\n"))
 		return
 	}
-	writeCallbackResult(w, http.StatusOK, allowed, false)
+	writeBrokerPolicy(w, policy.Format(connection))
 }
 
-func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	reader := http.MaxBytesReader(w, r.Body, s.deps.MaxBodyBytes)
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		s.writeError(w, r, errInvalidBody)
-		return
-	}
-	if err := s.deps.Presence.HandlePresenceWebhook(body); err != nil {
-		s.writeError(w, r, errInvalidBody)
-		return
-	}
-	writeCallbackResult(w, http.StatusOK, true, false)
-}
-
-func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	reader := http.MaxBytesReader(w, r.Body, s.deps.MaxBodyBytes)
-	decoder := json.NewDecoder(reader)
-	if err := decoder.Decode(target); err != nil {
-		return errInvalidBody
-	}
-	return nil
-}
-
-func writeCallbackResult(w http.ResponseWriter, status int, allow, superuser bool) {
-	result := "deny"
-	if allow {
-		result = "allow"
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(callbackResponse{Result: result, IsSuperuser: superuser})
+func writeBrokerPolicy(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
