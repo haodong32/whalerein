@@ -93,10 +93,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-ubuntu-24.04-1.95.0-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-ubuntu-24.04-1.95.0-${{ hashFiles('Cargo.lock') }}-
-            rust-ubuntu-24.04-1.95.0-
+            rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-
 
       - name: Cache Rust coverage tool
         if: matrix.kind == 'rust'
@@ -104,24 +104,21 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/bin/cargo-llvm-cov
-          key: llvm-cov-ubuntu-24.04-1.95.0-0.9.1
+          key: llvm-cov-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml') }}-0.9.1
 
       - name: Set up Rust
         if: matrix.kind == 'rust'
-        run: |
-          rustup toolchain install 1.95.0 --profile minimal \
-            --component clippy --component rustfmt --component llvm-tools-preview
-          rustup default 1.95.0
+        run: rustc --version
 
       - name: Install Rust coverage tool
         if: matrix.kind == 'rust' && steps.coverage-tool.outputs.cache-hit != 'true'
         run: cargo install cargo-llvm-cov --version 0.9.1 --locked
 
-      - name: Install protoc for Rust builds
+      - name: Install Linux Rust build dependencies
         if: matrix.kind == 'rust'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes protobuf-compiler
+          xargs -r sudo apt-get install --yes < tools/repo/linux-rust-packages.txt
 
       - name: Set up protocol tools
         if: matrix.kind == 'node'
@@ -152,6 +149,7 @@ jobs:
           path: |
             .data/runs/**/report.json
             .data/runs/**/report.html
+            .data/runs/**/coverage-*.coverprofile
             .data/bin/whalerein-access
             target/debug/whalerein
           if-no-files-found: warn

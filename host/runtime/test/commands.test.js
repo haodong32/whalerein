@@ -893,13 +893,15 @@ test('host shutdown releases observations from all channels without interrupting
 })
 
 
-test('expired abandoned wait is released even when the source ignores cancellation', async () => {
+test('expired abandoned wait is released even when the source ignores cancellation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const { service, adapter, advance } = makeService()
   adapter.describe = () => ({ capabilities: ['wait'] })
   adapter.waitSession = async () => new Promise(() => {})
   const request = makeRequest({ kind: 'REQUEST_KIND_QUERY', expiresAt: 2100 })
   const pending = service.handle({ request, payload: { wait_session: { session_id: 's1', wait_id: 'w1', timeout_ms: 50 } } })
   advance(1100)
+  t.mock.timers.tick(1100)
   assert.equal((await pending).errorCode, 'expired')
   assert.equal(service.waits.size, 0)
 })

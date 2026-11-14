@@ -10,18 +10,25 @@ from pathlib import Path
 
 from ..diagnostics import redact, sanitize
 from ..projects import go_test_paths
+from ..reports.model import atomic_write
 from .coverage import CoverageResult, parse_go_coverprofile
 
 
-def collect(project, runner, execute=False, only=None, coverage=False):
+def collect(project, runner, execute=False, only=None, coverage=False, coverage_output=None):
     if coverage:
         with tempfile.TemporaryDirectory(prefix="whalerein-go-cover-") as tmp:
             profile = Path(tmp) / "cover.out"
             scope = _collect(project, runner, execute, only, profile)
             try:
-                parsed = parse_go_coverprofile(profile.read_text())
+                raw_profile = profile.read_text()
+                parsed = parse_go_coverprofile(raw_profile)
                 if not parsed:
                     raise ValueError("empty coverage profile")
+                if coverage_output is not None:
+                    try:
+                        atomic_write(coverage_output, raw_profile)
+                    except OSError:
+                        scope.setdefault("errors", []).append("Could not save Go coverage profile")
                 for name, values in parsed.items():
                     if "/proto/" in name:
                         continue

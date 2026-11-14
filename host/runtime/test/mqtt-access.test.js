@@ -153,10 +153,13 @@ test('when MQTT receives malformed bytes or a foreign topic, it dispatches no ap
   assert.equal(broker.messages.length >= 1, true)
 })
 
-test('when MQTT has never connected, waiting for readiness reaches its deadline with unavailable', async () => {
+test('when MQTT has never connected, waiting for readiness reaches its deadline with unavailable', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const { access } = makeAccess()
   try {
-    await assert.rejects(access.waitForConnected(20), error => error.code === 'unavailable')
+    const expired = assert.rejects(access.waitForConnected(20), error => error.code === 'unavailable')
+    t.mock.timers.tick(20)
+    await expired
   } finally {
     await access.stop()
   }
@@ -223,13 +226,19 @@ test('when an application result exceeds the size limit, publication fails witho
   }
 })
 
-test('missing broker PUBACK is bounded and interrupts only the MQTT link', async () => {
+test('missing broker PUBACK is bounded and interrupts only the MQTT link', async t => {
   const { access, accesses }=makeAccess({publishTimeoutMs:5})
   access.start();await access.waitForConnected(2000)
   accesses[0].publish=()=>{}
-  await assert.rejects(access.publishResult(new Uint8Array([1])),error=>error.code==='unavailable')
-  await waitFor(()=>!access.connected)
-  await access.stop()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const expired = assert.rejects(access.publishResult(new Uint8Array([1])), error => error.code === 'unavailable')
+    t.mock.timers.tick(5)
+    await expired
+    assert.equal(access.connected, false)
+  } finally {
+    await access.stop()
+  }
 })
 
 test('when a device_offline presence event arrives, Access dispatches it without treating it as a request', async () => {

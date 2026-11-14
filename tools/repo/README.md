@@ -70,6 +70,8 @@ The second command executes selected projects through `./repo check`, applicable
 `./repo build` operations and `./repo test --coverage`. Rust registry/build caches
 and the pinned coverage tool are cached separately. Reports remain downloadable
 Artifacts with seven-day retention; no Summary or Pages publishing is configured.
+The Go artifact also includes the native coverage profile when available, even
+when the run fails its coverage gate.
 
 ## Integration CI
 
@@ -181,6 +183,9 @@ excluded from coverage, but their tests still run. Missing tools, measurements
 and below-threshold results fail the gate; passing cases alone do not satisfy it.
 
 Python, Go and Node collect coverage with their case results in one execution.
+For Go projects, use `go tool cover -func=<profile>` or `go tool cover
+-html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
+to inspect the measured code blocks.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
 cargo-llvm-cov execution after resetting stale workspace coverage artifacts,
 explicitly labeled `separate_measurement`; it does not

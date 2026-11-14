@@ -111,12 +111,19 @@ def run(root, projects, runner, request, output=None):
                                 if prefix.endswith(native_only[:overlap]):
                                     native_only = native_only[overlap:] or None
                                     break
+                        options = {}
+                        if project.kind != "rust":
+                            options["coverage"] = request.coverage
+                        if project.kind == "go" and request.coverage:
+                            options["coverage_output"] = (
+                                directory / f"coverage-{project.id}.coverprofile"
+                            )
                         scope = RUNNERS[project.kind].collect(
                             project,
                             runner,
                             not request.list_only,
                             only=native_only,
-                            **({"coverage": request.coverage} if project.kind != "rust" else {}),
+                            **options,
                         )
                         scope.update(suite_id="unit:" + project.id, project=project.id)
                         scope.setdefault("coverage", [])
