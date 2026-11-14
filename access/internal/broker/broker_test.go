@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho"
 	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
@@ -851,13 +853,6 @@ func TestPahoConnectorRejectsInvalidConfiguration(t *testing.T) {
 	if _, err := NewPahoConnector(config.BrokerConfig{URL: "tls://host"}, nil, nil); err == nil {
 		t.Fatal("nil dispatch")
 	}
-	connector, err := NewPahoConnector(config.BrokerConfig{URL: "tcp://127.0.0.1:1883"}, dispatch, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := connector.Connect(context.Background()); err == nil {
-		t.Fatal("expected dial error")
-	}
 	if _, err := NewPahoConnector(config.BrokerConfig{URL: "tls://127.0.0.1:8883", CAFile: filepath.Join(t.TempDir(), "missing")}, dispatch, nil); err == nil {
 		t.Fatal("missing CA")
 	}
@@ -866,6 +861,59 @@ func TestPahoConnectorRejectsInvalidConfiguration(t *testing.T) {
 	}
 	if _, err := NewPahoConnector(config.BrokerConfig{URL: "mqtts://[::1]"}, dispatch, nil); err != nil {
 		t.Fatalf("ipv6: %v", err)
+	}
+}
+
+func TestPahoConnectorDistinguishesDialAndHandshakeFailures(t *testing.T) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	connector, err := NewPahoConnector(config.BrokerConfig{
+		URL: "tcp://" + listener.Addr().String(), ClientID: "test-client",
+	}, func(string, []byte) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if session, err := connector.Connect(cancelled); session != nil || !errors.Is(err, context.Canceled) ||
+		!strings.HasPrefix(err.Error(), "broker dial:") {
+		t.Fatalf("expected cancelled dial, got %v", err)
+	}
+
+	ctx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := listener.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	server := make(chan error, 1)
+	go func() {
+		conn, err := listener.AcceptTCP()
+		if err != nil {
+			server <- err
+			return
+		}
+		defer conn.Close()
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			server <- err
+			return
+		}
+		packet, err := packets.ReadPacket(conn)
+		if err == nil && packet.Type != packets.CONNECT {
+			err = errors.New("expected MQTT CONNECT")
+		}
+		server <- err
+	}()
+	if session, err := connector.Connect(ctx); session != nil || err == nil ||
+		!strings.HasPrefix(err.Error(), "broker connect:") {
+		t.Fatalf("expected failed handshake, got %v", err)
+	}
+	if err := <-server; err != nil {
+		t.Fatal(err)
 	}
 }
 
