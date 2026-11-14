@@ -299,7 +299,7 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     if native:
         from native_environment import NativeScenario
 
-        value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
+        value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
     else:
         value = Scenario(tmp_path, schema)
     if request.node.get_closest_marker("privacy_access_info_logging") is not None:

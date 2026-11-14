@@ -1458,6 +1458,24 @@ def test_native_approval_refuses_a_stale_guard(scenario, paired_device):
     assert scenario.request("effects")["count"] == 1
 
 
+@pytest.mark.short_approvals
+def test_native_approval_refuses_an_expired_guard(scenario, paired_device):
+    """An approval past its lifetime authorizes nothing even with its exact digest and version."""
+    session = scenario.create()
+    scenario.model.plan("tool")
+    paired_device.send(session, "native expired approval fixture", delivery="start-if-idle")
+    wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
+    approval = paired_device.approvals(session)[0]
+    # This case shortens the approval lifetime to three seconds.
+    time.sleep(3.5)
+    code, values = paired_device.invoke(
+        "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
+        "--version", str(approval["version"]), success=False)
+    assert code == 7 and values[-1]["error"]["code"] == "unknown"
+    assert values[-1].get("data") is None
+    assert scenario.request("effects")["count"] == 0
+
+
 def test_native_interrupt_cancels_approval(scenario, paired_device):
     """When interruption cancels an actual native approval, a late remote approval is rejected and the protected fixture effect never executes."""
     session = scenario.create()
