@@ -33,7 +33,9 @@ def wait(predicate, timeout=60, process=None):
                 return
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             pass
-        time.sleep(0.1)
+        # 20 ms matches the product's delta coalescing window: readiness and
+        # command completion are observed promptly without busy-waiting.
+        time.sleep(0.02)
     raise TimeoutError("Expected fixture condition was not observed")
 
 
