@@ -1837,16 +1837,31 @@ c.close()
     assert_eq!(ready.trim(), "ready");
     let worker = core.clone();
     let task = tokio::spawn(async move { worker.revoke().await });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The worker must clear secrets while the database write stays blocked.
+    // Poll instead of sleeping a fixed interval: a loaded CI runner may not
+    // schedule the spawned task within the old 150 ms window.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let token = secrets
+            .load(&crate::security::keys::device_token(&paired.device_id))
+            .unwrap();
+        let key = secrets
+            .load(&crate::security::keys::cache_key(&paired.device_id))
+            .unwrap();
+        if token.is_none() && key.is_none() {
+            break;
+        }
+        assert!(
+            !task.is_finished(),
+            "revocation finished against a locked database"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "revocation did not clear secrets"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(!task.is_finished());
-    assert!(secrets
-        .load(&crate::security::keys::device_token(&paired.device_id))
-        .unwrap()
-        .is_none());
-    assert!(secrets
-        .load(&crate::security::keys::cache_key(&paired.device_id))
-        .unwrap()
-        .is_none());
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert!(dir.path().join("cache.sqlite3").exists());

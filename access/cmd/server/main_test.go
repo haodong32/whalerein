@@ -36,7 +36,6 @@ type configValues struct {
 	internalPort int
 	databaseURL  string
 	brokerURL    string
-	restURL      string
 	logLevel     string
 	cleanup      string
 }
@@ -69,11 +68,16 @@ broker:
   keep_alive: 5s
   reconnect_min: 10ms
   reconnect_max: 50ms
-emqx:
-  rest_url: "%s"
-  disconnect_mode: "ctl"
-  ctl_path: "emqx"
-  timeout: 100ms
+line:
+  policy_ttl: 10s
+  reconcile_interval: 1s
+  heartbeat_interval: 5s
+  operation_timeout: 1s
+admission:
+  max_entries: 1000
+  ttl: 1m
+  load_timeout: 100ms
+  max_background_loads: 16
 internal:
   callback_token: "internal-token-value"
 http:
@@ -105,7 +109,7 @@ protocol:
   version: 1
 log:
   level: "%s"
-`, values.publicPort, values.internalPort, values.databaseURL, values.brokerURL, values.restURL, values.cleanup, values.logLevel)
+`, values.publicPort, values.internalPort, values.databaseURL, values.brokerURL, values.cleanup, values.logLevel)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -212,7 +216,7 @@ func postInternal(t *testing.T, url, body, token string) *http.Response {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set(httpapi.InternalHeader, token)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

@@ -5,13 +5,22 @@ import os
 import select
 import signal
 import subprocess
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Shared broker bootstrap credentials. The plugin authenticates the Access
+# identity locally against its password file; the internal token authenticates
+# the Access callback the plugin makes for external principals.
+BROKER_PASSWORD = "integration-broker-password"
+INTERNAL_TOKEN = "compose-internal-token"
 
 
 def wait(predicate, timeout=60, process=None):
@@ -269,10 +278,8 @@ class Scenario:
             "WHALEREIN_DATABASE_URL": f"postgres://postgres@127.0.0.1:55432/whalerein_test?sslmode=disable&search_path={schema}",
             "WHALEREIN_ADMIN_TOKEN": self.admin,
             "WHALEREIN_HOST_PROVISIONING_TOKEN": uuid.uuid4().hex,
-            "WHALEREIN_BROKER_PASSWORD": uuid.uuid4().hex,
-            "WHALEREIN_INTERNAL_TOKEN": "compose-internal-token",
-            "WHALEREIN_EMQX_API_KEY": "compose-api-key",
-            "WHALEREIN_EMQX_API_SECRET": "compose-api-secret",
+            "WHALEREIN_BROKER_PASSWORD": BROKER_PASSWORD,
+            "WHALEREIN_INTERNAL_TOKEN": INTERNAL_TOKEN,
         }
         self.socket = directory / "dsh.sock"
         self.config = directory / "access.yaml"
@@ -283,16 +290,21 @@ database_url: "${WHALEREIN_DATABASE_URL}"
 admin_token: "${WHALEREIN_ADMIN_TOKEN}"
 host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
 broker:
-  url: "mqtt://127.0.0.1:1884"
+  url: "mqtt://127.0.0.1:1883"
   public_url: "mqtt://127.0.0.1:1883"
   client_id: "__ACCESS_CLIENT_ID__"
   username: access
   password: "${WHALEREIN_BROKER_PASSWORD}"
-emqx:
-  rest_url: "http://127.0.0.1:18083"
-  api_key: "${WHALEREIN_EMQX_API_KEY}"
-  api_secret: "${WHALEREIN_EMQX_API_SECRET}"
-  disconnect_mode: rest
+line:
+  policy_ttl: 10s
+  reconcile_interval: 30s
+  heartbeat_interval: 5s
+  operation_timeout: 5s
+admission:
+  max_entries: 10000
+  ttl: 5m
+  load_timeout: 250ms
+  max_background_loads: 64
 internal:
   callback_token: "${WHALEREIN_INTERNAL_TOKEN}"
 log:
@@ -314,9 +326,9 @@ log:
         """Start Access without waiting for readiness.
 
         The internal auth listener is up in well under a second, while the
-        broker starts later. Starting Access first lets EMQX's HTTP
-        authenticator initialize against a live endpoint instead of marking
-        the resource unhealthy and waiting for its 15 second health check.
+        broker starts later. Starting Access first means the plugin's first
+        deferred CONNECT callback already finds a live endpoint instead of
+        failing admission and retrying.
         """
         self.access = Process(
             ["/usr/local/bin/whalerein-access", "--config", str(self.config)],
@@ -441,3 +453,73 @@ log:
                 errors.append(error)
         if errors:
             raise ExceptionGroup("Fixture cleanup failed", errors)
+
+
+def _connect_policy(fields):
+    """Render the whalerein/1 policy used by the transport policy stub."""
+    username = fields.get("username", "")
+    if username.startswith("host:"):
+        host = username[5:]
+        if not host or any(character.isspace() for character in host):
+            return "whalerein/1\ndeny unauthorized\n"
+        entries = [
+            ("subscribe", f"whalerein/v1/h/{host}/request"),
+            ("read", f"whalerein/v1/h/{host}/request"),
+            ("subscribe", f"whalerein/v1/h/{host}/presence"),
+            ("read", f"whalerein/v1/h/{host}/presence"),
+            ("write", f"whalerein/v1/h/{host}/result"),
+            ("write", f"whalerein/v1/h/{host}/event"),
+        ]
+        lines = [
+            "whalerein/1",
+            "ok",
+            "kind host",
+            f"host {host}",
+            "revision 1",
+            "ready 1",
+        ]
+        lines.extend(f"acl {access} 1 {host} {filter}" for access, filter in entries)
+        return "\n".join(lines) + "\n"
+    return "whalerein/1\ndeny unauthorized\n"
+
+
+def start_connect_policy_stub(port=18081):
+    """Serve the plugin's deferred CONNECT callback for broker-only cases.
+
+    The transport Node.js case exercises the broker without an Access process.
+    The plugin still requires a policy answer for its synthetic host, so the
+    case owns this narrow loopback stub for the duration of its broker.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/internal/broker/connect":
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                length = 0
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+            fields = {key: value[0] for key, value in form.items() if value}
+            body = _connect_policy(fields).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class Stub:
+        def close(self):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    return Stub()

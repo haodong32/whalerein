@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -276,4 +278,27 @@ func (s *pahoSession) Close() error {
 		return err
 	}
 	return nil
+}
+
+func tlsConfigFor(caFile string, insecure bool, serverName string) (*tls.Config, error) {
+	cfg := &tls.Config{ // #nosec G402 -- insecure is an explicit local/test config switch.
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
+		InsecureSkipVerify: insecure,
+	}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA file: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, errors.New("CA file contains no certificates")
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
 }

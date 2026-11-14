@@ -16,9 +16,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Store is the authorization lookup used for each event.
-type Store interface {
-	HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error)
+// Admission is the local grant authority used for each event. Check never
+// blocks: an unknown grant drops the live event and schedules a bounded load,
+// so a cold lookup cannot stall unrelated forwarding.
+type Admission interface {
+	Check(hostID, deviceID string) (allowed bool, known bool)
 }
 
 // Broker publishes the event to the device topic.
@@ -28,26 +30,26 @@ type Broker interface {
 
 // Dependencies wires the event router.
 type Dependencies struct {
-	Store   Store
-	Broker  Broker
-	Metrics *diagnostics.Metrics
-	Masker  *diagnostics.Masker
-	Logger  *slog.Logger
+	Admission Admission
+	Broker    Broker
+	Metrics   *diagnostics.Metrics
+	Masker    *diagnostics.Masker
+	Logger    *slog.Logger
 }
 
 // Handler implements event routing.
 type Handler struct {
-	store   Store
-	broker  Broker
-	metrics *diagnostics.Metrics
-	masker  *diagnostics.Masker
-	logger  *slog.Logger
+	admission Admission
+	broker    Broker
+	metrics   *diagnostics.Metrics
+	masker    *diagnostics.Masker
+	logger    *slog.Logger
 }
 
 // New constructs an event handler.
 func New(deps Dependencies) (*Handler, error) {
-	if deps.Store == nil {
-		return nil, errors.New("events: store is required")
+	if deps.Admission == nil {
+		return nil, errors.New("events: admission is required")
 	}
 	if deps.Broker == nil {
 		return nil, errors.New("events: broker is required")
@@ -62,11 +64,11 @@ func New(deps Dependencies) (*Handler, error) {
 		deps.Masker = diagnostics.NewMasker()
 	}
 	return &Handler{
-		store:   deps.Store,
-		broker:  deps.Broker,
-		metrics: deps.Metrics,
-		masker:  deps.Masker,
-		logger:  deps.Logger,
+		admission: deps.Admission,
+		broker:    deps.Broker,
+		metrics:   deps.Metrics,
+		masker:    deps.Masker,
+		logger:    deps.Logger,
 	}, nil
 }
 
@@ -89,14 +91,16 @@ func (h *Handler) Handle(ctx context.Context, topicHost string, payload []byte) 
 	if deviceID == "" {
 		return errors.New("events: device id is required")
 	}
-	active, err := h.store.HasActiveGrant(ctx, topicHost, deviceID)
-	if err != nil {
-		return fmt.Errorf("events: check grant: %w", err)
-	}
+	active, known := h.admission.Check(topicHost, deviceID)
 	if !active {
 		h.metrics.EventDropped()
-		h.logger.Debug("event dropped",
-			"host", h.masker.Host(topicHost), "device", h.masker.Device(deviceID))
+		if !known {
+			h.logger.Debug("event dropped before the grant was known",
+				"host", h.masker.Host(topicHost), "device", h.masker.Device(deviceID))
+		} else {
+			h.logger.Debug("event dropped",
+				"host", h.masker.Host(topicHost), "device", h.masker.Device(deviceID))
+		}
 		return nil
 	}
 	if err := h.broker.PublishDeviceEvent(ctx, topicHost, deviceID, payload); err != nil {

@@ -28,7 +28,7 @@ WhaleRein Core (Rust library)
 WhaleRein Access (Go monolith) ── PostgreSQL (five tables)
   │  MQTT 5
   ▼
-EMQX 5.8 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
+Mosquitto 2.1.2 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
 ```
 
 - `proto/v1/whalerein.proto` is the only wire contract. HTTPS uses proto3 JSON;
@@ -40,7 +40,7 @@ EMQX 5.8 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
   and request copies; the shared Host owns execution records; source cursors stay opaque and DSH
   owns session content; Core runtime owns in-memory client connection state.
 - Noise XX with X25519/ChaCha20-Poly1305/SHA-256 protects everything after
-  pairing. Access and EMQX only see routing and transport metadata.
+  pairing. Access and the broker only see routing and transport metadata.
 
 ## Repository layout
 
@@ -53,7 +53,7 @@ host/                    # host-side implementation
   runtime/               # shared Node.js host runtime
   dsh/                   # WhaleRein for DSH connector
 proto/v1/                # wire schema, Go/Rust bindings and fixtures
-deploy/                  # Docker Compose stack for Access, EMQX, and Postgres
+deploy/                  # Docker Compose stack for Access, Mosquitto, and Postgres
 tests/integration/       # isolated Docker/pytest suite with FakeDSH
 tests/integration/drivers/ # Native protocol and transport integration drivers
 tests/fixtures/          # fixed compatibility fixtures
@@ -72,7 +72,7 @@ pnpm; it is not a product package or a test suite. Use `./repo` for build and te
 
 ## Server stack
 
-[Docker Compose](deploy/README.md) runs Access, PostgreSQL and EMQX. The DSH
+[Docker Compose](deploy/README.md) runs Access, PostgreSQL and Mosquitto. The DSH
 plugin runs separately on its host.
 
 ```bash
@@ -114,7 +114,7 @@ There is no second plugin to install.
   pnpm 12.18.0, Python 3.11+, and uv.
 - Build tools: Git, Git LFS, Bash, a C/C++ compiler, protoc, and protoc-gen-go.
 - Local server stack: Docker with Compose. Integration tests: Docker with
-  buildx/BuildKit. PostgreSQL and EMQX run in containers.
+  buildx/BuildKit. PostgreSQL and Mosquitto run in containers.
 - Optional: cargo-llvm-cov and llvm-tools-preview for Rust coverage;
   DSH for real-host plugin development.
 
@@ -127,7 +127,7 @@ Run `./repo doctor` to check the basic toolchains, or add
 # 1. Toolchain report (never modifies the system)
 ./repo doctor
 
-# 2. Local stack: PostgreSQL 18 on 55432, EMQX on 1883, and Access on 8080.
+# 2. Local stack: PostgreSQL 18 on 55432, Mosquitto on 1883, and Access on 8080.
 #    Docker checks image inputs and reuses cached layers.
 docker compose -f deploy/compose/stack.yaml up -d --build
 curl -sS http://127.0.0.1:8080/readyz
@@ -177,10 +177,10 @@ Run `git config core.hooksPath tools/hooks` once to enable the `commit-msg` chec
   is the one-time pairing token the user supplies.
 - TLS is mandatory for public HTTPS and MQTT. The development plaintext MQTT
   listener is loopback-only; disable it (`bind = 0`) in production.
-- The EMQX dashboard binds to loopback and uses a rendered password. Access
+- The Mosquitto plugin is built into the pinned broker image. Access
   uses a bootstrapped API key for REST disconnect; the key file is mode 0600
   and outside Git.
-- Access and EMQX share a fixed internal callback token that must differ from
+- Access and the broker plugin share a fixed internal callback token that must differ from
   the admin token. All deployment secrets live in mode-0600 environment files.
 - Development certificates are generated into `.data/certs` (gitignored) and
   must never be used in production.

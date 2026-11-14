@@ -110,22 +110,13 @@ func TestRunHealthyServerAgainstDatabase(t *testing.T) {
 	}
 
 	internalBase := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
-	authBody := `{"clientid":"whalerein-host-h1","username":"host:h1","password":"host-token-value"}`
-	response = postInternal(t, internalBase+"/internal/broker/auth", authBody, "internal-token-value")
-	if response.StatusCode != http.StatusOK || !strings.Contains(readBody(t, response), `"result":"allow"`) {
-		t.Fatalf("auth callback = %d", response.StatusCode)
+	connectBody := "clientid=whalerein-host-h1&username=host%3Ah1&password=host-token-value"
+	response = postInternal(t, internalBase+"/internal/broker/connect", connectBody, "internal-token-value")
+	policyBody := readBody(t, response)
+	if response.StatusCode != http.StatusOK || !strings.HasPrefix(policyBody, "whalerein/1\nok\nkind host\n") {
+		t.Fatalf("policy callback = %d %s", response.StatusCode, policyBody)
 	}
-	aclBody := `{"clientid":"whalerein-host-h1","username":"host:h1","topic":"whalerein/v1/h/h1/request","action":"subscribe"}`
-	response = postInternal(t, internalBase+"/internal/broker/acl", aclBody, "internal-token-value")
-	if response.StatusCode != http.StatusOK || !strings.Contains(readBody(t, response), `"result":"allow"`) {
-		t.Fatalf("acl callback = %d", response.StatusCode)
-	}
-	presenceBody := `{"event":"client.connected","clientid":"whalerein-host-h1","username":"host:h1"}`
-	response = postInternal(t, internalBase+"/internal/broker/presence", presenceBody, "internal-token-value")
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("presence callback = %d", response.StatusCode)
-	}
-	response = postInternal(t, internalBase+"/internal/broker/auth", authBody, "wrong")
+	response = postInternal(t, internalBase+"/internal/broker/connect", connectBody, "wrong")
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("bad internal token = %d", response.StatusCode)
 	}
@@ -172,11 +163,11 @@ func TestRunReportsDatabaseAndListenerBindFailures(t *testing.T) {
 		t.Fatalf("bind failure code = %d stderr=%s", code, stderr.String())
 	}
 
-	path = writeConfig(t, configValues{publicPort: freePort(t), internalPort: freePort(t), databaseURL: db.DSN, restURL: ":::"})
+	path = writeConfig(t, configValues{publicPort: freePort(t), internalPort: freePort(t), databaseURL: db.DSN, cleanup: "not-a-duration"})
 	stdout.Reset()
 	stderr.Reset()
 	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 2 {
-		t.Fatalf("rest failure code = %d stderr=%s", code, stderr.String())
+		t.Fatalf("invalid config code = %d stderr=%s", code, stderr.String())
 	}
 }
 
@@ -281,7 +272,7 @@ func TestRunCleanupLogsStoreFailures(t *testing.T) {
 	}
 }
 
-// When REST, disconnect, broker or listener configuration is invalid, Access rejects startup.
+// When line, broker or listener configuration is invalid, Access rejects startup.
 func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	newConfig := func(t *testing.T, db *storetest.DB) config.Config {
 		t.Helper()
@@ -297,17 +288,8 @@ func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	t.Run("rejects server startup when REST client configuration is invalid", func(t *testing.T) {
 		db := storetest.NewSchema(t)
 		cfg := newConfig(t, db)
-		cfg.EMQX.RESTURL = ":::"
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "EMQX REST") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("rejects server startup when disconnect configuration is invalid", func(t *testing.T) {
-		db := storetest.NewSchema(t)
-		cfg := newConfig(t, db)
-		cfg.EMQX.DisconnectMode = "ctl"
-		cfg.EMQX.CTLPath = ""
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "configure EMQX disconnect") {
+		cfg.Line.HeartbeatInterval = cfg.Line.PolicyTTL
+		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "heartbeat_interval") {
 			t.Fatalf("err = %v", err)
 		}
 	})

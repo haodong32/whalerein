@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
@@ -74,12 +75,37 @@ type Store interface {
 	ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (store.Device, error)
 	DeviceByID(ctx context.Context, deviceID string) (store.Device, error)
 	HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error)
+	ListDeviceGrants(ctx context.Context, deviceID string) ([]store.AdmissionGrant, error)
 	RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error)
 	RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error
 	SetHostAuthorizationKey(ctx context.Context, hostID string, publicKey []byte) error
 	HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error)
 	PendingRevocations(ctx context.Context, hostID string) ([]store.Revocation, error)
 	MarkRevocationsReplayed(ctx context.Context, hostID string, deviceIDs []string, revokedBefore, at time.Time, generations map[string]uint64) error
+}
+
+// Admission is the bounded local grant authority used by realtime checks.
+// PostgreSQL remains authoritative and reconciliation repairs local state.
+type Admission interface {
+	Authorize(ctx context.Context, hostID, deviceID string) (bool, error)
+	Deny(hostID, deviceID string)
+	DenyDevice(deviceID string)
+	CompleteDeviceRevoke(deviceID string)
+	Allow(ctx context.Context, hostID, deviceID string) error
+}
+
+// PolicyObserver records a policy revision that the broker already installed
+// for a connection, so reconciliation can skip unchanged projections.
+type PolicyObserver interface {
+	RecordPolicy(deviceID string, revision uint64)
+}
+
+// LineEnforcer applies revocation to the broker policy and closes superseded
+// broker connections. A revocation response is only complete after this
+// succeeds.
+type LineEnforcer interface {
+	RevokeGrant(ctx context.Context, hostID, deviceID string) error
+	RevokeDevice(ctx context.Context, deviceID string) error
 }
 
 // Presence is broker-derived host connectivity. It never reads the database.
@@ -108,6 +134,9 @@ type Config struct {
 // Dependencies wires the auth service.
 type Dependencies struct {
 	Store     Store
+	Admission Admission
+	Enforcer  LineEnforcer
+	Observer  PolicyObserver
 	Presence  Presence
 	Transport Transport
 	Config    Config
@@ -120,6 +149,9 @@ type Dependencies struct {
 // Service implements transport authorization and revocation.
 type Service struct {
 	store     Store
+	admission Admission
+	enforcer  LineEnforcer
+	observer  PolicyObserver
 	presence  Presence
 	transport Transport
 	cfg       Config
@@ -136,6 +168,12 @@ type Service struct {
 func New(deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
 		return nil, errors.New("auth: store is required")
+	}
+	if deps.Admission == nil {
+		return nil, errors.New("auth: admission is required")
+	}
+	if deps.Enforcer == nil {
+		return nil, errors.New("auth: line enforcer is required")
 	}
 	if deps.Presence == nil {
 		return nil, errors.New("auth: presence is required")
@@ -157,6 +195,9 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	return &Service{
 		store:     deps.Store,
+		admission: deps.Admission,
+		enforcer:  deps.Enforcer,
+		observer:  deps.Observer,
 		presence:  deps.Presence,
 		transport: deps.Transport,
 		cfg:       deps.Config,
@@ -205,9 +246,10 @@ func (s *Service) AuthenticateDeviceToken(ctx context.Context, token string) (Id
 	return Identity{DeviceID: device.DeviceID}, nil
 }
 
-// AuthorizeHost requires a live grant from the device to the host.
+// AuthorizeHost requires a live grant from the device to the host. Warmed
+// decisions read only local admission state.
 func (s *Service) AuthorizeHost(ctx context.Context, identity Identity, hostID string) error {
-	active, err := s.store.HasActiveGrant(ctx, hostID, identity.DeviceID)
+	active, err := s.admission.Authorize(ctx, hostID, identity.DeviceID)
 	if err != nil {
 		return fmt.Errorf("authorize host: %w", err)
 	}
@@ -268,7 +310,7 @@ func (s *Service) IdentityFromCredentials(clientID, username string) (BrokerIden
 	}
 }
 
-// AuthenticateBroker validates an EMQX HTTP authentication callback request.
+// AuthenticateBroker validates a broker CONNECT request from the native plugin.
 // A host is inserted on first successful authentication.
 func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, password string) (BrokerIdentity, error) {
 	identity, err := s.IdentityFromCredentials(clientID, username)
@@ -311,6 +353,24 @@ func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, pa
 	default:
 		return BrokerIdentity{}, ErrUnauthorized
 	}
+}
+
+// BrokerPolicy projects the committed grants for one authenticated broker
+// principal. Device policies read the durable grant list; the result is
+// installed by the broker plugin for the life of that connection.
+func (s *Service) BrokerPolicy(ctx context.Context, identity BrokerIdentity) (policy.Connection, error) {
+	if identity.Kind != KindDevice {
+		return policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, nil), nil
+	}
+	grants, err := s.store.ListDeviceGrants(ctx, identity.DeviceID)
+	if err != nil {
+		return policy.Connection{}, fmt.Errorf("broker policy: %w", err)
+	}
+	connection := policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, grants)
+	if s.observer != nil {
+		s.observer.RecordPolicy(identity.DeviceID, connection.Revision)
+	}
+	return connection, nil
 }
 
 // AuthenticateAccessCredentials is used by tests and by configuration checks.

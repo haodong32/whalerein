@@ -12,6 +12,7 @@ import os
 import platform
 import select
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -305,33 +306,53 @@ class Fixture:
         )
 
     def start_broker(self):
-        config = (ROOT / "deploy/compose/emqx/emqx.conf").read_text()
-        config = config.replace("http://access:8081", "http://127.0.0.1:18081")
-        config = config.replace(
-            'data_dir = "/opt/emqx/data"', 'data_dir = "{}"'.format(REPORTS / "broker")
+        """Start the pinned Mosquitto 2.1.2 line with the WhaleRein plugin."""
+        from environment import BROKER_PASSWORD, INTERNAL_TOKEN
+
+        directory = REPORTS / "broker"
+        directory.mkdir(parents=True, exist_ok=True)
+        for parent in [directory, *list(directory.parents)[:3]]:
+            try:
+                parent.chmod(0o755)
+            except OSError:
+                pass
+        password_file = directory / "access-password"
+        token_file = directory / "internal-token"
+        password_file.write_text(BROKER_PASSWORD)
+        token_file.write_text(INTERNAL_TOKEN)
+        config_path = directory / "mosquitto.conf"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "listener 1883 127.0.0.1",
+                    "protocol mqtt",
+                    "set_tcp_nodelay true",
+                    "allow_anonymous false",
+                    "persistence false",
+                    "max_packet_size 1048576",
+                    "log_dest stdout",
+                    "log_type error",
+                    "connection_messages false",
+                    "plugin /usr/local/lib/mosquitto/whalerein.so",
+                    "plugin_opt_access_username access",
+                    f"plugin_opt_access_password_file {password_file}",
+                    "plugin_opt_access_auth_url http://127.0.0.1:18081/internal/broker/connect",
+                    f"plugin_opt_access_auth_token_file {token_file}",
+                    "plugin_opt_auth_timeout_ms 500",
+                    "plugin_opt_policy_ttl_ms 15000",
+                    "",
+                ]
+            )
         )
-        config += "\nauthorization.cache.enable = false\n"
-        Path("/opt/emqx/etc/emqx.conf").write_text(config)
-        Path("/opt/emqx/etc/api-keys.csv").write_text(
-            (ROOT / "deploy/compose/emqx/api-keys.csv").read_text()
+        self.broker = Process(
+            ["/usr/local/sbin/mosquitto", "-c", str(config_path)], REPORTS / "fixture"
         )
-        Path("/opt/emqx/etc/acl.conf").write_text(
-            (ROOT / "deploy/compose/emqx/acl.conf").read_text()
-        )
-        self.broker = Process(["/opt/emqx/bin/emqx", "foreground"], REPORTS / "fixture")
-        wait(
-            lambda: (
-                subprocess.run(
-                    ["/opt/emqx/bin/emqx", "ctl", "status"],
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                ).returncode
-                == 0
-            ),
-            timeout=180,
-            process=self.broker,
-        )
+
+        def broker_ready():
+            with socket.create_connection(("127.0.0.1", 1883), timeout=1):
+                return True
+
+        wait(broker_ready, timeout=120, process=self.broker)
 
     def close(self):
         ok = True
@@ -683,7 +704,7 @@ def document_for(run):
             "artifacts": artifacts(),
             "topology": {
                 "database": "postgres-18-local",
-                "broker": "emqx-5.8.8-local",
+                "broker": "mosquitto-2.1.2-local",
                 "network": "none",
                 "containers": 1,
             },

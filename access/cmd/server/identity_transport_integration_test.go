@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,17 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	}
 	port := freePort(t)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	path := writeConfig(t, configValues{publicPort: port, internalPort: freePort(t), databaseURL: db.DSN, brokerURL: brokerURL})
+	internalPort := freePort(t)
+	// The case-scoped Mosquitto plugin posts deferred CONNECT decisions to a
+	// fixed callback port configured before Access starts.
+	if value := os.Getenv("WHALEREIN_TEST_INTERNAL_PORT"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal("invalid WHALEREIN_TEST_INTERNAL_PORT")
+		}
+		internalPort = parsed
+	}
+	path := writeConfig(t, configValues{publicPort: port, internalPort: internalPort, databaseURL: db.DSN, brokerURL: brokerURL})
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -47,17 +58,46 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	cfg.PublicURL = base
 	cfg.Broker.PublicURL = brokerURL
 	cfg.Broker.ClientID = "identity-transport-access"
+	if password := os.Getenv("WHALEREIN_TEST_BROKER_PASSWORD"); password != "" {
+		cfg.Broker.Password = password
+	}
+	// node_runtime.mjs presents this synthetic Host provisioning credential.
+	cfg.HostProvisioningToken = "fixture-host"
+	// The plugin reads its callback token from the broker configuration file.
+	if token := os.Getenv("WHALEREIN_TEST_INTERNAL_TOKEN"); token != "" {
+		cfg.Internal.CallbackToken = token
+	}
 	cfg.Broker.ConnectTimeout = config.Duration(5 * time.Second)
 	cfg.Broker.PublishTimeout = config.Duration(10 * time.Second)
 	cfg.Pairing.ClaimTimeout = config.Duration(5 * time.Second)
 	cfg.Revocation.AckTimeout = config.Duration(5 * time.Second)
-	cfg.EMQX.CTLPath = "/usr/bin/true"
 	cfg.HTTP.MaxBodyBytes = 24 << 20
 	cfg.HTTP.WriteTimeout = config.Duration(20 * time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	accessLog := io.Writer(io.Discard)
+	logPath := os.Getenv("WHALEREIN_TEST_ACCESS_LOG")
+	if logPath == "" {
+		if info, err := os.Stat("/reports"); err == nil && info.IsDir() {
+			logPath = "/reports/access.log"
+		}
+	}
+	var logFile *os.File
+	if path := logPath; path != "" {
+		opened, err := os.Create(path)
+		if err != nil {
+			t.Fatal("access log unavailable")
+		}
+		logFile = opened
+		accessLog = opened
+	}
+	defer func() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
 	stopped := make(chan error, 1)
-	go func() { stopped <- runServer(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
+	go func() { stopped <- runServer(ctx, cfg, slog.New(slog.NewTextHandler(accessLog, nil))) }()
 	defer func() {
 		cancel()
 		if err := <-stopped; err != nil {
@@ -109,11 +149,11 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	invoke := func(args ...string) []byte {
 		command := exec.CommandContext(ctx, binary, append([]string{"--json", "--yes", "--data-dir", data}, args...)...)
 		command.Env = append(os.Environ(), "WHALEREIN_SECRET_BACKEND=file:"+secrets, "WHALEREIN_LOG=error")
-		var stdout bytes.Buffer
+		var stdout, stderr bytes.Buffer
 		command.Stdout = &stdout
-		command.Stderr = io.Discard
+		command.Stderr = &stderr
 		if err := command.Run(); err != nil {
-			t.Fatalf("isolated CLI %s failed", args[0])
+			t.Fatalf("isolated CLI %s failed: code=%s stderr=%s", args[0], cliErrorCode(stdout.Bytes()), bounded(stderr.String()))
 		}
 		return stdout.Bytes()
 	}
@@ -312,4 +352,27 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	if entries, err := os.ReadDir(secrets); err != nil || len(entries) != 0 {
 		t.Fatal("explicit forget left identity credentials")
 	}
+}
+
+// cliErrorCode extracts only the bounded error code from CLI JSON output.
+func cliErrorCode(output []byte) string {
+	for _, line := range bytes.Split(output, []byte("\n")) {
+		var outcome struct {
+			Error *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(line, &outcome) == nil && outcome.Error != nil {
+			return outcome.Error.Code
+		}
+	}
+	return ""
+}
+
+// bounded keeps a diagnostic stderr excerpt free of long payloads.
+func bounded(value string) string {
+	if len(value) > 2000 {
+		return value[len(value)-2000:]
+	}
+	return value
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
+	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
 	"github.com/whalerein/whalerein/access/internal/store/storetest"
@@ -129,7 +130,6 @@ func newHarness(t *testing.T) harness {
 		Auth:          &acceptAdmin{},
 		Pairing:       stubPairing{},
 		Requests:      stubRequests{},
-		Presence:      stubPresence{},
 		Readiness:     diagnostics.NewReadiness(),
 		Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		InternalToken: "internal",
@@ -445,6 +445,9 @@ func (acceptAdmin) IdentityFromCredentials(string, string) (auth.BrokerIdentity,
 func (acceptAdmin) AuthorizeACL(context.Context, auth.BrokerIdentity, auth.ACLAction, string) (bool, error) {
 	return false, nil
 }
+func (acceptAdmin) BrokerPolicy(context.Context, auth.BrokerIdentity) (policy.Connection, error) {
+	return policy.Connection{}, nil
+}
 
 type stubPairing struct{}
 
@@ -466,7 +469,3 @@ func (stubRequests) Get(context.Context, string, string) (store.Request, error) 
 }
 
 func (stubRequests) Touch(string, string, whalereinv1.OnlineStatus) {}
-
-type stubPresence struct{}
-
-func (stubPresence) HandlePresenceWebhook([]byte) error { return nil }

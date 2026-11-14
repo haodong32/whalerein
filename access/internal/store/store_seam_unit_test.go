@@ -379,3 +379,47 @@ func TestHostListingAndRevocationReadsModelDatabaseOutcomes(t *testing.T) {
 		}
 	})
 }
+
+func TestAdmissionGrantReadsUseTheDatabaseSeam(t *testing.T) {
+	grantRow := syntheticRow{fill: func(dest ...any) {
+		*dest[0].(*string) = "host"
+		*dest[1].(*string) = "device"
+		*dest[2].(*bool) = true
+		*dest[3].(*uint64) = 4
+		*dest[4].(*uint64) = 5
+		*dest[5].(*uint64) = 6
+	}}
+	db := &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row { return grantRow }}
+	store := newStore(db)
+	grant, err := store.AdmissionGrantFor(context.Background(), "host", "device")
+	if err != nil || grant.HostID != "host" || !grant.Active || grant.GrantGeneration != 4 ||
+		grant.RevocationGeneration != 5 || grant.DeviceRevocationGeneration != 6 {
+		t.Fatalf("grant = %+v err=%v", grant, err)
+	}
+
+	missing := &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row {
+		return syntheticRow{err: pgx.ErrNoRows}
+	}}
+	if _, err := newStore(missing).AdmissionGrantFor(context.Background(), "host", "device"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing grant error = %v", err)
+	}
+
+	rows := &fakeRowSet{rows: []pgx.Row{grantRow, grantRow}}
+	listDB := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return rows, nil }}
+	list, err := newStore(listDB).ListAdmissionGrants(context.Background())
+	if err != nil || len(list) != 2 || rows.closed != 1 {
+		t.Fatalf("list = %+v err=%v closed=%d", list, err, rows.closed)
+	}
+
+	deviceRows := &fakeRowSet{rows: []pgx.Row{grantRow}}
+	deviceDB := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return deviceRows, nil }}
+	deviceList, err := newStore(deviceDB).ListDeviceGrants(context.Background(), "device")
+	if err != nil || len(deviceList) != 1 || deviceRows.closed != 1 {
+		t.Fatalf("device list = %+v err=%v closed=%d", deviceList, err, deviceRows.closed)
+	}
+
+	failing := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return nil, errStoreUnit }}
+	if _, err := newStore(failing).ListAdmissionGrants(context.Background()); !errors.Is(err, errStoreUnit) {
+		t.Fatalf("list error = %v", err)
+	}
+}

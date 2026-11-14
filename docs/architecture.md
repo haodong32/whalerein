@@ -11,7 +11,7 @@ flowchart LR
     CLI[CLI] --> Core[Rust Core]
     Core -->|HTTPS requests/results| Access[Go Access]
     Access --> DB[(PostgreSQL)]
-    Access <-->|MQTT| Broker[EMQX]
+    Access <-->|MQTT| Broker[Mosquitto + plugin]
     Broker <-->|MQTT| Plugin[Node.js plugin]
     Broker -->|MQTT events| Core
     Plugin --> Adapter[DSH adapter]
@@ -81,7 +81,7 @@ unconfirmed outcome. `host_offline`, `rejected`, `succeeded`, and `failed` are f
 
 Core and the plugin use Noise XX with X25519, ChaCha20-Poly1305, and SHA-256.
 Pairing confirms the host fingerprint from the Noise key. Each reconnect creates
-a fresh channel. Access and EMQX see routing metadata, not application plaintext.
+a fresh channel. Access and the broker see routing metadata, not application plaintext.
 Public HTTPS and MQTT require TLS.
 
 Access commits revocation before disconnecting the device and notifying hosts.
@@ -94,7 +94,7 @@ replaces the cache with a snapshot. Offline operation is read-only.
 
 ## Deployment
 
-The [Compose stack](../deploy/README.md) runs Access, PostgreSQL 18, and EMQX 5.8
+The [Compose stack](../deploy/README.md) runs Access, PostgreSQL 18, and Mosquitto 2.1.2
 with loopback plaintext development ports. The plugin runs on the DSH host.
 Production TLS must be configured separately; clients use advertised endpoints.
 

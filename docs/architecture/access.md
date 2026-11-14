@@ -4,7 +4,8 @@
 
 Access is a Go monolith for transport authorization, pairing registration,
 durable request/status copies, and encrypted relay. PostgreSQL owns durable
-server state; EMQX supplies transport and connection facts.
+server state; the pinned Mosquitto 2.1.2 line (with the WhaleRein broker
+plugin) supplies transport and connection facts.
 
 Access implements Standalone mode in one process with installation-scoped resources.
 External account mode, separate API/relay deployments and regional automation
@@ -29,7 +30,7 @@ Unknown modes fail configuration validation; there is no external-account fallba
 httpapi -> auth, pairing, requests
 pairing / requests / events -> store, broker
 store -> PostgreSQL
-broker -> EMQX
+broker -> Mosquitto plugin
 ```
 
 Handlers do not access SQL/MQTT directly. `cmd/server` wires callbacks;
@@ -144,10 +145,13 @@ freshness and optional REST fallback do not authorize grants.
 
 ## Broker and listeners
 
-Internal auth/ACL/presence callbacks use a separate listener and shared header.
-ACLs restrict principals to authorized topics. Presence comes from broker `$SYS`
-events, HostReady, or configured webhook/REST support. `$SYS` is not retained;
-restart recovery cannot rely on it alone. Active disconnect uses EMQX REST/ctl.
+The broker plugin delegates CONNECT validation to the internal listener and
+installs the returned per-connection policy locally; publish, subscribe,
+delivery and Will decisions never call Access. Presence comes from ordered
+broker connection notifications plus a sequence-bounded snapshot, with the
+device last will and HostReady as existing fallbacks. Active disconnect uses the
+private `$CONTROL/whalerein/v1` interface. See
+[Mosquitto line](mosquitto.md).
 
 Connection-test clients use username `probe:<host_id>` and a random client ID
 `whalerein-probe-<32 lowercase hex digits>`. Access validates the same provisioning

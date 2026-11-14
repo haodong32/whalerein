@@ -111,8 +111,14 @@ func (s *Service) rememberSignature(proof HostProof) bool {
 // cached broker ACL drops. Other hosts' grants are left in place.
 func (s *Service) RevokeHostGrant(ctx context.Context, hostID, deviceID string) error {
 	at := s.now()
+	// Fence realtime admission before the durable write so a concurrent
+	// dispatch cannot use the grant being revoked.
+	s.admission.Deny(hostID, deviceID)
 	if err := s.store.RevokeGrant(ctx, hostID, deviceID, at); err != nil {
 		return err
+	}
+	if err := s.enforcer.RevokeGrant(ctx, hostID, deviceID); err != nil {
+		return fmt.Errorf("revoke grant policy: %w", err)
 	}
 	s.logger.Info("revocation committed", "source", "host_settings", "trace_id", diagnostics.TraceID(ctx), "host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "revoked_at_unix_ms", at.UnixMilli())
 	if err := s.transport.DisconnectDevice(ctx, deviceID); err != nil {

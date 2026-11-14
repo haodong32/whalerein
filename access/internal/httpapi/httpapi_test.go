@@ -3,12 +3,12 @@ package httpapi
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +16,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/pairing"
+	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -38,8 +39,8 @@ type fakeAuth struct {
 	hostGrants     []string
 	brokerIdentity auth.BrokerIdentity
 	brokerErr      error
-	aclAllowed     bool
-	aclErr         error
+	brokerPolicy   policy.Connection
+	policyErr      error
 }
 
 func (f *fakeAuth) AuthenticateAdmin(token string) error {
@@ -103,12 +104,8 @@ func (f *fakeAuth) AuthenticateBroker(context.Context, string, string, string) (
 	return f.brokerIdentity, f.brokerErr
 }
 
-func (f *fakeAuth) IdentityFromCredentials(string, string) (auth.BrokerIdentity, error) {
-	return f.brokerIdentity, f.brokerErr
-}
-
-func (f *fakeAuth) AuthorizeACL(context.Context, auth.BrokerIdentity, auth.ACLAction, string) (bool, error) {
-	return f.aclAllowed, f.aclErr
+func (f *fakeAuth) BrokerPolicy(context.Context, auth.BrokerIdentity) (policy.Connection, error) {
+	return f.brokerPolicy, f.policyErr
 }
 
 type fakePairing struct {
@@ -151,22 +148,11 @@ func (f *fakeRequests) Get(_ context.Context, deviceID, requestID string) (store
 
 func (f *fakeRequests) Touch(_ string, _ string, _ whalereinv1.OnlineStatus) {}
 
-type fakePresence struct {
-	err   error
-	calls int
-}
-
-func (f *fakePresence) HandlePresenceWebhook([]byte) error {
-	f.calls++
-	return f.err
-}
-
 type apiFixture struct {
 	server   *Server
 	auth     *fakeAuth
 	pairing  *fakePairing
 	requests *fakeRequests
-	presence *fakePresence
 	ready    *diagnostics.Readiness
 }
 
@@ -178,7 +164,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		activeHosts:    map[string]bool{"h1": true},
 		list:           []auth.HostView{{HostID: "h1", Fingerprint: "fp", ProtocolVersion: 1, Online: true}},
 		brokerIdentity: auth.BrokerIdentity{Kind: auth.KindHost, HostID: "h1"},
-		aclAllowed:     true,
+		brokerPolicy:   policy.Build(policy.KindHost, "h1", "", nil),
 	}
 	fp := &fakePairing{
 		invitation: &whalereinv1.PairingInvitation{Token: "pair-token", HostId: "h1", ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli(), PairingUri: "whalerein://pair?v=1"},
@@ -189,11 +175,10 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND, ProtocolVersion: 1, Status: whalereinv1.OnlineStatus_received,
 		ResultBody: []byte("result"), ChannelID: "channel-1", ExpiresAt: now.Add(time.Hour), UpdatedAt: now,
 	}, created: true}
-	presence := &fakePresence{}
 	readiness := diagnostics.NewReadiness()
 	readiness.Add("database", func(context.Context) error { return nil })
 	server, err := New(Dependencies{
-		Auth: fa, Pairing: fp, Requests: fr, Presence: presence, Readiness: readiness,
+		Auth: fa, Pairing: fp, Requests: fr, Readiness: readiness,
 		Metrics: diagnostics.NewMetrics(), Masker: diagnostics.NewMaskerWithKey([]byte("http")),
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		InternalToken: "internal-token", MaxBodyBytes: 1 << 20,
@@ -201,7 +186,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &apiFixture{server: server, auth: fa, pairing: fp, requests: fr, presence: presence, ready: readiness}
+	return &apiFixture{server: server, auth: fa, pairing: fp, requests: fr, ready: readiness}
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
@@ -482,67 +467,89 @@ func TestBodyLimitRejectsOversizedRequestsAndPreservesTraceID(t *testing.T) {
 	}
 }
 
-func TestInternalRoutesRequireTokenAndApplyBrokerACL(t *testing.T) {
+func TestInternalBrokerConnectReturnsPolicyTextAndDeniesBadCredentials(t *testing.T) {
 	f := newAPIFixture(t)
-	body := []byte(`{"clientid":"whalerein-host-h1","username":"host:h1","password":"host-token"}`)
-	recorder := doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/auth", body, nil)
+	form := func(values url.Values) []byte { return []byte(values.Encode()) }
+	valid := form(url.Values{"clientid": {"whalerein-host-h1"}, "username": {"host:h1"}, "password": {"host-token"}})
+
+	// The internal token is mandatory.
+	recorder := doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", valid, nil)
 	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/auth", body, map[string]string{InternalHeader: "wrong"})
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", valid, map[string]string{InternalHeader: "wrong"})
 	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
 
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/auth", body, map[string]string{InternalHeader: "internal-token"})
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"result":"allow"`) {
-		t.Fatalf("auth = %d %s", recorder.Code, recorder.Body.String())
+	f.auth.brokerPolicy = policy.Build(policy.KindDevice, "", "d1", []store.AdmissionGrant{
+		{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 3},
+	})
+	f.auth.brokerIdentity = auth.BrokerIdentity{Kind: auth.KindDevice, DeviceID: "d1"}
+	device := form(url.Values{
+		"clientid": {"whalerein-device-d1"}, "username": {"device:d1"}, "password": {"device-token"},
+		"will": {"whalerein/v1/presence/device/d1"},
+	})
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", device, map[string]string{InternalHeader: "internal-token"})
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("connect = %d %q", recorder.Code, recorder.Header().Get("Content-Type"))
 	}
+	want := string(policy.Format(f.auth.brokerPolicy))
+	if recorder.Body.String() != want {
+		t.Fatalf("policy body = %q, want %q", recorder.Body.String(), want)
+	}
+	if !strings.Contains(recorder.Body.String(), "kind device") || !strings.Contains(recorder.Body.String(), "will whalerein/v1/presence/device/d1") {
+		t.Fatalf("policy body = %q", recorder.Body.String())
+	}
+
+	// Bad credentials produce a versioned deny body, not an HTTP error.
 	f.auth.brokerErr = auth.ErrUnauthorized
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/auth", body, map[string]string{InternalHeader: "internal-token"})
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("deny = %d %s", recorder.Code, recorder.Body.String())
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", valid, map[string]string{InternalHeader: "internal-token"})
+	if recorder.Code != http.StatusOK || !strings.HasPrefix(recorder.Body.String(), "whalerein/1\ndeny ") {
+		t.Fatalf("deny = %d %q", recorder.Code, recorder.Body.String())
 	}
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/auth", []byte("bad"), map[string]string{InternalHeader: "internal-token"})
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("malformed = %d %s", recorder.Code, recorder.Body.String())
+	f.auth.brokerErr = nil
+
+	// A Will outside the projected policy is denied even after authentication.
+	foreign := form(url.Values{
+		"clientid": {"whalerein-device-d1"}, "username": {"device:d1"}, "password": {"device-token"},
+		"will": {"whalerein/v1/presence/device/other"},
+	})
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", foreign, map[string]string{InternalHeader: "internal-token"})
+	if !strings.Contains(recorder.Body.String(), "deny will_not_authorized") {
+		t.Fatalf("foreign will = %q", recorder.Body.String())
 	}
 
-	f.auth.brokerErr = nil
-	aclBody := []byte(`{"clientid":"whalerein-host-h1","username":"host:h1","topic":"whalerein/v1/h/h1/request","action":"subscribe"}`)
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/acl", aclBody, map[string]string{InternalHeader: "internal-token"})
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"result":"allow"`) {
-		t.Fatalf("acl = %d %s", recorder.Code, recorder.Body.String())
+	// Policy projection failures also fail closed.
+	f.auth.policyErr = errors.New("db down")
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", device, map[string]string{InternalHeader: "internal-token"})
+	if !strings.Contains(recorder.Body.String(), "deny unavailable") {
+		t.Fatalf("policy failure = %q", recorder.Body.String())
 	}
-	f.auth.aclAllowed = false
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/acl", aclBody, map[string]string{InternalHeader: "internal-token"})
-	if !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("acl deny = %s", recorder.Body.String())
-	}
-	f.auth.aclErr = errors.New("db down")
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/acl", aclBody, map[string]string{InternalHeader: "internal-token"})
-	if !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("acl error = %s", recorder.Body.String())
-	}
-	f.auth.aclErr = nil
-	f.auth.brokerErr = auth.ErrBadRequest
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/acl", aclBody, map[string]string{InternalHeader: "internal-token"})
-	if !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("identity error = %s", recorder.Body.String())
-	}
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/acl", []byte("bad"), map[string]string{InternalHeader: "internal-token"})
-	if !strings.Contains(recorder.Body.String(), `"result":"deny"`) {
-		t.Fatalf("malformed acl = %s", recorder.Body.String())
+	f.auth.policyErr = nil
+
+	// Malformed form bodies are denied.
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", []byte("clientid=%zz"), map[string]string{InternalHeader: "internal-token"})
+	if !strings.Contains(recorder.Body.String(), "deny ") {
+		t.Fatalf("malformed = %q", recorder.Body.String())
 	}
 }
 
-func TestInternalPresenceRecordsBrokerConnectionState(t *testing.T) {
+func TestInternalBrokerConnectEnforcesBodyBound(t *testing.T) {
+	f := newAPIFixture(t)
+	oversized := make([]byte, 64<<10+1)
+	for index := range oversized {
+		oversized[index] = 'a'
+	}
+	recorder := doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", oversized, map[string]string{
+		InternalHeader: "internal-token",
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "deny malformed_request") {
+		t.Fatalf("oversized = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestInternalPresenceRouteWasRemoved(t *testing.T) {
 	f := newAPIFixture(t)
 	recorder := doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/presence", []byte(`{"event":"client.connected"}`), map[string]string{InternalHeader: "internal-token"})
-	if recorder.Code != http.StatusOK || f.presence.calls != 1 {
-		t.Fatalf("presence = %d calls=%d", recorder.Code, f.presence.calls)
-	}
-	f.presence.err = errors.New("bad")
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/presence", []byte("bad"), map[string]string{InternalHeader: "internal-token"})
-	assertError(t, recorder, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument)
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodGet, "/internal/broker/presence", nil, map[string]string{InternalHeader: "internal-token"})
-	assertError(t, recorder, http.StatusMethodNotAllowed, whalereinv1.ErrorCode_invalid_argument)
+	assertError(t, recorder, http.StatusNotFound, whalereinv1.ErrorCode_not_found)
 }
 
 func TestClassifyErrorsMapsProtocolAndServiceFailures(t *testing.T) {
@@ -658,30 +665,6 @@ func TestStatusWriterAndInternalTokenEnforceCallbackContract(t *testing.T) {
 	}
 }
 
-func TestWriteCallbackAndJSONEncodeResponses(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	writeCallbackResult(recorder, http.StatusOK, true, true)
-	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/json" {
-		t.Fatal("callback response lost JSON media type or success status")
-	}
-	var body map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body["result"] != "allow" || body["is_superuser"] != true {
-		t.Fatalf("body = %v", body)
-	}
-	recorder = httptest.NewRecorder()
-	writeCallbackResult(recorder, http.StatusOK, false, false)
-	body = nil
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal("deny callback was not JSON")
-	}
-	if recorder.Code != http.StatusOK || body["result"] != "deny" || body["is_superuser"] != false {
-		t.Fatal("deny callback did not explicitly deny non-superuser access")
-	}
-}
-
 func assertError(t *testing.T, recorder *httptest.ResponseRecorder, status int, code whalereinv1.ErrorCode) {
 	t.Helper()
 	if recorder.Code != status {
@@ -717,11 +700,11 @@ func TestNewRejectsInvalidDependenciesAndAppliesDefaults(t *testing.T) {
 	}
 	readiness := diagnostics.NewReadiness()
 	authFake := &fakeAuth{adminToken: "a", deviceToken: "d", deviceID: "d1", activeHosts: map[string]bool{}}
-	if _, err := New(Dependencies{Auth: authFake, Pairing: &fakePairing{}, Requests: &fakeRequests{}, Presence: &fakePresence{}}); err == nil {
+	if _, err := New(Dependencies{Auth: authFake, Pairing: &fakePairing{}, Requests: &fakeRequests{}}); err == nil {
 		t.Fatal("expected missing readiness error")
 	}
 	server, err := New(Dependencies{
-		Auth: authFake, Pairing: &fakePairing{}, Requests: &fakeRequests{}, Presence: &fakePresence{},
+		Auth: authFake, Pairing: &fakePairing{}, Requests: &fakeRequests{},
 		Readiness: readiness, InternalToken: "x",
 	})
 	if err != nil {
@@ -822,8 +805,8 @@ func TestRoutesRejectInvalidAuthAndOversizedBodies(t *testing.T) {
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodDelete, "/v1/devices/d1", nil, map[string]string{"Authorization": "Bearer wrong"})
 	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
 	f.server.deps.MaxBodyBytes = 5
-	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/presence", []byte(`{"event":"client.connected"}`), map[string]string{InternalHeader: "internal-token"})
-	assertError(t, recorder, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument)
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/pairing/claims", []byte(`{"claimId":"claim-1"}`), nil)
+	assertError(t, recorder, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_invalid_argument)
 }
 
 func TestHostSignatureAuthorizesInvitationAndSingleGrantRevocation(t *testing.T) {
@@ -861,4 +844,20 @@ func TestHostSignatureAuthorizesInvitationAndSingleGrantRevocation(t *testing.T)
 	}
 	bad := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/hosts/h1/devices/bad+id/revocation", revokeBody, nil)
 	assertError(t, bad, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument)
+}
+
+func TestHeartbeatRouteTouchesTheAuthorizedRequest(t *testing.T) {
+	f := newAPIFixture(t)
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, map[string]string{"Authorization": "Bearer device-token"})
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if f.requests.gotDevice != "d1" || f.requests.gotRequest != "r1" {
+		t.Fatalf("heartbeat read device=%q request=%q", f.requests.gotDevice, f.requests.gotRequest)
+	}
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, nil)
+	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
+	f.requests.getErr = errors.New("db down")
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, map[string]string{"Authorization": "Bearer device-token"})
+	assertError(t, recorder, http.StatusInternalServerError, whalereinv1.ErrorCode_internal)
 }

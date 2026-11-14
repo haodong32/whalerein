@@ -195,6 +195,16 @@ type fakePresence struct{ online map[string]bool }
 
 func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool { return f.online[hostID] }
 
+type fakePolicy struct {
+	err   error
+	calls []string
+}
+
+func (f *fakePolicy) ApplyPairing(_ context.Context, hostID, deviceID string) error {
+	f.calls = append(f.calls, hostID+"|"+deviceID)
+	return f.err
+}
+
 func (f *fakeTransport) SupportsPairing(string) bool { return f.capable == nil || *f.capable }
 
 type fixture struct {
@@ -202,6 +212,7 @@ type fixture struct {
 	store     *fakeStore
 	transport *fakeTransport
 	presence  *fakePresence
+	policy    *fakePolicy
 	now       time.Time
 }
 
@@ -212,10 +223,11 @@ func newFixture(t *testing.T) *fixture {
 	transport := &fakeTransport{}
 	transport.awaitFn = defaultPairingAnswers
 	presence := &fakePresence{online: map[string]bool{"h1": true}}
+	policy := &fakePolicy{}
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	fixtureRef := &fixture{now: now}
 	service, err := New(Dependencies{
-		Store: fs, Transport: transport, Presence: presence,
+		Store: fs, Policy: policy, Transport: transport, Presence: presence,
 		Config: Config{
 			PublicURL: "https://access.example.com/", MQTTURL: "mqtts://access.example.com:443",
 			InvitationTTL: 10 * time.Minute, ClaimTimeout: time.Second, ClaimTTL: time.Minute,
@@ -234,6 +246,7 @@ func newFixture(t *testing.T) *fixture {
 	fixtureRef.store = fs
 	fixtureRef.transport = transport
 	fixtureRef.presence = presence
+	fixtureRef.policy = policy
 	return fixtureRef
 }
 
@@ -288,9 +301,12 @@ func TestNewRejectsMissingRequiredDependencies(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if _, err := New(Dependencies{Store: newFakeStore()}); err == nil {
+		t.Fatal("expected policy error")
+	}
+	if _, err := New(Dependencies{Store: newFakeStore(), Policy: &fakePolicy{}}); err == nil {
 		t.Fatal("expected transport error")
 	}
-	if _, err := New(Dependencies{Store: newFakeStore(), Transport: &fakeTransport{}}); err == nil {
+	if _, err := New(Dependencies{Store: newFakeStore(), Policy: &fakePolicy{}, Transport: &fakeTransport{}}); err == nil {
 		t.Fatal("expected presence error")
 	}
 }
@@ -1122,7 +1138,7 @@ func TestDurablePairingRecoversAfterServiceRestartWithoutPersistingCredential(t 
 		t.Fatal(err)
 	}
 	// A fresh service loses every in-memory claim and waiter.
-	restarted, err := New(Dependencies{Store: f.store, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }, Random: bytes.NewReader(bytes.Repeat([]byte{9}, 1024))})
+	restarted, err := New(Dependencies{Store: f.store, Policy: f.policy, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }, Random: bytes.NewReader(bytes.Repeat([]byte{9}, 1024))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,7 +1151,7 @@ func TestDurablePairingRecoversAfterServiceRestartWithoutPersistingCredential(t 
 	if bytes.Contains(op.FinishResponse, []byte(finish.DeviceToken)) || bytes.Contains(op.HelloResponse, []byte(token)) {
 		t.Fatal("credential persisted in operation")
 	}
-	restarted, err = New(Dependencies{Store: f.store, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }})
+	restarted, err = New(Dependencies{Store: f.store, Policy: f.policy, Transport: f.transport, Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1339,5 +1355,53 @@ func TestHostCommitConfirmationRejectsMismatchedOrFailedAcknowledgement(t *testi
 				t.Fatal("invalid acknowledgement persisted")
 			}
 		})
+	}
+}
+
+func TestSuccessfulFinishAppliesPairingPolicyBeforeReturning(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	if _, err := f.service.Claim(ctx, helloRequest(token, "policy-ok", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.policy.calls) != 0 {
+		t.Fatalf("policy applied before FINISH: %v", f.policy.calls)
+	}
+	if _, err := f.service.Claim(ctx, finishRequest(token, "policy-ok", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.policy.calls) != 1 || f.policy.calls[0] != "h1|d1" {
+		t.Fatalf("policy calls = %v", f.policy.calls)
+	}
+}
+
+func TestPairingPolicyFailureReturnsInternalAfterDurableCommit(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	if _, err := f.service.Claim(ctx, helloRequest(token, "policy-fail", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	f.policy.err = errors.New("broker policy unavailable")
+	reply, err := f.service.Claim(ctx, finishRequest(token, "policy-fail", "d1"))
+	if !errors.Is(err, ErrInternal) || reply != nil {
+		t.Fatalf("reply = %+v err = %v", reply, err)
+	}
+	if len(f.policy.calls) != 1 {
+		t.Fatalf("policy calls = %v", f.policy.calls)
+	}
+	// The durable commit already happened; only the response was withheld.
+	if !f.store.grants["h1|d1"] {
+		t.Fatal("durable grant missing after policy failure")
+	}
+	if _, ok := f.store.devices["d1"]; !ok {
+		t.Fatal("durable device missing after policy failure")
+	}
+	if _, used := f.store.used[hashKey(mustHash(token))]; !used {
+		t.Fatal("durable token use missing after policy failure")
+	}
+	if _, ok := f.store.operations["policy-fail"]; !ok {
+		t.Fatal("durable operation missing after policy failure")
 	}
 }

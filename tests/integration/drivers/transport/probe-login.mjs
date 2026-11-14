@@ -21,7 +21,7 @@ try {
     properties: { sessionExpiryInterval: 0 },
   })
   client.on('error', () => {})
-  // EMQX must deny topic operations, even for an authenticated probe.
+  // The broker plugin must deny topic operations, even for an authenticated probe.
   await assert.rejects(client.subscribeAsync(`whalerein/v1/h/${hostId}/request`, { qos: 1 }))
   await assert.rejects(client.publishAsync(`whalerein/v1/h/${hostId}/result`, '', { qos: 1 }))
   console.log('probe-login-ok')

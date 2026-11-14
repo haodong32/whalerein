@@ -17,7 +17,7 @@ in independent managed regions. Allow a private account and commerce program to
 authorize automatic pairing and manage regional policy. Automate replacement
 of compute instances without making them owners of durable identity or state.
 
-The initial implementation remains Go and PostgreSQL with EMQX. Core remains
+The initial implementation remains Go and PostgreSQL with Mosquitto. Core remains
 self-contained Rust with SecretStore as its only injected capability. Source
 operations remain behind the Host adapter. Neither Access nor management gains
 access to conversation plaintext or endpoint private keys.
@@ -37,7 +37,7 @@ Keep the architecture small and explicit:
 - Run one Access process with HTTP and MQTT responsibilities separated internally.
   Separate deployable roles and replica coordination only when implementing
   multi-instance hosting.
-- Keep PostgreSQL and EMQX as the only server dependencies. Use direct module
+- Keep PostgreSQL and Mosquitto as the only server dependencies. Use direct module
   calls and ordinary transactions; add no generic workflow engine, event bus,
   plugin framework or distributed scheduler.
 - Expose only operations needed by actual callers. Do not add a public Go
@@ -121,10 +121,10 @@ Client + Host                      Account / commerce / region directory
       |                                      | authenticated management
 Access (API + relay)                   +-----+-----+
       |                                |           |
-PostgreSQL + EMQX                    Region A    Region B
+PostgreSQL + Mosquitto                    Region A    Region B
                                     API pool    API pool
                                     relay       relay
-                                    PG + EMQX   PG + EMQX
+                                    PG + Mosquitto   PG + Mosquitto
 ```
 
 Standalone mode uses a local authority scoped to the installation; manual invitations
@@ -368,7 +368,7 @@ callbacks and device APIs. mTLS authenticates service identities. Authorization
 maps each identity to its region and permitted operations. Each region has its
 own credentials and cannot write another region's observations or billing data.
 Provision trust during deployment, support overlapping rotation keys, and reject
-unknown issuers. Do not reuse the current EMQX callback token or admin bearer.
+unknown issuers. Do not reuse the current broker callback token or admin bearer.
 
 Central management sends effective membership/enrollment changes, entitlements
 and disable/revoke operations. Regions report applied versions, revocation
@@ -465,7 +465,7 @@ observations, replays revocations and resolves/restarts incomplete exchanges.
 Readiness is role-specific: an API can serve pending/status responses while relay
 availability is reported separately. Liveness alone never admits traffic.
 
-Creating a region additionally provisions PostgreSQL, EMQX, TLS endpoints,
+Creating a region additionally provisions PostgreSQL, Mosquitto, TLS endpoints,
 backups and directory registration. Compute replacement does not migrate the
 database or change a workspace's home region. Cross-region disaster recovery
 requires fencing the old region, choosing acceptable replication loss, preserving

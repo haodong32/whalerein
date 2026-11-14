@@ -12,16 +12,21 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type fakeStore struct {
-	active map[string]bool
-	err    error
+type admissionState struct {
+	allowed bool
+	known   bool
 }
 
-func (f *fakeStore) HasActiveGrant(_ context.Context, hostID, deviceID string) (bool, error) {
-	if f.err != nil {
-		return false, f.err
+type fakeAdmission struct {
+	grants map[string]admissionState
+}
+
+func (f *fakeAdmission) Check(hostID, deviceID string) (bool, bool) {
+	state, ok := f.grants[hostID+"|"+deviceID]
+	if !ok {
+		return false, false
 	}
-	return f.active[hostID+"|"+deviceID], nil
+	return state.allowed, state.known
 }
 
 type fakeBroker struct {
@@ -49,26 +54,26 @@ func envelope(t *testing.T, hostID, deviceID string) []byte {
 	return data
 }
 
-func newHandler(t *testing.T) (*Handler, *fakeStore, *fakeBroker) {
+func newHandler(t *testing.T) (*Handler, *fakeAdmission, *fakeBroker) {
 	t.Helper()
-	store := &fakeStore{active: map[string]bool{"h1|d1": true}}
+	admission := &fakeAdmission{grants: map[string]admissionState{"h1|d1": {allowed: true, known: true}}}
 	broker := &fakeBroker{}
 	handler, err := New(Dependencies{
-		Store: store, Broker: broker, Metrics: diagnostics.NewMetrics(),
+		Admission: admission, Broker: broker, Metrics: diagnostics.NewMetrics(),
 		Masker: diagnostics.NewMaskerWithKey([]byte("event")),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handler, store, broker
+	return handler, admission, broker
 }
 
 func TestNewRejectsMissingRequiredDependencies(t *testing.T) {
 	if _, err := New(Dependencies{}); err == nil {
 		t.Fatal("expected error")
 	}
-	if _, err := New(Dependencies{Store: &fakeStore{}}); err == nil {
+	if _, err := New(Dependencies{Admission: &fakeAdmission{}}); err == nil {
 		t.Fatal("expected broker error")
 	}
 }
@@ -89,26 +94,36 @@ func TestHandleRoutesValidEventToAuthorizedDevice(t *testing.T) {
 	}
 }
 
-func TestHandleDropsEventsForRevokedOrMissingGrants(t *testing.T) {
-	handler, store, broker := newHandler(t)
-	store.active["h1|d1"] = false
+func TestHandleDropsColdUnknownAndWarmedInactiveGrantsWithoutError(t *testing.T) {
+	handler, admission, broker := newHandler(t)
+	// A cold lookup is unknown: fail closed without surfacing an error.
+	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d-cold")); err != nil {
+		t.Fatalf("cold grant returned error: %v", err)
+	}
+	if broker.calls != 0 {
+		t.Fatal("cold grant event was published")
+	}
+	// A warmed grant that is inactive must also be dropped.
+	admission.grants["h1|d1"] = admissionState{allowed: false, known: true}
 	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d1")); err != nil {
-		t.Fatal(err)
+		t.Fatalf("inactive grant returned error: %v", err)
 	}
 	if broker.calls != 0 {
-		t.Fatal("dropped event was published")
+		t.Fatal("inactive grant event was published")
 	}
-	store.active["h1|d1"] = true
-	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d2")); err != nil {
+	// Allowed grants forward the exact bytes.
+	admission.grants["h1|d1"] = admissionState{allowed: true, known: true}
+	payload := envelope(t, "h1", "d1")
+	if err := handler.Handle(context.Background(), "h1", payload); err != nil {
 		t.Fatal(err)
 	}
-	if broker.calls != 0 {
-		t.Fatal("missing grant event was published")
+	if broker.calls != 1 || string(broker.payload) != string(payload) {
+		t.Fatalf("broker = %+v", broker)
 	}
 }
 
 func TestHandleRejectsMalformedEventEnvelopes(t *testing.T) {
-	handler, store, broker := newHandler(t)
+	handler, _, broker := newHandler(t)
 	if err := handler.Handle(context.Background(), "", envelope(t, "h1", "d1")); err == nil {
 		t.Fatal("empty topic host")
 	}
@@ -125,11 +140,6 @@ func TestHandleRejectsMalformedEventEnvelopes(t *testing.T) {
 	if err := handler.Handle(context.Background(), "h1", data); err == nil {
 		t.Fatal("missing device id")
 	}
-	store.err = errors.New("db down")
-	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d1")); err == nil {
-		t.Fatal("store error")
-	}
-	store.err = nil
 	broker.err = errors.New("mqtt down")
 	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d1")); err == nil {
 		t.Fatal("publish error")

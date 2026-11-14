@@ -1,5 +1,5 @@
 // Command server runs WhaleRein Access as one modular Go process: HTTPS API,
-// internal EMQX callbacks, PostgreSQL state and one MQTT 5 session.
+// internal broker callbacks, PostgreSQL state and one MQTT 5 session.
 package main
 
 import (
@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/admission"
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/broker"
 	"github.com/whalerein/whalerein/access/internal/config"
@@ -26,6 +27,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/events"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
+	"github.com/whalerein/whalerein/access/internal/line"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -123,6 +125,7 @@ type startupStoreOps struct {
 	open    func(context.Context, string) (*store.Store, error)
 	migrate func(context.Context, *store.Store) error
 	close   func(*store.Store)
+	cleanup func(context.Context, cleanupStore, time.Duration, time.Duration, *slog.Logger)
 }
 
 func defaultStartupStoreOps() startupStoreOps {
@@ -130,6 +133,7 @@ func defaultStartupStoreOps() startupStoreOps {
 		open:    store.Open,
 		migrate: func(ctx context.Context, db *store.Store) error { return db.Migrate(ctx) },
 		close:   func(db *store.Store) { db.Close() },
+		cleanup: runCleanup,
 	}
 }
 
@@ -184,15 +188,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			"mqtt_public_url", mqttPublicURL)
 	}
 
-	rest, err := broker.NewRESTClient(cfg.EMQX)
-	if err != nil {
-		return fmt.Errorf("configure EMQX REST: %w", err)
-	}
-	disconnecter, err := broker.NewDisconnecter(cfg.EMQX, rest, nil)
-	if err != nil {
-		return fmt.Errorf("configure EMQX disconnect: %w", err)
-	}
-	presence := broker.NewPresence(cfg.Presence.CacheTTL.D(), rest, metrics, logger)
+	presence := broker.NewPresence(cfg.Presence.CacheTTL.D(), metrics, logger)
 
 	var service *broker.Service
 	connector, err := broker.NewPahoConnector(cfg.Broker, func(topic string, payload []byte) {
@@ -202,14 +198,46 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return fmt.Errorf("configure broker: %w", err)
 	}
 	service, err = broker.New(broker.Dependencies{
-		Config:       cfg.Broker,
-		Presence:     presence,
-		Connector:    connector,
-		Disconnecter: disconnecter,
-		DeviceHosts:  db.ListAuthorizedHostIDs,
-		Metrics:      metrics,
-		Masker:       masker,
-		Logger:       logger,
+		Config:      cfg.Broker,
+		Presence:    presence,
+		Connector:   connector,
+		DeviceHosts: db.ListAuthorizedHostIDs,
+		Metrics:     metrics,
+		Masker:      masker,
+		Logger:      logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	admissionService, err := admission.New(admission.Dependencies{
+		Store: db,
+		Config: admission.Config{
+			MaximumEntries:     cfg.Admission.MaxEntries,
+			TTL:                cfg.Admission.TTL.D(),
+			LoadTimeout:        cfg.Admission.LoadTimeout.D(),
+			MaxBackgroundLoads: cfg.Admission.MaxBackgroundLoads,
+		},
+		Metrics: metrics,
+		Masker:  masker,
+		Logger:  logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	lineManager, err := line.New(line.Dependencies{
+		Store:     db,
+		Control:   service.Control(),
+		Admission: admissionService,
+		Presence:  presence,
+		Config: line.Config{
+			PolicyTTL: cfg.Line.PolicyTTL.D(),
+			Timeout:   cfg.Line.OperationTimeout.D(),
+		},
+		Metrics: metrics,
+		Masker:  masker,
+		Logger:  logger,
 	})
 	if err != nil {
 		return err
@@ -217,6 +245,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	authService, err := auth.New(auth.Dependencies{
 		Store:     db,
+		Admission: admissionService,
+		Enforcer:  lineManager,
+		Observer:  lineManager,
 		Presence:  service,
 		Transport: service,
 		Metrics:   metrics,
@@ -257,7 +288,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	eventService, err := events.New(events.Dependencies{
-		Store: db, Broker: service, Metrics: metrics, Masker: masker, Logger: logger,
+		Admission: admissionService, Broker: service, Metrics: metrics, Masker: masker, Logger: logger,
 	})
 	if err != nil {
 		return err
@@ -265,6 +296,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	pairingService, err := pairing.New(pairing.Dependencies{
 		Store:     db,
+		Policy:    lineManager,
 		Transport: service,
 		Presence:  service,
 		Config: pairing.Config{
@@ -295,6 +327,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		if !service.Ready() {
 			return errors.New("mqtt session is not ready")
 		}
+		if !presence.Available() {
+			return errors.New("broker presence is not reconciled")
+		}
 		return nil
 	})
 
@@ -312,7 +347,6 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Auth:          authService,
 		Pairing:       pairingService,
 		Requests:      requestService,
-		Presence:      presence,
 		Readiness:     readiness,
 		Metrics:       metrics,
 		Masker:        masker,
@@ -352,23 +386,26 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		IdleTimeout:       cfg.HTTP.IdleTimeout.D(),
 	}
 
+	service.SetReadyHook(lineManager.Reconcile)
 	return runServices(ctx, publicServer, internalServer, publicListener, internalListener,
 		service.Run, requestService.Run,
+		func(runCtx context.Context) error {
+			return runLine(runCtx, lineManager, cfg, logger)
+		},
 		func(runCtx context.Context) {
-			runCleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger)
+			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger)
 		}, logger, 10*time.Second)
 }
 
 // runServices owns server and worker shutdown after resources are initialized.
 func runServices(ctx context.Context, publicServer, internalServer *http.Server, publicListener, internalListener net.Listener,
-	runBroker, runForwarder func(context.Context) error, cleanup func(context.Context), logger *slog.Logger, shutdownTimeout time.Duration) error {
+	runBroker, runForwarder, runLineWorker func(context.Context) error, cleanup func(context.Context), logger *slog.Logger, shutdownTimeout time.Duration) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Start the HTTP listeners before the MQTT loop: EMQX calls the internal
-	// auth/ACL endpoints while Access establishes its own broker connection.
-	// If those endpoints are not listening yet, EMQX marks the auth resource
-	// down and a fast Access restart can be denied for a whole retry window.
+	// Start the HTTP listeners before the MQTT loop: the broker plugin posts
+	// CONNECT validation to the internal listener while Access establishes its
+	// own broker connection, so the endpoint must already be serving.
 	errCh := make(chan error, 2)
 	go serve(publicServer, publicListener, "public", errCh)
 	go serve(internalServer, internalListener, "internal", errCh)
@@ -377,7 +414,7 @@ func runServices(ctx context.Context, publicServer, internalServer *http.Server,
 		"internal", internalListener.Addr().String())
 
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(3)
 	go func() {
 		defer workers.Done()
 		if err := runBroker(runCtx); err != nil {
@@ -388,6 +425,12 @@ func runServices(ctx context.Context, publicServer, internalServer *http.Server,
 		defer workers.Done()
 		if err := runForwarder(runCtx); err != nil {
 			logger.Warn("forward loop stopped", "error", err.Error())
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		if err := runLineWorker(runCtx); err != nil {
+			logger.Warn("line loop stopped", "error", err.Error())
 		}
 	}()
 	go cleanup(runCtx)
@@ -485,6 +528,36 @@ func runCleanup(ctx context.Context, db cleanupStore, interval, retention time.D
 			return
 		case <-ticker.C:
 			cleanup()
+		}
+	}
+}
+
+// runLine keeps the broker policy validity window fresh and periodically
+// reconciles durable policy. A failed pass keeps the previous policy and the
+// broker fails closed when the validity window elapses.
+func runLine(ctx context.Context, manager *line.Manager, cfg config.Config, logger *slog.Logger) error {
+	heartbeat := time.NewTicker(cfg.Line.HeartbeatInterval.D())
+	defer heartbeat.Stop()
+	reconcile := time.NewTicker(cfg.Line.ReconcileInterval.D())
+	defer reconcile.Stop()
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeat.C:
+			if err := manager.Heartbeat(ctx); err != nil {
+				failures++
+				if failures == 1 || failures%20 == 0 {
+					logger.Warn("line policy heartbeat failed", "failures", failures, "error", err.Error())
+				}
+			} else {
+				failures = 0
+			}
+		case <-reconcile.C:
+			if err := manager.Reconcile(ctx); err != nil {
+				logger.Warn("line policy reconcile failed", "error", err.Error())
+			}
 		}
 	}
 }

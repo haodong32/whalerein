@@ -4,6 +4,29 @@ FROM golang:1.26@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf1132
 FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS node
 FROM postgres:18-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42 AS postgres
 
+# Build the pinned Mosquitto 2.1.2 broker and the WhaleRein plugin against its
+# headers. Debian trixie matches the runtime distribution, so the built
+# binaries link against the same glibc and OpenSSL ABI as the runtime image.
+FROM debian:trixie AS mosquitto-build
+USER root
+ARG MOSQUITTO_VERSION=2.1.2
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential ca-certificates curl libcjson-dev libedit-dev libsqlite3-dev libssl-dev patch && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN curl -fsSLo mosquitto.tar.gz \
+      "https://github.com/eclipse-mosquitto/mosquitto/archive/refs/tags/v${MOSQUITTO_VERSION}.tar.gz" && \
+    tar xzf mosquitto.tar.gz
+COPY deploy/mosquitto/patches /src/patches
+RUN cd "/src/mosquitto-${MOSQUITTO_VERSION}" && patch -p0 < /src/patches/loop-tick-schedule.patch
+COPY deploy/mosquitto/plugin /src/plugin
+RUN make -C /src/mosquitto-${MOSQUITTO_VERSION} WITH_TLS=yes WITH_WEBSOCKETS=no WITH_DOCS=no WITH_HTTP_API=no && \
+    make -C /src/mosquitto-${MOSQUITTO_VERSION} WITH_TLS=yes WITH_WEBSOCKETS=no WITH_DOCS=no WITH_HTTP_API=no install && \
+    make -C /src/plugin clean && \
+    make -C /src/plugin \
+      MOSQUITTO_INCLUDE="/src/mosquitto-${MOSQUITTO_VERSION}/include" \
+      CFLAGS="-O2 -Wall -Wextra -Werror -fPIC -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE"
+
 FROM rust AS rust-build
 USER root
 RUN --mount=type=bind,source=tools/repo/linux-rust-packages.txt,target=/tmp/linux-rust-packages.txt \
@@ -80,20 +103,26 @@ RUN --mount=type=cache,id=whalerein-native-npm,target=/root/.npm,sharing=locked 
     npm ci --ignore-scripts --no-audit --no-fund
 
 # Runtime contains test executables, not compiler toolchains or build caches.
-FROM emqx/emqx:5.8.8@sha256:4593b6e30196754779fa14483332cb0be56c233f1c8a387b1308bec4337c0144 AS runtime
+#
+# The runtime is the Debian trixie PostgreSQL 18 image already used above:
+# trixie matches the Rust build stage and the Mosquitto build stage, and the
+# image already owns PostgreSQL 18, the postgres account and the client tools.
+# It replaced the former EMQX image, which was also Debian but carried the
+# broker being replaced and made the runtime depend on its directory layout.
+FROM postgres AS runtime
 USER root
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich postgresql postgresql-client protobuf-compiler libprotobuf-dev libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich protobuf-compiler libprotobuf-dev libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+COPY --from=mosquitto-build /usr/local/sbin/mosquitto /usr/local/sbin/mosquitto
+COPY --from=mosquitto-build /usr/local/lib/libmosquitto.so* /usr/local/lib/
+COPY --from=mosquitto-build /src/plugin/whalerein.so /usr/local/lib/mosquitto/whalerein.so
+RUN ldconfig && test -x /usr/local/sbin/mosquitto && test -f /usr/local/lib/mosquitto/whalerein.so
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=native-tools /opt/native /opt/native
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 ENV PATH=/opt/native/node_modules/.bin:$PATH
 RUN node /opt/native/node_modules/playwright/cli.js install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=postgres /usr/lib/postgresql/18 /usr/lib/postgresql/18
-COPY --from=postgres /usr/share/postgresql/18 /usr/share/postgresql/18
-COPY --from=postgres /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/postgresql.conf.sample
-COPY --from=postgres /usr/lib/*-linux-gnu/libpq.so* /usr/local/lib/
 COPY --from=go-build /out/whalerein-access /out/broker-tests /out/server-tests /out/store-tests /out/store-support-tests /out/external-tests /usr/local/bin/
 COPY tools/repo/src/repo/__init__.py tools/repo/src/repo/test_timing.py /workspace/tools/repo/src/repo/
 ENV PYTHONPATH=/workspace/tools/repo/src
@@ -108,7 +137,6 @@ COPY --from=rust-build /out/wait_concurrency_driver target/debug/examples/wait_c
 COPY proto/v1 proto/v1
 COPY tests/integration tests/integration
 COPY tests/fixtures tests/fixtures
-COPY deploy/compose/emqx deploy/compose/emqx
 COPY --from=rust-build /out/whalerein-noise-peer tests/integration/drivers/noise/rust-peer/target/debug/whalerein-noise-peer
 COPY --from=rust-build /out/whalerein-proto-peer tests/integration/drivers/protobuf/rust-peer/target/debug/whalerein-proto-peer
 COPY --from=go-build /workspace/tests/integration/fixtures/store-cases.txt /workspace/tests/integration/fixtures/store-support-cases.txt /workspace/tests/integration/fixtures/server-cases.txt /workspace/tests/integration/fixtures/external-cases.txt tests/integration/fixtures/

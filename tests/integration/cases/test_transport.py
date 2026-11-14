@@ -5,7 +5,7 @@ import re
 import subprocess
 
 import pytest
-from environment import ROOT
+from environment import BROKER_PASSWORD, INTERNAL_TOKEN, ROOT
 
 pytestmark = pytest.mark.transport
 
@@ -16,7 +16,7 @@ pytestmark = pytest.mark.transport
         pytest.param(
             "routes",
             marks=pytest.mark.description(
-                "When the Go MQTT adapter and a host connect through EMQX, requests, results, events, presence and transient replies reach their intended handlers."
+                "When the Go MQTT adapter and a host connect through the Mosquitto line, requests, results, events, presence and transient replies reach their intended handlers."
             ),
         ),
         pytest.param(
@@ -44,12 +44,17 @@ def test_native_transport(case, postgres, broker):
     settings = {
         **os.environ,
         "WHALEREIN_TEST_MQTT_URL": broker,
-        "WHALEREIN_EMQX_MQTT_URL": broker,
+        "WHALEREIN_BROKER_MQTT_URL": broker,
+        "WHALEREIN_TEST_ACCESS_PASSWORD": BROKER_PASSWORD,
+        "WHALEREIN_TEST_HOST_PASSWORD": "host-pass",
+        "WHALEREIN_TEST_INTERNAL_PORT": "18081",
+        "WHALEREIN_TEST_BROKER_PASSWORD": BROKER_PASSWORD,
+        "WHALEREIN_TEST_INTERNAL_TOKEN": INTERNAL_TOKEN,
     }
     commands = {
         "routes": [
             "/usr/local/bin/broker-tests",
-            "-test.run=^TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughEMQX$",
+            "-test.run=^TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto$",
             "-test.v",
         ],
         "logical": [

@@ -93,6 +93,6 @@ coalescing, slow-recipient isolation, pending approvals, encrypted Host-scoped
 cache staging, receipt conflicts, conversation reduction, pump cancellation and
 human/JSON output. Generated field contracts and Node/Rust vectors cover typed
 history, state, Watch baselines, capabilities and live updates alongside security
-vectors. Isolated stack cases use real CLI/Core, Access, PostgreSQL, EMQX and the
+vectors. Isolated stack cases use real CLI/Core, Access, PostgreSQL, Mosquitto and the
 plugin with FakeDSH. Native DSH, OS keyring and deployment acceptance remain
 separate gates; fixtures do not certify another Harness or a running profile.

@@ -52,7 +52,8 @@ type Config struct {
 	AdminToken            string           `yaml:"admin_token"`
 	HostProvisioningToken string           `yaml:"host_provisioning_token"`
 	Broker                BrokerConfig     `yaml:"broker"`
-	EMQX                  EMQXConfig       `yaml:"emqx"`
+	Line                  LineConfig       `yaml:"line"`
+	Admission             AdmissionConfig  `yaml:"admission"`
 	Internal              InternalConfig   `yaml:"internal"`
 	HTTP                  HTTPConfig       `yaml:"http"`
 	External              ExternalConfig   `yaml:"external"`
@@ -104,16 +105,20 @@ type BrokerConfig struct {
 	ReconnectMax       Duration `yaml:"reconnect_max"`
 }
 
-// EMQXConfig describes optional EMQX management integrations.
-type EMQXConfig struct {
-	RESTURL            string   `yaml:"rest_url"`
-	APIKey             string   `yaml:"api_key"`
-	APISecret          string   `yaml:"api_secret"`
-	CAFile             string   `yaml:"ca_file"`
-	InsecureSkipVerify bool     `yaml:"insecure_skip_verify"`
-	Timeout            Duration `yaml:"timeout"`
-	DisconnectMode     string   `yaml:"disconnect_mode"` // "rest" or "ctl"
-	CTLPath            string   `yaml:"ctl_path"`
+// LineConfig bounds Mosquitto policy reconciliation.
+type LineConfig struct {
+	PolicyTTL         Duration `yaml:"policy_ttl"`
+	ReconcileInterval Duration `yaml:"reconcile_interval"`
+	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	OperationTimeout  Duration `yaml:"operation_timeout"`
+}
+
+// AdmissionConfig bounds the local grant cache.
+type AdmissionConfig struct {
+	MaxEntries         int      `yaml:"max_entries"`
+	TTL                Duration `yaml:"ttl"`
+	LoadTimeout        Duration `yaml:"load_timeout"`
+	MaxBackgroundLoads int      `yaml:"max_background_loads"`
 }
 
 // InternalConfig guards the broker callback endpoints.
@@ -191,10 +196,17 @@ func Default() Config {
 			ReconnectMin:   Duration(500 * time.Millisecond),
 			ReconnectMax:   Duration(30 * time.Second),
 		},
-		EMQX: EMQXConfig{
-			Timeout:        Duration(5 * time.Second),
-			DisconnectMode: "ctl",
-			CTLPath:        "emqx",
+		Line: LineConfig{
+			PolicyTTL:         Duration(10 * time.Second),
+			ReconcileInterval: Duration(30 * time.Second),
+			HeartbeatInterval: Duration(5 * time.Second),
+			OperationTimeout:  Duration(5 * time.Second),
+		},
+		Admission: AdmissionConfig{
+			MaxEntries:         10000,
+			TTL:                Duration(5 * time.Minute),
+			LoadTimeout:        Duration(250 * time.Millisecond),
+			MaxBackgroundLoads: 64,
 		},
 		HTTP: HTTPConfig{
 			ReadHeaderTimeout: Duration(5 * time.Second),
@@ -402,14 +414,16 @@ func (c Config) Validate() error {
 		c.HTTP.WriteTimeout.D() <= 0 || c.HTTP.IdleTimeout.D() <= 0 {
 		problems = append(problems, "http timeouts must be positive")
 	}
-	if c.EMQX.RESTURL != "" {
-		u, err := url.Parse(c.EMQX.RESTURL)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			problems = append(problems, "emqx.rest_url must be an absolute http(s) URL")
-		}
-		if c.EMQX.Timeout.D() <= 0 {
-			problems = append(problems, "emqx.timeout must be positive")
-		}
+	if c.Line.PolicyTTL.D() <= 0 || c.Line.ReconcileInterval.D() <= 0 ||
+		c.Line.HeartbeatInterval.D() <= 0 || c.Line.OperationTimeout.D() <= 0 {
+		problems = append(problems, "line durations must be positive")
+	}
+	if c.Line.HeartbeatInterval.D() >= c.Line.PolicyTTL.D() {
+		problems = append(problems, "line.heartbeat_interval must be shorter than line.policy_ttl")
+	}
+	if c.Admission.MaxEntries <= 0 || c.Admission.TTL.D() <= 0 ||
+		c.Admission.LoadTimeout.D() <= 0 || c.Admission.MaxBackgroundLoads <= 0 {
+		problems = append(problems, "admission tunables must be positive")
 	}
 	if c.Pairing.InvitationTTL <= 0 || c.Pairing.ClaimTimeout <= 0 || c.Pairing.ClaimTTL <= 0 {
 		problems = append(problems, "pairing durations must be positive")
@@ -437,19 +451,6 @@ func (c Config) Validate() error {
 		c.Broker.ReconnectMin.D() <= 0 || c.Broker.ReconnectMax.D() <= 0 {
 	case true:
 		problems = append(problems, "broker durations must be positive")
-	}
-	switch c.EMQX.DisconnectMode {
-	case "ctl", "rest":
-	default:
-		problems = append(problems, "emqx.disconnect_mode must be ctl or rest")
-	}
-	if c.EMQX.DisconnectMode == "rest" {
-		require("emqx.rest_url", c.EMQX.RESTURL)
-		require("emqx.api_key", c.EMQX.APIKey)
-		require("emqx.api_secret", c.EMQX.APISecret)
-	}
-	if c.EMQX.DisconnectMode == "ctl" {
-		require("emqx.ctl_path", c.EMQX.CTLPath)
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
@@ -509,8 +510,8 @@ func (c Config) Redacted() map[string]any {
 		"broker_url":        sanitizeURL(c.Broker.URL),
 		"broker_public_url": sanitizeURL(c.Broker.PublicURL),
 		"broker_username":   c.Broker.Username,
-		"emqx_rest_url":     sanitizeURL(c.EMQX.RESTURL),
-		"emqx_disconnect":   c.EMQX.DisconnectMode,
+		"line_policy_ttl":   c.Line.PolicyTTL.D().String(),
+		"admission_entries": c.Admission.MaxEntries,
 		"protocol_version":  c.Protocol.Version,
 		"log_level":         c.Log.Level,
 	}

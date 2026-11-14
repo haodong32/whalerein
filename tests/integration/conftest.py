@@ -1,12 +1,21 @@
 """Public integration fixtures; cases never start Docker."""
 
 import os
+import socket
 import subprocess
 import uuid
 from pathlib import Path
 
 import pytest
-from environment import ROOT, Process, Scenario, wait
+from environment import (
+    BROKER_PASSWORD,
+    INTERNAL_TOKEN,
+    ROOT,
+    Process,
+    Scenario,
+    start_connect_policy_stub,
+    wait,
+)
 from sharding import parse_shard, partition
 
 pytest_plugins = ("integration_report",)
@@ -150,48 +159,79 @@ def postgres(tmp_path_factory):
 
 
 class Broker:
-    """One disposable EMQX per container, supervised across cases.
+    """One disposable Mosquitto 2.1.2 broker per container, supervised across cases.
 
-    The broker is transport only: its data directory lives under the
-    container's tmpfs, sessions are clean-start, and Access's service account
-    uses an internal no-authn listener with a file ACL. A crash is therefore
-    recoverable; the next case restarts it instead of cascading failures.
+    The broker is transport only: persistence is disabled, its plugin state is
+    in memory, and the Access service account authenticates locally against the
+    plugin password file. External principals are admitted through Access's
+    HTTP callback, so a crash is recoverable; the next case restarts it instead
+    of cascading failures.
     """
 
     url = "mqtt://127.0.0.1:1883"
 
-    def __init__(self, config, directory):
-        self.config = config
-        self.directory = directory
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.plugindir = self.directory / "broker"
+        self.config = self._config_text()
         self.process = None
         self.restarts = 0
+
+    def _config_text(self):
+        self.plugindir.mkdir(parents=True, exist_ok=True)
+        # pytest temporary ancestors are private by default, but Mosquitto
+        # drops to the unprivileged nobody account before loading the plugin.
+        # Make the generated credential files traversable within the disposable
+        # container, as the PostgreSQL fixture already does for its data tree.
+        for directory in [self.plugindir, *list(self.plugindir.parents)[:3]]:
+            try:
+                directory.chmod(0o755)
+            except OSError:
+                pass
+        password_file = self.plugindir / "access-password"
+        token_file = self.plugindir / "internal-token"
+        password_file.write_text(BROKER_PASSWORD)
+        token_file.write_text(INTERNAL_TOKEN)
+        return "\n".join(
+            [
+                "# Generated per-broker config for the integration container.",
+                "listener 1883 127.0.0.1",
+                "protocol mqtt",
+                "set_tcp_nodelay true",
+                "allow_anonymous false",
+                "persistence false",
+                "max_packet_size 1048576",
+                "log_dest stdout",
+                "log_type error",
+                "connection_messages false",
+                "plugin /usr/local/lib/mosquitto/whalerein.so",
+                "plugin_opt_access_username access",
+                f"plugin_opt_access_password_file {password_file}",
+                "plugin_opt_access_auth_url http://127.0.0.1:18081/internal/broker/connect",
+                f"plugin_opt_access_auth_token_file {token_file}",
+                "plugin_opt_auth_timeout_ms 500",
+                "plugin_opt_policy_ttl_ms 15000",
+                "",
+            ]
+        )
 
     def start(self):
         if self.process is not None:
             return
-        Path("/opt/emqx/etc/emqx.conf").write_text(self.config)
-        Path("/opt/emqx/etc/api-keys.csv").write_text(
-            (ROOT / "deploy/compose/emqx/api-keys.csv").read_text()
-        )
-        Path("/opt/emqx/etc/acl.conf").write_text(
-            (ROOT / "deploy/compose/emqx/acl.conf").read_text()
-        )
+        config = self.plugindir / "mosquitto.conf"
+        config.write_text(self.config)
         from integration_report import progress
 
         progress({"event": "detail", "description": "Waiting for broker readiness"})
-        self.process = Process(["/opt/emqx/bin/emqx", "foreground"], self.directory)
-        wait(
-            lambda: (
-                subprocess.run(
-                    ["/opt/emqx/bin/emqx", "ctl", "status"],
-                    capture_output=True,
-                    check=False,
-                    timeout=5,
-                ).returncode
-                == 0
-            ),
-            process=self.process,
+        self.process = Process(
+            ["/usr/local/sbin/mosquitto", "-c", str(config)], self.directory
         )
+
+        def ready():
+            with socket.create_connection(("127.0.0.1", 1883), timeout=1):
+                return True
+
+        wait(ready, process=self.process)
 
     def ensure_started(self):
         """Restart a broker that exited, then wait for readiness."""
@@ -217,31 +257,20 @@ class Broker:
 
 @pytest.fixture
 def broker_control(tmp_path, request):
-    transport = (
-        request.node.path.name == "test_transport.py"
-        and request.node.callspec.params["case"] != "routes"
-    )
-    source = ROOT / (
-        "deploy/compose/emqx/transport-test.conf"
-        if transport
-        else "deploy/compose/emqx/emqx.conf"
-    )
-    config = source.read_text().replace("http://access:8081", "http://127.0.0.1:18081")
-    config = config.replace(
-        'data_dir = "/opt/emqx/data"', f'data_dir = "{tmp_path / "broker"}"'
-    )
-    config += "\nauthorization.cache.enable = false\n"
-    fixture = Broker(config, tmp_path)
-    yield fixture
-    fixture.close()
-
-
-def _base_broker_config(tmp_path):
-    source = ROOT / "deploy/compose/emqx/emqx.conf"
-    config = source.read_text().replace("http://access:8081", "http://127.0.0.1:18081")
-    return config.replace(
-        'data_dir = "/opt/emqx/data"', f'data_dir = "{tmp_path / "broker"}"'
-    ) + "\nauthorization.cache.enable = false\n"
+    policy_stub = None
+    if request.node.path.name == "test_transport.py":
+        case = getattr(request.node, "callspec", None)
+        if case is not None and case.params.get("case") == "node":
+            # The Node.js transport case has no Access process; the plugin's
+            # deferred CONNECT callback is served by a loopback policy stub.
+            policy_stub = start_connect_policy_stub()
+    fixture = Broker(tmp_path)
+    try:
+        yield fixture
+    finally:
+        fixture.close()
+        if policy_stub is not None:
+            policy_stub.close()
 
 
 @pytest.fixture(scope="session")
@@ -258,7 +287,7 @@ def shared_broker(tmp_path_factory):
         yield None
         return
     directory = tmp_path_factory.mktemp("shared-broker")
-    fixture = Broker(_base_broker_config(directory), directory)
+    fixture = Broker(directory)
     yield fixture
     fixture.close()
 
@@ -319,8 +348,8 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         )
         broker = shared_broker if shared_broker is not None else broker_control
         if native:
-            # Access first: its internal auth endpoint must answer EMQX's
-            # initial authenticator health check. Waiting for /readyz here
+            # Access first: its internal callback endpoint must answer the
+            # plugin's deferred CONNECT requests. Waiting for /readyz here
             # would deadlock until the broker exists.
             value.start_access_process()
             broker.ensure_started()

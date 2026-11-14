@@ -113,7 +113,7 @@ func TestWaitWithTimeoutReturnsForCompletedOrBlockedWork(t *testing.T) {
 }
 
 func TestCheckConfigSucceedsWithoutConnectingToInfrastructure(t *testing.T) {
-	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture?sslmode=disable", restURL: "http://localhost:1"})
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture?sslmode=disable"})
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-config", path, "-check-config"}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), "config ok:") {
@@ -142,8 +142,8 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 				public = failedListener{}
 			}
 			internal := &blockingListener{closed: make(chan struct{})}
-			started := make(chan struct{}, 2)
-			stopped := make(chan struct{}, 2)
+			started := make(chan struct{}, 3)
+			stopped := make(chan struct{}, 3)
 			cleanupStopped := make(chan struct{})
 			worker := func(ctx context.Context) error {
 				started <- struct{}{}
@@ -154,9 +154,9 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 			cleanup := func(ctx context.Context) { <-ctx.Done(); close(cleanupStopped) }
 			result := make(chan error, 1)
 			go func() {
-				result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, cleanup, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), time.Second)
+				result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, cleanup, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), time.Second)
 			}()
-			for i := 0; i < 2; i++ {
+			for i := 0; i < 3; i++ {
 				select {
 				case <-started:
 				case <-time.After(time.Second):
@@ -177,7 +177,7 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 			case <-time.After(2 * time.Second):
 				t.Fatal("service failed to stop")
 			}
-			for i := 0; i < 2; i++ {
+			for i := 0; i < 3; i++ {
 				select {
 				case <-stopped:
 				default:
@@ -194,7 +194,7 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 }
 
 func TestMalformedDatabaseConfigurationFailsBeforeServerOrMigrationStarts(t *testing.T) {
-	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://%zz", restURL: "http://localhost:1"})
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://%zz"})
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -223,8 +223,6 @@ func TestServerStartupFailsClosedAndReleasesOpenedStore(t *testing.T) {
 	}{
 		{"open failure", "open", "open store", 0, 0},
 		{"migration failure", "migration", "migrate store", 1, 1},
-		{"invalid rest configuration", "rest", "configure EMQX REST", 1, 1},
-		{"invalid disconnect configuration", "disconnect", "configure EMQX disconnect", 1, 1},
 		{"invalid broker configuration", "broker", "configure broker", 1, 1},
 		{"invalid public listener", "public-listen", "listen public", 1, 1},
 		{"invalid internal listener", "internal-listen", "listen internal", 1, 1},
@@ -244,12 +242,6 @@ func TestServerStartupFailsClosedAndReleasesOpenedStore(t *testing.T) {
 			}
 			if tc.fail == "internal-listen" {
 				cfg.InternalListen = "not-an-address"
-			}
-			if tc.fail == "rest" {
-				cfg.EMQX.RESTURL = "://invalid"
-			}
-			if tc.fail == "disconnect" {
-				cfg.EMQX.DisconnectMode = "invalid"
 			}
 			ops := startupStoreOps{
 				open: func(context.Context, string) (*store.Store, error) {
@@ -280,7 +272,7 @@ func TestServerStartupFailsClosedAndReleasesOpenedStore(t *testing.T) {
 }
 
 func TestCommandModesReturnCorrectStatusAndReleaseMigrationStore(t *testing.T) {
-	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture", restURL: "http://localhost:1"})
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture"})
 	for _, tc := range []struct {
 		name, mode, fail                 string
 		wantCode, wantClosed, wantServed int
@@ -360,14 +352,14 @@ func TestRunServicesRecordsWorkerFailureAndContinuesUntilCancelled(t *testing.T)
 	defer cancel()
 	public := &blockingListener{closed: make(chan struct{})}
 	internal := &blockingListener{closed: make(chan struct{})}
-	finished := make(chan struct{}, 2)
+	finished := make(chan struct{}, 3)
 	worker := func(context.Context) error { finished <- struct{}{}; return errors.New("synthetic worker failure") }
 	var logs safeBuffer
 	result := make(chan error, 1)
 	go func() {
-		result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&logs, nil)), time.Second)
+		result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&logs, nil)), time.Second)
 	}()
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		select {
 		case <-finished:
 		case <-time.After(time.Second):
@@ -383,7 +375,7 @@ func TestRunServicesRecordsWorkerFailureAndContinuesUntilCancelled(t *testing.T)
 	case <-time.After(2 * time.Second):
 		t.Fatal("service did not stop")
 	}
-	if !strings.Contains(logs.String(), "broker loop stopped") || !strings.Contains(logs.String(), "forward loop stopped") {
+	if !strings.Contains(logs.String(), "broker loop stopped") || !strings.Contains(logs.String(), "forward loop stopped") || !strings.Contains(logs.String(), "line loop stopped") {
 		t.Fatal("worker failures were not reported")
 	}
 }
@@ -403,7 +395,7 @@ func TestRunServicesReportsShutdownDeadlineWhenARequestStaysActive(t *testing.T)
 	worker := func(ctx context.Context) error { <-ctx.Done(); return nil }
 	result := make(chan error, 1)
 	go func() {
-		result <- runServices(ctx, publicServer, internalServer, listener, internal, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 100*time.Millisecond)
+		result <- runServices(ctx, publicServer, internalServer, listener, internal, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 100*time.Millisecond)
 	}()
 	clientDone := make(chan struct{})
 	go func() {
@@ -450,5 +442,90 @@ func TestMainVersionCommandExitsWithoutStartingServer(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(output), version) {
 		t.Fatal("version command did not exit successfully")
+	}
+}
+
+func TestServeReportsListenerFailureAndWaitWithTimeoutObservesCompletion(t *testing.T) {
+	errCh := make(chan error, 1)
+	serve(&http.Server{}, failingListener{}, "probe", errCh)
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "probe server") {
+			t.Fatalf("listener error %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failure was not reported")
+	}
+	serve(&http.Server{}, failingListener{}, "probe", make(chan error))
+	serve(&http.Server{}, closedListenerOnce(t), "probe", errCh)
+
+	var group sync.WaitGroup
+	group.Add(1)
+	group.Done()
+	waitWithTimeout(&group, time.Millisecond)
+}
+
+// failingListener returns a synthetic accept error.
+type failingListener struct{}
+
+func (failingListener) Accept() (net.Conn, error) { return nil, errors.New("synthetic accept failure") }
+func (failingListener) Close() error              { return nil }
+func (failingListener) Addr() net.Addr            { return &net.TCPAddr{} }
+
+func closedListenerOnce(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.Close()
+	return listener
+}
+
+func TestRunServerWithStoreStartsServersAndStopsOnCancellation(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabaseURL = "fixture"
+	cfg.Broker.URL = "tcp://127.0.0.1:1"
+	cfg.Listen = "127.0.0.1:0"
+	cfg.InternalListen = "127.0.0.1:0"
+	cfg.Requests.ForwardInterval = config.Duration(time.Hour)
+	cfg.Cleanup.Interval = config.Duration(time.Hour)
+	cfg.Line.HeartbeatInterval = config.Duration(time.Hour)
+	cfg.Line.ReconcileInterval = config.Duration(time.Hour)
+	cfg.Presence.CacheTTL = config.Duration(time.Second)
+
+	closed := 0
+	ops := startupStoreOps{
+		open: func(context.Context, string) (*store.Store, error) {
+			return store.NewWithPool(nil), nil
+		},
+		migrate: func(context.Context, *store.Store) error { return nil },
+		close:   func(*store.Store) { closed++ },
+		cleanup: func(ctx context.Context, _ cleanupStore, _, _ time.Duration, _ *slog.Logger) { <-ctx.Done() },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	var logs bytes.Buffer
+	go func() {
+		result <- runServerWithStore(ctx, cfg, slog.New(slog.NewTextHandler(&logs, nil)), ops)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "access listening") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "access listening") {
+		t.Fatalf("server did not start: %s", logs.String())
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not stop")
+	}
+	if closed != 1 {
+		t.Fatalf("store closed %d times", closed)
 	}
 }

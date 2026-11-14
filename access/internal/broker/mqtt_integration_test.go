@@ -6,7 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -27,29 +27,29 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	integrationBrokerPassword = "integration-broker-password"
+	integrationHostPassword   = "host-pass"
+	integrationDevicePassword = "device-pass"
+	integrationInternalToken  = "compose-internal-token"
+)
+
 // This native driver runs only through the container-owned pytest transport case.
-// It owns its HTTP auth/ACL callback listener and never reuses a development Access.
-func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughEMQX(t *testing.T) {
-	mqttURL := os.Getenv("WHALEREIN_EMQX_MQTT_URL")
+// It owns the deferred CONNECT policy callback and never reuses a development
+// Access. The Access identity is authenticated locally by the Mosquitto plugin.
+func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t *testing.T) {
+	mqttURL := os.Getenv("WHALEREIN_BROKER_MQTT_URL")
 	if mqttURL == "" {
 		mqttURL = "tcp://127.0.0.1:1883"
 	}
-	accessPassword := "access-pass"
-	hostPassword := "host-pass"
-	listener, err := net.Listen("tcp", "127.0.0.1:18081")
-	if err != nil {
-		t.Fatal("isolated broker callback listener is unavailable")
-	}
-	callback := httptest.NewUnstartedServer(http.HandlerFunc(integrationCallback))
-	callback.Listener.Close()
-	callback.Listener = listener
-	callback.Start()
-	defer callback.Close()
+	accessPassword := integrationBrokerPassword
+	hostPassword := integrationHostPassword
+	startIntegrationCallback(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	metrics := diagnostics.NewMetrics()
-	presence := NewPresence(time.Minute, nil, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	presence := NewPresence(time.Minute, metrics, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	var service *Service
 	connector, err := NewPahoConnector(config.BrokerConfig{
 		URL: mqttURL, ClientID: "whalerein-access-integration",
@@ -103,7 +103,6 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughEMQX(t *tes
 	})
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
-	// A cold EMQX HTTP resource can need a 15-second health-check interval.
 	deadline := time.Now().Add(45 * time.Second)
 	for !service.Ready() && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -117,7 +116,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughEMQX(t *tes
 		t.Fatalf("host subscribe: %v", err)
 	}
 
-	// $SYS presence is broker-authoritative.
+	// Broker connection notifications are presence-authoritative.
 	deadline = time.Now().Add(5 * time.Second)
 	for !presence.IsHostOnline(context.Background(), "h-e2e") && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -232,49 +231,91 @@ func waitForHostRequest(t *testing.T, received <-chan *paho.Publish, requestID s
 	}
 }
 
+func startIntegrationCallback(t *testing.T) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:18081")
+	if err != nil {
+		t.Fatal("isolated broker callback listener is unavailable")
+	}
+	callback := httptest.NewUnstartedServer(http.HandlerFunc(integrationCallback))
+	callback.Listener.Close()
+	callback.Listener = listener
+	callback.Start()
+	t.Cleanup(callback.Close)
+}
+
 func integrationCallback(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.URL.Path {
-	case "/internal/broker/auth":
-		var payload struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		allow := (payload.Username == "access" && payload.Password == "access-pass") ||
-			(payload.Username == "host:h-e2e" && payload.Password == "host-pass")
-		writeIntegrationResult(w, allow)
-	case "/internal/broker/acl":
-		var payload struct {
-			Username string `json:"username"`
-			Topic    string `json:"topic"`
-			Action   string `json:"action"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		allow := false
-		switch {
-		case payload.Username == "access":
-			allow = payload.Topic == ResultFilter || payload.Topic == EventFilter ||
-				payload.Topic == SysConnectedFilter || payload.Topic == SysDisconnectedFilter ||
-				strings.HasPrefix(payload.Topic, "whalerein/v1/h/")
-		case payload.Username == "device:transport-device":
-			allow = (payload.Action == "subscribe" && payload.Topic == DeviceEventTopic("h-e2e", "transport-device")) || (payload.Action == "publish" && payload.Topic == DeviceAckTopic("h-e2e", "transport-device"))
-		case payload.Username == "host:h-e2e":
-			allow = (payload.Action == "subscribe" && payload.Topic == RequestTopic("h-e2e")) ||
-				(payload.Action == "publish" && (payload.Topic == ResultTopic("h-e2e") || payload.Topic == EventTopic("h-e2e")))
-		}
-		writeIntegrationResult(w, allow)
-	default:
+	if r.URL.Path != "/internal/broker/connect" {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.Header.Get("X-WhaleRein-Internal-Token") != integrationInternalToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeIntegrationPolicy(w, "whalerein/1\ndeny malformed_request\n")
+		return
+	}
+	username := r.PostForm.Get("username")
+	password := r.PostForm.Get("password")
+	will := r.PostForm.Get("will")
+	switch {
+	case username == "host:h-e2e" && password == integrationHostPassword:
+		writeIntegrationPolicy(w, integrationHostPolicy("h-e2e"))
+	case username == "device:transport-device" && password == integrationDevicePassword:
+		if will != "" && will != DeviceWillTopic("transport-device") {
+			writeIntegrationPolicy(w, "whalerein/1\ndeny will_not_authorized\n")
+			return
+		}
+		writeIntegrationPolicy(w, integrationDevicePolicy("h-e2e", "transport-device"))
+	default:
+		// The Access identity never reaches the callback: the plugin checks it
+		// against its local password file.
+		writeIntegrationPolicy(w, "whalerein/1\ndeny unauthorized\n")
 	}
 }
 
-func writeIntegrationResult(w http.ResponseWriter, allow bool) {
-	result := "deny"
-	if allow {
-		result = "allow"
+func integrationHostPolicy(hostID string) string {
+	var builder strings.Builder
+	builder.WriteString("whalerein/1\nok\n")
+	fmt.Fprintf(&builder, "kind host\nhost %s\nrevision 1\nready 1\n", hostID)
+	entries := []struct {
+		access string
+		filter string
+	}{
+		{"subscribe", RequestTopic(hostID)},
+		{"read", RequestTopic(hostID)},
+		{"subscribe", PresenceTopic(hostID)},
+		{"read", PresenceTopic(hostID)},
+		{"write", ResultTopic(hostID)},
+		{"write", EventTopic(hostID)},
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"result": result, "is_superuser": false})
+	for _, entry := range entries {
+		fmt.Fprintf(&builder, "acl %s 1 %s %s\n", entry.access, hostID, entry.filter)
+	}
+	return builder.String()
+}
+
+func integrationDevicePolicy(hostID, deviceID string) string {
+	var builder strings.Builder
+	builder.WriteString("whalerein/1\nok\nkind device\n")
+	fmt.Fprintf(&builder, "device %s\nrevision 1\nready 1\n", deviceID)
+	fmt.Fprintf(&builder, "will %s\n", DeviceWillTopic(deviceID))
+	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceAckTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl write 1 - %s\n", DeviceWillTopic(deviceID))
+	return builder.String()
+}
+
+func writeIntegrationPolicy(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, body)
 }
 
 func connectIntegrationClient(t *testing.T, brokerURL, clientID, username, password string) (*paho.Client, <-chan *paho.Publish) {
@@ -329,19 +370,22 @@ func publishRaw(t *testing.T, client *paho.Client, topic string, payload []byte)
 	}
 }
 
-// TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust uses a separate broker (1 MiB
-// maximum). Auth/ACL are tested separately. No production broker or user devices are modified.
+// TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust uses the
+// case-scoped 1 MiB Mosquitto line. CONNECT admission is exercised separately;
+// here the callback admits only the synthetic Host and device fixtures. No
+// production broker or user devices are modified.
 func TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust(t *testing.T) {
 	mqttURL := os.Getenv("WHALEREIN_TEST_MQTT_URL")
 	if mqttURL == "" {
-		mqttURL = "mqtt://127.0.0.1:1884"
+		mqttURL = "mqtt://127.0.0.1:1883"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	startIntegrationCallback(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	presence := NewPresence(time.Minute, nil, nil, logger)
+	presence := NewPresence(time.Minute, nil, logger)
 	var service *Service
-	cfg := config.BrokerConfig{URL: mqttURL, ClientID: "transport-access-probe", Username: "access", Password: "access-pass", ConnectTimeout: config.Duration(5 * time.Second), PublishTimeout: config.Duration(10 * time.Second), KeepAlive: config.Duration(10 * time.Second)}
+	cfg := config.BrokerConfig{URL: mqttURL, ClientID: "transport-access-probe", Username: "access", Password: integrationBrokerPassword, ConnectTimeout: config.Duration(5 * time.Second), PublishTimeout: config.Duration(10 * time.Second), KeepAlive: config.Duration(10 * time.Second)}
 	connector, err := NewPahoConnector(cfg, func(topic string, payload []byte) { service.HandleMessage(topic, payload) }, logger)
 	if err != nil {
 		t.Fatal(err)

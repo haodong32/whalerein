@@ -18,10 +18,6 @@ const (
 	// DeviceWillFilter receives non-retained MQTT last wills published by the
 	// broker for disconnected device connections.
 	DeviceWillFilter = presenceRoot + "+"
-	// SysConnectedFilter receives broker client-connected events.
-	SysConnectedFilter = "$SYS/brokers/+/clients/+/connected"
-	// SysDisconnectedFilter receives broker client-disconnected events.
-	SysDisconnectedFilter = "$SYS/brokers/+/clients/+/disconnected"
 )
 
 // TopicKind is one of the four wire topic shapes.
@@ -117,23 +113,6 @@ func ParseTopic(topic string) (Topic, error) {
 		return Topic{HostID: parts[0], DeviceID: parts[2], Kind: kind}, nil
 	default:
 		return Topic{}, ErrInvalidTopic
-	}
-}
-
-// ParseSysClientTopic recognizes the EMQX $SYS client lifecycle topics and
-// returns client id and online state.
-func ParseSysClientTopic(topic string) (clientID string, online bool, ok bool) {
-	parts := strings.Split(topic, "/")
-	if len(parts) != 6 || parts[0] != "$SYS" || parts[1] != "brokers" || parts[3] != "clients" {
-		return "", false, false
-	}
-	switch parts[5] {
-	case "connected":
-		return parts[4], true, true
-	case "disconnected":
-		return parts[4], false, true
-	default:
-		return "", false, false
 	}
 }
 

@@ -31,18 +31,19 @@ broker:
   reconnect_min: 500ms
   reconnect_max: 30s
 
-emqx:
-  # Optional. $SYS topics and the host Ready signal provide presence without
-  # REST. Configure this for restart resilience and REST disconnects.
-  rest_url: ""
-  api_key: "${WHALEREIN_EMQX_API_KEY:-}"
-  api_secret: "${WHALEREIN_EMQX_API_SECRET:-}"
-  ca_file: ""
-  insecure_skip_verify: false
-  timeout: 5s
-  # "ctl" invokes `emqx ctl clients kick`; "rest" uses DELETE /api/v5/clients.
-  disconnect_mode: "ctl"
-  ctl_path: "emqx"
+line:
+  # Broker policy validity sent with each update. Must exceed heartbeat_interval.
+  policy_ttl: 10s
+  reconcile_interval: 30s
+  heartbeat_interval: 5s
+  operation_timeout: 5s
+
+admission:
+  # Bounded local grant cache shared by event admission and device ACL checks.
+  max_entries: 10000
+  ttl: 5m
+  load_timeout: 250ms
+  max_background_loads: 64
 
 internal:
   callback_token: "${WHALEREIN_INTERNAL_TOKEN}"

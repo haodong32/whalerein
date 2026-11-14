@@ -20,6 +20,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -41,8 +42,7 @@ type AuthService interface {
 	AuthenticateHostRequest(ctx context.Context, proof auth.HostProof) error
 	RevokeHostGrant(ctx context.Context, hostID, deviceID string) error
 	AuthenticateBroker(ctx context.Context, clientID, username, password string) (auth.BrokerIdentity, error)
-	IdentityFromCredentials(clientID, username string) (auth.BrokerIdentity, error)
-	AuthorizeACL(ctx context.Context, identity auth.BrokerIdentity, action auth.ACLAction, topic string) (bool, error)
+	BrokerPolicy(ctx context.Context, identity auth.BrokerIdentity) (policy.Connection, error)
 }
 
 // PairingService is the pairing package boundary used by HTTP.
@@ -58,17 +58,11 @@ type RequestService interface {
 	Touch(deviceID, requestID string, status whalereinv1.OnlineStatus)
 }
 
-// PresenceSink accepts EMQX presence webhooks.
-type PresenceSink interface {
-	HandlePresenceWebhook(body []byte) error
-}
-
 // Dependencies wires the HTTP server.
 type Dependencies struct {
 	Auth          AuthService
 	Pairing       PairingService
 	Requests      RequestService
-	Presence      PresenceSink
 	Readiness     *diagnostics.Readiness
 	Metrics       *diagnostics.Metrics
 	Masker        *diagnostics.Masker
@@ -96,8 +90,8 @@ type Server struct {
 
 // New constructs the HTTP server.
 func New(deps Dependencies) (*Server, error) {
-	if deps.Auth == nil || deps.Pairing == nil || deps.Requests == nil || deps.Presence == nil {
-		return nil, errors.New("httpapi: auth, pairing, requests and presence are required")
+	if deps.Auth == nil || deps.Pairing == nil || deps.Requests == nil {
+		return nil, errors.New("httpapi: auth, pairing and requests are required")
 	}
 	if deps.Readiness == nil {
 		return nil, errors.New("httpapi: readiness is required")
@@ -157,9 +151,7 @@ func (s *Server) publicRoutes() []routeSpec {
 
 func (s *Server) internalRoutes() []routeSpec {
 	return []routeSpec{
-		{method: http.MethodPost, pattern: "/internal/broker/auth", handler: s.handleBrokerAuth},
-		{method: http.MethodPost, pattern: "/internal/broker/acl", handler: s.handleBrokerACL},
-		{method: http.MethodPost, pattern: "/internal/broker/presence", handler: s.handlePresence},
+		{method: http.MethodPost, pattern: "/internal/broker/connect", handler: s.handleBrokerConnect},
 	}
 }
 

@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/eclipse/paho.golang v0.23.0
 	github.com/jackc/pgx/v5 v5.12.0
+	github.com/maypok86/otter/v2 v2.4.0
 	github.com/prometheus/client_golang v1.25.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1

@@ -138,9 +138,6 @@ export WHALEREIN_HOST_PROVISIONING_TOKEN='replace-me-too'
 export WHALEREIN_BROKER_PASSWORD='replace-me-three'
 export WHALEREIN_INTERNAL_TOKEN='replace-me-four'
 export WHALEREIN_BROKER_URL='tcp://127.0.0.1:1883'
-# Optional EMQX management API:
-# export WHALEREIN_EMQX_API_KEY='...'
-# export WHALEREIN_EMQX_API_SECRET='...'
 ```
 
 Configuration summary:
@@ -157,9 +154,11 @@ Configuration summary:
 | `broker.public_url` | MQTT URL advertised in `whalerein://pair?...&mqtt=...` |
 | `broker.username` / `broker.password` | Access broker credential |
 | `broker.ca_file` / `server_name` | MQTT TLS verification |
-| `emqx.rest_url` / `api_key` / `api_secret` | optional EMQX v5 REST |
-| `emqx.disconnect_mode` | `ctl` (default) or `rest` |
-| `emqx.ctl_path` | `emqx` command used by ctl disconnect |
+| `line.policy_ttl` | Broker policy validity sent with each update |
+| `line.reconcile_interval` / `heartbeat_interval` | Policy reconcile and validity refresh cadence |
+| `line.operation_timeout` | Bounded broker control operation |
+| `admission.max_entries` / `ttl` / `load_timeout` | Local grant cache bounds |
+| `admission.max_background_loads` | Bounded asynchronous cold loads |
 | `internal.callback_token` | value of `X-Whalerein-Internal-Token` |
 | `pairing.*` | invitation TTL, claim timeout/TTL, failure budget |
 | `requests.*` | max TTL, forward interval, lease, retry, attempts, batch |
@@ -179,7 +178,7 @@ warning. Set it explicitly for self-hosted brokers and official 443/ALPN.
 ## Docker Compose
 
 The Access server image is built by `deploy/docker/access.Dockerfile` and is
-part of `deploy/compose/stack.yaml` together with PostgreSQL 18 and EMQX 5.8:
+part of `deploy/compose/stack.yaml` together with PostgreSQL 18 and Mosquitto 2.1.2:
 
 ```bash
 docker compose -f deploy/compose/stack.yaml up -d --build
@@ -198,7 +197,7 @@ is already running, stop it first with
 
 ```bash
 # Dependencies only; the Access process runs natively below.
-docker compose -f deploy/compose/stack.yaml up -d postgres emqx
+docker compose -f deploy/compose/stack.yaml up -d postgres mosquitto
 # The compose file creates whalerein_dev and whalerein_test.
 
 # Validate config and apply versioned migrations.
@@ -252,109 +251,93 @@ The invitation request returns 404 until the host has authenticated to the
 broker at least once (`hosts` row created on first auth). The pairing URI
 contains `v`, `access`, optional `mqtt`, `host`, and the one-time `token`.
 
-## EMQX configuration
+## Mosquitto line
 
-Access expects an MQTT 5 broker with HTTP authentication, HTTP authorization,
-`$SYS` client lifecycle messages, and either `emqx ctl clients kick` or the
-EMQX v5 REST API. The broker is the only presence source.
+Access expects a Mosquitto 2.1.2 broker with the WhaleRein plugin described in
+[the Mosquitto line architecture](../docs/architecture/mosquitto.md). The broker
+validates CONNECT, publish, subscribe, delivery and Will decisions locally; it
+does not ask Access per operation.
 
-### HTTP authentication
+### Deferred CONNECT validation
 
-```http
-POST http://127.0.0.1:8081/internal/broker/auth
-Content-Type: application/json
-X-Whalerein-Internal-Token: <internal.callback_token>
-
-{"clientid":"${clientid}","username":"${username}","password":"${password}"}
-```
-
-Access accepts:
-
-- `username=access` with the configured broker password (Access MQTT client);
-- `username=host:{host_id}` with `clientid=whalerein-host-{host_id}` and the
-  host provisioning token; the host row is inserted on first success;
-- `username=device:{device_id}` with `clientid=whalerein-device-{device_id}` and
-  a transport token whose SHA-256 matches a `device_credentials.auth_hash` and which has at
-  least one live grant.
-
-A successful response is HTTP 200:
-
-```json
-{"result":"allow","is_superuser":false}
-```
-
-Everything else returns `{"result":"deny"}`. Keep `is_superuser=false` so the
-ACL callback is consulted.
-
-### HTTP authorization
+The plugin posts form-encoded credentials to the internal listener and installs
+the returned policy for that connection:
 
 ```http
-POST http://127.0.0.1:8081/internal/broker/acl
-Content-Type: application/json
+POST http://127.0.0.1:8081/internal/broker/connect
+Content-Type: application/x-www-form-urlencoded
 X-Whalerein-Internal-Token: <internal.callback_token>
 
-{"clientid":"${clientid}","username":"${username}","topic":"${topic}","action":"${action}"}
+clientid=...&username=...&password=...&will=<optional will topic>
 ```
 
-Expected `action` values are `publish` and `subscribe`; the response is
-`{"result":"allow"}` or `{"result":"deny"}`.
+The response is a versioned policy with the principal, its complete ACL set,
+the monotonic revision and (for devices) the authorized Will topic:
 
-The rule matrix is:
+```text
+whalerein/1
+ok
+kind device
+device dev_123
+revision 7
+ready 1
+will whalerein/v1/presence/device/dev_123
+acl subscribe 7 host_1 whalerein/v1/h/host_1/d/dev_123/event
+...
+```
+
+Any other response is a denial. Access accepts `username=access` with the broker
+password, `username=host:{host_id}` with the provisioning token, and
+`username=device:{device_id}` with a transport token that has at least one live
+grant. A Will topic outside the device policy is denied.
+
+### Local ACL rules
 
 | Principal | Subscribe | Publish |
 |---|---|---|
-| Access | `whalerein/v1/h/+/result`, `whalerein/v1/h/+/event`, `whalerein/v1/h/+/d/+/ack`, `$SYS/brokers/+/clients/+/connected`, `$SYS/brokers/+/clients/+/disconnected` | own-host `request`, `.../d/{device}/event` |
-| Host | own `whalerein/v1/h/{host}/request` | own `result` and own `event` |
-| Device | `whalerein/v1/h/{host}/d/{device}/event` with a live grant | own `whalerein/v1/h/{host}/d/{device}/ack` with a live grant |
+| Access (plugin-local) | results, events, acks, device wills, control replies/events | own-host requests, device events, host presence, `$CONTROL/whalerein/v1` |
+| Host | own `whalerein/v1/h/{host}/request` and `presence` | own `result` and own `event` |
+| Device | `whalerein/v1/h/{host}/d/{device}/event` for each live grant | own `.../ack` and own Will topic |
+| Probe | none | none |
 
-Host and device topics may not contain wildcards. Cross-host subscriptions are
-denied. Access requires `$SYS` permission; remove any default EMQX file ACL
-rule that denies `$SYS/#` to the Access user, and allow Access to publish to
-`whalerein/v1/h/.../request` and `.../d/.../event`.
+Host and device topics may not contain wildcards. A revoked grant removes its
+local ACL entries and closes the superseded connection.
 
-### Presence
+### Presence and revocation
 
-Primary presence comes from EMQX system topics. Access subscribes to:
+Primary presence comes from ordered broker connection notifications on
+`whalerein/v1/control/events`. On connect, Access requests a broker snapshot with
+a sequence boundary, then applies later notifications in order. A delayed
+notification for a superseded connection identity is ignored. The device last
+will and the Host `HostReady` result remain the existing fallbacks when a
+notification is lost. Presence stays unavailable until the first snapshot
+establishes current state.
 
-```text
-$SYS/brokers/+/clients/+/connected
-$SYS/brokers/+/clients/+/disconnected
-```
-
-Optional fallbacks:
-
-- EMQX HTTP webhook `client.connected` / `client.disconnected` posted to
-  `/internal/broker/presence` with the internal header;
-- EMQX v5 REST `GET /api/v5/clients/{clientid}` when `emqx.rest_url`,
-  `api_key` and `api_secret` are configured;
-- the host `HostReady` result message on the result topic (empty `request_id`,
-  `status=succeeded`, body `HostReady`).
-
-`$SYS` is not retained. If Access restarts while hosts stay connected, it
-cannot learn those hosts until they reconnect/HostReady or until the EMQX REST
-query is configured. Configure REST for restart-resilient presence.
+Revocation installs a local Access deny before the PostgreSQL write, then denies
+the matching broker scope and closes the device connection through
+`$CONTROL/whalerein/v1`. Completion requires the durable commit, the broker
+acknowledgement and the closure. Without a control path the broker fails closed
+after its bounded policy validity window.
 
 ### Active disconnect and revocation
 
-`emqx.disconnect_mode: ctl` executes:
+Access issues private control operations on `$CONTROL/whalerein/v1`:
 
 ```text
-emqx ctl clients kick whalerein-device-{device_id}
+op kick
+username device:{device_id}
 ```
 
-`emqx.disconnect_mode: rest` requires `emqx.rest_url`, `api_key` and
-`api_secret` and calls:
+The plugin disconnects matching connections and acknowledges the operation. A
+Host-scoped revocation denies that exact grant scope; a device-wide revocation
+denies each affected grant and then disconnects the device.
 
-```text
-DELETE /api/v5/clients/whalerein-device-{device_id}
-```
-
-Revocation writes `grants.revoked_at` first. ACLs are computed from the live
-grant, so HTTP and MQTT authorization fail from commit onward. Access then
-disconnects the device, publishes `RevocationNotice` to the host, and writes
-`replayed_at` only after `RevocationAck`. On every host Ready signal it replays
-all pending revocations and publishes a final empty `RevocationNotice`; both
-batches are acknowledged.
+Revocation writes `grants.revoked_at` first. Access also installed a local
+admission deny before the write, so event forwarding and broker policy updates
+stop immediately. Access then disconnects the device, publishes
+`RevocationNotice` to the host, and writes `replayed_at` only after
+`RevocationAck`. On every host Ready signal it replays all pending revocations
+and publishes a final empty `RevocationNotice`; both batches are acknowledged.
 
 ### TLS
 
@@ -366,9 +349,6 @@ broker:
   ca_file: "/etc/whalerein/ca.pem"
   server_name: "mqtt.internal"
   public_url: "mqtts://access.example.com:443"
-emqx:
-  rest_url: "https://emqx.internal:18083"
-  ca_file: "/etc/whalerein/ca.pem"
 ```
 
 Nginx terminates public TLS/ALPN `mqtt` on 443 and proxies to the broker; the
@@ -474,7 +454,7 @@ Database and MQTT integration tests run in the single Linux test container:
 ./repo test --suite integration --group transport
 ```
 
-Pytest owns PostgreSQL, EMQX, fixture callbacks, and native driver execution.
+Pytest owns PostgreSQL, Mosquitto, fixture callbacks, and native driver execution.
 Go integration assertions use the `integration` build tag and are excluded from
 unit execution. Each database test uses an isolated schema; transport fixtures
 own their listeners instead of reusing development Access credentials. No opt-in
