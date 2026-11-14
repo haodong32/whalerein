@@ -80,6 +80,7 @@ def validate(document):
             invalid("missing section " + key)
     _scenario(document["scenario"])
     _run(document["run"])
+    _cadence(document)
     _environment(document["environment"])
     attempts = _attempts(document["attempts"])
     _outcomes(document["outcomes"], attempts)
@@ -167,6 +168,19 @@ def _run(run):
         invalid("run configuration warmup_attempts must be a non-negative integer")
     if not isinstance(configuration["profile"], str) or not configuration["profile"]:
         invalid("run configuration profile must be text")
+
+
+def _cadence(document):
+    """The recorded cadence must match the workload it produced."""
+    configuration = document["run"]["configuration"]
+    if "cadence_ms" not in configuration:
+        return
+    cadence = configuration["cadence_ms"]
+    if not count(cadence) or cadence < 1:
+        invalid("run configuration cadence_ms must be a positive integer")
+    gap = document["scenario"]["workload"]["gap_ms"]
+    if gap != cadence:
+        invalid("scenario gap_ms disagrees with the recorded cadence")
 
 
 def _environment(environment):

@@ -238,6 +238,18 @@ def test_cleanup_and_status_reasons_are_required_when_not_complete():
         model.validate(facts)
 
 
+def test_recorded_cadence_must_match_the_workload():
+    facts = document()
+    facts["run"]["configuration"]["cadence_ms"] = 20
+    with pytest.raises(RepoError, match="gap_ms disagrees with the recorded cadence"):
+        model.validate(facts)
+    facts["scenario"]["workload"]["gap_ms"] = 20
+    model.validate(facts)
+    facts["run"]["configuration"]["cadence_ms"] = 0
+    with pytest.raises(RepoError, match="cadence_ms must be a positive integer"):
+        model.validate(facts)
+
+
 def test_recorded_deadline_must_precede_scripted_settlement():
     facts = document()
     facts["scenario"]["deadline_ms"] = 100

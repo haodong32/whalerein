@@ -41,11 +41,13 @@ SETTLE_SECONDS = float(os.environ.get("WHALEREIN_BENCHMARK_SETTLE", "3"))
 SCENARIO_ID = "streaming-reply"
 SCENARIO_VERSION = 1
 
-# Fixed workload: five visible updates starting at FINAL_START_MS, then the
-# final reply after one more cadence step.
+# Fixed workload: five visible updates starting at FIRST_UPDATE_MS, one per
+# cadence step, then the final reply after one more step. A cadence at or below
+# the product's own 20 ms coalescing window makes that window the thing being
+# observed instead of hidden noise.
 UPDATES = ["Stream", "ed ", "reply", " for", " benchmark"]
 FINAL_TEXT = "".join(UPDATES)
-GAP_MS = 100
+GAP_MS = int(CONFIG.get("cadence_ms", 100))
 FIRST_UPDATE_MS = 0
 FINAL_AT_MS = FIRST_UPDATE_MS + GAP_MS * (len(UPDATES) - 1) + GAP_MS
 DUPLICATE_AFTER_MS = 300

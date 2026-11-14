@@ -99,7 +99,8 @@ Full reference: tools/repo/README.md""",
         "bench": (
             "  ./repo bench\n"
             "  ./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline\n"
-            "  ./repo bench --delay 50 --output .data/benchmarks/delayed-50"
+            "  ./repo bench --delay 50 --output .data/benchmarks/delayed-50\n"
+            "  ./repo bench --cadence 20 --output .data/benchmarks/cadence-20"
         ),
         "bench-compare": (
             "  ./repo bench-compare --baseline .data/benchmarks/a --candidate .data/benchmarks/b\n"
@@ -243,6 +244,15 @@ Full reference: tools/repo/README.md""",
                 help="injected delay on the scripted reply in milliseconds (default: 0)",
             )
             sub.add_argument(
+                "--cadence",
+                type=int,
+                default=100,
+                metavar="MS",
+                help="spacing between scripted visible updates in milliseconds "
+                "(default: 100); values at or below the product's 20 ms coalescing "
+                "window expose batching",
+            )
+            sub.add_argument(
                 "--deadline",
                 type=int,
                 default=5000,
@@ -336,6 +346,7 @@ def dispatch(args, root, runner):
             attempts=args.attempts,
             warmup=args.warmup,
             delay_ms=args.delay,
+            cadence_ms=args.cadence,
             deadline_ms=args.deadline,
             observation_window_ms=args.observation_window,
             seed=args.seed,

@@ -134,6 +134,7 @@ Host and plugin against FakeDSH. It is opt-in and never runs as part of
 | `--attempts N` | Measured attempts after warmup (default 30). |
 | `--warmup N` | Setup-quality attempts excluded from every result (default 3). |
 | `--delay MS` | Injected delay on the scripted reply, for calibration (default 0). |
+| `--cadence MS` | Spacing between scripted visible updates (default 100). Values at or below the product's 20 ms coalescing window make that window observable. |
 | `--deadline MS` | Per-attempt deadline measured from dispatch (default 5000). |
 | `--observation-window MS` | Window after the final reply used to detect duplicates (default 1000). |
 | `--seed N` | Recorded scenario seed (default 0). |
@@ -165,6 +166,23 @@ Lifecycle markers, empty previews, and replies carrying another attempt's
 identity never satisfy it. Attempt identity is unique per attempt, which is what
 distinguishes a reply from a previous attempt's streams.
 
+### Cadence and the coalescing window
+
+Core coalesces adjacent deltas for up to 20 ms or an 8 KiB target before they
+reach the client. A 100 ms cadence sits well above that window, so the measured
+update gaps describe delivery jitter; a cadence at or below it turns the
+coalescing window itself into the measurement. Use a short cadence to look for
+batch-shaped gaps (multiples of the window) rather than smooth jitter:
+
+```bash
+./repo bench --cadence 20 --output .data/benchmarks/cadence-20
+./repo bench --cadence 10 --output .data/benchmarks/cadence-10
+```
+
+The recorded `scenario.workload.gap_ms` and `run.configuration.cadence_ms` must
+agree; a report whose cadence cannot settle before its deadline is rejected as
+a usage error before any container starts.
+
 ### Outcomes
 
 Every measured attempt records exactly one outcome:
@@ -188,6 +206,16 @@ reported separately and excluded from every count and sample.
 carries the schema version, scenario identity and parameters, observation
 surface, build and environment metadata, per-attempt timings and outcomes,
 outcome counts, latency samples, and the run status with cleanup verification.
+
+Timings are recorded from dispatch, so `first_text_ms` and `final_ms` include CLI
+process start-up. `send_exit_ms` is when the send process exits after collecting
+its result, not a start-up or reply time. The start-up share of an attempt can be
+read back from the report's own constants: because the scripted final reply is
+emitted `scenario.response.final_ms` after acceptance, `final_ms` minus that
+constant is the dispatch-to-acceptance interval. For the default scenario that is
+roughly 290 ms, against roughly 5 ms from acceptance to first visible text, so the
+headline first-text number is dominated by process start-up rather than by
+delivery.
 
 Latency samples cover only correctly completed attempts and report nearest-rank
 median, p95, and p99 with the actual sample count. A quantile that the sample

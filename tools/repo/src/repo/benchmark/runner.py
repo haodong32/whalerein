@@ -34,12 +34,19 @@ EXIT_FAILED_ATTEMPTS = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
 
+# The streaming scenario emits this many visible updates; the container entry
+# point owns the same list. Kept here so a cadence/deadline combination that
+# cannot settle before the deadline fails as a usage error instead of wasting a
+# container run.
+SCENARIO_UPDATES = 5
+
 
 @dataclass(frozen=True)
 class BenchRequest:
     attempts: int = 30
     warmup: int = 3
     delay_ms: int = 0
+    cadence_ms: int = 100
     deadline_ms: int = 5000
     observation_window_ms: int = 1000
     seed: int = 0
@@ -53,8 +60,17 @@ class BenchRequest:
             raise UsageError("--warmup must be between 0 and 10000")
         if not 0 <= self.delay_ms <= 60000:
             raise UsageError("--delay must be between 0 and 60000 milliseconds")
+        if not 10 <= self.cadence_ms <= 60000:
+            raise UsageError("--cadence must be between 10 and 60000 milliseconds")
         if not 100 <= self.deadline_ms <= 600000:
             raise UsageError("--deadline must be between 100 and 600000 milliseconds")
+        # The scripted reply settles one cadence step after the last update, so a
+        # slow cadence against a short deadline can never be observed in time.
+        if self.cadence_ms * SCENARIO_UPDATES >= self.deadline_ms:
+            raise UsageError(
+                f"--cadence {self.cadence_ms} ms needs a deadline above "
+                f"{self.cadence_ms * SCENARIO_UPDATES} ms to observe the scripted reply"
+            )
         if not 0 <= self.observation_window_ms <= 60000:
             raise UsageError("--observation-window must be between 0 and 60000 milliseconds")
         if self.concurrency != 1:
@@ -69,6 +85,7 @@ class BenchRequest:
             "concurrency": self.concurrency,
             "profile": "warm-client",
             "delay_ms": self.delay_ms,
+            "cadence_ms": self.cadence_ms,
             "deadline_ms": self.deadline_ms,
             "observation_window_ms": self.observation_window_ms,
             "seed": self.seed,

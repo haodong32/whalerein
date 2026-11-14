@@ -148,6 +148,7 @@ def document(attempts=None, status=None):
                 "warmup_attempts": len([i for i in attempts if i["phase"] == "warmup"]),
                 "concurrency": 1,
                 "profile": "warm-client",
+                "cadence_ms": 100,
             },
         },
         "environment": {
@@ -271,6 +272,8 @@ def test_existing_report_in_the_output_directory_is_rejected(tmp_path):
         ({"warmup": -1}, "--warmup must be between"),
         ({"delay_ms": -1}, "--delay must be between"),
         ({"deadline_ms": 0}, "--deadline must be between"),
+        ({"cadence_ms": 5}, "--cadence must be between"),
+        ({"cadence_ms": 70000}, "--cadence must be between"),
         ({"concurrency": 2}, "--concurrency must be 1"),
         ({"timeout": 0}, "--benchmark-timeout must be a positive"),
     ],
@@ -278,6 +281,25 @@ def test_existing_report_in_the_output_directory_is_rejected(tmp_path):
 def test_invalid_requests_are_usage_errors(changes, message):
     with pytest.raises(UsageError, match=message):
         runner.BenchRequest(**changes).validate()
+
+
+def test_a_cadence_that_cannot_settle_before_the_deadline_is_a_usage_error():
+    with pytest.raises(UsageError, match="needs a deadline above"):
+        runner.BenchRequest(cadence_ms=2000, deadline_ms=5000).validate()
+
+
+def test_cadence_is_recorded_and_reaches_the_container(tmp_path):
+    docker = Docker(document())
+    run(tmp_path, docker, cadence_ms=20)
+    run_call = next(args for args in docker.calls if args[1] == "run")
+    probe = next(part for part in run_call if part.startswith("WHALEREIN_BENCHMARK_CONFIG="))
+    configuration = json.loads(probe.split("=", 1)[1])
+    assert configuration["cadence_ms"] == 20
+
+
+def test_default_cadence_matches_the_streaming_scenario():
+    assert runner.BenchRequest().cadence_ms == 100
+    assert runner.SCENARIO_UPDATES == 5
 
 
 def test_missing_buildx_is_a_prerequisite_failure(tmp_path):
