@@ -461,3 +461,46 @@ def test_native_revocation_after_host_cache_admission_fences_result_and_control(
             process.kill()
             process.communicate(timeout=5)
         scenario.model.release.set()
+
+
+def test_native_repair_keeps_the_revoked_command_unrecoverable(scenario, paired_device):
+    """A repaired profile still lists the revoked command identity, cannot recover it, and does not run it again."""
+    from environment import http
+
+    session = scenario.create()
+    scenario.model.plan(hold=True)
+    scenario.request("start", sessionId=session)
+    assert scenario.model.started.wait(timeout=15)
+    scenario.request("queue-add", sessionId=session)
+    assert scenario.request("queue-read", sessionId=session)["available"]
+    paired_device.sessions(scenario.host)
+    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    assert scenario.request("arm-channel-queue-barrier", config={"phase": "post-native"})["armed"]
+    args = [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), "queue", "remove", "--session", session, "--item", item]
+    process = subprocess.Popen(args, cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        wait(lambda: scenario.request("channel-queue-barrier")["entered"], timeout=15, process=scenario.native)
+        pending = paired_device.call("commands-pending")["commands"]
+        assert len(pending) == 1
+        identity = pending[0]["request_id"]
+        assert paired_device.invoke("revoke", success=False)[0] == 0
+        scenario.request("release-channel-queue-barrier")
+        process.communicate(timeout=25)
+        assert scenario.request("queue-native-ids", sessionId=session)["ids"] == []
+        invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
+        repaired = paired_device.invoke("pair", invitation["pairingUri"], success=False)
+        assert repaired[0] == 0
+        # A repair keeps the device identity, which is why the opaque entry is
+        # still attributable to this profile for manual review.
+        assert repaired[1][-1]["data"]["device_id"] == paired_device.identity["device_id"]
+        assert paired_device.call("commands-pending")["unconfirmed_after_revocation"] == [identity]
+        code, values = paired_device.invoke("command-recover", "--request", identity, success=False)
+        assert code == 3 and values[-1]["error"]["code"] == "not_found"
+        assert values[-1].get("data") is None
+        assert scenario.request("queue-native-ids", sessionId=session)["ids"] == []
+    finally:
+        scenario.model.release.set()
+        if process.poll() is None:
+            scenario.request("release-channel-queue-barrier")
+            process.kill()
+            process.communicate(timeout=5)

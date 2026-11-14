@@ -71,3 +71,20 @@ def test_forget_cannot_replace_identity_during_revocation_cleanup(scenario, pair
     finally:
         if barrier.exists(): barrier.unlink()
         if process.poll() is None: process.kill(); process.communicate(timeout=5)
+
+
+def test_revoke_then_ordinary_forget_allows_a_new_pairing(scenario, paired_device):
+    """After a global revoke, an ordinary forget clears the identity so the next invitation issues a new device."""
+    env = {**os.environ, 'WHALEREIN_SECRET_BACKEND': 'file:' + str(paired_device.directory / 'secrets'), 'WHALEREIN_LOG': 'error'}
+    common = [str(ROOT / 'target/debug/whalerein'), '--json', '--yes', '--data-dir', str(paired_device.directory / 'client')]
+    revoked = subprocess.run([*common, 'revoke'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+    assert revoked.returncode == 0 and json.loads(revoked.stdout)['data']['revoked']
+    forgotten = subprocess.run([*common, 'forget'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
+    assert forgotten.returncode == 0
+    assert json.loads(forgotten.stdout)['data'] == {'identity_forgotten': True, 'local_only': False}
+    assert not (paired_device.directory / 'client' / 'config.json').exists()
+    invitation = http('/v1/pairing/invitations', {'hostId': scenario.host}, scenario.admin)
+    paired = subprocess.run([*common, 'pair', invitation['pairingUri']], cwd=ROOT, env=env, capture_output=True, text=True, timeout=25)
+    assert paired.returncode == 0
+    assert json.loads(paired.stdout)['data']['device_id'] != paired_device.identity['device_id']
+    assert (paired_device.directory / 'client' / 'config.json').exists()
