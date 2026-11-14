@@ -7,6 +7,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -54,6 +55,7 @@ type Config struct {
 	EMQX                  EMQXConfig       `yaml:"emqx"`
 	Internal              InternalConfig   `yaml:"internal"`
 	HTTP                  HTTPConfig       `yaml:"http"`
+	External              ExternalConfig   `yaml:"external"`
 	Pairing               PairingConfig    `yaml:"pairing"`
 	Requests              RequestConfig    `yaml:"requests"`
 	Revocation            RevocationConfig `yaml:"revocation"`
@@ -61,6 +63,28 @@ type Config struct {
 	Cleanup               CleanupConfig    `yaml:"cleanup"`
 	Protocol              ProtocolConfig   `yaml:"protocol"`
 	Log                   LogConfig        `yaml:"log"`
+}
+
+// ExternalConfig describes external account mode.
+//
+// External mode is explicit: an operator selects the trusted account service
+// and its issuer keys, and Access never falls back to Standalone or to an
+// unconfigured authority.
+type ExternalConfig struct {
+	ServiceIdentity  string                    `yaml:"service_identity"`
+	Issuer           string                    `yaml:"issuer"`
+	Region           string                    `yaml:"region"`
+	MQTTURL          string                    `yaml:"mqtt_url"`
+	ClockSkew        Duration                  `yaml:"clock_skew"`
+	VerificationKeys []ExternalVerificationKey `yaml:"verification_keys"`
+}
+
+// ExternalVerificationKey is one pinned issuer key with its validity window.
+type ExternalVerificationKey struct {
+	ID        string   `yaml:"id"`
+	PublicKey string   `yaml:"public_key"`
+	NotBefore Duration `yaml:"not_before"`
+	NotAfter  Duration `yaml:"not_after"`
 }
 
 // BrokerConfig describes the MQTT 5 broker connection.
@@ -268,12 +292,58 @@ func expandEnv(raw []byte, lookup func(string) (string, bool)) ([]byte, error) {
 	return []byte(strings.ReplaceAll(out, placeholder, "$")), nil
 }
 
+// validateExternal checks the external account mode settings.
+func (c Config) validateExternal() []string {
+	var problems []string
+	require := func(name, value string) {
+		if strings.TrimSpace(value) == "" {
+			problems = append(problems, name+" is required")
+		}
+	}
+	require("external.service_identity", c.External.ServiceIdentity)
+	require("external.issuer", c.External.Issuer)
+	require("external.region", c.External.Region)
+	require("external.mqtt_url", c.External.MQTTURL)
+	if len(c.External.VerificationKeys) == 0 {
+		problems = append(problems, "external.verification_keys needs at least one key")
+	}
+	if identity, err := url.Parse(c.External.ServiceIdentity); err != nil || identity.Host == "" {
+		problems = append(problems, "external.service_identity must be an absolute URL")
+	}
+	seen := map[string]bool{}
+	for index, key := range c.External.VerificationKeys {
+		label := fmt.Sprintf("external.verification_keys[%d]", index)
+		if strings.TrimSpace(key.ID) == "" {
+			problems = append(problems, label+".id is required")
+		} else if seen[key.ID] {
+			problems = append(problems, label+".id is duplicated")
+		} else {
+			seen[key.ID] = true
+		}
+		if _, err := base64.RawURLEncoding.DecodeString(key.PublicKey); err != nil {
+			problems = append(problems, label+".public_key must be raw URL base64")
+		}
+		if key.NotBefore != 0 && key.NotAfter != 0 &&
+			time.Duration(key.NotBefore) >= time.Duration(key.NotAfter) {
+			problems = append(problems, label+".not_before must precede not_after")
+		}
+	}
+	return problems
+}
+
 // Validate checks required values and bounded tunables without echoing
 // secret values.
 func (c Config) Validate() error {
 	var problems []string
-	if c.Mode != "standalone" {
-		problems = append(problems, "mode must be standalone; external account mode is not implemented")
+	switch c.Mode {
+	case "standalone":
+		if len(c.External.VerificationKeys) > 0 || c.External.Issuer != "" {
+			problems = append(problems, "external settings are only valid in external mode")
+		}
+	case "external":
+		problems = append(problems, c.validateExternal()...)
+	default:
+		problems = append(problems, `mode must be "standalone" or "external"`)
 	}
 	require := func(name, value string) {
 		if strings.TrimSpace(value) == "" {

@@ -75,6 +75,16 @@ type Dependencies struct {
 	Logger        *slog.Logger
 	InternalToken string
 	MaxBodyBytes  int64
+	// External serves external account mode when it is configured. Standalone
+	// deployments leave it nil and keep the invitation routes only.
+	External ExternalService
+}
+
+// ExternalService is the external account mode boundary.
+type ExternalService interface {
+	EnrollHost(ctx context.Context, request *whalereinv1.HostEnrollmentRequest) (*whalereinv1.HostEnrollmentResponse, error)
+	EnrollmentStatus(ctx context.Context, hostID string) (*whalereinv1.HostEnrollmentStatus, error)
+	OperationStatus(ctx context.Context, operationID string) (*whalereinv1.OperationStatus, error)
 }
 
 // Server owns the public and internal HTTP handlers.
@@ -120,7 +130,7 @@ func (s *Server) PublicHandler() http.Handler { return s.public }
 func (s *Server) InternalHandler() http.Handler { return s.internal }
 
 func (s *Server) publicRoutes() []routeSpec {
-	return []routeSpec{
+	routes := []routeSpec{
 		{method: http.MethodPost, pattern: "/v1/pairing/invitations", handler: s.handleInvitation},
 		{method: http.MethodPost, pattern: "/v1/pairing/claims", handler: s.handleClaim},
 		{method: http.MethodGet, pattern: "/v1/hosts", handler: s.handleHosts},
@@ -133,6 +143,16 @@ func (s *Server) publicRoutes() []routeSpec {
 		{method: http.MethodGet, pattern: "/readyz", handler: s.handleReady},
 		{method: http.MethodGet, pattern: "/metrics", handler: s.handleMetrics},
 	}
+	// External account mode adds its own endpoints and never removes the
+	// Standalone ones, so a deployment can test either path.
+	if s.deps.External != nil {
+		routes = append(routes,
+			routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
+			routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
+			routeSpec{method: http.MethodGet, pattern: "/v1/operations/{operation_id}", handler: s.handleOperationStatus},
+		)
+	}
+	return routes
 }
 
 func (s *Server) internalRoutes() []routeSpec {

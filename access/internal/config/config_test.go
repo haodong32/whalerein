@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,10 +255,98 @@ func TestDurationMarshalSerializesConfiguredDuration(t *testing.T) {
 	}
 }
 
-func TestExternalAccountModeCannotSilentlyFallBackToStandalone(t *testing.T) {
-	c := Default()
+func TestExternalAccountModeRequiresExplicitTrust(t *testing.T) {
+	// Selecting external mode without trust settings must fail: Access may not
+	// guess an account service or silently stay in Standalone.
+	c := validConfig(t)
 	c.Mode = "external"
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "mode must be standalone") {
-		t.Fatal("unsupported mode accepted")
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("external mode without settings was accepted")
+	}
+	for _, required := range []string{
+		"external.service_identity", "external.issuer", "external.region",
+		"external.mqtt_url", "external.verification_keys",
+	} {
+		if !strings.Contains(err.Error(), required) {
+			t.Fatalf("error should name %s: %v", required, err)
+		}
+	}
+}
+
+func TestUnknownModeIsRejected(t *testing.T) {
+	c := Default()
+	c.Mode = "managed"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `mode must be "standalone" or "external"`) {
+		t.Fatalf("an unknown mode was accepted: %v", err)
+	}
+}
+
+func TestExternalSettingsAreInvalidInStandaloneMode(t *testing.T) {
+	c := Default()
+	c.External.Issuer = "fixture://issuer/a"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "only valid in external mode") {
+		t.Fatalf("standalone accepted external settings: %v", err)
+	}
+}
+
+func TestFullyConfiguredExternalModeIsAccepted(t *testing.T) {
+	c := validConfig(t)
+	c.Mode = "external"
+	c.External = ExternalConfig{
+		ServiceIdentity: "https://access.fixture.test",
+		Issuer:          "fixture://issuer/a",
+		Region:          "fixture-a",
+		MQTTURL:         "mqtts://access.fixture.test:8883",
+		ClockSkew:       Duration(30 * time.Second),
+		VerificationKeys: []ExternalVerificationKey{{
+			ID:        "issuer-1",
+			PublicKey: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+			NotBefore: Duration(0),
+			NotAfter:  Duration(0),
+		}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a complete external configuration was refused: %v", err)
+	}
+}
+
+func TestExternalVerificationKeysAreValidated(t *testing.T) {
+	base := func() Config {
+		c := validConfig(t)
+		c.Mode = "external"
+		c.External = ExternalConfig{
+			ServiceIdentity: "https://access.fixture.test",
+			Issuer:          "fixture://issuer/a",
+			Region:          "fixture-a",
+			MQTTURL:         "mqtts://access.fixture.test:8883",
+			VerificationKeys: []ExternalVerificationKey{{
+				ID:        "issuer-1",
+				PublicKey: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+			}},
+		}
+		return c
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"duplicate id": func(c *Config) {
+			key := c.External.VerificationKeys[0]
+			c.External.VerificationKeys = append(c.External.VerificationKeys, key)
+		},
+		"missing id": func(c *Config) { c.External.VerificationKeys[0].ID = "" },
+		"not base64": func(c *Config) { c.External.VerificationKeys[0].PublicKey = "not base64!" },
+		"inverted window": func(c *Config) {
+			c.External.VerificationKeys[0].NotBefore = Duration(time.Hour)
+			c.External.VerificationKeys[0].NotAfter = Duration(time.Minute)
+		},
+		"service identity": func(c *Config) { c.External.ServiceIdentity = "not-a-url" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base()
+			mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatal("expected a validation error")
+			}
+		})
 	}
 }

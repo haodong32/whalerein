@@ -2790,6 +2790,241 @@
                   "id": 4
                 }
               }
+            },
+            "ExternalAuthorization": {
+              "fields": {
+                "auth_version": {
+                  "type": "string",
+                  "id": 1
+                },
+                "authorization_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "issuer": {
+                  "type": "string",
+                  "id": 3
+                },
+                "audience": {
+                  "type": "string",
+                  "id": 4
+                },
+                "purpose": {
+                  "type": "string",
+                  "id": 5
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 6
+                },
+                "region_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "operation_id": {
+                  "type": "string",
+                  "id": 8
+                },
+                "enrollment_revision": {
+                  "type": "string",
+                  "id": 9
+                },
+                "precondition": {
+                  "type": "string",
+                  "id": 10
+                },
+                "expected_revision": {
+                  "type": "string",
+                  "id": 11
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 12
+                },
+                "host_public_keys": {
+                  "rule": "repeated",
+                  "type": "bytes",
+                  "id": 13
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 14
+                },
+                "device_public_keys": {
+                  "rule": "repeated",
+                  "type": "bytes",
+                  "id": 15
+                },
+                "issued_at_unix_ms": {
+                  "type": "int64",
+                  "id": 16
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 17
+                },
+                "nonce": {
+                  "type": "bytes",
+                  "id": 18
+                },
+                "key_id": {
+                  "type": "string",
+                  "id": 19
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 20
+                }
+              }
+            },
+            "HostEnrollmentRequest": {
+              "fields": {
+                "authorization": {
+                  "type": "ExternalAuthorization",
+                  "id": 1
+                },
+                "operation_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "host_signing_public_key": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "host_noise_public_key": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "proof_signature": {
+                  "type": "bytes",
+                  "id": 6
+                }
+              }
+            },
+            "HostCredential": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "mqtt_url": {
+                  "type": "string",
+                  "id": 2
+                },
+                "username": {
+                  "type": "string",
+                  "id": 3
+                },
+                "password": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "EnrollmentState": {
+              "values": {
+                "ENROLLMENT_STATE_UNSPECIFIED": 0,
+                "enrollment_pending": 1,
+                "enrollment_ready": 2,
+                "enrollment_disabled": 3
+              }
+            },
+            "HostEnrollmentStatus": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "enrollment_revision": {
+                  "type": "string",
+                  "id": 3
+                },
+                "state": {
+                  "type": "EnrollmentState",
+                  "id": 4
+                },
+                "operation_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "host_signing_public_key": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "host_noise_public_key": {
+                  "type": "bytes",
+                  "id": 7
+                }
+              }
+            },
+            "HostEnrollmentResponse": {
+              "fields": {
+                "status": {
+                  "type": "HostEnrollmentStatus",
+                  "id": 1
+                },
+                "credential": {
+                  "type": "HostCredential",
+                  "id": 2
+                }
+              }
+            },
+            "OperationState": {
+              "values": {
+                "OPERATION_STATE_UNSPECIFIED": 0,
+                "operation_pending": 1,
+                "operation_committed": 2,
+                "operation_conflict": 3,
+                "operation_refused": 4
+              }
+            },
+            "OperationStatus": {
+              "fields": {
+                "operation_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "purpose": {
+                  "type": "string",
+                  "id": 2
+                },
+                "state": {
+                  "type": "OperationState",
+                  "id": 3
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "enrollment_revision": {
+                  "type": "string",
+                  "id": 6
+                },
+                "authorization_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "payload_digest": {
+                  "type": "bytes",
+                  "id": 8
+                },
+                "committed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 9
+                }
+              }
             }
           }
         }

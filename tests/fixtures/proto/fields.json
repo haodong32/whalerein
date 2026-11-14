@@ -124,6 +124,26 @@
         }
       ]
     },
+    "EnrollmentState": {
+      "values": [
+        {
+          "name": "ENROLLMENT_STATE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "enrollment_pending",
+          "number": 1
+        },
+        {
+          "name": "enrollment_ready",
+          "number": 2
+        },
+        {
+          "name": "enrollment_disabled",
+          "number": 3
+        }
+      ]
+    },
     "ErrorCode": {
       "values": [
         {
@@ -325,6 +345,30 @@
         {
           "name": "unknown",
           "number": 7
+        }
+      ]
+    },
+    "OperationState": {
+      "values": [
+        {
+          "name": "OPERATION_STATE_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "operation_pending",
+          "number": 1
+        },
+        {
+          "name": "operation_committed",
+          "number": 2
+        },
+        {
+          "name": "operation_conflict",
+          "number": 3
+        },
+        {
+          "name": "operation_refused",
+          "number": 4
         }
       ]
     },
@@ -1071,6 +1115,132 @@
         }
       ]
     },
+    "ExternalAuthorization": {
+      "fields": [
+        {
+          "json_name": "authVersion",
+          "name": "auth_version",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "precondition",
+          "name": "precondition",
+          "number": "10",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expectedRevision",
+          "name": "expected_revision",
+          "number": "11",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "12",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostPublicKeys",
+          "label": "LABEL_REPEATED",
+          "name": "host_public_keys",
+          "number": "13",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": "14",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "devicePublicKeys",
+          "label": "LABEL_REPEATED",
+          "name": "device_public_keys",
+          "number": "15",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "issuedAtUnixMs",
+          "name": "issued_at_unix_ms",
+          "number": "16",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": "17",
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "nonce",
+          "name": "nonce",
+          "number": "18",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "keyId",
+          "name": "key_id",
+          "number": "19",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "authorizationId",
+          "name": "authorization_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": "20",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "issuer",
+          "name": "issuer",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "audience",
+          "name": "audience",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "purpose",
+          "name": "purpose",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": "6",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "regionId",
+          "name": "region_id",
+          "number": "7",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "operationId",
+          "name": "operation_id",
+          "number": "8",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "enrollmentRevision",
+          "name": "enrollment_revision",
+          "number": "9",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "ForkSession": {
       "fields": [
         {
@@ -1271,6 +1441,140 @@
           "name": "session_fork",
           "number": "300",
           "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "HostCredential": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "mqttUrl",
+          "name": "mqtt_url",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "username",
+          "name": "username",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "password",
+          "name": "password",
+          "number": "4",
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostEnrollmentRequest": {
+      "fields": [
+        {
+          "json_name": "authorization",
+          "name": "authorization",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ExternalAuthorization"
+        },
+        {
+          "json_name": "operationId",
+          "name": "operation_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostSigningPublicKey",
+          "name": "host_signing_public_key",
+          "number": "4",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostNoisePublicKey",
+          "name": "host_noise_public_key",
+          "number": "5",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "proofSignature",
+          "name": "proof_signature",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "HostEnrollmentResponse": {
+      "fields": [
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": "1",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostEnrollmentStatus"
+        },
+        {
+          "json_name": "credential",
+          "name": "credential",
+          "number": "2",
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostCredential"
+        }
+      ]
+    },
+    "HostEnrollmentStatus": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "enrollmentRevision",
+          "name": "enrollment_revision",
+          "number": "3",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": "4",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.EnrollmentState"
+        },
+        {
+          "json_name": "operationId",
+          "name": "operation_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostSigningPublicKey",
+          "name": "host_signing_public_key",
+          "number": "6",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostNoisePublicKey",
+          "name": "host_noise_public_key",
+          "number": "7",
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -1917,6 +2221,65 @@
           "name": "text",
           "number": "2",
           "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "OperationStatus": {
+      "fields": [
+        {
+          "json_name": "operationId",
+          "name": "operation_id",
+          "number": "1",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "purpose",
+          "name": "purpose",
+          "number": "2",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": "3",
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OperationState"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": "4",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": "5",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "enrollmentRevision",
+          "name": "enrollment_revision",
+          "number": "6",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "authorizationId",
+          "name": "authorization_id",
+          "number": "7",
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "payloadDigest",
+          "name": "payload_digest",
+          "number": "8",
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "committedAtUnixMs",
+          "name": "committed_at_unix_ms",
+          "number": "9",
+          "type": "TYPE_INT64"
         }
       ]
     },

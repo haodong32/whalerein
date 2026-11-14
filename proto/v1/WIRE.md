@@ -267,6 +267,55 @@ ACKed notice. Access and Host must be upgraded together for these guarantees.
 The host never calls Access to delete an ACL and never persists an independent
 authorization list. Access is always authoritative on conflict.
 
+## External account mode
+
+Standalone mode never sends these messages. When an operator configures the
+service identity, issuer and pinned verification keys for external account
+mode, Access admits an enrollment only after two independent checks:
+
+1. **The authorization.** The issuer signs the canonical text form, and no
+   JSON is part of the signed bytes:
+
+   ```text
+   whalerein/v1/ext-auth-v1
+   |{auth_version}|{authorization_id}|{issuer}|{audience}|{purpose}
+   |{workspace_id}|{region_id}|{operation_id}|{enrollment_revision}
+   |{precondition}|{expected_revision}
+   |{host_id}|{sha256(host_pubkeys, sorted, length-prefixed)}
+   |{device_id}|{sha256(device_pubkeys, sorted, length-prefixed)}
+   |{issued_at_unix_ms}|{expires_at_unix_ms}|{base64url(nonce)}
+   ```
+
+   Field order is fixed. Empty values stay empty. Key sets hash as sorted,
+   length-prefixed values, so ordering never changes the signature. Access
+   checks the issuer, the audience against its own service identity, the
+   purpose, the region, the expiry, and that the signing key was valid at
+   `issued_at_unix_ms`. An untrusted issuer, an unknown key id, a failed
+   signature or a key outside its window refuses the request.
+
+2. **The Host's proof of possession.** The Host signs the enrollment proof
+   input with the approved Host **signing** key:
+
+   ```text
+   whalerein/v1/enrollment|{authorization_id}|{base64url(nonce)}|{host_id}|{base64url(host_signing_public_key)}|{operation_id}
+   ```
+
+   Access requires the asserted signing and Noise keys to be exactly the
+   approved pair, and it verifies the proof against that signing key. A
+   changed key, a stale nonce or a proof lifted from another operation is
+   refused.
+
+`POST /v1/enrollments/hosts` commits the operation row, the enrollment row and
+a hashed broker credential in one transaction, so a lost reply is recoverable:
+the same authorization with the same payload returns the recorded status and
+**no** second credential, while a changed payload reports
+`operation_conflict`. The broker credential is delivered only by the call that
+commits the enrollment, and the enrollment stays `enrollment_pending` until an
+authenticated connection is observed.
+
+`GET /v1/enrollments/hosts/{host_id}` and `GET /v1/operations/{operation_id}`
+report state, bindings and revisions. Neither ever returns a credential.
+
 ## HTTP surface
 
 ```http

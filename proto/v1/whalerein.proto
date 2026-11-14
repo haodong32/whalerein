@@ -823,3 +823,99 @@ message UpdatePendingQueue {
   // Text replaces the complete prior item content, including attachments.
   string text = 4;
 }
+
+// ---------------------------------------------------------------------------
+// External account mode (contract v1, ratified 2026-11-14)
+//
+// Standalone mode never sends these messages. An endpoint carries a portable
+// authorization minted by the selected account service, and Access verifies
+// it locally before admitting an enrollment or pairing.
+// ---------------------------------------------------------------------------
+
+// A short-lived, purpose-bound authorization. The signature is Ed25519 over
+// the canonical text form; no JSON is signed.
+message ExternalAuthorization {
+  string auth_version = 1;
+  string authorization_id = 2;
+  string issuer = 3;
+  string audience = 4;
+  string purpose = 5;
+  string workspace_id = 6;
+  string region_id = 7;
+  string operation_id = 8;
+  string enrollment_revision = 9;
+  string precondition = 10;
+  string expected_revision = 11;
+  string host_id = 12;
+  repeated bytes host_public_keys = 13;
+  string device_id = 14;
+  repeated bytes device_public_keys = 15;
+  int64 issued_at_unix_ms = 16;
+  int64 expires_at_unix_ms = 17;
+  bytes nonce = 18;
+  string key_id = 19;
+  bytes signature = 20;
+}
+
+// The Host proves possession of the approved signing key by signing the
+// enrollment proof input; Access compares the proven key with the assertion.
+message HostEnrollmentRequest {
+  ExternalAuthorization authorization = 1;
+  string operation_id = 2;
+  string host_id = 3;
+  bytes host_signing_public_key = 4;
+  bytes host_noise_public_key = 5;
+  bytes proof_signature = 6;
+}
+
+// Broker credentials are issued once, on the call that commits the enrollment.
+message HostCredential {
+  string host_id = 1;
+  string mqtt_url = 2;
+  string username = 3;
+  string password = 4;
+}
+
+enum EnrollmentState {
+  ENROLLMENT_STATE_UNSPECIFIED = 0;
+  // Recorded and waiting for readiness to be observed.
+  enrollment_pending = 1;
+  enrollment_ready = 2;
+  enrollment_disabled = 3;
+}
+
+message HostEnrollmentStatus {
+  string host_id = 1;
+  string workspace_id = 2;
+  string enrollment_revision = 3;
+  EnrollmentState state = 4;
+  string operation_id = 5;
+  bytes host_signing_public_key = 6;
+  bytes host_noise_public_key = 7;
+}
+
+message HostEnrollmentResponse {
+  HostEnrollmentStatus status = 1;
+  // Present only on the response that commits the enrollment.
+  HostCredential credential = 2;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  operation_pending = 1;
+  operation_committed = 2;
+  operation_conflict = 3;
+  operation_refused = 4;
+}
+
+message OperationStatus {
+  string operation_id = 1;
+  string purpose = 2;
+  OperationState state = 3;
+  string workspace_id = 4;
+  string host_id = 5;
+  string enrollment_revision = 6;
+  string authorization_id = 7;
+  bytes payload_digest = 8;
+  int64 committed_at_unix_ms = 9;
+}
