@@ -32,13 +32,13 @@ concurrency:
 jobs:
   integration:
     name: Full integration
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     outputs:
       tested_revision: ${{ steps.result.outputs.revision }}
     steps:
       - name: Check out the requested revision
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
@@ -58,10 +58,10 @@ jobs:
       - name: Restore successful input record
         id: baseline
         continue-on-error: true
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/integration-passed
-          key: integration-pass-ubuntu-24.04-v1-${{ steps.inputs.outputs.key }}
+          key: integration-pass-ubuntu-26.04-v1-${{ steps.inputs.outputs.key }}
 
       - name: Decide whether to run
         id: selection
@@ -82,10 +82,10 @@ jobs:
 
       - name: Set up uv and Python
         if: steps.selection.outputs.run == 'true'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.11.7'
-          python-version: '3.11'
+          version: '0.13.8'
+          python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
@@ -106,14 +106,14 @@ jobs:
 
       - name: Retain successful baseline
         if: success() && steps.tests.outcome == 'success' && steps.baseline.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/integration-passed
-          key: integration-pass-ubuntu-24.04-v1-${{ steps.inputs.outputs.key }}
+          key: integration-pass-ubuntu-26.04-v1-${{ steps.inputs.outputs.key }}
 
       - name: Upload reports and verification record
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

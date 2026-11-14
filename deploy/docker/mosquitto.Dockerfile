@@ -5,7 +5,7 @@
 # authentication. The plugin is compiled against the matching headers. Only the
 # broker, its libraries and the plugin are copied into the runtime image.
 # syntax=docker/dockerfile:1
-FROM alpine:3.20 AS build
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS build
 
 ARG MOSQUITTO_VERSION=2.1.2
 
@@ -27,7 +27,7 @@ RUN make -C /src/plugin clean && make -C /src/plugin \
       MOSQUITTO_INCLUDE="/src/mosquitto-${MOSQUITTO_VERSION}/include" \
       CFLAGS="-O2 -Wall -Wextra -Werror -fPIC -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE"
 
-FROM alpine:3.20
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 RUN apk add --no-cache cjson libcrypto3 libedit libssl3 sqlite-libs && \
     addgroup -g 1883 -S mosquitto && \

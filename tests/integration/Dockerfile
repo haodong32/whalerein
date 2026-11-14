@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1
-FROM rust:slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS rust
-FROM golang:1.26@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551 AS go
-FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS node
-FROM postgres:18-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42 AS postgres
+FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS rust
+FROM golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9 AS go
+FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS node
+FROM postgres:18.7-trixie@sha256:9f4fd4aa918f52ae3d6f3b687f1de90d8f867cd4d520021545a9a50c120eae3b AS postgres
+FROM python:3.15.2-slim-trixie@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS python
+FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579 AS browsers
 
 # Build the pinned Mosquitto 2.1.2 broker and the WhaleRein plugin against its
 # headers. Debian trixie matches the runtime distribution, so the built
 # binaries link against the same glibc and OpenSSL ABI as the runtime image.
-FROM debian:trixie AS mosquitto-build
+FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS mosquitto-build
 USER root
 ARG MOSQUITTO_VERSION=2.1.2
 RUN apt-get update && \
@@ -31,12 +33,14 @@ FROM rust AS rust-build
 USER root
 RUN --mount=type=bind,source=tools/repo/linux-rust-packages.txt,target=/tmp/linux-rust-packages.txt \
     apt-get update && \
-    xargs -r apt-get install -y --no-install-recommends build-essential ca-certificates git libprotobuf-dev libssl-dev < /tmp/linux-rust-packages.txt && \
+    xargs -r apt-get install -y --no-install-recommends build-essential ca-certificates curl git libssl-dev < /tmp/linux-rust-packages.txt && \
     rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=tools/repo/protoc-linux.sh,target=/tmp/protoc-linux.sh \
+    bash /tmp/protoc-linux.sh /usr/local
 WORKDIR /workspace
 ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=4
 ARG TARGETARCH
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY core core
 COPY apps/cli apps/cli
 COPY proto/v1/whalerein.proto proto/v1/whalerein.proto
@@ -111,8 +115,12 @@ RUN --mount=type=cache,id=whalerein-native-npm,target=/root/.npm,sharing=locked 
 # broker being replaced and made the runtime depend on its directory layout.
 FROM postgres AS runtime
 USER root
+COPY --from=python /usr/local /usr/local
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich protobuf-compiler libprotobuf-dev libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir pytest==9.2.0
+COPY --from=rust-build /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=rust-build /usr/local/include/google /usr/local/include/google
 COPY --from=mosquitto-build /usr/local/sbin/mosquitto /usr/local/sbin/mosquitto
 COPY --from=mosquitto-build /usr/local/lib/libmosquitto.so* /usr/local/lib/
 COPY --from=mosquitto-build /src/plugin/whalerein.so /usr/local/lib/mosquitto/whalerein.so
@@ -121,8 +129,9 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=native-tools /opt/native /opt/native
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 ENV PATH=/opt/native/node_modules/.bin:$PATH
-RUN node /opt/native/node_modules/playwright/cli.js install --with-deps chromium \
+RUN node /opt/native/node_modules/playwright/cli.js install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=browsers /ms-playwright/chromium_headless_shell-1255 /opt/playwright-browsers/chromium_headless_shell-1255
 COPY --from=go-build /out/whalerein-access /out/broker-tests /out/server-tests /out/store-tests /out/store-support-tests /out/external-tests /usr/local/bin/
 COPY tools/repo/src/repo/__init__.py tools/repo/src/repo/test_timing.py /workspace/tools/repo/src/repo/
 ENV PYTHONPATH=/workspace/tools/repo/src
