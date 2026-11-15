@@ -77,6 +77,9 @@ For the same entry on Windows, use
 `repo.native_ci` installs checksummed native protoc 36.2 and owns the isolated
 Keychain check; it does not start development services. macOS/Windows reports
 are uploaded as `ci-native-<os>-<sha>-<attempt>` Artifacts.
+Native dependency/build caches are also retained after failed verification so
+debugging does not repeatedly rebuild the same toolchain. These caches contain
+build artifacts, not successful-test receipts.
 
 Inspect selection locally without running tests or contacting GitHub:
 

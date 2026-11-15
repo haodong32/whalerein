@@ -187,22 +187,27 @@ jobs:
           cache-dependency-glob: tools/repo/uv.lock
 
       - name: Cache Rust dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
             target
-          key: rust-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-
 
       - name: Install native protoc and Rust coverage tool
         run: |
           uv run --project tools/repo python -m repo.native_ci protoc .data/native-protoc
           echo "$GITHUB_WORKSPACE/.data/native-protoc" >> "$GITHUB_PATH"
           rustc --version
-          cargo install cargo-llvm-cov --version 0.9.1 --locked
+          if ! cargo llvm-cov --version; then
+            cargo install cargo-llvm-cov --version 0.9.1 --locked
+          fi
 
       - name: Verify Windows repository process handling
         if: runner.os == 'Windows'
@@ -229,6 +234,20 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
+
+      - name: Retain native build cache after verification
+        if: >-
+          !cancelled() && steps.native-cache.outcome == 'success' &&
+          steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
 
   gate:
     name: CI gate
