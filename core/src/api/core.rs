@@ -2317,6 +2317,17 @@ impl Core {
         // Match the Unix ordering: durably confirm revocation, attempt identity
         // retention, and erase the FINISH credential before final cleanup. A
         // failed retention attempt remains visible through the sticky lost phase.
+        if crate::security::device::existing_device_id(
+            &self.options.secrets,
+            &self.options.data_dir,
+        )?
+        .as_deref()
+            != Some(device_id)
+        {
+            return Err(CoreError::Conflict(
+                "profile identity changed during cleanup".into(),
+            ));
+        }
         let confirmed = revoked_commands::write_marker_in(guard.directory(), "confirmed-waiting");
         if self
             .redact_pending_pairing_after_revocation(device_id, guard.directory())
