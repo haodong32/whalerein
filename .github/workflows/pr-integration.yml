@@ -1,0 +1,52 @@
+name: PR integration
+run-name: 'Full integration for PR #${{ github.event.pull_request.number }}'
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Full integration (manual)
+    if: github.event.label.name == 'run-integration'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Unrelated label events skip this job without interrupting an active run.
+    concurrency:
+      group: pr-integration-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out the PR merge revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Identify the tested revision
+        run: git rev-parse HEAD
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.11.7'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Run the complete isolated suite
+        run: ./repo test --suite integration --output .data/runs/integration
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pr-integration-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/integration/report.json
+            .data/runs/integration/report.html
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

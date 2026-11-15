@@ -118,7 +118,20 @@ integration is scheduled separately by `.github/workflows/integration.yml` at
 03:17 Asia/Shanghai each day. GitHub scheduling is best-effort; manual dispatch
 can validate a repair or high-risk change without waiting for the next schedule.
 
-The workflow freezes one main commit and fingerprints all tracked inputs except
+For a PR, manually add the `run-integration` label to start the **PR integration /
+Full integration (manual)** check. The dedicated `.github/workflows/pr-integration.yml`
+workflow runs the complete suite on Linux against the PR merge revision captured
+by that label event. Opening a PR, pushing commits, or leaving the label attached
+does not start another full run. After pushing a repair, remove and re-add the
+label to test the new revision. Use **Re-run jobs** to retry the original revision.
+The label must exist in the repository; create it once through GitHub's Labels
+page if needed. JSON/HTML reports are available in the run's
+`pr-integration-<pr-number>-<run-id>-<attempt>` Artifact for seven days.
+This optional check has its own per-PR queue, does not block the fast CI gate,
+and does not update the scheduled main-branch success baseline. It should not be
+configured as a required branch-protection check because it only runs on request.
+
+The scheduled workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips
 heavy execution only when an exact successful input receipt exists. The initial
 run, changed inputs, unknown/missing evidence or evicted cache cause a full run.

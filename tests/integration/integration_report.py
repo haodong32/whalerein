@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from time import monotonic
 
@@ -51,6 +52,22 @@ def pytest_deselected(items):
     _DESELECTED |= bool(items)
 
 
+def failure_message(report):
+    # Export source locations only. Pytest assertion text, source lines and
+    # captured output can contain decrypted messages or credentials.
+    traceback = getattr(getattr(report, "longrepr", None), "reprtraceback", None)
+    locations = []
+    for entry in getattr(traceback, "reprentries", []):
+        location = getattr(entry, "reprfileloc", None)
+        filename = str(getattr(location, "path", "")).replace("\\", "/").rsplit("/", 1)[-1]
+        line = getattr(location, "lineno", None)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.py", filename) and type(line) is int and line > 0:
+            locations.append(f"{filename}:{line}")
+    if locations:
+        return "Integration failure at " + " -> ".join(locations[-8:])
+    return "Integration assertion or fixture failed; source location unavailable."
+
+
 def pytest_runtest_logreport(report):
     _PHASES.setdefault(report.nodeid, set()).add(report.when)
     record = _RESULTS.setdefault(
@@ -72,7 +89,7 @@ def pytest_runtest_logreport(report):
         record.setdefault("diagnostics", []).append(
             {
                 "phase": report.when,
-                "message": "Integration assertion or fixture failed; see bounded pytest output.",
+                "message": failure_message(report),
             }
         )
     elif report.skipped and record["status"] != "failed":
