@@ -191,7 +191,8 @@ defaults and must be replaced for a shared deployment.
 
 ## Local run
 
-Go 1.26+ is required. The repository has one root `go.mod`. If Compose Access
+Go 1.26+ is required. The root `go.mod` selects Go 1.27.4 for development when toolchain switching is enabled.
+If Compose Access
 is already running, stop it first with
 `docker compose -f deploy/compose/stack.yaml stop access` to free its listeners.
 

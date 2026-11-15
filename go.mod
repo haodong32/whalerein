@@ -2,6 +2,8 @@ module github.com/whalerein/whalerein
 
 go 1.26.0
 
+toolchain go1.27.4
+
 require (
 	github.com/eclipse/paho.golang v0.23.0
 	github.com/jackc/pgx/v5 v5.12.0

@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.2-rc.1",
-    "playwright": "1.65.0",
+    "playwright": "1.65.1",
     "pnpm": "12.18.0"
   },
   "license": "AGPL-3.0-only"
