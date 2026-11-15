@@ -88,6 +88,47 @@ def test_teardown_failure_preserves_failure(reporting, tmp_path):
     assert [c["status"] for c in document["scope"]["tests"]] == ["failed"]
 
 
+def test_failure_reports_locations_without_source_or_values(reporting):
+    private = "synthetic-private-payload"
+    entries = [
+        SimpleNamespace(reprfileloc=SimpleNamespace(path=path, lineno=line, message=private))
+        for path, line in [("cases/test_native_dsh.py", 1237), ("environment.py", 39)]
+    ]
+    reporting.pytest_runtest_logreport(
+        SimpleNamespace(
+            nodeid="case.one",
+            when="call",
+            passed=False,
+            failed=True,
+            skipped=False,
+            longrepr=SimpleNamespace(reprtraceback=SimpleNamespace(reprentries=entries)),
+            longreprtext=private,
+            capstdout=private,
+            capstderr=private,
+        )
+    )
+    diagnostic = reporting._RESULTS["case.one"]["diagnostics"][0]["message"]
+    assert "test_native_dsh.py:1237" in diagnostic
+    assert "environment.py:39" in diagnostic
+    assert private not in diagnostic
+
+
+def test_failure_locations_are_bounded_and_filter_unexpected_paths(reporting):
+    entries = [
+        SimpleNamespace(reprfileloc=SimpleNamespace(path=path, lineno=line))
+        for path, line in [("private-payload", 1), ("test_case.py", "private")]
+        + [("test_case.py", n) for n in range(1, 21)]
+    ]
+    diagnostic = reporting.failure_message(
+        SimpleNamespace(
+            longrepr=SimpleNamespace(reprtraceback=SimpleNamespace(reprentries=entries)),
+        )
+    )
+    assert "private" not in diagnostic
+    assert diagnostic.count("test_case.py:") == 8
+    assert "test_case.py:20" in diagnostic
+
+
 def test_missing_teardown_is_not_success(reporting, tmp_path):
     phase(reporting, "setup")
     phase(reporting, "call")

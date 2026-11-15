@@ -315,7 +315,9 @@ async fn grants_config_loss_and_forget_have_distinct_identity_lifetimes() {
     assert_eq!(renewed.device_id, original);
     core.sessions("host-1").await.unwrap();
     std::fs::remove_file(dir.path().join("config.json")).unwrap();
-    let reopened = Core::new(core.options.clone()).unwrap();
+    let options = core.options.clone();
+    drop(core);
+    let reopened = Core::new(options).unwrap();
     let recovered = reopened
         .pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await

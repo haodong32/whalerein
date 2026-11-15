@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-26.04
     outputs:
       matrix: ${{ steps.changes.outputs.matrix }}
+      native_matrix: ${{ steps.changes.outputs.native_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,6 +38,8 @@ jobs:
         run: |
           matrix=$(python3 tools/repo/src/repo/ci.py plan --base "$BASE_SHA" --head "$HEAD_SHA")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          native_matrix=$(python3 tools/repo/src/repo/ci.py native-plan --base "$BASE_SHA" --head "$HEAD_SHA")
+          echo "native_matrix=$native_matrix" >> "$GITHUB_OUTPUT"
 
   fast:
     name: Checks and coverage (${{ matrix.kind }})
@@ -158,10 +161,98 @@ jobs:
           include-hidden-files: true
           retention-days: 7
 
+  native:
+    name: Native Rust checks and coverage (${{ matrix.os }})
+    needs: changes
+    if: >-
+      needs.changes.outputs.native_matrix != '{"include": []}'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.native_matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.8'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Cache Rust dependencies and builds
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
+          key: rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Install native protoc and Rust coverage tool
+        run: |
+          uv run --project tools/repo python -m repo.native_ci protoc .data/native-protoc
+          echo "$GITHUB_WORKSPACE/.data/native-protoc" >> "$GITHUB_PATH"
+          rustc --version
+          if ! cargo llvm-cov --version; then
+            cargo install cargo-llvm-cov --version 0.9.1 --locked
+          fi
+
+      - name: Verify Windows repository process handling
+        if: runner.os == 'Windows'
+        run: uv run --project tools/repo python -m repo test --project repo --only windows
+
+      - name: Check, build and test selected native projects
+        env:
+          PROJECTS: ${{ toJSON(matrix.projects) }}
+        run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
+
+      - name: Verify the macOS Keychain explicitly
+        if: runner.os == 'macOS' && contains(matrix.projects, 'core')
+        run: uv run --project tools/repo python -m repo.native_ci keychain .data/runs/keychain/result.json
+
+      - name: Upload native test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-native-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            .data/runs/keychain/result.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Retain native build cache after verification
+        if: >-
+          !cancelled() && steps.native-cache.outcome == 'success' &&
+          steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
+
   gate:
     name: CI gate
     if: always()
-    needs: [changes, fast]
+    needs: [changes, fast, native]
     runs-on: ubuntu-26.04
     steps:
       - name: Check required results
@@ -169,10 +260,17 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_RESULT: ${{ needs.fast.result }}
           MATRIX: ${{ needs.changes.outputs.matrix }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_MATRIX: ${{ needs.changes.outputs.native_matrix }}
         run: |
           test "$CHANGES_RESULT" = success
           if [ "$MATRIX" = '{"include": []}' ]; then
             test "$TEST_RESULT" = skipped
           else
             test "$TEST_RESULT" = success
+          fi
+          if [ "$NATIVE_MATRIX" = '{"include": []}' ]; then
+            test "$NATIVE_RESULT" = skipped
+          else
+            test "$NATIVE_RESULT" = success
           fi

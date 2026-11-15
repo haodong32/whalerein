@@ -1107,7 +1107,9 @@ async fn remote_revocation_cleans_when_secret_load_breaks_after_delete() {
             .unwrap();
         core.pending_commands().unwrap();
         let core = if cold {
-            Core::new(core.options.clone()).unwrap()
+            let options = core.options.clone();
+            drop(core);
+            Core::new(options).unwrap()
         } else {
             core
         };

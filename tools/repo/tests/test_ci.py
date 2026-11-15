@@ -1,6 +1,7 @@
 """Affected selection must never schedule unrelated project bodies."""
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,12 +70,12 @@ def test_execution_excludes_unselected_projects_and_unsupported_build(monkeypatc
     monkeypatch.setattr(ci.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
     ci.run_projects(ROOT, ["dsh"])
     assert calls == [
-        [str(ROOT / "repo"), "check", "--project", "dsh"],
-        [str(ROOT / "repo"), "test", "--project", "dsh", "--coverage"],
+        [sys.executable, "-m", "repo", "check", "--project", "dsh"],
+        [sys.executable, "-m", "repo", "test", "--project", "dsh", "--coverage"],
     ]
     calls.clear()
     ci.run_projects(ROOT, ["cli"])
-    assert [cmd[1] for cmd in calls] == ["check", "build", "test"]
+    assert [cmd[3] for cmd in calls] == ["check", "build", "test"]
     with pytest.raises(ValueError, match="explicit"):
         ci.run_projects(ROOT, [])
 
@@ -89,3 +90,15 @@ def test_cli_plan_and_run(monkeypatch, capsys):
     monkeypatch.setattr(ci, "run_projects", lambda *args: calls.append(args[1]))
     ci.main()
     assert calls == [["cli"]]
+
+
+def test_native_plan_schedules_matching_rust_consumers_on_both_systems():
+    jobs = ci.native_plan(ROOT, ["core/src/api.rs"])["include"]
+    assert {job["os"] for job in jobs} == {"macos-15", "windows-2025"}
+    assert all(set(job["projects"]) == {"core", "cli", "noise-peer"} for job in jobs)
+    assert ci.native_plan(ROOT, ["host/dsh/client.js"]) == {"include": []}
+    assert ci.native_plan(ROOT, ["docs/testing.md"]) == {"include": []}
+    assert all(
+        "proto" in job["projects"]
+        for job in ci.native_plan(ROOT, [".github/workflows/ci.yml"])["include"]
+    )

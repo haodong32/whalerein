@@ -89,6 +89,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
+      - name: Prepare storage on the disposable runner
+        if: steps.selection.outputs.run == 'true'
+        run: bash tools/repo/prepare-integration-storage.sh
+
       - name: Run the complete isolated suite
         if: steps.selection.outputs.run == 'true'
         id: tests

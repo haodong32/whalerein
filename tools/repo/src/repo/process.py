@@ -89,7 +89,8 @@ class Runner:
             child_env = {**child_env, "WHALEREIN_PROGRESS": "events"}
         started = time.monotonic()
         try:
-            execute = self._stream
+            # Windows selectors cannot watch anonymous subprocess pipes.
+            execute = self._capture if os.name == "nt" else self._stream
             completed = execute(
                 list(args),
                 cwd=cwd_str,
@@ -144,6 +145,36 @@ class Runner:
         if check and not result.ok:
             raise ToolMissingError(result.stderr) if result.missing else _failed(result)
         return result
+
+    def _capture(self, argv, *, cwd, env, timeout, **kwargs):
+        """Portable buffered capture; Windows uses taskkill to stop the child tree."""
+        with subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as failure:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        check=False,
+                        timeout=15,
+                    )
+                else:
+                    process.terminate()
+                stdout, stderr = process.communicate(timeout=45)
+                failure.stdout, failure.stderr = stdout, stderr
+                raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     def _stream(self, argv, *, cwd, env, timeout, **kwargs):
         from .progress import parse

@@ -72,6 +72,17 @@ before waiting for transient database contention; an already-live Cache may keep
 its in-memory key copy until its references are released. Transport, source and
 decoding errors are not grant revocation.
 
+Windows cleanup must not initialize a missing cache to infer retention. A cold
+existing cache is opened read-only without migration before remote revocation;
+its SQLite native handle, the pinned profile and the singly linked database
+entry must match their volume and 128-bit file identifiers. Missing or unproven
+data retains an unverified marker. Reparse points and unexpected SQLite sidecars
+are rejected. Cache reads on Windows check the same confirmed revocation fence
+as Unix. An obsolete connection releases its handle without discarding the
+durable journal; authoritative cleanup closes the database before unlinking it.
+Failure to retain a pending pairing identity cannot be reported as a saved
+snapshot merely because the command snapshot succeeded.
+
 Confirmed global revocation removes any retained pairing FINISH credential after
 saving only its redacted identity. The profile also retains an opaque revocation
 epoch after transient cleanup markers are removed. Pairing captures this epoch

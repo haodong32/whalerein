@@ -91,13 +91,36 @@ impl FileSecretStore {
         let encoded: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
         self.directory.join(encoded)
     }
+
+    fn missing_parent_is_valid(&self) -> bool {
+        // Windows may report PATH_NOT_FOUND when an ancestor is a file, while
+        // Unix reports ENOTDIR. Only a genuinely missing directory is empty.
+        for ancestor in self.directory.ancestors() {
+            let ancestor = if ancestor.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                ancestor
+            };
+            match std::fs::metadata(ancestor) {
+                Ok(metadata) => return metadata.is_dir(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
 }
 
 impl SecretStore for FileSecretStore {
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, SecretError> {
         match std::fs::read(self.path(key)) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.missing_parent_is_valid() =>
+            {
+                Ok(None)
+            }
             Err(_) => Err(SecretError::Failed),
         }
     }
@@ -118,7 +141,12 @@ impl SecretStore for FileSecretStore {
     fn delete(&self, key: &str) -> Result<(), SecretError> {
         match std::fs::remove_file(self.path(key)) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.missing_parent_is_valid() =>
+            {
+                Ok(())
+            }
             Err(_) => Err(SecretError::Failed),
         }
     }
@@ -257,6 +285,10 @@ mod tests {
             Err(SecretError::Unavailable)
         ));
         assert!(matches!(store.load("k"), Err(SecretError::Failed)));
+        assert!(matches!(store.delete("k"), Err(SecretError::Failed)));
+        let missing = FileSecretStore::new(dir.path().join("missing/child"));
+        assert!(missing.load("k").unwrap().is_none());
+        missing.delete("k").unwrap();
     }
 
     #[test]

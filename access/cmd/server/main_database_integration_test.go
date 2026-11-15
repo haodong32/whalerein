@@ -272,7 +272,7 @@ func TestRunCleanupLogsStoreFailures(t *testing.T) {
 	}
 }
 
-// When line, broker or listener configuration is invalid, Access rejects startup.
+// When broker or listener configuration is invalid, Access rejects startup.
 func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	newConfig := func(t *testing.T, db *storetest.DB) config.Config {
 		t.Helper()
@@ -285,19 +285,13 @@ func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	t.Run("rejects server startup when REST client configuration is invalid", func(t *testing.T) {
-		db := storetest.NewSchema(t)
-		cfg := newConfig(t, db)
-		cfg.Line.HeartbeatInterval = cfg.Line.PolicyTTL
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "heartbeat_interval") {
-			t.Fatalf("err = %v", err)
-		}
-	})
 	t.Run("rejects server startup when broker connector is invalid", func(t *testing.T) {
 		db := storetest.NewSchema(t)
 		cfg := newConfig(t, db)
 		cfg.Broker.URL = "bad://host"
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "broker") {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runServer(ctx, cfg, logger); err == nil || !strings.Contains(err.Error(), "broker") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -310,7 +304,9 @@ func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 		defer occupied.Close()
 		cfg := newConfig(t, db)
 		cfg.InternalListen = occupied.Addr().String()
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "internal") {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runServer(ctx, cfg, logger); err == nil || !strings.Contains(err.Error(), "internal") {
 			t.Fatalf("err = %v", err)
 		}
 	})

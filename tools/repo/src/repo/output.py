@@ -75,7 +75,10 @@ class Output:
             for frame, number in traceback.walk_tb(current.__traceback__):
                 filename = Path(frame.f_code.co_filename).name
                 lines.append(f'  File "{filename}", line {number}, in {frame.f_code.co_name}')
-            lines.append(type(current).__name__)
+            label = type(current).__name__
+            if isinstance(current, OSError) and type(current.errno) is int:
+                label += f" (errno={current.errno})"
+            lines.append(label)
             current = current.__cause__ or (
                 current.__context__ if not current.__suppress_context__ else None
             )

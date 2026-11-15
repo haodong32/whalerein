@@ -124,6 +124,24 @@ func TestCheckConfigSucceedsWithoutConnectingToInfrastructure(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidLineTimingBeforeConnectingToInfrastructure(t *testing.T) {
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture?sslmode=disable"})
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.ReplaceAll(body, []byte("heartbeat_interval: 5s"), []byte("heartbeat_interval: 10s"))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	if code := run(ctx, []string{"-config", path}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "heartbeat_interval") {
+		t.Fatal("invalid line timing was not rejected during configuration loading")
+	}
+}
+
 type blockingListener struct {
 	closed chan struct{}
 	once   sync.Once

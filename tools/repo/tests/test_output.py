@@ -141,3 +141,15 @@ def test_successful_explicit_result_and_case_identity_are_preserved():
     human = io.StringIO()
     Output(stdout=human).info(identity)
     assert human.getvalue().strip() == identity
+
+
+def test_oserror_diagnostics_expose_errno_without_private_payloads():
+    import errno
+
+    stderr = io.StringIO()
+    out = Output(verbose=True, stdout=io.StringIO(), stderr=stderr)
+    out.failure(
+        "test", OSError(errno.ENOSPC, "synthetic-private-message", "synthetic-private-path")
+    )
+    assert "OSError (errno=28)" in stderr.getvalue()
+    assert "synthetic-private" not in stderr.getvalue()
