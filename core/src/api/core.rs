@@ -2302,7 +2302,31 @@ impl Core {
         device_id: &str,
         expected_marker: &str,
     ) -> CoreResult<()> {
-        self.clear_local_pairing_inner(device_id, false, Some(expected_marker))
+        let guard = crate::security::device::ProfileLock::acquire_admission_async(
+            &self.options.data_dir,
+            std::time::Instant::now()
+                + Duration::from_millis(crate::commands::REQUEST_TTL_MS as u64),
+        )
+        .await
+        .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
+        if revoked_commands::marker_in(guard.directory())?.as_deref() != Some(expected_marker) {
+            return Err(CoreError::Conflict(
+                "pairing changed while clearing authorization".into(),
+            ));
+        }
+        // Match the Unix ordering: durably confirm revocation, attempt identity
+        // retention, and erase the FINISH credential before final cleanup. A
+        // failed retention attempt remains visible through the sticky lost phase.
+        let confirmed = revoked_commands::write_marker_in(guard.directory(), "confirmed-waiting");
+        if self
+            .redact_pending_pairing_after_revocation(device_id, guard.directory())
+            .is_err()
+        {
+            let _ = revoked_commands::write_marker_in(guard.directory(), "confirmed-lost");
+        }
+        let _ = self.clear_local_pairing_secrets(device_id);
+        self.clear_local_pairing_prepared(device_id, false, None, Some(guard))?;
+        confirmed
     }
 
     fn clear_local_pairing_inner(
