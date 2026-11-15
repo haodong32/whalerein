@@ -112,6 +112,9 @@ the scheduled main-branch cache baseline.
 
 The PR job first builds the image and collects the complete inventory, uploading
 preparation evidence before executing all cases. Inventory is not a test pass.
+Both integration workflows reclaim unused preinstalled images and SDKs on their
+disposable GitHub-hosted Linux VM and require 24 GiB free before image building.
+The storage helper rejects local, self-hosted and non-Linux environments.
 Image builds temporarily reserve 32 MiB on the report filesystem, then release
 it before saving failure reports so build storage exhaustion does not mask its
 original error. Verbose exception diagnostics include numeric OS error codes

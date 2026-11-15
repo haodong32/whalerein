@@ -41,6 +41,9 @@ jobs:
           df -Pm / "$GITHUB_WORKSPACE"
           docker system df
 
+      - name: Prepare storage on the disposable runner
+        run: bash tools/repo/prepare-integration-storage.sh
+
       - name: Prepare the image and discover the complete suite
         run: ./repo --verbose test --suite integration --list --output .data/runs/integration-inventory
 
