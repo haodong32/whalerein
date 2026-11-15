@@ -396,7 +396,7 @@ impl Core {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn admission_revocation_error(state: Option<&str>, warning: bool) -> Option<CoreError> {
         match state.and_then(revoked_commands::confirmed_phase) {
             Some("saved") if !warning => Some(CoreError::Revoked),
@@ -406,7 +406,7 @@ impl Core {
     }
 
     fn cache(&self) -> CoreResult<Arc<Cache>> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let (state, warning) =
                 revoked_commands::marker_with_retention_warning(&self.options.data_dir)?;
@@ -2351,9 +2351,10 @@ impl Core {
             }),
             Err(error) => Err(error.into()),
         };
-        // Windows has no verified fd-relative SQLite opening path yet.
+        // Never create a new cache during revocation: a missing database cannot
+        // prove that all pending identities were retained.
         #[cfg(not(unix))]
-        let cache = self.cache();
+        let cache = self.cache.lock().expect("cache lock").clone();
         let _admission = match prepared {
             Some(guard) => guard,
             None => crate::security::device::ProfileLock::acquire_admission_waiting(
@@ -2471,15 +2472,17 @@ impl Core {
             )),
         };
         #[cfg(not(unix))]
-        let snapshot_missing = false;
+        let snapshot_missing = cache.is_none();
         #[cfg(not(unix))]
         let snapshot = cache
+            .ok_or(crate::cache::CacheError::Missing)
+            .map_err(CoreError::from)
             .and_then(|cache| cache.pending_commands().map_err(Into::into))
             .and_then(|pending| revoked_commands::preserve_in(_admission.directory(), &pending));
         let retention = if fence.is_ok() {
             revoked_commands::write_marker_in(
                 _admission.directory(),
-                if snapshot.is_ok() {
+                if snapshot.is_ok() && pending_cleanup.is_ok() {
                     "confirmed-saved"
                 } else {
                     "confirmed-lost"

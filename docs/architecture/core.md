@@ -72,6 +72,13 @@ before waiting for transient database contention; an already-live Cache may keep
 its in-memory key copy until its references are released. Transport, source and
 decoding errors are not grant revocation.
 
+Windows cleanup must not initialize a missing cache to infer retention. It uses
+only the already initialized connection, and a missing cache retains an
+unverified marker. Cache reads on Windows check the same confirmed revocation
+fence as Unix, including when an older Core still holds a cached connection.
+Failure to retain a pending pairing identity cannot be reported as a saved
+snapshot merely because the command snapshot succeeded.
+
 Confirmed global revocation removes any retained pairing FINISH credential after
 saving only its redacted identity. The profile also retains an opaque revocation
 epoch after transient cleanup markers are removed. Pairing captures this epoch
