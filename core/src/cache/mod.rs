@@ -5,6 +5,8 @@
 //! cache key held by `SecretStore`; the key never enters the database.
 
 mod conversation;
+#[cfg(windows)]
+mod windows;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -132,6 +134,13 @@ struct CacheProvenance {
     inode: u64,
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CacheProvenance {
+    profile: windows::Identity,
+    database: windows::Identity,
+}
+
 #[cfg(unix)]
 impl Drop for LockedPendingSnapshot<'_> {
     fn drop(&mut self) {
@@ -141,9 +150,9 @@ impl Drop for LockedPendingSnapshot<'_> {
 
 pub struct Cache {
     conn: Mutex<Connection>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     provenance: Option<CacheProvenance>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     revocation_only: bool,
     key: [u8; 32],
     history_budget_bytes: u64,
@@ -167,7 +176,7 @@ impl Cache {
         self.provenance.is_some()
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn is_revocation_only(&self) -> bool {
         self.revocation_only
     }
@@ -190,15 +199,15 @@ impl Cache {
         #[allow(unused_mut)] // Unix records provenance after initialization.
         let mut cache = Self {
             conn: Mutex::new(conn),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             provenance: None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             revocation_only: false,
             key,
             history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             cache.provenance = cache.capture_provenance(path);
         }
@@ -208,9 +217,9 @@ impl Cache {
     pub fn open_in_memory(key: [u8; 32]) -> Result<Self, CacheError> {
         let cache = Self {
             conn: Mutex::new(Connection::open_in_memory()?),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             provenance: None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             revocation_only: false,
             key,
             history_budget_bytes: HISTORY_CACHE_BYTES,
@@ -573,6 +582,97 @@ impl Cache {
         })
     }
 
+    #[cfg(windows)]
+    fn capture_provenance(&self, path: &Path) -> Option<CacheProvenance> {
+        let conn = self.conn.try_lock().ok()?;
+        windows::prove(&conn, path.parent()?).ok()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn open_existing_verified(
+        path: &Path,
+        key: [u8; 32],
+        directory: &std::fs::File,
+    ) -> Result<Self, CacheError> {
+        let conn = Connection::open_with_flags(
+            windows::directory_path(directory)?.join("cache.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )?;
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        let provenance = windows::prove(&conn, path.parent().ok_or(CacheError::Corrupt)?)?;
+        if provenance.profile != windows::directory_identity(directory)? {
+            return Err(CacheError::Corrupt);
+        }
+        Ok(Self {
+            conn: Mutex::new(conn),
+            provenance: Some(provenance),
+            revocation_only: true,
+            key,
+            history_budget_bytes: HISTORY_CACHE_BYTES,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn pending_commands_verified(
+        &self,
+        directory: &std::fs::File,
+        profile: &Path,
+    ) -> Result<Vec<PendingCommand>, CacheError> {
+        let provenance = self.provenance.ok_or(CacheError::Corrupt)?;
+        let conn = self.conn.lock().map_err(|_| CacheError::Database)?;
+        if windows::prove(&conn, profile)? != provenance
+            || windows::directory_identity(directory)? != provenance.profile
+        {
+            return Err(CacheError::Corrupt);
+        }
+        windows::no_sidecars(directory)?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| match e.sqlite_error_code() {
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                    CacheError::Busy
+                }
+                _ => CacheError::Database,
+            })?;
+        let mode: String = transaction.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(CacheError::Corrupt);
+        }
+        let pending = Self::read_pending_commands(&transaction)?;
+        windows::no_sidecars(directory)?;
+        if windows::prove(&conn, profile)? != provenance {
+            return Err(CacheError::Corrupt);
+        }
+        Ok(pending)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_profile(&self, directory: &std::fs::File, profile: &Path) -> bool {
+        let Some(provenance) = self.provenance else {
+            return false;
+        };
+        let Ok(conn) = self.conn.try_lock() else {
+            return false;
+        };
+        matches!(windows::prove(&conn, profile), Ok(actual) if actual == provenance)
+            && matches!(windows::directory_identity(directory), Ok(id) if id == provenance.profile)
+    }
+
+    /// Release the file handle without discarding the durable pending journal.
+    #[cfg(windows)]
+    pub(crate) fn release_for_revocation(&self) -> Result<(), CacheError> {
+        let replacement = Self::open_in_memory(self.key)?
+            .conn
+            .into_inner()
+            .map_err(|_| CacheError::Database)?;
+        *self.conn.lock().map_err(|_| CacheError::Database)? = replacement;
+        Ok(())
+    }
+
     /// Initialize a Cache around an already existing database without creating
     /// or migrating it; business rows are not read until provenance is checked.
     #[cfg(unix)]
@@ -766,10 +866,17 @@ impl Cache {
 
     #[cfg(any(not(unix), test))]
     pub fn clear(&self) -> Result<(), CacheError> {
+        #[cfg(windows)]
+        if self.revocation_only {
+            return self.release_for_revocation();
+        }
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(
             "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages;",
         )?;
+        drop(conn);
+        #[cfg(windows)]
+        self.release_for_revocation()?;
         Ok(())
     }
 }
