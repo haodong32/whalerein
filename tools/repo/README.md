@@ -110,6 +110,13 @@ enable automatic integration runs. Reports are uploaded as
 `pr-integration-<pr-number>-<run-id>-<attempt>` Artifacts; PR runs do not establish
 the scheduled main-branch cache baseline.
 
+The PR job first builds the image and collects the complete inventory, uploading
+preparation evidence before executing all cases. Inventory is not a test pass.
+Image builds temporarily reserve 32 MiB on the report filesystem, then release
+it before saving failure reports so build storage exhaustion does not mask its
+original error. Verbose exception diagnostics include numeric OS error codes
+without exception messages or filenames.
+
 Inspect its content fingerprint locally:
 
 ```bash

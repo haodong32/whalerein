@@ -36,8 +36,43 @@ jobs:
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
+      - name: Inspect available build storage
+        run: |
+          df -Pm / "$GITHUB_WORKSPACE"
+          docker system df
+
+      - name: Prepare the image and discover the complete suite
+        run: ./repo --verbose test --suite integration --list --output .data/runs/integration-inventory
+
+      - name: Inspect storage after image preparation
+        if: always()
+        continue-on-error: true
+        run: |
+          df -Pm / "$GITHUB_WORKSPACE"
+          docker system df
+
+      - name: Upload preparation evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pr-integration-inventory-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/integration-inventory/report.json
+            .data/runs/integration-inventory/report.html
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Run the complete isolated suite
         run: ./repo --verbose test --suite integration --output .data/runs/integration
+
+      - name: Inspect storage after execution
+        if: always()
+        continue-on-error: true
+        run: |
+          df -Pm / "$GITHUB_WORKSPACE"
+          docker system df
 
       - name: Upload reports
         if: always()
