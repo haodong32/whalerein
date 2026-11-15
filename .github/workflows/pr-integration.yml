@@ -37,7 +37,7 @@ jobs:
           cache-dependency-glob: tools/repo/uv.lock
 
       - name: Run the complete isolated suite
-        run: ./repo test --suite integration --output .data/runs/integration
+        run: ./repo --verbose test --suite integration --output .data/runs/integration
 
       - name: Upload reports
         if: always()
