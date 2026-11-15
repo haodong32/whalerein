@@ -376,7 +376,7 @@ mod lock_tests {
             Ok(_) => panic!("a held lock must not be acquired"),
             Err(error) => error,
         };
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(retryable_admission_error(&error));
         assert!(started.elapsed() >= std::time::Duration::from_millis(25));
         drop(held);
     }
