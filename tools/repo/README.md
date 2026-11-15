@@ -61,6 +61,23 @@ project in the same checkout. Each group installs only its required toolchains,
 checks supported operations and saves its own coverage reports as an artifact.
 The `CI gate` job requires all selected groups to pass, including on retries.
 
+Affected Rust projects additionally run on `macos-15` and `windows-2025` native
+runners, with their own checks, builds and per-crate coverage gates. The native
+matrix uses the same project inventory and consumer expansion as Linux; a
+non-Rust change does not schedule it. Native job failures block `CI gate`.
+The macOS Core job explicitly runs the otherwise ignored Keychain round-trip
+in a temporary keychain and verifies execution and cleanup. Windows also runs
+focused repository-runner tests for its native pipes and process-tree deadlines.
+The Windows runner buffers child output because Windows selectors cannot watch
+subprocess pipes; timeout/interruption retains observed output and terminates
+the child tree. CI invokes the repository module through its active Python
+interpreter so Windows does not need to execute the Unix `./repo` launcher.
+For the same entry on Windows, use
+`uv run --project tools/repo python -m repo <command>`.
+`repo.native_ci` installs checksummed native protoc 36.2 and owns the isolated
+Keychain check; it does not start development services. macOS/Windows reports
+are uploaded as `ci-native-<os>-<sha>-<attempt>` Artifacts.
+
 Inspect selection locally without running tests or contacting GitHub:
 
 ```bash
