@@ -626,6 +626,7 @@ async fn revocation_retains_only_opaque_unconfirmed_identity_and_clears_credenti
     assert_eq!(reopened.unconfirmed_revoked_commands().unwrap(), identities);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_storage_failure_still_clears_credentials_and_reports_failure() {
     let access = FakeAccess::start().await;
