@@ -3,8 +3,10 @@ name: iOS
 # Cost tiers:
 # - pull request: build once, then the Unit plan plus a small UI smoke selection.
 # - merge queue, main push, nightly, and a manual "full" dispatch: the complete
-#   UI plan. The merge queue runs it once per queued entry instead of once per
-#   push, so a long UI job cannot be cancelled by the next commit.
+#   UI plan. A merge queue would run it once per queued entry instead of once
+#   per push, so a long UI job cannot be cancelled by the next commit. This
+#   personal repository cannot enable that ruleset yet, but the merge_group
+#   tier is already wired for when it can.
 
 on:
   pull_request:

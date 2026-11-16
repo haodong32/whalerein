@@ -231,23 +231,31 @@ or updating a PR, or leaving the label attached, does not start the heavy suite.
 After pushing a repair, remove and re-add the label to test the new revision.
 The label must exist in the repository; create it once through GitHub's Labels
 page if needed. JSON/HTML reports are available in the run's
-`integration-<run-id>-<attempt>` Artifact for seven days. An unlabeled PR passes
-`Full integration` as a no-op, so it can also be required.
+`integration-<run-id>-<attempt>` Artifact for seven days. A complete run builds
+the integration image and executes the whole isolated suite, so it takes about
+90 minutes; it is therefore reported but not a required check on this
+repository.
 
-### Merge queue
+### Merge queue (not available here)
 
-Every queued entry runs `CI gate`, the complete integration suite and the full
-iOS UI plan against the exact merge-group tree. The queue runs each suite once
-per entry instead of once per push, so a long UI job cannot be cancelled by the
-next commit. Integration does not record a main-branch baseline from a queue
-tree because a merge-group commit is not an ancestor of main.
+The workflows accept `merge_group` and run `CI gate`, the complete integration
+suite and the full iOS UI plan against the exact merge-group tree. The merge
+queue itself is a repository ruleset feature that GitHub currently rejects for
+this personal public repository (`Invalid rule 'merge_queue'`), so the tier is
+inactive here. No workflow change is needed if the queue becomes available
+later, for example after moving the repository into an organization with the
+feature. Enabling the ruleset with required `CI gate` and `iOS gate` checks is
+already done; the merge-queue rule can be added to it unchanged.
 
 ### Main and nightly
 
 A main push reruns the full iOS UI plan for the landed tree. Full integration
 remains scheduled by `.github/workflows/integration.yml` at 03:17 Asia/Shanghai
-and the iOS full plan at 02:47; GitHub scheduling is best-effort, and manual
-dispatch can validate a repair or high-risk change without waiting.
+and the iOS full plan at 02:47 Asia/Shanghai (18:47 UTC); GitHub scheduling is
+best-effort, and manual dispatch can validate a repair or high-risk change
+without waiting.
+iOS dispatch accepts `unit`, `smoke` or `full`; choose the PR branch and `full`
+to run the complete UI plan before merging.
 
 The scheduled workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips

@@ -103,13 +103,14 @@ Asia/Shanghai), manual and reusable release-gate execution. See
 concurrency and report rules. It calls the existing
 `./repo test --suite integration`; it does not require local server services.
 
-A merge-queue entry always runs the complete suite against the exact tree that
-will land. On a pull request, add the `run-integration` label to request the
-same suite for that label event; later pushes do not rerun it, so remove and
-re-add the label to verify a new revision. Unlabeled PR revisions still report
-the `Full integration` check as a successful no-op, which lets the check be
-required. PR and queue runs do not establish the scheduled main-branch cache
-baseline. Reports are uploaded as `integration-<run-id>-<attempt>` Artifacts.
+The workflows already run the complete suite on a `merge_group` tree, but this
+personal repository cannot enable GitHub's merge-queue ruleset, so that tier is
+inactive here. On a pull request, add the `run-integration` label to request the
+suite for that label event; later pushes do not rerun it, so remove and re-add
+the label to verify a new revision. A complete run takes about 90 minutes, so
+the check is reported but not required. PR and queue runs do not establish the
+scheduled main-branch cache baseline. Reports are uploaded as
+`integration-<run-id>-<attempt>` Artifacts.
 
 Every run reclaims unused preinstalled images and SDKs on its disposable
 GitHub-hosted Linux VM and requires 24 GiB free before image building. The
