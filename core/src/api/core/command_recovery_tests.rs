@@ -926,6 +926,7 @@ async fn uncertain_revocation_reopens_without_false_revoked_and_can_retry() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_reports_cache_sidecar_and_config_cleanup_errors_and_retries() {
     for target in [

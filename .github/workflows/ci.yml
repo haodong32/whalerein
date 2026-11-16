@@ -273,20 +273,6 @@ jobs:
         if: runner.os == 'Windows'
         run: uv run --project tools/repo python -m repo test --project repo --only windows
 
-      - name: Diagnose Windows core revocation
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        env:
-          RUST_BACKTRACE: '1'
-        run: cargo test -p whalerein-core --lib revocation_while_waiting_for_command_ends_pairing -- --nocapture
-
-      - name: Diagnose Windows CLI pairing
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        env:
-          RUST_BACKTRACE: '1'
-        run: cargo test -p whalerein-cli --test cli_binary pair_reads_the_invitation_from_stdin -- --nocapture
-
       - name: Check, build and test selected native projects
         env:
           PROJECTS: ${{ toJSON(matrix.projects) }}

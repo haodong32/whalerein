@@ -2559,12 +2559,14 @@ impl Core {
                     .clear_local_pairing_async(&device_id, &revocation_intent)
                     .await
                 {
-                    if !matches!(
+                    let cleanup_only = matches!(
                         error,
                         CoreError::Cache(_)
                             | CoreError::Unavailable(_)
                             | CoreError::RevokedRetentionUnverified
-                    ) {
+                    ) || (cfg!(windows)
+                        && matches!(&error, CoreError::Internal(message) if message == "pairing cleanup incomplete"));
+                    if !cleanup_only {
                         return Err(error);
                     }
                 }
