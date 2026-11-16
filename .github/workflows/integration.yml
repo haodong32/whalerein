@@ -1,6 +1,17 @@
 name: Integration
 
+# Trigger tiers:
+# - pull request: quiet unless the `run-integration` label is attached. The job
+#   still runs so the `Full integration` check reports a result for every
+#   revision; it simply skips the heavy suite.
+# - merge queue: always runs against the exact tree about to land.
+# - nightly schedule, manual dispatch and reusable release calls: run the
+#   complete suite, with the scheduled baseline skip described in docs/testing.md.
+
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  merge_group:
   schedule:
     - cron: '17 3 * * *'
       timezone: Asia/Shanghai
@@ -24,9 +35,13 @@ on:
 permissions:
   contents: read
 
-# Shared by daily, manual and reusable release invocations. Never cancel a release check.
+# Pull-request and merge-queue runs queue per revision; scheduled, manual and
+# release runs share one global slot so a release check is never cancelled.
 concurrency:
-  group: whalerein-full-integration
+  group: >-
+    ${{ (github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number)) ||
+        (github.event_name == 'merge_group' && format('integration-queue-{0}', github.event.merge_group.head_sha)) ||
+        'whalerein-full-integration' }}
   cancel-in-progress: false
 
 jobs:
@@ -47,16 +62,25 @@ jobs:
         id: inputs
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT: ${{ github.event_name }}
         run: |
+          set -euo pipefail
           test "$DEFAULT_BRANCH" = main
           revision=$(git rev-parse HEAD)
-          git merge-base --is-ancestor "$revision" origin/main
+          # Pull-request and merge-queue commits are synthetic merges of the
+          # proposal and main; they are not ancestors of main but they are the
+          # trees that would land, so they are still the verified revision.
+          case "$EVENT" in
+            pull_request|merge_group) ;;
+            *) git merge-base --is-ancestor "$revision" origin/main ;;
+          esac
           key=$(python3 tools/repo/src/repo/integration_ci.py key --revision "$revision")
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Restore successful input record
         id: baseline
+        if: github.event_name == 'schedule'
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -67,18 +91,45 @@ jobs:
         id: selection
         env:
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CACHE_HIT: ${{ steps.baseline.outputs.cache-hit }}
           REVISION: ${{ steps.inputs.outputs.revision }}
         run: |
-          prior=$(python3 tools/repo/src/repo/integration_ci.py cached --revision "$REVISION" --output .data/integration-passed/receipt.json)
-          if [ "$EVENT" = schedule ] && [ "$CACHE_HIT" = true ] && [ -n "$prior" ]; then
-            echo "verified_revision=$prior" >> "$GITHUB_OUTPUT"
-            echo 'run=false' >> "$GITHUB_OUTPUT"
-            echo 'Full integration skipped: these relevant inputs already passed.'
-          else
-            echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              # Only the label event itself requests the suite. Later pushes
+              # keep the check reporting without spending the heavy run.
+              if [ "$ACTION" = labeled ] && printf '%s' "$LABELS" | grep -q '"run-integration"'; then
+                echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+                echo 'run=true' >> "$GITHUB_OUTPUT"
+              else
+                echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+                echo 'run=false' >> "$GITHUB_OUTPUT"
+                echo 'Full integration skipped: add the run-integration label to request it.'
+              fi
+              ;;
+            merge_group|workflow_dispatch|workflow_call)
+              echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+              echo 'run=true' >> "$GITHUB_OUTPUT"
+              ;;
+            schedule)
+              prior=$(python3 tools/repo/src/repo/integration_ci.py cached --revision "$REVISION" --output .data/integration-passed/receipt.json)
+              if [ "$CACHE_HIT" = true ] && [ -n "$prior" ]; then
+                echo "verified_revision=$prior" >> "$GITHUB_OUTPUT"
+                echo 'run=false' >> "$GITHUB_OUTPUT"
+                echo 'Full integration skipped: these relevant inputs already passed.'
+              else
+                echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+                echo 'run=true' >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
+              echo 'run=true' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - name: Set up uv and Python
         if: steps.selection.outputs.run == 'true'
@@ -99,7 +150,10 @@ jobs:
         run: ./repo test --suite integration --output .data/runs/integration
 
       - name: Record complete success
-        if: steps.tests.outcome == 'success'
+        if: >-
+          steps.tests.outcome == 'success' &&
+          github.event_name != 'pull_request' &&
+          github.event_name != 'merge_group'
         env:
           REVISION: ${{ steps.inputs.outputs.revision }}
         run: >-
@@ -109,7 +163,11 @@ jobs:
           --output .data/integration-passed/receipt.json
 
       - name: Retain successful baseline
-        if: success() && steps.tests.outcome == 'success' && steps.baseline.outputs.cache-hit != 'true'
+        if: >-
+          success() && steps.tests.outcome == 'success' &&
+          steps.baseline.outputs.cache-hit != 'true' &&
+          github.event_name != 'pull_request' &&
+          github.event_name != 'merge_group'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/integration-passed

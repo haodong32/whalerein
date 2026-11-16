@@ -211,25 +211,43 @@ oversubscribes a 4–6 vCPU host and can fail timing-sensitive cases, so raise
 the shard count only with more CPU. Readiness polling runs at 20 ms, which
 roughly halves the wall time spent in fixture waits.
 
-## CI integration timing
+## CI test tiers
 
-Ordinary PR updates and main pushes run affected-project fast checks. Full
-integration is scheduled separately by `.github/workflows/integration.yml` at
-03:17 Asia/Shanghai each day. GitHub scheduling is best-effort; manual dispatch
-can validate a repair or high-risk change without waiting for the next schedule.
+Pull requests, the merge queue, main pushes and the nightly schedule run
+deliberately different amounts of work. Cheap tiers keep PR feedback fast; the
+queue, main and nightly tiers prove the exact trees that land.
 
-For a PR, manually add the `run-integration` label to start the **PR integration /
-Full integration (manual)** check. The dedicated `.github/workflows/pr-integration.yml`
-workflow runs the complete suite on Linux against the PR merge revision captured
-by that label event. Opening a PR, pushing commits, or leaving the label attached
-does not start another full run. After pushing a repair, remove and re-add the
-label to test the new revision. Use **Re-run jobs** to retry the original revision.
+### Pull request
+
+`.github/workflows/ci.yml` runs the affected-project fast checks, contract
+checks and deployment acceptance. The iOS workflow builds the XCFramework and
+test products once, then runs the Unit plan and a small UI smoke selection; the
+full 43-case UI plan does not run on every push. `CI gate` and `iOS gate` are the
+recommended required checks.
+
+`Full integration` reports a result on every PR revision but only runs the
+suite when the `run-integration` label is attached to that exact event. Opening
+or updating a PR, or leaving the label attached, does not start the heavy suite.
+After pushing a repair, remove and re-add the label to test the new revision.
 The label must exist in the repository; create it once through GitHub's Labels
 page if needed. JSON/HTML reports are available in the run's
-`pr-integration-<pr-number>-<run-id>-<attempt>` Artifact for seven days.
-This optional check has its own per-PR queue, does not block the fast CI gate,
-and does not update the scheduled main-branch success baseline. It should not be
-configured as a required branch-protection check because it only runs on request.
+`integration-<run-id>-<attempt>` Artifact for seven days. An unlabeled PR passes
+`Full integration` as a no-op, so it can also be required.
+
+### Merge queue
+
+Every queued entry runs `CI gate`, the complete integration suite and the full
+iOS UI plan against the exact merge-group tree. The queue runs each suite once
+per entry instead of once per push, so a long UI job cannot be cancelled by the
+next commit. Integration does not record a main-branch baseline from a queue
+tree because a merge-group commit is not an ancestor of main.
+
+### Main and nightly
+
+A main push reruns the full iOS UI plan for the landed tree. Full integration
+remains scheduled by `.github/workflows/integration.yml` at 03:17 Asia/Shanghai
+and the iOS full plan at 02:47; GitHub scheduling is best-effort, and manual
+dispatch can validate a repair or high-risk change without waiting.
 
 The scheduled workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips
@@ -247,12 +265,16 @@ jobs depend on the successful integration job. Publication automation is not yet
 implemented; this is its callable integration gate, not a complete release flow.
 Final package installation acceptance remains a separate release requirement.
 
-Scheduled, manual and reusable invocations share a concurrency group and do not
-cancel an active run. GitHub may replace an older pending run when several queue;
+Pull-request and merge-queue integration runs queue per revision. Scheduled,
+manual and reusable invocations share one global group and never cancel an
+active run. GitHub may replace an older pending run when several queue;
 cancelled callers must never be treated as successful publication gates.
 JSON/HTML reports and successful-input receipts are uploaded as
 `integration-<run-id>-<attempt>` Artifacts with seven-day retention. The cache is
 an optimization, not a permanent evidence archive. No Summary or Pages is used.
+
+The manual iOS dispatch accepts `unit`, `smoke` or `full`, so a flaky UI case can
+be retried without pushing a commit that would supersede the run.
 
 These CI triggers do not waive the local change-validation requirements above.
 
