@@ -117,12 +117,14 @@ class WhaleReinUITestCase: XCTestCase {
     ) {
         let picker = waitFor("host.picker", file: file, line: line)
         tap(picker, file: file, line: line)
-        let byIdentifier = app.buttons["host.row.\(hostId)"]
+        let byIdentifier = app.descendants(matching: .any)
+            .matching(identifier: "host.row.\(hostId)").firstMatch
         if byIdentifier.waitForExistence(timeout: 3) {
             byIdentifier.tap()
             return
         }
-        let byLabel = app.buttons[hostId]
+        let byLabel = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", hostId)).firstMatch
         // A rotation or re-layout can dismiss the menu between the wait and
         // the tap; reopen it once before declaring the item missing.
         if !byLabel.waitForExistence(timeout: 2) {

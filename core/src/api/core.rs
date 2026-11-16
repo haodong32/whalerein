@@ -3136,6 +3136,10 @@ impl Core {
                     failed = true;
                     let _ = cache.release_for_revocation();
                 }
+                // Windows cannot delete an open SQLite file. Drop the last
+                // connection before removing the profile entry; otherwise the
+                // revocation reports incomplete cleanup and leaves the fence.
+                drop(cache);
             }
             #[cfg(not(any(unix, windows)))]
             {

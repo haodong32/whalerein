@@ -891,7 +891,8 @@ mod tests {
         // Units are part of the contract, not just prose.
         assert!(!readme.contains("--timeout MILLISECONDS"));
         assert!(readme.contains("--timeout <seconds>"));
-        assert!(readme.contains("require `--yes`") || readme.contains("require\n`--yes`"));
+        let normalized = readme.replace("\r\n", "\n");
+        assert!(normalized.contains("require `--yes`") || normalized.contains("require\n`--yes`"));
         assert!(Command::known_names().iter().all(|name| !name.is_empty()));
     }
 
