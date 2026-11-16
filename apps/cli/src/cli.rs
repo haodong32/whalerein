@@ -392,6 +392,8 @@ impl Command {
     pub fn session_id(&self) -> Option<&str> {
         match self {
             Self::SessionFork { session }
+            | Self::Tail { session, .. }
+            | Self::Wait { session, .. }
             | Self::Sync { session }
             | Self::Send { session, .. }
             | Self::Questions { session, .. }

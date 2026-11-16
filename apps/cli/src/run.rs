@@ -9,7 +9,7 @@ use serde_json::json;
 use whalerein_core::api::{
     default_data_dir, CreateSessionInput, Environment, MemorySecretStore, PairingDecision,
     PendingQueueAction, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome, SecretStore,
-    SessionModel, WaitReason,
+    SessionKey, SessionModel, WaitReason,
 };
 use whalerein_core::{Core, CoreError, CoreOptions};
 
@@ -24,6 +24,10 @@ use crate::output::{
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Default total `wait` deadline. It starts before key resolution so
+/// authorized-Host discovery is charged to the same budget as the observation.
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Largest accepted deadline, matching the Host request budget.
 const MAX_TIMEOUT_MS: u64 = 2_147_483_647;
@@ -67,15 +71,13 @@ fn parse_timeout_seconds(value: &str) -> Result<Duration, &'static str> {
 async fn queue_change(
     core: &Core,
     command: &Command,
-    session: &str,
+    key: &SessionKey,
     item: &str,
     action: PendingQueueAction,
     text: &str,
 ) -> Result<CliOutcome, CoreError> {
-    let handle = core
-        .update_pending_queue(session, item, action, text)
-        .await?;
-    let refresh = core.pending_queue(session).await;
+    let handle = core.update_pending_queue(key, item, action, text).await?;
+    let refresh = core.pending_queue(key).await;
     let refresh_status = match refresh {
         Ok(queue) if queue.available => "current",
         _ => "unavailable",
@@ -87,6 +89,47 @@ async fn queue_change(
         refresh_status
     );
     Ok(CliOutcome::success(command, data, human))
+}
+
+/// The total elapsed-time budget for commands that observe a session over
+/// time. It is parsed before key resolution so Host discovery is charged to the
+/// same deadline as the observation itself.
+fn command_budget(command: &Command) -> Result<Option<Duration>, &'static str> {
+    match command {
+        Command::Wait { timeout, .. } => Ok(Some(match timeout.as_deref() {
+            Some(value) => parse_timeout_seconds(value)?,
+            None => DEFAULT_WAIT_TIMEOUT,
+        })),
+        Command::Tail { once, timeout, .. } => match timeout.as_deref() {
+            Some(value) => Ok(Some(parse_timeout_seconds(value)?)),
+            None if *once => Ok(Some(DEFAULT_TAIL_TIMEOUT)),
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+/// Borrow the key resolved by `run_with_signal`. Every session command reaches
+/// dispatch only after resolution, so a missing key is an internal invariant
+/// violation rather than a user-input problem.
+fn resolved_key(key: Option<&SessionKey>) -> Result<&SessionKey, CoreError> {
+    key.ok_or_else(|| CoreError::Internal("session key was not resolved before dispatch".into()))
+}
+
+/// What is left of a command's total deadline. `None` keeps an unbounded
+/// command unbounded; an expired deadline is a timeout.
+fn remaining_budget(deadline: Option<tokio::time::Instant>) -> Result<Option<Duration>, CoreError> {
+    match deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                Err(CoreError::Timeout)
+            } else {
+                Ok(Some(remaining))
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 pub async fn run(cli: Cli) -> CliOutcome {
@@ -137,31 +180,62 @@ where
         Err(error) => return with_quarantine(core_error_outcome(&command, error), quarantined),
     };
 
-    let core = match cli.host.as_deref() {
-        Some(host) => match core.with_session_host(host) {
-            Ok(scoped) => scoped,
-            Err(error) => return core_error_outcome(&command, error),
-        },
-        None => core,
-    };
+    // Two explicit scopes must not silently disagree about which Host a
+    // listing describes. This was enforced by the removed ambient Host scope.
+    if let (Some(scope), Command::Sessions { host }) = (cli.host.as_deref(), &command) {
+        if scope != host {
+            return core_error_outcome(
+                &command,
+                CoreError::Conflict(format!(
+                    "--host {scope} and sessions --host {host} disagree"
+                )),
+            );
+        }
+    }
 
-    let core = if let Some(session) = command.session_id() {
-        let key = match core.session_key(session).await {
-            Ok(key) => key,
+    // The total `wait`/`tail` deadline starts before session resolution, so a
+    // slow authorized-Host discovery cannot extend the observation window.
+    let started = tokio::time::Instant::now();
+    let budget = match command_budget(&command) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return with_quarantine(
+                CliOutcome::local_failure(&command, "invalid_argument", error, 2),
+                quarantined,
+            )
+        }
+    };
+    let deadline = budget.map(|budget| started + budget);
+
+    // Resolve the Host-qualified key exactly once, before dispatch. The key
+    // travels with the request; no ambient Host scope is installed.
+    let key = if let Some(session) = command.session_id() {
+        let resolve = async {
+            match cli.host.as_deref() {
+                Some(host) => core.scoped_session_key(host, session).await,
+                None => core.session_key(session).await,
+            }
+        };
+        let resolved = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, resolve).await {
+                Ok(resolved) => resolved,
+                Err(_) => Err(CoreError::Timeout),
+            },
+            None => resolve.await,
+        };
+        match resolved {
+            Ok(key) => Some(key),
             Err(error) => {
                 return core_error_outcome(
                     &command,
                     explain_ambiguous_session(&core, session, error).await,
                 )
             }
-        };
-        match core.with_session_host(&key.host_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return core_error_outcome(&command, error),
         }
     } else {
-        core
+        None
     };
+    let key = key.as_ref();
 
     // `answer` owns a richer interrupt path: it asks the Host to cancel the
     // open answer and only then reports unknown. Racing that against the
@@ -174,12 +248,12 @@ where
     };
     let mut signal = std::pin::pin!(signal);
     let result = if matches!(command, Command::Answer { .. }) {
-        dispatch(&core, &cli, &command).await
+        dispatch(&core, &cli, &command, key, deadline).await
     } else {
         // The dispatch future is boxed so the interrupt branch can drop it
         // *before* the cleanup window: dropping a `wait` future runs Core's
         // observation guard, which sends CancelSessionWait from a spawned task.
-        let mut work = Box::pin(dispatch(&core, &cli, &command));
+        let mut work = Box::pin(dispatch(&core, &cli, &command, key, deadline));
         tokio::select! {
             result = &mut work => result,
             _ = &mut signal => {
@@ -447,7 +521,13 @@ fn make_private(path: &Path) {
 /// dispatches that carry a `CliOutcome`; protocol failures stay `CoreError`.
 /// Execute one parsed command. Local validation failures are successful
 /// dispatches that carry a `CliOutcome`; protocol failures stay `CoreError`.
-async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcome, CoreError> {
+async fn dispatch(
+    core: &Core,
+    cli: &Cli,
+    command: &Command,
+    key: Option<&SessionKey>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<CliOutcome, CoreError> {
     let result = match command {
         Command::Profile { .. } => unreachable!("profile commands are dispatched before Core"),
         Command::Pair {
@@ -509,15 +589,18 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             Err(error) => Err(error),
         },
         Command::Model {
-            action: ModelAction::Get { session },
-        } => match core.read_session_model(session).await {
-            Ok(selection) => Ok(CliOutcome::success(
-                command,
-                json!(selection),
-                render_session_model(&selection),
-            )),
-            Err(error) => Err(error),
-        },
+            action: ModelAction::Get { .. },
+        } => {
+            let key = resolved_key(key)?;
+            match core.read_session_model(key).await {
+                Ok(selection) => Ok(CliOutcome::success(
+                    command,
+                    json!(selection),
+                    render_session_model(&selection),
+                )),
+                Err(error) => Err(error),
+            }
+        }
         Command::Model {
             action:
                 ModelAction::Set {
@@ -527,9 +610,10 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                     effort,
                 },
         } => {
+            let key = resolved_key(key)?;
             // Re-selecting the effective next model is a no-op. It must not
             // journal a second indistinguishable pending command (QMQ-10).
-            if let Ok(current) = core.read_session_model(session).await {
+            if let Ok(current) = core.read_session_model(key).await {
                 if model_selection_matches(&current, provider, model, effort.as_deref()) {
                     return Ok(CliOutcome::success(
                         command,
@@ -539,7 +623,7 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                 }
             }
             match core
-                .select_session_model(session, provider, model, effort.as_deref())
+                .select_session_model(key, provider, model, effort.as_deref())
                 .await
             {
                 Ok(handle) => Ok(CliOutcome::success(
@@ -550,7 +634,10 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                 Err(error) => Err(error),
             }
         }
-        Command::SessionFork { session } => match core.fork_session_outcome(session).await {
+        Command::SessionFork { session } => match core
+            .fork_session_outcome(resolved_key(key)?)
+            .await
+        {
             Ok(outcome) => {
                 let handle = outcome.handle;
                 let created = handle.lifecycle_receipt.as_ref().is_some_and(|receipt| {
@@ -705,49 +792,24 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             )),
             Err(error) => Err(error),
         },
-        Command::Tail {
-            session,
-            once,
-            timeout,
-        } => {
-            let timeout = match timeout.as_deref().map(parse_timeout_seconds).transpose() {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(CliOutcome::local_failure(
-                        command,
-                        "invalid_argument",
-                        error,
-                        2,
-                    ))
-                }
-            };
-            let timeout = timeout.or(if *once {
-                Some(DEFAULT_TAIL_TIMEOUT)
-            } else {
-                None
-            });
-            tail(core, command, cli.json, session, *once, timeout).await
+        Command::Tail { once, .. } => {
+            let key = resolved_key(key)?;
+            // Resolution already ran inside the same budget, so tail gets only
+            // what is left of the original deadline.
+            let timeout = remaining_budget(deadline)?;
+            tail(core, command, cli.json, key, *once, timeout).await
         }
         Command::Wait {
-            session,
-            timeout,
-            fail_on_timeout,
+            fail_on_timeout, ..
         } => {
-            let timeout = match timeout.as_deref().map(parse_timeout_seconds).transpose() {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(CliOutcome::local_failure(
-                        command,
-                        "invalid_argument",
-                        error,
-                        2,
-                    ))
-                }
-            };
-            let timeout_ms = timeout
-                .map(|value| value.as_millis() as u64)
-                .unwrap_or(30_000);
-            match core.wait_session(session, timeout_ms).await {
+            let key = resolved_key(key)?;
+            let timeout_ms = remaining_budget(deadline)?
+                .map(|remaining| remaining.as_millis() as u64)
+                .unwrap_or(DEFAULT_WAIT_TIMEOUT.as_millis() as u64);
+            if timeout_ms == 0 {
+                return Err(CoreError::Timeout);
+            }
+            match core.wait_session(key, timeout_ms).await {
                 Ok(observation) => {
                     let mut outcome = CliOutcome::success(
                         command,
@@ -773,20 +835,19 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                 Err(error) => Err(error),
             }
         }
-        Command::Sync { session } => match core.sync_session(session).await {
-            Ok(events) => Ok(CliOutcome::success(
-                command,
-                json!({ "session_id": session, "events": events }),
-                format!("Synced session {session} ({events} event(s)).\n"),
-            )),
-            Err(error) => Err(error),
-        },
-        Command::Send {
-            session,
-            text,
-            delivery,
-        } => match core
-            .send_message_with_delivery(session, text, (*delivery).into())
+        Command::Sync { session } => {
+            let key = resolved_key(key)?;
+            match core.sync_session(key).await {
+                Ok(events) => Ok(CliOutcome::success(
+                    command,
+                    json!({ "session_id": session, "events": events }),
+                    format!("Synced session {session} ({events} event(s)).\n"),
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        Command::Send { text, delivery, .. } => match core
+            .send_message_with_delivery(resolved_key(key)?, text, (*delivery).into())
             .await
         {
             Ok(handle) => Ok(CliOutcome::success(
@@ -825,7 +886,8 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             if let Some(approval_id) = request {
                 // APPR-03 read path: one approval's live or terminal state.
                 // A known id is success; an unknown id stays not_found (exit 3).
-                return match core.get_approval(approval_id).await {
+                let host = core.approval_host(cli.host.as_deref()).await?;
+                return match core.get_approval(&host, approval_id).await {
                     Ok(approval) => Ok(CliOutcome::success(
                         command,
                         approval_data(&approval),
@@ -834,18 +896,35 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                     Err(error) => Err(error),
                 };
             }
-            let session = session.as_deref().unwrap_or_default();
-            match core.list_approvals(session).await {
+            // With a session the resolved key names the Host. Without a
+            // session, only an explicit --host can scope the empty-session
+            // listing; the session-less, Host-less shape stays the same input
+            // error it always was instead of listing every Host's approvals.
+            let (host, session_id) = match session.as_deref() {
+                Some(session) => {
+                    let key = resolved_key(key)?;
+                    (key.host_id.clone(), session.to_owned())
+                }
+                None => match cli.host.as_deref() {
+                    Some(_) => (
+                        core.approval_host(cli.host.as_deref()).await?,
+                        String::new(),
+                    ),
+                    None => return Err(CoreError::InvalidInput("session identity missing".into())),
+                },
+            };
+            match core.list_approvals(&host, &session_id).await {
                 Ok(approvals) => Ok(CliOutcome::success(
                     command,
-                    json!({ "session_id": session, "approvals": approvals }),
+                    json!({ "session_id": session_id, "approvals": approvals }),
                     render_approvals(&approvals),
                 )),
                 Err(error) => Err(error),
             }
         }
-        Command::Questions { session, cursor } => {
-            match core.list_questions(session, cursor).await {
+        Command::Questions { cursor, .. } => {
+            let key = resolved_key(key)?;
+            match core.list_questions(key, cursor).await {
                 Ok(page) => Ok(CliOutcome::success(
                     command,
                     json!(page),
@@ -855,7 +934,6 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             }
         }
         Command::Answer {
-            session,
             batch,
             epoch,
             version,
@@ -863,6 +941,7 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             phase,
             input,
             command_id,
+            ..
         } => {
             let digest = match parse_digest(digest) {
                 Ok(digest) => digest,
@@ -886,7 +965,8 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                     ))
                 }
             };
-            match core.get_question(session, batch).await {
+            let key = resolved_key(key)?;
+            match core.get_question(key, batch).await {
                 Ok(current) => {
                     // An unknown or unanswerable phase is an input problem, not
                     // evidence that the source data went stale.
@@ -902,9 +982,10 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                         ));
                     }
                     let actual_id = command_id.clone().unwrap_or_else(Core::new_command_id);
-                    let answer = core.answer_question_with_id(&current, answers, Some(&actual_id));
+                    let answer =
+                        core.answer_question_with_id(key, &current, answers, Some(&actual_id));
                     let (outcome, interrupted) = if current.phase == "QUESTION_OPEN" {
-                        match wait_open_answer(answer, crate::signal::interrupt(), || core.cancel_question_answer(session, &actual_id),
+                        match wait_open_answer(answer, crate::signal::interrupt(), || core.cancel_question_answer(key, &actual_id),
                             Duration::from_millis(whalerein_core::api::CONTROL_REQUEST_TTL_MS), Duration::from_millis(250)).await {
                             OpenAnswerWait::Finished(result, interrupted) => (*result, interrupted),
                             OpenAnswerWait::CancellationRequested => {
@@ -942,9 +1023,12 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             }
         }
         Command::QuestionCancel {
-            session,
             command: command_id,
-        } => match core.cancel_question_answer(session, command_id).await {
+            ..
+        } => match core
+            .cancel_question_answer(resolved_key(key)?, command_id)
+            .await
+        {
             Ok(requested) => Ok(CliOutcome::success(
                 command,
                 json!({"cancellation_requested": requested}),
@@ -973,7 +1057,8 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                     ))
                 }
             };
-            match core.approve(request, &digest, *version).await {
+            let host = core.approval_host(cli.host.as_deref()).await?;
+            match core.approve(&host, request, &digest, *version).await {
                 Ok(handle) => Ok(CliOutcome::success(
                     command,
                     command_data(&handle),
@@ -998,7 +1083,8 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                     ))
                 }
             };
-            match core.reject(request, &digest, *version).await {
+            let host = core.approval_host(cli.host.as_deref()).await?;
+            match core.reject(&host, request, &digest, *version).await {
                 Ok(handle) => Ok(CliOutcome::success(
                     command,
                     command_data(&handle),
@@ -1008,27 +1094,44 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
             }
         }
         Command::Queue { action } => match action {
-            QueueCommand::List { session } => match core.pending_queue(session).await {
-                Ok(queue) => {
-                    let human = render_queue(&queue);
-                    let data = serde_json::to_value(&queue).unwrap_or_else(|_| json!({}));
-                    Ok(CliOutcome::success(command, data, human))
+            QueueCommand::List { .. } => {
+                let key = resolved_key(key)?;
+                match core.pending_queue(key).await {
+                    Ok(queue) => {
+                        let human = render_queue(&queue);
+                        let data = serde_json::to_value(&queue).unwrap_or_else(|_| json!({}));
+                        Ok(CliOutcome::success(command, data, human))
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
-            QueueCommand::Edit {
-                session,
-                item,
-                text,
-            } => queue_change(core, command, session, item, PendingQueueAction::Edit, text).await,
-            QueueCommand::Remove { session, item } => {
-                queue_change(core, command, session, item, PendingQueueAction::Remove, "").await
             }
-            QueueCommand::Steer { session, item } => {
+            QueueCommand::Edit { item, text, .. } => {
                 queue_change(
                     core,
                     command,
-                    session,
+                    resolved_key(key)?,
+                    item,
+                    PendingQueueAction::Edit,
+                    text,
+                )
+                .await
+            }
+            QueueCommand::Remove { item, .. } => {
+                queue_change(
+                    core,
+                    command,
+                    resolved_key(key)?,
+                    item,
+                    PendingQueueAction::Remove,
+                    "",
+                )
+                .await
+            }
+            QueueCommand::Steer { item, .. } => {
+                queue_change(
+                    core,
+                    command,
+                    resolved_key(key)?,
                     item,
                     PendingQueueAction::Promote,
                     "",
@@ -1036,7 +1139,7 @@ async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcom
                 .await
             }
         },
-        Command::Interrupt { session } => match core.interrupt(session).await {
+        Command::Interrupt { .. } => match core.interrupt(resolved_key(key)?).await {
             Ok(handle) => Ok(CliOutcome::success(
                 command,
                 command_data(&handle),
@@ -1275,26 +1378,16 @@ async fn tail(
     core: &Core,
     command: &Command,
     json_output: bool,
-    session: &str,
+    key: &SessionKey,
     once: bool,
     timeout: Option<Duration>,
 ) -> Result<CliOutcome, CoreError> {
-    let started = tokio::time::Instant::now();
-    let key = match timeout {
-        Some(limit) => tokio::time::timeout(limit, core.session_key(session))
-            .await
-            .map_err(|_| CoreError::Timeout)??,
-        None => core.session_key(session).await?,
-    };
-    let timeout = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
-    if timeout.is_some_and(|remaining| remaining.is_zero()) {
-        return Err(CoreError::Timeout);
-    }
+    let session = key.session_id.as_str();
     let mut renderer = TailRenderer::default();
     let mut visible = false;
     let mut closed = false;
     let emitted = core
-        .watch_session(&key, timeout, |event| {
+        .watch_session(key, timeout, |event| {
             let text = if json_output {
                 let mut value = tail_event_json(event);
                 value["data"]["event"]["session"] =
@@ -3271,9 +3364,7 @@ mod forget_tests {
         assert_eq!(outcome.to_json()["data"]["reason"], "idle");
     }
 
-    #[tokio::test]
-    async fn cli_wait_and_tail_deadlines_include_slow_host_discovery() {
-        let cli = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+    async fn slow_discovery_fixture() -> (FakeAccess, tempfile::TempDir, Arc<dyn SecretStore>) {
         let access = FakeAccess::start().await;
         let dir = tempfile::tempdir().unwrap();
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
@@ -3286,6 +3377,16 @@ mod forget_tests {
             .await
             .unwrap();
         access.host.lock().unwrap().hosts_delay_ms = 2500;
+        (access, dir, secrets)
+    }
+
+    // AC-07.wait: the total wait deadline starts before session resolution, so
+    // a slow authorized-Host discovery consumes the budget instead of
+    // extending the observation window.
+    #[tokio::test]
+    async fn cli_wait_deadline_includes_slow_host_discovery() {
+        let cli = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+        let (_access, dir, secrets) = slow_discovery_fixture().await;
         let started = std::time::Instant::now();
         let outcome = run_with(
             cli(&[
@@ -3298,11 +3399,17 @@ mod forget_tests {
                 "--data-dir",
                 dir.path().to_str().unwrap(),
             ]),
-            secrets.clone(),
+            secrets,
         )
         .await;
         assert_eq!(outcome.to_json()["error"]["code"], "timeout");
         assert!(started.elapsed() < Duration::from_millis(900));
+    }
+
+    #[tokio::test]
+    async fn cli_tail_deadline_includes_slow_host_discovery() {
+        let cli = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+        let (access, dir, secrets) = slow_discovery_fixture().await;
         let started = std::time::Instant::now();
         let outcome = run_with(
             cli(&[
@@ -4854,6 +4961,36 @@ mod approval_read_tests {
             scoped.to_json()["data"]["approval"]["state"],
             "APPROVAL_STATE_PENDING"
         );
+    }
+
+    #[tokio::test]
+    async fn approvals_without_a_session_or_explicit_host_is_an_input_error() {
+        // AC-08.cli: a session-less, Host-less list is the same input error it
+        // always was; it must not become an all-Hosts approval listing.
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let outcome = run_with(
+            Cli {
+                json: true,
+                yes: false,
+                data_dir: Some(dir.path().to_path_buf()),
+                host: None,
+                command: Command::Approvals {
+                    session: None,
+                    request: None,
+                },
+            },
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 2, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["command"], "approvals");
+        assert_eq!(value["error"]["code"], "invalid_argument");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("session identity missing"));
     }
 
     #[tokio::test]

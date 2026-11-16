@@ -252,6 +252,12 @@ pub struct FakeHost {
     pub drop_command_receipts: bool,
     pub command_receipt_status_override: Option<OnlineStatus>,
     pub commands_seen: usize,
+    /// Query frames that reached the fake Host, including retries.
+    pub query_attempts: usize,
+    /// Channel identity observed for each query attempt.
+    pub query_channels: Vec<Option<String>>,
+    /// Answer the next query with this encrypted domain error code.
+    pub query_error_once: Option<ErrorCode>,
     pub last_delivery_mode: Option<i32>,
     pub model_selection_available: bool,
     pub model_observed: Option<String>,
@@ -300,6 +306,12 @@ impl FakeHost {
 
     pub fn set_query_unavailable(&mut self, value: bool) {
         self.query_error = value.then_some(ErrorCode::Unavailable);
+    }
+
+    /// Fail the next query with a channel-replaced signal so Core performs its
+    /// one read retry on a freshly negotiated channel.
+    pub fn replace_channel_once(&mut self) {
+        self.query_error_once = Some(ErrorCode::ChannelReplaced);
     }
 
     pub fn new() -> Self {
@@ -369,6 +381,9 @@ impl FakeHost {
             drop_command_receipts: false,
             command_receipt_status_override: None,
             commands_seen: 0,
+            query_attempts: 0,
+            query_channels: Vec::new(),
+            query_error_once: None,
             last_delivery_mode: None,
             model_selection_available: true,
             model_observed: None,
@@ -902,6 +917,8 @@ impl FakeHost {
     }
 
     fn query(&mut self, request: &HostRequest) -> Result<Vec<u8>, ErrorCode> {
+        self.query_attempts += 1;
+        self.query_channels.push(self.channel_id());
         if let Some(code) = self.query_error {
             return Err(code);
         }
@@ -922,7 +939,14 @@ impl FakeHost {
             .map_err(|_| ErrorCode::InvalidArgument)?;
         let payload = whalerein_proto::RequestPayload::decode(plaintext.as_slice())
             .map_err(|_| ErrorCode::InvalidArgument)?;
-        let response = self.respond(payload, &request.host_id)?;
+        let response = match self.query_error_once.take() {
+            Some(code) => ResponsePayload {
+                error_code: code as i32,
+                error_detail: "channel replaced".into(),
+                ..Default::default()
+            },
+            None => self.respond(payload, &request.host_id)?,
+        };
         let sealed = channel
             .peer_view()
             .seal_request(&aad, &response.encode_to_vec())

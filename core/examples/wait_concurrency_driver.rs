@@ -18,6 +18,7 @@ async fn main() {
     .expect("fixture Core");
     let watch_core = core.clone();
     let watch_key = core.session_key(&args[3]).await.expect("fixture session");
+    let first_key = watch_key.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let resets = Arc::new(AtomicUsize::new(0));
     let watch_resets = resets.clone();
@@ -36,13 +37,13 @@ async fn main() {
             .await
     });
     let first_core = core.clone();
-    let first_session = args[3].clone();
-    let mut first =
-        tokio::spawn(async move { first_core.wait_session(&first_session, 20000).await });
+    let mut first = tokio::spawn(async move { first_core.wait_session(&first_key, 20000).await });
     let second_core = core.clone();
     let second_session = args[4].clone();
-    let mut second =
-        tokio::spawn(async move { second_core.wait_session(&second_session, 10000).await });
+    let mut second = tokio::spawn(async move {
+        let key = second_core.session_key(&second_session).await?;
+        second_core.wait_session(&key, 10000).await
+    });
     let release = PathBuf::from(&args[5]);
     let watch_ready = tokio::time::timeout(Duration::from_secs(8), ready_rx)
         .await

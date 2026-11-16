@@ -23,6 +23,7 @@ pub use crate::runtime::ConnectionState;
 #[cfg(feature = "keyring")]
 pub use crate::security::KeyringSecretStore;
 pub use crate::security::{FileSecretStore, MemorySecretStore, SecretError, SecretStore};
+pub use crate::session::SessionKey;
 pub use config::default_data_dir;
 pub use core::{Core, CoreOptions, ForkOutcome};
 pub use error::{error_code_action, error_code_exit_code, error_code_name, CoreError, CoreResult};
@@ -39,8 +40,8 @@ pub use types::{
     WaitObservation, WaitReason, WaitState,
 };
 
-// Delivery choices are shared with the versioned wire contract.
-pub use whalerein_proto::DeliveryMode;
+// Delivery choices are Core-owned; wire conversion stays internal.
+pub use types::{DeliveryMode, QuestionPhase};
 
 /// Existing Host control request lifetime used for bounded cancellation.
 pub const CONTROL_REQUEST_TTL_MS: u64 = crate::commands::REQUEST_TTL_MS as u64;

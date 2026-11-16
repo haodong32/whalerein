@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
-use whalerein_core::api::{Core, CoreOptions, PairingDecision, PairingPrompt};
-use whalerein_core::conversation::SessionKey;
+use whalerein_core::api::{Core, CoreOptions, PairingDecision, PairingPrompt, SessionKey};
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
@@ -440,8 +439,7 @@ impl MobileCore {
     /// `cachedSessions` when they need an explicit cache-only view.
     pub fn sessions(&self, host_id: String) -> Result<Vec<SessionSummaryView>, MobileError> {
         validate_id(&host_id)?;
-        let core = self.scoped_host(&host_id)?;
-        let list = self.run(QUERY_TIMEOUT, core.sessions(&host_id))?;
+        let list = self.run(QUERY_TIMEOUT, self.core.sessions(&host_id))?;
         Ok(list.sessions.into_iter().map(Into::into).collect())
     }
 
@@ -457,8 +455,7 @@ impl MobileCore {
     ) -> Result<SessionCapabilitiesView, MobileError> {
         validate_id(&host_id)?;
         validate_id(&session_id)?;
-        let core = self.scoped_host(&host_id)?;
-        let list = self.run(QUERY_TIMEOUT, core.sessions(&host_id))?;
+        let list = self.run(QUERY_TIMEOUT, self.core.sessions(&host_id))?;
         let session = list
             .sessions
             .into_iter()
@@ -651,10 +648,14 @@ impl MobileCore {
         validate_id(&host_id)?;
         validate_id(&session_id)?;
         validate_text(&text)?;
-        let core = self.scoped_host(&host_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
         let handle = self.run(
             COMMAND_TIMEOUT,
-            core.send_message_with_delivery(&session_id, &text, delivery.to_core()),
+            self.core
+                .send_message_with_delivery(&key, &text, delivery.to_core()),
         )?;
         Ok(self.publish_command(handle))
     }
@@ -663,8 +664,11 @@ impl MobileCore {
     pub fn stop(&self, host_id: String, session_id: String) -> Result<CommandView, MobileError> {
         validate_id(&host_id)?;
         validate_id(&session_id)?;
-        let core = self.scoped_host(&host_id)?;
-        let handle = self.run(COMMAND_TIMEOUT, core.interrupt(&session_id))?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let handle = self.run(COMMAND_TIMEOUT, self.core.interrupt(&key))?;
         Ok(self.publish_command(handle))
     }
 
@@ -676,8 +680,10 @@ impl MobileCore {
     ) -> Result<Vec<ApprovalView>, MobileError> {
         validate_id(&host_id)?;
         validate_id(&session_id)?;
-        let core = self.scoped_host(&host_id)?;
-        let approvals = self.run(QUERY_TIMEOUT, core.list_approvals(&session_id))?;
+        let approvals = self.run(
+            QUERY_TIMEOUT,
+            self.core.list_approvals(&host_id, &session_id),
+        )?;
         Ok(approvals.into_iter().map(ApprovalView::from).collect())
     }
 
@@ -701,14 +707,16 @@ impl MobileCore {
             return Err(MobileError::invalid_input());
         }
         let digest = decode_digest(&digest_hex)?;
-        let core = self.scoped_host(&host_id)?;
         let handle = if allow {
             self.run(
                 COMMAND_TIMEOUT,
-                core.approve(&approval_id, &digest, version),
+                self.core.approve(&host_id, &approval_id, &digest, version),
             )?
         } else {
-            self.run(COMMAND_TIMEOUT, core.reject(&approval_id, &digest, version))?
+            self.run(
+                COMMAND_TIMEOUT,
+                self.core.reject(&host_id, &approval_id, &digest, version),
+            )?
         };
         Ok(CommandView::from(handle))
     }
@@ -860,12 +868,6 @@ impl MobileCore {
             state.running = false;
             state.decision = None;
         }
-    }
-
-    fn scoped_host(&self, host_id: &str) -> Result<Core, MobileError> {
-        self.core
-            .with_session_host(host_id)
-            .map_err(MobileError::from)
     }
 
     /// Block the calling thread for one Core request with a bounded timeout.

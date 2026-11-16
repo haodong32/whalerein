@@ -1,4 +1,4 @@
-use super::test_support::core;
+use super::test_support::{core, key};
 use super::*;
 use crate::api::test_support::FakeAccess;
 use crate::api::{OnlineStatus, PairingDecision};
@@ -11,16 +11,23 @@ async fn wait_uses_remote_state_and_rejects_invalid_deadlines() {
     core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
-    let passive = core.read_wait_state("session-1").await.unwrap();
+    let passive = core
+        .read_wait_state(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert!(!passive.active && !passive.queue_available);
     for timeout in [0, 2_147_483_648] {
         assert!(matches!(
-            core.wait_session("session-1", timeout).await,
+            core.wait_session(&key("host-1", "session-1"), timeout)
+                .await,
             Err(CoreError::InvalidInput(_))
         ));
     }
     access.host.lock().unwrap().wait_timeouts = 2;
-    let observation = core.wait_session("session-1", 3000).await.unwrap();
+    let observation = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap();
     assert_eq!(observation.reason, crate::api::WaitReason::Idle);
     assert_eq!(access.host.lock().unwrap().wait_queries, 3);
     assert!(!observation.state.active);
@@ -28,9 +35,10 @@ async fn wait_uses_remote_state_and_rejects_invalid_deadlines() {
     // A live tail owns this guard; a read-only wait must not claim it.
     core.watch_active
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first_key = key("host-1", "session-1");
     let (first, second) = tokio::join!(
-        core.wait_session("session-1", 3000),
-        core.wait_session("session-1", 3000)
+        core.wait_session(&first_key, 3000),
+        core.wait_session(&first_key, 3000)
     );
     assert_eq!(first.unwrap().reason, crate::api::WaitReason::Idle);
     assert_eq!(second.unwrap().reason, crate::api::WaitReason::Idle);
@@ -41,7 +49,10 @@ async fn wait_uses_remote_state_and_rejects_invalid_deadlines() {
     // Leave a real timing margin: the first session lookup and coverage
     // instrumentation share the deadline, and a 100 ms budget is too tight on
     // slower native runners.
-    let observation = core.wait_session("session-1", 1000).await.unwrap();
+    let observation = core
+        .wait_session(&key("host-1", "session-1"), 1000)
+        .await
+        .unwrap();
     assert_eq!(observation.reason, crate::api::WaitReason::Timeout);
     access.host.lock().unwrap().wait_timeouts = 0;
     for (code, expected) in [
@@ -49,17 +60,20 @@ async fn wait_uses_remote_state_and_rejects_invalid_deadlines() {
         (whalerein_proto::ErrorCode::Expired, "expired"),
     ] {
         access.host.lock().unwrap().query_error = Some(code);
-        let failure = core.wait_session("session-1", 3000).await.unwrap_err();
+        let failure = core
+            .wait_session(&key("host-1", "session-1"), 3000)
+            .await
+            .unwrap_err();
         assert_eq!(failure.code(), expected);
     }
     access.host.lock().unwrap().query_error = None;
     access.host.lock().unwrap().wait_bad_id = true;
     assert!(matches!(
-        core.read_wait_state("session-1").await,
+        core.read_wait_state(&key("host-1", "session-1")).await,
         Err(CoreError::ChannelMismatch)
     ));
     assert!(matches!(
-        core.wait_session("session-1", 3000).await,
+        core.wait_session(&key("host-1", "session-1"), 3000).await,
         Err(CoreError::ChannelMismatch)
     ));
 }
@@ -76,12 +90,64 @@ async fn lost_host_channel_does_not_revoke_device() {
     let old_channel = access.host.lock().unwrap().channel_id();
     access.host.lock().unwrap().drop_channel();
 
-    let result = core.sync_session("session-1").await;
+    let result = core.sync_session(&key("host-1", "session-1")).await;
     assert_eq!(result.unwrap(), 1);
     assert_ne!(access.host.lock().unwrap().channel_id(), old_channel);
     assert!(core.is_paired());
     assert!(!core.runtime().is_revoked());
     assert!(!secrets.is_empty());
+}
+
+// AC-03.read
+#[tokio::test]
+async fn a_read_retries_once_on_a_fresh_channel() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    core.sessions("host-1").await.unwrap();
+    let before = access.host.lock().unwrap().query_attempts;
+    access.host.lock().unwrap().replace_channel_once();
+    // One logical read: the first channel is replaced, the retry negotiates a
+    // fresh channel and returns the same result exactly once.
+    let summary = core.get_session(&key("host-1", "session-2")).await.unwrap();
+    assert_eq!(summary.session_id, "session-2");
+    let host = access.host.lock().unwrap();
+    assert_eq!(host.query_attempts, before + 2);
+    assert_ne!(
+        host.query_channels[before],
+        host.query_channels[before + 1],
+        "the retry must negotiate a fresh channel"
+    );
+    assert_eq!(host.commands_seen, 0);
+}
+
+// AC-03.read
+#[tokio::test]
+async fn a_persistent_read_failure_reports_the_original_error_without_retrying() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    core.sessions("host-1").await.unwrap();
+    let before = access.host.lock().unwrap().query_attempts;
+    access.host.lock().unwrap().query_error = Some(whalerein_proto::ErrorCode::Unavailable);
+    let error = core
+        .get_session(&key("host-1", "session-2"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "unavailable");
+    let host = access.host.lock().unwrap();
+    assert_eq!(
+        host.query_attempts,
+        before + 1,
+        "a non-channel read failure must not be resubmitted"
+    );
+    assert_eq!(host.commands_seen, 0);
 }
 
 #[tokio::test]
@@ -100,7 +166,7 @@ async fn a_channel_without_a_capability_rejects_the_operation_before_submission(
     access.host.lock().unwrap().channel_capabilities = Some(advertised);
 
     let error = core
-        .send_message("session-1", "hello")
+        .send_message(&key("host-1", "session-1"), "hello")
         .await
         .expect_err("messages capability was not advertised");
     assert!(matches!(error, CoreError::Unsupported));
@@ -120,7 +186,10 @@ async fn a_channel_without_a_capability_rejects_the_operation_before_submission(
     // gate cannot reject a normal channel.
     access.host.lock().unwrap().channel_capabilities = None;
     core.runtime().clear_channel("host-1");
-    let handle = core.send_message("session-1", "hello").await.unwrap();
+    let handle = core
+        .send_message(&key("host-1", "session-1"), "hello")
+        .await
+        .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
 }
@@ -193,7 +262,10 @@ async fn completes_pairing_session_control_diagnostics_and_revocation_workflow()
     let channel = access.host.lock().unwrap().channel_id();
     assert!(channel.is_some());
 
-    let handle = core.send_message("session-1", "hello").await.unwrap();
+    let handle = core
+        .send_message(&key("host-1", "session-1"), "hello")
+        .await
+        .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
     assert_eq!(handle.message_id.as_deref(), Some("message-1"));
     assert_eq!(handle.delivery_id.as_deref(), Some("delivery-1"));
@@ -203,18 +275,25 @@ async fn completes_pairing_session_control_diagnostics_and_revocation_workflow()
         access.host.lock().unwrap().last_delivery_mode,
         Some(whalerein_proto::DeliveryMode::EnqueueAfterRun as i32)
     );
-    core.send_message_with_delivery("session-1", "fixture", whalerein_proto::DeliveryMode::Steer)
-        .await
-        .unwrap();
+    core.send_message_with_delivery(
+        &key("host-1", "session-1"),
+        "fixture",
+        crate::api::DeliveryMode::Steer,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         access.host.lock().unwrap().last_delivery_mode,
         Some(whalerein_proto::DeliveryMode::Steer as i32)
     );
 
-    let session = core.get_session("session-1").await.unwrap();
+    let session = core.get_session(&key("host-1", "session-1")).await.unwrap();
     assert_eq!(session.title, "test session");
 
-    let approval = core.approve("approval-1", &[0xab; 32], 3).await.unwrap();
+    let approval = core
+        .approve("host-1", "approval-1", &[0xab; 32], 3)
+        .await
+        .unwrap();
     assert_eq!(approval.status, OnlineStatus::HostAccepted);
 
     let report = core.doctor().unwrap();
@@ -317,7 +396,8 @@ async fn unpaired_snapshot_calls_fail_closed() {
         Err(CoreError::NotPaired)
     ));
     assert!(matches!(
-        core.send_message("session-1", "hello").await,
+        core.send_message(&key("host-1", "session-1"), "hello")
+            .await,
         Err(CoreError::NotPaired)
     ));
 }
@@ -330,7 +410,12 @@ async fn explicit_sync_delivers_typed_committed_messages() {
     core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
-    assert_eq!(core.sync_session("session-1").await.unwrap(), 1);
+    assert_eq!(
+        core.sync_session(&key("host-1", "session-1"))
+            .await
+            .unwrap(),
+        1
+    );
     let key = core.session_key("session-1").await.unwrap();
     assert_eq!(core.cached_messages(&key).unwrap().len(), 1);
 }
@@ -354,7 +439,7 @@ async fn model_selection_uses_fresh_capability_and_preserves_receipt() {
         "model"
     );
     assert!(core
-        .read_session_model("session-1")
+        .read_session_model(&key("host-1", "session-1"))
         .await
         .unwrap()
         .pending
@@ -365,18 +450,23 @@ async fn model_selection_uses_fresh_capability_and_preserves_receipt() {
         Err(CoreError::Unsupported)
     ));
     assert!(matches!(
-        core.read_session_model("session-1").await,
+        core.read_session_model(&key("host-1", "session-1")).await,
         Err(CoreError::Unsupported)
     ));
     assert!(matches!(
-        core.select_session_model("session-1", "provider", "model", None)
+        core.select_session_model(&key("host-1", "session-1"), "provider", "model", None)
             .await,
         Err(CoreError::Unsupported)
     ));
     assert_eq!(access.host.lock().unwrap().commands_seen, 0);
     access.host.lock().unwrap().model_selection_available = true;
     let receipt = core
-        .select_session_model("session-1", "provider", "model", Some("high"))
+        .select_session_model(
+            &key("host-1", "session-1"),
+            "provider",
+            "model",
+            Some("high"),
+        )
         .await
         .unwrap()
         .model_selection
@@ -401,26 +491,48 @@ async fn question_queries_are_scoped_and_guarded_answers_keep_the_receipt() {
         .await
         .unwrap();
     core.sessions("host-1").await.unwrap();
-    let page = core.list_questions("session-1", "").await.unwrap();
+    let page = core
+        .list_questions(&key("host-1", "session-1"), "")
+        .await
+        .unwrap();
     assert!(core
-        .cancel_question_answer("session-1", "command-1")
+        .cancel_question_answer(&key("host-1", "session-1"), "command-1")
         .await
         .unwrap());
-    assert!(core.cancel_question_answer("session-1", "").await.is_err());
+    assert!(core
+        .cancel_question_answer(&key("host-1", "session-1"), "")
+        .await
+        .is_err());
     assert_eq!(page.batches.len(), 1);
-    let batch = core.get_question("session-1", "batch-1").await.unwrap();
+    let batch = core
+        .get_question(&key("host-1", "session-1"), "batch-1")
+        .await
+        .unwrap();
     assert_eq!(
         batch.questions[0].options[0].description.as_deref(),
         Some("Option")
     );
-    assert!(core.get_question("session-1", "other").await.is_err());
+    assert!(core
+        .get_question(&key("host-1", "session-1"), "other")
+        .await
+        .is_err());
     let answer = crate::api::QuestionAnswer {
         id: "q".into(),
         selected: vec!["A".into()],
         custom: None,
     };
+    // A batch that belongs to another session must be rejected before any
+    // command is journaled or submitted.
+    let before_commands = access.host.lock().unwrap().commands_seen;
+    let mismatch = key("host-1", "session-2");
+    assert!(matches!(
+        core.answer_question_with_id(&mismatch, &batch, vec![answer.clone()], None)
+            .await,
+        Err(CoreError::Conflict(_))
+    ));
+    assert_eq!(access.host.lock().unwrap().commands_seen, before_commands);
     let handle = core
-        .answer_question(&batch, vec![answer.clone()])
+        .answer_question(&key("host-1", "session-1"), &batch, vec![answer.clone()])
         .await
         .unwrap();
     assert_eq!(
@@ -430,12 +542,15 @@ async fn question_queries_are_scoped_and_guarded_answers_keep_the_receipt() {
     let mut invalid = batch.clone();
     invalid.source_epoch.clear();
     assert!(core
-        .answer_question(&invalid, vec![answer.clone()])
+        .answer_question(&key("host-1", "session-1"), &invalid, vec![answer.clone()])
         .await
         .is_err());
     invalid = batch.clone();
     invalid.phase = "QUESTION_SETTLED".into();
-    assert!(core.answer_question(&invalid, vec![answer]).await.is_err());
+    assert!(core
+        .answer_question(&key("host-1", "session-1"), &invalid, vec![answer])
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -449,7 +564,10 @@ async fn wait_reconnects_with_a_fresh_channel_without_revoking_pairing() {
     core.sessions("host-1").await.unwrap();
     let old = access.host.lock().unwrap().channel_id();
     access.host.lock().unwrap().drop_channel();
-    let result = core.wait_session("session-1", 3000).await.unwrap();
+    let result = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap();
     assert_eq!(result.reason, crate::api::WaitReason::Idle);
     assert_ne!(access.host.lock().unwrap().channel_id(), old);
     assert!(core.is_paired());
@@ -470,7 +588,10 @@ async fn wait_recovery_reissues_a_new_identity_with_only_remaining_budget() {
         host.wait_drop_channel_once = true;
         host.wait_receipt_delay_ms = 150;
     }
-    let result = core.wait_session("session-1", 3000).await.unwrap();
+    let result = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap();
     assert_eq!(result.reason, crate::api::WaitReason::Idle);
     let host = access.host.lock().unwrap();
     assert_eq!(host.wait_ids.len(), 2);
@@ -490,7 +611,7 @@ async fn wait_deadline_during_delayed_first_result_is_an_error() {
     access.host.lock().unwrap().wait_receipt_delay_ms = 250;
     let started = tokio::time::Instant::now();
     assert!(matches!(
-        core.wait_session("session-1", 100).await,
+        core.wait_session(&key("host-1", "session-1"), 100).await,
         Err(CoreError::Timeout)
     ));
     // The contract is the Timeout, not the scheduler latency: only a stuck
@@ -509,7 +630,10 @@ async fn wait_slice_budget_is_calculated_after_a_delayed_channel_handshake() {
         .unwrap();
     access.host.lock().unwrap().channel_receipt_delay_ms = 200;
     assert_eq!(
-        core.wait_session("session-1", 1500).await.unwrap().reason,
+        core.wait_session(&key("host-1", "session-1"), 1500)
+            .await
+            .unwrap()
+            .reason,
         crate::api::WaitReason::Idle
     );
     let host = access.host.lock().unwrap();
@@ -529,7 +653,8 @@ async fn cancelling_a_wait_attempts_to_cancel_its_exact_remote_observation() {
         .unwrap();
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_receipt_delay_ms = 1000;
-    let runner = tokio::spawn(async move { core.wait_session("session-1", 3000).await });
+    let runner =
+        tokio::spawn(async move { core.wait_session(&key("host-1", "session-1"), 3000).await });
     tokio::time::timeout(Duration::from_secs(1), async {
         while access.host.lock().unwrap().wait_ids.is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -595,12 +720,18 @@ async fn model_operations_do_not_cache_or_defer_when_host_is_offline() {
         .unwrap();
     core.sessions("host-1").await.unwrap();
     assert!(core.list_models("host-1").await.is_ok());
-    assert!(core.read_session_model("session-1").await.is_ok());
+    assert!(core
+        .read_session_model(&key("host-1", "session-1"))
+        .await
+        .is_ok());
     access.host.lock().unwrap().host_online = false;
     assert!(core.list_models("host-1").await.is_err());
-    assert!(core.read_session_model("session-1").await.is_err());
     assert!(core
-        .select_session_model("session-1", "provider", "model", None)
+        .read_session_model(&key("host-1", "session-1"))
+        .await
+        .is_err());
+    assert!(core
+        .select_session_model(&key("host-1", "session-1"), "provider", "model", None)
         .await
         .is_err());
     assert_eq!(access.host.lock().unwrap().commands_seen, 0);
@@ -617,9 +748,11 @@ async fn concurrent_waits_on_distinct_sessions_share_initial_channel() {
     core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
+    let first_key = key("host-1", "session-1");
+    let second_key = key("host-1", "session-2");
     let (first, second) = tokio::join!(
-        core.wait_session("session-1", 3000),
-        core.wait_session("session-2", 3000)
+        core.wait_session(&first_key, 3000),
+        core.wait_session(&second_key, 3000)
     );
     assert_eq!(first.unwrap().session_id, "session-1");
     assert_eq!(second.unwrap().session_id, "session-2");
@@ -641,9 +774,11 @@ async fn concurrent_waits_recover_one_replaced_channel_without_evicting_each_oth
         host.wait_drop_channel_once = true;
         host.wait_receipt_delay_ms = 150;
     }
+    let first_key = key("host-1", "session-1");
+    let second_key = key("host-1", "session-2");
     let (first, second) = tokio::join!(
-        core.wait_session("session-1", 3000),
-        core.wait_session("session-2", 3000)
+        core.wait_session(&first_key, 3000),
+        core.wait_session(&second_key, 3000)
     );
     assert_eq!(first.unwrap().session_id, "session-1");
     assert_eq!(second.unwrap().session_id, "session-2");
@@ -664,7 +799,11 @@ async fn revocation_during_channel_handshake_cannot_restore_a_channel() {
         .unwrap();
     access.host.lock().unwrap().channel_receipt_delay_ms = 200;
     let running = core.clone();
-    let task = tokio::spawn(async move { running.wait_session("session-1", 3000).await });
+    let task = tokio::spawn(async move {
+        running
+            .wait_session(&key("host-1", "session-1"), 3000)
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(1), async {
         while access.host.lock().unwrap().channel_handshake_steps == 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -702,7 +841,8 @@ async fn concurrent_cold_waits_share_identity_initialization() {
         let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
-            core.wait_session(&format!("session-{i}"), 5000).await
+            core.wait_session(&key("host-1", &format!("session-{i}")), 5000)
+                .await
         }));
     }
     barrier.wait().await;
@@ -722,7 +862,10 @@ async fn wait_recovers_only_the_explicit_channel_replacement_signal() {
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_replaced_once = true;
     access.host.lock().unwrap().wait_extra_replacements = 1;
-    let result = core.wait_session("session-1", 3000).await.unwrap();
+    let result = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap();
     assert_eq!(result.reason, crate::api::WaitReason::Idle);
     let host = access.host.lock().unwrap();
     assert_eq!(host.wait_ids.len(), 3);
@@ -740,7 +883,10 @@ async fn wait_preserves_a_source_authorization_error_without_retrying_it() {
         .unwrap();
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_source_unauthorized_once = true;
-    let error = core.wait_session("session-1", 3000).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unauthorized");
     assert_eq!(access.host.lock().unwrap().wait_queries, 1);
     assert!(core.is_paired());
@@ -762,7 +908,10 @@ async fn wait_reports_persistent_transport_failure_during_recovery_handshake() {
         host.fail_handshake_polls_after_replacement = true;
     }
     let started = tokio::time::Instant::now();
-    let error = core.wait_session("session-1", 1500).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 1500)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unavailable");
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(access.host.lock().unwrap().wait_queries, 2);
@@ -779,7 +928,10 @@ async fn wait_rejects_tampered_error_body_even_if_status_claims_channel_replaced
         .unwrap();
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_corrupt_source_error_once = true;
-    let error = core.wait_session("session-1", 3000).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap_err();
     assert!(matches!(
         error,
         CoreError::Security(_) | CoreError::Internal(_)
@@ -804,7 +956,10 @@ async fn authenticated_source_error_takes_precedence_over_a_conflicting_status_c
         .lock()
         .unwrap()
         .wait_conflicting_source_error_once = true;
-    let error = core.wait_session("session-1", 3000).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unauthorized");
     assert_eq!(error.source_layer(), "source");
     assert_eq!(access.host.lock().unwrap().wait_queries, 1);
@@ -821,7 +976,10 @@ async fn authenticated_source_error_takes_precedence_over_a_conflicting_success_
         .unwrap();
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_forged_success_once = true;
-    let error = core.wait_session("session-1", 3000).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unauthorized");
     assert_eq!(error.source_layer(), "source");
     assert_eq!(access.host.lock().unwrap().wait_queries, 1);
@@ -838,7 +996,10 @@ async fn wait_rejects_a_foreign_channel_error_body_without_retrying() {
         .unwrap();
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().wait_foreign_frame_once = true;
-    let error = core.wait_session("session-1", 3000).await.unwrap_err();
+    let error = core
+        .wait_session(&key("host-1", "session-1"), 3000)
+        .await
+        .unwrap_err();
     assert!(matches!(error, CoreError::Security(_)));
     assert_eq!(access.host.lock().unwrap().wait_queries, 1);
     assert!(core.is_paired() && !core.runtime().is_revoked() && !secrets.is_empty());
@@ -869,18 +1030,21 @@ async fn legacy_host_creation_capability_errors_preserve_existing_controls() {
             "session-1"
         );
         assert_eq!(
-            core.send_message("session-1", "fixture")
+            core.send_message(&key("host-1", "session-1"), "fixture")
                 .await
                 .unwrap()
                 .status,
             OnlineStatus::Succeeded
         );
         assert_eq!(
-            core.interrupt("session-1").await.unwrap().status,
+            core.interrupt(&key("host-1", "session-1"))
+                .await
+                .unwrap()
+                .status,
             OnlineStatus::Succeeded
         );
         assert_eq!(
-            core.approve("approval-1", &[0xab; 32], 3)
+            core.approve("host-1", "approval-1", &[0xab; 32], 3)
                 .await
                 .unwrap()
                 .status,
@@ -890,21 +1054,26 @@ async fn legacy_host_creation_capability_errors_preserve_existing_controls() {
 }
 
 #[tokio::test]
-async fn wait_deadline_includes_authorized_host_discovery() {
+async fn explicit_resolution_keeps_host_discovery_out_of_the_wait_deadline() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let (core, _) = core(dir.path());
     core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
+    // Resolution may be slow; the wait budget starts only after it returns.
     access.host.lock().unwrap().hosts_delay_ms = 500;
+    let resolved = core.session_key("session-1").await.unwrap();
+    access.host.lock().unwrap().channel_receipt_delay_ms = 500;
     let started = std::time::Instant::now();
     assert!(matches!(
-        core.wait_session("session-1", 60).await,
+        core.wait_session(&resolved, 60).await,
         Err(CoreError::Timeout)
     ));
     assert!(started.elapsed() < Duration::from_millis(400));
     assert_eq!(access.host.lock().unwrap().wait_queries, 0);
+    // A total deadline that also covers resolution is a CLI-layer concern; Core
+    // promises only that a resolved key is not charged a second discovery.
 }
 
 #[cfg(unix)]
@@ -1041,7 +1210,7 @@ async fn selecting_the_effective_model_is_a_core_noop_without_a_command() {
     access.host.lock().unwrap().model_observed = Some("model".into());
     let before = access.host.lock().unwrap().commands_seen;
     let handle = core
-        .select_session_model("session-1", "provider", "model", None)
+        .select_session_model(&key("host-1", "session-1"), "provider", "model", None)
         .await
         .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
@@ -1060,7 +1229,12 @@ async fn selecting_the_effective_model_is_a_core_noop_without_a_command() {
 
     // A different effort or model is still submitted exactly once.
     let high = core
-        .select_session_model("session-1", "provider", "model", Some("high"))
+        .select_session_model(
+            &key("host-1", "session-1"),
+            "provider",
+            "model",
+            Some("high"),
+        )
         .await
         .unwrap();
     assert_eq!(high.status, OnlineStatus::Succeeded);
@@ -1070,7 +1244,7 @@ async fn selecting_the_effective_model_is_a_core_noop_without_a_command() {
     );
     assert_eq!(access.host.lock().unwrap().commands_seen, before + 1);
     let other = core
-        .select_session_model("session-1", "provider", "other-model", None)
+        .select_session_model(&key("host-1", "session-1"), "provider", "other-model", None)
         .await
         .unwrap();
     assert_eq!(other.status, OnlineStatus::Succeeded);

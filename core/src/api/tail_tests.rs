@@ -10,6 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use whalerein_proto::{EventEnvelope, EventPayload};
 
+fn key(host: &str, session: &str) -> crate::api::SessionKey {
+    crate::api::SessionKey::new(host, session).unwrap()
+}
+
 async fn setup() -> (tempfile::TempDir, Core, FakeAccess, TcpListener) {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -22,7 +26,9 @@ async fn setup() -> (tempfile::TempDir, Core, FakeAccess, TcpListener) {
         .await
         .unwrap();
     core.sessions("host-1").await.unwrap();
-    core.sync_session("session-1").await.unwrap();
+    core.sync_session(&crate::api::SessionKey::new("host-1", "session-1").unwrap())
+        .await
+        .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     core.config.write().unwrap().as_mut().unwrap().mqtt_url =
         Some(format!("mqtt://{}", listener.local_addr().unwrap()));
@@ -243,6 +249,14 @@ async fn watch_deadline_cancels_the_mqtt_pump_and_closes_its_connection() {
         .await
         .unwrap()
         .unwrap();
+    // AC-07.cancel: cancellation releases the profile watch lease with the
+    // pump, so a fresh watch attaches instead of conflicting with the finished
+    // one.
+    assert!(matches!(
+        core.watch_session(&key, Some(Duration::from_millis(100)), |_| true)
+            .await,
+        Err(CoreError::Timeout)
+    ));
 }
 #[tokio::test]
 async fn host_scoped_sync_is_idempotent_and_summary_refresh_does_not_advance_it() {
@@ -253,8 +267,8 @@ async fn host_scoped_sync_is_idempotent_and_summary_refresh_does_not_advance_it(
     assert_eq!(core.cache().unwrap().history_cursor(&key).unwrap(), before);
     // An explicit sync reports the whole committed history even when the
     // cursor is already current; only watch attach suppresses the baseline.
-    assert_eq!(core.sync_session("session-1").await.unwrap(), 1);
-    let other = SessionKey {
+    assert_eq!(core.sync_session(&key).await.unwrap(), 1);
+    let other = crate::api::SessionKey {
         host_id: "other".into(),
         session_id: key.session_id.clone(),
     };
@@ -264,7 +278,7 @@ async fn host_scoped_sync_is_idempotent_and_summary_refresh_does_not_advance_it(
 async fn accepted_command_recovers_result_without_resending() {
     let (_dir, core, access, _listener) = setup().await;
     access.host.lock().unwrap().drop_channel_after_command = true;
-    let result = core.send_message("session-1", "").await;
+    let result = core.send_message(&key("host-1", "session-1"), "").await;
     assert_eq!(result.unwrap().status, OnlineStatus::Succeeded);
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
     assert!(core.is_paired());
@@ -274,7 +288,10 @@ async fn accepted_command_recovers_result_without_resending() {
 async fn revocation_while_waiting_for_command_ends_pairing() {
     let (_dir, core, access, _listener) = setup().await;
     access.host.lock().unwrap().revoke_after_command = true;
-    let error = core.send_message("session-1", "").await.unwrap_err();
+    let error = core
+        .send_message(&key("host-1", "session-1"), "")
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -485,7 +502,7 @@ async fn cold_cache_watch_reports_new_live_output_but_not_the_snapshot() {
 async fn interrupt_waits_for_the_terminal_receipt_instead_of_returning_host_accepted() {
     let (_dir, core, access, _listener) = setup().await;
     access.host.lock().unwrap().pending_result_polls = 1;
-    let handle = core.interrupt("session-1").await.unwrap();
+    let handle = core.interrupt(&key("host-1", "session-1")).await.unwrap();
     assert_eq!(
         handle.status,
         OnlineStatus::Succeeded,
@@ -504,7 +521,10 @@ async fn interrupt_without_a_terminal_receipt_is_unknown_not_success() {
         host.pending_result_polls = 1;
         host.settled_command_status = whalerein_proto::OnlineStatus::Unknown;
     }
-    let error = core.interrupt("session-1").await.unwrap_err();
+    let error = core
+        .interrupt(&key("host-1", "session-1"))
+        .await
+        .unwrap_err();
     assert!(matches!(error, CoreError::UnknownResult), "{error:?}");
     assert_eq!(error.code(), "unknown");
     assert_eq!(error.exit_code(), 7);
@@ -525,7 +545,10 @@ async fn interrupt_definitive_failure_is_not_reported_as_success() {
         host.settled_command_status = whalerein_proto::OnlineStatus::Failed;
         host.settled_error_code = Some(whalerein_proto::ErrorCode::Unavailable);
     }
-    let error = core.interrupt("session-1").await.unwrap_err();
+    let error = core
+        .interrupt(&key("host-1", "session-1"))
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unavailable");
     assert_eq!(error.exit_code(), 5);
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
@@ -892,7 +915,7 @@ async fn an_unconfirmed_send_reports_unknown_and_a_resend_recovers_without_resub
     let (_dir, core, access, _listener) = setup().await;
     access.host.lock().unwrap().pending_result_polls = 50;
     let error = core
-        .send_message("session-1", "same text")
+        .send_message(&key("host-1", "session-1"), "same text")
         .await
         .unwrap_err();
     assert_eq!(error.code(), "unknown");
@@ -909,7 +932,10 @@ async fn an_unconfirmed_send_reports_unknown_and_a_resend_recovers_without_resub
         host.pending_result_polls = 0;
         host.settled_command_status = whalerein_proto::OnlineStatus::Succeeded;
     }
-    let recovered = core.send_message("session-1", "same text").await.unwrap();
+    let recovered = core
+        .send_message(&key("host-1", "session-1"), "same text")
+        .await
+        .unwrap();
     assert_eq!(recovered.request_id, retained);
     assert_eq!(recovered.status, OnlineStatus::Succeeded);
     assert_eq!(
@@ -932,7 +958,11 @@ async fn an_unadvertised_delivery_mode_is_rejected_before_any_submission() {
     }
     let before = access.host.lock().unwrap().commands_seen;
     let error = core
-        .send_message_with_delivery("session-1", "fixture", whalerein_proto::DeliveryMode::Steer)
+        .send_message_with_delivery(
+            &key("host-1", "session-1"),
+            "fixture",
+            crate::api::DeliveryMode::Steer,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.code(), "unsupported_capability");
@@ -944,14 +974,20 @@ async fn an_unadvertised_delivery_mode_is_rejected_before_any_submission() {
     );
     // The default mode still works, and a legacy Host with no advertisement
     // keeps the old pass-through path.
-    core.send_message("session-1", "fixture").await.unwrap();
+    core.send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .unwrap();
     {
         let mut host = access.host.lock().unwrap();
         host.sessions[0].source_capabilities = Some(whalerein_proto::SourceCapabilities::default());
     }
-    core.send_message_with_delivery("session-1", "fixture", whalerein_proto::DeliveryMode::Steer)
-        .await
-        .unwrap();
+    core.send_message_with_delivery(
+        &key("host-1", "session-1"),
+        "fixture",
+        crate::api::DeliveryMode::Steer,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1070,7 +1106,10 @@ async fn repeated_interrupts_each_reach_terminal_success() {
     let (_dir, core, access, _listener) = setup().await;
     for _ in 0..2 {
         assert_eq!(
-            core.interrupt("session-1").await.unwrap().status,
+            core.interrupt(&key("host-1", "session-1"))
+                .await
+                .unwrap()
+                .status,
             OnlineStatus::Succeeded
         );
     }

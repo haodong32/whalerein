@@ -12,6 +12,12 @@ It has no DSH/Pi payload paths, history cursor arithmetic or preview protocol re
 | `output.rs` | Stable human/JSON formatting and terminal line boundaries. |
 | `main.rs` | Tracing, streams and process exit. |
 
+The CLI resolves one explicit `SessionKey` per session command and passes it to
+every Core call, so the Host cannot change between a lookup and its action. An
+unqualified `--session` is resolved against the current authorized Hosts; an
+explicit `--host` uses `scoped_session_key`. Approval commands resolve their Host
+separately because an approval identity is Host-scoped, not session-scoped.
+
 Core's typed ViewUpdates contain Messages, provisional text/reset, Attempt
 settlement and runtime/approval state. Core decides completion and prefix relation;
 the terminal renderer prints a suffix or a corrected complete message. It retains
