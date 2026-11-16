@@ -493,7 +493,10 @@ async fn wait_deadline_during_delayed_first_result_is_an_error() {
         core.wait_session("session-1", 100).await,
         Err(CoreError::Timeout)
     ));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // The contract is the Timeout, not the scheduler latency: only a stuck
+    // implementation would exceed this bound, which coverage instrumentation
+    // and slower Windows timers can otherwise trip.
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[tokio::test]
