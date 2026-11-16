@@ -758,3 +758,84 @@ async fn fresh_invitation_pairing_works_without_account_configuration() {
     assert!(reopened.is_paired());
     assert_eq!(reopened.data_dir(), dir.path());
 }
+
+#[test]
+fn custom_service_selection_preserves_the_legacy_host_pin() {
+    use crate::api::config::{ConfigStore, PersistedConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let mut config = PersistedConfig::new(
+        "https://access.test".into(),
+        None,
+        "h-1".into(),
+        "d-1".into(),
+    );
+    let pin = "AB".repeat(32);
+    config.host_fingerprint = Some(pin.clone());
+    config.host_fingerprints.insert("h-1".into(), pin.clone());
+    ConfigStore::new(dir.path()).save(&config).unwrap();
+    let original = std::fs::read(dir.path().join("config.json")).unwrap();
+
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_custom(
+            "corp",
+            CustomServiceInput {
+                api_origin: "https://api.corp.example".into(),
+                issuer: "https://id.corp.example".into(),
+                native_client_id: "whalerein-cli".into(),
+                access_url: None,
+            },
+            &secrets,
+        )
+        .unwrap();
+    profiles.activate("corp").unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("config.json")).unwrap(),
+        original
+    );
+
+    profiles.activate(LEGACY_PROFILE_ID).unwrap();
+    let core = crate::Core::new(crate::CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets,
+    })
+    .unwrap();
+    assert!(core.profile().legacy);
+    assert!(core.is_paired());
+    let reopened: PersistedConfig =
+        serde_json::from_slice(&std::fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(reopened.host_fingerprint.as_deref(), Some(pin.as_str()));
+}
+
+#[test]
+fn profile_registry_contains_no_secret_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_custom(
+            "corp",
+            CustomServiceInput {
+                api_origin: "https://api.corp.example".into(),
+                issuer: "https://id.corp.example".into(),
+                native_client_id: "whalerein-cli".into(),
+                access_url: None,
+            },
+            &secrets,
+        )
+        .unwrap();
+    profiles.activate("corp").unwrap();
+    secrets
+        .save(
+            &crate::security::keys::pending_pairing("synthetic-device"),
+            b"SENSITIVE-MARKER",
+        )
+        .unwrap();
+    let registry = std::fs::read_to_string(dir.path().join(PROFILES_FILE)).unwrap();
+    assert!(!registry.contains("SENSITIVE-MARKER"));
+    assert!(!registry.contains("whalerein:v1:"));
+    assert!(!registry.contains("private_key"));
+    assert!(!registry.contains("device-token"));
+}

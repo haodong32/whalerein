@@ -342,3 +342,61 @@ fn profile_commands_are_stable_across_processes_and_gated() {
         "official-production"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn profile_switch_conflicts_with_an_external_activation_holder() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_text = dir.path().to_str().unwrap();
+    let added = binary()
+        .args([
+            "profile",
+            "add",
+            "official-staging",
+            "--staging",
+            "--enable-testing",
+            "--data-dir",
+            dir_text,
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let lock = dir.path().join("activation.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let mut holder = Command::new("python3")
+        .args([
+            "-c",
+            "import fcntl,sys,time\nf=open(sys.argv[1],'a+')\nfcntl.flock(f,fcntl.LOCK_SH)\nprint('ready',flush=True)\ntime.sleep(5)",
+            lock.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("python3 is available for the cross-process lock case");
+    let stdout = holder.stdout.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+    assert_eq!(lines.next().unwrap().unwrap(), "ready");
+
+    let switched = binary()
+        .args([
+            "--json",
+            "--data-dir",
+            dir_text,
+            "profile",
+            "use",
+            "official-staging",
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert_eq!(switched.status.code(), Some(8), "{switched:?}");
+    let value: serde_json::Value = serde_json::from_slice(&switched.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "conflict");
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+}
