@@ -25,10 +25,10 @@ use crate::access::{AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSet
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
-use crate::pairing::{PairingDecision, PairingInitiator, default_capabilities, parse_pairing_uri};
+use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, PairingInitiator};
 use crate::runtime::channel::{ensure_channel, ensure_channel_after, require_payload_capability};
 use crate::runtime::{ConnectionState, Runtime};
-use crate::security::{SecretStore, keys, load_device_token, load_or_create_cache_key};
+use crate::security::{keys, load_device_token, load_or_create_cache_key, SecretStore};
 use crate::sync::SyncService;
 
 pub(crate) mod revoked_commands;
