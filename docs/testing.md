@@ -222,8 +222,10 @@ queue, main and nightly tiers prove the exact trees that land.
 `.github/workflows/ci.yml` runs the affected-project fast checks, contract
 checks and deployment acceptance. The iOS workflow builds the XCFramework and
 test products once, then runs the Unit plan and a small UI smoke selection; the
-full 43-case UI plan does not run on every push. `CI gate` and `iOS gate` are the
-recommended required checks.
+full 43-case UI plan does not run on every push. The workflow has no path filter
+so every revision reports `iOS gate`, but the heavy jobs skip when no
+iOS-facing build input changed. `CI gate` and `iOS gate` are the required checks
+on main.
 
 `Full integration` reports a result on every PR revision but only runs the
 suite when the `run-integration` label is attached to that exact event. Opening

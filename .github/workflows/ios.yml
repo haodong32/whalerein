@@ -9,17 +9,10 @@ name: iOS
 #   tier is already wired for when it can.
 
 on:
+  # No path filter: the `iOS gate` check is required on main, so every PR
+  # revision must receive a conclusion. The changes job below decides whether
+  # the heavy jobs run.
   pull_request:
-    paths:
-      - "apps/ios/**"
-      - "apps/mobile-bindings/**"
-      - "core/**"
-      - "proto/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/ios.yml"
-      - ".github/actions/select-ios-simulator/**"
   merge_group:
   push:
     branches:
@@ -57,32 +50,46 @@ concurrency:
 jobs:
   changes:
     name: Detect iOS-facing changes
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
+      build: ${{ steps.diff.outputs.build }}
       ios: ${{ steps.diff.outputs.ios }}
     steps:
       - name: Check out the merge revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Compare the pull request
+      - name: Compare the tested revision
         id: diff
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --)
-          if printf '%s\n' "$changed" | grep -qE '^(apps/ios/|\.github/(workflows/ios\.yml|actions/select-ios-simulator/))'; then
-            echo 'ios=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ios=false' >> "$GITHUB_OUTPUT"
+          case "$EVENT" in
+            pull_request|merge_group)
+              changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --) ;;
+            *)
+              # Main, scheduled and manual runs always verify the full tier.
+              changed=$'apps/ios/app\n' ;;
+          esac
+          build=false
+          ios=false
+          if printf '%s\n' "$changed" | grep -qE '^(apps/ios/|apps/mobile-bindings/|core/|proto/|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/(workflows/ios\.yml|actions/select-ios-simulator/))'; then
+            build=true
           fi
+          if printf '%s\n' "$changed" | grep -qE '^(apps/ios/|\.github/(workflows/ios\.yml|actions/select-ios-simulator/))'; then
+            ios=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "ios=$ios" >> "$GITHUB_OUTPUT"
 
   build:
     name: iOS build
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: macos-15
     timeout-minutes: 40
     steps:
@@ -141,7 +148,8 @@ jobs:
 
   unit:
     name: iOS unit plan
-    needs: build
+    needs: [changes, build]
+    if: needs.build.result == 'success'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -178,8 +186,9 @@ jobs:
     name: iOS UI smoke
     needs: [changes, build]
     if: >-
-      (github.event_name == 'pull_request' && needs.changes.outputs.ios == 'true') ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke')
+      needs.build.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.changes.outputs.ios == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke'))
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -222,12 +231,13 @@ jobs:
 
   full:
     name: iOS full UI plan
-    needs: build
+    needs: [changes, build]
     if: >-
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
+      needs.build.result == 'success' &&
+      ((github.event_name == 'merge_group' && needs.changes.outputs.build == 'true') ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full'))
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -274,12 +284,22 @@ jobs:
           EVENT: ${{ github.event_name }}
           SUITE: ${{ github.event.inputs.suite || 'full' }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
           BUILD_RESULT: ${{ needs.build.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           FULL_RESULT: ${{ needs.full.result }}
         run: |
           set -euo pipefail
+          # A revision with no iOS-facing build input skips every heavy job and
+          # still passes the required gate.
+          if [ "$BUILD_REQUIRED" != 'true' ]; then
+            test "$BUILD_RESULT" = skipped
+            test "$UNIT_RESULT" = skipped
+            test "$SMOKE_RESULT" = skipped
+            test "$FULL_RESULT" = skipped
+            exit 0
+          fi
           test "$BUILD_RESULT" = success
           test "$UNIT_RESULT" = success
           case "$EVENT" in
