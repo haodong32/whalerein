@@ -114,7 +114,10 @@ device        client id whalerein-device-{device_id}, username device:{device_id
 ```
 
 Hosts authenticate with the deployment provisioning token from configuration.
-A host is inserted into `hosts` on its first successful broker authentication.
+External Host enrollment issues a broker credential that this build does not
+yet accept; the deployment token remains the only working Host broker
+credential. A host is inserted into `hosts` on its first successful broker
+authentication.
 Devices authenticate with the transport token issued at pairing. ACLs are
 computed from the live grants row; a revoked grant denies both HTTP and MQTT.
 
@@ -401,6 +404,9 @@ GET    /v1/requests/{request_id}        device bearer token
 POST   /v1/requests/{request_id}/heartbeat  device bearer token
 DELETE /v1/devices/{device_id}          device bearer token (self) or admin
 POST   /v1/hosts/{host_id}/devices/{device_id}/revocation  host signature
+POST   /v1/enrollments/hosts           portable authorization + Host proof
+GET    /v1/enrollments/hosts/{host_id} admin bearer (device/Host proof pending)
+GET    /v1/operations/{operation_id}   admin bearer (original-endpoint proof pending)
 GET    /healthz
 GET    /readyz
 GET    /metrics
@@ -415,9 +421,7 @@ the Host aborts the request scope.
 Internal broker callbacks (bound on the internal listener, fixed shared header):
 
 ```http
-POST /internal/broker/auth
-POST /internal/broker/acl
-POST /internal/broker/presence
+POST /internal/broker/connect
 ```
 
 HTTP errors use `ErrorResponse` JSON with a stable `ErrorCode` value. Success

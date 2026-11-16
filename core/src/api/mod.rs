@@ -11,8 +11,14 @@ mod proto_compat;
 pub mod test_support;
 mod types;
 
+pub use crate::account::{
+    AccountBinding, CustomServiceInput, Environment, ProfileMode, ServiceDescriptor, ServiceKind,
+};
 pub use crate::diagnostics::MetricSample;
 pub use crate::pairing::{PairingDecision, PairingError};
+pub use crate::profiles::{
+    ActivationOutcome, ProfileContext, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome,
+};
 pub use crate::runtime::ConnectionState;
 #[cfg(feature = "keyring")]
 pub use crate::security::KeyringSecretStore;

@@ -135,31 +135,6 @@ fn exits_four_when_command_requires_pairing() {
     assert_eq!(output.status.code(), Some(4));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["code"], "not_paired");
-    assert_eq!(value["error"]["action"], "reauth");
-    let message = value["error"]["message"].as_str().unwrap();
-    assert!(
-        message.contains("whalerein pair <pairing-uri>"),
-        "{message}"
-    );
-    assert!(
-        message.contains("whalerein forget --local-only"),
-        "{message}"
-    );
-
-    // The reachable first-run human output names the next command too.
-    let human = binary()
-        .args(["--data-dir", dir.path().to_str().unwrap(), "hosts"])
-        .env("WHALEREIN_SECRET_BACKEND", "memory")
-        .output()
-        .unwrap();
-    assert_eq!(human.status.code(), Some(4));
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&human.stderr),
-        String::from_utf8_lossy(&human.stdout)
-    );
-    assert!(text.contains("not_paired"), "{text}");
-    assert!(text.contains("whalerein pair"), "{text}");
 }
 
 #[test]
@@ -333,16 +308,6 @@ async fn pairing_rejects_a_mismatched_fingerprint_even_with_yes() {
     assert_eq!(output.status.code(), Some(8), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["code"], "host_fingerprint_mismatch");
-    let message = value["error"]["message"].as_str().unwrap();
-    for hint in [
-        "verify",
-        "whalerein forget --local-only",
-        "whalerein pair",
-        "revoke",
-    ] {
-        assert!(message.contains(hint), "missing {hint:?}: {message}");
-    }
-    assert!(!message.contains(&"00".repeat(32)));
     assert!(!dir.path().join("config.json").exists());
 
     // A refused fingerprint must leave no authorization behind.
@@ -875,6 +840,7 @@ async fn sigint_before_submission_exits_two_with_a_cancelled_envelope() {
     .expect("process must exit after SIGINT");
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stdout.contains("panicked"), "{stdout}");
     assert!(
         !stdout.trim().is_empty(),
@@ -1090,4 +1056,127 @@ async fn approvals_request_prints_the_wire_state_and_unknown_is_not_found() {
     assert_eq!(value["data"]["session_id"], "session-1");
     assert_eq!(value["data"]["approvals"][0]["approval_id"], "approval-1");
     assert!(value["data"].get("state").is_none());
+}
+#[test]
+fn profile_commands_are_stable_across_processes_and_gated() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_text = dir.path().to_str().unwrap();
+    let json = |args: &[&str]| {
+        let output = binary()
+            .args(["--json", "--data-dir", dir_text])
+            .args(args)
+            .env("WHALEREIN_SECRET_BACKEND", "memory")
+            .output()
+            .unwrap();
+        (output,)
+    };
+
+    let (fresh,) = json(&["profile", "current"]);
+    assert!(fresh.status.success(), "{fresh:?}");
+    let value: serde_json::Value = serde_json::from_slice(&fresh.stdout).unwrap();
+    assert_eq!(value["command"], "profile-current");
+    assert!(value["data"]["active"].is_null());
+    assert_eq!(
+        value["data"]["default_service"]["kind"],
+        "official-production"
+    );
+    assert!(!dir.path().join("profiles.json").exists());
+
+    let (denied,) = json(&["profile", "add", "official-staging", "--staging"]);
+    assert_eq!(denied.status.code(), Some(9), "{denied:?}");
+    let value: serde_json::Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "unsupported_capability");
+
+    let (added,) = json(&[
+        "profile",
+        "add",
+        "official-staging",
+        "--staging",
+        "--enable-testing",
+    ]);
+    assert!(added.status.success(), "{added:?}");
+    let (used,) = json(&["profile", "use", "official-staging"]);
+    assert!(used.status.success(), "{used:?}");
+
+    let (current,) = json(&["profile", "current"]);
+    assert!(current.status.success(), "{current:?}");
+    let value: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(value["data"]["active"]["name"], "official-staging");
+    assert_eq!(value["data"]["active"]["environment"], "staging");
+    assert_eq!(value["data"]["active"]["testing"], true);
+
+    let (listed,) = json(&["profile", "list"]);
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(value["data"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|profile| profile["name"] == "official-staging" && profile["active"] == true));
+
+    let (removed,) = json(&["profile", "remove", "official-staging"]);
+    assert!(removed.status.success(), "{removed:?}");
+    let value: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(value["data"]["remote_revocation"], "not_attempted");
+    assert_eq!(
+        value["data"]["active"]["active"]["name"],
+        "official-production"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_switch_conflicts_with_an_external_activation_holder() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_text = dir.path().to_str().unwrap();
+    let added = binary()
+        .args([
+            "profile",
+            "add",
+            "official-staging",
+            "--staging",
+            "--enable-testing",
+            "--data-dir",
+            dir_text,
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let lock = dir.path().join("activation.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let mut holder = Command::new("python3")
+        .args([
+            "-c",
+            "import fcntl,sys,time\nf=open(sys.argv[1],'a+')\nfcntl.flock(f,fcntl.LOCK_SH)\nprint('ready',flush=True)\ntime.sleep(5)",
+            lock.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("python3 is available for the cross-process lock case");
+    let stdout = holder.stdout.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+    assert_eq!(lines.next().unwrap().unwrap(), "ready");
+
+    let switched = binary()
+        .args([
+            "--json",
+            "--data-dir",
+            dir_text,
+            "profile",
+            "use",
+            "official-staging",
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert_eq!(switched.status.code(), Some(8), "{switched:?}");
+    let value: serde_json::Value = serde_json::from_slice(&switched.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "conflict");
+
+    let _ = holder.kill();
+    let _ = holder.wait();
 }

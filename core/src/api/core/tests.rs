@@ -38,7 +38,10 @@ async fn wait_uses_remote_state_and_rejects_invalid_deadlines() {
     core.watch_active
         .store(false, std::sync::atomic::Ordering::SeqCst);
     access.host.lock().unwrap().wait_timeouts = usize::MAX;
-    let observation = core.wait_session("session-1", 100).await.unwrap();
+    // Leave a real timing margin: the first session lookup and coverage
+    // instrumentation share the deadline, and a 100 ms budget is too tight on
+    // slower native runners.
+    let observation = core.wait_session("session-1", 1000).await.unwrap();
     assert_eq!(observation.reason, crate::api::WaitReason::Timeout);
     access.host.lock().unwrap().wait_timeouts = 0;
     for (code, expected) in [

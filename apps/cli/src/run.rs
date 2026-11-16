@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use serde_json::json;
 use whalerein_core::api::{
-    default_data_dir, CreateSessionInput, MemorySecretStore, PairingDecision, PendingQueueAction,
-    SecretStore, SessionModel, WaitReason,
+    default_data_dir, CreateSessionInput, Environment, MemorySecretStore, PairingDecision,
+    PendingQueueAction, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome, SecretStore,
+    SessionModel, WaitReason,
 };
 use whalerein_core::{Core, CoreError, CoreOptions};
 
-use crate::cli::{Cli, Command, ModelAction, QueueCommand};
+use crate::cli::{Cli, Command, ModelAction, ProfileAction, QueueCommand};
 use crate::output::{
     approval_data, command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
     lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approval, render_approvals,
@@ -125,6 +126,12 @@ where
     } else {
         None
     };
+    if let Command::Profile { action } = &command {
+        return match profile(&data_dir, &secrets, &command, action) {
+            Ok(outcome) => outcome,
+            Err(error) => core_error_outcome(&command, error),
+        };
+    }
     let core = match Core::new(CoreOptions { data_dir, secrets }) {
         Ok(core) => core,
         Err(error) => return with_quarantine(core_error_outcome(&command, error), quarantined),
@@ -442,6 +449,7 @@ fn make_private(path: &Path) {
 /// dispatches that carry a `CliOutcome`; protocol failures stay `CoreError`.
 async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcome, CoreError> {
     let result = match command {
+        Command::Profile { .. } => unreachable!("profile commands are dispatched before Core"),
         Command::Pair {
             uri,
             fingerprint,
@@ -1525,6 +1533,203 @@ fn prompt_yes_no(prompt: &str) -> bool {
     answer
 }
 
+fn profile(
+    data_dir: &std::path::Path,
+    secrets: &Arc<dyn SecretStore>,
+    command: &Command,
+    action: &ProfileAction,
+) -> Result<CliOutcome, CoreError> {
+    let profiles = Profiles::new(data_dir);
+    match action {
+        ProfileAction::List { include_staging } => {
+            let profiles_list = profiles.list(secrets, *include_staging)?;
+            let data = json!({ "profiles": profiles_list });
+            let human = render_profile_list(&profiles_list);
+            Ok(CliOutcome::success(command, data, human))
+        }
+        ProfileAction::Current => {
+            let selection = profiles.current(secrets)?;
+            let data = serde_json::to_value(&selection)
+                .unwrap_or_else(|_| json!({ "registry_present": selection.registry_present }));
+            Ok(CliOutcome::success(
+                command,
+                data,
+                render_profile_current(&selection),
+            ))
+        }
+        ProfileAction::Add {
+            name,
+            staging,
+            enable_testing,
+            api_origin,
+            issuer,
+            client_id,
+            access_url,
+        } => {
+            let custom_supplied = api_origin.is_some()
+                || issuer.is_some()
+                || client_id.is_some()
+                || access_url.is_some();
+            if *staging && custom_supplied {
+                return Err(CoreError::InvalidInput(
+                    "--staging cannot be combined with custom service arguments".into(),
+                ));
+            }
+            let summary = if *staging {
+                if !*enable_testing {
+                    return Err(CoreError::Unsupported);
+                }
+                profiles.add_official_staging(name, true, secrets)?
+            } else {
+                if *enable_testing {
+                    return Err(CoreError::InvalidInput(
+                        "--enable-testing requires --staging".into(),
+                    ));
+                }
+                let api_origin = api_origin.as_ref().ok_or_else(|| {
+                    CoreError::InvalidInput("custom profile requires --api-origin".into())
+                })?;
+                let issuer = issuer.as_ref().ok_or_else(|| {
+                    CoreError::InvalidInput("custom profile requires --issuer".into())
+                })?;
+                let client_id = client_id.as_ref().ok_or_else(|| {
+                    CoreError::InvalidInput("custom profile requires --client-id".into())
+                })?;
+                profiles.add_custom(
+                    name,
+                    whalerein_core::api::CustomServiceInput {
+                        api_origin: api_origin.clone(),
+                        issuer: issuer.clone(),
+                        native_client_id: client_id.clone(),
+                        access_url: access_url.clone(),
+                    },
+                    secrets,
+                )?
+            };
+            let data = json!({ "profile": summary, "current": false });
+            let human = format!(
+                "Added profile {} ({}); active profile unchanged.\n",
+                summary.name,
+                environment_label(summary.environment)
+            );
+            Ok(CliOutcome::success(command, data, human))
+        }
+        ProfileAction::Use { name } => {
+            let outcome = profiles.activate(name)?;
+            let data = serde_json::to_value(&outcome)
+                .unwrap_or_else(|_| json!({ "profile": outcome.profile }));
+            let mut human = format!(
+                "Active profile: {}\nEnvironment: {}\nService: {}\n",
+                outcome.profile.name,
+                environment_label(outcome.profile.environment),
+                profile_service_label(&outcome.profile),
+            );
+            if let Some(service) = &outcome.profile.service {
+                if service.environment() == Environment::Custom {
+                    human.push_str(&format!("Issuer: {}\n", service.issuer_display()));
+                }
+            }
+            if let Some(warning) = &outcome.rollback_warning {
+                human.push_str(&format!("Warning: {warning}\n"));
+            }
+            Ok(CliOutcome::success(command, data, human))
+        }
+        ProfileAction::Remove { name } => {
+            let outcome = profiles.remove(name, secrets)?;
+            let data = serde_json::to_value(&outcome)
+                .unwrap_or_else(|_| json!({ "remote_revocation": outcome.remote_revocation }));
+            Ok(CliOutcome::success(
+                command,
+                data,
+                render_profile_removal(&outcome),
+            ))
+        }
+    }
+}
+
+fn environment_label(environment: Environment) -> &'static str {
+    match environment {
+        Environment::Production => "Production",
+        Environment::Staging => "Staging (testing only)",
+        Environment::Custom => "Custom",
+        Environment::Standalone => "Standalone",
+    }
+}
+
+fn profile_service_label(profile: &ProfileSummary) -> &'static str {
+    profile
+        .service
+        .as_ref()
+        .map_or("Standalone", whalerein_core::api::ServiceDescriptor::label)
+}
+
+fn render_profile_list(profiles: &[ProfileSummary]) -> String {
+    if profiles.is_empty() {
+        return "No local profiles.\n".into();
+    }
+    let mut output = String::from("NAME\tENVIRONMENT\tCURRENT\n");
+    for profile in profiles {
+        output.push_str(&format!(
+            "{}\t{}\t{}\n",
+            profile.name,
+            environment_label(profile.environment),
+            if profile.active { "yes" } else { "no" }
+        ));
+    }
+    output
+}
+
+fn render_profile_current(selection: &ProfileSelection) -> String {
+    match &selection.active {
+        Some(profile) => {
+            let mut output = format!(
+                "profile: {}\nenvironment: {}\nservice: {}\n",
+                profile.name,
+                environment_label(profile.environment),
+                profile_service_label(profile),
+            );
+            if let Some(service) = &profile.service {
+                if service.environment() == Environment::Custom {
+                    output.push_str(&format!("issuer: {}\n", service.issuer_display()));
+                }
+            }
+            output.push_str(&format!(
+                "legacy: {}\naccount: {}\n",
+                if profile.legacy { "yes" } else { "no" },
+                if profile.account.is_some() {
+                    "bound"
+                } else {
+                    "signed out"
+                }
+            ));
+            output
+        }
+        None => {
+            let default = selection
+                .default_service
+                .as_ref()
+                .map_or("none", whalerein_core::api::ServiceDescriptor::label);
+            format!("profile: none\naccount service: {default} (default)\nstandalone: available\n")
+        }
+    }
+}
+
+fn render_profile_removal(outcome: &RemovalOutcome) -> String {
+    let mut output = format!(
+        "Removed profile {} (local state only).\nRemote grants and account sessions were not revoked.\n",
+        outcome.removed.name
+    );
+    match &outcome.active.active {
+        Some(profile) => output.push_str(&format!(
+            "Active profile: {} ({})\n",
+            profile.name,
+            environment_label(profile.environment)
+        )),
+        None => output.push_str("Active profile: none\n"),
+    }
+    output
+}
+
 #[cfg(not(unix))]
 fn prompt_yes_no(prompt: &str) -> bool {
     use std::io::Write;
@@ -2584,6 +2789,314 @@ mod tests {
 
         let after = run_args(&data_dir, secrets, &["hosts"]).await;
         assert_eq!(after.exit, 4);
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use clap::Parser;
+    use whalerein_core::api::MemorySecretStore;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[tokio::test]
+    async fn profile_current_defaults_to_official_production_without_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "profile",
+                "current",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["command"], "profile-current");
+        assert!(value["data"]["active"].is_null());
+        assert_eq!(
+            value["data"]["default_service"]["kind"],
+            "official-production"
+        );
+        assert_eq!(value["data"]["standalone_available"], true);
+        assert!(!dir.path().join("profiles.json").exists());
+    }
+
+    #[tokio::test]
+    async fn profile_staging_requires_explicit_testing_and_never_activates() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_text = dir.path().to_str().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let denied = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "add",
+                "official-staging",
+                "--staging",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(denied.exit, 9, "{denied:?}");
+        assert_eq!(denied.to_json()["error"]["code"], "unsupported_capability");
+        assert!(!dir.path().join("profiles.json").exists());
+
+        let added = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "add",
+                "official-staging",
+                "--staging",
+                "--enable-testing",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(added.exit, 0, "{added:?}");
+        assert_eq!(added.to_json()["data"]["current"], false);
+        assert_eq!(added.to_json()["data"]["profile"]["environment"], "staging");
+        assert_eq!(added.to_json()["data"]["profile"]["testing"], true);
+
+        let current = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "current",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(
+            current.to_json()["data"]["active"]["name"],
+            "official-production"
+        );
+
+        let hidden = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "list",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(
+            hidden.to_json()["data"]["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let shown = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "list",
+                "--include-staging",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(
+            shown.to_json()["data"]["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(shown.to_json()["data"]["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["name"] == "official-staging" && value["environment"] == "staging"));
+    }
+
+    #[tokio::test]
+    async fn profile_activation_labels_staging_and_persists_across_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_text = dir.path().to_str().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let added = run_with(
+            cli(&[
+                "whalerein",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "add",
+                "official-staging",
+                "--staging",
+                "--enable-testing",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(added.exit, 0, "{added:?}");
+        let used = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "use",
+                "official-staging",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(used.exit, 0, "{used:?}");
+        assert_eq!(used.to_json()["data"]["profile"]["environment"], "staging");
+        assert!(used.human.contains("Staging"));
+
+        let current = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "current",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(
+            current.to_json()["data"]["active"]["name"],
+            "official-staging"
+        );
+        assert_eq!(current.to_json()["data"]["active"]["testing"], true);
+
+        let removed = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "remove",
+                "official-staging",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(removed.exit, 0, "{removed:?}");
+        assert_eq!(
+            removed.to_json()["data"]["remote_revocation"],
+            "not_attempted"
+        );
+        assert_eq!(
+            removed.to_json()["data"]["active"]["active"]["name"],
+            "official-production"
+        );
+        let after = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "current",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(
+            after.to_json()["data"]["active"]["name"],
+            "official-production"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_custom_service_requires_every_explicit_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_text = dir.path().to_str().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let missing = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "add",
+                "corp",
+                "--api-origin",
+                "https://api.corp.example",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(missing.exit, 2, "{missing:?}");
+        assert_eq!(missing.to_json()["error"]["code"], "invalid_argument");
+
+        let added = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "add",
+                "corp",
+                "--api-origin",
+                "https://api.corp.example",
+                "--issuer",
+                "https://id.corp.example",
+                "--client-id",
+                "whalerein-cli",
+                "--access-url",
+                "https://access.corp.example",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(added.exit, 0, "{added:?}");
+        assert_eq!(added.to_json()["data"]["profile"]["environment"], "custom");
+        let used = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir_text,
+                "profile",
+                "use",
+                "corp",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(used.exit, 0, "{used:?}");
+        assert_eq!(
+            used.to_json()["data"]["profile"]["service"]["issuer"],
+            "https://id.corp.example"
+        );
+        assert!(used.human.contains("https://id.corp.example"));
     }
 }
 

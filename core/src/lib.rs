@@ -5,12 +5,14 @@
 //! capability.
 
 mod access;
+mod account;
 pub mod api;
 mod cache;
 mod commands;
 mod diagnostics;
 mod drafts;
 mod pairing;
+mod profiles;
 mod runtime;
 mod security;
 mod sync;
@@ -18,7 +20,8 @@ mod sync;
 pub(crate) mod util;
 
 pub use api::{
-    Core, CoreError, CoreOptions, FileSecretStore, MemorySecretStore, SecretError, SecretStore,
+    Core, CoreError, CoreOptions, FileSecretStore, MemorySecretStore, Profiles, SecretError,
+    SecretStore,
 };
 
 pub mod conversation;

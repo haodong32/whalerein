@@ -1,10 +1,13 @@
 # External account protocol v1
 
-Status: **contract ratified, implementation pending.** The operator approved
-decisions R1–R10 on 2026-11-14, so this document fixes the v1 public contract
-that Access, Core and an independent account service implement. No endpoint of
-this protocol is shipped yet: Standalone behavior described in
-[the wire contract](../../proto/v1/WIRE.md) remains the only operating mode.
+Status: **contract ratified; partial Host-enrollment surface shipped; device
+account mode not implemented.** The operator approved decisions R1–R10 on
+2026-11-14, so this document fixes the v1 public contract that Access, Core and
+an independent account service implement. Host enrollment and its status reads
+exist and verify signatures and Host proof, but external Host enrollment is not
+operationally usable and no account-authorized device pairing is implemented.
+Standalone behavior described in [the wire contract](../../proto/v1/WIRE.md)
+therefore remains the only usable operating mode.
 
 Ratified v1 shape, in one place:
 
@@ -28,6 +31,40 @@ Written by task 05 (Cloud workspace) additively: no existing statement in this
 repository is changed by this file. Where this document and the current
 Standalone wire contract differ, the wire contract wins for current
 deployments.
+
+## Current implementation status
+
+Verified against the pinned code on 2026-11-16. This is a status record, not an
+acceptance claim.
+
+- **Host enrollment routes exist**: `POST /v1/enrollments/hosts`,
+  `GET /v1/enrollments/hosts/{host_id}` and `GET /v1/operations/{operation_id}`
+  are wired and verify issuer, audience, purpose, region, key window, signature,
+  expiry and Host proof of possession. See `access/internal/external/` and
+  `access/internal/httpapi/external_handlers.go`.
+- **Enrollment is not operational**: the issued broker credential is not
+  accepted by the broker, readiness is unreachable, an external Host does not
+  become a `hosts` row, operation state is always reported committed, retries
+  after authorization expiry are refused, revisions are count-derived without
+  locking, and a second enrollment for the same Host conflicts with the
+  enrollment primary key. These are implementation gaps, not contract choices.
+- **Status reads are admin-only** in this build; the original-device/Host proof
+  described by this contract is not implemented.
+- **Device account pairing, directory, device registration, management apply and
+  regional enforcement are absent.** Only purpose constants and fixture
+  issuance exist for `device_pairing`/`device_recovery`.
+- **Cloud mints Host enrollment authority only**; it has no device approval,
+  scoped directory, membership enforcement or capacity model, and its regional
+  client still uses a deployment admin bearer rather than a scoped service
+  identity.
+- **Account authentication is deferred.** The official client does not ship a
+  Bearer account session: device-bound credentials remain required, and the
+  pinned provider does not yet support DPoP. When a maintained provider
+  officially supports DPoP, re-run the native feasibility gate before
+  implementing login, refresh, directory, device registration or pairing
+  authorization. Do not add a Bearer fallback in the meantime.
+
+Treat the operations table below as the target contract, not current behavior.
 
 ## Scope
 
