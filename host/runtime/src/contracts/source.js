@@ -1,6 +1,12 @@
 // Harness-neutral source seam. Implementations own native history and actions;
 // neither credentials nor a Host database belongs on this interface.
 import { AdapterError, DefinitiveExecutionError } from '../errors.js'
+import { validateId } from './ids.js'
+
+function requireId(kind, value, message) {
+  if (!validateId(kind, value).ok) throw new AdapterError('invalid_argument', message)
+  return value
+}
 
 export class SourceAdapter {
   async open({metadata}={}) { this.metadata=metadata }
@@ -33,15 +39,16 @@ export class SourceAdapter {
 }
 
 export function validateSessionUpdate(update) {
-  if (!update?.session?.session_id || update.session.session_id.length>512) throw new AdapterError('invalid_argument','session identity missing')
+  if (!update?.session?.session_id || !validateId('session_id', update.session.session_id).ok) throw new AdapterError('invalid_argument','session identity missing')
   const kinds=['history','live','state','reset'].filter(key=>update[key]!=null)
   if(kinds.length!==1)throw new AdapterError('invalid_argument','exactly one update required')
   if(update.history) {
     const b=update.history
-    if(!b.from_cursor||!b.to_cursor||!b.batch_id||b.from_cursor.length>4096||b.to_cursor.length>4096)throw new AdapterError('invalid_argument','invalid history interval')
+    if(!b.from_cursor||!b.to_cursor||!validateId('cursor', b.from_cursor).ok||!validateId('cursor', b.to_cursor).ok||!validateId('batch_id', b.batch_id).ok)throw new AdapterError('invalid_argument','invalid history interval')
     for(const {message} of b.changes??[]) {
       if(!message?.message_id||!message.role||!Array.isArray(message.blocks))throw new AdapterError('invalid_argument','invalid message')
-      for(const block of message.blocks)if(!block.block_id||['text','tool_call','tool_result','notice','attachment'].filter(k=>block[k]!=null).length!==1)throw new AdapterError('invalid_argument','invalid content block')
+      requireId('message_id', message.message_id, 'invalid message identity')
+      for(const block of message.blocks){requireId('block_id', block.block_id, 'invalid content block identity');if(['text','tool_call','tool_result','notice','attachment'].filter(k=>block[k]!=null).length!==1)throw new AdapterError('invalid_argument','invalid content block')}
     }
   }
   if(update.live) {

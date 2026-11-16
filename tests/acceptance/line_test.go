@@ -142,15 +142,34 @@ func (c *mqttClient) next(t *testing.T, prefix string, timeout time.Duration) []
 }
 
 type stack struct {
-	root       *testing.T
-	mqttAddr   string
-	accessURL  string
-	db         *pgxpool.Pool
-	hostToken  string
-	adminToken string
-	hostID     string
-	devices    []string
-	tokens     []string
+	root              *testing.T
+	mqttAddr          string
+	accessURL         string
+	db                *pgxpool.Pool
+	hostToken         string
+	adminToken        string
+	hostID            string
+	devices           []string
+	tokens            []string
+	restartAccess     string
+	restartBroker     string
+	restartPostgres   string
+	stopAccess        string
+	startAccess       string
+	accessContainer   string
+	postgresContainer string
+}
+
+// requiredEnv returns a required acceptance setting. A missing restart command
+// is a configuration failure, never a skip: the deployment suite exists to
+// exercise restarts, so a run without them proves nothing.
+func requiredEnv(t *testing.T, key string) string {
+	t.Helper()
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		t.Fatalf("%s is required for the deployment acceptance suite; see docs/testing.md#deployment-acceptance", key)
+	}
+	return value
 }
 
 func newStack(t *testing.T) *stack {
@@ -175,13 +194,20 @@ func newStack(t *testing.T) *stack {
 	unique := fmt.Sprintf("%d", time.Now().UnixNano())
 	hostID := "accept-host-" + unique
 	s := &stack{
-		root:       t,
-		mqttAddr:   get("WHALEREIN_ACCEPTANCE_MQTT", "127.0.0.1:1883"),
-		accessURL:  get("WHALEREIN_ACCEPTANCE_ACCESS", "http://127.0.0.1:8080"),
-		db:         db,
-		hostToken:  get("WHALEREIN_HOST_PROVISIONING_TOKEN", "dev-host-token"),
-		adminToken: get("WHALEREIN_ADMIN_TOKEN", "dev-admin-token"),
-		hostID:     hostID,
+		root:              t,
+		mqttAddr:          get("WHALEREIN_ACCEPTANCE_MQTT", "127.0.0.1:1883"),
+		accessURL:         get("WHALEREIN_ACCEPTANCE_ACCESS", "http://127.0.0.1:8080"),
+		db:                db,
+		hostToken:         get("WHALEREIN_HOST_PROVISIONING_TOKEN", "dev-host-token"),
+		adminToken:        get("WHALEREIN_ADMIN_TOKEN", "dev-admin-token"),
+		hostID:            hostID,
+		restartAccess:     requiredEnv(t, "WHALEREIN_ACCEPTANCE_RESTART_ACCESS"),
+		restartBroker:     requiredEnv(t, "WHALEREIN_ACCEPTANCE_RESTART_BROKER"),
+		restartPostgres:   get("WHALEREIN_ACCEPTANCE_RESTART_POSTGRES", ""),
+		stopAccess:        get("WHALEREIN_ACCEPTANCE_STOP_ACCESS", ""),
+		startAccess:       get("WHALEREIN_ACCEPTANCE_START_ACCESS", ""),
+		accessContainer:   get("WHALEREIN_ACCEPTANCE_ACCESS_CONTAINER", "whalerein-access"),
+		postgresContainer: get("WHALEREIN_ACCEPTANCE_POSTGRES_CONTAINER", "whalerein-postgres"),
 	}
 	seedGrant(t, db, hostID, "accept-device-a-"+unique, "acceptance-device-a-"+unique)
 	seedGrant(t, db, hostID, "accept-device-b-"+unique, "acceptance-device-b-"+unique)
@@ -313,18 +339,30 @@ func (s *stack) metrics(t *testing.T) map[string]float64 {
 	return values
 }
 
-func restart(t *testing.T, command string) {
+func runCommand(t *testing.T, command string) (time.Duration, error) {
 	t.Helper()
-	if command == "" {
-		t.Skip("restart command not configured")
+	if strings.TrimSpace(command) == "" {
+		t.Fatal("command not configured; the deployment acceptance suite does not skip restart work")
 	}
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
-		t.Skip("restart command not configured")
+		t.Fatal("command not configured; the deployment acceptance suite does not skip restart work")
 	}
-	output, err := exec.Command(parts[0], parts[1:]...).CombinedOutput()
+	started := time.Now()
+	commandProcess := exec.Command(parts[0], parts[1:]...)
+	commandProcess.Dir = repositoryRoot()
+	output, err := commandProcess.CombinedOutput()
+	elapsed := time.Since(started)
 	if err != nil {
-		t.Fatalf("restart %q: %v (%s)", command, err, output)
+		return elapsed, fmt.Errorf("%q: %w (%s)", command, err, output)
+	}
+	return elapsed, nil
+}
+
+func restart(t *testing.T, command string) {
+	t.Helper()
+	if _, err := runCommand(t, command); err != nil {
+		t.Fatalf("restart: %v", err)
 	}
 }
 
@@ -342,6 +380,22 @@ func waitReady(t *testing.T, accessURL string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatal("Access did not become ready")
+}
+
+func waitNotReady(t *testing.T, accessURL string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(accessURL + "/readyz")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatal("Access stayed ready on a read-only database")
 }
 
 func eventPayload(hostID, deviceID string) []byte {

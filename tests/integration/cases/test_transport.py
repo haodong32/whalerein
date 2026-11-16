@@ -37,6 +37,12 @@ pytestmark = pytest.mark.transport
                 "When the Node.js MQTT adapter publishes a two MiB result, bounded MQTT frames deliver the complete body without reconnecting."
             ),
         ),
+        pytest.param(
+            "boundaries",
+            marks=pytest.mark.description(
+                "Payloads of one byte and at 60 KiB plus or minus one cross the real broker intact, with every wire packet inside the packet budget."
+            ),
+        ),
     ],
 )
 def test_native_transport(case, postgres, broker):
@@ -71,6 +77,11 @@ def test_native_transport(case, postgres, broker):
             "node",
             "--test",
             "tests/integration/drivers/transport/mqtt-large-message.test.js",
+        ],
+        "boundaries": [
+            "node",
+            "--test",
+            "tests/integration/drivers/transport/mqtt-boundary-message.test.js",
         ],
     }
     directory = ROOT / (

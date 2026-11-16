@@ -45,6 +45,22 @@ actual tail, not from the full native array.
 State refresh uses the native live head directly when available rather than
 materializing conversation content on every heartbeat.
 
+Questions stay source-owned. An open answer claims a live native handle for the
+duration of the answer; a session interrupt releases that claim and settles only
+the in-flight answer, so a later question is never permanently `conflict`.
+Question list cursors are authenticated by device and session, persist a per-Host
+key in the Host state store, and resume from the last delivered batch identity
+rather than from a whole-snapshot fingerprint. Adding, answering or removing a
+batch between pages therefore changes the continuation point, not the cursor
+validity; a cursor from a lost key generation is reported as `snapshot_required`
+(restart from the first page) instead of a misleading conflict.
+
+Model selection is a session mutation with the same command deadline as queue and
+answer controls. Re-selecting the session's effective model is a no-op at the CLI
+and FakeDSH source level, a selection never rewrites another session's model, and
+the next turn is observed through the source's `last_used` projection rather than
+the receipt echo.
+
 Host keys stay in the original DSH credential namespace. Peer/command/revocation
 state paths are preserved during extraction. The shared Host has no credential
 methods on SourceAdapter and no second plaintext session log. One persistent

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -255,7 +256,9 @@ def test_session_fork_without_complete_turn(scenario, paired_device, session_id)
     """A source with no completed turn is rejected without creating a child."""
     before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
     code, envelopes = paired_device.invoke("session-fork", "--session", session_id, success=False)
-    assert code == 5 and envelopes[-1]["error"]["code"] == "operation_failed"
+    # PREFLIGHT_CONFLICT decodes through the wire ErrorCode: conflict is exit 8,
+    # not the generic "unavailable" 5.
+    assert code == 8 and envelopes[-1]["error"]["code"] == "conflict"
     assert envelopes[-1]["data"]["lifecycle_receipt"]["disposition"] == "FAILED"
     assert envelopes[-1]["data"]["lifecycle_receipt"]["reason_code"] == "PREFLIGHT_CONFLICT"
     assert {item["session_id"] for item in paired_device.sessions(scenario.host)} == before
@@ -359,7 +362,7 @@ def test_tail(scenario, paired_device, session_id):
 def test_approval(decision, scenario, paired_device, session_id, pending_approval):
     """Resolves the pending approval to the requested decision."""
     approval = paired_device.approvals(session_id)[0]
-    assert approval["approval_id"] == pending_approval["approvalId"]
+    assert approval["approval_id"] == pending_approval["approval_id"]
     assert paired_device.resolve(decision, approval)["status"] in (
         "host_accepted",
         "succeeded",
@@ -384,7 +387,7 @@ def test_interrupt(scenario, paired_device, session_id):
 
 
 def test_sync(scenario, paired_device, session_id):
-    """When one session gains two committed Messages, sync installs only that session's new identities and opaque cursor, and a repeat reports zero changes."""
+    """When one session gains two committed Messages, sync installs only that session's new identities and opaque cursor; an explicit repeat re-reports the full committed count without changing identities."""
     other = scenario.dsh.create_session()
     paired_device.sync(session_id)
     paired_device.sync(other)
@@ -400,7 +403,7 @@ def test_sync(scenario, paired_device, session_id):
     assert len(installed[1]) == 2 and len(set(installed[1])) == 2
     assert paired_device.cached_history_state(scenario.host, other) == other_before, "Sync crossed the session boundary"
     repeated = paired_device.sync(session_id)
-    assert repeated["session_id"] == session_id and repeated["events"] == 0
+    assert repeated["session_id"] == session_id and repeated["events"] == 2
     assert paired_device.cached_history_state(scenario.host, session_id) == installed, "Idempotent sync changed committed identities or cursor"
     assert paired_device.sync(other)["events"] == 2
 
@@ -544,6 +547,16 @@ def test_live_preview(json_output, once, visible_text, scenario, paired_device, 
         values = [json.loads(line) for line in raw.split(b"\n")[:-1] if line]
         return [v["data"]["event"] for v in values if v.get("data", {}).get("event")]
 
+    state_line = re.compile(rb"\[state\] [^\n]*\n")
+
+    def human_text(raw):
+        # The human renderer prints a `[state] ...` line for each run-phase
+        # transition; those lines are not preview or message content. Line
+        # boundaries depend on whether a transition landed between preview
+        # chunks, so compare the remaining visible text without trailing
+        # newlines.
+        return state_line.sub(b"", raw).rstrip(b"\n")
+
     try:
         wait(subscribed, process=live)
         scenario.dsh.process.control("preview_start", session_id=session_id)
@@ -557,7 +570,7 @@ def test_live_preview(json_output, once, visible_text, scenario, paired_device, 
                 )
                 assert all(e.get("type") != "message" for e in events(bytes(buffered)))
             else:
-                read_until(lambda raw: raw == (b"x\n" if once else b"x"))
+                read_until(lambda raw: human_text(raw) == b"x")
         else:
             read_until(lambda raw: any(e.get("type") == "reset" for e in events(raw)))
         # This assertion runs before the final message is even emitted.
@@ -569,7 +582,7 @@ def test_live_preview(json_output, once, visible_text, scenario, paired_device, 
             if json_output:
                 read_until(lambda raw: any(e.get("type") == "message" for e in events(raw)))
             else:
-                read_until(lambda raw: raw == b"xy\n")
+                read_until(lambda raw: human_text(raw) == b"xy")
     finally:
         live.close()
     # Restart the CLI and rebuild only this isolated device's disposable cache.
@@ -578,12 +591,25 @@ def test_live_preview(json_output, once, visible_text, scenario, paired_device, 
     for suffix in ("", "-wal", "-shm"):
         cache.with_name(cache.name + suffix).unlink(missing_ok=True)
     paired_device.sessions(scenario.host)
-    _, values = paired_device.invoke("tail", "--session", session_id, "--once", "--timeout", "15")
-    recovered = [v["data"]["event"] for v in values if v.get("data", {}).get("event")]
-    assert all(event["type"] != "preview" for event in recovered)
-    committed = [event for event in recovered if event["type"] == "message"]
+    # STREAM-01: a watch-attached snapshot is history, not new output, so a
+    # cold-cache `tail --once` must time out instead of replaying it.
+    code, values = paired_device.invoke(
+        "tail", "--session", session_id, "--once", "--timeout", "3", success=False
+    )
+    assert code == 7, f"cold-cache tail --once replayed history: exit {code}"
+    assert values[-1]["error"]["code"] == "timeout"
+    assert all(
+        value.get("data", {}).get("event", {}).get("type") != "preview"
+        for value in values
+    )
+    # The same committed history is recovered by the explicit sync path, and
+    # only then is it usable local state.
+    sync_events = paired_device.sync(session_id)["events"]
+    _, committed = paired_device.cached_history_state(scenario.host, session_id)
+    snapshot_events = len(scenario.dsh.snapshot(session_id)["events"])
+    assert sync_events == 1
     assert len(committed) == 1
-    assert len(scenario.dsh.snapshot(session_id)["events"]) == 1
+    assert snapshot_events == 1
 
 
 def test_probe_login(scenario, paired_device):
@@ -910,7 +936,9 @@ def test_pending_queue_chain(scenario, paired_device):
     queue = paired_device.call("queue", "list", "--session", session)
     assert queue["available"] and len(queue["items"]) == 1
     item = queue["items"][0]["item_id"]
-    edit = paired_device.call("queue", "edit", "--session", session, "--item", item, "replacement fixture")
+    edit = paired_device.call(
+        "queue", "edit", "--session", session, "--item", item, "replacement fixture"
+    )
     assert edit["command"]["status"] == "succeeded" and edit["refresh"] == "current"
     refreshed = paired_device.call("queue", "list", "--session", session)
     assert refreshed["items"][0]["item_id"] == item

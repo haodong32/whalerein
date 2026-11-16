@@ -34,7 +34,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Answer yes to pairing and diagnostic-export confirmation prompts.
+    /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic export).
     #[arg(long, global = true)]
     pub yes: bool,
 
@@ -42,7 +42,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
 
-    /// Scope session operations to one authorized Host (placed before the command).
+    /// Scope session operations to one authorized Host. It must be placed
+    /// before the command; commands with their own required `--host`
+    /// (`sessions`, `models`, `session-create`) use that value.
     #[arg(long, value_name = "HOST_ID")]
     pub host: Option<String>,
 
@@ -54,7 +56,9 @@ pub struct Cli {
 pub enum Command {
     /// Pair with a host using a whalerein://pair invitation.
     Pair {
-        /// Pairing URI. The one-time token is never logged or echoed.
+        /// Pairing URI, or `-` to read it from standard input so the one-time
+        /// token stays out of argv, `ps` output and shell history. The token
+        /// is never logged or echoed.
         uri: String,
         /// Require this host fingerprint (hex, spaces allowed).
         #[arg(long, value_name = "HEX")]
@@ -125,12 +129,13 @@ pub enum Command {
     Tail {
         #[arg(long, value_name = "SESSION_ID")]
         session: String,
-        /// Exit after the first event.
+        /// Exit after the first visible output (text or committed message).
         #[arg(long)]
         once: bool,
-        /// Stop after this many seconds. `--once` defaults to 15 seconds.
+        /// Stop after this many seconds (decimals allowed, must be non-zero).
+        /// `--once` defaults to 15 seconds.
         #[arg(long, value_name = "SECONDS")]
-        timeout: Option<u64>,
+        timeout: Option<String>,
     },
 
     /// Wait for native session quiescence or pending input.
@@ -158,14 +163,20 @@ pub enum Command {
         /// Delivery mode. start-if-idle checks a sampled state and is not atomic.
         #[arg(long, value_enum, default_value = "enqueue-after-run")]
         delivery: Delivery,
-        /// Message text. It is sent, never logged or echoed.
+        /// Message text. It is sent, never logged or echoed. A text that starts
+        /// with `-` is accepted; use `--` if it could also be read as a flag.
+        #[arg(allow_hyphen_values = true)]
         text: String,
     },
 
-    /// List pending tool approvals for a session.
+    /// List pending tool approvals for a session, or read one approval's state.
     Approvals {
-        #[arg(long, value_name = "SESSION_ID")]
-        session: String,
+        /// List pending approvals for this session (the default read mode).
+        #[arg(long, value_name = "SESSION_ID", required_unless_present = "request")]
+        session: Option<String>,
+        /// Read one approval's live or terminal state by id.
+        #[arg(long, value_name = "APPROVAL_ID", conflicts_with = "session")]
+        request: Option<String>,
     },
 
     /// List pending human questions for a session.
@@ -356,6 +367,9 @@ pub enum QueueCommand {
         session: String,
         #[arg(long)]
         item: String,
+        /// Replacement text. Hyphen-leading text is accepted; use `--` when it
+        /// could also be read as a flag.
+        #[arg(allow_hyphen_values = true)]
         text: String,
     },
     /// Withdraw one queued item.
@@ -380,11 +394,11 @@ impl Command {
             Self::SessionFork { session }
             | Self::Sync { session }
             | Self::Send { session, .. }
-            | Self::Approvals { session }
             | Self::Questions { session, .. }
             | Self::Answer { session, .. }
             | Self::QuestionCancel { session, .. }
             | Self::Interrupt { session } => Some(session),
+            Self::Approvals { session, .. } => session.as_deref(),
             Self::Model {
                 action: ModelAction::Get { session } | ModelAction::Set { session, .. },
             } => Some(session),
@@ -434,6 +448,76 @@ impl Command {
             Self::Profile { action } => action.name(),
             Self::Doctor { .. } => "doctor",
         }
+    }
+
+    /// Every subcommand token clap accepts, used for usage-error attribution
+    /// and documentation consistency checks.
+    pub fn known_names() -> &'static [&'static str] {
+        &[
+            "pair",
+            "pair-resume",
+            "pairing-history",
+            "hosts",
+            "sessions",
+            "models",
+            "model",
+            "session-create",
+            "session-fork",
+            "commands-pending",
+            "command-recover",
+            "tail",
+            "wait",
+            "sync",
+            "send",
+            "approvals",
+            "questions",
+            "answer",
+            "question-cancel",
+            "approve",
+            "reject",
+            "queue",
+            "interrupt",
+            "revoke",
+            "forget",
+            "doctor",
+        ]
+    }
+
+    /// User-facing invocation spellings, one per documented entry point.
+    #[allow(dead_code)]
+    pub fn known_usage() -> &'static [&'static str] {
+        &[
+            "pair",
+            "pair-resume",
+            "pairing-history",
+            "hosts",
+            "sessions",
+            "models",
+            "model get",
+            "model set",
+            "session-create",
+            "session-fork",
+            "commands-pending",
+            "command-recover",
+            "tail",
+            "wait",
+            "sync",
+            "send",
+            "approvals",
+            "questions",
+            "answer",
+            "question-cancel",
+            "approve",
+            "reject",
+            "queue list",
+            "queue edit",
+            "queue remove",
+            "queue steer",
+            "interrupt",
+            "revoke",
+            "forget",
+            "doctor",
+        ]
     }
 }
 
@@ -742,6 +826,196 @@ mod tests {
     fn exposes_stable_names_for_every_cli_command() {
         assert_eq!(parse(&["whalerein", "hosts"]).command.name(), "hosts");
         assert_eq!(parse(&["whalerein", "doctor"]).command.name(), "doctor");
+    }
+
+    #[test]
+    fn hyphen_leading_message_and_queue_text_are_values_not_flags() {
+        for (args, expected) in [
+            (
+                vec!["whalerein", "send", "--session", "s", "-hello"],
+                "-hello",
+            ),
+            (
+                vec!["whalerein", "send", "--session", "s", "--why"],
+                "--why",
+            ),
+            (
+                vec!["whalerein", "send", "--session", "s", "--", "-hello"],
+                "-hello",
+            ),
+        ] {
+            let cli = parse(&args);
+            assert!(
+                matches!(cli.command, Command::Send { text, .. } if text == expected),
+                "{args:?}"
+            );
+        }
+        let cli = parse(&[
+            "whalerein",
+            "queue",
+            "edit",
+            "--session",
+            "s",
+            "--item",
+            "q",
+            "-replacement",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Command::Queue {
+                action: QueueCommand::Edit { text, .. }
+            } if text == "-replacement"
+        ));
+        // A bare `--help` still prints help instead of becoming message text.
+        assert!(matches!(
+            Cli::try_parse_from(["whalerein", "--help"]),
+            Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp
+        ));
+    }
+
+    #[test]
+    fn approvals_supports_a_list_mode_and_a_single_approval_read_mode() {
+        let list = parse(&["whalerein", "approvals", "--session", "session-1"]);
+        assert!(matches!(
+            list.command,
+            Command::Approvals {
+                session: Some(ref session),
+                request: None
+            } if session == "session-1"
+        ));
+        assert_eq!(list.command.session_id(), Some("session-1"));
+        let read = parse(&["whalerein", "approvals", "--request", "approval-1"]);
+        assert!(matches!(
+            read.command,
+            Command::Approvals {
+                session: None,
+                request: Some(ref request)
+            } if request == "approval-1"
+        ));
+        // A request read is Host-resolved by Core, not session-scoped.
+        assert_eq!(read.command.session_id(), None);
+        // The two read modes are mutually exclusive; exactly one is required.
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "approvals",
+            "--session",
+            "session-1",
+            "--request",
+            "approval-1"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["whalerein", "approvals"]).is_err());
+        // A single read mode still accepts an explicit Host scope.
+        let read = parse(&[
+            "whalerein",
+            "--host",
+            "host-1",
+            "approvals",
+            "--request",
+            "approval-1",
+        ]);
+        assert_eq!(read.host.as_deref(), Some("host-1"));
+        let list = parse(&[
+            "whalerein",
+            "--host",
+            "host-1",
+            "approvals",
+            "--session",
+            "session-1",
+        ]);
+        assert_eq!(list.host.as_deref(), Some("host-1"));
+    }
+
+    #[test]
+    fn tail_and_wait_timeouts_are_seconds_strings_with_the_same_shape() {
+        let cli = parse(&["whalerein", "tail", "--session", "s", "--timeout", "0.25"]);
+        assert!(matches!(
+            cli.command,
+            Command::Tail {
+                timeout: Some(ref timeout),
+                ..
+            } if timeout == "0.25"
+        ));
+        let cli = parse(&["whalerein", "wait", "--session", "s", "--timeout", "0.25"]);
+        assert!(matches!(
+            cli.command,
+            Command::Wait {
+                timeout: Some(ref timeout),
+                ..
+            } if timeout == "0.25"
+        ));
+    }
+
+    #[test]
+    fn host_flag_position_is_explicit() {
+        // Global before the command.
+        let cli = parse(&[
+            "whalerein",
+            "--host",
+            "h-before",
+            "send",
+            "--session",
+            "s",
+            "x",
+        ]);
+        assert_eq!(cli.host.as_deref(), Some("h-before"));
+        // After a session command it is rejected, so it can never be sent as text.
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "send",
+            "--session",
+            "s",
+            "--host",
+            "h-after",
+            "x"
+        ])
+        .is_err());
+        // A command that owns `--host` keeps its own value even when the global
+        // flag is also present.
+        let cli = parse(&[
+            "whalerein",
+            "--host",
+            "h-global",
+            "sessions",
+            "--host",
+            "h-command",
+        ]);
+        assert_eq!(cli.host.as_deref(), Some("h-global"));
+        assert!(matches!(cli.command, Command::Sessions { host } if host == "h-command"));
+    }
+
+    #[test]
+    fn every_documented_command_appears_in_the_cli_docs() {
+        let readme = include_str!("../README.md");
+        for usage in Command::known_usage() {
+            assert!(
+                readme.contains(&format!("whalerein {usage}")),
+                "apps/cli/README.md is missing `whalerein {usage}`"
+            );
+        }
+        // Units are part of the contract, not just prose.
+        assert!(!readme.contains("--timeout MILLISECONDS"));
+        assert!(readme.contains("--timeout <seconds>"));
+        let normalized = readme.replace("\r\n", "\n");
+        assert!(normalized.contains("require `--yes`") || normalized.contains("require\n`--yes`"));
+        assert!(Command::known_names().iter().all(|name| !name.is_empty()));
+    }
+
+    #[test]
+    fn root_readme_documents_the_cli_contract() {
+        let readme = include_str!("../../../README.md");
+        for fragment in [
+            "whalerein pair",
+            "whalerein send --session",
+            "revoke --yes",
+            "--timeout` is always in",
+        ] {
+            assert!(
+                readme.contains(fragment),
+                "README.md is missing {fragment:?}"
+            );
+        }
+        assert!(!readme.contains("--timeout MILLISECONDS"));
     }
 
     #[test]

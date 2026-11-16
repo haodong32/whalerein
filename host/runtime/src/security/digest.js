@@ -23,15 +23,28 @@ export function commandDigest(body) {
 }
 
 /**
+ * Escape one canonical approval field so the `|` field separator cannot be
+ * forged by content. The mapping is injective: `\` becomes `\\` and `|`
+ * becomes `\|`, so two different field tuples can never produce the same
+ * canonical string. Values without those bytes keep their historical digest.
+ */
+function escapeApprovalField(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
+}
+
+/**
  * Canonical approval digest from WIRE.md section "Approval digest".
+ * `|` inside any field is escaped, so a reason or tool name cannot shift the
+ * field boundary. Rust `core::security::approval_digest` uses the same rule
+ * and the shared vectors in `proto/v1/approval_digest_vectors.json`.
  * @param {object} approval approval fields; `approval_id` and camelCase aliases accepted.
  */
 export function approvalDigest(approval) {
-  const id = approval.approvalId ?? approval.approval_id ?? ''
-  const sessionId = approval.sessionId ?? approval.session_id ?? ''
-  const toolName = approval.toolName ?? approval.tool_name ?? ''
-  const callId = approval.callId ?? approval.call_id ?? ''
-  const reason = approval.reason ?? ''
+  const id = escapeApprovalField(approval.approvalId ?? approval.approval_id ?? '')
+  const sessionId = escapeApprovalField(approval.sessionId ?? approval.session_id ?? '')
+  const toolName = escapeApprovalField(approval.toolName ?? approval.tool_name ?? '')
+  const callId = escapeApprovalField(approval.callId ?? approval.call_id ?? '')
+  const reason = escapeApprovalField(approval.reason ?? '')
   const version = approval.version ?? 0
   const expiresAt = approval.expiresAtUnixMs ?? approval.expires_at_unix_ms
     ?? approval.expiresAt ?? approval.expires_at ?? 0

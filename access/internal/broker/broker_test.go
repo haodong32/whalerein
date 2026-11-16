@@ -422,6 +422,8 @@ func TestHandleMessageRoutesResultsAndEvents(t *testing.T) {
 
 func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
+	// The line readiness hook establishes broker state before host traffic.
+	service.Presence().ApplySnapshot(nil, 0)
 	ready := make(chan string, 1)
 	service.SetReadyHandler(func(_ context.Context, hostID string) error {
 		ready <- hostID

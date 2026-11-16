@@ -1,7 +1,10 @@
 //! Two-step Noise channel establishment over `HostRequest{kind=HANDSHAKE}`.
 
 use prost::Message;
-use whalerein_proto::{ChannelHello, ChannelReady, HostRequest, RequestKind};
+use whalerein_proto::{
+    request_payload::Payload, Capability, CapabilitySet, ChannelHello, ChannelReady, HostRequest,
+    RequestKind, RequestPayload,
+};
 
 use super::{ConnectionState, HandshakePhase, Runtime};
 use crate::access::AccessClient;
@@ -124,6 +127,9 @@ async fn ensure_channel_guarded(
     match handshake(access, identity, host_id, device_id, expected_fingerprint).await {
         Ok(established) => {
             runtime.set_channel(host_id, established.channel.clone());
+            // The capability set is read from `ChannelReady` once, next to the
+            // channel it belongs to; gating reads it back from the Runtime.
+            runtime.set_capabilities(host_id, established.capabilities);
             runtime.set_handshake_phase(host_id, HandshakePhase::Complete);
             runtime.set_state(host_id, ConnectionState::Syncing)?;
             runtime.set_sync_state(host_id, SyncState::Idle);
@@ -150,6 +156,9 @@ async fn ensure_channel_guarded(
 
 struct Established {
     channel: SecureChannel,
+    /// The capability set the Host advertised in `ChannelReady`. An absent
+    /// field decodes to the empty set, which advertises nothing.
+    capabilities: CapabilitySet,
     #[allow(dead_code)]
     host_public_key: [u8; 32],
 }
@@ -189,6 +198,7 @@ async fn handshake(
     if !ready.device_id.is_empty() && ready.device_id != device_id {
         return Err(CoreError::Unauthorized);
     }
+    let capabilities = ready.capabilities.unwrap_or_default();
 
     // XX message 2 authenticates the responder static key. Check its pairing
     // pin before message 3 discloses the device identity to the responder.
@@ -222,8 +232,71 @@ async fn handshake(
     );
     Ok(Established {
         channel,
+        capabilities,
         host_public_key,
     })
+}
+
+/// The capability a request payload requires on the negotiated channel.
+///
+/// Discovery and health probes (`Ping`, `GetHostCapabilities`) are never
+/// gated: an older peer must still answer them so a client can decide whether
+/// a later operation is supported. Session lifecycle commands (create, fork)
+/// and model operations are session-scoped, so they require `Sessions`; their
+/// finer-grained support is negotiated separately through `HostCapabilities`.
+pub fn required_capability(payload: &RequestPayload) -> Option<Capability> {
+    match payload.payload.as_ref()? {
+        Payload::ListSessions(_)
+        | Payload::GetSession(_)
+        | Payload::GetCommandResult(_)
+        | Payload::CreateSession(_)
+        | Payload::ForkSession(_)
+        | Payload::ListModels(_)
+        | Payload::ReadSessionModel(_)
+        | Payload::SelectSessionModel(_) => Some(Capability::Sessions),
+        Payload::ReadHistory(_)
+        | Payload::WatchSession(_)
+        | Payload::RefreshWatches(_)
+        | Payload::UnwatchSession(_) => Some(Capability::Events),
+        Payload::SendMessage(_) | Payload::ReadPendingQueue(_) | Payload::UpdatePendingQueue(_) => {
+            Some(Capability::Messages)
+        }
+        Payload::GetApproval(_)
+        | Payload::ResolveApproval(_)
+        | Payload::ListApprovals(_)
+        | Payload::ListQuestions(_)
+        | Payload::GetQuestion(_)
+        | Payload::AnswerQuestion(_)
+        | Payload::CancelQuestionAnswer(_) => Some(Capability::Approvals),
+        Payload::Interrupt(_) => Some(Capability::Interrupt),
+        Payload::WaitSession(_) | Payload::CancelSessionWait(_) | Payload::ReadWaitState(_) => {
+            Some(Capability::Sync)
+        }
+        Payload::Ping(_) | Payload::GetHostCapabilities(_) => None,
+    }
+}
+
+/// Reject an operation before submitting it when the channel negotiated
+/// without the capability it requires.
+pub fn require_payload_capability(
+    runtime: &Runtime,
+    host_id: &str,
+    payload: &RequestPayload,
+) -> CoreResult<()> {
+    let Some(required) = required_capability(payload) else {
+        return Ok(());
+    };
+    let advertised = runtime.capabilities(host_id).unwrap_or_default();
+    if whalerein_proto::has_capability(&advertised, required) {
+        Ok(())
+    } else {
+        tracing::debug!(
+            host_id,
+            capability = required.as_str_name(),
+            "operation requires a capability this channel did not negotiate"
+        );
+        Err(CoreError::Unsupported)
+    }
 }
 
 async fn send_handshake(
@@ -322,6 +395,154 @@ mod fake_host_tests {
             second.channel_id()
         );
         assert_eq!(runtime.reconnect_count("host-1"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_channel_that_omits_a_capability_rejects_the_operation_before_submission() {
+        use crate::pairing::default_capabilities;
+        use whalerein_proto::{request_payload::Payload, Capability, ListSessions, WatchSession};
+
+        let access = FakeAccess::start().await;
+        let mut advertised = default_capabilities();
+        advertised
+            .capabilities
+            .retain(|value| *value != Capability::Events as i32);
+        access.host.lock().unwrap().channel_capabilities = Some(advertised);
+
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        let _channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+        let negotiated = runtime.capabilities("host-1").expect("negotiated set");
+        assert!(!whalerein_proto::has_capability(
+            &negotiated,
+            Capability::Events
+        ));
+
+        // The omitted capability is refused with the stable unsupported code
+        // before any request is submitted.
+        let watch = RequestPayload {
+            payload: Some(Payload::WatchSession(WatchSession {
+                session_id: "session-1".into(),
+            })),
+        };
+        let traced = access.host.lock().unwrap().request_traces.len();
+        let error = require_payload_capability(&runtime, "host-1", &watch).unwrap_err();
+        assert!(matches!(error, CoreError::Unsupported));
+        assert_eq!(error.code(), "unsupported_capability");
+        assert_eq!(error.exit_code(), 9);
+        assert_eq!(
+            access.host.lock().unwrap().request_traces.len(),
+            traced,
+            "a missing capability must be rejected before submitting"
+        );
+
+        // An advertised capability on the same channel is still accepted.
+        let list = RequestPayload {
+            payload: Some(Payload::ListSessions(ListSessions {})),
+        };
+        assert!(require_payload_capability(&runtime, "host-1", &list).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_normal_channel_advertises_every_gated_capability_and_still_works() {
+        use crate::cache::Cache;
+        use crate::commands::CommandService;
+        use std::sync::Arc;
+        use whalerein_proto::{
+            request_payload::Payload, Capability, Interrupt, ListApprovals, ListSessions,
+            ReadWaitState, SendMessage, WatchSession,
+        };
+
+        let access = FakeAccess::start().await;
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        let channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+        let negotiated = runtime.capabilities("host-1").expect("negotiated set");
+        for capability in [
+            Capability::Sessions,
+            Capability::Events,
+            Capability::Messages,
+            Capability::Approvals,
+            Capability::Interrupt,
+            Capability::Sync,
+            Capability::Snapshot,
+        ] {
+            assert!(
+                whalerein_proto::has_capability(&negotiated, capability),
+                "{capability:?}"
+            );
+        }
+
+        let gated = [
+            RequestPayload {
+                payload: Some(Payload::ListSessions(ListSessions {})),
+            },
+            RequestPayload {
+                payload: Some(Payload::WatchSession(WatchSession {
+                    session_id: "session-1".into(),
+                })),
+            },
+            RequestPayload {
+                payload: Some(Payload::SendMessage(SendMessage {
+                    session_id: "session-1".into(),
+                    text: "hello".into(),
+                    delivery_mode: whalerein_proto::DeliveryMode::StartIfIdle as i32,
+                })),
+            },
+            RequestPayload {
+                payload: Some(Payload::ListApprovals(ListApprovals {
+                    session_id: String::new(),
+                })),
+            },
+            RequestPayload {
+                payload: Some(Payload::Interrupt(Interrupt {
+                    session_id: "session-1".into(),
+                })),
+            },
+            RequestPayload {
+                payload: Some(Payload::ReadWaitState(ReadWaitState {
+                    session_id: "session-1".into(),
+                })),
+            },
+        ];
+        for payload in &gated {
+            assert!(
+                require_payload_capability(&runtime, "host-1", payload).is_ok(),
+                "{:?}",
+                required_capability(payload)
+            );
+        }
+        // Discovery probes stay ungated so an older peer remains inspectable.
+        let ping = RequestPayload {
+            payload: Some(Payload::Ping(Default::default())),
+        };
+        assert!(required_capability(&ping).is_none());
+        assert!(require_payload_capability(&runtime, "host-1", &ping).is_ok());
+
+        // The same channel still carries an ordinary read.
+        let cache = Arc::new(Cache::open_in_memory([3u8; 32]).unwrap());
+        let service = CommandService::new(Arc::new(client), cache);
+        let response = service
+            .query(
+                "host-1",
+                "d-1",
+                &channel,
+                RequestPayload {
+                    payload: Some(Payload::ListSessions(ListSessions {})),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.payload,
+            Some(whalerein_proto::response_payload::Payload::SessionList(_))
+        ));
     }
 
     #[tokio::test]

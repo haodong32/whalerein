@@ -6,6 +6,7 @@
 pub(crate) mod config;
 pub(crate) mod core;
 mod error;
+mod proto_compat;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod types;
@@ -23,8 +24,11 @@ pub use crate::runtime::ConnectionState;
 pub use crate::security::KeyringSecretStore;
 pub use crate::security::{FileSecretStore, MemorySecretStore, SecretError, SecretStore};
 pub use config::default_data_dir;
-pub use core::{Core, CoreOptions};
-pub use error::{error_code_exit_code, error_code_name, CoreError, CoreResult};
+pub use core::{Core, CoreOptions, ForkOutcome};
+pub use error::{error_code_action, error_code_exit_code, error_code_name, CoreError, CoreResult};
+pub use proto_compat::{
+    decode_json, protocol_incompatible, require_payload, require_protocol_version, wire_error,
+};
 pub use types::{
     ApprovalInfo, CommandDiagnostics, CommandHandle, CreateSessionInput, DoctorReport,
     ExportManifest, HostCapabilities, HostInfo, LifecycleReceipt, ModelCatalog, ModelChoice,

@@ -60,8 +60,9 @@ Migrations remove the former fixed `local` workspace table and the duplicate
 
 Pairing operation receipts are durable. Transient MQTT correlation, presence
 caches and signature replay windows remain in memory. A still-valid host signature
-can be accepted again after restart. Broker REST presence lookup supports discovery
-of Hosts whose non-retained connection events were missed during restart.
+can be accepted again after restart. On reconnect Access applies a sequenced broker
+connection snapshot, which repairs Hosts and devices whose non-retained connection
+events were missed during the restart. There is no HTTP/REST presence lookup.
 
 ## Forwarding
 
@@ -141,7 +142,9 @@ old notices preserve newer peers and old COMMIT retries cannot restore revoked
 incarnations. Existing grants migrate as generation zero.
 
 Presence updates reject timestamps older than the cached connection fact. Cached
-freshness and optional REST fallback do not authorize grants.
+freshness never authorizes grants. A Host is online only after `HostReady`
+confirms its request subscription, and cached observations expire after
+`presence.cache_ttl` unless a broker event or snapshot refreshes them.
 
 ## Broker and listeners
 

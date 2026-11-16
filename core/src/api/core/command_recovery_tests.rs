@@ -626,6 +626,7 @@ async fn revocation_retains_only_opaque_unconfirmed_identity_and_clears_credenti
     assert_eq!(reopened.unconfirmed_revoked_commands().unwrap(), identities);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_storage_failure_still_clears_credentials_and_reports_failure() {
     let access = FakeAccess::start().await;
@@ -817,6 +818,7 @@ async fn pending_admission_rechecks_fence_after_lock_is_released() {
     assert_eq!(access.host.lock().unwrap().commands_seen, 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_attempts_every_secret_delete_and_retries_after_reopen() {
     use crate::api::{MemorySecretStore, SecretError, SecretStore};
@@ -926,6 +928,7 @@ async fn uncertain_revocation_reopens_without_false_revoked_and_can_retry() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_reports_cache_sidecar_and_config_cleanup_errors_and_retries() {
     for target in [
@@ -2324,4 +2327,28 @@ c.close()
         reopened.unconfirmed_revoked_commands().unwrap(),
         vec![identity]
     );
+}
+
+#[tokio::test]
+async fn recovery_after_the_access_request_row_expires_uses_the_host_journal() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    access.host.lock().unwrap().drop_command_receipts = true;
+    assert!(core.send_message("session-1", "fixture").await.is_err());
+    let pending = core.pending_commands().unwrap();
+    access.host.lock().unwrap().drop_command_receipts = false;
+    // Access now answers 410 expired for the control-plane row (a long wait or
+    // cleanup), but the Host journal still has the executed command.
+    access.host.lock().unwrap().expire_request_id = Some(pending[0].request_id.clone());
+    let recovered = core
+        .recover_pending_command(&pending[0].request_id)
+        .await
+        .expect("an expired Access row must not discard the Host journal result");
+    assert_eq!(recovered.status, OnlineStatus::Succeeded);
+    assert_eq!(recovered.message_id.as_deref(), Some("message-1"));
+    assert!(core.pending_commands().unwrap().is_empty());
 }

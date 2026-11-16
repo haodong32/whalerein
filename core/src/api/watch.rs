@@ -14,6 +14,108 @@ use whalerein_proto::{
 // The v1 device transport owns one MQTT subscription. Reject competing
 // watches rather than starting clients that evict each other at the broker.
 struct WatchGuard(Arc<AtomicBool>);
+
+/// One active watch per device profile, including across processes.
+///
+/// Two CLI processes share one MQTT client id, so the later connection would
+/// silently replace the earlier subscription. A profile-scoped OS lock makes
+/// the conflict deterministic: the second `tail` fails with `conflict` while
+/// unrelated commands such as `send` keep working. The lock is released by the
+/// OS when the process exits, including after Ctrl-C.
+/// Failures that a reconnect cannot fix. Everything else during a watch is
+/// treated as a transient transport/path problem and retried with backoff.
+fn watch_fatal(error: &CoreError) -> bool {
+    // Upgrade-required codes may arrive as wrapped `Host`/`Api` errors.
+    if matches!(
+        error.code(),
+        "unsupported_capability" | "protocol_version_incompatible"
+    ) {
+        return true;
+    }
+    matches!(
+        error,
+        CoreError::Revoked
+            | CoreError::RevokedRetentionUnverified
+            | CoreError::NotPaired
+            | CoreError::FingerprintMismatch { .. }
+            | CoreError::Unsupported
+            | CoreError::ProtocolIncompatible
+            | CoreError::InvalidInput(_)
+            | CoreError::Config(_)
+            | CoreError::Cache(_)
+            | CoreError::HostRejected
+            | CoreError::PairingCancelled
+            | CoreError::PairingFenced
+            | CoreError::PairingCommittedUnavailable
+            | CoreError::PairingCommittedUnconfirmed
+    )
+}
+
+#[derive(Debug)]
+struct WatchLease {
+    _file: Option<std::fs::File>,
+}
+
+impl WatchLease {
+    fn acquire(profile: &std::path::Path) -> CoreResult<Self> {
+        let path = profile.join("watch.lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|_| CoreError::Cache("watch lock directory is unavailable".into()))?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)
+                .map_err(|_| CoreError::Cache("watch lock is unavailable".into()))?;
+            extern "C" {
+                fn flock(
+                    fd: std::os::raw::c_int,
+                    operation: std::os::raw::c_int,
+                ) -> std::os::raw::c_int;
+            }
+            // LOCK_EX | LOCK_NB
+            if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
+                Err(CoreError::Conflict(
+                    "another watch is active for this device profile; stop it or use a separate device profile".into(),
+                ))
+            } else {
+                Ok(Self { _file: Some(file) })
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&path);
+            match file {
+                Ok(file) => Ok(Self { _file: Some(file) }),
+                Err(error) if error.raw_os_error() == Some(32) => Err(CoreError::Conflict(
+                    "another watch is active for this device profile; stop it or use a separate device profile".into(),
+                )),
+                Err(_) => Err(CoreError::Cache("watch lock is unavailable".into())),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Ok(Self { _file: None })
+        }
+    }
+}
+
 impl Drop for WatchGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
@@ -44,6 +146,22 @@ impl Pump {
             }
         }
     }
+}
+
+/// Bounded, secret-free candidate list for an ambiguous session resolution.
+fn bounded_host_candidates(hosts: &[String]) -> String {
+    const MAX_HOSTS: usize = 8;
+    const MAX_HOST_CHARS: usize = 48;
+    let mut shown = hosts
+        .iter()
+        .take(MAX_HOSTS)
+        .map(|host| host.chars().take(MAX_HOST_CHARS).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if hosts.len() > MAX_HOSTS {
+        shown.push_str(&format!(" and {} more", hosts.len() - MAX_HOSTS));
+    }
+    shown
 }
 
 impl Core {
@@ -77,11 +195,28 @@ impl Core {
         }
         let mut matches = Vec::new();
         for host in hosts {
-            let list = self.sessions(&host.host_id).await.map_err(|_| {
-                CoreError::Unavailable(
-                    "cannot verify session on every authorized Host; specify a Host".into(),
-                )
-            })?;
+            // A revocation/settlement that lands between discovery and the
+            // per-Host listing must end resolution. Mapping it to a generic
+            // "unavailable, specify a Host" would invite a cross-Host action
+            // while the profile is already revoked.
+            if self.runtime.is_revoked() {
+                return Err(CoreError::Revoked);
+            }
+            let list = self
+                .sessions(&host.host_id)
+                .await
+                .map_err(|error| match error {
+                    CoreError::Revoked
+                    | CoreError::RevokedRetentionUnverified
+                    | CoreError::NotPaired
+                    | CoreError::Unauthorized => error,
+                    _ => CoreError::Unavailable(
+                        "cannot verify session on every authorized Host; specify a Host".into(),
+                    ),
+                })?;
+            if self.runtime.is_revoked() {
+                return Err(CoreError::Revoked);
+            }
             if list.source != "remote" || !list.complete {
                 return Err(CoreError::Unavailable(
                     "cannot verify session on every authorized Host; specify a Host".into(),
@@ -103,16 +238,29 @@ impl Core {
             [] => Err(CoreError::NotFound(
                 "session not found on authorized Hosts".into(),
             )),
-            _ => Err(CoreError::Conflict(
-                "session exists on multiple Hosts; specify a Host".into(),
-            )),
+            _ => Err(CoreError::Conflict(format!(
+                "session exists on multiple Hosts ({}); specify a Host with --host",
+                bounded_host_candidates(&matches)
+            ))),
         }
     }
 
+    /// Synchronise committed history through opaque cursors.
+    ///
+    /// `deliver_snapshot` distinguishes a cold watch attach (which rebuilds
+    /// local history but must not print it as new output) from an explicit
+    /// synchronisation or a gap recovery (which must deliver missed messages,
+    /// deduplicated against what this watch already printed).
+    ///
+    /// `force_snapshot` makes an explicit `sync` report the whole committed
+    /// history even when a cursor already exists. A watch never forces it, so
+    /// a reconnect continues from its local cursor.
     pub(super) async fn sync_conversation<F>(
         &self,
         key: &SessionKey,
         conversation: &mut Conversation,
+        deliver_snapshot: bool,
+        force_snapshot: bool,
         on_update: &mut F,
     ) -> CoreResult<u64>
     where
@@ -121,8 +269,12 @@ impl Core {
         let sync = self.sync_service()?;
         self.runtime
             .set_sync_state(&key.host_id, crate::sync::SyncState::Syncing);
-        let mut snapshot = sync.cursor(key)?.is_none();
-        let mut after = sync.cursor(key)?.unwrap_or_default();
+        let mut snapshot = force_snapshot || sync.cursor(key)?.is_none();
+        let mut after = if force_snapshot {
+            String::new()
+        } else {
+            sync.cursor(key)?.unwrap_or_default()
+        };
         let mut cut = String::new();
         let mut seen = HashSet::new();
         let mut emitted = 0;
@@ -184,18 +336,37 @@ impl Core {
             let installed = sync.apply_page(key, &page)?;
             if installed {
                 if snapshot {
+                    // A snapshot replaces the whole committed view only on its
+                    // final page. Emitting from earlier pages would either
+                    // replay the previous view or deliver the replacement
+                    // twice, so only the committed complete view is considered.
+                    if !page.complete {
+                        continue;
+                    }
                     let mut ordinal = -1;
                     while let Some((next, message)) = sync.next_message(key, ordinal)? {
                         ordinal = next;
-                        let update = conversation.committed(&message)?;
-                        emitted += 1;
-                        if !on_update(&update) {
-                            return Ok(emitted);
+                        if deliver_snapshot {
+                            if let Some(update) = conversation.committed_once(&message)? {
+                                emitted += 1;
+                                if !on_update(&update) {
+                                    return Ok(emitted);
+                                }
+                            }
+                        } else {
+                            // Cold baseline: record what the viewer has now
+                            // seen without presenting it as new output.
+                            conversation.mark_delivered(&message);
                         }
                     }
+                    self.runtime
+                        .set_sync_state(&key.host_id, crate::sync::SyncState::Synced);
+                    return Ok(emitted);
                 } else {
                     for change in &batch.changes {
-                        let update = conversation.committed(change)?;
+                        let Some(update) = conversation.committed_once(change)? else {
+                            continue;
+                        };
                         emitted += 1;
                         if !on_update(&update) {
                             return Ok(emitted);
@@ -223,12 +394,19 @@ impl Core {
     where
         F: FnMut(&ViewUpdate) -> bool,
     {
+        let _lease = WatchLease::acquire(&self.options.data_dir)?;
         self.watch_active
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| CoreError::Conflict("a conversation watch is already active".into()))?;
         let _watch_guard = WatchGuard(self.watch_active.clone());
         let mut emitted = 0;
         let mut last_watch = None;
+        // One Conversation spans reconnects so committed identities already
+        // delivered to this viewer are not printed again after a gap recovery.
+        let mut conversation = Conversation::default();
+        // Preserve the last actionable transport failure. A bounded tail
+        // with no output reports that cause instead of a bare deadline.
+        let mut last_error: Option<CoreError> = None;
         let operation = async {
             let mut fresh = false;
             loop {
@@ -236,23 +414,27 @@ impl Core {
                     return Err(CoreError::Revoked);
                 }
                 match self
-                    .watch_connection(key, fresh, &mut last_watch, &mut emitted, &mut on_update)
+                    .watch_connection(
+                        key,
+                        fresh,
+                        &mut last_watch,
+                        &mut conversation,
+                        &mut emitted,
+                        &mut on_update,
+                    )
                     .await
                 {
                     Ok(true) => return Ok(()),
-                    Ok(false)
-                    | Err(CoreError::Unavailable(_))
-                    | Err(CoreError::HostOffline)
-                    | Err(CoreError::ChannelMismatch) => {
+                    Ok(false) => {
                         fresh = true;
                         tokio::time::sleep(self.runtime.next_reconnect_delay(&key.host_id)).await;
                     }
-                    Err(error)
-                        if matches!(
-                            error.code(),
-                            "expired" | "revocations_pending" | "snapshot_required" | "unavailable"
-                        ) =>
-                    {
+                    // Transport changes, channel replacement and a transient
+                    // source/baseline inconsistency are reconnectable: a path
+                    // change must rebuild the channel inside the deadline, not
+                    // end the watch with an internal/security error.
+                    Err(error) if !watch_fatal(&error) => {
+                        last_error = Some(error);
                         fresh = true;
                         tokio::time::sleep(self.runtime.next_reconnect_delay(&key.host_id)).await;
                     }
@@ -265,7 +447,7 @@ impl Core {
                 Ok(result) => result,
                 Err(_) => {
                     if emitted == 0 {
-                        Err(CoreError::Timeout)
+                        Err(last_error.unwrap_or(CoreError::Timeout))
                     } else {
                         Ok(())
                     }
@@ -294,6 +476,7 @@ impl Core {
         key: &SessionKey,
         fresh: bool,
         last_watch: &mut Option<String>,
+        conversation: &mut Conversation,
         emitted: &mut u64,
         on_update: &mut F,
     ) -> CoreResult<bool>
@@ -311,7 +494,9 @@ impl Core {
             token,
         )
         .with_trace_id(self.diagnostic_id());
-        let (tx, mut rx) = mpsc::channel(16);
+        // A snapshot attach can take several pages; buffers must absorb the
+        // live frames that arrive meanwhile instead of dropping previews.
+        let (tx, mut rx) = mpsc::channel(1024);
         let (ready_tx, ready_rx) = oneshot::channel();
         let mut ready_tx = Some(ready_tx);
         let stop = Arc::new(AtomicBool::new(false));
@@ -323,6 +508,10 @@ impl Core {
         let task_queued = queued.clone();
         let error = Arc::new(Mutex::new(None));
         let task_error = error.clone();
+        // Overflow is never silent: the watch reconnects and re-syncs so a
+        // committed message is still delivered exactly once.
+        let overflow = Arc::new(AtomicBool::new(false));
+        let task_overflow = overflow.clone();
         let task = tokio::spawn(async move {
             let result = client
                 .run(
@@ -332,10 +521,12 @@ impl Core {
                         if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > 32 * 1024 * 1024
                         {
                             task_queued.fetch_sub(bytes, Ordering::SeqCst);
+                            task_overflow.store(true, Ordering::SeqCst);
                             return true;
                         }
                         if tx.try_send(envelope.clone()).is_err() {
                             task_queued.fetch_sub(bytes, Ordering::SeqCst);
+                            task_overflow.store(true, Ordering::SeqCst);
                         }
                         true
                     },
@@ -395,15 +586,19 @@ impl Core {
             .record("core", "watch_ready", "succeeded", "none");
         let epoch = initial.live_epoch.clone();
         let mut state_revision = initial.revision;
-        let mut conversation = Conversation::default();
         conversation.reset(&epoch);
+        // Anything already in the local committed view predates this watch:
+        // it is baseline, not output, and a reconnect must not replay it.
+        for message_id in self.sync_service()?.history_message_ids(key)? {
+            conversation.mark_delivered_id(&message_id);
+        }
         if !on_update(&ViewUpdate::Reset) {
             pump.finish().await;
             return Ok(true);
         }
         let mut keep_going = true;
         *emitted += self
-            .sync_conversation(key, &mut conversation, &mut |update| {
+            .sync_conversation(key, &mut *conversation, false, false, &mut |update| {
                 keep_going = on_update(update);
                 keep_going
             })
@@ -426,6 +621,12 @@ impl Core {
             if self.runtime.is_revoked() {
                 return Err(CoreError::Revoked);
             }
+            if overflow.swap(false, Ordering::SeqCst) {
+                // A dropped live frame would leave a hole in the preview or
+                // hide a committed turn; reconnect and resync instead.
+                pump.finish().await;
+                return Ok(false);
+            }
             if interrupted.load(Ordering::SeqCst) {
                 if let Some(failure) = error.lock().expect("watch error mutex").take() {
                     return Err(failure);
@@ -443,9 +644,12 @@ impl Core {
                         Some(session_update::Payload::Live(frame))=>{if let Some(view)=conversation.live(&frame)?{*emitted+=1;if !on_update(&view){pump.finish().await;return Ok(true)}}},
                         Some(session_update::Payload::History(batch))=>{
                             match sync.apply_batch(key,&batch)? {
-                                BatchOutcome::Applied=>for change in &batch.changes{let view=conversation.committed(change)?;*emitted+=1;if !on_update(&view){pump.finish().await;return Ok(true)}},
+                                BatchOutcome::Applied=>for change in &batch.changes{if let Some(view)=conversation.committed_once(change)?{*emitted+=1;if !on_update(&view){pump.finish().await;return Ok(true)}}},
                                 BatchOutcome::Duplicate=>{},
-                                BatchOutcome::Gap=>{*emitted+=self.sync_conversation(key,&mut conversation,&mut |u|{keep_going=on_update(u);keep_going}).await?;},
+                                // A missed batch is output the viewer never saw;
+                                // recovery must deliver it (deduplicated against
+                                // messages this watch already printed).
+                                BatchOutcome::Gap=>{*emitted+=self.sync_conversation(key,conversation,true,false,&mut |u|{keep_going=on_update(u);keep_going}).await?;},
                             }
                         },
                         Some(session_update::Payload::State(state))=>{
@@ -465,7 +669,9 @@ impl Core {
                     let state=states.watches.into_iter().find(|w|w.watch_id==ready.watch_id).and_then(|w|w.state).ok_or_else(||CoreError::Security("missing watch refresh".into()))?;
                     if state.session.as_ref()!=Some(key){return Err(CoreError::Security("watch refresh scope mismatch".into()))}
                     if state.live_epoch != epoch { pump.finish().await; return Ok(false) }
-                    if sync.cursor(key)?.as_deref()!=Some(state.history_head.as_str()) {*emitted+=self.sync_conversation(key,&mut conversation,&mut |u|{keep_going=on_update(u);keep_going}).await?;}
+                    // The head moved past the local cursor: this is a recovery
+                    // gap, not a cold baseline, so deliver the unseen messages.
+                    if sync.cursor(key)?.as_deref()!=Some(state.history_head.as_str()) {*emitted+=self.sync_conversation(key,conversation,true,false,&mut |u|{keep_going=on_update(u);keep_going}).await?;}
                     if state.revision>state_revision {state_revision=state.revision;if !on_update(&ViewUpdate::State(state)){pump.finish().await;return Ok(true)}}
                 }
             }
@@ -474,5 +680,23 @@ impl Core {
                 return Ok(true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_watch_lease_for_the_same_profile_is_a_deterministic_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = WatchLease::acquire(directory.path()).unwrap();
+        let error = WatchLease::acquire(directory.path()).unwrap_err();
+        assert_eq!(error.code(), "conflict");
+        assert_eq!(error.exit_code(), 8);
+        assert!(error.to_string().contains("another watch is active"));
+        drop(first);
+        // The OS lock is released immediately; a later tail can attach.
+        WatchLease::acquire(directory.path()).unwrap();
     }
 }

@@ -767,3 +767,115 @@ test('open claims cannot settle after native agent or session replacement', asyn
     assert.deepEqual(await native, { answers: [{ id: 'q', selected: ['B'] }] })
   }
 })
+
+test('interrupt during an open answer releases the claim so a later answer is not permanently conflicted', async () => {
+  const { OpenQuestionBroker } = await import('../src/adapter/questions.js')
+  const agent = { id: 's' }, agents = { get: () => agent, roots: () => [agent] }
+  const handles = new QuestionHandles(), local = Promise.withResolvers(), gate = Promise.withResolvers()
+  let claims = 0, entered = false
+  const userQuestions = { async *attachWait(_agent, _call, signal) {
+    claims++
+    try {
+      // Simulate a native claim acquisition that is still opening when the user
+      // interrupts the session.
+      entered = true
+      await Promise.race([gate.promise, new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))])
+      if (signal.aborted) return
+      yield { remainingMs: 1000 }
+    } finally { claims-- }
+  } }
+  const broker = new OpenQuestionBroker({ agents, userQuestions, handles })
+  const native = broker.capture({ agent, questions, wait: { callId: 'call', timed: true } }, () => local.promise)
+  const batch = broker.list('s')[0]
+  const request = { session_id: 's', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] }
+  const first = broker.answer(request)
+  while (!entered) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(claims, 1)
+  broker.interruptSession('s')
+  await assert.rejects(first, error => error instanceof Error && error.code === 'conflict' && error.name === 'DefinitiveExecutionError')
+  assert.equal(claims, 0)
+  // No claim handle leaked and the same batch remains listed for a later answer.
+  assert.deepEqual(handles.listActive('s'), [])
+  assert.equal(broker.list('s').length, 1)
+  gate.resolve()
+  assert.equal((await broker.answer(request)).phase, 'QUESTION_SETTLED')
+  assert.deepEqual(await native, { answers: [{ id: 'q', selected: ['A'] }] })
+  local.resolve({ answers: [{ id: 'q', selected: ['B'] }] })
+})
+
+test('a session interrupt does not touch another session open answer', async () => {
+  const { OpenQuestionBroker } = await import('../src/adapter/questions.js')
+  const one = { id: 'one' }, two = { id: 'two' }
+  const agents = { get: id => id === 'one' ? one : id === 'two' ? two : undefined, roots: () => [one, two] }
+  const handles = new QuestionHandles(), local = Promise.withResolvers(), gate = Promise.withResolvers()
+  let claims = 0, entered = false
+  const userQuestions = { async *attachWait(_agent, _call, signal) {
+    claims++
+    try {
+      entered = true
+      await Promise.race([gate.promise, new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))])
+      if (signal.aborted) return
+      yield { remainingMs: 1000 }
+    } finally { claims-- }
+  } }
+  const broker = new OpenQuestionBroker({ agents, userQuestions, handles })
+  const pending = broker.capture({ agent: two, questions, wait: { callId: 'call', timed: true } }, () => local.promise)
+  const batch = broker.list('two')[0]
+  const attempt = broker.answer({ session_id: 'two', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] })
+  while (!entered) await new Promise(resolve => setImmediate(resolve))
+  broker.interruptSession('other')
+  assert.equal(claims, 1)
+  gate.resolve()
+  // The other session's answer still settles normally and the question stays listed.
+  assert.equal((await attempt).phase, 'QUESTION_SETTLED')
+  assert.deepEqual(await pending, { answers: [{ id: 'q', selected: ['A'] }] })
+  assert.equal(claims, 0)
+  local.resolve({ answers: [{ id: 'q', selected: ['B'] }] })
+})
+
+test('fake session interrupt cancels a held open answer and keeps the question answerable', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true, questionsOpen: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'call', state: 'open', questions })
+  adapter.holdFixtureQuestion('s')
+  const batch = (await adapter.listQuestionPage('s')).batches[0]
+  const request = { session_id: 's', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] }
+  const pending = adapter.answerOpenQuestion(request)
+  while (!adapter.fixtureQuestionWaiting('s')) await new Promise(resolve => setImmediate(resolve))
+  await adapter.interrupt('s')
+  await assert.rejects(pending, { code: 'unavailable' })
+  assert.equal(adapter.fixtureQuestionWaiting('s'), false)
+  assert.equal((await adapter.listQuestionPage('s')).batches.length, 1)
+  assert.equal(adapter.describe().capabilities.includes('questions-answer-open'), true)
+})
+
+test('question read distinguishes an offline source from an unsupported read', async () => {
+  const { RealDshAdapter } = await import('../src/adapter/real.js')
+  const offline = new RealDshAdapter({ ctx: { agents: { get: () => undefined, roots: () => [] }, sessionController: {
+    projections: async () => { throw Object.assign(new Error('offline'), { code: 'unavailable' }) },
+  } } })
+  await assert.rejects(offline.listProjectedQuestions('s'), { code: 'unavailable' })
+  const unsupported = new RealDshAdapter({ ctx: {} })
+  await assert.rejects(unsupported.listProjectedQuestions('s'), { code: 'unsupported_capability' })
+})
+
+test('fake question phases expose only answerable phases as answerable', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true, questionsOpen: true }, sessions: [{ sessionId: 's' }] })
+  for (const [state, phase, answerable] of [
+    ['open', 'QUESTION_OPEN', true],
+    ['continued', 'QUESTION_CONTINUED', true],
+    ['reply_queued', 'QUESTION_REPLY_QUEUED', false],
+  ]) {
+    adapter.setFixtureQuestion('s', { callId: `call-${state}`, state, questions })
+    const batch = (await adapter.listQuestionPage('s')).batches[0]
+    assert.equal(batch.phase, phase)
+    assert.equal(batch.answerable, answerable)
+  }
+})

@@ -21,6 +21,8 @@ type claimReviewPresence struct{}
 
 func (claimReviewPresence) IsHostOnline(context.Context, string) bool { return true }
 
+func (claimReviewPresence) Available() bool { return true }
+
 type claimReviewPolicy struct{}
 
 func (claimReviewPolicy) ApplyPairing(context.Context, string, string) error { return nil }

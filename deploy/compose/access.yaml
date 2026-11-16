@@ -53,7 +53,9 @@ revocation:
   ack_timeout: 5s
 
 presence:
-  cache_ttl: 1s
+  # Must stay >= line.reconcile_interval (30s) and > line.heartbeat_interval
+  # (5s). A short cache would make presence flap between reconciles.
+  cache_ttl: 60s
 
 cleanup:
   interval: 1m

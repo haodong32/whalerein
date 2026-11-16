@@ -101,7 +101,7 @@ requests:
 revocation:
   ack_timeout: 100ms
 presence:
-  cache_ttl: 1s
+  cache_ttl: 10s
 cleanup:
   interval: %s
   pairing_token_retention: 1h

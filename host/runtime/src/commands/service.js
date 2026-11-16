@@ -4,6 +4,7 @@
 // payload, and crash recovery marks unfinished accepted commands unknown.
 
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { bytesEqual, sha256Bytes, sha256Text, hex } from '../security/digest.js'
 import { summaryToProto } from '../contracts/serialization.js'
 import { AdapterError, DefinitiveExecutionError, PluginError, publicMessage } from '../errors.js'
@@ -32,18 +33,46 @@ const APPROVAL_DECISION_TO_PROTO = Object.freeze({
   reject: 'APPROVAL_DECISION_REJECT',
 })
 
+// Native text is bounded before it enters the wire. Tool arguments and other
+// native request data are never part of an approval, so they cannot leak here.
+const APPROVAL_REASON_MAX = 1024
+const APPROVAL_FIELD_MAX = 256
+
+function boundedText(value, max = APPROVAL_FIELD_MAX) {
+  if (typeof value !== 'string' || value === '') return ''
+  const clean = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+  const points = Array.from(clean)
+  return points.length <= max ? clean : points.slice(0, max).join('')
+}
+
 function approvalToProto(approval) {
   return {
     approval_id: approval.approvalId,
     session_id: approval.sessionId,
-    tool_name: approval.toolName,
-    call_id: approval.callId,
-    reason: approval.reason,
+    tool_name: boundedText(approval.toolName),
+    call_id: boundedText(approval.callId),
+    reason: boundedText(approval.reason, APPROVAL_REASON_MAX),
     digest: approval.digest,
     version: approval.version,
     expires_at_unix_ms: approval.expiresAt,
     state: APPROVAL_STATE_TO_PROTO[approval.state] ?? 'APPROVAL_STATE_UNAVAILABLE',
     decision: APPROVAL_DECISION_TO_PROTO[approval.decision] ?? 'APPROVAL_DECISION_UNSPECIFIED',
+  }
+}
+
+/** Terminal/durable view when the native source no longer holds the approval. */
+function approvalRecordToProto(record) {
+  return {
+    approval_id: record.approvalId,
+    session_id: record.sessionId,
+    tool_name: boundedText(record.toolName),
+    call_id: boundedText(record.callId),
+    reason: '',
+    digest: new Uint8Array(record.digest),
+    version: record.version,
+    expires_at_unix_ms: record.expiresAt,
+    state: APPROVAL_STATE_TO_PROTO[record.state] ?? 'APPROVAL_STATE_UNAVAILABLE',
+    decision: APPROVAL_DECISION_TO_PROTO[record.decision] ?? 'APPROVAL_DECISION_UNSPECIFIED',
   }
 }
 
@@ -146,9 +175,46 @@ export class CommandService {
     this.codec = resolveCodec(codec)
     this.waits = new Map()
     this.questionAnswers = new Map()
-    this.questionPager = new QuestionPager(this.codec)
+    this.questionPager = new QuestionPager(this.codec, { key: this.#questionCursorKey() })
     this.modelQueries = new Map()
+    this.sendGates = new Map()
     this.requests = new Set()
+  }
+
+  // Native prompt modes are only queue/steer; there is no atomic
+  // start-if-idle primitive. Serialize start-if-idle sends per session so the
+  // second request observes the first turn instead of racing the idle check.
+  async #withSendGate(sessionId, operation) {
+    const previous = this.sendGates.get(sessionId) ?? Promise.resolve()
+    let release
+    const current = new Promise((resolve) => { release = resolve })
+    const tail = previous.then(() => current)
+    this.sendGates.set(sessionId, tail)
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (this.sendGates.get(sessionId) === tail) this.sendGates.delete(sessionId)
+    }
+  }
+
+  // Pagination cursors must survive a Host restart. Derive the pager key from
+  // the persisted state store (created once, like the log salt); memory-only
+  // stores keep an ephemeral key.
+  #questionCursorKey() {
+    try {
+      const stored = this.store?.getMeta?.('question_cursor_key')
+      if (typeof stored === 'string' && stored !== '') {
+        const key = Buffer.from(stored, 'base64')
+        if (key.length === 32) return key
+      }
+      const key = randomBytes(32)
+      this.store?.setMeta?.('question_cursor_key', key.toString('base64'))
+      return key
+    } catch {
+      return randomBytes(32)
+    }
   }
 
   cancelChannel(deviceId, channelId, reason = 'unavailable') {
@@ -226,7 +292,75 @@ export class CommandService {
     this.store.pruneCommandResults(this.now())
     const count = this.store.recoverAcceptedCommands(this.now())
     if (count > 0) this.#log('warn', 'commands_marked_unknown', { count, code: 'unavailable' })
+    // A pending native approval cannot outlive the process that owned its
+    // waterfall. Keep the identity as unavailable so a late decision fails with
+    // approval_unavailable instead of silently disappearing or reading unknown.
+    let invalidated = 0
+    try {
+      invalidated = this.store.invalidatePendingApprovals({ now: this.now() })
+      this.store.pruneApprovalRecords(this.now())
+    } catch {
+      this.#log('error', 'approval_ledger_unavailable', { code: 'internal' })
+    }
+    if (invalidated > 0) this.#log('warn', 'approvals_invalidated', { count: invalidated, reason: 'process_interrupted' })
     return count
+  }
+
+  #recordApproval(approval) {
+    try {
+      this.store.recordApproval({
+        approvalId: approval.approvalId,
+        sessionId: approval.sessionId,
+        toolName: approval.toolName,
+        callId: approval.callId,
+        digest: approval.digest,
+        version: approval.version,
+        expiresAt: approval.expiresAt,
+        now: this.now(),
+      })
+    } catch {
+      // The ledger is an observability/recovery aid; it must never break the
+      // authoritative native approval path.
+      this.#log('warn', 'approval_ledger_write_failed', { code: 'internal' })
+    }
+  }
+
+  /** Retire pending ledger records whose own TTL has passed. */
+  #expireLedgerApprovals(sessionId = '') {
+    try {
+      for (const record of this.store.listApprovalRecords({ sessionId, state: 'pending', limit: 64 })) {
+        if (record.expiresAt > 0 && record.expiresAt <= this.now()) this.#settleApproval(record.approvalId, 'expired')
+      }
+    } catch {
+      this.#log('warn', 'approval_ledger_read_failed', { code: 'internal' })
+    }
+  }
+
+  #ledgerApproval(approvalId) {
+    try { return this.store.getApprovalRecord(approvalId) }
+    catch { return null }
+  }
+
+  #settleApproval(approvalId, state, decision = 'unspecified', invalidatedReason = null) {
+    try { return this.store.settleApproval({ approvalId, state, decision, invalidatedReason, now: this.now() }) }
+    catch { this.#log('warn', 'approval_ledger_write_failed', { code: 'internal' }); return null }
+  }
+
+  /** Re-read the authoritative source state and mirror one terminal outcome. */
+  async #syncApprovalRecord(approvalId) {
+    let approval = null
+    try { approval = await this.adapter.getApproval(approvalId) } catch { approval = null }
+    if (approval) {
+      this.#recordApproval(approval)
+      if (approval.state !== 'pending') {
+        this.#settleApproval(approvalId, approval.state, approval.decision ?? 'unspecified')
+      }
+      return
+    }
+    const recorded = this.#ledgerApproval(approvalId)
+    if (recorded?.state === 'pending') {
+      this.#settleApproval(approvalId, 'unavailable', 'unspecified', 'native_missing')
+    }
   }
 
   /**
@@ -366,6 +500,8 @@ export class CommandService {
         const approvals = await this.adapter.listApprovals(
           payload.list_approvals.session_id ?? '',
         )
+        for (const approval of approvals) this.#recordApproval(approval)
+        this.#expireLedgerApprovals(payload.list_approvals.session_id ?? '')
         return {
           status: 'succeeded',
           response: { approval_list: { approvals: approvals.map(approvalToProto) } },
@@ -373,8 +509,22 @@ export class CommandService {
       }
       if (payload.get_approval) {
         const approval = await this.adapter.getApproval(payload.get_approval.approval_id)
-        if (!approval) return failed('not_found')
-        return { status: 'succeeded', response: { approval: approvalToProto(approval) } }
+        if (approval) {
+          this.#recordApproval(approval)
+          return { status: 'succeeded', response: { approval: approvalToProto(approval) } }
+        }
+        // Terminal state remains observable after the native source (or the
+        // process that owned it) is gone. Pending-with-no-native is a lost
+        // approval, not a fresh one.
+        const recorded = this.#ledgerApproval(payload.get_approval.approval_id)
+        if (!recorded) return failed('not_found')
+        if (recorded.state === 'pending') {
+          const expired = recorded.expiresAt > 0 && recorded.expiresAt <= this.now()
+          this.#settleApproval(recorded.approvalId, expired ? 'expired' : 'unavailable', 'unspecified',
+            expired ? null : 'native_missing')
+          return { status: 'succeeded', response: { approval: approvalRecordToProto(this.#ledgerApproval(recorded.approvalId)) } }
+        }
+        return { status: 'succeeded', response: { approval: approvalRecordToProto(recorded) } }
       }
       if (payload.get_command_result) {
         return { status: 'succeeded', response: { command_result: this.#commandResult(request.device_id, payload.get_command_result.command_id) } }
@@ -616,13 +766,6 @@ export class CommandService {
       }
       return this.#replay(existing)
     }
-    if (operation.resolve) {
-      let precheck
-      try { precheck = await this.#untilCancelled(this.#approvalPrecheck(operation.resolve), scope) }
-      catch (error) { if (scope.controller.signal.aborted) return {status:'rejected',errorCode:scopeCode(scope)}; throw error }
-      if (scope.controller.signal.aborted) return {status:'rejected',errorCode:scopeCode(scope)}
-      if (precheck) return { status: 'rejected', errorCode: precheck }
-    }
     const { command, created } = this.store.createOrGetCommand({
       deviceId: request.device_id,
       commandId,
@@ -636,6 +779,28 @@ export class CommandService {
         return { status: 'rejected', errorCode: 'payload_digest_mismatch' }
       }
       return this.#replay(command)
+    }
+    // A definitive precheck rejection is journaled like any other terminal
+    // command. Returning a bodyless negative reply without a journal row makes
+    // recovery report unknown instead of the exact approval_* code, and a
+    // same-command-id retry would replay the still-accepted row as
+    // `host_accepted` without ever re-checking. Precheck only reads, so an
+    // abort or read failure is a proven non-execution and is journaled failed.
+    if (operation.resolve) {
+      let precheck
+      try {
+        precheck = await this.#untilCancelled(this.#approvalPrecheck(operation.resolve), scope)
+      } catch (error) {
+        const code = scope.controller.signal.aborted
+          ? scopeCode(scope)
+          : error instanceof AdapterError || error instanceof PluginError ? error.code : 'internal'
+        return this.#finish(request, 'failed', { error_code: code, error_detail: publicMessage(code) }, code)
+      }
+      if (scope.controller.signal.aborted) {
+        const code = scopeCode(scope)
+        return this.#finish(request, 'failed', { error_code: code, error_detail: publicMessage(code) }, code)
+      }
+      if (precheck) return this.#finish(request, 'failed', { error_code: precheck, error_detail: publicMessage(precheck) }, precheck)
     }
     // Register before awaiting the acceptance notification so channel loss or
     // an explicit open cancellation cannot be missed during that await.
@@ -746,11 +911,32 @@ export class CommandService {
       return 'invalid_argument'
     }
     const approval = await this.adapter.getApproval(resolve.approval_id)
-    if (!approval) return 'approval_unavailable'
+    if (!approval) {
+      // The native action may have been resolved before this process started,
+      // or a pending waterfall was lost with the previous owner. The ledger
+      // keeps a durable terminal answer so a late decision is deterministically
+      // `already_resolved`/`expired`/`unavailable` instead of a generic unknown.
+      const recorded = this.#ledgerApproval(resolve.approval_id)
+      if (!recorded) return 'approval_unavailable'
+      if (recorded.state === 'approved' || recorded.state === 'rejected') return 'approval_already_resolved'
+      if (recorded.state === 'expired') return 'approval_expired'
+      if (recorded.state === 'unavailable') return 'approval_unavailable'
+      if (recorded.expiresAt > 0 && recorded.expiresAt <= this.now()) {
+        this.#settleApproval(recorded.approvalId, 'expired')
+        return 'approval_expired'
+      }
+      this.#settleApproval(recorded.approvalId, 'unavailable', 'unspecified', 'native_missing')
+      return 'approval_unavailable'
+    }
+    this.#recordApproval(approval)
     if (approval.state === 'expired' || (approval.expiresAt > 0 && approval.expiresAt <= this.now())) {
+      this.#settleApproval(approval.approvalId, 'expired')
       return 'approval_expired'
     }
-    if (approval.state !== 'pending') return 'approval_already_resolved'
+    if (approval.state !== 'pending') {
+      this.#settleApproval(approval.approvalId, approval.state, approval.decision ?? 'unspecified')
+      return 'approval_already_resolved'
+    }
     if (!(resolve.expected_digest instanceof Uint8Array) || !bytesEqual(resolve.expected_digest, approval.digest)) {
       return 'approval_version_mismatch'
     }
@@ -978,6 +1164,10 @@ export class CommandService {
       if (!this.adapter.describe?.().capabilities?.includes('model-select')) throw new DefinitiveExecutionError('unsupported_capability')
       const selection = operation.selectModel
       if (!selection.session_id || !selection.provider || !selection.model) throw new DefinitiveExecutionError('invalid_argument')
+      // Model selection is a source mutation like a queue edit or an answer. A
+      // request that went stale before the native call must fail definitively
+      // instead of reporting an unknown outcome for a change it never made.
+      this.#assertFresh(request, scope)
       const result = await this.adapter.execute(selection.session_id, { select_session_model: selection }, context)
       const receipt = result?.model_selection_receipt
       const selected = receipt?.selected
@@ -1087,7 +1277,11 @@ export class CommandService {
       if (typeof operation.send.text !== 'string' || operation.send.text.trim() === '') {
         throw new DefinitiveExecutionError('invalid_argument', 'message empty')
       }
-      return this.adapter.execute(operation.send.session_id, {send_message:operation.send}, context)
+      const send = () => this.adapter.execute(operation.send.session_id, {send_message:operation.send}, context)
+      // STEER remains native-authoritative: DSH reports steer-unavailable when
+      // the turn it targets has ended. Only the idle precheck needs the gate.
+      if (operation.send.delivery_mode === 'START_IF_IDLE') return this.#withSendGate(operation.send.session_id, send)
+      return send()
     }
     if (operation.interrupt) return this.adapter.execute(operation.interrupt.session_id, {interrupt:operation.interrupt}, context)
     if (operation.queue) {
@@ -1135,7 +1329,18 @@ export class CommandService {
       catch (error) { throw new DefinitiveExecutionError(error instanceof AdapterError ? error.code : 'internal') }
       if (!approval) throw new DefinitiveExecutionError('approval_unavailable')
       this.#assertFresh(request, scope)
-      return this.adapter.execute(approval.sessionId, {resolve_approval:operation.resolve}, context)
+      try {
+        const result = await this.adapter.execute(approval.sessionId, {resolve_approval:operation.resolve}, context)
+        this.#settleApproval(approval.approvalId,
+          operation.resolve.decision === 'APPROVAL_DECISION_APPROVE' ? 'approved' : 'rejected',
+          operation.resolve.decision === 'APPROVAL_DECISION_APPROVE' ? 'approve' : 'reject')
+        return result
+      } catch (error) {
+        // The adapter is authoritative for a racing decision. Mirror its
+        // terminal state so a later decision from any device is consistent.
+        await this.#syncApprovalRecord(approval.approvalId)
+        throw error
+      }
     }
     throw new DefinitiveExecutionError('unsupported_capability', 'command unsupported')
   }

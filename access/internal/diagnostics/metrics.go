@@ -41,6 +41,14 @@ type Metrics struct {
 	AdmissionLoadErrors      prometheus.Counter
 	AdmissionDenied          prometheus.Counter
 	AdmissionReconcileErrors prometheus.Counter
+
+	// CleanupBatches counts bounded retention batches by operation. A full
+	// batch leaves work behind, which CleanupBacklog reports so an operator can
+	// alert on a backlog that outlives a long pause instead of discovering it
+	// from unbounded storage growth.
+	CleanupBatches      *prometheus.CounterVec
+	CleanupRows         prometheus.Counter
+	CleanupBacklogTotal prometheus.Counter
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -132,6 +140,18 @@ func NewMetrics() *Metrics {
 			Name: "grant_admission_reconcile_errors_total",
 			Help: "Grant reconciliation passes that could not read durable state.",
 		}),
+		CleanupBatches: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cleanup_batches_total",
+			Help: "Bounded retention batches by cleanup operation.",
+		}, []string{"operation"}),
+		CleanupRows: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "cleanup_rows_total",
+			Help: "Rows cleared or deleted by retention cleanup.",
+		}),
+		CleanupBacklogTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "cleanup_backlog_detected_total",
+			Help: "Cleanup batches that filled their bound and left work behind.",
+		}),
 	}
 	registry.MustRegister(
 		m.HostResults,
@@ -155,6 +175,9 @@ func NewMetrics() *Metrics {
 		m.AdmissionLoadErrors,
 		m.AdmissionDenied,
 		m.AdmissionReconcileErrors,
+		m.CleanupBatches,
+		m.CleanupRows,
+		m.CleanupBacklogTotal,
 	)
 	return m
 }
@@ -279,4 +302,30 @@ func (m *Metrics) ObserveHostResult(status whalereinv1.OnlineStatus, code whaler
 		code = whalereinv1.ErrorCode_error_code_unspecified
 	}
 	m.HostResults.WithLabelValues(status.String(), code.String()).Inc()
+}
+
+// CleanupBatch records one bounded retention batch. operation is bounded to a
+// fixed label set so a caller cannot grow metric cardinality.
+func (m *Metrics) CleanupBatch(operation string, rows int) {
+	if m == nil {
+		return
+	}
+	switch operation {
+	case "bodies", "tokens", "queries":
+	default:
+		operation = "unknown"
+	}
+	m.CleanupBatches.WithLabelValues(operation).Inc()
+	if rows > 0 {
+		m.CleanupRows.Add(float64(rows))
+	}
+}
+
+// CleanupBacklog records that a cleanup batch filled its bound. It is the
+// alert signal for a backlog that survives a long pause; it never substitutes
+// for actually draining the work.
+func (m *Metrics) CleanupBacklog() {
+	if m != nil {
+		m.CleanupBacklogTotal.Inc()
+	}
 }

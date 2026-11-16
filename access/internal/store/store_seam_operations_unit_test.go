@@ -140,7 +140,9 @@ func TestDeleteExpiredPairingTokensReconcilesBeforeDeleting(t *testing.T) {
 	t.Run("reconciles first and removes expired rows", func(t *testing.T) {
 		db, steps := build(t, "ok")
 		deleted, err := newStore(db).DeleteExpiredPairingTokens(context.Background(), at)
-		if err != nil || deleted != 4 || len(*steps) != 3 || (*steps)[0] != "reconcile" || (*steps)[1] != "operations" || (*steps)[2] != "tokens" {
+		// operations=2 and tokens=4 are both reported so the cleanup drain sees
+		// the complete bounded work.
+		if err != nil || deleted != 6 || len(*steps) != 3 || (*steps)[0] != "reconcile" || (*steps)[1] != "operations" || (*steps)[2] != "tokens" {
 			t.Fatalf("deleted=%d err=%v steps=%v", deleted, err, *steps)
 		}
 	})

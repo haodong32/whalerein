@@ -54,14 +54,30 @@ export function normalizeEvent({
   }
 }
 
+export const APPROVAL_REASON_MAX = 1024
+export const APPROVAL_FIELD_MAX = 256
+
+/**
+ * Bound one native approval string before it enters the approval record and
+ * its digest: no control bytes, at most `max` Unicode code points. Tool
+ * arguments and other native request data are never accepted here, so they
+ * cannot reach the wire.
+ */
+export function boundedApprovalText(value, max = APPROVAL_FIELD_MAX) {
+  if (typeof value !== 'string' || value === '') return ''
+  const clean = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+  const points = Array.from(clean)
+  return points.length <= max ? clean : points.slice(0, max).join('')
+}
+
 export function normalizeApproval(approval) {
   if (!approval) return null
   return {
     approvalId: approval.approvalId,
     sessionId: approval.sessionId,
-    toolName: approval.toolName ?? '',
-    callId: approval.callId ?? '',
-    reason: approval.reason ?? '',
+    toolName: boundedApprovalText(approval.toolName),
+    callId: boundedApprovalText(approval.callId),
+    reason: boundedApprovalText(approval.reason, APPROVAL_REASON_MAX),
     digest: approval.digest instanceof Uint8Array ? approval.digest : new Uint8Array(approval.digest ?? 0),
     version: Number(approval.version ?? 0),
     expiresAt: Number(approval.expiresAt ?? 0),

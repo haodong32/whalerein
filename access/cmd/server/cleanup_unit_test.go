@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/whalerein/whalerein/access/internal/config"
+	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/store"
 )
 
@@ -50,7 +52,7 @@ func TestCleanupUsesIndependentRetentionCutoffsAndReportsFailures(t *testing.T) 
 			var output bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&output, nil))
 			before := time.Now().UTC()
-			runCleanup(ctx, store, 0, 2*time.Hour, logger)
+			runCleanup(ctx, store, 0, 2*time.Hour, logger, nil)
 			after := time.Now().UTC()
 			if strings.Join(store.calls, ",") != "bodies,tokens,queries" {
 				t.Fatalf("calls=%v", store.calls)
@@ -339,7 +341,7 @@ func TestCleanupUsesDefaultRetentionWhenUnset(t *testing.T) {
 	cancel()
 	recorder := &cleanupRecorder{}
 	before := time.Now().UTC()
-	runCleanup(ctx, recorder, time.Second, 0, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	runCleanup(ctx, recorder, time.Second, 0, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), nil)
 	after := time.Now().UTC()
 	if len(recorder.times) != 3 {
 		t.Fatal("expected one cleanup pass")
@@ -519,7 +521,9 @@ func TestRunServerWithStoreStartsServersAndStopsOnCancellation(t *testing.T) {
 		},
 		migrate: func(context.Context, *store.Store) error { return nil },
 		close:   func(*store.Store) { closed++ },
-		cleanup: func(ctx context.Context, _ cleanupStore, _, _ time.Duration, _ *slog.Logger) { <-ctx.Done() },
+		cleanup: func(ctx context.Context, _ cleanupStore, _, _ time.Duration, _ *slog.Logger, _ *diagnostics.Metrics) {
+			<-ctx.Done()
+		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -545,5 +549,117 @@ func TestRunServerWithStoreStartsServersAndStopsOnCancellation(t *testing.T) {
 	}
 	if closed != 1 {
 		t.Fatalf("store closed %d times", closed)
+	}
+}
+
+// catchUpRecorder reports a full batch once per operation, then a short batch.
+// It models a backlog created by a long pause.
+type catchUpRecorder struct {
+	calls map[string]int
+}
+
+func (r *catchUpRecorder) record(name string) (int64, error) {
+	r.calls[name]++
+	if r.calls[name] == 1 {
+		return store.CleanupBatchSize, nil
+	}
+	return 1, nil
+}
+
+func (r *catchUpRecorder) ClearExpiredBodies(context.Context, time.Time) (int64, error) {
+	return r.record("bodies")
+}
+func (r *catchUpRecorder) DeleteExpiredPairingTokens(context.Context, time.Time) (int64, error) {
+	return r.record("tokens")
+}
+func (r *catchUpRecorder) DeleteExpiredQueries(context.Context, time.Time) (int64, error) {
+	return r.record("queries")
+}
+
+func TestCleanupDrainsABacklogImmediatelyWithAlertEvidence(t *testing.T) {
+	// The first pass after a start or a suspended worker runs immediately and
+	// repeats each bounded batch until it drains. The long interval guarantees
+	// no second pass runs during the assertion window.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorder := &catchUpRecorder{calls: map[string]int{}}
+	metrics := diagnostics.NewMetrics()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	done := make(chan struct{})
+	go func() {
+		runCleanup(ctx, recorder, time.Hour, 2*time.Hour, logger, metrics)
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorder.calls["bodies"] >= 2 && recorder.calls["tokens"] >= 2 && recorder.calls["queries"] >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup did not stop")
+	}
+
+	for _, operation := range []string{"bodies", "tokens", "queries"} {
+		if recorder.calls[operation] != 2 {
+			t.Fatalf("%s batches = %d, want 2", operation, recorder.calls[operation])
+		}
+	}
+	if got := testutil.ToFloat64(metrics.CleanupBacklogTotal); got != 3 {
+		t.Fatalf("backlog evidence = %v, want 3", got)
+	}
+	if got := testutil.ToFloat64(metrics.CleanupBatches.WithLabelValues("bodies")); got != 2 {
+		t.Fatalf("body batches metric = %v", got)
+	}
+	if !strings.Contains(logs.String(), "more work remains") {
+		t.Fatalf("backlog warning missing: %s", logs.String())
+	}
+}
+
+func TestCheckConfigRejectsAnUnsupportedProtocolVersionLoudly(t *testing.T) {
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture?sslmode=disable"})
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := bytes.Replace(body, []byte("version: 1"), []byte("version: 2"), 1)
+	if bytes.Equal(updated, body) {
+		t.Fatal("fixture protocol version not replaced")
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-config", path, "-check-config"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "supported versions: 1-1") {
+		t.Fatalf("startup did not name the supported range: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "config ok") {
+		t.Fatal("check-config accepted an unsupported protocol version")
+	}
+}
+
+func TestCheckConfigRejectsAMissingBrokerCAFile(t *testing.T) {
+	path := writeConfig(t, configValues{publicPort: 1, internalPort: 2, databaseURL: "postgres://localhost:1/fixture?sslmode=disable", brokerURL: "tls://mqtt.internal:8883"})
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := bytes.Replace(body, []byte("  password: \"broker-password-value\""), []byte("  password: \"broker-password-value\"\n  ca_file: \"/absent/ca.pem\""), 1)
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-config", path, "-check-config"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "broker.ca_file") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

@@ -7,6 +7,9 @@ Core, Access and the DSH plugin do not read Compose settings.
 This is the current standalone stack, not a verified multi-instance deployment.
 The proposed [Access redesign](../docs/architecture/access-evolution.md) defines
 future regional roles and automation separately from these working instructions.
+Shutdown, bounded log rotation, request-retention capacity, PostgreSQL failure
+handling, backup/restore validation and the rolling-upgrade window are documented
+in [deployment operations](../docs/deploy.md).
 
 ```text
 Client (whalerein CLI)

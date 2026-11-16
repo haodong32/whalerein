@@ -6,6 +6,7 @@
 | Domain language | [Conversation glossary](glossary.md) |
 | Repository tasks | [Commands and architecture](../tools/repo/README.md), [Agent skill](../.agents/skills/whalerein-repo/SKILL.md), [commit rules](commits.md), [pull request rules](pull-requests.md) |
 | Validation | [Testing policy](testing.md), [integration environment](../tests/integration/README.md) |
+| iOS client | [Build, test plans and limits](ios.md) |
 | Troubleshooting | [Failure diagnosis](troubleshooting.md) |
 | Security | [Trust, credentials, revocation](security.md) |
 | Protocol | [Binding layout](../proto/README.md), [wire contract](../proto/v1/WIRE.md), [protocol integration cases](../tests/integration/README.md#protocol) |

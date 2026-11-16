@@ -1,0 +1,132 @@
+{
+  "schema": "whalerein/ios-surface/v1",
+  "swiftModule": "WhaleReinMobile",
+  "swiftErrorFile": "apps/mobile-bindings/swift/WhaleReinMobileError.swift",
+  "generatedSwiftFile": "apps/ios/Vendor/WhaleReinMobile/WhaleReinMobile.swift",
+  "requiredGeneratedSymbols": [
+    "MobileError"
+  ],
+  "errorCodes": {
+    "error_code_unspecified": {
+      "swiftCase": "Internal",
+      "wireAction": "none",
+      "status": "mapped"
+    },
+    "invalid_argument": {
+      "swiftCase": "InvalidInput",
+      "wireAction": "fix_input",
+      "status": "mapped"
+    },
+    "unauthorized": {
+      "swiftCase": "Security",
+      "wireAction": "reauth",
+      "status": "mapped"
+    },
+    "forbidden": {
+      "swiftCase": "Security",
+      "wireAction": "reauth",
+      "status": "mapped"
+    },
+    "not_found": {
+      "swiftCase": "NotFound",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "conflict": {
+      "swiftCase": "Conflict",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "expired": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "unsupported_capability": {
+      "swiftCase": "UnsupportedCapability",
+      "wireAction": "upgrade",
+      "status": "mapped"
+    },
+    "protocol_version_incompatible": {
+      "swiftCase": "ProtocolVersionIncompatible",
+      "wireAction": "upgrade",
+      "status": "mapped"
+    },
+    "payload_digest_mismatch": {
+      "swiftCase": "Security",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "approval_expired": {
+      "swiftCase": "Conflict",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "approval_version_mismatch": {
+      "swiftCase": "Conflict",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "approval_already_resolved": {
+      "swiftCase": "Conflict",
+      "wireAction": "refresh",
+      "status": "mapped"
+    },
+    "approval_unavailable": {
+      "swiftCase": "Conflict",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "snapshot_required": {
+      "swiftCase": "Unavailable",
+      "wireAction": "resync",
+      "status": "mapped"
+    },
+    "revocations_pending": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "rate_limited": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "internal": {
+      "swiftCase": "Internal",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "unavailable": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
+    },
+    "payload_too_large": {
+      "swiftCase": "InvalidInput",
+      "wireAction": "fix_input",
+      "status": "mapped"
+    },
+    "pairing_fenced": {
+      "swiftCase": "Cancelled",
+      "wireAction": "restart_pairing",
+      "status": "follow-up"
+    },
+    "pairing_committed_unavailable": {
+      "swiftCase": "Unavailable",
+      "wireAction": "restart_pairing",
+      "status": "follow-up"
+    },
+    "pairing_committed_unconfirmed": {
+      "swiftCase": "Unavailable",
+      "wireAction": "review_pairing",
+      "status": "follow-up"
+    },
+    "channel_replaced": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
+    }
+  },
+  "comment": "Current Swift-visible surface. A status of follow-up means the wire action cannot be represented yet; the check fails when a new wire code is unclassified, not when a recorded follow-up exists."
+}

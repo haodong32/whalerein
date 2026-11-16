@@ -146,9 +146,18 @@ impl MqttSettings {
         Ok(Arc::new(config))
     }
 
+    #[cfg(test)]
     fn options(&self, device_id: &str, token: &str) -> Result<MqttOptions, AccessError> {
-        let mut options =
-            MqttOptions::new(device_client_id(device_id), self.host.clone(), self.port);
+        self.options_with_client(device_id, token, &device_client_id(device_id))
+    }
+
+    fn options_with_client(
+        &self,
+        device_id: &str,
+        token: &str,
+        client_id: &str,
+    ) -> Result<MqttOptions, AccessError> {
+        let mut options = MqttOptions::new(client_id, self.host.clone(), self.port);
         options
             .set_credentials(device_username(device_id), token)
             .set_keep_alive(self.keep_alive)
@@ -243,6 +252,10 @@ pub struct DeviceMqttClient {
     device_id: String,
     token: String,
     trace_id: String,
+    /// Per-connection MQTT identity. Two processes for the same device must not
+    /// replace each other's broker session; the device id still scopes topics,
+    /// credentials and presence.
+    client_id: String,
 }
 
 impl DeviceMqttClient {
@@ -252,10 +265,16 @@ impl DeviceMqttClient {
         device_id: impl Into<String>,
         token: impl Into<String>,
     ) -> Self {
+        let device_id = device_id.into();
         Self {
             settings,
             host_id: host_id.into(),
-            device_id: device_id.into(),
+            client_id: format!(
+                "{}-{}",
+                device_client_id(&device_id),
+                crate::util::random_id(6)
+            ),
+            device_id,
             token: token.into(),
             trace_id: crate::util::random_id(16),
         }
@@ -281,7 +300,9 @@ impl DeviceMqttClient {
         F: FnMut(&EventEnvelope) -> bool,
         G: FnMut(MqttConnectionEvent),
     {
-        let options = self.settings.options(&self.device_id, &self.token)?;
+        let options =
+            self.settings
+                .options_with_client(&self.device_id, &self.token, &self.client_id)?;
         let (client, mut eventloop) = AsyncClient::new(options, 32);
         let topic = self.topic();
         let mut attempt = 0u32;
@@ -435,6 +456,19 @@ pub fn parse_certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_device_connections_use_distinct_client_ids() {
+        let settings = MqttSettings::parse("mqtt://broker.test:1883").unwrap();
+        let first = DeviceMqttClient::new(settings.clone(), "host-1", "device-1", "token");
+        let second = DeviceMqttClient::new(settings, "host-1", "device-1", "token");
+        assert_ne!(first.client_id, second.client_id);
+        assert!(first.client_id.starts_with("whalerein-device-device-1-"));
+        // Topics and the device identity are unchanged; only the broker
+        // session identity differs so two processes cannot replace each other.
+        assert_eq!(first.device_id, second.device_id);
+        assert_eq!(first.topic(), second.topic());
+    }
 
     #[test]
     fn connection_diagnostics_keep_numeric_reasons_without_broker_text() {

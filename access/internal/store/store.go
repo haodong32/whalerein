@@ -41,6 +41,11 @@ var migrationFS embed.FS
 
 const migrationLockKey int64 = 0x5748524143434553 // "WHRACCES"
 
+// CleanupBatchSize bounds every retention statement. Cleanup repeats batches
+// until one comes back short, so a long pause drains as fast as the database
+// allows without one unbounded delete or update.
+const CleanupBatchSize = 2000
+
 // database is the narrow storage seam the Store needs. It is satisfied by
 // *pgxpool.Pool in production and by a hand-rolled double in unit tests so
 // public Store methods can be exercised without PostgreSQL.

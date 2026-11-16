@@ -357,6 +357,134 @@ func TestExternalVerificationKeysAreValidated(t *testing.T) {
 	}
 }
 
+const testCACertificate = `-----BEGIN CERTIFICATE-----
+MIIDBjCCAe6gAwIBAgIUNuVz/ksHazcE3LG2v3/FsdRsJJYwDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYd2hhbGVyZWluLWNvbmZpZy10ZXN0LWNhMB4XDTI2MTEx
+NTE1NDgxMVoXDTM2MTExMjE1NDgxMVowIzEhMB8GA1UEAwwYd2hhbGVyZWluLWNv
+bmZpZy10ZXN0LWNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2aql
+zvh6i9DJ89xl5D5dd32Y2qBUDIxN28PQJrStA/Q2p6KllWiLv9CFocCczTvMALcm
+pmyH3wgUrj7R1WZYngRbrk2HrdCWbegP3hfZ40XvtYWJJYJsLtChowzAT6Apqr1J
+RCL35QcXf4gfrT6hlXNsOsaye/DcBKDiLJ4pj5GNcTInWh01uG936C7L7ZNof9a4
+rv07J8XiqjJ0vndz50DEntkKqMOb/GEfgh84eyRPRco+BdEe8WkROzuc8Qgdkd0P
+PvBgcM55xNuQ0in6IEkFRTWvsQgAH6MHMJH5cMTw7VAdHEhGv4NG9aEb4liB14B7
+6qBmQUrdTRm0G5SmJQIDAQABozIwMDAdBgNVHQ4EFgQUZw/Q5BmpU3cnfGT4HR1Y
+MlEWvVYwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAezv36N3k
+3Ga7cZhgEnAVSrGOuioulAEwr/RpMMfF4LBGVFnBvPSwqSy9Q56nOwwlmgILcVrt
+PS5u+/bD1cwVVTsa3dj2EUXtXLwXRo6UzFlnIuB1nHD2eB+ZlDOHkQvJVWnumbRJ
+tGizMmlfQY+j7yfl0iLObdKE73o7gRj9+A43WXAun/d1z6iGAPSr7/btcvFe7nH/
+/8S7+I0katVWiJZa4GREsoEpo3nDKzVA45WZncR60QvubMagflQIhJOiQY+0fk5L
+On7w3LbLmnozQ2pRdorNJul5ctwa92FCDOmwC1CLAGx2d84vfFyKADqk0jEtfwKO
+Q6JHSiYHnCFnvQ==
+-----END CERTIFICATE-----
+`
+
+func TestProtocolVersionOutsideTheSupportedRangeFailsConfiguration(t *testing.T) {
+	for _, version := range []uint32{0, 2, 3} {
+		t.Run("rejects protocol version", func(t *testing.T) {
+			cfg := validConfig(t)
+			cfg.Protocol.Version = version
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "supported versions: 1-1") {
+				t.Fatalf("version %d err = %v", version, err)
+			}
+		})
+	}
+	cfg := validConfig(t)
+	cfg.Protocol.Version = 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("supported version rejected: %v", err)
+	}
+}
+
+func TestBrokerTLSConfigurationIsValidatedAtStartup(t *testing.T) {
+	validCA := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(validCA, []byte(testCACertificate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidCA := filepath.Join(t.TempDir(), "invalid.pem")
+	if err := os.WriteFile(invalidCA, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"accepts a readable CA bundle", func(c *Config) { c.Broker.CAFile = validCA }, ""},
+		{"rejects a missing CA bundle", func(c *Config) { c.Broker.CAFile = filepath.Join(t.TempDir(), "absent.pem") }, "broker.ca_file: cannot be read"},
+		{"rejects a CA bundle with no certificate", func(c *Config) { c.Broker.CAFile = invalidCA }, "contains no PEM certificate"},
+		{"rejects insecure skip verify for a remote broker", func(c *Config) { c.Broker.InsecureSkipVerify = true }, "only allowed for a loopback broker"},
+		{"rejects insecure skip verify with a CA bundle", func(c *Config) {
+			c.Broker.URL = "tls://127.0.0.1:8883"
+			c.Broker.InsecureSkipVerify = true
+			c.Broker.CAFile = validCA
+		}, "has no effect while broker.insecure_skip_verify is true"},
+		{"accepts insecure skip verify for a loopback broker", func(c *Config) {
+			c.Broker.URL = "tls://127.0.0.1:8883"
+			c.Broker.InsecureSkipVerify = true
+		}, ""},
+		{"rejects TLS settings on a plaintext broker", func(c *Config) {
+			c.Broker.URL = "tcp://127.0.0.1:1883"
+			c.Broker.CAFile = validCA
+		}, "require a TLS broker.url"},
+		{"rejects a server name on a plaintext broker", func(c *Config) {
+			c.Broker.URL = "tcp://127.0.0.1:1883"
+			c.Broker.ServerName = "mqtt.internal"
+		}, "require a TLS broker.url"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig(t)
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPresenceCacheTTLMustOutliveTheReconcileInterval(t *testing.T) {
+	cases := []struct {
+		name      string
+		reconcile time.Duration
+		cache     time.Duration
+		heartbeat time.Duration
+		want      string
+	}{
+		{"accepts the coherent defaults", 10 * time.Second, 45 * time.Second, 5 * time.Second, ""},
+		{"accepts the integration layout", 30 * time.Second, 60 * time.Second, 5 * time.Second, ""},
+		{"rejects a cache TTL below the reconcile interval", 30 * time.Second, 15 * time.Second, 5 * time.Second, "presence.cache_ttl must be at least line.reconcile_interval"},
+		{"accepts a cache TTL equal to the reconcile interval", 30 * time.Second, 30 * time.Second, 5 * time.Second, ""},
+		{"rejects a heartbeat that outlives the cache TTL", 10 * time.Second, 20 * time.Second, 20 * time.Second, "line.heartbeat_interval must be shorter than presence.cache_ttl"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig(t)
+			cfg.Line.ReconcileInterval = Duration(tc.reconcile)
+			cfg.Presence.CacheTTL = Duration(tc.cache)
+			cfg.Line.HeartbeatInterval = Duration(tc.heartbeat)
+			err := cfg.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestExternalKeyWindowUsesTimestamps(t *testing.T) {
 	base := validConfig(t)
 	base.Mode = "external"
@@ -426,6 +554,7 @@ external:
 			}
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("an invalid window was accepted")
+
 			}
 		})
 	}

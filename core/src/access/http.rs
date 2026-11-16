@@ -441,7 +441,7 @@ async fn parse_response<T: DeserializeOwned>(
         .bytes()
         .await
         .map_err(|_| AccessError::transport("Access response could not be read"))?;
-    serde_json::from_slice(&bytes).map_err(|_| AccessError::protocol("invalid Access response"))
+    crate::api::decode_json(&bytes)
 }
 
 async fn parse_error_response(response: reqwest::Response) -> AccessError {
@@ -604,7 +604,7 @@ mod transport_tests {
     use crate::api::test_support::{MockResponse, MockServer};
     use std::sync::{Arc, Mutex};
     use whalerein_proto::{
-        HostList, HostRequest, OnlineStatus, PairingClaimRequest, PairingClaimResponse,
+        ErrorCode, HostList, HostRequest, OnlineStatus, PairingClaimRequest, PairingClaimResponse,
         RequestState,
     };
 
@@ -867,5 +867,31 @@ mod transport_tests {
             message: "x".into()
         }
         .is_retryable_transport());
+    }
+
+    #[tokio::test]
+    async fn additive_response_fields_are_ignored_and_unknown_enums_are_actionable() {
+        // A newer peer adding a field must not break an older reader.
+        let additive = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            body: br#"{"hosts":[],"futureField":true}"#.to_vec(),
+            delay_ms: 0,
+        }))
+        .await;
+        let client = AccessClient::new(additive.url(), None).unwrap();
+        assert!(client.list_hosts().await.unwrap().is_empty());
+
+        // An enum value this reader does not know is a version mismatch, not a
+        // silently parsed zero value.
+        let unknown = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            body: br#"{"requestId":"r-1","status":"FUTURE_STATUS"}"#.to_vec(),
+            delay_ms: 0,
+        }))
+        .await;
+        let client = AccessClient::new(unknown.url(), None).unwrap();
+        let error = client.get_request("r-1").await.unwrap_err();
+        assert_eq!(error.code, Some(ErrorCode::ProtocolVersionIncompatible));
+        assert!(error.message.contains("upgrade"), "{}", error.message);
     }
 }

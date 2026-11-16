@@ -76,12 +76,19 @@ func (s *Store) DeleteExpiredPairingTokens(ctx context.Context, before time.Time
 	if err := s.reconcilePairingOutcomes(ctx, before, true); err != nil {
 		return 0, fmt.Errorf("reconcile pairing outcomes: %w", err)
 	}
-	if _, err := s.db.Exec(ctx, `DELETE FROM pairing_operations WHERE expires_at <= $1`, before); err != nil {
+	operations, err := s.db.Exec(ctx, `DELETE FROM pairing_operations WHERE claim_id IN (
+		SELECT claim_id FROM pairing_operations WHERE expires_at <= $1 ORDER BY expires_at LIMIT $2)`, before, CleanupBatchSize)
+	if err != nil {
 		return 0, err
 	}
-	cmd, err := s.db.Exec(ctx, `DELETE FROM pairing_tokens WHERE expires_at <= $1`, before)
+	cmd, err := s.db.Exec(ctx, `DELETE FROM pairing_tokens WHERE token_hash IN (
+		SELECT token_hash FROM pairing_tokens WHERE expires_at <= $1 ORDER BY expires_at LIMIT $2)`, before, CleanupBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired pairing tokens: %w", err)
 	}
-	return cmd.RowsAffected(), nil
+	// Report both bounded deletes. Dropping the operations count would let a
+	// full operations batch (2000 rows, more pending) look like a short pass
+	// whenever the token batch was small, so the cleanup drain would stop with
+	// a backlog left behind.
+	return operations.RowsAffected() + cmd.RowsAffected(), nil
 }

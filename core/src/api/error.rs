@@ -179,6 +179,45 @@ impl CoreError {
         }
     }
 
+    /// Stable client action for this error.
+    ///
+    /// Clients use this instead of guessing from the exit code. `upgrade` is
+    /// terminal for the current attempt: a mobile or CLI client must show an
+    /// upgrade prompt and must never map it to a retryable `unavailable`.
+    pub fn action(&self) -> &'static str {
+        match self {
+            Self::Host {
+                code: Some(code), ..
+            }
+            | Self::Source {
+                code: Some(code), ..
+            }
+            | Self::Api {
+                code: Some(code), ..
+            } => error_code_action(*code),
+            Self::InvalidInput(_) | Self::Config(_) => "fix_input",
+            Self::NotFound(_) => "refresh",
+            Self::Unauthorized
+            | Self::Revoked
+            | Self::RevokedRetentionUnverified
+            | Self::NotPaired => "reauth",
+            Self::HostOffline | Self::Unavailable(_) => "retry",
+            Self::HostRejected => "refresh",
+            Self::Timeout | Self::UnknownResult => "retry",
+            Self::Conflict(_) | Self::FingerprintMismatch { .. } => "refresh",
+            Self::Unsupported | Self::ProtocolIncompatible => "upgrade",
+            Self::PairingCancelled | Self::PairingFenced | Self::PairingCommittedUnavailable => {
+                "restart_pairing"
+            }
+            Self::PairingCommittedUnconfirmed => "review_pairing",
+            Self::ChannelMismatch | Self::StaleCommand { .. } => "retry",
+            Self::Host { code: None, .. }
+            | Self::Source { code: None, .. }
+            | Self::Api { code: None, .. } => "retry",
+            Self::Cache(_) | Self::Security(_) | Self::Internal(_) => "retry",
+        }
+    }
+
     /// Authorization rejection that requires Access confirmation before cleanup.
     ///
     /// Access answers that token with unauthorized or forbidden. A missing
@@ -362,6 +401,34 @@ pub fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::PairingCommittedUnavailable => "pairing_committed_unavailable",
         ErrorCode::PairingCommittedUnconfirmed => "pairing_committed_unconfirmed",
         ErrorCode::ChannelReplaced => "channel_replaced",
+    }
+}
+
+/// Stable client action for an `ErrorResponse` code.
+///
+/// The vocabulary and the per-code value live in `proto/v1/error_codes.json`
+/// and in the complete table in `proto/v1/WIRE.md`.
+pub fn error_code_action(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::Unspecified => "none",
+        ErrorCode::InvalidArgument | ErrorCode::PayloadTooLarge => "fix_input",
+        ErrorCode::Unauthorized | ErrorCode::Forbidden => "reauth",
+        ErrorCode::NotFound | ErrorCode::Conflict => "refresh",
+        ErrorCode::Expired
+        | ErrorCode::Unavailable
+        | ErrorCode::Internal
+        | ErrorCode::RateLimited
+        | ErrorCode::RevocationsPending
+        | ErrorCode::ApprovalUnavailable => "retry",
+        ErrorCode::UnsupportedCapability | ErrorCode::ProtocolVersionIncompatible => "upgrade",
+        ErrorCode::PayloadDigestMismatch
+        | ErrorCode::ApprovalExpired
+        | ErrorCode::ApprovalVersionMismatch
+        | ErrorCode::ApprovalAlreadyResolved => "refresh",
+        ErrorCode::SnapshotRequired => "resync",
+        ErrorCode::PairingFenced | ErrorCode::PairingCommittedUnavailable => "restart_pairing",
+        ErrorCode::PairingCommittedUnconfirmed => "review_pairing",
+        ErrorCode::ChannelReplaced => "retry",
     }
 }
 
@@ -725,6 +792,142 @@ mod exhaustive_tests {
             assert_eq!(core.code(), code);
             assert_eq!(core.exit_code(), exit);
         }
+    }
+
+    #[test]
+    fn golden_error_table_is_the_single_source_for_names_exits_and_actions() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../../proto/v1/error_codes.json"))
+                .expect("golden error table");
+        assert_eq!(table["schema"].as_str(), Some("whalerein/error-codes/v1"));
+        let codes = table["codes"].as_array().expect("codes");
+        assert_eq!(codes.len(), whalerein_proto::ALL_ERROR_CODES.len());
+        let actions = [
+            "none",
+            "fix_input",
+            "reauth",
+            "refresh",
+            "retry",
+            "upgrade",
+            "resync",
+            "restart_pairing",
+            "review_pairing",
+        ];
+        for (position, code) in whalerein_proto::ALL_ERROR_CODES.iter().enumerate() {
+            let entry = &codes[position];
+            let name = error_code_name(*code);
+            assert_eq!(entry["name"].as_str(), Some(name));
+            assert_eq!(entry["number"].as_i64(), Some(*code as i64));
+            assert_eq!(
+                entry["exitCode"].as_u64(),
+                Some(error_code_exit_code(*code) as u64),
+                "{name} exit"
+            );
+            let action = error_code_action(*code);
+            assert_eq!(entry["action"].as_str(), Some(action), "{name} action");
+            assert!(actions.contains(&action), "{name} action {action}");
+            assert_eq!(
+                CoreError::Api {
+                    code: Some(*code),
+                    message: "m".into()
+                }
+                .action(),
+                action,
+                "{name} projection"
+            );
+        }
+    }
+
+    #[test]
+    fn every_core_error_has_a_known_client_action() {
+        let actions = [
+            "none",
+            "fix_input",
+            "reauth",
+            "refresh",
+            "retry",
+            "upgrade",
+            "resync",
+            "restart_pairing",
+            "review_pairing",
+        ];
+        let errors = [
+            CoreError::InvalidInput("x".into()),
+            CoreError::NotFound("x".into()),
+            CoreError::Unauthorized,
+            CoreError::Revoked,
+            CoreError::RevokedRetentionUnverified,
+            CoreError::HostOffline,
+            CoreError::HostRejected,
+            CoreError::Timeout,
+            CoreError::UnknownResult,
+            CoreError::Conflict("x".into()),
+            CoreError::Unsupported,
+            CoreError::ProtocolIncompatible,
+            CoreError::PairingCancelled,
+            CoreError::PairingFenced,
+            CoreError::PairingCommittedUnavailable,
+            CoreError::PairingCommittedUnconfirmed,
+            CoreError::FingerprintMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            CoreError::NotPaired,
+            CoreError::ChannelMismatch,
+            CoreError::StaleCommand {
+                request_id: "r".into(),
+                command_id: "c".into(),
+            },
+            CoreError::Host {
+                code: Some(ErrorCode::ProtocolVersionIncompatible),
+                message: "x".into(),
+            },
+            CoreError::Source {
+                code: None,
+                message: "x".into(),
+            },
+            CoreError::Api {
+                code: None,
+                message: "x".into(),
+            },
+            CoreError::Unavailable("x".into()),
+            CoreError::Cache("x".into()),
+            CoreError::Security("x".into()),
+            CoreError::Internal("x".into()),
+            CoreError::Config("x".into()),
+        ];
+        for error in errors {
+            assert!(
+                actions.contains(&error.action()),
+                "{error:?} has unknown action {}",
+                error.action()
+            );
+        }
+    }
+
+    #[test]
+    fn a_version_mismatch_is_an_upgrade_contract_not_a_retryable_outage() {
+        // The iOS client previously mapped this state to `unavailable` and
+        // retried forever. `upgrade` is terminal for the current attempt.
+        let error = CoreError::Host {
+            code: Some(ErrorCode::ProtocolVersionIncompatible),
+            message: "peer is newer".into(),
+        };
+        assert_eq!(error.code(), "protocol_version_incompatible");
+        assert_eq!(error.exit_code(), 9);
+        assert_eq!(error.action(), "upgrade");
+        assert_ne!(error.code(), "unavailable");
+        assert_eq!(
+            error_code_action(ErrorCode::UnsupportedCapability),
+            "upgrade"
+        );
+        assert_eq!(error_code_action(ErrorCode::Unavailable), "retry");
+        assert_eq!(
+            error_code_action(ErrorCode::PairingCommittedUnconfirmed),
+            "review_pairing"
+        );
+        assert_eq!(CoreError::Unsupported.action(), "upgrade");
+        assert_eq!(CoreError::ProtocolIncompatible.action(), "upgrade");
     }
 
     #[test]

@@ -273,7 +273,17 @@ pub fn event_aad(aad: &EventAad<'_>) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Approval digest exactly as defined by the wire contract.
+/// Escape one canonical approval field so the `|` separator cannot be forged
+/// by content. The mapping is injective (`\` -> `\\`, `|` -> `\|`), matching
+/// `host/runtime/src/security/digest.js`; values without those bytes keep
+/// their historical digest.
+fn escape_approval_field(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('|', "\\|")
+}
+
+/// Approval digest exactly as defined by the wire contract. The shared
+/// vectors in `proto/v1/approval_digest_vectors.json` bind this
+/// implementation to the Node connector.
 pub fn approval_digest(
     approval_id: &str,
     session_id: &str,
@@ -284,13 +294,20 @@ pub fn approval_digest(
     expires_at_unix_ms: i64,
 ) -> [u8; 32] {
     let canonical = format!(
-        "whalerein/v1/approval|{approval_id}|{session_id}|{tool_name}|{call_id}|{reason}|{version}|{expires_at_unix_ms}"
+        "whalerein/v1/approval|{}|{}|{}|{}|{}|{version}|{expires_at_unix_ms}",
+        escape_approval_field(approval_id),
+        escape_approval_field(session_id),
+        escape_approval_field(tool_name),
+        escape_approval_field(call_id),
+        escape_approval_field(reason),
     );
     crate::util::sha256(canonical.as_bytes())
 }
 
-/// Seal arbitrary bytes with a raw application key. Used by interop tooling.
-#[cfg(any(test, feature = "protocol-testing"))]
+/// Seal arbitrary bytes with a raw application key.
+///
+/// Used by interop tooling and by Core's local draft store; both must bind the
+/// ciphertext to caller-supplied associated data.
 pub fn seal_with_key(
     key: &[u8; 32],
     aad: &[u8],
@@ -310,8 +327,9 @@ pub fn seal_with_key(
     Ok((nonce_bytes, ciphertext))
 }
 
-/// Open arbitrary bytes with a raw application key. Used by interop tooling.
-#[cfg(any(test, feature = "protocol-testing"))]
+/// Open arbitrary bytes with a raw application key.
+///
+/// Used by interop tooling and by Core's local draft store.
 pub fn open_with_key(
     key: &[u8; 32],
     aad: &[u8],
@@ -500,19 +518,36 @@ mod tests {
 
     #[test]
     fn approval_digest_matches_vector() {
-        let digest = approval_digest(
-            "appr",
-            "sess",
-            "Write",
-            "call",
-            "reason text",
-            3,
-            1_700_000_000_000,
-        );
-        assert_eq!(
-            hex::encode(digest),
-            "6537dd17e336f8d69a8b82eb0cceaf501614b59de04d81b091e472c67393bece"
-        );
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../proto/v1/approval_digest_vectors.json"
+        ))
+        .expect("shared approval digest vectors");
+        let cases = vectors["cases"].as_array().expect("cases");
+        let mut digest_of = std::collections::HashMap::new();
+        for case in cases {
+            let fields = &case["fields"];
+            let digest = approval_digest(
+                fields["approval_id"].as_str().unwrap(),
+                fields["session_id"].as_str().unwrap(),
+                fields["tool_name"].as_str().unwrap(),
+                fields["call_id"].as_str().unwrap(),
+                fields["reason"].as_str().unwrap(),
+                fields["version"].as_i64().unwrap(),
+                fields["expires_at_unix_ms"].as_i64().unwrap(),
+            );
+            let name = case["name"].as_str().unwrap();
+            assert_eq!(
+                hex::encode(digest),
+                case["digest_hex"].as_str().unwrap(),
+                "shared vector {name}"
+            );
+            digest_of.insert(name.to_owned(), digest);
+        }
+        for pair in vectors["must_differ"].as_array().expect("must_differ") {
+            let left = pair[0].as_str().unwrap();
+            let right = pair[1].as_str().unwrap();
+            assert_ne!(digest_of[left], digest_of[right], "{left} vs {right}");
+        }
     }
 
     #[test]

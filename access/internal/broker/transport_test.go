@@ -245,6 +245,184 @@ func TestConnectorLearnsHostAndDeviceTransportV2FromSmallLegacyEnvelopes(t *test
 	}
 }
 
+// transportFrames splits one logical payload into the exact wire frames the
+// sender produces, so a case can feed them to a receiver in a chosen order.
+func transportFrames(t *testing.T, topic string, payload []byte) [][]byte {
+	t.Helper()
+	hash := sha256.Sum256(payload)
+	transfer := fmt.Sprintf("%032x", 0x72657374)
+	count := (len(payload) + transportChunkBytes - 1) / transportChunkBytes
+	frames := make([][]byte, 0, count)
+	for index := 0; index < count; index++ {
+		frame := &whalereinv1.TransportFrame{
+			Version:    transportVersion,
+			TransferId: transfer,
+			Topic:      topic,
+			Index:      uint32(index),
+			Count:      uint32(count),
+			TotalBytes: uint32(len(payload)),
+			Digest:     hash[:],
+			Payload:    payload[index*transportChunkBytes : min(len(payload), (index+1)*transportChunkBytes)],
+		}
+		frames = append(frames, encodeTransport(frame))
+	}
+	return frames
+}
+
+func TestLogicalTransportLostReassemblyNeverConfirmsDeliveryAndRetryRecovers(t *testing.T) {
+	var delivered atomic.Int32
+	var mu sync.Mutex
+	var acks []*whalereinv1.TransportFrame
+	receiver := newLogicalTransport(func(_ context.Context, _ string, payload []byte) error {
+		frame := &whalereinv1.TransportFrame{}
+		if err := proto.Unmarshal(payload[len(transportPrefix):], frame); err != nil {
+			return err
+		}
+		mu.Lock()
+		acks = append(acks, frame)
+		mu.Unlock()
+		return nil
+	}, func(string, []byte) { delivered.Add(1) })
+	frames := transportFrames(t, "data", make([]byte, transportChunkBytes*4+1))
+	if len(frames) != 5 {
+		t.Fatalf("frame count = %d", len(frames))
+	}
+
+	// Access receives the first fragment, then restarts: the in-memory
+	// reassembly map is dropped. The remaining fragments arrive into a fresh
+	// state that can never be completed.
+	if _, err := receiver.receive("data", frames[0], "ack"); err != nil {
+		t.Fatal(err)
+	}
+	receiver.reset()
+	for _, frame := range frames[1:] {
+		if _, err := receiver.receive("data", frame, "ack"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	for _, ack := range acks {
+		if ack.GetAck() && ack.GetComplete() && !ack.GetRejected() {
+			t.Fatal("a lost reassembly acknowledged a completed transfer")
+		}
+	}
+	mu.Unlock()
+	if delivered.Load() != 0 {
+		t.Fatal("lost reassembly reached application dispatch")
+	}
+	// The sender must retry the whole logical message; a complete retry is
+	// independent of the dropped fragment state and is delivered once.
+	for _, frame := range frames {
+		if _, err := receiver.receive("data", frame, "ack"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for delivered.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if delivered.Load() != 1 {
+		t.Fatalf("retry delivered %d messages", delivered.Load())
+	}
+}
+
+func TestLogicalTransportPayloadBoundariesAroundTheChunkSize(t *testing.T) {
+	for _, size := range []int{1, transportChunkBytes - 1, transportChunkBytes, transportChunkBytes + 1, 2*transportChunkBytes - 1, 2*transportChunkBytes + 1} {
+		for _, capable := range []bool{true, false} {
+			if !capable && size > transportChunkBytes {
+				continue
+			}
+			var sender *logicalTransport
+			var receiver *logicalTransport
+			var delivered atomic.Int32
+			var frames atomic.Int32
+			receiver = newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
+				_, err := sender.receive(topic, payload, "")
+				return err
+			}, func(string, []byte) { delivered.Add(1) })
+			sender = newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
+				frames.Add(1)
+				consumed, err := receiver.receive(topic, payload, "ack")
+				if err == nil && !consumed {
+					receiver.deliver(topic, payload)
+				}
+				return err
+			}, func(string, []byte) {})
+			sender.ackTimeout = 100 * time.Millisecond
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			body := bytes.Repeat([]byte{byte(size % 251)}, size)
+			err := sender.send(ctx, "data", body, "ack", capable)
+			cancel()
+			if err != nil {
+				t.Fatalf("size %d capable=%v: %v", size, capable, err)
+			}
+			deliveryDeadline := time.Now().Add(2 * time.Second)
+			for delivered.Load() != 1 && time.Now().Before(deliveryDeadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if delivered.Load() != 1 {
+				t.Fatalf("size %d capable=%v delivered %d", size, capable, delivered.Load())
+			}
+			want := (size + transportChunkBytes - 1) / transportChunkBytes
+			if !capable {
+				want = 1
+			}
+			if frames.Load() != int32(want) {
+				t.Fatalf("size %d capable=%v frames = %d, want %d", size, capable, frames.Load(), want)
+			}
+		}
+	}
+}
+
+func TestTransientBulkSaturationIsRetryableAndNotAPermanentBudgetFailure(t *testing.T) {
+	transport := newLogicalTransport(func(context.Context, string, []byte) error { return nil }, func(string, []byte) {})
+	transport.ackTimeout = time.Millisecond
+	if err := transport.acquireBulk(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.acquireBulk(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	// Both bulk slots are held and every waiter slot is occupied, which is a
+	// transient admission condition, not an oversized message.
+	var waiters []context.CancelFunc
+	for index := 0; index < cap(transport.bulkWaiters); index++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		waiters = append(waiters, cancel)
+		go func() { _ = transport.acquireBulk(ctx, 1) }()
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(transport.bulkWaiters) < cap(transport.bulkWaiters) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	err := transport.acquireBulk(context.Background(), transportChunkBytes+1)
+	if err == nil {
+		t.Fatal("saturated admission accepted a bulk message")
+	}
+	if errors.Is(err, ErrMessageBudget) {
+		t.Fatal("transient saturation was classified as a terminal payload budget failure")
+	}
+	for _, cancel := range waiters {
+		cancel()
+	}
+	// After the cancellation releases the waiters, a retry succeeds.
+	<-transport.bulkSlots
+	<-transport.bulkSlots
+	deadline = time.Now().Add(time.Second)
+	for len(transport.bulkWaiters) > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := transport.acquireBulk(context.Background(), transportChunkBytes+1); err != nil {
+		t.Fatalf("retry after saturation failed: %v", err)
+	}
+	<-transport.bulkSlots
+	// A message larger than the logical transport budget is permanent.
+	permanent := newLogicalTransport(func(context.Context, string, []byte) error { return nil }, func(string, []byte) {})
+	if err := permanent.send(context.Background(), "data", make([]byte, transportMessageBytes+1), "ack", true); !errors.Is(err, ErrMessageBudget) {
+		t.Fatalf("oversized message error = %v", err)
+	}
+}
+
 func TestChunkReceiptsFromDifferentReceiverStatesDoNotConfirmDelivery(t *testing.T) {
 	var sender *logicalTransport
 	var delivered, parts atomic.Int32

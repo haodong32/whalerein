@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""Protobuf field-compatibility check for proto/v1/whalerein.proto.
+"""Wire-schema compatibility checker for proto/v1/whalerein.proto.
 
-Uses protoc's descriptor set and its text form (stdlib parsing only) to record
-every message field number/type/name and enum value. A stale golden file fails,
-which surfaces deletions, renames, renumbering and type changes.
+The checker compares the compiled descriptor with two checked-in artifacts:
+
+* ``proto/v1/compat/baseline.json`` is the immutable compatibility baseline.
+  ``--check`` fails when a field or enum value is removed, a tag number is
+  reused, a field type or JSON name changes, or a field changes oneof
+  membership. ``--write`` cannot rewrite it by accident; ``--update-baseline``
+  refuses a breaking change unless ``--rationale`` explains the version bump and
+  records it in ``proto/v1/compat/CHANGELOG.md``.
+* ``tests/fixtures/proto/fields.json`` is an exact snapshot used to detect any
+  unreviewed schema edit. ``--write`` refreshes it only after the baseline check
+  passes.
 
 Usage:
-  proto_compat.py --write [--root DIR]
   proto_compat.py --check [--root DIR]
+  proto_compat.py --write [--root DIR]
+  proto_compat.py --update-baseline [--rationale TEXT] [--root DIR]
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import subprocess
 import sys
@@ -20,8 +30,11 @@ import tempfile
 from pathlib import Path
 
 FIXTURE_REL = "tests/fixtures/proto/fields.json"
+BASELINE_REL = "proto/v1/compat/baseline.json"
+CHANGELOG_REL = "proto/v1/compat/CHANGELOG.md"
 PROTO_REL = "proto/v1/whalerein.proto"
-SCHEMA = "whalerein/proto-fields/v1"
+BASELINE_SCHEMA = "whalerein/proto-schema-baseline/v1"
+SNAPSHOT_SCHEMA = "whalerein/proto-fields/v1"
 
 
 def _run(argv: list[str], stdin: bytes | None = None, cwd: Path | None = None) -> bytes:
@@ -72,124 +85,244 @@ def _value(text: str) -> str:
     return text
 
 
-def parse_descriptor(text: str) -> dict:
-    messages: dict[str, dict] = {}
-    enums: dict[str, dict] = {}
-    current_message: dict | None = None
-    current_enum: dict | None = None
-    current_field: dict | None = None
-    current_enum_value: dict | None = None
-
-    for raw_line in text.splitlines():
-        indent = len(raw_line) - len(raw_line.lstrip())
-        line = raw_line.strip()
+def _parse_block(lines: list[str], index: int = 0) -> tuple[dict, int]:
+    """Parse protoc's text format into ``{key: [value, ...]}``."""
+    block: dict[str, list] = {}
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
         if not line:
             continue
-        if indent == 2 and line.startswith("message_type {"):
-            current_message = {"name": "", "fields": []}
-            current_enum = None
-            current_field = None
+        if line == "}":
+            return block, index
+        if line.endswith("{"):
+            key = line[:-1].strip()
+            value, index = _parse_block(lines, index)
+            block.setdefault(key, []).append(value)
             continue
-        if indent == 2 and line.startswith("enum_type {"):
-            current_enum = {"name": "", "values": []}
-            current_message = None
-            current_enum_value = None
-            continue
-        if indent == 2 and line == "}":
-            if current_message is not None:
-                messages[current_message["name"]] = {
-                    "fields": sorted(
-                        current_message["fields"], key=lambda item: item["number"]
-                    )
-                }
-                current_message = None
-            elif current_enum is not None:
-                enums[current_enum["name"]] = {
-                    "values": sorted(
-                        current_enum["values"], key=lambda item: item["number"]
-                    )
-                }
-                current_enum = None
-            continue
-        if current_message is not None:
-            if indent == 4 and line == "name:":
-                continue
-            if indent == 4 and line.startswith("name:"):
-                current_message["name"] = _value(line.split(":", 1)[1])
-                continue
-            if indent == 4 and line == "field {":
-                current_field = {}
-                continue
-            if indent == 4 and line == "}" and current_field is not None:
-                current_message["fields"].append(current_field)
-                current_field = None
-                continue
-            if current_field is not None and indent == 6 and ":" in line:
-                key, value = line.split(":", 1)
-                current_field[key.strip()] = _value(value)
-                continue
-        if current_enum is not None:
-            if indent == 4 and line.startswith("name:"):
-                current_enum["name"] = _value(line.split(":", 1)[1])
-                continue
-            if indent == 4 and line == "value {":
-                current_enum_value = {}
-                continue
-            if indent == 4 and line == "}" and current_enum_value is not None:
-                current_enum["values"].append(current_enum_value)
-                current_enum_value = None
-                continue
-            if current_enum_value is not None and indent == 6 and ":" in line:
-                key, value = line.split(":", 1)
-                value = _value(value)
-                current_enum_value[key.strip()] = (
-                    int(value) if key.strip() == "number" else value
-                )
-                continue
+        key, _, value = line.partition(":")
+        block.setdefault(key.strip(), []).append(_value(value))
+    return block, index
 
-    for message in messages.values():
-        for field in message["fields"]:
-            field.pop("label", None) if field.get("label") == "LABEL_OPTIONAL" else None
+
+def _single(block: dict, key: str, default=None):
+    values = block.get(key, [])
+    return values[0] if values else default
+
+
+def parse_descriptor(text: str) -> dict:
+    parsed, _ = _parse_block(text.splitlines())
+    file_block = _single(parsed, "file", {})
+    messages: dict[str, dict] = {}
+    enums: dict[str, dict] = {}
+    for message in file_block.get("message_type", []):
+        name = _single(message, "name", "")
+        oneof_names = [
+            _single(oneof, "name", "") for oneof in message.get("oneof_decl", [])
+        ]
+        fields = []
+        for field in message.get("field", []):
+            number = int(_single(field, "number", "0"))
+            optional = _single(field, "proto3_optional") == "true"
+            oneof_index = _single(field, "oneof_index")
+            oneof = None
+            if oneof_index is not None and not optional:
+                index = int(oneof_index)
+                if index >= len(oneof_names):
+                    raise RuntimeError(f"{name}.{_single(field, 'name')} has invalid oneof_index")
+                oneof = oneof_names[index]
+            entry = {
+                "name": _single(field, "name", ""),
+                "number": number,
+                "type": _single(field, "type", ""),
+                "json_name": _single(field, "json_name", ""),
+                "repeated": _single(field, "label", "") == "LABEL_REPEATED",
+            }
             if "type_name" in field:
-                field["type_name"] = field["type_name"].lstrip(".")
-    return {"schema": SCHEMA, "file": PROTO_REL, "messages": messages, "enums": enums}
+                entry["type_name"] = _single(field, "type_name", "").lstrip(".")
+            if oneof is not None:
+                entry["oneof"] = oneof
+            if optional:
+                entry["optional"] = True
+            fields.append(entry)
+        messages[name] = {"fields": sorted(fields, key=lambda item: item["number"])}
+    for enum in file_block.get("enum_type", []):
+        name = _single(enum, "name", "")
+        values = [
+            {
+                "name": _single(value, "name", ""),
+                "number": int(_single(value, "number", "0")),
+            }
+            for value in enum.get("value", [])
+        ]
+        enums[name] = sorted(values, key=lambda item: item["number"])
+    return {"messages": messages, "enums": enums}
 
 
 def build(root: Path) -> dict:
-    text = descriptor_text(root)
-    return parse_descriptor(text)
+    schema = parse_descriptor(descriptor_text(root))
+    return {
+        "schema": BASELINE_SCHEMA,
+        "file": PROTO_REL,
+        "messages": schema["messages"],
+        "enums": schema["enums"],
+    }
 
 
-def write_fixture(root: Path) -> Path:
-    fixture = build(root)
-    path = root / FIXTURE_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(fixture, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return path
+def compatibility_violations(baseline: dict, current: dict) -> list[str]:
+    """Every breaking change from ``baseline`` to ``current``.
+
+    Additions are compatible. Removals, renumbering, type changes, JSON-name
+    changes and oneof membership changes are breaking.
+    """
+    violations: list[str] = []
+    for message_name, baseline_message in sorted(baseline["messages"].items()):
+        current_message = current["messages"].get(message_name)
+        if current_message is None:
+            violations.append(f"removed message {message_name}")
+            continue
+        by_number = {field["number"]: field for field in current_message["fields"]}
+        by_name = {field["name"]: field for field in current_message["fields"]}
+        for field in baseline_message["fields"]:
+            label = f"{message_name}.{field['name']}"
+            current_field = by_number.get(field["number"])
+            if current_field is None:
+                if field["name"] in by_name:
+                    violations.append(
+                        f"renumbered field {label} from {field['number']} to "
+                        f"{by_name[field['name']]['number']}"
+                    )
+                else:
+                    violations.append(f"removed field {label} (tag {field['number']})")
+                continue
+            if current_field["name"] != field["name"]:
+                violations.append(
+                    f"tag {field['number']} of {message_name} was reused from "
+                    f"{field['name']} to {current_field['name']}"
+                )
+            for key in ("type", "type_name", "repeated", "json_name"):
+                if current_field.get(key) != field.get(key):
+                    violations.append(
+                        f"changed {key} of {label}: {field.get(key)!r} -> "
+                        f"{current_field.get(key)!r}"
+                    )
+            if current_field.get("oneof") != field.get("oneof"):
+                violations.append(
+                    f"changed oneof membership of {label}: "
+                    f"{field.get('oneof')!r} -> {current_field.get('oneof')!r}"
+                )
+    for enum_name, baseline_values in sorted(baseline["enums"].items()):
+        current_values = current["enums"].get(enum_name)
+        if current_values is None:
+            violations.append(f"removed enum {enum_name}")
+            continue
+        current_by_number = {value["number"]: value for value in current_values}
+        current_by_name = {value["name"]: value for value in current_values}
+        for value in baseline_values:
+            label = f"{enum_name}.{value['name']}"
+            current_value = current_by_number.get(value["number"])
+            if current_value is None:
+                if value["name"] in current_by_name:
+                    violations.append(
+                        f"renumbered enum value {label} from {value['number']} to "
+                        f"{current_by_name[value['name']]['number']}"
+                    )
+                else:
+                    violations.append(f"removed enum value {label} ({value['number']})")
+                continue
+            if current_value["name"] != value["name"]:
+                violations.append(
+                    f"enum number {value['number']} of {enum_name} was reused from "
+                    f"{value['name']} to {current_value['name']}"
+                )
+    return violations
 
 
-def check_fixture(root: Path) -> tuple[int, int]:
+def _load(path: Path, schema: str) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema") != schema:
+        raise SystemExit(f"{path} has an unexpected schema")
+    return data
+
+
+def check_baseline(root: Path) -> dict:
+    path = root / BASELINE_REL
+    if not path.is_file():
+        raise SystemExit(f"missing compatibility baseline: {path}")
+    baseline = _load(path, BASELINE_SCHEMA)
+    current = build(root)
+    violations = compatibility_violations(baseline, current)
+    if violations:
+        detail = "\n".join(f"  - {violation}" for violation in violations)
+        raise SystemExit(
+            "protobuf compatibility failed against "
+            f"{BASELINE_REL}:\n{detail}\n"
+            "Additive schema changes are compatible. For an intentional breaking "
+            "change, run --update-baseline --rationale TEXT after bumping the "
+            "protocol version."
+        )
+    return current
+
+
+def check_snapshot(root: Path, current: dict) -> None:
     path = root / FIXTURE_REL
     if not path.is_file():
         raise SystemExit(f"missing golden fixture: {path}")
     expected = json.loads(path.read_text(encoding="utf-8"))
-    actual = build(root)
-    if actual != expected:
-        import difflib
-
+    if expected != current:
         diff = difflib.unified_diff(
             json.dumps(expected, indent=2, sort_keys=True).splitlines(),
-            json.dumps(actual, indent=2, sort_keys=True).splitlines(),
-            fromfile="golden",
+            json.dumps(current, indent=2, sort_keys=True).splitlines(),
+            fromfile="snapshot",
             tofile="descriptor",
             lineterm="",
         )
         raise SystemExit(
-            "protobuf field compatibility failed:\n" + "\n".join(list(diff)[:200])
+            "protobuf field snapshot failed:\n" + "\n".join(list(diff)[:200])
         )
-    return len(actual["messages"]), len(actual["enums"])
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_snapshot(root: Path) -> tuple[Path, Path]:
+    """Refresh the exact snapshot and absorb additive baseline growth.
+
+    A breaking change fails here, so ``--write`` cannot bless a removal.
+    """
+    current = check_baseline(root)
+    snapshot = root / FIXTURE_REL
+    _write_json(snapshot, current)
+    baseline = root / BASELINE_REL
+    _write_json(baseline, current)
+    return snapshot, baseline
+
+
+def update_baseline(root: Path, rationale: str) -> Path:
+    path = root / BASELINE_REL
+    baseline = _load(path, BASELINE_SCHEMA)
+    current = build(root)
+    violations = compatibility_violations(baseline, current)
+    if violations and not rationale.strip():
+        detail = "\n".join(f"  - {violation}" for violation in violations)
+        raise SystemExit(
+            "refusing to bless a breaking schema change without --rationale:\n" + detail
+        )
+    _write_json(path, current)
+    if violations:
+        changelog = root / CHANGELOG_REL
+        changelog.parent.mkdir(parents=True, exist_ok=True)
+        with changelog.open("a", encoding="utf-8") as handle:
+            if changelog.stat().st_size == 0:
+                handle.write("# Protocol compatibility baseline changes\n\n")
+            handle.write("## Breaking change accepted\n\n")
+            handle.write(f"Rationale: {rationale.strip()}\n\n")
+            for violation in violations:
+                handle.write(f"- {violation}\n")
+            handle.write("\n")
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -198,16 +331,26 @@ def main(argv: list[str] | None = None) -> int:
         "--root", type=Path, default=Path(__file__).resolve().parents[4]
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")
+    mode.add_argument("--write", action="store_true")
+    mode.add_argument("--update-baseline", action="store_true")
+    parser.add_argument("--rationale", default="")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     if args.write:
-        path = write_fixture(root)
+        snapshot, baseline = write_snapshot(root)
+        print(f"wrote {snapshot} and {baseline}")
+        return 0
+    if args.update_baseline:
+        path = update_baseline(root, args.rationale)
         print(f"wrote {path}")
         return 0
-    messages, enums = check_fixture(root)
-    print(f"protobuf field compatibility passed ({messages} messages, {enums} enums)")
+    current = check_baseline(root)
+    check_snapshot(root, current)
+    print(
+        "protobuf compatibility passed "
+        f"({len(current['messages'])} messages, {len(current['enums'])} enums)"
+    )
     return 0
 
 

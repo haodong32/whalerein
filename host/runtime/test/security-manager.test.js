@@ -421,14 +421,26 @@ test('when host identity is created, credentials retain the private key and SQLi
 
   const emptyStore = new StateStore({ path: ':memory:' })
   emptyStore.saveHostPublicKey(identity.publicKey, identity.fingerprint)
-  await assert.rejects(loadOrCreateHostIdentity({ credentials: new MemoryHostCredentials(), store: emptyStore }), (error) => error.code === 'internal')
+  await assert.rejects(loadOrCreateHostIdentity({ credentials: new MemoryHostCredentials(), store: emptyStore }), (error) => {
+    assert.equal(error.code, 'internal')
+    assert.match(error.message, /restore the credential store/)
+    assert.match(error.message, /revoke every paired device/)
+    assert.match(error.message, /do not delete the state database/)
+    assert.doesNotMatch(error.message, /[A-Za-z0-9+/]{40,}/)
+    return true
+  })
 
   const otherIdentity = generateKeypair()
   const otherAdapter = new MemoryHostCredentials()
   await otherAdapter.setCredential(HOST_KEY_CREDENTIAL, Buffer.from(otherIdentity.privateKey).toString('base64'))
   const mismatchStore = new StateStore({ path: ':memory:' })
   mismatchStore.saveHostPublicKey(identity.publicKey, identity.fingerprint)
-  await assert.rejects(loadOrCreateHostIdentity({ credentials: otherAdapter, store: mismatchStore }), (error) => error.code === 'internal')
+  await assert.rejects(loadOrCreateHostIdentity({ credentials: otherAdapter, store: mismatchStore }), (error) => {
+    assert.equal(error.code, 'internal')
+    assert.match(error.message, /does not match the recorded public key/)
+    assert.match(error.message, /revoke every paired device/)
+    return true
+  })
 
   const bytesAdapter = new MemoryHostCredentials()
   const bytesIdentity = generateKeypair()

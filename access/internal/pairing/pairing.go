@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -205,6 +206,10 @@ func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalere
 		uri += "&mqtt=" + url.QueryEscape(s.cfg.MQTTURL)
 	}
 	uri += "&host=" + url.QueryEscape(hostID) + "&token=" + url.QueryEscape(token)
+	// `exp` is the cross-component invitation expiry contract: Unix seconds,
+	// not milliseconds. Mobile clients reject a stale link locally before any
+	// network request, so this field must match PairingInvitation.expires_at.
+	uri += "&exp=" + strconv.FormatInt(expires.Unix(), 10)
 	s.logger.Info("pairing invitation created",
 		"host", s.masker.Host(hostID), "expires_at", expires.Format(time.RFC3339))
 	return &whalereinv1.PairingInvitation{
@@ -444,7 +449,6 @@ func (s *Service) committedOutcome(ctx context.Context, request *whalereinv1.Pai
 func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time, deviceGeneration, hostGeneration int64) (*whalereinv1.PairingClaimResponse, error) {
 
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
-		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostOffline
 	}
 	claim := &whalereinv1.PairingClaim{
@@ -457,7 +461,7 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 	result, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM, claim, now)
 	if err != nil {
-		s.recordFailure(ctx, token.TokenHash, now)
+		s.recordProofFailure(ctx, token.TokenHash, now, err)
 		return nil, err
 	}
 	claimResult, err := decodePairingResult(result)
@@ -521,7 +525,6 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 	hashHex := hex.EncodeToString(token.TokenHash)
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
-		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostOffline
 	}
 
@@ -537,7 +540,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	claim.DeviceAuthHash = authHash[:]
 	result, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM, claim, now)
 	if err != nil {
-		s.recordFailure(ctx, token.TokenHash, now)
+		s.recordProofFailure(ctx, token.TokenHash, now, err)
 		return nil, err
 	}
 	claimResult, err := decodePairingResult(result)
@@ -555,6 +558,9 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 
 	if !bytes.Equal(claimResult.DeviceAuthHash, authHash[:]) {
+		// The Host answered with a different credential hash: a proof failure,
+		// not an availability problem, so it consumes the failure budget.
+		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
 	}
 	deviceToken := request.DeviceToken
@@ -571,7 +577,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 	authResult, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, authorize, now)
 	if err != nil {
-		s.recordFailure(ctx, token.TokenHash, now)
+		s.recordProofFailure(ctx, token.TokenHash, now, err)
 		return nil, err
 	}
 	authorized, err := decodePairingResult(authResult)
@@ -609,7 +615,9 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		if errors.Is(err, store.ErrPairingIntentExpired) {
 			return nil, ErrClaimRequired
 		}
-		s.recordFailure(ctx, token.TokenHash, now)
+		// A durable commit failure is an Access storage problem. Consuming the
+		// invitation budget here would lock a legitimate user out of an
+		// invitation that never reached the proof step.
 		return nil, fmt.Errorf("%w: commit pairing", ErrInternal)
 	}
 	if !used {
@@ -715,6 +723,16 @@ func decodePairingResult(result *whalereinv1.HostResult) (*whalereinv1.PairingCl
 		return nil, err
 	}
 	return &claimResult, nil
+}
+
+// recordProofFailure consumes one unit of the invitation failure budget only
+// for a Host proof or authentication rejection. A host that is offline, slow,
+// or unreachable is an availability problem: it must not lock the invitation
+// for a legitimate user who retries when the host returns.
+func (s *Service) recordProofFailure(ctx context.Context, tokenHash []byte, now time.Time, err error) {
+	if errors.Is(err, ErrHostRejected) {
+		s.recordFailure(ctx, tokenHash, now)
+	}
 }
 
 func (s *Service) recordFailure(ctx context.Context, tokenHash []byte, now time.Time) {

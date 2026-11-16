@@ -1,29 +1,42 @@
 //! Command execution. All protocol behavior lives in `whalerein-core`.
 
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 use whalerein_core::api::{
-    default_data_dir, CreateSessionInput, Environment, ExportManifest, MemorySecretStore,
-    PairingDecision, PendingQueueAction, ProfileSelection, ProfileSummary, Profiles,
-    RemovalOutcome, SecretStore, WaitReason,
+    default_data_dir, CreateSessionInput, Environment, MemorySecretStore, PairingDecision,
+    PendingQueueAction, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome, SecretStore,
+    SessionModel, WaitReason,
 };
 use whalerein_core::{Core, CoreError, CoreOptions};
 
 use crate::cli::{Cli, Command, ModelAction, ProfileAction, QueueCommand};
 use crate::output::{
-    command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
-    lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approvals, render_command,
-    render_doctor, render_hosts, render_lifecycle_outcome, render_manifest, render_pair,
-    render_sessions, sessions_data, tail_event_json, CliError, CliOutcome, TailRenderer,
+    approval_data, command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
+    lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approval, render_approvals,
+    render_command, render_doctor, render_hosts, render_lifecycle_outcome, render_manifest,
+    render_models, render_pair, render_pairing_history, render_quarantine, render_questions,
+    render_queue, render_session_model, render_sessions, sanitize_field, sessions_data,
+    tail_event_json, CliError, CliOutcome, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn parse_wait_seconds(value: &str) -> Result<u64, &'static str> {
+/// Largest accepted deadline, matching the Host request budget.
+const MAX_TIMEOUT_MS: u64 = 2_147_483_647;
+
+/// File and schema that `Core` reads at startup. `quarantine_corrupt_config`
+/// only renames a file whose shape cannot be a valid configuration.
+const CONFIG_FILE: &str = "config.json";
+const CONFIG_SCHEMA: &str = "whalerein/v1/config";
+
+/// Parse `--timeout` for both `wait` and `tail`: seconds, non-zero, with at
+/// most millisecond precision. The one parser keeps the two commands from
+/// drifting in units or bounds.
+fn parse_timeout_seconds(value: &str) -> Result<Duration, &'static str> {
     let invalid = "timeout must be positive seconds with at most three decimal places";
     let (whole, fraction) = value
         .split_once('.')
@@ -45,10 +58,10 @@ fn parse_wait_seconds(value: &str) -> Result<u64, &'static str> {
         .checked_mul(1000)
         .and_then(|v| v.checked_add(milliseconds))
         .ok_or(invalid)?;
-    if total == 0 || total > 2_147_483_647 {
+    if total == 0 || total > MAX_TIMEOUT_MS {
         return Err(invalid);
     }
-    Ok(total)
+    Ok(Duration::from_millis(total))
 }
 
 async fn queue_change(
@@ -84,13 +97,35 @@ pub async fn run(cli: Cli) -> CliOutcome {
             return CliOutcome::local_failure(&command, error.code.as_str(), error.message, 2)
         }
     };
-    run_with(cli, secrets).await
+    run_with_signal(cli, secrets, crate::signal::interrupt()).await
 }
 
 /// Injectable variant used by tests. The only injected boundary is SecretStore.
+#[allow(dead_code)]
 pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutcome {
+    run_with_signal(cli, secrets, crate::signal::interrupt()).await
+}
+
+/// Dispatch with an injectable interrupt future so tests can prove the
+/// cancellation contract without delivering a real signal.
+pub(crate) async fn run_with_signal<S>(
+    cli: Cli,
+    secrets: Arc<dyn SecretStore>,
+    signal: S,
+) -> CliOutcome
+where
+    S: std::future::Future<Output = ()>,
+{
     let command = cli.command.clone();
     let data_dir = cli.data_dir.clone().unwrap_or_else(default_data_dir);
+    // Only the two recovery commands tolerate a corrupt configuration. Every
+    // other command still needs a routable configuration and keeps the
+    // explicit invalid_configuration error.
+    let quarantined = if recoverable_config(&command) {
+        quarantine_corrupt_config(&data_dir)
+    } else {
+        None
+    };
     if let Command::Profile { action } = &command {
         return match profile(&data_dir, &secrets, &command, action) {
             Ok(outcome) => outcome,
@@ -99,7 +134,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
     }
     let core = match Core::new(CoreOptions { data_dir, secrets }) {
         Ok(core) => core,
-        Err(error) => return core_error_outcome(&command, error),
+        Err(error) => return with_quarantine(core_error_outcome(&command, error), quarantined),
     };
 
     let core = match cli.host.as_deref() {
@@ -113,7 +148,12 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
     let core = if let Some(session) = command.session_id() {
         let key = match core.session_key(session).await {
             Ok(key) => key,
-            Err(error) => return core_error_outcome(&command, error),
+            Err(error) => {
+                return core_error_outcome(
+                    &command,
+                    explain_ambiguous_session(&core, session, error).await,
+                )
+            }
         };
         match core.with_session_host(&key.host_id) {
             Ok(scoped) => scoped,
@@ -123,7 +163,292 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         core
     };
 
-    let result = match &command {
+    // `answer` owns a richer interrupt path: it asks the Host to cancel the
+    // open answer and only then reports unknown. Racing that against the
+    // generic handler would exit before the cancellation request is sent.
+    let may_submit = may_submit(&command);
+    let before = if may_submit {
+        pending_commands(&core)
+    } else {
+        Vec::new()
+    };
+    let mut signal = std::pin::pin!(signal);
+    let result = if matches!(command, Command::Answer { .. }) {
+        dispatch(&core, &cli, &command).await
+    } else {
+        // The dispatch future is boxed so the interrupt branch can drop it
+        // *before* the cleanup window: dropping a `wait` future runs Core's
+        // observation guard, which sends CancelSessionWait from a spawned task.
+        let mut work = Box::pin(dispatch(&core, &cli, &command));
+        tokio::select! {
+            result = &mut work => result,
+            _ = &mut signal => {
+                let after = if may_submit {
+                    pending_commands(&core)
+                } else {
+                    Vec::new()
+                };
+                let outcome = crate::signal::interruption_outcome(
+                    &command,
+                    &before,
+                    &after,
+                    core.diagnostic_id(),
+                );
+                if outcome.exit == 7 {
+                    let _ = core.save_failure("unknown");
+                }
+                drop(work);
+                if matches!(command, Command::Wait { .. }) {
+                    // Give the best-effort CancelSessionWait a bounded window so
+                    // a Ctrl-C never leaves a Host wait claim behind.
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                return with_quarantine(outcome, quarantined);
+            }
+        }
+    };
+    let outcome = finish_core_result(&core, &command, result);
+    with_quarantine(outcome, quarantined)
+}
+
+/// Commands that can create a journaled command identity. Only these need the
+/// pre-dispatch pending snapshot; read-only commands must not open the cache
+/// just to answer an interrupt (opening it changes revocation retention
+/// reporting).
+fn may_submit(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Send { .. }
+            | Command::Approve { .. }
+            | Command::Reject { .. }
+            | Command::Interrupt { .. }
+            | Command::SessionCreate { .. }
+            | Command::SessionFork { .. }
+            | Command::QuestionCancel { .. }
+            | Command::Answer { .. }
+            | Command::Recover { .. }
+            | Command::Model {
+                action: ModelAction::Set { .. },
+            }
+            | Command::Queue {
+                action: QueueCommand::Edit { .. }
+                    | QueueCommand::Remove { .. }
+                    | QueueCommand::Steer { .. },
+            }
+    )
+}
+
+/// Human warning for a doctor report whose local cache could not be opened.
+///
+/// The report itself stays usable (exit 0); commands that need the real cache
+/// keep failing with `cache_error`.
+fn render_cache_warning(warning: &str) -> String {
+    format!(
+        "Warning: the local cache is unavailable ({}). Unfinished-command counts may be incomplete; cache-backed commands still fail until the cache is rebuilt.\n",
+        crate::output::sanitize_field(warning)
+    )
+}
+
+/// Human outcome of a successful revocation.
+///
+/// The unverified branch is a warning with a concrete next step: review the
+/// retained identities before pairing again and never reuse the old identity.
+fn revoke_human(unverified: bool) -> String {
+    let mut human = "Revoked this device's grants. Local identity was kept.\n".to_owned();
+    if unverified {
+        human.push_str(
+            "Unable to verify whether unconfirmed command or pairing identities were retained.\nReview them with `whalerein commands-pending` before pairing again; do not reuse the old identity.\n",
+        );
+    }
+    human
+}
+
+/// Human sentence for the child working directory of a fork.
+///
+/// A fork is complete once the child identity is confirmed; the directory is a
+/// best-effort second read. When that read fails the fork stays successful and
+/// the sentence says so instead of silently omitting the directory.
+fn fork_directory_sentence(
+    working_directory: Option<&str>,
+    working_directory_error: Option<&str>,
+) -> String {
+    match (working_directory, working_directory_error) {
+        (Some(directory), _) => format!(" Directory: {}.", crate::output::sanitize_field(directory)),
+        (None, Some(error)) => format!(
+            " The child working directory could not be read ({}); the child still exists and must not be retried or deleted.",
+            crate::output::sanitize_field(error)
+        ),
+        (None, None) => String::new(),
+    }
+}
+
+/// Name the candidate Hosts for an unqualified multi-Host session conflict.
+///
+/// Core's resolution knows the matches but its `Conflict` message historically
+/// dropped them. The CLI re-derives the candidates from the authorized Host
+/// projection so the operator gets a usable `--host` choice; when Core already
+/// names candidates, the message is left untouched. Local-only: no additional
+/// risk beyond the resolution's own reads.
+async fn explain_ambiguous_session(core: &Core, session: &str, error: CoreError) -> CoreError {
+    let CoreError::Conflict(message) = &error else {
+        return error;
+    };
+    if !should_explain_ambiguous(message) {
+        return error;
+    }
+    let Ok(hosts) = core.hosts().await else {
+        return error;
+    };
+    let mut candidates = Vec::new();
+    for host in hosts {
+        let Ok(list) = core.sessions(&host.host_id).await else {
+            continue;
+        };
+        if list.source == "remote"
+            && list.complete
+            && list.sessions.iter().any(|item| item.session_id == session)
+        {
+            candidates.push(host.host_id);
+        }
+    }
+    match ambiguous_session_conflict(message, session, &candidates) {
+        Some(explained) => explained,
+        None => error,
+    }
+}
+
+/// Whether an ambiguity message still needs the candidate list appended.
+///
+/// Core now names candidates itself as `session exists on multiple Hosts
+/// (host-1, host-2); specify a Host with --host`, and some callers use the word
+/// "candidate". Both shapes are already actionable, so they are never rewritten.
+fn should_explain_ambiguous(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("multiple hosts")
+        && !lowered.contains("candidate")
+        && !message.contains("multiple Hosts (")
+}
+
+/// Build the actionable ambiguity error from candidate Host ids.
+fn ambiguous_session_conflict(
+    message: &str,
+    session: &str,
+    candidates: &[String],
+) -> Option<CoreError> {
+    if candidates.is_empty() {
+        return None;
+    }
+    Some(CoreError::Conflict(format!(
+        "{message}. Candidates: {}. Use `whalerein --host <host-id> <command> --session {session}`",
+        candidates.join(", ")
+    )))
+}
+
+fn pending_commands(core: &Core) -> Vec<whalerein_core::api::PendingCommand> {
+    core.pending_commands().unwrap_or_default()
+}
+
+/// Add the quarantine path to a successful recovery outcome. The original file
+/// is retained next to the data directory; nothing is silently deleted.
+fn with_quarantine(mut outcome: CliOutcome, quarantined: Option<PathBuf>) -> CliOutcome {
+    let Some(path) = quarantined.filter(|_| outcome.exit == 0) else {
+        return outcome;
+    };
+    let display = path.display().to_string();
+    if let Some(data) = outcome.data.as_mut().and_then(|data| data.as_object_mut()) {
+        data.insert("config_quarantined".into(), json!(display));
+    }
+    outcome.human.push_str(&render_quarantine(&path));
+    outcome
+}
+
+fn finish_core_result(
+    core: &Core,
+    command: &Command,
+    result: Result<CliOutcome, CoreError>,
+) -> CliOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mut outcome = core_error_outcome(command, error);
+            if let Some(error) = outcome.error.as_mut() {
+                error.diagnostic_id = Some(core.diagnostic_id().to_owned());
+                if core.save_failure(&error.code).is_err() {
+                    tracing::warn!(event = "diagnostic_save_failed", trace_id = %core.diagnostic_id(), code = "unavailable");
+                }
+            }
+            outcome
+        }
+    }
+}
+
+/// The two commands that must stay usable when the local configuration cannot
+/// be parsed. `forget --local-only` is the documented last-resort recovery;
+/// `doctor` is the diagnostic entry point.
+fn recoverable_config(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Doctor { .. } | Command::Forget { local_only: true }
+    )
+}
+
+/// Rename an unparseable or foreign `config.json` to `config.json.corrupt-<ms>`.
+///
+/// Identity secrets live in the SecretStore, not in this file, so quarantining
+/// the configuration never discards keys or tokens. A malformed configuration
+/// that happens to be valid JSON is quarantined too: it cannot be routed and
+/// the user has no other local recovery path.
+fn quarantine_corrupt_config(data_dir: &Path) -> Option<PathBuf> {
+    let path = data_dir.join(CONFIG_FILE);
+    let bytes = std::fs::read(&path).ok()?;
+    if !is_corrupt_config(&bytes) {
+        return None;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    for attempt in 0..100u32 {
+        let candidate = if attempt == 0 {
+            data_dir.join(format!("{CONFIG_FILE}.corrupt-{stamp}"))
+        } else {
+            data_dir.join(format!("{CONFIG_FILE}.corrupt-{stamp}-{attempt}"))
+        };
+        if candidate.exists() {
+            continue;
+        }
+        if std::fs::rename(&path, &candidate).is_err() {
+            return None;
+        }
+        make_private(&candidate);
+        return Some(candidate);
+    }
+    None
+}
+
+fn is_corrupt_config(bytes: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) => value.get("schema").and_then(|schema| schema.as_str()) != Some(CONFIG_SCHEMA),
+        Err(_) => true,
+    }
+}
+
+fn make_private(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Execute one parsed command. Local validation failures are successful
+/// dispatches that carry a `CliOutcome`; protocol failures stay `CoreError`.
+/// Execute one parsed command. Local validation failures are successful
+/// dispatches that carry a `CliOutcome`; protocol failures stay `CoreError`.
+async fn dispatch(core: &Core, cli: &Cli, command: &Command) -> Result<CliOutcome, CoreError> {
+    let result = match command {
         Command::Profile { .. } => unreachable!("profile commands are dispatched before Core"),
         Command::Pair {
             uri,
@@ -131,9 +456,9 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             name,
         } => {
             pair(
-                &core,
-                &command,
-                &cli,
+                core,
+                command,
+                cli,
                 uri,
                 fingerprint.as_deref(),
                 name.as_deref(),
@@ -142,7 +467,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         }
         Command::PairResume => match core.resume_pairing().await {
             Ok(outcome) => Ok(CliOutcome::success(
-                &command,
+                command,
                 serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})),
                 render_pair(&outcome),
             )),
@@ -150,18 +475,18 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         },
         Command::PairingHistory => match core.pairing_history() {
             Ok(records) => {
-                let human = serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".into());
+                let human = render_pairing_history(&records);
                 Ok(CliOutcome::success(
-                    &command,
+                    command,
                     json!({ "pairings": records }),
-                    format!("{human}\n"),
+                    human,
                 ))
             }
             Err(error) => Err(error),
         },
         Command::Hosts => match core.hosts().await {
             Ok(hosts) => Ok(CliOutcome::success(
-                &command,
+                command,
                 hosts_data(&hosts),
                 render_hosts(&hosts),
             )),
@@ -169,7 +494,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         },
         Command::Sessions { host } => match core.sessions(host).await {
             Ok(list) => Ok(CliOutcome::success(
-                &command,
+                command,
                 sessions_data(host, &list),
                 render_sessions(&list),
             )),
@@ -177,12 +502,9 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         },
         Command::Models { host } => match core.list_models(host).await {
             Ok(catalog) => Ok(CliOutcome::success(
-                &command,
+                command,
                 json!(catalog),
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&catalog).unwrap_or_default()
-                ),
+                render_models(&catalog),
             )),
             Err(error) => Err(error),
         },
@@ -190,12 +512,9 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             action: ModelAction::Get { session },
         } => match core.read_session_model(session).await {
             Ok(selection) => Ok(CliOutcome::success(
-                &command,
+                command,
                 json!(selection),
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&selection).unwrap_or_default()
-                ),
+                render_session_model(&selection),
             )),
             Err(error) => Err(error),
         },
@@ -207,57 +526,73 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
                     model,
                     effort,
                 },
-        } => match core
-            .select_session_model(session, provider, model, effort.as_deref())
-            .await
-        {
-            Ok(handle) => Ok(CliOutcome::success(
-                &command,
-                command_data(&handle),
-                render_command(&handle),
-            )),
-            Err(error) => Err(error),
-        },
-        Command::SessionFork { session } => match core.fork_session(session).await {
-            Ok(handle) => {
+        } => {
+            // Re-selecting the effective next model is a no-op. It must not
+            // journal a second indistinguishable pending command (QMQ-10).
+            if let Ok(current) = core.read_session_model(session).await {
+                if model_selection_matches(&current, provider, model, effort.as_deref()) {
+                    return Ok(CliOutcome::success(
+                        command,
+                        json!({"session": session, "selection": current.next, "noop": true}),
+                        "Already selected; no command was sent.\n",
+                    ));
+                }
+            }
+            match core
+                .select_session_model(session, provider, model, effort.as_deref())
+                .await
+            {
+                Ok(handle) => Ok(CliOutcome::success(
+                    command,
+                    command_data(&handle),
+                    render_command(&handle),
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        Command::SessionFork { session } => match core.fork_session_outcome(session).await {
+            Ok(outcome) => {
+                let handle = outcome.handle;
                 let created = handle.lifecycle_receipt.as_ref().is_some_and(|receipt| {
                     !receipt.session_id.is_empty()
                         && matches!(receipt.disposition.as_str(), "READY" | "READY_WITH_WARNING")
                 });
-                let cwd = match &handle.lifecycle_receipt {
-                    Some(receipt) if created => core
-                        .get_session(&receipt.session_id)
-                        .await
-                        .ok()
-                        .map(|s| s.cwd)
-                        .filter(|s| !s.is_empty()),
-                    _ => None,
-                };
                 let human = match &handle.lifecycle_receipt {
-                    Some(receipt) if created => format!(
-                        "Session {} forked from {}. The child shares the working directory; no worktree is created.{}{}\n",
-                        receipt.session_id,
-                        session,
-                        cwd.as_ref().map(|dir| format!(" Directory: {dir}.")).unwrap_or_default(),
-                        if receipt.warning_code.is_some() {
-                            " Workspace attachment is incomplete; the child exists and must not be retried or deleted."
-                        } else {
-                            ""
-                        }
-                    ),
-                    _ => render_lifecycle_outcome(&handle).unwrap_or_else(|| render_command(&handle)),
-                };
+                        Some(receipt) if created => format!(
+                            "Session {} forked from {}. The child shares the working directory; no worktree is created.{}{}\n",
+                            crate::output::sanitize_field(&receipt.session_id),
+                            crate::output::sanitize_field(session),
+                            fork_directory_sentence(
+                                outcome.working_directory.as_deref(),
+                                outcome.working_directory_error.as_deref(),
+                            ),
+                            if receipt.warning_code.is_some() {
+                                " Workspace attachment is incomplete; the child exists and must not be retried or deleted."
+                            } else {
+                                ""
+                            }
+                        ),
+                        _ => render_lifecycle_outcome(&handle)
+                            .unwrap_or_else(|| render_command(&handle)),
+                    };
                 let mut data = command_data(&handle);
-                if let Some(cwd) = cwd {
+                if let Some(cwd) = &outcome.working_directory {
                     data["working_directory"] = json!(cwd);
                 }
-                Ok(CliOutcome::lifecycle(
-                    &command,
+                if let Some(error) = &outcome.working_directory_error {
+                    data["working_directory_error"] = json!(error);
+                }
+                let mut outcome = CliOutcome::lifecycle(
+                    command,
                     &handle,
                     lifecycle_error_code(&handle),
                     human,
                     lifecycle_exit_code(&handle),
-                ))
+                );
+                // `lifecycle()` rebuilds the data payload from the handle, so
+                // the fork-only directory fields are installed afterwards.
+                outcome.data = Some(data);
+                Ok(outcome)
             }
             Err(error) => Err(error),
         },
@@ -294,7 +629,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
                             .unwrap_or_else(|| render_command(&handle)),
                     };
                     Ok(CliOutcome::lifecycle(
-                        &command,
+                        command,
                         &handle,
                         lifecycle_error_code(&handle),
                         human,
@@ -324,7 +659,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             ) => {
                 let values: Vec<_> = commands.iter().map(|item| json!({"request_id": item.request_id, "command_id": item.command_id, "host_id": item.host_id, "status": item.status.as_str()})).collect();
                 let mut human = String::new();
-                for item in &commands {
+                for item in commands {
                     human.push_str(&format!(
                         "request: {}  command: {}  host: {}  status: {}\n",
                         item.request_id,
@@ -351,7 +686,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
                     human.push_str("No pending commands.\n");
                 }
                 Ok(CliOutcome::success(
-                    &command,
+                    command,
                     json!({"commands": values, "unconfirmed_after_revocation": revoked, "revoked_retention_unverified": retention_unverified, "authorization_verification_pending": authorization_pending, "revocation_cleanup_requires_inspection": cleanup_inspection}),
                     human,
                 ))
@@ -364,7 +699,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         },
         Command::Recover { request } => match core.recover_pending_command(request).await {
             Ok(handle) => Ok(CliOutcome::success(
-                &command,
+                command,
                 command_data(&handle),
                 render_command(&handle),
             )),
@@ -375,36 +710,63 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             once,
             timeout,
         } => {
-            let timeout = timeout.map(Duration::from_secs).or(if *once {
+            let timeout = match timeout.as_deref().map(parse_timeout_seconds).transpose() {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(CliOutcome::local_failure(
+                        command,
+                        "invalid_argument",
+                        error,
+                        2,
+                    ))
+                }
+            };
+            let timeout = timeout.or(if *once {
                 Some(DEFAULT_TAIL_TIMEOUT)
             } else {
                 None
             });
-            tail(&core, &command, cli.json, session, *once, timeout).await
+            tail(core, command, cli.json, session, *once, timeout).await
         }
         Command::Wait {
             session,
             timeout,
             fail_on_timeout,
         } => {
-            let timeout_ms = match timeout.as_deref().map(parse_wait_seconds).transpose() {
-                Ok(value) => value.unwrap_or(30_000),
+            let timeout = match timeout.as_deref().map(parse_timeout_seconds).transpose() {
+                Ok(value) => value,
                 Err(error) => {
-                    return CliOutcome::local_failure(&command, "invalid_argument", error, 2)
+                    return Ok(CliOutcome::local_failure(
+                        command,
+                        "invalid_argument",
+                        error,
+                        2,
+                    ))
                 }
             };
+            let timeout_ms = timeout
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or(30_000);
             match core.wait_session(session, timeout_ms).await {
                 Ok(observation) => {
                     let mut outcome = CliOutcome::success(
-                        &command,
+                        command,
                         serde_json::to_value(&observation).unwrap_or_else(|_| json!({})),
                         format!(
                             "Session {}: {:?}\n",
-                            observation.session_id, observation.reason
+                            crate::output::sanitize_field(&observation.session_id),
+                            observation.reason
                         ),
                     );
                     if *fail_on_timeout && observation.reason == WaitReason::Timeout {
+                        // A timeout observation that is configured to fail is
+                        // an error envelope with data, matching `tail` instead
+                        // of a bare non-zero exit with `error: null`.
                         outcome.exit = 7;
+                        outcome.error = Some(crate::output::CliError::new(
+                            "timeout",
+                            "wait deadline expired before the session settled",
+                        ));
                     }
                     Ok(outcome)
                 }
@@ -413,7 +775,7 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         }
         Command::Sync { session } => match core.sync_session(session).await {
             Ok(events) => Ok(CliOutcome::success(
-                &command,
+                command,
                 json!({ "session_id": session, "events": events }),
                 format!("Synced session {session} ({events} event(s)).\n"),
             )),
@@ -428,30 +790,67 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             .await
         {
             Ok(handle) => Ok(CliOutcome::success(
-                &command,
+                command,
                 command_data(&handle),
                 render_command(&handle),
             )),
+            Err(CoreError::UnknownResult) => {
+                // The accepted command may still create the message. Name the
+                // retained request and explicitly forbid a blind resend: a
+                // repeat of the same text recovers this command instead.
+                let pending = core.pending_commands().unwrap_or_default();
+                let retained: Vec<String> = pending
+                    .iter()
+                    .map(|pending| pending.request_id.clone())
+                    .collect();
+                let message = match retained.last() {
+                    Some(request) => format!(
+                        "command result is unknown; the command was retained as request {request}. Read its result with `whalerein command-recover --request {request}`. Do not resend: retrying the same text recovers this command."
+                    ),
+                    None => "command result is unknown. Do not resend; inspect `whalerein commands-pending` before retrying.".into(),
+                };
+                let mut outcome = CliOutcome::local_failure_with_diagnostic(
+                    command,
+                    "unknown",
+                    message,
+                    7,
+                    core.diagnostic_id(),
+                );
+                outcome.data = Some(json!({ "retained_requests": retained }));
+                Ok(outcome)
+            }
             Err(error) => Err(error),
         },
-        Command::Approvals { session } => match core.list_approvals(session).await {
-            Ok(approvals) => Ok(CliOutcome::success(
-                &command,
-                json!({ "session_id": session, "approvals": approvals }),
-                render_approvals(&approvals),
-            )),
-            Err(error) => Err(error),
-        },
+        Command::Approvals { session, request } => {
+            if let Some(approval_id) = request {
+                // APPR-03 read path: one approval's live or terminal state.
+                // A known id is success; an unknown id stays not_found (exit 3).
+                return match core.get_approval(approval_id).await {
+                    Ok(approval) => Ok(CliOutcome::success(
+                        command,
+                        approval_data(&approval),
+                        render_approval(&approval),
+                    )),
+                    Err(error) => Err(error),
+                };
+            }
+            let session = session.as_deref().unwrap_or_default();
+            match core.list_approvals(session).await {
+                Ok(approvals) => Ok(CliOutcome::success(
+                    command,
+                    json!({ "session_id": session, "approvals": approvals }),
+                    render_approvals(&approvals),
+                )),
+                Err(error) => Err(error),
+            }
+        }
         Command::Questions { session, cursor } => {
             match core.list_questions(session, cursor).await {
-                Ok(page) => {
-                    let human = serde_json::to_string_pretty(&page).unwrap_or_else(|_| "{}".into());
-                    Ok(CliOutcome::success(
-                        &command,
-                        json!(page),
-                        format!("{human}\n"),
-                    ))
-                }
+                Ok(page) => Ok(CliOutcome::success(
+                    command,
+                    json!(page),
+                    render_questions(&page),
+                )),
                 Err(error) => Err(error),
             }
         }
@@ -468,47 +867,59 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             let digest = match parse_digest(digest) {
                 Ok(digest) => digest,
                 Err(error) => {
-                    return CliOutcome::local_failure(
-                        &command,
+                    return Ok(CliOutcome::local_failure(
+                        command,
                         error.code.as_str(),
                         error.message,
                         2,
-                    )
+                    ))
                 }
             };
             let answers = match read_question_answers(input) {
                 Ok(answers) => answers,
                 Err(error) => {
-                    return CliOutcome::local_failure(
-                        &command,
+                    return Ok(CliOutcome::local_failure(
+                        command,
                         error.code.as_str(),
                         error.message,
                         2,
-                    )
+                    ))
                 }
             };
             match core.get_question(session, batch).await {
-                Ok(current)
-                    if current.source_epoch == *epoch
-                        && current.version == *version
-                        && current.digest == digest
-                        && current.phase == *phase =>
-                {
+                Ok(current) => {
+                    // An unknown or unanswerable phase is an input problem, not
+                    // evidence that the source data went stale.
+                    validate_requested_question_phase(phase)?;
+                    validate_source_question_phase(&current.phase)?;
+                    if current.source_epoch != *epoch
+                        || current.version != *version
+                        || current.digest != digest
+                        || current.phase != *phase
+                    {
+                        return Err(CoreError::Conflict(
+                            "question changed; refresh before answering".into(),
+                        ));
+                    }
                     let actual_id = command_id.clone().unwrap_or_else(Core::new_command_id);
                     let answer = core.answer_question_with_id(&current, answers, Some(&actual_id));
                     let (outcome, interrupted) = if current.phase == "QUESTION_OPEN" {
-                        match wait_open_answer(answer, tokio::signal::ctrl_c(), || core.cancel_question_answer(session, &actual_id),
+                        match wait_open_answer(answer, crate::signal::interrupt(), || core.cancel_question_answer(session, &actual_id),
                             Duration::from_millis(whalerein_core::api::CONTROL_REQUEST_TTL_MS), Duration::from_millis(250)).await {
                             OpenAnswerWait::Finished(result, interrupted) => (*result, interrupted),
-                            OpenAnswerWait::CancellationRequested => return CliOutcome::local_failure(&command, "unknown", format!("Cancellation requested for command {actual_id}; recover its result."), 7),
-                            OpenAnswerWait::CancellationUnconfirmed => return CliOutcome::local_failure(&command, "unknown", format!("Cancellation was not confirmed for command {actual_id}; recover its result."), 7),
+                            OpenAnswerWait::CancellationRequested => {
+                                return Ok(unknown_outcome(core, command, format!("Cancellation requested for command {actual_id}; recover its result with `whalerein commands-pending` and `whalerein command-recover --request <request-id>`.")))
+                            }
+                            OpenAnswerWait::CancellationUnconfirmed => {
+                                return Ok(unknown_outcome(core, command, format!("Cancellation was not confirmed for command {actual_id}; recover its result with `whalerein commands-pending` and `whalerein command-recover --request <request-id>`.")))
+                            }
                         }
                     } else {
                         (answer.await, false)
                     };
                     match outcome {
                         Ok(handle) => Ok(CliOutcome::success(
-                            &command,
+                            command,
                             command_data(&handle),
                             render_command(&handle),
                         )),
@@ -519,14 +930,11 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
                                     "unknown" | "channel_mismatch" | "unavailable" | "timeout"
                                 ) =>
                         {
-                            return CliOutcome::local_failure(&command, "unknown", format!("Outcome of command {actual_id} is unconfirmed; recover its result."), 7);
+                            return Ok(unknown_outcome(core, command, format!("Outcome of command {actual_id} is unconfirmed; recover its result with `whalerein commands-pending` and `whalerein command-recover --request <request-id>`.")));
                         }
                         Err(error) => Err(error),
                     }
                 }
-                Ok(_) => Err(CoreError::Conflict(
-                    "question changed; refresh before answering".into(),
-                )),
                 Err(error) if error.code() == "not_found" => Err(CoreError::Conflict(
                     "question unavailable; refresh before answering".into(),
                 )),
@@ -538,12 +946,13 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             command: command_id,
         } => match core.cancel_question_answer(session, command_id).await {
             Ok(requested) => Ok(CliOutcome::success(
-                &command,
+                command,
                 json!({"cancellation_requested": requested}),
                 if requested {
                     "Cancellation requested; recover the command result to confirm its outcome.\n"
+                        .to_owned()
                 } else {
-                    "No matching active answer; it may have completed or not reached the Host. Recover its result.\n"
+                    question_cancel_guidance(core, command_id)
                 },
             )),
             Err(error) => Err(error),
@@ -556,17 +965,17 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             let digest = match parse_digest(digest) {
                 Ok(digest) => digest,
                 Err(error) => {
-                    return CliOutcome::local_failure(
-                        &command,
+                    return Ok(CliOutcome::local_failure(
+                        command,
                         error.code.as_str(),
                         error.message,
                         2,
-                    )
+                    ))
                 }
             };
             match core.approve(request, &digest, *version).await {
                 Ok(handle) => Ok(CliOutcome::success(
-                    &command,
+                    command,
                     command_data(&handle),
                     render_command(&handle),
                 )),
@@ -581,17 +990,17 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             let digest = match parse_digest(digest) {
                 Ok(digest) => digest,
                 Err(error) => {
-                    return CliOutcome::local_failure(
-                        &command,
+                    return Ok(CliOutcome::local_failure(
+                        command,
                         error.code.as_str(),
                         error.message,
                         2,
-                    )
+                    ))
                 }
             };
             match core.reject(request, &digest, *version).await {
                 Ok(handle) => Ok(CliOutcome::success(
-                    &command,
+                    command,
                     command_data(&handle),
                     render_command(&handle),
                 )),
@@ -601,16 +1010,9 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         Command::Queue { action } => match action {
             QueueCommand::List { session } => match core.pending_queue(session).await {
                 Ok(queue) => {
+                    let human = render_queue(&queue);
                     let data = serde_json::to_value(&queue).unwrap_or_else(|_| json!({}));
-                    let human = if queue.available {
-                        format!(
-                            "{}\n",
-                            serde_json::to_string_pretty(&data).unwrap_or_default()
-                        )
-                    } else {
-                        "Queue unavailable (session may be cold).\n".to_owned()
-                    };
-                    Ok(CliOutcome::success(&command, data, human))
+                    Ok(CliOutcome::success(command, data, human))
                 }
                 Err(error) => Err(error),
             },
@@ -618,32 +1020,14 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
                 session,
                 item,
                 text,
-            } => {
-                queue_change(
-                    &core,
-                    &command,
-                    session,
-                    item,
-                    PendingQueueAction::Edit,
-                    text,
-                )
-                .await
-            }
+            } => queue_change(core, command, session, item, PendingQueueAction::Edit, text).await,
             QueueCommand::Remove { session, item } => {
-                queue_change(
-                    &core,
-                    &command,
-                    session,
-                    item,
-                    PendingQueueAction::Remove,
-                    "",
-                )
-                .await
+                queue_change(core, command, session, item, PendingQueueAction::Remove, "").await
             }
             QueueCommand::Steer { session, item } => {
                 queue_change(
-                    &core,
-                    &command,
+                    core,
+                    command,
                     session,
                     item,
                     PendingQueueAction::Promote,
@@ -654,32 +1038,40 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
         },
         Command::Interrupt { session } => match core.interrupt(session).await {
             Ok(handle) => Ok(CliOutcome::success(
-                &command,
+                command,
                 command_data(&handle),
                 render_command(&handle),
             )),
             Err(error) => Err(error),
         },
-        Command::Revoke => match core.revoke().await {
-            Ok(outcome) => {
-                let unverified = matches!(
-                    outcome.retention,
-                    whalerein_core::api::RevocationRetention::Unverified
-                );
-                let mut human =
-                    "Revoked this device's grants. Local identity was kept.\n".to_owned();
-                if unverified {
-                    human.push_str("Unable to verify whether unconfirmed command or pairing identities were retained.\n");
+        Command::Revoke => match require_destructive_confirmation(
+            command,
+            cli,
+            "Revoke this device's grants and clear local authorization material?",
+        ) {
+            Err(outcome) => Ok(outcome),
+            Ok(()) => match core.revoke().await {
+                Ok(outcome) => {
+                    let unverified = matches!(
+                        outcome.retention,
+                        whalerein_core::api::RevocationRetention::Unverified
+                    );
+                    let human = revoke_human(unverified);
+                    Ok(CliOutcome::success(
+                        command,
+                        json!({ "device_id":outcome.device_id, "revoked":true, "revoked_retention_unverified":unverified }),
+                        human,
+                    ))
                 }
-                Ok(CliOutcome::success(
-                    &command,
-                    json!({ "device_id":outcome.device_id, "revoked":true, "revoked_retention_unverified":unverified }),
-                    human,
-                ))
-            }
-            Err(error) => Err(error),
+                Err(error) => Err(error),
+            },
         },
         Command::Forget { local_only } => {
+            if let Err(outcome) =
+                require_destructive_confirmation(command, cli, "Forget this local device identity?")
+            {
+                return Ok(outcome);
+            }
             if !local_only && core.is_paired() {
                 let _ = core.hosts().await;
             }
@@ -688,7 +1080,21 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             } else {
                 core.forget_device()
             };
-            forgotten.map(|()| CliOutcome::success(&command, json!({"identity_forgotten": true,"local_only":local_only}), if *local_only {"Forgot local identity. Its server entry may remain; revoke the old device in host settings.\n"} else {"Forgot this local device identity.\n"}))
+            forgotten.map(|()| {
+                CliOutcome::success(
+                    command,
+                    json!({
+                        "identity_forgotten": true,
+                        "local_only": local_only,
+                        "remote_grant_may_remain": local_only,
+                    }),
+                    if *local_only {
+                        "Forgot local identity. The remote grant may still be active; revoke the old device in host settings before reusing that identity.\n"
+                    } else {
+                        "Forgot this local device identity.\n"
+                    },
+                )
+            })
         }
         Command::Doctor {
             export,
@@ -697,29 +1103,17 @@ pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutc
             if *clear_diagnostics {
                 core.clear_diagnostics().map(|()| {
                     CliOutcome::success(
-                        &command,
+                        command,
                         json!({"diagnostics_cleared": true}),
                         "Cleared local diagnostic history.\n",
                     )
                 })
             } else {
-                doctor(&core, &command, &cli, export.as_deref())
+                doctor(core, command, cli, export.as_deref())
             }
         }
     };
-    match result {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let mut outcome = core_error_outcome(&command, error);
-            if let Some(error) = outcome.error.as_mut() {
-                error.diagnostic_id = Some(core.diagnostic_id().to_owned());
-                if core.save_failure(&error.code).is_err() {
-                    tracing::warn!(event = "diagnostic_save_failed", trace_id = %core.diagnostic_id(), code = "unavailable");
-                }
-            }
-            outcome
-        }
-    }
+    result
 }
 
 fn secret_store() -> Result<Arc<dyn SecretStore>, CliError> {
@@ -802,6 +1196,44 @@ async fn pair(
     fingerprint: Option<&str>,
     name: Option<&str>,
 ) -> Result<CliOutcome, CoreError> {
+    // `-` reads the invitation from standard input so the one-time token never
+    // appears in argv, `ps` output or shell history. Surrounding whitespace is
+    // removed; the Core parser validates and bounds the value.
+    let uri_owned;
+    let uri = if uri == "-" {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text).map_err(|_| {
+            CoreError::InvalidInput("pairing URI could not be read from standard input".into())
+        })?;
+        uri_owned = text.trim().to_owned();
+        if uri_owned.is_empty() {
+            return Ok(CliOutcome::local_failure(
+                command,
+                "invalid_argument",
+                "standard input did not contain a pairing URI",
+                2,
+            ));
+        }
+        uri_owned.as_str()
+    } else {
+        uri
+    };
+    // Reject a malformed pin locally: sending it to the Host would surface as a
+    // fingerprint mismatch (or a transport error) and mislead the MITM check.
+    let fingerprint = match fingerprint {
+        Some(value) => match parse_fingerprint(value) {
+            Ok(fingerprint) => Some(fingerprint),
+            Err(error) => {
+                return Ok(CliOutcome::local_failure(
+                    command,
+                    error.code.as_str(),
+                    error.message,
+                    2,
+                ))
+            }
+        },
+        None => None,
+    };
     let interactive = std::io::stdin().is_terminal();
     if !cli.yes && fingerprint.is_none() && !interactive {
         return Ok(CliOutcome::local_failure(
@@ -811,7 +1243,7 @@ async fn pair(
             2,
         ));
     }
-    let expected = fingerprint.map(str::to_owned);
+    let expected = fingerprint;
     let yes = cli.yes;
     let decision = move |prompt: &whalerein_core::api::PairingPrompt| {
         if let Some(expected) = &expected {
@@ -860,24 +1292,41 @@ async fn tail(
     }
     let mut renderer = TailRenderer::default();
     let mut visible = false;
+    let mut closed = false;
     let emitted = core
         .watch_session(&key, timeout, |event| {
-            if json_output {
+            let text = if json_output {
                 let mut value = tail_event_json(event);
                 value["data"]["event"]["session"] =
                     json!({"host_id":key.host_id,"session_id":key.session_id});
-                println!("{}", serde_json::to_string(&value).unwrap_or_default());
+                format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
             } else {
-                print!("{}", renderer.render(event));
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
+                renderer.render(event)
+            };
+            let written = crate::stream::to_stdout(text.as_bytes());
             visible |= is_tail_output(event);
-            !(once && visible)
+            match written {
+                Ok(()) => !(once && visible),
+                Err(failure) if failure.is_closed() => {
+                    // The consumer closed the pipe (`tail | head -1`): stop the
+                    // stream cleanly instead of panicking on the next write.
+                    closed = true;
+                    false
+                }
+                Err(_) => false,
+            }
         })
         .await;
+    if closed {
+        return Ok(CliOutcome::success(
+            command,
+            json!({ "session_id": session, "events": 0, "closed": true }),
+            String::new(),
+        ));
+    }
     if !json_output {
-        print!("{}", renderer.finish_line());
+        let tail = renderer.finish_line();
+        let _ = crate::stream::to_stdout(tail.as_bytes());
     }
     let emitted = emitted?;
     if once && !visible {
@@ -898,32 +1347,23 @@ fn doctor(
 ) -> Result<CliOutcome, CoreError> {
     match export {
         Some(path) => {
-            let fields = ExportManifest::fields();
-            eprintln!("Diagnostic export will include:");
-            for field in &fields {
-                eprintln!("  - {field}");
-            }
-            eprintln!(
-                "Last failure: at most 32 metadata events, retained for 7 days, under 32 KiB."
-            );
-            eprintln!("It never includes message content, tool arguments, private keys,");
-            eprintln!("device tokens, pairing tokens, full ciphertext, or host/device ids.");
-            if !cli.yes && !std::io::stdin().is_terminal() {
+            // A directory is a usage error, not an internal write failure.
+            if path.exists() && path.is_dir() {
                 return Ok(CliOutcome::local_failure(
                     command,
                     "invalid_argument",
-                    "diagnostic export requires --yes in non-interactive mode",
+                    "diagnostic export target must be a file, not a directory",
                     2,
                 ));
             }
-            if !cli.yes && !prompt_yes_no("Write the diagnostic bundle?") {
-                return Ok(CliOutcome::local_failure(
-                    command,
-                    "cancelled",
-                    "diagnostic export cancelled",
-                    2,
-                ));
+            if let Err(outcome) =
+                require_destructive_confirmation(command, cli, "Write the diagnostic bundle?")
+            {
+                return Ok(outcome);
             }
+            // The manifest fields and redactions are the only explanation; they
+            // belong to the envelope, never to stderr, so `--json` keeps the
+            // stream separation scripts rely on.
             let manifest = core.export_diagnostics(path)?;
             Ok(CliOutcome::success(
                 command,
@@ -932,14 +1372,165 @@ fn doctor(
             ))
         }
         None => {
-            let report = core.doctor()?;
-            Ok(CliOutcome::success(
-                command,
-                doctor_data(&report),
-                render_doctor(&report),
-            ))
+            // A corrupt cache must not make diagnostics unavailable: Core
+            // returns the degraded report plus an explicit warning.
+            let (report, cache_warning) = core.doctor_with_cache_status()?;
+            let mut data = doctor_data(&report);
+            let mut human = render_doctor(&report);
+            if let Some(warning) = cache_warning {
+                data["cache_warning"] = json!(warning);
+                human.push_str(&render_cache_warning(warning));
+            }
+            Ok(CliOutcome::success(command, data, human))
         }
     }
+}
+
+/// Decision for a destructive command, factored out so a unit test never needs
+/// a terminal or stdin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveDecision {
+    Proceed,
+    RefuseNonInteractive,
+    Ask,
+}
+
+pub fn destructive_decision(yes: bool, interactive: bool) -> DestructiveDecision {
+    if yes {
+        DestructiveDecision::Proceed
+    } else if interactive {
+        DestructiveDecision::Ask
+    } else {
+        DestructiveDecision::RefuseNonInteractive
+    }
+}
+
+/// Enforce the destructive-command contract.
+///
+/// `--yes` is the only non-interactive consent. On a TTY the user is asked and
+/// the default answer is "no". Nothing destructive happens before this returns.
+#[allow(clippy::result_large_err)]
+fn require_destructive_confirmation(
+    command: &Command,
+    cli: &Cli,
+    prompt: &str,
+) -> Result<(), CliOutcome> {
+    match destructive_decision(cli.yes, std::io::stdin().is_terminal()) {
+        DestructiveDecision::Proceed => Ok(()),
+        DestructiveDecision::RefuseNonInteractive => Err(CliOutcome::local_failure(
+            command,
+            "invalid_argument",
+            format!("{prompt} Re-run with --yes in non-interactive mode."),
+            2,
+        )),
+        DestructiveDecision::Ask => {
+            if prompt_yes_no(prompt) {
+                Ok(())
+            } else {
+                Err(CliOutcome::local_failure(
+                    command,
+                    "cancelled",
+                    "cancelled by the user; nothing was changed",
+                    2,
+                ))
+            }
+        }
+    }
+}
+
+/// Normalize `--fingerprint` before any network call.
+///
+/// The pin is SHA-256 hex; display grouping (ASCII whitespace, `:` or `-`) and
+/// an optional `sha256:` prefix are accepted. The invalid value is never echoed
+/// because a mistyped pin may itself be pasted key material.
+pub fn parse_fingerprint(value: &str) -> Result<String, CliError> {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    if !value.chars().all(|character| {
+        character.is_ascii_hexdigit()
+            || character.is_ascii_whitespace()
+            || matches!(character, ':' | '-')
+    }) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "fingerprint must be 64 hex characters (spaces, ':' or '-' may group them)",
+        ));
+    }
+    let normalized: String = value
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    if normalized.len() != 64 {
+        return Err(CliError::new(
+            "invalid_argument",
+            "fingerprint must be exactly 64 hex characters (32 bytes)",
+        ));
+    }
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn prompt_yes_no(prompt: &str) -> bool {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // A blocking stdin read cannot observe the async signal handler, so a
+    // Ctrl-C at the prompt would otherwise hang forever. Install a temporary
+    // synchronous handler, poll stdin with a bounded timeout and treat SIGINT
+    // as a refusal (the safe default). The previous disposition is restored so
+    // the rest of the command keeps the normal cancellation contract.
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn mark_interrupted(_: libc::c_int) {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    }
+
+    eprint!("{prompt} [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = mark_interrupted as *const () as usize;
+    action.sa_flags = 0;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+    }
+    let mut previous_int: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut previous_term: libc::sigaction = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigaction(libc::SIGINT, &action, &mut previous_int);
+        libc::sigaction(libc::SIGTERM, &action, &mut previous_term);
+    }
+
+    let answer = loop {
+        if INTERRUPTED.swap(false, Ordering::SeqCst) {
+            break false;
+        }
+        let mut descriptor = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 200) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break false;
+        }
+        if ready == 0 {
+            continue;
+        }
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            break false;
+        }
+        break matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    };
+
+    unsafe {
+        libc::sigaction(libc::SIGINT, &previous_int, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &previous_term, std::ptr::null_mut());
+    }
+    answer
 }
 
 fn profile(
@@ -1139,6 +1730,7 @@ fn render_profile_removal(outcome: &RemovalOutcome) -> String {
     output
 }
 
+#[cfg(not(unix))]
 fn prompt_yes_no(prompt: &str) -> bool {
     use std::io::Write;
     eprint!("{prompt} [y/N] ");
@@ -1170,15 +1762,14 @@ where
     A: std::future::Future<
         Output = whalerein_core::api::CoreResult<whalerein_core::api::CommandHandle>,
     >,
-    I: std::future::Future<Output = std::io::Result<()>>,
+    I: std::future::Future<Output = ()>,
     C: FnMut() -> F,
     F: std::future::Future<Output = whalerein_core::api::CoreResult<bool>>,
 {
     tokio::pin!(answer);
     tokio::select! {
         result = &mut answer => OpenAnswerWait::Finished(Box::new(result), false),
-        signal = interrupt => {
-            if signal.is_err() { return OpenAnswerWait::Finished(Box::new(answer.await), false); }
+        _ = interrupt => {
             let deadline = tokio::time::Instant::now() + timeout;
             loop {
                 tokio::select! {
@@ -1243,14 +1834,17 @@ fn read_question_answers(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn wait_seconds_are_exact_and_bounded() {
+    fn timeout_seconds_are_exact_and_bounded() {
         for (input, expected) in [
             ("0.001", 1),
             ("30", 30_000),
             ("1.25", 1_250),
             ("2147483.647", 2_147_483_647),
         ] {
-            assert_eq!(super::parse_wait_seconds(input), Ok(expected));
+            assert_eq!(
+                super::parse_timeout_seconds(input),
+                Ok(Duration::from_millis(expected))
+            );
         }
         for input in [
             "",
@@ -1263,7 +1857,7 @@ mod tests {
             "2147483.648",
             "99999999999999999999",
         ] {
-            assert!(super::parse_wait_seconds(input).is_err());
+            assert!(super::parse_timeout_seconds(input).is_err());
         }
     }
     use super::*;
@@ -1334,13 +1928,22 @@ mod tests {
             .exit,
             0
         );
-        let outcome = run_with(cli(&["whalerein", "--data-dir", path, "revoke"]), secrets).await;
+        let outcome = run_with(
+            cli(&["whalerein", "--data-dir", path, "revoke", "--yes"]),
+            secrets,
+        )
+        .await;
         assert_eq!(outcome.exit, 0);
-        assert_eq!(
-            outcome.to_json()["data"]["revoked_retention_unverified"],
-            true
-        );
+        let value = outcome.to_json();
+        assert_eq!(value["data"]["revoked"], true);
+        assert_eq!(value["data"]["revoked_retention_unverified"], true);
+        assert!(value["data"]["device_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert_eq!(outcome.render(), revoke_human(true));
         assert!(outcome.render().contains("Unable to verify"));
+        assert!(outcome.render().contains("whalerein commands-pending"));
+        assert!(outcome.render().contains("do not reuse the old identity"));
     }
 
     #[tokio::test]
@@ -1397,7 +2000,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             run_with(
-                cli(&["whalerein", "--data-dir", path, "revoke"]),
+                cli(&["whalerein", "--data-dir", path, "revoke", "--yes"]),
                 secrets.clone()
             )
             .await
@@ -1632,6 +2235,7 @@ mod tests {
                 "--data-dir",
                 dir.path().to_str().unwrap(),
                 "revoke",
+                "--yes",
             ],
             vec![
                 "whalerein",
@@ -1922,7 +2526,9 @@ mod tests {
         assert!((27_900..=28_000).contains(&slice), "wait slice {slice}");
         access.host.lock().unwrap().wait_timeouts = usize::MAX;
         for (extra, exit) in [(false, 0), (true, 7)] {
-            let mut args = vec!["wait", "--session", "session-1", "--timeout", "0.2"];
+            // One second leaves room for Host discovery under parallel test load
+            // while still proving the timeout-observation contract.
+            let mut args = vec!["wait", "--session", "session-1", "--timeout", "1"];
             if extra {
                 args.push("--fail-on-timeout");
             }
@@ -2176,7 +2782,7 @@ mod tests {
         assert!(!bundle.contains("continue"));
         assert!(!bundle.contains("test session"));
 
-        let revoked = run_args(&data_dir, secrets.clone(), &["revoke"]).await;
+        let revoked = run_args(&data_dir, secrets.clone(), &["revoke", "--yes"]).await;
         assert_eq!(revoked.exit, 0);
         assert_eq!(revoked.to_json()["data"]["revoked"], true);
         assert_eq!(revoked.to_json()["data"]["device_id"], device_id);
@@ -2517,6 +3123,7 @@ mod forget_tests {
             "--data-dir",
             dir.path().to_str().unwrap(),
             "forget",
+            "--yes",
         ])
         .unwrap();
         assert_eq!(run_with(normal, secrets.clone()).await.exit, 8);
@@ -2526,11 +3133,13 @@ mod forget_tests {
             dir.path().to_str().unwrap(),
             "forget",
             "--local-only",
+            "--yes",
         ])
         .unwrap();
         let result = run_with(local, secrets.clone()).await;
         assert_eq!(result.exit, 0);
-        assert!(result.human.contains("server entry may remain"));
+        assert!(result.human.contains("remote grant may still be active"));
+        assert_eq!(result.to_json()["data"]["remote_grant_may_remain"], true);
         assert!(secrets.is_empty());
     }
     #[tokio::test]
@@ -2544,7 +3153,7 @@ mod forget_tests {
         let calls = AtomicUsize::new(0);
         let result = wait_open_answer(
             never_answer(),
-            async { Ok(()) },
+            async {},
             || async { Ok(calls.fetch_add(1, Ordering::SeqCst) > 0) },
             Duration::from_secs(1),
             Duration::from_millis(1),
@@ -2554,7 +3163,7 @@ mod forget_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let result = wait_open_answer(
             never_answer(),
-            async { Ok(()) },
+            async {},
             || async { Ok(false) },
             Duration::from_millis(5),
             Duration::from_millis(1),
@@ -2578,7 +3187,7 @@ mod forget_tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 Err(CoreError::UnknownResult)
             },
-            async { Ok(()) },
+            async {},
             std::future::pending,
             Duration::from_secs(1),
             Duration::from_millis(1),
@@ -2590,7 +3199,7 @@ mod forget_tests {
         ));
         let result = wait_open_answer(
             async { Err(CoreError::UnknownResult) },
-            async { Err(std::io::Error::other("signal")) },
+            std::future::pending::<()>(),
             || async { Ok(false) },
             Duration::from_secs(1),
             Duration::from_millis(1),
@@ -2601,6 +3210,67 @@ mod forget_tests {
             OpenAnswerWait::Finished(value, false) if matches!(*value, Err(CoreError::UnknownResult))
         ));
     }
+    #[tokio::test]
+    async fn ctrl_c_during_wait_cancels_the_host_observation_and_the_next_wait_succeeds() {
+        let cli = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let core = Core::new(CoreOptions {
+            data_dir: dir.path().to_path_buf(),
+            secrets: secrets.clone(),
+        })
+        .unwrap();
+        core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+            .await
+            .unwrap();
+        // Every wait slice reports its deadline, so the observation stays
+        // active until the injected signal arrives.
+        access.host.lock().unwrap().wait_timeouts = usize::MAX;
+        let outcome = run_with_signal(
+            cli(&[
+                "whalerein",
+                "wait",
+                "--session",
+                "session-1",
+                "--timeout",
+                "5",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+            ]),
+            secrets.clone(),
+            async {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+            },
+        )
+        .await;
+        assert_eq!(outcome.exit, 2, "{}", outcome.to_json());
+        assert_eq!(outcome.to_json()["error"]["code"], "cancelled");
+        assert!(
+            !access.host.lock().unwrap().wait_cancel_ids.is_empty(),
+            "Ctrl-C must cancel the Host wait observation"
+        );
+
+        // The next wait starts cleanly instead of blocking on a stale claim.
+        access.host.lock().unwrap().wait_timeouts = 0;
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "wait",
+                "--session",
+                "session-1",
+                "--timeout",
+                "2",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 0);
+        assert_eq!(outcome.to_json()["data"]["reason"], "idle");
+    }
+
     #[tokio::test]
     async fn cli_wait_and_tail_deadlines_include_slow_host_discovery() {
         let cli = |args: &[&str]| Cli::try_parse_from(args).unwrap();
@@ -2651,5 +3321,1567 @@ mod forget_tests {
         assert_eq!(outcome.to_json()["error"]["code"], "timeout");
         assert!(started.elapsed() < Duration::from_millis(1800));
         assert_eq!(access.host.lock().unwrap().wait_queries, 0);
+    }
+}
+
+#[cfg(test)]
+mod cli_contract_tests {
+    use super::*;
+    use clap::Parser;
+    use whalerein_core::api::test_support::FakeAccess;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("parse")
+    }
+
+    fn command_named(name: &str) -> Command {
+        cli(&["whalerein", name]).command
+    }
+
+    #[test]
+    fn destructive_commands_never_run_without_consent() {
+        assert_eq!(
+            destructive_decision(true, false),
+            DestructiveDecision::Proceed
+        );
+        assert_eq!(
+            destructive_decision(true, true),
+            DestructiveDecision::Proceed
+        );
+        assert_eq!(
+            destructive_decision(false, false),
+            DestructiveDecision::RefuseNonInteractive
+        );
+        assert_eq!(destructive_decision(false, true), DestructiveDecision::Ask);
+
+        // A non-interactive test process must refuse without touching stdin.
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        for name in ["revoke", "forget"] {
+            let command = command_named(name);
+            let cli = cli(&["whalerein", name]);
+            let outcome = require_destructive_confirmation(&command, &cli, "Proceed?")
+                .expect_err("must refuse without --yes");
+            assert_eq!(outcome.exit, 2, "{name}");
+            let error = outcome.error.unwrap();
+            assert_eq!(error.code, "invalid_argument");
+            assert!(error.message.contains("--yes"), "{name}: {}", error.message);
+        }
+        let command = Command::Doctor {
+            clear_diagnostics: false,
+            export: Some(PathBuf::from("out.json")),
+        };
+        let without_yes = cli(&["whalerein", "doctor"]);
+        assert_eq!(
+            require_destructive_confirmation(&command, &without_yes, "Write?")
+                .unwrap_err()
+                .exit,
+            2
+        );
+        let with_yes = cli(&["whalerein", "--yes", "doctor"]);
+        assert!(require_destructive_confirmation(&command, &with_yes, "Write?").is_ok());
+    }
+
+    #[tokio::test]
+    async fn revoke_and_forget_require_yes_and_leave_state_untouched() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        let refused = run_with(
+            cli(&["whalerein", "--data-dir", path, "revoke"]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(refused.exit, 2);
+        assert_eq!(refused.to_json()["error"]["code"], "invalid_argument");
+        // The pairing still works: nothing was revoked.
+        assert_eq!(
+            run_with(
+                cli(&["whalerein", "--data-dir", path, "hosts"]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        let forget = run_with(
+            cli(&["whalerein", "--data-dir", path, "forget", "--local-only"]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(forget.exit, 2);
+        assert_eq!(
+            run_with(
+                cli(&["whalerein", "--data-dir", path, "hosts"]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        let revoked = run_with(
+            cli(&["whalerein", "--data-dir", path, "revoke", "--yes"]),
+            secrets,
+        )
+        .await;
+        assert_eq!(revoked.exit, 0);
+    }
+
+    #[tokio::test]
+    async fn corrupt_configuration_is_quarantined_only_for_recovery_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        std::fs::write(dir.path().join(CONFIG_FILE), b"not json at all").unwrap();
+        // Any command that needs routing keeps the explicit error.
+        let blocked = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "hosts",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(blocked.exit, 2);
+        assert_eq!(blocked.to_json()["error"]["code"], "invalid_configuration");
+        assert!(dir.path().join(CONFIG_FILE).exists(), "must not touch it");
+
+        let doctor = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "doctor",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(doctor.exit, 0, "{doctor:?}");
+        let quarantined = doctor.to_json()["data"]["config_quarantined"]
+            .as_str()
+            .expect("quarantine path")
+            .to_owned();
+        assert!(
+            quarantined.contains("config.json.corrupt-"),
+            "{quarantined}"
+        );
+        assert!(Path::new(&quarantined).exists());
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+        assert!(doctor.render().contains("quarantined"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&quarantined)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn forget_local_only_recovers_from_a_corrupt_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        std::fs::write(dir.path().join(CONFIG_FILE), b"{\"schema\":\"wrong\"}").unwrap();
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--yes",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "forget",
+                "--local-only",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        assert!(outcome.to_json()["data"]["config_quarantined"].is_string());
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers
+                .iter()
+                .any(|name| name.starts_with("config.json.corrupt-")),
+            "the corrupt file must be retained: {leftovers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantine_ignores_a_valid_configuration() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    dir.path().to_str().unwrap(),
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets
+            )
+            .await
+            .exit,
+            0
+        );
+        assert_eq!(quarantine_corrupt_config(dir.path()), None);
+        assert!(dir.path().join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn fingerprint_is_normalized_and_rejected_before_any_network_call() {
+        let expected = "ab".repeat(32);
+        assert_eq!(parse_fingerprint(&expected).unwrap(), expected);
+        let grouped = "AB"
+            .repeat(32)
+            .as_bytes()
+            .chunks(4)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(parse_fingerprint(&grouped).unwrap(), expected);
+        let colon_grouped = format!("sha256:{}ab", "ab:".repeat(31));
+        assert_eq!(parse_fingerprint(&colon_grouped).unwrap(), expected);
+        for value in ["zz", "", "ab", &"ab".repeat(31), &"ab".repeat(33), "ab cd"] {
+            let error = parse_fingerprint(value).unwrap_err();
+            assert_eq!(error.code, "invalid_argument", "{value:?}");
+            assert!(
+                !error.message.contains(value) || value.is_empty(),
+                "must not echo the pin: {value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_fingerprint_exits_two_without_contacting_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--yes",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "pair",
+                "whalerein://pair?v=1&access=http%3A%2F%2F127.0.0.1%3A1&host=h&token=t",
+                "--fingerprint",
+                "zz",
+            ]),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .await;
+        assert_eq!(outcome.exit, 2);
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "invalid_argument");
+        assert!(!value.to_string().contains("zz"));
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_before_submission_is_a_cancelled_envelope() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        access.host.lock().unwrap().wait_receipt_delay_ms = 5_000;
+        let outcome = run_with_signal(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "wait",
+                "--session",
+                "session-1",
+                "--timeout",
+                "20",
+            ]),
+            secrets,
+            std::future::ready(()),
+        )
+        .await;
+        assert_eq!(outcome.exit, 2, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "cancelled");
+        assert_eq!(value["command"], "wait");
+        assert!(value.get("data").is_none() || value["data"].is_null());
+        assert_eq!(access.host.lock().unwrap().commands_seen, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_failure_uses_an_error_envelope_like_tail() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        access.host.lock().unwrap().wait_timeouts = usize::MAX;
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "wait",
+                "--session",
+                "session-1",
+                "--timeout",
+                "1",
+                "--fail-on-timeout",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 7);
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "timeout");
+        assert_eq!(value["data"]["reason"], "timeout");
+        // Without the flag the same observation stays a successful exit.
+        let ok = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "wait",
+                "--session",
+                "session-1",
+                "--timeout",
+                "1",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(ok.exit, 0);
+        assert!(ok.to_json().get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn tail_and_wait_reject_zero_timeout_before_contacting_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        for args in [
+            vec!["tail", "--session", "s", "--timeout", "0"],
+            vec!["wait", "--session", "s", "--timeout", "0"],
+            vec!["tail", "--session", "s", "--timeout", "0.000"],
+        ] {
+            let mut full = vec![
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+            ];
+            full.extend_from_slice(&args);
+            let outcome = run_with(cli(&full), secrets.clone()).await;
+            assert_eq!(outcome.exit, 2, "{args:?}");
+            assert_eq!(outcome.to_json()["error"]["code"], "invalid_argument");
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_data_dir_overrides_the_environment() {
+        let flag = tempfile::tempdir().unwrap();
+        let env = tempfile::tempdir().unwrap();
+        let env_dir = env.path().join("from-env");
+        let flag_dir = flag.path().join("from-flag");
+        let previous = std::env::var("WHALEREIN_DATA_DIR").ok();
+        std::env::set_var("WHALEREIN_DATA_DIR", &env_dir);
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                flag_dir.to_str().unwrap(),
+                "doctor",
+            ]),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .await;
+        match previous {
+            Some(previous) => std::env::set_var("WHALEREIN_DATA_DIR", previous),
+            None => std::env::remove_var("WHALEREIN_DATA_DIR"),
+        }
+        assert_eq!(outcome.exit, 0);
+        assert!(flag_dir.exists(), "the flag directory must be used");
+        assert!(
+            !env_dir.exists(),
+            "the environment directory must be ignored"
+        );
+    }
+
+    #[test]
+    fn secret_backend_configuration_failures_are_usage_errors() {
+        let previous = std::env::var("WHALEREIN_SECRET_BACKEND").ok();
+        std::env::set_var("WHALEREIN_SECRET_BACKEND", "bogus");
+        let error = super::secret_store().err().expect("invalid backend");
+        assert_eq!(error.code, "invalid_configuration");
+        assert_eq!(error_exit_for(&error), 2);
+        std::env::set_var("WHALEREIN_SECRET_BACKEND", "file:");
+        let error = super::secret_store().err().expect("empty file path");
+        assert_eq!(error.code, "invalid_configuration");
+        for backend in ["memory", "file:/tmp/whalerein-secret-test", "keyring", ""] {
+            std::env::set_var("WHALEREIN_SECRET_BACKEND", backend);
+            assert!(
+                super::secret_store().is_ok(),
+                "backend {backend:?} should be constructible"
+            );
+        }
+        match previous {
+            Some(previous) => std::env::set_var("WHALEREIN_SECRET_BACKEND", previous),
+            None => std::env::remove_var("WHALEREIN_SECRET_BACKEND"),
+        }
+    }
+
+    fn error_exit_for(error: &CliError) -> u8 {
+        crate::output::error_exit_code(&error.code)
+    }
+
+    #[tokio::test]
+    async fn a_local_unknown_outcome_carries_a_diagnostic_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(CoreOptions {
+            data_dir: dir.path().to_path_buf(),
+            secrets: Arc::new(MemorySecretStore::new()),
+        })
+        .unwrap();
+        let command = Command::Interrupt {
+            session: "session-1".into(),
+        };
+        let outcome = unknown_outcome(&core, &command, "not observed".to_owned());
+        assert_eq!(outcome.exit, 7);
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "unknown");
+        assert_eq!(value["error"]["diagnostic_id"], core.diagnostic_id());
+        let record = whalerein_core::api::test_support::load_failure(dir.path()).unwrap();
+        assert_eq!(record.trace_id, core.diagnostic_id());
+        assert_eq!(record.events.last().unwrap().code, "unknown");
+    }
+
+    #[tokio::test]
+    async fn a_host_rejection_maps_to_exit_six_at_the_cli_layer() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        access.host.lock().unwrap().settled_command_status =
+            whalerein_proto::OnlineStatus::Rejected;
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "send",
+                "--session",
+                "session-1",
+                "text",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 6, "{outcome:?}");
+        assert_eq!(outcome.to_json()["error"]["code"], "rejected");
+    }
+
+    #[tokio::test]
+    async fn dual_host_flags_must_agree_and_the_command_value_is_used() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        // Agreement is required and the command-level value is authoritative.
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--host",
+                "host-1",
+                "--data-dir",
+                path,
+                "sessions",
+                "--host",
+                "host-1",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        assert_eq!(outcome.to_json()["data"]["host_id"], "host-1");
+        assert_eq!(
+            outcome.to_json()["data"]["sessions"][0]["session_id"],
+            "session-1"
+        );
+        // Disagreement is a deterministic conflict, never a silent override.
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--host",
+                "bogus-host",
+                "--data-dir",
+                path,
+                "sessions",
+                "--host",
+                "host-1",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 8, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "conflict");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("disagree"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_reports_an_unavailable_cache_without_failing() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        // Healthy paired profile: the warning key is absent.
+        let healthy = run_with(
+            cli(&["whalerein", "--json", "--data-dir", path, "doctor"]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(healthy.exit, 0);
+        assert!(healthy.to_json()["data"].get("cache_warning").is_none());
+        assert!(!healthy.human.contains("Warning:"));
+
+        // A cache that cannot even be quarantined (read-only data directory)
+        // is a degraded diagnostic report, not a failure. Corruption alone is
+        // recovered automatically by `Cache::open_recovering`.
+        std::fs::write(dir.path().join("cache.sqlite3"), b"corrupt cache bytes").unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(format!("cache.sqlite3{suffix}")));
+        }
+        let readonly = dir.path().to_path_buf();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let outcome = run_with(
+            cli(&["whalerein", "--json", "--data-dir", path, "doctor"]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["data"]["cache_warning"], "cache_unavailable");
+        assert_eq!(value["data"]["commands"]["non_terminal"], 0);
+        assert_eq!(value["data"]["commands"]["unknown"], 0);
+        assert_eq!(value["error"], serde_json::Value::Null);
+        assert!(outcome.human.contains("cache is unavailable"));
+        assert!(outcome
+            .human
+            .ends_with(&render_cache_warning("cache_unavailable")));
+
+        // Cache-backed commands still fail explicitly on the same profile.
+        let sessions = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "sessions",
+                "--host",
+                "host-1",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(sessions.exit, 1, "{sessions:?}");
+        assert_eq!(sessions.to_json()["error"]["code"], "cache_error");
+        assert_eq!(sessions.to_json()["error"]["action"], "retry");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_refuses_a_symlink_target_without_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        std::fs::write(&target, b"do not overwrite").unwrap();
+        let link = dir.path().join("bundle.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--yes",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "doctor",
+                "--export",
+                link.to_str().unwrap(),
+            ]),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .await;
+        assert_eq!(outcome.exit, 2, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "invalid_argument");
+        assert_eq!(value["error"]["action"], "fix_input");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("symbolic link"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not overwrite");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn fork_directory_sentence_covers_success_warning_and_absence() {
+        assert_eq!(
+            fork_directory_sentence(Some("/work-child"), None),
+            " Directory: /work-child."
+        );
+        assert_eq!(
+            fork_directory_sentence(None, Some("unavailable")),
+            " The child working directory could not be read (unavailable); the child still exists and must not be retried or deleted."
+        );
+        assert_eq!(fork_directory_sentence(None, None), "");
+        // A hostile directory cannot inject layout or ANSI.
+        let hostile = fork_directory_sentence(Some("/tmp\tx\u{1b}[31m"), None);
+        assert!(!hostile.contains('\u{1b}'), "{hostile}");
+        assert!(hostile.contains("\\t"), "{hostile}");
+    }
+
+    #[test]
+    fn revocation_warning_names_the_next_step_only_when_retention_is_unverified() {
+        let verified = revoke_human(false);
+        assert_eq!(
+            verified,
+            "Revoked this device's grants. Local identity was kept.\n"
+        );
+        assert!(!verified.contains("commands-pending"));
+        let unverified = revoke_human(true);
+        assert!(unverified.contains("Unable to verify"));
+        assert!(unverified.contains("whalerein commands-pending"));
+        assert!(unverified.contains("do not reuse the old identity"));
+        assert!(unverified.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn forget_reports_the_remote_grant_flag_and_exact_human_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        let local_only = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--yes",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "forget",
+                "--local-only",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(local_only.exit, 0, "{local_only:?}");
+        let value = local_only.to_json();
+        assert_eq!(value["data"]["identity_forgotten"], true);
+        assert_eq!(value["data"]["local_only"], true);
+        assert_eq!(value["data"]["remote_grant_may_remain"], true);
+        assert_eq!(
+            local_only.human,
+            "Forgot local identity. The remote grant may still be active; revoke the old device in host settings before reusing that identity.\n"
+        );
+
+        // A full forget makes no remote-grant claim.
+        let normal = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--yes",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "forget",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(normal.exit, 0, "{normal:?}");
+        assert_eq!(normal.to_json()["data"]["remote_grant_may_remain"], false);
+        assert_eq!(normal.to_json()["data"]["local_only"], false);
+        assert_eq!(normal.human, "Forgot this local device identity.\n");
+    }
+
+    #[tokio::test]
+    async fn fork_reports_the_working_directory_or_an_explicit_warning() {
+        let access = FakeAccess::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            run_with(
+                cli(&[
+                    "whalerein",
+                    "--yes",
+                    "--data-dir",
+                    path,
+                    "pair",
+                    &access.pairing_uri()
+                ]),
+                secrets.clone()
+            )
+            .await
+            .exit,
+            0
+        );
+        let fork = || {
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                path,
+                "session-fork",
+                "--session",
+                "session-1",
+            ])
+        };
+        let created = run_with(fork(), secrets.clone()).await;
+        assert_eq!(created.exit, 0, "{created:?}");
+        let value = created.to_json();
+        assert_eq!(value["command"], "session-fork");
+        assert_eq!(value["data"]["lifecycle_receipt"]["disposition"], "READY");
+        assert_eq!(value["data"]["working_directory"], "/work-child");
+        assert!(created.human.contains("Directory: /work-child"));
+        assert!(created.human.contains("no worktree is created"));
+
+        // The fork succeeded, but the second, best-effort summary read failed:
+        // the directory is not silently omitted and the child is preserved.
+        // A distinct child id keeps the read out of the cache seeded by the
+        // first fork, so the failed second read is what the CLI must report.
+        {
+            let mut host = access.host.lock().unwrap();
+            host.fork_reply = whalerein_core::api::test_support::LifecycleReply::Ready {
+                session_id: "forked-2".into(),
+            };
+            host.fail_get_session_for =
+                Some(("forked-2".into(), whalerein_proto::ErrorCode::Unavailable));
+        }
+        let warned = run_with(fork(), secrets).await;
+        assert_eq!(warned.exit, 0, "{warned:?}");
+        let value = warned.to_json();
+        assert_eq!(value["data"]["lifecycle_receipt"]["disposition"], "READY");
+        assert_eq!(value["data"]["working_directory_error"], "unavailable");
+        assert!(value["data"].get("working_directory").is_none());
+        assert!(warned.human.contains("could not be read (unavailable)"));
+        assert!(warned.human.contains("must not be retried or deleted"));
+        assert!(!warned.human.contains("Directory:"));
+        assert_eq!(
+            warned.human,
+            "Session forked-2 forked from session-1. The child shares the working directory; no worktree is created. The child working directory could not be read (unavailable); the child still exists and must not be retried or deleted.\n"
+        );
+    }
+
+    #[test]
+    fn human_renderers_are_used_for_model_queue_and_question_commands() {
+        // The dispatch layer must not fall back to pretty JSON for these
+        // commands; the pure renderers are covered in output.rs, so assert the
+        // wiring by reading the source contract through their output.
+        let model = whalerein_core::api::SessionModel {
+            pending: None,
+            last_used: None,
+            default_selection: None,
+            default_is_fallback: false,
+            next: Some(whalerein_core::api::ModelChoice {
+                provider: "p".into(),
+                model: "m".into(),
+                effort: None,
+            }),
+            pending_known: true,
+        };
+        let text = render_session_model(&model);
+        assert!(text.contains("next: p m"));
+        assert!(!text.contains('{'));
+    }
+}
+
+/// Local `unknown` outcome that stays forensically traceable.
+///
+/// The bounded diagnostic history is written as well so a later
+/// `doctor --export` can explain what was not observed.
+fn unknown_outcome(core: &Core, command: &Command, message: String) -> CliOutcome {
+    if core.save_failure("unknown").is_err() {
+        tracing::warn!(event = "diagnostic_save_failed", trace_id = %core.diagnostic_id(), code = "unavailable");
+    }
+    CliOutcome::local_failure_with_diagnostic(command, "unknown", message, 7, core.diagnostic_id())
+}
+
+#[cfg(test)]
+mod journey_guidance_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_profile_names_the_pair_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "hosts",
+            ]),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .await;
+        assert_eq!(outcome.exit, 4);
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "not_paired");
+        assert_eq!(value["error"]["action"], "reauth");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("whalerein pair <pairing-uri>"),
+            "{message}"
+        );
+        assert!(
+            message.contains("whalerein forget --local-only"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_changed_host_identity_names_the_recovery_path_without_echoing_the_pin() {
+        let error = whalerein_core::CoreError::FingerprintMismatch {
+            expected: "aa".repeat(32),
+            actual: "bb".repeat(32),
+        };
+        let outcome = core_error_outcome(&Command::Hosts, error);
+        assert_eq!(outcome.exit, 8);
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "host_fingerprint_mismatch");
+        let message = value["error"]["message"].as_str().unwrap();
+        for hint in [
+            "verify",
+            "whalerein forget --local-only",
+            "revoke",
+            "whalerein pair",
+        ] {
+            assert!(message.contains(hint), "missing {hint:?}: {message}");
+        }
+        assert!(!message.contains(&"aa".repeat(32)));
+        assert!(!message.contains(&"bb".repeat(32)));
+        assert!(!message.to_ascii_lowercase().contains("token"));
+        assert!(!message.to_ascii_lowercase().contains("private key"));
+    }
+
+    #[test]
+    fn an_ambiguous_session_lists_its_candidate_hosts() {
+        let message = "session exists on multiple Hosts; specify a Host";
+        let error = ambiguous_session_conflict(
+            message,
+            "shared-session",
+            &["host-1".to_owned(), "host-2".to_owned()],
+        )
+        .expect("candidates produce guidance");
+        let CoreError::Conflict(explained) = error else {
+            panic!("ambiguity stays a conflict");
+        };
+        assert!(explained.contains("host-1"), "{explained}");
+        assert!(explained.contains("host-2"), "{explained}");
+        assert!(explained.contains("--host"), "{explained}");
+        assert!(explained.contains("--session shared-session"));
+        assert_eq!(
+            whalerein_core::CoreError::Conflict(explained).exit_code(),
+            8
+        );
+        assert!(ambiguous_session_conflict(message, "s", &[]).is_none());
+        // Explicit Host routing keeps working: no ambiguity means no message.
+        assert!(!message.contains("Candidates"));
+    }
+
+    #[test]
+    fn only_unexplained_ambiguity_messages_are_rewritten() {
+        // The legacy Core message has no names: the CLI adds them.
+        assert!(should_explain_ambiguous(
+            "session exists on multiple Hosts; specify a Host"
+        ));
+        // Core's newer message already lists the candidates.
+        assert!(!should_explain_ambiguous(
+            "session exists on multiple Hosts (host-1, host-2); specify a Host with --host"
+        ));
+        // A caller that uses the word "candidate" is already actionable.
+        assert!(!should_explain_ambiguous(
+            "session exists on multiple Hosts; candidates are host-1, host-2"
+        ));
+        // Unrelated conflicts keep their original message.
+        assert!(!should_explain_ambiguous(
+            "question changed; refresh before answering"
+        ));
+        assert!(!should_explain_ambiguous(
+            "--host a and sessions --host b disagree"
+        ));
+    }
+
+    #[test]
+    fn an_ambiguity_that_already_names_hosts_is_returned_unchanged() {
+        // The wrapper must not touch an already-explanatory conflict: this is
+        // the shape Core emits after SESS added bounded candidates.
+        let original = "session exists on multiple Hosts (host-1, host-2); specify a Host";
+        let error = CoreError::Conflict(original.into());
+        let CoreError::Conflict(message) = error else {
+            panic!("conflict")
+        };
+        assert!(!should_explain_ambiguous(&message));
+        assert_eq!(message, original);
+    }
+}
+
+/// Phases the source accepts an answer for. Everything else is an input
+/// problem and must never be reported as stale source data (QMQ-04).
+fn question_phase_answerable(phase: &str) -> bool {
+    matches!(phase, "QUESTION_OPEN" | "QUESTION_CONTINUED")
+}
+
+fn validate_requested_question_phase(phase: &str) -> Result<(), CoreError> {
+    if question_phase_answerable(phase) {
+        return Ok(());
+    }
+    if matches!(
+        phase,
+        "QUESTION_REPLY_QUEUED" | "QUESTION_SETTLED" | "QUESTION_PHASE_UNSPECIFIED"
+    ) {
+        return Err(CoreError::InvalidInput(format!(
+            "question phase {phase} is not answerable; only QUESTION_OPEN and QUESTION_CONTINUED accept an answer"
+        )));
+    }
+    Err(CoreError::InvalidInput(
+        "unknown question phase; expected QUESTION_OPEN or QUESTION_CONTINUED".into(),
+    ))
+}
+
+fn validate_source_question_phase(phase: &str) -> Result<(), CoreError> {
+    if question_phase_answerable(phase) {
+        return Ok(());
+    }
+    Err(CoreError::InvalidInput(format!(
+        "the current question phase {phase} is not answerable; wait for the next question or refresh"
+    )))
+}
+
+/// Point a failed cancellation at a real pending request or state that the
+/// supplied command id cannot be recovered (QMQ-05).
+fn question_cancel_guidance(core: &Core, command_id: &str) -> String {
+    question_cancel_message(command_id, &pending_commands(core))
+}
+
+fn question_cancel_message(
+    command_id: &str,
+    pending: &[whalerein_core::api::PendingCommand],
+) -> String {
+    if let Some(command) = pending.iter().find(|item| item.command_id == command_id) {
+        return format!(
+            "No active open answer matches command {} (request {}). It may have completed already; recover its result with `whalerein command-recover --request {}`.\n",
+            sanitize_field(&command.command_id),
+            sanitize_field(&command.request_id),
+            sanitize_field(&command.request_id)
+        );
+    }
+    let candidates: Vec<String> = pending
+        .iter()
+        .take(3)
+        .map(|item| {
+            format!(
+                "{} (request {})",
+                sanitize_field(&item.command_id),
+                sanitize_field(&item.request_id)
+            )
+        })
+        .collect();
+    if candidates.is_empty() {
+        format!(
+            "No pending command matches {}; a mistyped command id cannot be recovered. Run `whalerein commands-pending` to list accepted commands.\n",
+            sanitize_field(command_id)
+        )
+    } else {
+        format!(
+            "No pending command matches {}; a mistyped command id cannot be recovered. Pending commands: {}.\n",
+            sanitize_field(command_id),
+            candidates.join(", ")
+        )
+    }
+}
+
+/// The requested selection is already the effective next model. Sending it
+/// again would only create a second indistinguishable pending command
+/// (QMQ-10).
+fn model_selection_matches(
+    current: &SessionModel,
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> bool {
+    current.next.as_ref().is_some_and(|choice| {
+        choice.provider == provider
+            && choice.model == model
+            && choice.effort.as_deref().unwrap_or("") == effort.unwrap_or("")
+    })
+}
+
+#[cfg(test)]
+mod qmq_cli_tests {
+    use super::*;
+    use whalerein_core::api::{ModelChoice, PendingCommand};
+
+    fn pending(request: &str, command: &str) -> PendingCommand {
+        PendingCommand {
+            access_url: "http://127.0.0.1:8080".into(),
+            host_fingerprint: "00".repeat(32),
+            request_id: request.into(),
+            command_id: command.into(),
+            host_id: "host-1".into(),
+            device_id: "device-1".into(),
+            status: whalerein_core::api::OnlineStatus::HostAccepted,
+        }
+    }
+
+    #[test]
+    fn question_phase_validation_is_an_input_error_not_stale_data() {
+        assert!(validate_requested_question_phase("QUESTION_OPEN").is_ok());
+        assert!(validate_requested_question_phase("QUESTION_CONTINUED").is_ok());
+        for invalid in ["question_open", "OPEN", "", "QUESTION_OPEN "] {
+            let error = validate_requested_question_phase(invalid).unwrap_err();
+            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.exit_code(), 2);
+        }
+        let unanswerable = validate_requested_question_phase("QUESTION_REPLY_QUEUED").unwrap_err();
+        assert_eq!(unanswerable.code(), "invalid_argument");
+        assert!(unanswerable.to_string().contains("not answerable"));
+        assert!(validate_source_question_phase("QUESTION_CONTINUED").is_ok());
+        let current = validate_source_question_phase("QUESTION_SETTLED").unwrap_err();
+        assert_eq!(current.code(), "invalid_argument");
+        assert!(current.to_string().contains("current question phase"));
+    }
+
+    #[test]
+    fn question_cancel_guidance_points_at_a_real_pending_request() {
+        let commands = vec![pending("request-1", "command-1")];
+        let matched = question_cancel_message("command-1", &commands);
+        assert!(
+            matched.contains("command-recover --request request-1"),
+            "{matched}"
+        );
+        let typo = question_cancel_message("command-typо", &commands);
+        assert!(typo.contains("No pending command matches"), "{typo}");
+        assert!(
+            typo.contains("Pending commands: command-1 (request request-1)"),
+            "{typo}"
+        );
+        let empty = question_cancel_message("command-typо", &[]);
+        assert!(empty.contains("commands-pending"), "{empty}");
+        assert!(!empty.contains("Pending commands:"), "{empty}");
+    }
+
+    #[test]
+    fn model_selection_match_requires_the_exact_effective_choice() {
+        let current = SessionModel {
+            pending: None,
+            last_used: None,
+            default_selection: None,
+            default_is_fallback: false,
+            next: Some(ModelChoice {
+                provider: "provider".into(),
+                model: "model".into(),
+                effort: Some("high".into()),
+            }),
+            pending_known: true,
+        };
+        assert!(model_selection_matches(
+            &current,
+            "provider",
+            "model",
+            Some("high")
+        ));
+        assert!(!model_selection_matches(
+            &current, "provider", "model", None
+        ));
+        assert!(!model_selection_matches(
+            &current,
+            "provider",
+            "other",
+            Some("high")
+        ));
+        assert!(!model_selection_matches(
+            &current,
+            "other",
+            "model",
+            Some("high")
+        ));
+        let empty = SessionModel {
+            next: None,
+            ..current.clone()
+        };
+        assert!(!model_selection_matches(
+            &empty,
+            "provider",
+            "model",
+            Some("high")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod qmq_cli_fake_access_tests {
+    use super::*;
+    use clap::Parser;
+    use whalerein_core::api::test_support::FakeAccess;
+
+    async fn paired(access: &FakeAccess) -> (tempfile::TempDir, String, Arc<dyn SecretStore>) {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let data_dir = directory.path().to_str().unwrap().to_owned();
+        let pairing = access.pairing_uri();
+        let outcome = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                &data_dir,
+                "pair",
+                &pairing,
+                "--yes",
+            ])
+            .unwrap(),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        (directory, data_dir, secrets)
+    }
+
+    #[tokio::test]
+    async fn model_set_of_the_effective_selection_sends_no_command() {
+        let access = FakeAccess::start().await;
+        let (_directory, data_dir, secrets) = paired(&access).await;
+        access.host.lock().unwrap().model_observed = Some("model".into());
+        let before = access.host.lock().unwrap().commands_seen;
+        let noop = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                data_dir.as_str(),
+                "model",
+                "set",
+                "--session",
+                "session-1",
+                "--provider",
+                "provider",
+                "--model",
+                "model",
+            ])
+            .unwrap(),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(noop.exit, 0, "{noop:?}");
+        assert_eq!(noop.to_json()["data"]["noop"], true);
+        assert_eq!(access.host.lock().unwrap().commands_seen, before);
+        // A different selection still submits exactly one command.
+        let submitted = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                data_dir.as_str(),
+                "model",
+                "set",
+                "--session",
+                "session-1",
+                "--provider",
+                "provider",
+                "--model",
+                "other",
+            ])
+            .unwrap(),
+            secrets,
+        )
+        .await;
+        assert_eq!(submitted.exit, 0, "{submitted:?}");
+        assert_eq!(access.host.lock().unwrap().commands_seen, before + 1);
+    }
+
+    #[tokio::test]
+    async fn unanswerable_or_unknown_question_phase_is_an_input_error() {
+        let access = FakeAccess::start().await;
+        let (directory, data_dir, secrets) = paired(&access).await;
+        let answers = directory.path().join("answers.json");
+        std::fs::write(&answers, r#"{"answers":[{"id":"q","selected":["A"]}]}"#).unwrap();
+        for phase in ["QUESTION_REPLY_QUEUED", "QUESTION_OPNE"] {
+            let outcome = run_with(
+                Cli::try_parse_from([
+                    "whalerein",
+                    "--json",
+                    "--data-dir",
+                    data_dir.as_str(),
+                    "answer",
+                    "--session",
+                    "session-1",
+                    "--batch",
+                    "batch-1",
+                    "--epoch",
+                    "epoch",
+                    "--version",
+                    "1",
+                    "--digest",
+                    &"07".repeat(32),
+                    "--phase",
+                    phase,
+                    "--input",
+                    answers.to_str().unwrap(),
+                ])
+                .unwrap(),
+                secrets.clone(),
+            )
+            .await;
+            assert_eq!(outcome.exit, 2, "{phase}: {outcome:?}");
+            let value = outcome.to_json();
+            assert_eq!(value["error"]["code"], "invalid_argument", "{phase}");
+            assert_ne!(value["error"]["code"], "conflict", "{phase}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_read_tests {
+    use super::*;
+    use clap::Parser;
+    use whalerein_core::api::test_support::FakeAccess;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("parse")
+    }
+
+    fn approval(id: &str, state: whalerein_proto::ApprovalState) -> whalerein_proto::Approval {
+        whalerein_proto::Approval {
+            approval_id: id.into(),
+            session_id: "session-1".into(),
+            tool_name: "bash".into(),
+            call_id: format!("call-{id}"),
+            reason: "review".into(),
+            digest: vec![1; 32],
+            version: 3,
+            expires_at_unix_ms: 9,
+            state: state as i32,
+            decision: whalerein_proto::ApprovalDecision::Unspecified as i32,
+        }
+    }
+
+    async fn paired(dir: &std::path::Path) -> (FakeAccess, Arc<dyn SecretStore>) {
+        let access = FakeAccess::start().await;
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--yes",
+                "--data-dir",
+                dir.to_str().unwrap(),
+                "pair",
+                &access.pairing_uri(),
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        (access, secrets)
+    }
+
+    #[tokio::test]
+    async fn approval_read_reports_approved_expired_and_unavailable_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let (access, secrets) = paired(dir.path()).await;
+        access.host.lock().unwrap().approvals = vec![
+            approval(
+                "approval-approved",
+                whalerein_proto::ApprovalState::Approved,
+            ),
+            approval("approval-expired", whalerein_proto::ApprovalState::Expired),
+            approval(
+                "approval-unavailable",
+                whalerein_proto::ApprovalState::Unavailable,
+            ),
+        ];
+        for (id, state) in [
+            ("approval-approved", "APPROVAL_STATE_APPROVED"),
+            ("approval-expired", "APPROVAL_STATE_EXPIRED"),
+            ("approval-unavailable", "APPROVAL_STATE_UNAVAILABLE"),
+        ] {
+            let outcome = run_with(
+                cli(&[
+                    "whalerein",
+                    "--json",
+                    "--data-dir",
+                    dir.path().to_str().unwrap(),
+                    "approvals",
+                    "--request",
+                    id,
+                ]),
+                secrets.clone(),
+            )
+            .await;
+            assert_eq!(outcome.exit, 0, "{id}: {outcome:?}");
+            let value = outcome.to_json();
+            assert_eq!(value["command"], "approvals");
+            assert_eq!(value["data"]["approval"]["approval_id"], id);
+            assert_eq!(value["data"]["approval"]["state"], state);
+            assert!(value["data"].get("state").is_none());
+            assert_eq!(
+                outcome.human.lines().nth(1),
+                Some(format!("state: {state}").as_str())
+            );
+            assert!(outcome.human.contains("version: 3"));
+            assert!(outcome
+                .human
+                .contains("decision: APPROVAL_DECISION_UNSPECIFIED"));
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_read_unknown_id_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_access, secrets) = paired(dir.path()).await;
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "approvals",
+                "--request",
+                "missing-approval",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 3, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["error"]["code"], "not_found");
+        assert_eq!(value["error"]["action"], "refresh");
+        assert!(value.get("data").is_none() || value["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn approval_read_with_two_hosts_names_candidates_and_honors_host_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (access, secrets) = paired(dir.path()).await;
+        {
+            let mut host = access.host.lock().unwrap();
+            host.extra_host = true;
+            host.extra_host_approvals = vec![approval(
+                "approval-two",
+                whalerein_proto::ApprovalState::Pending,
+            )];
+        }
+        // Without --host the read is Host-scoped and names the candidates.
+        let ambiguous = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "approvals",
+                "--request",
+                "approval-two",
+            ]),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(ambiguous.exit, 8, "{ambiguous:?}");
+        let value = ambiguous.to_json();
+        assert_eq!(value["error"]["code"], "conflict");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("host-1"), "{message}");
+        assert!(message.contains("host-2"), "{message}");
+        assert!(message.contains("--host"), "{message}");
+
+        // A single authorized Host keeps the read working with an explicit --host.
+        access.host.lock().unwrap().extra_host = false;
+        access.host.lock().unwrap().approvals = vec![approval(
+            "approval-one",
+            whalerein_proto::ApprovalState::Pending,
+        )];
+        let scoped = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--host",
+                "host-1",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "approvals",
+                "--request",
+                "approval-one",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(scoped.exit, 0, "{scoped:?}");
+        assert_eq!(
+            scoped.to_json()["data"]["approval"]["state"],
+            "APPROVAL_STATE_PENDING"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_list_json_shape_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (access, secrets) = paired(dir.path()).await;
+        access.host.lock().unwrap().approvals = vec![approval(
+            "approval-1",
+            whalerein_proto::ApprovalState::Pending,
+        )];
+        let outcome = run_with(
+            cli(&[
+                "whalerein",
+                "--json",
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "approvals",
+                "--session",
+                "session-1",
+            ]),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["data"]["session_id"], "session-1");
+        assert_eq!(value["data"]["approvals"][0]["approval_id"], "approval-1");
+        assert!(value["data"].get("approval").is_none());
+        assert!(value["data"].get("state").is_none());
     }
 }

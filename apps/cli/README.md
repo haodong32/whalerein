@@ -10,31 +10,46 @@ Noise messages.
 
 ```bash
 whalerein pair [--name <display-name>] <pairing-uri> [--yes] [--fingerprint <hex>]
+whalerein pair-resume
 whalerein pairing-history
 whalerein hosts
 whalerein sessions --host <host-id>
+whalerein models --host <host-id>
+whalerein model get --session <session-id>
+whalerein model set --session <session-id> --provider <provider> --model <model> [--effort <effort>]
 whalerein session-create --host <host-id> [--cwd <host-path> | --workspace <id>] [--preset <id>] [--session-id <preferred-id>]
+whalerein session-fork --session <session-id>
 whalerein commands-pending
 whalerein command-recover --request <request-id>
 whalerein tail --session <session-id> [--once] [--timeout <seconds>]
+whalerein wait --session <session-id> [--timeout <seconds>] [--fail-on-timeout]
+whalerein sync --session <session-id>
 whalerein send --session <session-id> [--delivery enqueue-after-run|steer|start-if-idle] <text>
+whalerein approvals --session <session-id>
+whalerein approvals --request <approval-id>
 whalerein approve --request <approval-id> --digest <hex> --version <n>
 whalerein reject --request <approval-id> --digest <hex> --version <n>
 whalerein interrupt --session <session-id>
 whalerein questions --session <session-id> [--cursor <cursor>]
 whalerein answer --session <session-id> --batch <batch-id> --epoch <epoch> --version <n> --digest <hex> --phase <phase> --input <file-or-dash> [--command-id <id>]
 whalerein question-cancel --session <session-id> --command <command-id>
+whalerein queue list --session <session-id>
+whalerein queue edit --session <session-id> --item <item-id> <text>
+whalerein queue remove --session <session-id> --item <item-id>
+whalerein queue steer --session <session-id> --item <item-id>
 whalerein profile list [--include-staging]
 whalerein profile current
 whalerein profile add NAME [--staging --enable-testing | --api-origin URL --issuer URL --client-id ID [--access-url URL]]
 whalerein profile use NAME
 whalerein profile remove NAME
 whalerein revoke
+whalerein forget [--local-only] --yes
 whalerein doctor
 whalerein doctor --export <file>
 ```
 
-Global flags: `--json`, `--yes`, `--data-dir <path>`.
+Global flags: `--json`, `--yes`, `--data-dir <path>`. Destructive commands
+require `--yes` when standard input is not a terminal.
 
 To select a Host for a session operation, put `--host HOST_ID` before the
 command, for example `whalerein --host HOST_ID send --session SESSION_ID text`.
@@ -70,7 +85,7 @@ attachment failed after creation; do not retry or delete it. `UNKNOWN` never
 claims identity; it reports an operation id and a reconcile mode, and the CLI
 never retries automatically.
 
-`whalerein wait --session SESSION_ID --timeout MILLISECONDS [--fail-on-timeout]`
+`whalerein wait --session SESSION_ID --timeout <seconds> [--fail-on-timeout]`
 reports a typed idle/running/input-required/timeout observation without activating
 a cold Agent. The default timeout exit is 0; `--fail-on-timeout` exits 7 only for
 a timeout observation, while transport failures keep their own error codes.

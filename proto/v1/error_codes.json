@@ -1,0 +1,173 @@
+{
+  "schema": "whalerein/error-codes/v1",
+  "codes": [
+    {
+      "name": "error_code_unspecified",
+      "number": 0,
+      "exitCode": 1,
+      "action": "none",
+      "meaning": "No error code was supplied."
+    },
+    {
+      "name": "invalid_argument",
+      "number": 1,
+      "exitCode": 2,
+      "action": "fix_input",
+      "meaning": "The request is malformed or violates a wire constraint."
+    },
+    {
+      "name": "unauthorized",
+      "number": 2,
+      "exitCode": 4,
+      "action": "reauth",
+      "meaning": "The caller is not authenticated; refresh pairing or credentials."
+    },
+    {
+      "name": "forbidden",
+      "number": 3,
+      "exitCode": 4,
+      "action": "reauth",
+      "meaning": "The caller is authenticated but not authorized; refresh pairing or credentials."
+    },
+    {
+      "name": "not_found",
+      "number": 4,
+      "exitCode": 3,
+      "action": "refresh",
+      "meaning": "The named request, session, or object does not exist."
+    },
+    {
+      "name": "conflict",
+      "number": 5,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The request conflicts with current state; re-read state before retrying."
+    },
+    {
+      "name": "expired",
+      "number": 6,
+      "exitCode": 7,
+      "action": "retry",
+      "meaning": "The request expired before it completed; submit a new request."
+    },
+    {
+      "name": "unsupported_capability",
+      "number": 7,
+      "exitCode": 9,
+      "action": "upgrade",
+      "meaning": "The peer does not support the required capability; upgrade the relevant side."
+    },
+    {
+      "name": "protocol_version_incompatible",
+      "number": 8,
+      "exitCode": 9,
+      "action": "upgrade",
+      "meaning": "The peers cannot agree on one protocol version; upgrade the side named in the message."
+    },
+    {
+      "name": "payload_digest_mismatch",
+      "number": 9,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The same command id was sent with a different payload; re-read state and use a new command."
+    },
+    {
+      "name": "approval_expired",
+      "number": 10,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The approval expired; request a fresh approval list."
+    },
+    {
+      "name": "approval_version_mismatch",
+      "number": 11,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The approval version is stale; request a fresh approval list."
+    },
+    {
+      "name": "approval_already_resolved",
+      "number": 12,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The approval was resolved elsewhere; refresh the list."
+    },
+    {
+      "name": "approval_unavailable",
+      "number": 13,
+      "exitCode": 8,
+      "action": "retry",
+      "meaning": "The approval cannot be resolved right now; retry later."
+    },
+    {
+      "name": "snapshot_required",
+      "number": 14,
+      "exitCode": 8,
+      "action": "resync",
+      "meaning": "The cursor can no longer continue; resynchronize from a snapshot."
+    },
+    {
+      "name": "revocations_pending",
+      "number": 15,
+      "exitCode": 8,
+      "action": "retry",
+      "meaning": "The Host has not replayed pending revocations yet; retry after replay."
+    },
+    {
+      "name": "rate_limited",
+      "number": 16,
+      "exitCode": 8,
+      "action": "retry",
+      "meaning": "A rate or concurrency limit was reached; retry after the hint."
+    },
+    {
+      "name": "internal",
+      "number": 17,
+      "exitCode": 1,
+      "action": "retry",
+      "meaning": "An unexpected local failure occurred; retry once, then collect diagnostics."
+    },
+    {
+      "name": "unavailable",
+      "number": 18,
+      "exitCode": 5,
+      "action": "retry",
+      "meaning": "The service is temporarily unreachable; retry with backoff."
+    },
+    {
+      "name": "payload_too_large",
+      "number": 19,
+      "exitCode": 5,
+      "action": "fix_input",
+      "meaning": "The logical message exceeds the transfer budget; reduce the payload."
+    },
+    {
+      "name": "pairing_fenced",
+      "number": 20,
+      "exitCode": 8,
+      "action": "restart_pairing",
+      "meaning": "The unfinished pairing intent can no longer commit; start a new confirmed invitation."
+    },
+    {
+      "name": "pairing_committed_unavailable",
+      "number": 21,
+      "exitCode": 8,
+      "action": "restart_pairing",
+      "meaning": "The FINISH committed but its grant is gone; review evidence and pair again."
+    },
+    {
+      "name": "pairing_committed_unconfirmed",
+      "number": 22,
+      "exitCode": 8,
+      "action": "review_pairing",
+      "meaning": "The FINISH committed but Host confirmation is unavailable; review evidence before pairing again."
+    },
+    {
+      "name": "channel_replaced",
+      "number": 220,
+      "exitCode": 8,
+      "action": "retry",
+      "meaning": "The Host replaced the channel that owned the observation; establish a new channel and retry."
+    }
+  ]
+}

@@ -97,26 +97,26 @@ when the run fails its coverage gate.
 
 ## Integration CI
 
-The separate Integration workflow provides daily (03:17 Asia/Shanghai), manual
-and reusable release-gate execution. See [CI integration timing](../../docs/testing.md#ci-integration-timing)
-for trigger, evidence, concurrency and report rules. It calls the existing
+The separate Integration workflow provides merge-queue, daily (03:17
+Asia/Shanghai), manual and reusable release-gate execution. See
+[CI test tiers](../../docs/testing.md#ci-test-tiers) for trigger, evidence,
+concurrency and report rules. It calls the existing
 `./repo test --suite integration`; it does not require local server services.
 
-To request full integration on a PR, add the `run-integration` label. The separate
-**PR integration / Full integration (manual)** check runs the same command on
-Linux against that event's PR merge revision. After another push, remove and
-re-add the label to verify the new revision. Leaving the label attached does not
-enable automatic integration runs. Reports are uploaded as
-`pr-integration-<pr-number>-<run-id>-<attempt>` Artifacts; PR runs do not establish
-the scheduled main-branch cache baseline.
+The workflows already run the complete suite on a `merge_group` tree, but this
+personal repository cannot enable GitHub's merge-queue ruleset, so that tier is
+inactive here. On a pull request, add the `run-integration` label to request the
+suite for that label event; later pushes do not rerun it, so remove and re-add
+the label to verify a new revision. A complete run takes about 90 minutes, so
+the check is reported but not required. PR and queue runs do not establish the
+scheduled main-branch cache baseline. Reports are uploaded as
+`integration-<run-id>-<attempt>` Artifacts.
 
-The PR job first builds the image and collects the complete inventory, uploading
-preparation evidence before executing all cases. Inventory is not a test pass.
-Both integration workflows reclaim unused preinstalled images and SDKs on their
-disposable GitHub-hosted Linux VM and require 24 GiB free before image building.
-The storage helper rejects local, self-hosted and non-Linux environments.
-Image builds temporarily reserve 32 MiB on the report filesystem, then release
-it before saving failure reports so build storage exhaustion does not mask its
+Every run reclaims unused preinstalled images and SDKs on its disposable
+GitHub-hosted Linux VM and requires 24 GiB free before image building. The
+storage helper rejects local, self-hosted and non-Linux environments. Image
+builds temporarily reserve 32 MiB on the report filesystem, then release it
+before saving failure reports so build storage exhaustion does not mask its
 original error. Verbose exception diagnostics include numeric OS error codes
 without exception messages or filenames.
 

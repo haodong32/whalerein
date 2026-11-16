@@ -5,6 +5,47 @@ encoding of these messages (lowerCamel fields, enum value names as written,
 bytes base64). MQTT uses the binary protobuf encoding. There is no peer
 OpenAPI or JSON Schema.
 
+## Compatibility and version window
+
+The application protocol version is carried as `protocol_version` on
+`HostRequest`, `HostResult`, `CapabilitySet`, `ChannelHello`, `ChannelReady`,
+`PairingHello`, `PairingHelloReply`, `PairingClaimRequest` and
+`PairingClaimResponse`. This build supports the closed window
+**1..=1** (`MIN_SUPPORTED_PROTOCOL_VERSION`..`MAX_SUPPORTED_PROTOCOL_VERSION`).
+A zero or absent version is not a wildcard; it is an old peer that must
+upgrade. `proto/v1/error_codes.json` and `proto/v1/compat/` are checked-in
+golden artifacts and `tests/integration/drivers/protobuf/proto_compat.py`
+fails a build that removes a field, reuses a tag number, changes a type or
+JSON name, changes oneof membership, or reuses an enum number.
+
+Readers follow one policy:
+
+1. **Unknown field names and unknown binary tags are ignored.** Adding a field
+   is additive. A new writer and an old reader stay compatible in both
+   directions, and both proto3 JSON and protobuf implementations already skip
+   unknown fields.
+2. **Unknown enum values are rejected explicitly** with
+   `protocol_version_incompatible`. A reader never falls back to the zero value
+   and never renders a number as a name.
+3. **A oneof must carry a known variant.** An absent payload variant is
+   `invalid_argument`, not an empty success. A variant this build does not know
+   rejects the frame, because its meaning cannot be recovered.
+4. **A version mismatch names the side that must upgrade.** If the peer is
+   older than the window, upgrade the peer; if it is newer, upgrade this
+   component. `protocol_version_incompatible` is never retryable.
+5. **proto3 JSON omits zero values.** Readers therefore must not distinguish an
+   absent field from its default; absent means default. Explicit empty strings
+   are emitted as `""` only where the schema marks a field `optional`.
+6. **64-bit integers are decimal strings in JSON.** A JavaScript reader keeps an
+   unsafe value (|value| > 2^53-1) as a string/BigInt instead of a `Number`, so
+   `grant_generation`, `version` and time values never lose precision.
+7. **Time values are Unix milliseconds** (`*_unix_ms` is milliseconds since the
+   Unix epoch, UTC; `*_ms` without `unix` is a duration in milliseconds).
+   Expiry comparisons are exact and never gain grace from clock skew. The only
+   accepted clock window is the pairing signature window, two minutes in the
+   past through one minute in the future; a peer outside it is rejected with
+   actionable text and the `clock_skew` diagnostic label.
+
 ## Identifiers
 
 All identifiers are opaque, random, and logged only through a local salted
@@ -20,6 +61,21 @@ diagnostic id.
 | History cursor | Source | Opaque, session/view-bound committed position. |
 | Attempt reference | Source adapter | Live epoch plus Attempt ID, independent of Message identity. |
 | `delivery_id` | Source adapter | Opaque acceptance identity; it does not establish execution or a committed Message. |
+
+Identifiers are bounded so a peer cannot amplify logs or database rows, and no
+identifier may contain the `|` AAD separator, which would make two different
+AAD inputs ambiguous. The shared validator is `whalerein_proto::validate_id`.
+
+| Field | Maximum encoded bytes | Allowed content |
+|---|---|---|
+| `request_id`, `command_id`, `channel_id`, `claim_id`, `approval_id`, `delivery_id`, `message_id`, `block_id`, `batch_id`, `item_id` | 128 | printable ASCII, no `|`; `command_id` may be empty |
+| `host_id`, `device_id` | 200 | printable ASCII, no `|` |
+| `trace_id`, `watch_id`, `wait_id` | 64 | printable ASCII, no `|` |
+| `session_id` | 512 | UTF-8 without control characters or `|` |
+| History cursor | 4096 | UTF-8 without control characters or `|`; may be empty at the origin |
+
+A request whose identifier violates these bounds is `invalid_argument` and is
+not forwarded. An identifier near the limit is never truncated on the wire.
 
 Access preserves `command_id` and `payload_digest` after a request expires and
 drops only the bodies. The same `command_id` with a different digest is
@@ -345,6 +401,7 @@ POST   /v1/pairing/claims              token in body
 GET    /v1/hosts                       device bearer token
 POST   /v1/hosts/{host_id}/requests     device bearer token
 GET    /v1/requests/{request_id}        device bearer token
+POST   /v1/requests/{request_id}/heartbeat  device bearer token
 DELETE /v1/devices/{device_id}          device bearer token (self) or admin
 POST   /v1/hosts/{host_id}/devices/{device_id}/revocation  host signature
 POST   /v1/enrollments/hosts           portable authorization + Host proof
@@ -354,6 +411,12 @@ GET    /healthz
 GET    /readyz
 GET    /metrics
 ```
+
+`POST /v1/requests/{request_id}/heartbeat` renews the non-terminal request
+claim while a one-shot CLI command waits for a terminal result. It carries no
+command body and cannot change a terminal result. A silent claim lease is
+bounded at 10 seconds; after it expires Access publishes `request_stale`, and
+the Host aborts the request scope.
 
 Internal broker callbacks (bound on the internal listener, fixed shared header):
 
@@ -378,6 +441,43 @@ bodies are the messages above; `POST /requests` returns `RequestReceipt`.
 8  conflict: busy, digest mismatch, approval version/digest/state conflict
 9  unsupported capability or incompatible protocol version
 ```
+
+Every `ErrorCode` and every client action is listed in
+`proto/v1/error_codes.json`; this table is the golden source for the CLI, Core
+and Host mappings and must stay identical to it.
+
+| `ErrorCode` | Exit | Client action | Meaning |
+|---|---|---|---|
+| `error_code_unspecified` | 1 | `none` | No error code was supplied. |
+| `invalid_argument` | 2 | `fix_input` | The request is malformed or violates a wire constraint. |
+| `unauthorized` | 4 | `reauth` | The caller is not authenticated; refresh pairing or credentials. |
+| `forbidden` | 4 | `reauth` | The caller is authenticated but not authorized. |
+| `not_found` | 3 | `refresh` | The named request, session, or object does not exist. |
+| `conflict` | 8 | `refresh` | The request conflicts with current state; re-read state before retrying. |
+| `expired` | 7 | `retry` | The request expired before it completed; submit a new request. |
+| `unsupported_capability` | 9 | `upgrade` | The peer does not support the required capability. |
+| `protocol_version_incompatible` | 9 | `upgrade` | The peers cannot agree on one protocol version; upgrade the named side. |
+| `payload_digest_mismatch` | 8 | `refresh` | The same command id carried a different payload; use a new command. |
+| `approval_expired` | 8 | `refresh` | The approval expired; request a fresh approval list. |
+| `approval_version_mismatch` | 8 | `refresh` | The approval version is stale; request a fresh approval list. |
+| `approval_already_resolved` | 8 | `refresh` | The approval was resolved elsewhere; refresh the list. |
+| `approval_unavailable` | 8 | `retry` | The approval cannot be resolved right now; retry later. |
+| `snapshot_required` | 8 | `resync` | The cursor can no longer continue; resynchronize from a snapshot. |
+| `revocations_pending` | 8 | `retry` | The Host has not replayed pending revocations yet. |
+| `rate_limited` | 8 | `retry` | A rate or concurrency limit was reached. |
+| `internal` | 1 | `retry` | An unexpected local failure occurred; retry once, then collect diagnostics. |
+| `unavailable` | 5 | `retry` | The service is temporarily unreachable; retry with backoff. |
+| `payload_too_large` | 5 | `fix_input` | The logical message exceeds the transfer budget. |
+| `pairing_fenced` | 8 | `restart_pairing` | The unfinished pairing intent can no longer commit. |
+| `pairing_committed_unavailable` | 8 | `restart_pairing` | The FINISH committed but its grant is gone; pair again. |
+| `pairing_committed_unconfirmed` | 8 | `review_pairing` | The FINISH committed but Host confirmation is unavailable. |
+| `channel_replaced` | 8 | `retry` | The Host replaced the channel that owned the observation. |
+
+`upgrade` is terminal for the current attempt: a client must surface an upgrade
+prompt (or upgrade the peer) and must never map it to `unavailable`, which is
+retryable. Pairing actions listed above are distinct: `restart_pairing` starts a
+new confirmed invitation, `review_pairing` retains the pending FINISH until the
+user reviews the evidence.
 
 `channel_replaced` (exit 8 if recovery fails) identifies an observation whose
 Host channel was replaced. Read-only waits may establish a fresh channel and
@@ -426,14 +526,43 @@ arithmetic. Approval execution always revalidates the native pending action.
 The complete schema and Source invariants are in
 [the Harness contract](../../docs/architecture/harness-contract.md).
 
+### Contract surface snapshot
+
+`proto/v1/compat/surface.json` pins the public contract surface: HTTP routes,
+MQTT topic patterns, protobuf message and enum names, the `ErrorCode`
+vocabulary, and the harness type aliases below. A route or type rename must
+update the snapshot, WIRE.md and the Harness contract in one reviewed change;
+`proto/v1/bindings/rust/tests/compat.rs` fails otherwise.
+
+| Harness contract name | Wire type |
+|---|---|
+| `Message` | `ConversationMessage` |
+| `HistoryBatch` | `HistoryBatch` |
+| `LiveFrame` | `LiveFrame` |
+| `RuntimeState` | `SessionState` |
+| `ApprovalState` | `Approval` (and the `ApprovalState` enum) |
+| `HistoryReset` | `HistoryReset` |
+
+The snapshot also records the zero-value policy (`omitted`), so a reader cannot
+silently start distinguishing an absent field from its default.
+
 ## Approval digest
 
 ```text
+escape(field) = field with "\" -> "\\" and "|" -> "\|"
 digest = SHA-256(
-  "whalerein/v1/approval|{approval_id}|{session_id}|{tool_name}|{call_id}|" +
-  "{reason}|{version}|{expires_at_unix_ms}"
+  "whalerein/v1/approval|{escape(approval_id)}|{escape(session_id)}|" +
+  "{escape(tool_name)}|{escape(call_id)}|{escape(reason)}|" +
+  "{version}|{expires_at_unix_ms}"
 )
 ```
+
+Every string field is escaped before joining, so a reason or tool name that
+contains `|` or `\` cannot shift a field boundary. Values without either byte
+keep their historical digest. Both Core (`core::security::approval_digest`) and
+the Host connector (`approvalDigest`) must match the vectors in
+`proto/v1/approval_digest_vectors.json`; the Rust and Node unit tests read the
+same file.
 
 The digest and version live only inside encrypted commands and events. The
 client sends them back with `ResolveApproval`; the plugin checks pending state,

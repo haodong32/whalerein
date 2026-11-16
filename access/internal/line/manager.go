@@ -203,8 +203,11 @@ func (m *Manager) forget(deviceID string) {
 
 // Heartbeat refreshes the broker policy validity window. Without it the broker
 // fails closed after the validity window, which is the intended partition
-// behavior.
+// behavior. It also expires presence observations that outlived the cache TTL,
+// so a lost disconnect cannot leave a Host or device online indefinitely when
+// the snapshot reconcile loop is stalled.
 func (m *Manager) Heartbeat(ctx context.Context) error {
+	m.presence.Sweep()
 	_, err := m.request(ctx, "ping", "ttl "+fmt.Sprint(m.cfg.PolicyTTL.Milliseconds()))
 	return err
 }

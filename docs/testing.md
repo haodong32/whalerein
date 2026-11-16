@@ -44,6 +44,97 @@ macOS or Windows validation.
   change record; a missing local OS is an environmental limitation, not a reason
   to fail or silently pass the local run.
 
+## CI operating-system matrix
+
+`.github/workflows/ci.yml` keeps the affected-project selection in the `changes`
+job and adds two consumers:
+
+| Job | Runner | What it proves |
+|---|---|---|
+| Checks and coverage (`fast`) | `ubuntu-24.04` | Static checks, Linux unit coverage, CLI diagnostics acceptance. |
+| Native unit tests (macOS/Windows) | `macos-15`, `windows-2025` | The same selected Rust, Go and Node projects run their native unit tests on the matching OS. |
+| Deployment acceptance | `ubuntu-24.04` | Compose stack, restart/in-flight recovery, graceful shutdown, log rotation, backup/restore and retention. |
+
+The native jobs reuse `tools/repo/src/repo/ci.py plan`; they do not select a
+different project set and they never run the Linux container integration suite.
+They invoke native unit commands instead of `./repo test` because the streaming
+process runner depends on POSIX process groups. Rust coverage, Go statement
+coverage and Node line coverage remain the Linux gate; the OS jobs prove that
+platform-gated tests actually execute. A skipped platform test in another OS job
+is not evidence for the skipped platform.
+
+Named platform-gated tests include
+`windows_sharing_violation_is_retryable_admission_contention`,
+`windows_directory_handle_blocks_renaming_until_released`,
+`windows_reparse_points_are_rejected_without_touching_target`,
+`unix_epipe_is_not_retryable_admission_contention`, and the macOS-only
+`scutil` display-name path in the CLI. The Windows reparse-point test needs
+Developer Mode or symlink privilege on the runner; a failure there is a runner
+capability failure, not permission to skip the case in another job.
+
+## Contract checks
+
+The `Contract checks` job runs when the affected set includes the `proto`
+project. It is offline and runs three checks:
+
+```bash
+./repo proto --check
+python3 proto/v1/bindings/swift/check_swift_surface.py
+python3 tests/integration/drivers/protobuf/proto_compat.py --check
+```
+
+The first compares committed Go/JavaScript bindings with the proto source and
+needs `protoc`, `protoc-gen-go` and the Node workspace. The Swift check compares
+`proto/v1/error_codes.json` with the recorded iOS surface and the hand-written
+`MobileError` mapping; a new wire code or a changed mapping fails. The
+compatibility check compares the compiled descriptor with the immutable
+baseline and the exact field snapshot; a removed field/tag reuse fails, and an
+intentional breaking change requires an explicit baseline update with a
+rationale. A failure in either script prints an actionable `::error::` message
+naming the file to review; do not regenerate a snapshot just to make it pass.
+
+## Deployment acceptance
+
+`tests/acceptance` is an opt-in Go suite with the `acceptance` build tag. It
+drives the Compose stack from [deploy/README.md](../deploy/README.md) over real
+MQTT, PostgreSQL and the Access HTTP API. Restart commands are **required**: a
+missing command fails the case with a configuration error instead of skipping
+the restart scenario. The CI `Deployment acceptance` job supplies the explicit
+commands and starts the stack before running the suite.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `WHALEREIN_ACCEPTANCE` | yes | Must be `1`; without it the suite skips as not requested. |
+| `WHALEREIN_ACCEPTANCE_RESTART_ACCESS` | yes | Restart command, for example `docker compose -f deploy/compose/stack.yaml restart access`. |
+| `WHALEREIN_ACCEPTANCE_RESTART_BROKER` | yes | Restart command for `mosquitto`. |
+| `WHALEREIN_ACCEPTANCE_RESTART_POSTGRES` | deployment cases | PostgreSQL restart command. |
+| `WHALEREIN_ACCEPTANCE_STOP_ACCESS` | shutdown case | SIGTERM stop command, for example `docker stop --time 20 whalerein-access`. |
+| `WHALEREIN_ACCEPTANCE_START_ACCESS` | shutdown case | Start command paired with the stop command. |
+| `WHALEREIN_ACCEPTANCE_ACCESS_CONTAINER` | no | Access container name for log/rotation inspection; defaults to `whalerein-access`. |
+| `WHALEREIN_ACCEPTANCE_POSTGRES_CONTAINER` | no | PostgreSQL container name for `pg_dump`/`pg_restore`; defaults to `whalerein-postgres`. |
+| `WHALEREIN_ACCEPTANCE_DATABASE_URL` | no | Database URL; defaults to the Compose loopback URL. |
+| `WHALEREIN_ACCEPTANCE_MQTT` / `_ACCESS` | no | Published endpoints; default to `127.0.0.1:1883` and `http://127.0.0.1:8080`. |
+| `WHALEREIN_HOST_PROVISIONING_TOKEN` / `WHALEREIN_ADMIN_TOKEN` | no | Compose development tokens; override for a non-default stack. |
+
+```bash
+WHALEREIN_ACCEPTANCE=1 \
+WHALEREIN_ACCEPTANCE_RESTART_ACCESS='docker compose -f deploy/compose/stack.yaml restart access' \
+WHALEREIN_ACCEPTANCE_RESTART_BROKER='docker compose -f deploy/compose/stack.yaml restart mosquitto' \
+WHALEREIN_ACCEPTANCE_RESTART_POSTGRES='docker compose -f deploy/compose/stack.yaml restart postgres' \
+WHALEREIN_ACCEPTANCE_STOP_ACCESS='docker stop --time 20 whalerein-access' \
+WHALEREIN_ACCEPTANCE_START_ACCESS='docker start whalerein-access' \
+  go test -tags acceptance ./tests/acceptance -v
+```
+
+The CLI diagnostics acceptance case (`TestCLIDoctorDegradedEnvironment`) does
+not need the stack. CI runs it in the Linux Rust group after the CLI is built,
+with `WHALEREIN_ACCEPTANCE_CLI=target/debug/whalerein`; without that variable the
+case builds the CLI with Cargo and fails if the toolchain is unavailable.
+
+Deployment acceptance cases mutate restart state and some create temporary
+databases. Run them serially against the stack; do not run them concurrently
+with another agent's Compose run.
+
 ## Choose checks for a change
 
 Run commands from the repository root:
@@ -74,7 +165,9 @@ MOSQUITTO_INCLUDE=$(brew --prefix)/include \
 ```
 
 The stack acceptance suite runs against the Compose stack and needs its
-restart commands so it can exercise restarts:
+restart commands so it can exercise restarts. Missing restart configuration
+fails the run; it does not skip the restart cases (see
+[Deployment acceptance](#deployment-acceptance) for the full contract):
 
 ```bash
 WHALEREIN_ACCEPTANCE=1 \
@@ -118,25 +211,53 @@ oversubscribes a 4–6 vCPU host and can fail timing-sensitive cases, so raise
 the shard count only with more CPU. Readiness polling runs at 20 ms, which
 roughly halves the wall time spent in fixture waits.
 
-## CI integration timing
+## CI test tiers
 
-Ordinary PR updates and main pushes run affected-project fast checks. Full
-integration is scheduled separately by `.github/workflows/integration.yml` at
-03:17 Asia/Shanghai each day. GitHub scheduling is best-effort; manual dispatch
-can validate a repair or high-risk change without waiting for the next schedule.
+Pull requests, the merge queue, main pushes and the nightly schedule run
+deliberately different amounts of work. Cheap tiers keep PR feedback fast; the
+queue, main and nightly tiers prove the exact trees that land.
 
-For a PR, manually add the `run-integration` label to start the **PR integration /
-Full integration (manual)** check. The dedicated `.github/workflows/pr-integration.yml`
-workflow runs the complete suite on Linux against the PR merge revision captured
-by that label event. Opening a PR, pushing commits, or leaving the label attached
-does not start another full run. After pushing a repair, remove and re-add the
-label to test the new revision. Use **Re-run jobs** to retry the original revision.
+### Pull request
+
+`.github/workflows/ci.yml` runs the affected-project fast checks, contract
+checks and deployment acceptance. The iOS workflow builds the XCFramework and
+test products once, then runs the Unit plan and a small UI smoke selection; the
+full 43-case UI plan does not run on every push. The workflow has no path filter
+so every revision reports `iOS gate`, but the heavy jobs skip when no
+iOS-facing build input changed. `CI gate` and `iOS gate` are the required checks
+on main.
+
+`Full integration` reports a result on every PR revision but only runs the
+suite when the `run-integration` label is attached to that exact event. Opening
+or updating a PR, or leaving the label attached, does not start the heavy suite.
+After pushing a repair, remove and re-add the label to test the new revision.
 The label must exist in the repository; create it once through GitHub's Labels
 page if needed. JSON/HTML reports are available in the run's
-`pr-integration-<pr-number>-<run-id>-<attempt>` Artifact for seven days.
-This optional check has its own per-PR queue, does not block the fast CI gate,
-and does not update the scheduled main-branch success baseline. It should not be
-configured as a required branch-protection check because it only runs on request.
+`integration-<run-id>-<attempt>` Artifact for seven days. A complete run builds
+the integration image and executes the whole isolated suite, so it takes about
+90 minutes; it is therefore reported but not a required check on this
+repository.
+
+### Merge queue (not available here)
+
+The workflows accept `merge_group` and run `CI gate`, the complete integration
+suite and the full iOS UI plan against the exact merge-group tree. The merge
+queue itself is a repository ruleset feature that GitHub currently rejects for
+this personal public repository (`Invalid rule 'merge_queue'`), so the tier is
+inactive here. No workflow change is needed if the queue becomes available
+later, for example after moving the repository into an organization with the
+feature. Enabling the ruleset with required `CI gate` and `iOS gate` checks is
+already done; the merge-queue rule can be added to it unchanged.
+
+### Main and nightly
+
+A main push reruns the full iOS UI plan for the landed tree. Full integration
+remains scheduled by `.github/workflows/integration.yml` at 03:17 Asia/Shanghai
+and the iOS full plan at 02:47 Asia/Shanghai (18:47 UTC); GitHub scheduling is
+best-effort, and manual dispatch can validate a repair or high-risk change
+without waiting.
+iOS dispatch accepts `unit`, `smoke` or `full`; choose the PR branch and `full`
+to run the complete UI plan before merging.
 
 The scheduled workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips
@@ -154,12 +275,16 @@ jobs depend on the successful integration job. Publication automation is not yet
 implemented; this is its callable integration gate, not a complete release flow.
 Final package installation acceptance remains a separate release requirement.
 
-Scheduled, manual and reusable invocations share a concurrency group and do not
-cancel an active run. GitHub may replace an older pending run when several queue;
+Pull-request and merge-queue integration runs queue per revision. Scheduled,
+manual and reusable invocations share one global group and never cancel an
+active run. GitHub may replace an older pending run when several queue;
 cancelled callers must never be treated as successful publication gates.
 JSON/HTML reports and successful-input receipts are uploaded as
 `integration-<run-id>-<attempt>` Artifacts with seven-day retention. The cache is
 an optimization, not a permanent evidence archive. No Summary or Pages is used.
+
+The manual iOS dispatch accepts `unit`, `smoke` or `full`, so a flaky UI case can
+be retried without pushing a commit that would supersede the run.
 
 These CI triggers do not waive the local change-validation requirements above.
 

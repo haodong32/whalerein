@@ -10,6 +10,7 @@ pub mod api;
 mod cache;
 mod commands;
 mod diagnostics;
+mod drafts;
 mod pairing;
 mod profiles;
 mod runtime;

@@ -12,7 +12,9 @@ import { OpenQuestionBroker, QuestionHandles, QuestionProjection, assertQuestion
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { approvalDigest, bytesEqual, randomId, sha256Text } from 'whalerein-host/security/digest.js'
 import {
+  APPROVAL_REASON_MAX,
   DshAdapter,
+  boundedApprovalText,
   normalizeApproval,
   normalizeEvent,
   normalizeSummary,
@@ -287,7 +289,9 @@ export class RealDshAdapter extends DshAdapter {
     if (typeof controller?.list === 'function' || typeof sessions?.list === 'function') capabilities.push('sessions')
     if (subscribable || typeof sessions?.get === 'function') capabilities.push('events')
     if (typeof controller?.prompt === 'function') capabilities.push('messages')
-    if (subscribable) capabilities.push('approvals')
+    // Delegate mode forwards native approvals to the local DSH UI; it has no
+    // remote pending action to serve, so it must not advertise approvals.
+    if (subscribable && this.approvalMode !== 'delegate') capabilities.push('approvals')
     if (typeof controller?.cancel === 'function') capabilities.push('interrupt')
     if (typeof controller?.state === 'function' || typeof controller?.events === 'function') capabilities.push('sync')
     if (typeof sessions?.get === 'function' || typeof controller?.events === 'function') capabilities.push('snapshot')
@@ -378,7 +382,9 @@ export class RealDshAdapter extends DshAdapter {
         pending: next && !equal ? next : null,
         pending_known: !equal,
         default_selection: normalizeModelSelection(catalog.default),
-        default_is_fallback: true,
+        // A recorded pending/last-used choice is the session's own selection;
+        // the catalog default only stands in when none was recorded.
+        default_is_fallback: next === null,
       }
     } catch (error) {
       if (signal?.aborted) throw new AdapterError('unavailable')
@@ -386,17 +392,23 @@ export class RealDshAdapter extends DshAdapter {
     }
   }
 
-  async selectSessionModel(sessionId, selection) {
+  async selectSessionModel(sessionId, selection, context = {}) {
     if (typeof sessionId !== 'string' || !sessionId || typeof selection?.provider !== 'string' || !selection.provider || typeof selection?.model !== 'string' || !selection.model || (selection.effort !== undefined && typeof selection.effort !== 'string')) {
       throw new DefinitiveExecutionError('invalid_argument')
     }
     const controller = this.#service('sessionController')
     if (typeof controller?.selectModel !== 'function') throw new DefinitiveExecutionError('unsupported_capability')
+    // Model selection mutates the source just like a queue edit. Re-check the
+    // command deadline immediately before the native call so expiry is
+    // definitive and never reported as an unknown applied change.
+    this.assertCommandFresh(context)
     try {
       const result = await controller.selectModel({
         sessionId, provider: selection.provider, model: selection.model,
         ...(selection.effort !== undefined && selection.effort !== null ? { reasoningEffort: selection.effort } : {}),
       })
+      // The deadline may have passed while the native call was in flight. The
+      // native action already happened, so this stays uncertain by design.
       const selected = normalizeModelSelection(result?.selected)
       if (!selected) throw new AdapterError('internal')
       return { selected, effect_scope: 'session_and_source_default_attempt', default_persistence: 'unconfirmed' }
@@ -968,9 +980,19 @@ export class RealDshAdapter extends DshAdapter {
     try { queue = await this.readPendingQueue(sessionId, {signal:context.signal}) }
     catch (error) { throw new DefinitiveExecutionError(error instanceof AdapterError ? error.code : 'unavailable') }
     if (!queue.available) throw new DefinitiveExecutionError('unavailable')
-    const item = queue.items.find((entry) => entry.item_id === command.item_id)
+    let item = queue.items.find((entry) => entry.item_id === command.item_id)
     if (!item) throw new DefinitiveExecutionError('not_found')
-    if (!item.actions.includes(command.action)) throw new DefinitiveExecutionError('conflict')
+    if (!item.actions.includes(command.action)) {
+      // An idle/running transition between the observation and this action can
+      // add PROMOTE. Re-read once so a benign state flip is not reported as a
+      // stale conflict; the native update remains authoritative.
+      try { queue = await this.readPendingQueue(sessionId, {signal:context.signal}) }
+      catch (error) { throw new DefinitiveExecutionError(error instanceof AdapterError ? error.code : 'unavailable') }
+      if (!queue.available) throw new DefinitiveExecutionError('unavailable')
+      item = queue.items.find((entry) => entry.item_id === command.item_id)
+      if (!item) throw new DefinitiveExecutionError('not_found')
+      if (!item.actions.includes(command.action)) throw new DefinitiveExecutionError('conflict')
+    }
     this.assertCommandFresh(context)
     const action = command.action === 'EDIT' ? {kind:'edit',content:[{type:'text',text:command.text}]} : {kind:command.action === 'REMOVE' ? 'remove' : 'steer'}
     try {
@@ -1136,12 +1158,38 @@ export class RealDshAdapter extends DshAdapter {
     if (!controller || typeof controller.cancel !== 'function') {
       throw new DefinitiveExecutionError('unsupported_capability', 'interrupt unavailable')
     }
+    let running = false
+    try {
+      const state = typeof controller.state === 'function' ? await controller.state({ sessionId }) : null
+      running = state?.running === true
+    } catch {
+      // A state read failure does not block cancellation; it only means no
+      // synthetic attempt-end is emitted when the turn state is unknown.
+    }
     try {
       const value = controller.cancel({ sessionId })
       if (value && typeof value.then === 'function') await value
+      // The interrupted turn owns any in-flight question and approval claims.
+      // Release both so a later wait does not keep reporting input-required.
+      this.#openQuestionBroker?.interruptSession?.(sessionId)
+      this.#releaseApprovals(sessionId)
+      if (running) this.publishInterruptedAttempt(sessionId)
       return { accepted: true }
     } catch (error) {
       throw new AdapterError(mapAdapterError(error))
+    }
+  }
+
+  // Settle every pending approval claim owned by this session. A decision that
+  // is already resolving is left to win its own race.
+  #releaseApprovals(sessionId) {
+    for (const record of this.#approvals.values()) {
+      if (record.sessionId !== sessionId || record.state !== 'pending' || record.resolving) continue
+      record.state = 'unavailable'
+      record.decision = 'unspecified'
+      try { record.settle?.('cancelled') } catch { /* Native cancellation remains authoritative. */ }
+      this.#emitApproval('resolved', record)
+      this.logger?.info('approval_released', { approval: record.approvalId, status: 'interrupted' })
     }
   }
 
@@ -1196,9 +1244,9 @@ export class RealDshAdapter extends DshAdapter {
     const record = {
       approvalId,
       sessionId,
-      toolName: typeof request?.toolName === 'string' ? request.toolName : '',
-      callId: typeof request?.callId === 'string' ? request.callId : '',
-      reason: typeof request?.reason === 'string' ? request.reason : '',
+      toolName: boundedApprovalText(request?.toolName),
+      callId: boundedApprovalText(request?.callId),
+      reason: boundedApprovalText(request?.reason, APPROVAL_REASON_MAX),
       version,
       expiresAt,
       state: 'pending',
@@ -1224,7 +1272,10 @@ export class RealDshAdapter extends DshAdapter {
       if (record.state !== 'pending') return
       record.state = 'expired'
       this.#emitApproval('resolved', record)
-      settle('unavailable')
+      // A timeout is a cancelled decision, not a missing approval channel.
+      // Reporting 'unavailable' makes DSH tell the model no channel exists,
+      // which then suppresses later approval attempts in the same session.
+      settle('cancelled')
     }, Math.max(1, expiresAt - this.now()))
     this.#approvalTimers.add(timer)
     timer.unref?.()
@@ -1295,7 +1346,9 @@ export class RealDshAdapter extends DshAdapter {
   #expire(record) {
     if (record.state === 'pending' && record.expiresAt <= this.now()) {
       record.state = 'expired'
-      record.settle?.('unavailable')
+      // Same decision as the TTL timer: expiry cancels the approval surface
+      // instead of reporting that no approval channel exists.
+      record.settle?.('cancelled')
       this.#emitApproval('resolved', record)
       return true
     }

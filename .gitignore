@@ -37,6 +37,9 @@ certs/
 !.env.example
 !.env.*.example
 
+# Profiling output.
+*.profraw
+
 # OS/editor noise.
 .DS_Store
 .idea/
@@ -49,3 +52,6 @@ certs/
 
 # Native plugin build output.
 deploy/mosquitto/plugin/*.so
+
+# Generated iOS vendor artifacts (XCFramework and Swift bindings).
+apps/ios/Vendor/

@@ -16,6 +16,14 @@ import (
 const (
 	PresenceSourceBroker = "broker"
 	PresenceSourceWill   = "will"
+	// PresenceSourceSnapshot marks an offline edge proven by a later broker
+	// snapshot: a disconnect notification was lost or missed while Access was
+	// restarting, so the snapshot is the only current state.
+	PresenceSourceSnapshot = "snapshot"
+	// PresenceSourceExpired marks an offline edge caused by the cached
+	// observation outliving presence.cache_ttl without a refresh. It bounds a
+	// false-online entry when both live notifications and snapshots stall.
+	PresenceSourceExpired = "expiry"
 )
 
 // DeviceOfflineHandler runs once for each accepted online -> offline edge.
@@ -24,8 +32,21 @@ type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
 
 type presenceEntry struct {
 	online bool
-	at     time.Time
+	// at is the source timestamp used to reject stale events for one identity.
+	at time.Time
+	// seenAt is when Access last observed this entry from a broker event or a
+	// snapshot. It drives cache_ttl expiry independently of the broker's own
+	// connection timestamp: a long-lived connection stays fresh because each
+	// accepted event or snapshot refreshes it, while a lost disconnect stops
+	// being refreshed and eventually expires.
+	seenAt time.Time
 	connID uint64
+	// ready records that a Host confirmed subscription readiness with HostReady
+	// (or that a broker snapshot already observed an established connection).
+	// A broker CONNECT alone is not enough: the Host may not have subscribed
+	// yet, so publishing then would be acknowledged by the broker but never
+	// delivered.
+	ready bool
 }
 
 // Presence is the broker-derived online registry. It is seeded by ordered
@@ -84,8 +105,10 @@ func (p *Presence) Available() bool {
 	return p.available
 }
 
-// IsHostOnline returns broker presence. A missing or unavailable presence view
-// reports offline.
+// IsHostOnline returns broker presence. A missing, unavailable or expired
+// presence view reports offline. A Host whose broker connection exists but has
+// not confirmed subscription readiness (HostReady) is not online yet: the
+// broker would accept a publish that no subscriber can receive.
 func (p *Presence) IsHostOnline(ctx context.Context, hostID string) bool {
 	if hostID == "" {
 		return false
@@ -99,17 +122,28 @@ func (p *Presence) IsHostOnline(ctx context.Context, hostID string) bool {
 	if !ok {
 		return false
 	}
-	return entry.online
+	return entry.online && entry.ready && !p.stale(entry, p.now())
 }
 
-// SetHostOnline updates broker-derived host presence.
+// stale reports whether a cached observation has outlived cache_ttl. The
+// presence view must never claim a connection it has not observed within that
+// bound.
+func (p *Presence) stale(entry presenceEntry, now time.Time) bool {
+	return p.cacheTTL > 0 && !entry.seenAt.IsZero() && now.Sub(entry.seenAt) > p.cacheTTL
+}
+
+// SetHostOnline updates broker-derived host presence. A direct online update
+// from a caller that already established readiness (HostReady or a snapshot)
+// also marks the connection ready.
 func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 	if hostID == "" {
 		return
 	}
+	now := p.now()
 	p.mu.Lock()
-	if previous, exists := p.hosts[hostID]; !exists || !at.Before(previous.at) {
-		p.hosts[hostID] = presenceEntry{online: online, at: at, connID: previous.connID}
+	previous, exists := p.hosts[hostID]
+	if !exists || !at.Before(previous.at) {
+		p.hosts[hostID] = presenceEntry{online: online, at: at, seenAt: now, connID: previous.connID, ready: online}
 	}
 	p.available = true
 	p.mu.Unlock()
@@ -119,7 +153,7 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 // SetDeviceOnline updates broker-derived device presence. An online -> offline
 // transition invokes the registered device-offline handler exactly once.
 func (p *Presence) SetDeviceOnline(deviceID string, online bool, at time.Time) {
-	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0)
+	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0, true)
 }
 
 // SetDeviceOfflineHandler installs the callback for accepted device-offline
@@ -133,19 +167,37 @@ func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
 // applyDevice records device presence and emits at most one offline callback
 // per online -> offline edge. A non-zero connID limits the transition to its
 // own connection so a delayed disconnect cannot affect a newer one.
-func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64) {
+//
+// allowOnlineOverride is false for a device last will. A will payload does not
+// name the connection that ended, so it cannot prove that the connection the
+// cache currently holds is gone; a delayed will from a superseded connection
+// must never mark a newer connection offline. Lost disconnect notifications are
+// repaired by the next snapshot or by cache_ttl expiry instead.
+func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64, allowOnlineOverride bool) {
 	if deviceID == "" {
 		return
 	}
+	now := p.now()
 	p.mu.Lock()
 	previous, exists := p.devices[deviceID]
 	if exists && at.Before(previous.at) {
 		p.mu.Unlock()
 		return
 	}
-	if connID != 0 && previous.connID != 0 && previous.connID != connID {
+	// A device connection notification with a newer connection identity is a
+	// takeover and must be adopted. Only an offline event is fenced to its own
+	// connection: a delayed disconnect for a superseded connection cannot
+	// affect the newer one.
+	if !online && connID != 0 && previous.connID != 0 && previous.connID != connID {
 		p.mu.Unlock()
 		p.logger.Debug("presence event for a superseded connection ignored", "source", source)
+		return
+	}
+	if !online && !allowOnlineOverride && exists && previous.online {
+		p.mu.Unlock()
+		// Not a duplicate edge: the notification is unverifiable against the
+		// live connection, so it is dropped without changing presence counts.
+		p.logger.Debug("device will could not override a live connection", "source", source)
 		return
 	}
 	transition := false
@@ -157,7 +209,7 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			duplicate = true
 		}
 	}
-	next := presenceEntry{online: online, at: at, connID: previous.connID}
+	next := presenceEntry{online: online, at: at, seenAt: now, connID: previous.connID}
 	if connID != 0 {
 		next.connID = connID
 	}
@@ -184,9 +236,55 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 	}
 }
 
-// MarkHostReady treats a ready host result as broker presence.
+// Expire marks cached observations older than cache_ttl offline. Live broker
+// notifications and each successful snapshot refresh online entries, so a
+// healthy reconcile loop never expires a connected client. A stalled presence
+// path does: a lost disconnect must not keep a Host or device online forever.
+// It returns the number of expired online entries.
+func (p *Presence) Expire(now time.Time) int {
+	p.mu.Lock()
+	expired := 0
+	for hostID, entry := range p.hosts {
+		if entry.online && p.stale(entry, now) {
+			p.hosts[hostID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID}
+			expired++
+		}
+	}
+	var devices []string
+	for deviceID, entry := range p.devices {
+		if entry.online && p.stale(entry, now) {
+			p.devices[deviceID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID}
+			devices = append(devices, deviceID)
+			expired++
+		}
+	}
+	handler := p.deviceOfflineHandler
+	p.mu.Unlock()
+	p.publishCounts()
+	for _, deviceID := range devices {
+		if p.metrics != nil {
+			p.metrics.PresenceEvent(PresenceSourceExpired, "offline")
+		}
+		if handler != nil {
+			handler(deviceID, PresenceSourceExpired, now)
+		}
+	}
+	return expired
+}
+
+// MarkHostReady treats a ready host result as broker presence. HostReady is
+// published only after the Host subscribed to its request topic, so it is the
+// readiness confirmation a bare broker CONNECT lacks.
 func (p *Presence) MarkHostReady(hostID string, at time.Time) {
-	p.SetHostOnline(hostID, true, at)
+	if hostID == "" {
+		return
+	}
+	now := p.now()
+	p.mu.Lock()
+	previous := p.hosts[hostID]
+	p.hosts[hostID] = presenceEntry{online: true, at: at, seenAt: now, connID: previous.connID, ready: true}
+	p.mu.Unlock()
+	p.publishCounts()
 }
 
 // HandleNotification applies one ordered broker connection notification.
@@ -215,14 +313,23 @@ func (p *Presence) HandleNotification(notification *Notification) {
 				"last_seq", p.lastSeq, "conn", notification.ConnID, "previous_conn", previous.connID,
 				"superseded", superseded, "stale", exists && at.Before(previous.at))
 			if !superseded && (!exists || !at.Before(previous.at)) {
-				p.hosts[notification.HostID] = presenceEntry{online: online, at: at, connID: notification.ConnID}
+				ready := false
+				if online && exists && previous.connID == notification.ConnID {
+					// A repeated connect for the same connection keeps the
+					// HostReady confirmation.
+					ready = previous.ready
+				}
+				p.hosts[notification.HostID] = presenceEntry{
+					online: online, at: at, seenAt: p.now(),
+					connID: notification.ConnID, ready: ready,
+				}
 			}
 		}
-		p.available = true
 	case "device":
 		if notification.DeviceID != "" {
+			connID := notification.ConnID
 			p.mu.Unlock()
-			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, notification.ConnID)
+			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true)
 			return
 		}
 	}
@@ -231,7 +338,9 @@ func (p *Presence) HandleNotification(notification *Notification) {
 }
 
 // ApplySnapshot replaces presence with the broker's current connection set at
-// the returned sequence boundary.
+// the returned sequence boundary. An online device that is absent or offline in
+// the snapshot lost its offline edge (a missed or startup-window notification)
+// and is emitted as offline here; this is the sequence-boundary self-heal.
 func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 	p.mu.Lock()
 	hosts := make(map[string]presenceEntry, len(p.hosts))
@@ -248,13 +357,27 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		switch client.Kind {
 		case "host":
 			if client.HostID != "" {
-				hosts[client.HostID] = presenceEntry{online: true, at: at, connID: client.ConnID}
+				// A snapshot connection predates this Access session, so its
+				// subscription was already established. Only a live CONNECT
+				// after the snapshot waits for HostReady.
+				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: true}
 			}
 		case "device":
 			if client.DeviceID != "" {
-				devices[client.DeviceID] = presenceEntry{online: true, at: at, connID: client.ConnID}
+				devices[client.DeviceID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID}
 			}
 		}
+	}
+	var recovered []string
+	for deviceID, previous := range p.devices {
+		if !previous.online {
+			continue
+		}
+		next, ok := devices[deviceID]
+		if ok && next.online {
+			continue
+		}
+		recovered = append(recovered, deviceID)
 	}
 	p.hosts = hosts
 	p.devices = devices
@@ -262,9 +385,23 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		p.lastSeq = boundary
 	}
 	p.available = true
+	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
 	p.publishCounts()
+	for _, deviceID := range recovered {
+		if p.metrics != nil {
+			p.metrics.PresenceEvent(PresenceSourceSnapshot, "offline")
+		}
+		if handler != nil {
+			handler(deviceID, PresenceSourceSnapshot, now)
+		}
+	}
 }
+
+// Sweep expires cached observations using the presence clock. The line
+// heartbeat calls it so a stalled reconcile cannot leave a stale online entry
+// until the next successful snapshot.
+func (p *Presence) Sweep() int { return p.Expire(p.now()) }
 
 // deviceWillHint is the only information Access uses from a last-will payload.
 type deviceWillHint struct {
@@ -297,23 +434,25 @@ func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
 		}
 		return
 	}
-	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0)
+	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0, false)
 }
 
-// ConnectedCounts returns the last broker-derived online counts.
+// ConnectedCounts returns the last broker-derived online counts, excluding
+// observations that outlived cache_ttl.
 func (p *Presence) ConnectedCounts() (hosts, devices int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if !p.available {
 		return 0, 0
 	}
+	now := p.now()
 	for _, entry := range p.hosts {
-		if entry.online {
+		if entry.online && entry.ready && !p.stale(entry, now) {
 			hosts++
 		}
 	}
 	for _, entry := range p.devices {
-		if entry.online {
+		if entry.online && !p.stale(entry, now) {
 			devices++
 		}
 	}

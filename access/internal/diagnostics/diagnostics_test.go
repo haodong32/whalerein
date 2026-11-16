@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -266,4 +267,100 @@ func TestTraceContextCorrelatesHostResultMetrics(t *testing.T) {
 	absent.PresenceDuplicate()
 	absent.PresenceInvalid()
 	absent.DeviceOfflinePublishFailed()
+}
+
+func TestMaskerRedactMasksKnownIdentifiersAndSQLValues(t *testing.T) {
+	masker := NewMaskerWithKey([]byte("redact-key"))
+	text := "query failed for host h1 and device d1 (request_id='r1')\nsecond line"
+	got := masker.Redact(text, map[string]string{
+		"h1": masker.Host("h1"),
+		"d1": masker.Device("d1"),
+		"r1": masker.Request("r1"),
+	})
+	if strings.Contains(got, "h1") || strings.Contains(got, "d1") || strings.Contains(got, "r1") {
+		t.Fatalf("raw identifier survived: %q", got)
+	}
+	if !strings.Contains(got, masker.Host("h1")) || !strings.Contains(got, masker.Device("d1")) {
+		t.Fatalf("masked identifier missing: %q", got)
+	}
+	if strings.Contains(got, "'r1'") || !strings.Contains(got, "'?'") {
+		t.Fatalf("SQL literal was not redacted: %q", got)
+	}
+	if strings.ContainsAny(got, "\n\r\t") {
+		t.Fatalf("control characters survived: %q", got)
+	}
+	var nilMasker *Masker
+	if string(nilMasker.Redact("plain", nil)) != "plain" {
+		t.Fatal("nil masker should pass text through")
+	}
+}
+
+func TestMaskerRedactBoundsLongMessages(t *testing.T) {
+	masker := NewMaskerWithKey([]byte("redact-key"))
+	got := masker.Redact(strings.Repeat("x", MaxRedactedLength+100), nil)
+	if len(got) > MaxRedactedLength+4 {
+		t.Fatalf("message length = %d", len(got))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatal("truncation marker missing")
+	}
+	// Multi-byte content is truncated at a rune boundary.
+	multi := masker.Redact(strings.Repeat("é", MaxRedactedLength), nil)
+	if !utf8.ValidString(multi) {
+		t.Fatalf("truncation split a rune: %q", multi)
+	}
+}
+
+type fakeDatabase struct {
+	pingErr  error
+	probeErr error
+	probes   int
+}
+
+func (f *fakeDatabase) Ping(context.Context) error { return f.pingErr }
+func (f *fakeDatabase) WriteProbe(context.Context) error {
+	f.probes++
+	return f.probeErr
+}
+
+func TestDatabaseReadinessRequiresAPingAndAWriteProbe(t *testing.T) {
+	healthy := &fakeDatabase{}
+	if err := DatabaseReadiness(healthy)(context.Background()); err != nil || healthy.probes != 1 {
+		t.Fatalf("healthy database = %v probes=%d", err, healthy.probes)
+	}
+	pingDown := &fakeDatabase{pingErr: errors.New("connection refused")}
+	if err := DatabaseReadiness(pingDown)(context.Background()); err == nil {
+		t.Fatal("ping failure was not reported")
+	}
+	if pingDown.probes != 0 {
+		t.Fatalf("write probe ran after a failed ping: %d", pingDown.probes)
+	}
+	readOnly := &fakeDatabase{probeErr: errors.New("read-only transaction")}
+	if err := DatabaseReadiness(readOnly)(context.Background()); err == nil {
+		t.Fatal("read-only database was reported ready")
+	}
+}
+
+func TestCleanupMetricsRecordBatchesAndBacklog(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.CleanupBatch("bodies", 2000)
+	metrics.CleanupBatch("queries", 10)
+	metrics.CleanupBatch("tokens", 0)
+	metrics.CleanupBatch("unexpected", 1)
+	metrics.CleanupBacklog()
+	if got := testutil.ToFloat64(metrics.CleanupBatches.WithLabelValues("bodies")); got != 1 {
+		t.Fatalf("bodies batches = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.CleanupBatches.WithLabelValues("unknown")); got != 1 {
+		t.Fatalf("unknown batches = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.CleanupRows); got != 2011 {
+		t.Fatalf("cleanup rows = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.CleanupBacklogTotal); got != 1 {
+		t.Fatalf("cleanup backlog = %v", got)
+	}
+	var nilMetrics *Metrics
+	nilMetrics.CleanupBatch("bodies", 1)
+	nilMetrics.CleanupBacklog()
 }

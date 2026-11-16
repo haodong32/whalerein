@@ -16,18 +16,50 @@ import { codec } from '../../../host/runtime/src/protocol.js'
 
 import { createHost } from '../../../host/dsh/index.js'
 
+const approvalMode = process.env.WHALEREIN_APPROVAL_MODE === 'delegate' ? 'delegate' : 'claim'
+const approvalTtlMs = Number(process.env.WHALEREIN_APPROVAL_TTL_MS || 0)
 const config = {
   adapter: 'fake',
   mqtt_url: process.env.WHALEREIN_MQTT_URL,
   host_id: process.env.WHALEREIN_HOST_ID,
   host_token: process.env.WHALEREIN_HOST_TOKEN,
   state_dir: process.env.WHALEREIN_STATE_DIR,
-  allow_insecure_mqtt: true,
-  event_batch_ms: 0,
+  allow_insecure_mqtt: process.env.WHALEREIN_ALLOW_INSECURE_MQTT !== '0',
+  ca_file: process.env.WHALEREIN_CA_FILE || '',
+  event_batch_ms: 1,
+  approval_mode: approvalMode,
+  ...(Number.isSafeInteger(approvalTtlMs) && approvalTtlMs > 0 ? { approval_ttl_ms: approvalTtlMs } : {}),
+  pending_queue_enabled: process.env.WHALEREIN_PENDING_QUEUE_ENABLED !== 'false',
   log_level: process.env.WHALEREIN_LOG_LEVEL || 'warn',
 }
 
 const adapter = new FixtureAdapter()
+// FixtureAdapter inherits from DshAdapter, which has no `behavior` object. Keep
+// the behavior mirror for parity with FakeDshAdapter and set the property the
+// proxy's describe/readPendingQueue/updatePendingQueue actually read.
+adapter.behavior = { ...(adapter.behavior ?? {}), pendingQueueEnabled: config.pending_queue_enabled }
+adapter.pendingQueueEnabled = config.pending_queue_enabled
+adapter.approvalMode = approvalMode
+
+// The FakeDSH authority advertises every capability it was built with. The
+// Host-visible capability set follows this Host process's configuration, as
+// the real adapter does: delegate mode withholds remote approvals, and the
+// pending-queue opt-out removes the four queue capabilities.
+const capabilityOverrides = {
+  approvals: approvalMode !== 'delegate',
+  pending_queue_read: config.pending_queue_enabled !== false,
+  pending_queue_edit: config.pending_queue_enabled !== false,
+  pending_queue_remove: config.pending_queue_enabled !== false,
+  pending_queue_steer: config.pending_queue_enabled !== false,
+}
+const listSessions = adapter.listSessions.bind(adapter)
+adapter.listSessions = async options => {
+  const sessions = await listSessions(options)
+  for (const session of sessions) {
+    if (session?.sourceCapabilities) Object.assign(session.sourceCapabilities, capabilityOverrides)
+  }
+  return sessions
+}
 
 const host = createHost(config, { adapter, credentials: { getCredential: (...args) => adapter.call('getCredential', ...args), setCredential: (...args) => adapter.call('setCredential', ...args) } })
 // Keep the process alive while waiting for the first broker connection; the

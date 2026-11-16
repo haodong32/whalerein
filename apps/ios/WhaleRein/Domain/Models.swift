@@ -1,0 +1,340 @@
+// Domain types mirroring the Swift/Rust binding contract for the iOS client.
+// Keep this file free of UI imports: presentation models and fixtures depend on
+// it, and the future LiveSessionService maps UniFFI records into these types.
+
+import Foundation
+
+// MARK: - Connection
+
+enum ConnectionStatus: String, Codable, CaseIterable, Sendable {
+    case offline
+    case connecting
+    case online
+    case degraded
+    case reconnecting
+
+    var isOnline: Bool { self == .online || self == .degraded }
+}
+
+// MARK: - Hosts and pairing
+
+struct HostSummary: Identifiable, Hashable, Codable, Sendable {
+    let hostId: String
+    let online: Bool
+    let fingerprint: String
+    let protocolVersion: String
+
+    var id: String { hostId }
+}
+
+struct PairingPrompt: Identifiable, Hashable, Sendable {
+    let hostId: String
+    let accessURL: URL
+    let fingerprint: String
+    let fingerprintDisplay: String
+    /// Presentation addition: the confirmation window the user can act within.
+    let expiresAt: Date
+
+    var id: String { "\(hostId)/\(fingerprint)" }
+}
+
+struct Invitation: Hashable, Sendable {
+    let accessURL: URL
+    let token: String
+    let hostHint: String?
+    let expiresAt: Date?
+}
+
+enum InvitationParseError: Error, Equatable, Sendable {
+    case empty
+    case malformed
+    case unsupportedScheme
+    case missingToken
+    case invalidAccessURL
+    case expired
+}
+
+// MARK: - Sessions
+
+struct SessionSummary: Identifiable, Hashable, Codable, Sendable {
+    let sessionId: String
+    let title: String
+    let updatedAtUnixMs: Int64
+    /// Working directory reported by the Source. Used only to group the session
+    /// list by workspace; it is never shown as a row subtitle.
+    let cwd: String
+    /// True while the Source reports an active turn for this session.
+    var running: Bool = false
+
+    var id: String { sessionId }
+
+    var updatedAt: Date { Date(timeIntervalSince1970: Double(updatedAtUnixMs) / 1000) }
+}
+
+struct SessionCapabilities: Hashable, Sendable {
+    var running: Bool
+    var supportsSteer: Bool
+    var supportsQueue: Bool
+    /// True only when the Source reports interrupt support. Stop is additionally
+    /// gated by `running`.
+    var supportsInterrupt: Bool = false
+
+    static let idle = SessionCapabilities(
+        running: false,
+        supportsSteer: true,
+        supportsQueue: true,
+        supportsInterrupt: true
+    )
+    static let running = SessionCapabilities(
+        running: true,
+        supportsSteer: true,
+        supportsQueue: true,
+        supportsInterrupt: true
+    )
+}
+
+struct SessionContext: Hashable, Sendable {
+    let hostId: String
+    let sessionId: String
+}
+
+// MARK: - Conversation
+
+enum MessageRole: String, Codable, Sendable {
+    case user
+    case assistant
+    case tool
+    case notice
+    case system
+}
+
+enum BlockKind: String, Codable, Sendable {
+    case text
+    case tool
+    case notice
+    case question
+}
+
+struct ConversationBlock: Identifiable, Hashable, Sendable {
+    let blockId: String
+    let kind: BlockKind
+    let text: String
+    let toolName: String?
+
+    var id: String { blockId }
+
+    init(blockId: String, kind: BlockKind, text: String, toolName: String? = nil) {
+        self.blockId = blockId
+        self.kind = kind
+        self.text = text
+        self.toolName = toolName
+    }
+}
+
+struct ConversationMessage: Identifiable, Hashable, Sendable {
+    let messageId: String
+    let role: MessageRole
+    let blocks: [ConversationBlock]
+    let createdAtUnixMs: Int64
+
+    var id: String { messageId }
+
+    var plainText: String { blocks.map(\.text).joined(separator: "\n") }
+
+    var hasToolBlock: Bool { blocks.contains { $0.kind == .tool } }
+}
+
+// MARK: - Approvals
+
+enum ApprovalState: String, Codable, Sendable {
+    case pending
+    case allowed
+    case rejected
+    case expired
+    case changed
+    /// The Source or Core reports that the approval's session is gone. A card
+    /// stays on screen with an accurate explanation instead of degrading into a
+    /// permanently unapprovable "changed" request.
+    case unavailable
+    /// A pending request disappeared from the Host's pending list because
+    /// another device decided it. The card stays visible but is not actionable.
+    case resolvedElsewhere
+
+    /// Terminal states must survive a pending-only refresh. Core's approval
+    /// listing returns only pending requests, so replacing the local list with
+    /// that result would erase the card the user just decided.
+    var isTerminal: Bool { self != .pending }
+}
+
+struct Approval: Identifiable, Hashable, Sendable {
+    let approvalId: String
+    let sessionId: String
+    let toolName: String
+    let callId: String
+    let reason: String
+    let version: Int
+    let expiresAtUnixMs: Int64
+    let digestHex: String
+    var state: ApprovalState
+
+    var id: String { approvalId }
+
+    var expiresAt: Date { Date(timeIntervalSince1970: Double(expiresAtUnixMs) / 1000) }
+
+    var isActionable: Bool { state == .pending }
+}
+
+/// Identifies the exact approval variant the user reviewed. A decision is only
+/// submitted when both the version and digest still match this value.
+struct ApprovalReview: Hashable, Sendable {
+    let approvalId: String
+    let version: Int
+    let digestHex: String
+
+    init(approval: Approval) {
+        approvalId = approval.approvalId
+        version = approval.version
+        digestHex = approval.digestHex
+    }
+}
+
+// MARK: - Commands
+
+enum DeliveryChoice: String, Codable, CaseIterable, Sendable {
+    case send
+    case steer
+    case queue
+}
+
+enum CommandStatus: String, Codable, Sendable {
+    case accepted
+    case uncertain
+    case confirmed
+    case rejected
+    case cancelled
+}
+
+struct CommandReceipt: Identifiable, Hashable, Sendable {
+    let commandId: String
+    let requestId: String
+    var status: CommandStatus
+    let delivery: DeliveryChoice?
+    /// Committed conversation message id reported by Core, when it already
+    /// exists at receipt time. Used to reconcile the optimistic bubble with the
+    /// committed echo instead of rendering both.
+    var messageId: String? = nil
+    /// Delivery id reported by Core for idempotency-aware reconciliation.
+    var deliveryId: String? = nil
+
+    var id: String { commandId }
+}
+
+// MARK: - Diagnostics
+
+enum DiagnosticStageKind: String, Codable, Sendable {
+    case https
+    case mqtt
+}
+
+enum DiagnosticStageStatus: String, Codable, Sendable {
+    case ok
+    case failed
+    case idle
+}
+
+struct DiagnosticStage: Identifiable, Hashable, Sendable {
+    let hostId: String
+    let kind: DiagnosticStageKind
+    let status: DiagnosticStageStatus
+    let correlationId: String?
+    let failureCode: String?
+
+    var id: String { "\(hostId).\(kind.rawValue)" }
+}
+
+struct DiagnosticsReport: Hashable, Sendable {
+    var json: String
+    var redactionFields: [String]
+    var lastFailureCode: String?
+    var appVersion: String
+    var coreVersion: String
+    var stages: [DiagnosticStage]
+    var generatedAt: Date
+}
+
+// MARK: - Events
+
+enum AttemptOutcome: String, Codable, Sendable {
+    case completed
+    case cancelled
+    case failed
+}
+
+enum MessageEvent: Sendable {
+    case reset(messages: [ConversationMessage], approvals: [Approval])
+    case message(ConversationMessage)
+    case replace(message: ConversationMessage)
+    case preview(attemptId: String, text: String, replace: Bool, incomplete: Bool)
+    case attemptEnded(attemptId: String, outcome: AttemptOutcome)
+    case state(ConnectionStatus)
+    case connection(hostId: String, status: ConnectionStatus)
+    case capabilities(SessionCapabilities)
+    case approvals([Approval])
+    case approvalChanged(Approval)
+    case commandStatus(CommandReceipt)
+    case error(code: AppErrorCode, message: String)
+    case watchEnded(reason: String)
+}
+
+/// Envelope carrying the watch identity and ordering of a `MessageEvent`.
+/// Presentation models drop any event whose host/session no longer matches the
+/// active watch, or whose sequence is not newer than the last one applied.
+struct SessionEventEnvelope: Sendable {
+    let hostId: String
+    let sessionId: String
+    let sequence: Int
+    let event: MessageEvent
+}
+
+// MARK: - Errors
+
+enum AppErrorCode: String, CaseIterable, Codable, Sendable {
+    case invalidInvitation
+    case invitationExpired
+    case pairingDeclined
+    case fingerprintMismatch
+    case notPaired
+    case revoked
+    case hostOffline
+    case unavailable
+    case conflict
+    case timeout
+    case cancelled
+    case security
+    case internalError
+    case unsupportedDelivery
+    case staleApproval
+    case draftUnavailable
+    case integrationUnavailable
+    /// The Host speaks an incompatible protocol line. Recovery is an upgrade,
+    /// not a retry.
+    case protocolVersionIncompatible
+    /// The Host does not implement a capability this client requires.
+    case unsupportedCapability
+    /// The device Keychain is locked or unavailable (for example before the
+    /// first unlock after a reboot). Recoverable after unlocking; never a tight
+    /// retry loop.
+    case keychainUnavailable
+}
+
+struct SessionServiceError: Error, Equatable, LocalizedError, Sendable {
+    let code: AppErrorCode
+    let detail: String?
+
+    init(_ code: AppErrorCode, detail: String? = nil) {
+        self.code = code
+        self.detail = detail
+    }
+
+    var errorDescription: String? { L10nKey.errorKey(for: code).string }
+}

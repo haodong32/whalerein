@@ -260,7 +260,7 @@ def broker_control(tmp_path, request):
     policy_stub = None
     if request.node.path.name == "test_transport.py":
         case = getattr(request.node, "callspec", None)
-        if case is not None and case.params.get("case") == "node":
+        if case is not None and case.params.get("case") in ("node", "boundaries"):
             # The Node.js transport case has no Access process; the plugin's
             # deferred CONNECT callback is served by a loopback policy stub.
             policy_stub = start_connect_policy_stub()
@@ -331,6 +331,17 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
     else:
         value = Scenario(tmp_path, schema)
+    tls_marker = request.node.get_closest_marker("tls")
+    tls_broker = None
+    if not native and tls_marker is not None:
+        from tls_environment import TlsBroker, certificate
+
+        kind = tls_marker.args[0] if tls_marker.args else "server"
+        value.configure_tls(certificate(kind)["ca"])
+        tls_broker = TlsBroker(tmp_path / "tls-broker", cert=kind)
+    # Journey cases restart the case-owned broker or rotate the case TLS
+    # listener; expose the fixture instances without changing their lifecycle.
+    value.tls_broker = tls_broker
     if request.node.get_closest_marker("privacy_access_info_logging") is not None:
         config = value.config.read_text()
         assert config.count("log:\n  level: error") == 1
@@ -347,6 +358,7 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
             }
         )
         broker = shared_broker if shared_broker is not None else broker_control
+        value.broker = broker
         if native:
             # Access first: its internal callback endpoint must answer the
             # plugin's deferred CONNECT requests. Waiting for /readyz here
@@ -357,8 +369,11 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
             value.start_native()
         else:
             value.start_dsh()
+            if tls_broker is not None:
+                tls_broker.start()
+            else:
+                broker.ensure_started()
             value.start_access_process()
-            broker.ensure_started()
             value.wait_access_ready()
             value.start_plugin()
         yield value
@@ -369,6 +384,8 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         try:
             value.close()
         finally:
+            if tls_broker is not None:
+                tls_broker.close()
             subprocess.run(
                 [*command, f"DROP SCHEMA {schema} CASCADE"],
                 check=True,

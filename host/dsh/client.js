@@ -106,6 +106,23 @@ window.__ModuleLoader__.load({
       unavailable: 'WhaleRein is not loaded in this profile.',
       readOnly: 'This profile is read-only.',
       statusUnavailable: 'Connection status is temporarily unavailable. Check the settings below or try again.',
+      configurationInvalidTitle: 'Saved configuration is invalid',
+      configurationInvalidDetail: 'The host did not start: {field}{reason}. Fix the value below, save, then reload the plugin.',
+      configurationInvalidGeneric: 'The saved configuration could not be resolved. Fix the connection settings below, save, then reload the plugin.',
+      configurationInvalidField: 'the saved {field} value',
+      configurationInvalidReason: ' ({reason})',
+      externalChange: 'Settings changed in another window. Your unsaved draft is kept.',
+      loadSaved: 'Load saved values',
+      errorServerRequired: 'Enter a server address. Removing it requires a saved legacy MQTT URL.',
+      errorServerInvalid: 'Use a host name or IPv4 address without a scheme or port.',
+      errorPortInvalid: 'Use a whole number between 1 and 65535.',
+      errorHostIdInvalid: 'Use 1-128 letters, digits, dots, colons, underscores or hyphens.',
+      errorLogLevelInvalid: 'Choose one of the listed log levels.',
+      errorSaveConflict: 'Settings changed in another window. Your draft was kept; review it and save again.',
+      hostIdChange: 'Changing the host ID creates a new host identity. Paired devices must pair again and the host needs its provisioning token. Continue?',
+      pairingUriExpires: 'Expires {time}. One use.',
+      pairingUriExpired: 'This pairing link has expired. Generate a new one.',
+      pairingUriUnknownExpiry: 'One use.',
       refresh: 'Refresh',
       diagnostics: 'Runtime diagnostics',
       diagnosticsHint: 'Current host state. MQTT counters accumulate during this host run; unavailable values are shown as —.',
@@ -205,6 +222,23 @@ window.__ModuleLoader__.load({
       unavailable: '当前 profile 未加载 WhaleRein。',
       readOnly: '当前 profile 只读。',
       statusUnavailable: '暂时无法获取连接状态，请检查下方配置或重试。',
+      configurationInvalidTitle: '已保存的配置无效',
+      configurationInvalidDetail: '主机未能启动：{field}{reason}。请修正下方对应字段，保存后重新加载插件。',
+      configurationInvalidGeneric: '无法解析已保存的配置。请修正下方连接配置，保存后重新加载插件。',
+      configurationInvalidField: '已保存的 {field}',
+      configurationInvalidReason: '（{reason}）',
+      externalChange: '设置已在另一个窗口修改，你未保存的草稿已保留。',
+      loadSaved: '载入已保存的值',
+      errorServerRequired: '请输入服务器地址。清空服务器前，profile 中必须已保存旧版 MQTT 地址。',
+      errorServerInvalid: '请填写不含协议和端口的主机名或 IPv4 地址。',
+      errorPortInvalid: '请填写 1 到 65535 之间的整数。',
+      errorHostIdInvalid: '请使用 1-128 个字母、数字、点、冒号、下划线或连字符。',
+      errorLogLevelInvalid: '请选择列表中的日志级别。',
+      errorSaveConflict: '设置已在另一个窗口修改，你的草稿已保留，请检查后重新保存。',
+      hostIdChange: '修改主机 ID 会创建新的主机身份，已配对设备需要重新配对，并且主机需要重新配置 Token。是否继续？',
+      pairingUriExpires: '{time} 过期，只能使用一次。',
+      pairingUriExpired: '该配对链接已过期，请重新生成。',
+      pairingUriUnknownExpiry: '只能使用一次。',
       refresh: '刷新',
       diagnostics: '运行诊断',
       diagnosticsHint: '当前主机的运行状态。MQTT 计数在本次运行期间累计；无法获取的值显示为 —。',
@@ -261,7 +295,7 @@ window.__ModuleLoader__.load({
       // Button has no danger variant. Override its primary palette locally so
       // the official control still owns hover, focus and disabled behavior.
       revokeConfirm: { '--dsw-alias-button-primary-fill': 'var(--dsw-alias-state-error-primary)', '--dsw-alias-button-primary-hover': 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 88%, var(--dsw-alias-label-primary))', whiteSpace: 'nowrap', flexShrink: 0 },
-      fieldRow: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(180px, 240px)', alignItems: 'center', gap: '24px', padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
+      fieldRow: { display: 'grid', alignItems: 'center', gap: '24px', padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
       fieldCopy: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: '4px' },
       fieldTitle: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', fontSize: '14px', fontWeight: 400, lineHeight: '20px' },
       fieldSubtitle: { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', lineHeight: '18px' },
@@ -269,7 +303,7 @@ window.__ModuleLoader__.load({
       formActions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', paddingTop: '16px' },
       details: { borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: '16px' },
       form: { display: 'flex', flexDirection: 'column', gap: '16px', paddingTop: '12px' },
-      diagnosticRow: { display: 'grid', gridTemplateColumns: 'minmax(140px, 0.7fr) minmax(0, 1.3fr)', gap: '16px', padding: '8px 0', fontSize: '13px' },
+      diagnosticRow: { display: 'grid', gap: '16px', padding: '8px 0', fontSize: '13px' },
     }
 
     const css = `
@@ -281,6 +315,8 @@ window.__ModuleLoader__.load({
       @media (hover: hover) {
         .whalerein-settings .whalerein-select:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
       }
+      .whalerein-settings .whalerein-field-row { grid-template-columns: minmax(0, 1fr) minmax(180px, 240px); }
+      .whalerein-settings .whalerein-diagnostic-row { grid-template-columns: minmax(140px, 0.7fr) minmax(0, 1.3fr); }
       @media (max-width: 560px) {
         .whalerein-settings .whalerein-field-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
         .whalerein-settings .whalerein-field-control { justify-content: flex-start; }
@@ -315,9 +351,11 @@ window.__ModuleLoader__.load({
       return 'revokeFailed'
     }
 
-    function Field({ field, draft, t, onChange, secretSet, disabled, id, menuOpen, setMenuOpen }) {
+    function Field({ field, draft, t, onChange, secretSet, disabled, id, menuOpen, setMenuOpen, error }) {
       const label = t(field.label)
       const subtitleId = `${id}-subtitle`
+      const errorId = `${id}-error`
+      const describedBy = error ? `${subtitleId} ${errorId}` : subtitleId
       let control
       if (field.kind === 'select') {
         control = h(Menu, {
@@ -325,7 +363,7 @@ window.__ModuleLoader__.load({
           anchor: h(Button, {
             variant: 'ghost', size: 'md', className: 'whalerein-select', disabled,
             'aria-labelledby': `${id}-label ${id}-value`,
-            'aria-describedby': subtitleId,
+            'aria-describedby': describedBy,
             'aria-haspopup': 'menu', 'aria-expanded': menuOpen && !disabled,
             onClick: () => setMenuOpen((open) => !open),
           }, h('span', { id: `${id}-value` }, draft[field.key]), h(IconChevronDownOutlineRegular)),
@@ -337,7 +375,7 @@ window.__ModuleLoader__.load({
       } else {
         control = h(Input, {
           id, disabled, type: field.kind === 'password' ? 'password' : 'text',
-          className: 'whalerein-input', 'aria-label': label, 'aria-describedby': subtitleId,
+          className: 'whalerein-input', 'aria-label': label, 'aria-describedby': describedBy,
           value: draft[field.key] ?? '',
           placeholder: field.placeholder ? t(field.placeholder) : undefined,
           autoComplete: field.kind === 'password' ? 'new-password' : 'off',
@@ -351,7 +389,8 @@ window.__ModuleLoader__.load({
               ? h('span', { id: `${id}-label` }, label)
               : h('label', { htmlFor: id }, label),
             field.kind === 'password' ? h(Tag, { tone: secretSet ? 'neutral' : 'quiet' }, t(secretSet ? 'tokenConfigured' : 'tokenMissing')) : null),
-          h('p', { id: subtitleId, style: styles.fieldSubtitle }, t(field.subtitle))),
+          h('p', { id: subtitleId, style: styles.fieldSubtitle }, t(field.subtitle)),
+          error ? h('p', { id: errorId, style: styles.error, role: 'alert' }, error) : null),
         h('div', { style: styles.fieldControl, className: 'whalerein-field-control' }, control))
     }
 
@@ -381,20 +420,34 @@ window.__ModuleLoader__.load({
       return labels[String(value ?? '').trim().toLowerCase()] ?? ''
     }
 
-    function DeviceRow({ device, t, locale, confirming, revoking, error, onAsk, onCancel, onConfirm }) {
+    function DeviceRow({ device, t, locale, confirming, revoking, busy, autoFocus, id, error, onAsk, onCancel, onConfirm }) {
       const time = formatTime(device.pairedAt, locale)
       const name = String(device.displayName ?? '').trim()
-      const title = name || device.deviceId
+      // Two devices often share the default computer name. Always expose a
+      // short stable id in the heading so a revoke cannot target a same-named
+      // online device by mistake; the full id stays in the metadata line.
+      const tail = device.deviceId.slice(device.deviceId.lastIndexOf('-') + 1)
+      const shortId = tail.length >= 6 ? tail : device.deviceId.slice(-8)
+      const title = name ? `${name} · ${shortId}` : device.deviceId
       const os = osLabel(device.os)
       const identity = name ? h('span', { style: styles.deviceId }, device.deviceId) : null
       const status = h(Tag, { tone: device.connected ? 'success' : 'quiet' },
         h(StateDot, { state: device.connected ? 'done' : 'idle', size: 10 }),
         device.connected ? t('deviceConnected') : t('devicePaired'))
       const revokeControls = confirming
-        ? h('div', { style: styles.deviceActions },
-          h(Button, { variant: 'ghost', size: 'sm', disabled: revoking, onClick: onCancel }, t('revokeCancel')),
+        ? h('div', {
+          style: styles.deviceActions,
+          onKeyDown: (event) => {
+            if (event?.key === 'Escape' && !revoking) {
+              event.preventDefault?.()
+              onCancel()
+            }
+          },
+        },
+          h(Button, { variant: 'ghost', size: 'sm', disabled: revoking, autoFocus: true, onClick: onCancel }, t('revokeCancel')),
           h(Button, { variant: 'primary', size: 'sm', style: styles.revokeConfirm, disabled: revoking, onClick: onConfirm }, revoking ? t('revoking') : t('revokeConfirm')))
-        : h(Button, { variant: 'ghost', size: 'sm', style: styles.revokeAction, onClick: onAsk }, t('revoke'))
+        : h('span', { id, style: { display: 'contents' } },
+          h(Button, { variant: 'ghost', size: 'sm', style: styles.revokeAction, disabled: busy, autoFocus, onClick: onAsk }, t('revoke')))
       return h('li', { style: styles.deviceRow, className: 'whalerein-device-row' },
         h('div', { style: styles.deviceIcon }, h(IconLinkOutlineRegular, { size: 17 })),
         h('div', { style: styles.deviceMain },
@@ -457,7 +510,27 @@ window.__ModuleLoader__.load({
             h('dd', { style: { margin: 0, overflowWrap: 'anywhere' } }, value)))))
     }
 
-    function ConnectionCard({ t, snapshot, inviting, inviteError, pairingUri, copyFeedback, onGenerate, onCopy, onRefresh, titleId }) {
+    function formatExpiry(t, expiresAt, locale) {
+      if (!(expiresAt > 0)) return t('pairingUriUnknownExpiry')
+      const time = formatTime(expiresAt, locale)
+      return time ? t('pairingUriExpires', { time }) : t('pairingUriUnknownExpiry')
+    }
+
+    function ConfigurationError({ t, error }) {
+      if (!error) return null
+      const detail = error.field
+        ? t('configurationInvalidDetail', { field: t('configurationInvalidField', { field: error.field }), reason: error.reason ? t('configurationInvalidReason', { reason: error.reason }) : '' })
+        : t('configurationInvalidGeneric')
+      return h('section', { style: styles.statusCard, role: 'alert', 'aria-labelledby': 'whalerein-config-error-title' },
+        h('div', { style: styles.statusHeader },
+          h('span', { style: { ...styles.statusIcon, color: 'var(--dsw-alias-state-error-primary)' }, 'aria-hidden': true },
+            h(IconWarningOutlineRegular, { size: 20 })),
+          h('div', { style: styles.statusText },
+            h('h3', { id: 'whalerein-config-error-title', style: { ...styles.statusTitle, margin: 0 } }, t('configurationInvalidTitle')),
+            h('p', { style: { ...styles.statusHint, margin: 0 } }, detail))))
+    }
+
+    function ConnectionCard({ t, snapshot, inviting, inviteError, pairingUri, pairingExpiresAt, pairingExpired, locale, copyFeedback, onGenerate, onCopy, onRefresh, titleId }) {
       const connected = snapshot.connected === true
       const statusColor = connected ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)'
       return h('section', { style: styles.statusCard, 'aria-labelledby': titleId },
@@ -481,10 +554,40 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.connectionHeader },
             h('div', { style: styles.connectionCopy },
               h('p', { style: styles.codeLabel }, t('pairingUri')),
-              h('p', { style: styles.hint }, t('pairingUriHint'))),
-            h(Button, { variant: 'outline', size: 'sm', onClick: onCopy }, t('copyUri'))),
+              h('p', { style: { ...styles.hint, ...(pairingExpired ? styles.error : {}) } },
+                pairingExpired ? t('pairingUriExpired') : formatExpiry(t, pairingExpiresAt, locale))),
+            h(Button, { variant: 'outline', size: 'sm', disabled: pairingExpired, onClick: onCopy }, t('copyUri'))),
           h('code', { style: styles.code, 'aria-label': t('pairingUri') }, pairingUri),
           copyFeedback ? h('p', { style: copyFeedback === 'uriCopied' ? styles.success : styles.error, role: 'status' }, t(copyFeedback)) : null) : null)
+    }
+
+    function draftErrors(draft, { storedServer, legacyMqttUrl }) {
+      const errors = {}
+      const server = String(draft.server ?? '').trim()
+      if (server) {
+        if (!/^[A-Za-z0-9.-]{1,253}$/.test(server) || server.startsWith('.') || server.startsWith('-') ||
+            server.endsWith('.') || server.endsWith('-') || server.includes('..')) errors.server = 'errorServerInvalid'
+      } else if (storedServer && !legacyMqttUrl) {
+        errors.server = 'errorServerRequired'
+      }
+      for (const key of ['access_port', 'mqtt_port']) {
+        const value = String(draft[key] ?? '').trim()
+        if (value !== '' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) errors[key] = 'errorPortInvalid'
+      }
+      const hostId = String(draft.host_id ?? '').trim()
+      if (hostId && !/^[A-Za-z0-9_.:-]{1,128}$/.test(hostId)) errors.host_id = 'errorHostIdInvalid'
+      if (!['debug', 'info', 'warn', 'error', 'silent'].includes(String(draft.log_level ?? 'info'))) errors.log_level = 'errorLogLevelInvalid'
+      return errors
+    }
+
+    function confirmationHostIdChange(t) {
+      try {
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function') return window.confirm(t('hostIdChange'))
+      } catch {
+        // A blocked dialog must not silently rename the host.
+        return false
+      }
+      return true
     }
 
     function SettingsPage({ t, form, status, developerTools, locale, invite, revoke, secrets, testConnection }) {
@@ -504,8 +607,18 @@ window.__ModuleLoader__.load({
       const [revokeTarget, setRevokeTarget] = React.useState('')
       const [revoking, setRevoking] = React.useState(false)
       const [revokeError, setRevokeError] = React.useState({ id: '', key: '' })
+      const [revokeFocus, setRevokeFocus] = React.useState('')
       const [pairingUri, setPairingUri] = React.useState('')
+      const [pairingExpiresAt, setPairingExpiresAt] = React.useState(0)
       const [inviteError, setInviteError] = React.useState('')
+      const [fieldErrors, setFieldErrors] = React.useState({})
+      const [externalChange, setExternalChange] = React.useState(false)
+      const [, setExpiryTick] = React.useState(0)
+      const inviteInFlight = React.useRef(false)
+      const revokeInFlight = React.useRef(false)
+      const draftRef = React.useRef(draft)
+      const baselineRef = React.useRef(initialDraft(snapshot.value))
+      draftRef.current = draft
       const [statusSnapshot, setStatusSnapshot] = React.useState(() => status.getSnapshot())
       const [development, setDevelopment] = React.useState(() => developerTools.getSnapshot() === true)
       const [activeLocale, setActiveLocale] = React.useState(() => locale.getSnapshot().active)
@@ -525,15 +638,50 @@ window.__ModuleLoader__.load({
         setTestResult(null)
         let cancelled = false
         void secrets.refresh().then(() => {
-          if (!cancelled) setDraft(initialDraft(snapshot.value))
+          if (cancelled) return
+          const nextBaseline = initialDraft(snapshot.value)
+          const dirty = FIELDS.some((field) => draftRef.current[field.key] !== baselineRef.current[field.key])
+          baselineRef.current = nextBaseline
+          if (dirty) {
+            setExternalChange(true)
+          } else {
+            setDraft(nextBaseline)
+            setExternalChange(false)
+            setFieldErrors({})
+          }
         })
         return () => {
           cancelled = true
         }
       }, [snapshot.revision])
+      const dirty = FIELDS.some((field) => draft[field.key] !== initialDraft(snapshot.value)[field.key])
+      React.useEffect(() => {
+        if (!dirty || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        const guard = (event) => {
+          event.preventDefault()
+          event.returnValue = ''
+          return ''
+        }
+        window.addEventListener('beforeunload', guard)
+        return () => window.removeEventListener('beforeunload', guard)
+      }, [dirty])
+      React.useEffect(() => {
+        if (!pairingUri || !(pairingExpiresAt > 0)) return undefined
+        const remaining = pairingExpiresAt - Date.now()
+        if (remaining <= 0) return undefined
+        const timer = setTimeout(() => setExpiryTick((value) => value + 1), Math.min(remaining, 2147483647))
+        return () => clearTimeout(timer)
+      }, [pairingUri, pairingExpiresAt])
       React.useEffect(() => {
         setConfigurationOpen(!statusSnapshot.connected)
       }, [statusSnapshot.connected])
+      React.useEffect(() => {
+        if (!revokeFocus) return
+        if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return
+        const node = document.getElementById(`${fieldId}-revoke-${revokeFocus}`)
+        const trigger = node?.querySelector?.('button') ?? node
+        trigger?.focus?.()
+      }, [revokeFocus, fieldId])
 
       if (snapshot.status === 'loading') {
         return h('div', { style: styles.page, className: 'whalerein-settings' }, h('style', null, css), h('h2', { style: styles.title }, tr('title')), h('p', { style: styles.intro }, tr('loading')))
@@ -547,6 +695,12 @@ window.__ModuleLoader__.load({
         setTestResult(null)
         setSaved(false)
         setError('')
+        setFieldErrors((previous) => {
+          if (!(key in previous)) return previous
+          const next = { ...previous }
+          delete next[key]
+          return next
+        })
         setDraft((previous) => ({ ...previous, [key]: value }))
       }
       const runConnectionTest = async () => {
@@ -568,8 +722,10 @@ window.__ModuleLoader__.load({
           setTesting(false)
         }
       }
+      const pairingExpired = pairingUri !== '' && pairingExpiresAt > 0 && Date.now() >= pairingExpiresAt
       const copyUri = async () => {
         setCopyFeedback('')
+        if (pairingExpired) return
         try {
           const copied = pairingUri && await writeClipboard(pairingUri)
           setCopyFeedback(copied ? 'uriCopied' : 'copyFailed')
@@ -578,25 +734,34 @@ window.__ModuleLoader__.load({
         }
       }
       const generateLink = async () => {
+        // A double click must never mint two one-time invitations.
+        if (inviteInFlight.current) return
+        inviteInFlight.current = true
         setInviteError('')
         setPairingUri('')
+        setPairingExpiresAt(0)
         setCopyFeedback('')
         setInviting(true)
         try {
           const result = await invite()
           const uri = result?.ok ? result.value?.pairingUri : ''
           if (typeof uri === 'string' && uri.startsWith('whalerein://pair?')) {
+            const expiry = Number(result.value?.expiresAtUnixMs)
             setPairingUri(uri)
+            setPairingExpiresAt(Number.isSafeInteger(expiry) && expiry > 0 ? expiry : 0)
             return
           }
           setInviteError(inviteErrorKey(result?.error?.code))
         } catch (caught) {
           setInviteError(inviteErrorKey(caught?.code))
         } finally {
+          inviteInFlight.current = false
           setInviting(false)
         }
       }
       const confirmRevoke = async (deviceId) => {
+        if (revokeInFlight.current) return
+        revokeInFlight.current = true
         setRevokeError({ id: '', key: '' })
         setRevokeTarget(deviceId)
         setRevoking(true)
@@ -611,35 +776,62 @@ window.__ModuleLoader__.load({
         } catch (caught) {
           setRevokeError({ id: deviceId, key: revokeErrorKey(caught?.code) })
         } finally {
+          revokeInFlight.current = false
           setRevoking(false)
         }
       }
       const save = async () => {
-        if (!snapshot.writable || testing) return
+        if (!snapshot.writable || testing || saving) return
+        const storedServer = String(snapshot.user?.server ?? snapshot.base?.server ?? snapshot.value?.server ?? '').trim()
+        const legacyMqttUrl = String(snapshot.user?.mqtt_url ?? snapshot.base?.mqtt_url ?? '').trim()
+        const validation = draftErrors(draft, { storedServer, legacyMqttUrl })
+        if (Object.keys(validation).length) {
+          setFieldErrors(validation)
+          setError('')
+          setSaved(false)
+          return
+        }
+        setFieldErrors({})
+        const storedHostId = String(snapshot.user?.host_id ?? snapshot.base?.host_id ?? snapshot.value?.host_id ?? '').trim()
+        const nextHostId = String(draft.host_id ?? '').trim()
+        if (storedHostId && nextHostId && nextHostId !== storedHostId && !confirmationHostIdChange(tr)) return
         testVersion.current += 1
         setTestResult(null)
         setSaving(true)
         setError('')
         setSaved(false)
+        const revision = snapshot.revision
         try {
+          const baseline = initialDraft(snapshot.value)
+          const ops = []
           for (const field of FIELDS) {
             const key = field.key
             if (SECRET_FIELDS.has(key) && draft[key] === '') continue
-            if (key === 'host_id' && String(draft[key] ?? '').trim() === '') continue
-            const okay = draft[key] === '' ? await form.unset(key) : await form.set(key, draft[key])
-            if (!okay) {
-              setError(tr('saveFailed'))
-              return
-            }
+            if (key === 'host_id' && nextHostId === '') continue
+            if (draft[key] === baseline[key]) continue
+            ops.push(draft[key] === '' ? { op: 'unset', path: [key] } : { op: 'set', path: [key], value: draft[key] })
           }
           if (String(draft.server ?? '').trim() !== '') {
-            const clearedMqtt = await form.unset('mqtt_url')
-            const clearedAccess = await form.unset('access_url')
-            if (!clearedMqtt || !clearedAccess) {
-              setError(tr('saveFailed'))
-              return
+            // Saved server settings always clear legacy explicit endpoints.
+            ops.push({ op: 'unset', path: ['mqtt_url'] }, { op: 'unset', path: ['access_url'] })
+          }
+          let okay
+          if (typeof form.mutate === 'function') {
+            okay = await form.mutate(ops, revision)
+          } else {
+            // Older DSH releases lack atomic namespace writes; retained only
+            // for compatibility with a host that already exposes this page.
+            for (const op of ops) {
+              okay = op.op === 'unset' ? await form.unset(op.path[0]) : await form.set(op.path[0], op.value)
+              if (!okay) break
             }
           }
+          if (!okay) {
+            const changed = form.getSnapshot().revision !== revision
+            setError(tr(changed ? 'errorSaveConflict' : 'saveFailed'))
+            return
+          }
+          setExternalChange(false)
           setSaved(true)
         } catch {
           setError(tr('saveFailed'))
@@ -652,17 +844,34 @@ window.__ModuleLoader__.load({
       const baseline = initialDraft(snapshot.value)
       const primaryFields = FIELDS.filter((field) => !field.advanced)
       const advancedFields = FIELDS.filter((field) => field.advanced)
+      const configError = statusSnapshot.configError ?? null
 
       return h('div', { style: styles.page, className: 'whalerein-settings' },
         h('style', null, css),
         h('header', { style: styles.header },
           h('h2', { style: styles.title }, tr('title'))),
+        h(ConfigurationError, { t: tr, error: configError }),
         h(ConnectionCard, {
-          t: tr, snapshot: statusSnapshot, inviting, inviteError, pairingUri, copyFeedback,
+          t: tr, snapshot: statusSnapshot, inviting, inviteError, pairingUri, pairingExpiresAt,
+          pairingExpired, locale: activeLocale, copyFeedback,
           onGenerate: generateLink, onCopy: copyUri, onRefresh: () => status.refresh(),
           titleId: `${fieldId}-connection-title`,
         }),
-        h('section', { style: styles.section, 'aria-labelledby': 'whalerein-devices-title' },
+        !configError && externalChange ? h('section', { style: styles.section, role: 'status' },
+          h('p', { style: styles.hint }, tr('externalChange')),
+          h('div', { style: styles.formActions },
+            h(Button, {
+              variant: 'outline', size: 'sm',
+              onClick: () => {
+                const next = initialDraft(snapshot.value)
+                baselineRef.current = next
+                setDraft(next)
+                setExternalChange(false)
+                setFieldErrors({})
+                setSaved(false)
+              },
+            }, tr('loadSaved')))) : null,
+        !configError ? h('section', { style: styles.section, 'aria-labelledby': 'whalerein-devices-title' },
           h('div', { style: styles.sectionHeader },
             h('h3', { id: 'whalerein-devices-title', style: styles.sectionTitle }, tr('devices')),
             h(Tag, { tone: 'quiet' }, tr('deviceCount', { count: devices.length }))),
@@ -674,12 +883,15 @@ window.__ModuleLoader__.load({
               locale: activeLocale,
               confirming: revokeTarget === device.deviceId,
               revoking: revoking && revokeTarget === device.deviceId,
+              busy: revoking,
+              id: `${fieldId}-revoke-${device.deviceId}`,
+              autoFocus: revokeFocus === device.deviceId,
               error: revokeError.id === device.deviceId ? revokeError.key : '',
-              onAsk: () => { setRevokeTarget(device.deviceId); setRevokeError({ id: '', key: '' }) },
-              onCancel: () => { if (!revoking) setRevokeTarget('') },
+              onAsk: () => { if (revoking) return; setRevokeFocus(''); setRevokeTarget(device.deviceId); setRevokeError({ id: '', key: '' }) },
+              onCancel: () => { if (!revoking) { setRevokeTarget(''); setRevokeFocus(device.deviceId) } },
               onConfirm: () => confirmRevoke(device.deviceId),
             })))
-            : h('p', { style: styles.hint }, tr('noDevices'))),
+            : h('p', { style: styles.hint }, tr('noDevices'))) : null,
         h('section', { style: styles.details },
           h(DisclosureRow, {
             title: tr('configuration'), icon: h(IconSettingsOutlineRegular, { size: 16 }),
@@ -689,17 +901,17 @@ window.__ModuleLoader__.load({
             h('p', { style: styles.hint }, tr('configurationHint')),
             !snapshot.writable ? h('p', { style: styles.hint }, tr('readOnly')) : null,
             h('div', null,
-              primaryFields.map((field) => h(Field, { key: field.key, field, draft, t: tr, onChange: setField, secretSet: secrets.has(field.key), id: `${fieldId}-${field.key}`, disabled: saving || !snapshot.writable })),
+              primaryFields.map((field) => h(Field, { key: field.key, field, draft, t: tr, onChange: setField, secretSet: secrets.has(field.key), id: `${fieldId}-${field.key}`, disabled: saving || !snapshot.writable, error: fieldErrors[field.key] ? tr(fieldErrors[field.key]) : '' })),
               h(DisclosureRow, {
                 title: tr('advanced'), icon: h(IconSlidersTwoOutlineRegular, { size: 16 }),
                 open: advancedOpen, expandable: true, expandOnRowClick: true,
                 onToggle: () => { setMenuOpen(false); setAdvancedOpen((open) => !open) },
               }, h('div', { style: styles.form },
-                advancedFields.map((field) => h(Field, { key: field.key, field, draft, t: tr, onChange: setField, id: `${fieldId}-${field.key}`, menuOpen, setMenuOpen, disabled: saving || !snapshot.writable }))))),
+                advancedFields.map((field) => h(Field, { key: field.key, field, draft, t: tr, onChange: setField, id: `${fieldId}-${field.key}`, menuOpen, setMenuOpen, disabled: saving || !snapshot.writable, error: fieldErrors[field.key] ? tr(fieldErrors[field.key]) : '' }))))),
             // The official form has a fixed footer; compose official buttons
             // here so saving and testing share one accessible action row.
             h('div', { style: styles.formActions },
-              h(Button, { variant: 'primary', size: 'sm', disabled: saving || testing || !snapshot.writable || !FIELDS.some((field) => draft[field.key] !== baseline[field.key]), onClick: save }, saving ? tr('saving') : tr('save')),
+              h(Button, { variant: 'primary', size: 'sm', disabled: saving || testing || !snapshot.writable || !dirty, onClick: save }, saving ? tr('saving') : tr('save')),
               h(Button, { variant: 'outline', size: 'sm', disabled: saving || testing, onClick: runConnectionTest }, testing ? tr('testingConnection') : tr('testConnection'))),
             testing ? h('p', { style: styles.hint, role: 'status' }, tr('testingConnection')) : null,
             testResult ? h(ConnectionTestResult, { t: tr, result: testResult, connected: statusSnapshot.connected }) : null,
@@ -778,12 +990,15 @@ window.__ModuleLoader__.load({
                 pairingCode: typeof result.value.pairingCode === 'string' ? result.value.pairingCode : '',
                 devices: Array.isArray(result.value.devices) ? result.value.devices : [],
                 diagnostics: result.value.diagnostics ?? null,
+                configError: result.value.configError ?? null,
               })
             } else {
-              publish({ ...snapshot, available: false, connected: false, pairingCode: '', devices: [] })
+              // A transient read failure must not look like every device was
+              // unpaired; keep the last known list and mark status unavailable.
+              publish({ ...snapshot, available: false })
             }
           } catch {
-            if (!disposed) publish({ ...snapshot, available: false, connected: false, pairingCode: '', devices: [] })
+            if (!disposed) publish({ ...snapshot, available: false })
           } finally {
             running = false
             if (queued && !disposed) {

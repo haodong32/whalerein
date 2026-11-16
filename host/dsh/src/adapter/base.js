@@ -91,7 +91,7 @@ export class DshAdapter extends SourceAdapter {
       return {command_accepted:{message_id:result?.messageId??'', delivery_id:result?.deliveryId??''}}
     }
     if (command.select_session_model) {
-      const receipt = await this.selectSessionModel(sessionId, command.select_session_model)
+      const receipt = await this.selectSessionModel(sessionId, command.select_session_model, context)
       return { model_selection_receipt: receipt }
     }
     if (command.update_pending_queue) return this.updatePendingQueue(sessionId, command.update_pending_queue, context)
@@ -130,6 +130,12 @@ export class DshAdapter extends SourceAdapter {
     const id=event.approval?.sessionId
     if(this.opened&&id)this.#publish(id,{session:{session_id:id},state_changed:true})
   }
+  // Publish one terminal Attempt frame for a turn interrupted before the
+  // source supplied its own end frame.
+  publishInterruptedAttempt(sessionId, options = {}) {
+    for (const update of this.conversation.interrupt(sessionId, options)) this.#publish(sessionId, update)
+  }
+
   observeNative(event) {
     if(!this.opened)return
     if(event.ephemeral){this.#publish(event.sessionId,this.conversation.notification(event));return}

@@ -13,13 +13,15 @@ import (
 )
 
 var (
-	errRouteNotFound = errors.New("route not found")
-	errMethod        = errors.New("method not allowed")
-	errInvalidBody   = errors.New("invalid request body")
-	errBodyTooLarge  = errors.New("request body too large")
-	errMissingAuth   = errors.New("missing bearer token")
-	errInternalToken = errors.New("invalid internal callback token")
-	errPanic         = errors.New("handler panic")
+	errRouteNotFound        = errors.New("route not found")
+	errMethod               = errors.New("method not allowed")
+	errInvalidBody          = errors.New("invalid request body")
+	errInvalidPagination    = errors.New("invalid pagination parameters")
+	errUnsupportedMediaType = errors.New("unsupported content type")
+	errBodyTooLarge         = errors.New("request body too large")
+	errMissingAuth          = errors.New("missing bearer token")
+	errInternalToken        = errors.New("invalid internal callback token")
+	errPanic                = errors.New("handler panic")
 )
 
 type errorInfo struct {
@@ -29,6 +31,13 @@ type errorInfo struct {
 }
 
 func classify(err error) errorInfo {
+	var enumErr *whalereinv1.UnknownEnumError
+	if errors.As(err, &enumErr) {
+		// The field name is schema-defined. The submitted enum name or value is
+		// client input and is deliberately not echoed.
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible,
+			"protocol version incompatible: unsupported value for " + enumErr.Field}
+	}
 	switch {
 	case err == nil:
 		return errorInfo{status: http.StatusOK, code: whalereinv1.ErrorCode_error_code_unspecified}
@@ -37,16 +46,26 @@ func classify(err error) errorInfo {
 	case errors.Is(err, errMethod):
 		return errorInfo{http.StatusMethodNotAllowed, whalereinv1.ErrorCode_invalid_argument, "method not allowed"}
 	case errors.Is(err, errBodyTooLarge):
-		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_invalid_argument, "request body too large"}
+		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "request body too large"}
+	case errors.Is(err, errUnsupportedMediaType):
+		return errorInfo{http.StatusUnsupportedMediaType, whalereinv1.ErrorCode_invalid_argument, "content type must be application/json"}
+	case errors.Is(err, errInvalidPagination):
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid pagination parameters; limit is 1-500 and offset is 0-1000000"}
 	case errors.Is(err, errInvalidBody):
-		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid request body"}
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "request body is not valid JSON for this endpoint"}
 	case errors.Is(err, errMissingAuth), errors.Is(err, auth.ErrUnauthorized), errors.Is(err, pairing.ErrUnauthorized), errors.Is(err, errInternalToken):
 		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized"}
 	case errors.Is(err, auth.ErrForbidden), errors.Is(err, pairing.ErrHostRejected):
 		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden"}
 	case errors.Is(err, errAuthorizationExpired):
 		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "authorization expired"}
-	case errors.Is(err, errAuthorizationRefused), errors.Is(err, errExternalNotConfigured):
+	case errors.Is(err, errExternalNotConfigured):
+		// The route exists in every build, so a deployment that did not enable
+		// external account mode answers with an explicit capability error
+		// instead of a 404 that looks like a mistyped path.
+		return errorInfo{http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability,
+			"external account mode is not configured on this Access deployment"}
+	case errors.Is(err, errAuthorizationRefused):
 		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization refused"}
 	case errors.Is(err, errOperationConflict):
 		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "operation conflict"}

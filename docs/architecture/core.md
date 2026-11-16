@@ -81,11 +81,41 @@ Committed changes and cursors update atomically. Snapshot pages stage separately
 and replace a complete view only on successful completion. Source branch/reset
 failures request a new snapshot without deleting pairing or the previous cache.
 
+Session listings have one order for remote and cache-only views: most recently
+updated first, then session identity, so an offline list does not jump when the
+Host reconnects. A complete remote listing replaces the cached rows for that
+Host, and deleted or archived sessions disappear from the offline view. An
+explicit `sessions --host` accepts only a locally authorized Host identity; an
+unknown or unpinned Host is `not_found`, never a reason to pair again, and two
+disagreeing explicit Host scopes are a conflict.
+
 Watching subscribes MQTT before registering a source Watch and synchronizing its
 fixed history cut. A bounded background pump continues processing receipts during
 HTTP history reads. Channel/watch replacement rejects old updates. RefreshWatch
 reconciles the source history head and current state every five seconds; a lost
 final notification can therefore recover without subsequent event traffic.
+A cold-cache snapshot is committed locally without being reported as new output;
+only changes after the synchronized cut and later live updates are delivered.
+An explicit `sync` remains the way to read and count committed history, so
+`tail --once` does not exit on the oldest replayed message; it forces a fresh
+snapshot and reports the complete committed count even when the cursor is
+current.
+A reconnect or a `BatchOutcome::Gap` recovers the missed committed messages and
+delivers each unseen message identity exactly once, deduplicated against what
+this viewer already printed. The same dedupe prevents a replayed batch or a
+snapshot that overlaps live output from printing a message twice.
+One device profile owns one active watch. The watch holds an OS-released profile
+lease, so a second `tail` fails deterministically with `conflict` instead of
+silently replacing the first subscription; `send`, `wait` and other commands do
+not take that lease.
+
+Interrupt follows an accepted stop to its terminal receipt, as send does. An
+accepted stop without terminal confirmation is reported as unknown, and a
+terminal failure as an error; neither claims that the Agent stopped. An
+interrupted attempt end is visible tail output, so `tail --once` reports the
+stop instead of timing out with no output. Fork
+reports the confirmed child working directory, or an explicit reason why that
+second read failed, while keeping the successful fork identity.
 
 Core delivers typed ViewUpdates to consumers. Only committed changes enter the
 cache; provisional text never advances a history cursor. The conversation reducer
@@ -182,3 +212,28 @@ limit; freed pages are reused. Session summaries and durable command recovery
 metadata are separate and are not discarded by history eviction. Offline cached
 messages may therefore be unavailable for an evicted view; online access reloads
 an authoritative snapshot.
+
+Conversation drafts are an additive cache table scoped by explicit
+`(host_id, session_id)`. Draft text is sealed with the profile cache key and
+AEAD associated data binding the schema and both identities before it reaches
+SQLite; the database and `SecretStore` never hold draft plaintext. Empty text
+deletes the row, the accepted size is bounded at 256 KiB, and the profile must
+be paired. Confirmed revocation and explicit forget delete the cache file, so
+they remove drafts and their key with the rest of the local conversation store.
+
+`diagnostics_preview()` renders the same local, redacted evidence as
+`export_diagnostics` without writing a file or opening a channel. It keeps the
+existing policy of redacting Host identities to ordinal labels and exposes only
+the last failure code, while including schema/version, the Access address class
+already present in doctor output, command counts, connection state and metrics.
+Message content, tool parameters, drafts, credentials, invitation tokens and
+private keys are excluded.
+
+
+A cache is rebuildable local state; pairing lives in configuration and the
+`SecretStore`. A missing or replaced cache key and a non-SQLite cache file are
+quarantined and rebuilt automatically without changing the paired identity. A
+busy cache or a cache written by a newer schema is refused with `cache_error`
+instead of being destroyed, so a downgrade cannot silently discard newer
+storage. The last recovery reason is recorded in `cache-recovery.json` and is
+readable through `Core::cache_recovery_reason` without opening the cache.

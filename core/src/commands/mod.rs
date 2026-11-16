@@ -251,7 +251,7 @@ impl CommandService {
             Some("") => {
                 return Err(CoreError::InvalidInput(
                     "command identity is required".into(),
-                ))
+                ));
             }
             Some(value) => value.to_owned(),
             None => random_id(16),
@@ -396,7 +396,7 @@ impl CommandService {
                             return Err(CoreError::StaleCommand {
                                 request_id: request_id.clone(),
                                 command_id: command_id.clone(),
-                            })
+                            });
                         }
                         Err(CoreError::UnknownResult)
                             if status == DomainStatus::HostAccepted
@@ -488,7 +488,7 @@ impl CommandService {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
                 Ok(result) => {
-                    return self.handle_from_command_result(request_id, command_id, &result)
+                    return self.handle_from_command_result(request_id, command_id, &result);
                 }
                 Err(CoreError::UnknownResult) if attempt < 49 => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -501,7 +501,7 @@ impl CommandService {
                             | CoreError::Security(_)
                     ) || error.device_authorization_lost() =>
                 {
-                    return Err(error)
+                    return Err(error);
                 }
                 // A failure of the observation is not a rejection of the
                 // already-admitted original control; keep its identity pending.
@@ -546,8 +546,18 @@ impl CommandService {
     }
 
     /// Decode the terminal payload carried by a `CommandResult`.
+    ///
+    /// A non-empty result payload must carry exactly one known
+    /// `ResponsePayload` variant; an unknown oneof is a protocol violation. A
+    /// bodyless result is legitimate for control commands without a typed
+    /// response (queue edit, interrupt, approval decision), and typed lifecycle
+    /// receipts are validated by the caller that knows the expected kind.
     pub fn decode_command_result(result: &CommandResult) -> CoreResult<Option<ResponsePayload>> {
         if result.result_payload.is_empty() {
+            // Bodyless results are legitimate: queue edits, interrupt and
+            // approval decisions succeed without a response variant. Typed
+            // lifecycle receipts are validated by the caller that knows the
+            // expected command kind.
             return Ok(None);
         }
         let payload = ResponsePayload::decode(result.result_payload.as_slice())
@@ -555,6 +565,11 @@ impl CommandService {
         if payload.error_code != 0 {
             return Err(response_error(&payload));
         }
+        // A known status with no known payload variant means a newer peer sent
+        // a variant this build cannot render; reject it instead of reporting an
+        // empty success.
+        whalerein_proto::required_oneof(payload.payload.as_ref(), "ResponsePayload")
+            .map_err(crate::api::wire_error)?;
         Ok(Some(payload))
     }
 
@@ -726,7 +741,7 @@ impl CommandService {
                     return Err(SubmitFailure {
                         error: error.into(),
                         definitely_unsent: false,
-                    })
+                    });
                 }
             }
         }
@@ -834,6 +849,8 @@ fn decrypt_response_raw(
     Ok(payload)
 }
 
+/// A successful `CommandResult` with no payload is a protocol violation, with
+/// the shared actionable `invalid_argument` text.
 fn response_error(payload: &ResponsePayload) -> CoreError {
     let code = ErrorCode::try_from(payload.error_code).ok();
     let mut message = payload.error_detail.replace(['\n', '\r'], " ");
@@ -1909,7 +1926,12 @@ mod tests {
             let mut result = CommandResult {
                 found: true,
                 status: OnlineStatus::Succeeded as i32,
-                result_payload: vec![],
+                // A valid but non-lifecycle variant: the recovered result
+                // cannot prove the recorded command kind.
+                result_payload: response(whalerein_proto::response_payload::Payload::Pong(
+                    Default::default(),
+                ))
+                .encode_to_vec(),
                 error_code: 0,
             };
             assert!(matches!(
@@ -2053,19 +2075,84 @@ mod tests {
         assert!(CommandService::decode_command_result(&result)
             .unwrap()
             .is_some());
-        let empty = CommandResult {
-            found: true,
-            ..Default::default()
-        };
-        assert!(CommandService::decode_command_result(&empty)
-            .unwrap()
-            .is_none());
         let bad = CommandResult {
             found: true,
+            status: OnlineStatus::Succeeded as i32,
             result_payload: b"garbage".to_vec(),
             ..Default::default()
         };
         assert!(CommandService::decode_command_result(&bad).is_err());
+    }
+
+    #[test]
+    fn a_successful_command_result_requires_a_known_payload_variant() {
+        // A bodyless success is valid for control commands that have no typed
+        // response (queue edit, interrupt, approval decision).
+        let success_empty = CommandResult {
+            found: true,
+            status: OnlineStatus::Succeeded as i32,
+            result_payload: Vec::new(),
+            error_code: 0,
+        };
+        assert!(CommandService::decode_command_result(&success_empty)
+            .unwrap()
+            .is_none());
+
+        // A non-empty payload with no known oneof is a newer/unknown variant:
+        // reject it instead of reporting an empty success. Field 99 is unknown
+        // to this schema but is a valid protobuf field, so it decodes to a
+        // payload with no known variant.
+        let unknown_variant = CommandResult {
+            found: true,
+            status: OnlineStatus::Succeeded as i32,
+            result_payload: vec![0x98, 0x06, 0x01],
+            error_code: 0,
+        };
+        let error = CommandService::decode_command_result(&unknown_variant).unwrap_err();
+        assert_eq!(error.code(), "invalid_argument");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("protocol version"),
+            "the error must name the version check: {error}"
+        );
+
+        // A genuinely bodyless negative status stays valid: the status itself
+        // proves the failure and there is no typed result to decode.
+        for status in [
+            OnlineStatus::Failed,
+            OnlineStatus::Rejected,
+            OnlineStatus::HostOffline,
+        ] {
+            let failed_empty = CommandResult {
+                found: true,
+                status: status as i32,
+                result_payload: Vec::new(),
+                error_code: 0,
+            };
+            assert!(
+                CommandService::decode_command_result(&failed_empty)
+                    .unwrap()
+                    .is_none(),
+                "{status:?}"
+            );
+        }
+
+        // An unknown oneof is skipped by prost and decodes to no variant; it
+        // must fail rather than look like an empty success.
+        let unknown_oneof = CommandResult {
+            found: true,
+            status: OnlineStatus::Succeeded as i32,
+            // Field 9999, varint 1: a variant this build does not know.
+            result_payload: vec![0xF8, 0xF1, 0x04, 0x01],
+            error_code: 0,
+        };
+        let error = CommandService::decode_command_result(&unknown_oneof).unwrap_err();
+        assert_eq!(error.code(), "invalid_argument");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("ResponsePayload"),
+            "the error must name the payload type: {error}"
+        );
     }
 
     #[test]

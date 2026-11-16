@@ -43,6 +43,7 @@ ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY core core
 COPY apps/cli apps/cli
+COPY apps/mobile-bindings apps/mobile-bindings
 COPY proto/v1/whalerein.proto proto/v1/whalerein.proto
 COPY proto/v1/bindings/rust proto/v1/bindings/rust
 COPY tools/noise-peer tools/noise-peer
@@ -117,7 +118,7 @@ FROM postgres AS runtime
 USER root
 COPY --from=python /usr/local /usr/local
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
-RUN apt-get update && apt-get install -y --no-install-recommends libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 chromium libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir pytest==9.2.0
 COPY --from=rust-build /usr/local/bin/protoc /usr/local/bin/protoc
 COPY --from=rust-build /usr/local/include/google /usr/local/include/google
@@ -128,6 +129,7 @@ RUN ldconfig && test -x /usr/local/sbin/mosquitto && test -f /usr/local/lib/mosq
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=native-tools /opt/native /opt/native
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+ENV WHALEREIN_CHROMIUM_PATH=/usr/bin/chromium
 ENV PATH=/opt/native/node_modules/.bin:$PATH
 RUN node /opt/native/node_modules/playwright/cli.js install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
@@ -144,6 +146,8 @@ COPY --from=rust-build /out/mqtt_transport_driver target/debug/examples/mqtt_tra
 COPY --from=rust-build /out/delivery_budget_driver target/debug/examples/delivery_budget_driver
 COPY --from=rust-build /out/wait_concurrency_driver target/debug/examples/wait_concurrency_driver
 COPY proto/v1 proto/v1
+COPY access/internal/auth/testdata access/internal/auth/testdata
+COPY apps/mobile-bindings/swift apps/mobile-bindings/swift
 COPY tests/integration tests/integration
 COPY tests/fixtures tests/fixtures
 COPY --from=rust-build /out/whalerein-noise-peer tests/integration/drivers/noise/rust-peer/target/debug/whalerein-noise-peer

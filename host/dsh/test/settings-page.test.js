@@ -150,6 +150,7 @@ function savedSecrets() {
 
 async function createSettingsRuntime({ connected = true, development = false, remoteFailure = false, describe = savedSecrets, writable = true } = {}) {
   const writes = []
+  let currentRemoteFailure = remoteFailure
   const disposers = []
   const registered = []
   const developerListeners = new Set()
@@ -162,7 +163,7 @@ async function createSettingsRuntime({ connected = true, development = false, re
     ok: true,
     value: {
       pairingUri: 'whalerein://pair?v=1&host=host-real&token=once',
-      expiresAtUnixMs: 1700000000000,
+      expiresAtUnixMs: Date.now() + 600_000,
       fingerprint: 'abcd ef01 2345 6789',
     },
   }
@@ -178,31 +179,44 @@ async function createSettingsRuntime({ connected = true, development = false, re
       { deviceId: 'device-laptop', fingerprint: 'f2', pairedAt: 1700000001000, connected: false },
     ],
   }
+  let formSnapshot = {
+    status: 'ready',
+    value: {
+      mqtt_url: 'mqtt://127.0.0.1:1883',
+      host_id: 'host-real',
+      host_token: 'hidden',
+      ca_file: '',
+      state_dir: '/tmp/whalerein',
+      adapter: 'real',
+      log_level: 'debug',
+      allow_insecure_mqtt: true,
+    },
+    user: { mqtt_url: 'mqtt://127.0.0.1:1883' },
+    base: {},
+    writable,
+    revision: 3,
+  }
+  let mutateResult = true
+  const mutations = []
+  const formListeners = new Set()
   const form = {
-    getSnapshot: () => ({
-      status: 'ready',
-      value: {
-        mqtt_url: 'mqtt://127.0.0.1:1883',
-        host_id: 'host-real',
-        host_token: 'hidden',
-        ca_file: '',
-        state_dir: '/tmp/whalerein',
-        adapter: 'real',
-        log_level: 'debug',
-        allow_insecure_mqtt: true,
-      },
-      user: { mqtt_url: 'mqtt://127.0.0.1:1883' },
-      base: {},
-      writable,
-      revision: 3,
-    }),
-    subscribe: () => () => {},
+    getSnapshot: () => formSnapshot,
+    subscribe(listener) {
+      formListeners.add(listener)
+      return () => formListeners.delete(listener)
+    },
     set: async (key, value) => {
       writes.push(['set', key, value])
       return true
     },
     unset: async (key) => {
       writes.push(['unset', key])
+      return true
+    },
+    mutate: async (ops, revision) => {
+      mutations.push({ ops, revision })
+      if (mutateResult !== true) return false
+      for (const op of ops) writes.push(op.op === 'set' ? ['set', op.path[0], op.value] : ['unset', op.path[0]])
       return true
     },
   }
@@ -222,7 +236,7 @@ async function createSettingsRuntime({ connected = true, development = false, re
       return async () => {}
     },
     whalerein: {
-      snapshot: async () => remoteFailure
+      snapshot: async () => currentRemoteFailure
         ? { ok: false, error: { code: 'gateway/internal' } }
         : { ok: true, value: currentStatus },
       invite: async () => {
@@ -319,6 +333,14 @@ async function createSettingsRuntime({ connected = true, development = false, re
     async refresh() {
       await injected.status.refresh()
     },
+    mutations,
+    setMutateResult(value) { mutateResult = value },
+    setFormSnapshot(value) {
+      formSnapshot = value
+      for (const listener of formListeners) listener()
+    },
+    setRemoteFailure(value) { currentRemoteFailure = value },
+    statusStore: injected.status,
     setDevelopment(value) {
       developerMode = value
       for (const listener of developerListeners) listener()
@@ -633,10 +655,7 @@ test('when developer mode is enabled, diagnostics appear and configuration stays
     assert.ok(runtime.writes.some(([op, key, value]) => op === 'set' && key === 'server' && value === 'access.example'))
     assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'mqtt_url'))
     assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'access_url'))
-    assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'access_port'))
-    assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'mqtt_port'))
-    assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'ca_file'))
-    assert.ok(runtime.writes.some(([op, key, value]) => op === 'set' && key === 'log_level' && value === 'debug'))
+    assert.equal(runtime.writes.some(([op, key]) => op === 'unset' && ['access_port', 'mqtt_port', 'ca_file'].includes(key)), false)
     assert.equal(runtime.writes.some(([, key]) => ['adapter', 'state_dir', 'allow_insecure_mqtt', 'admin_token'].includes(key)), false)
     assert.ok(runtime.writes.every(([, key, value]) => key !== 'host_token' && key !== 'admin_token' && value !== SECRET_MASK))
 
@@ -952,6 +971,468 @@ test('when remote status loading fails, settings keeps configuration open and of
     const retry = find(tree, (node) => node.type === UI.Button && text(node) === '刷新')
     assert.ok(retry)
     await retry.props.onClick()
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+const saveButton = (runtime) => find(runtime.render(), (node) => node.type === UI.Button && text(node) === '保存修改')
+const field = (runtime, label) => find(runtime.render(), (node) => node.type === UI.Input && node.props['aria-label'] === label)
+const deviceRow = (runtime, id) => find(runtime.render(), (node) => node.type === 'li' && text(node).includes(id))
+
+test('clearing the server without a legacy MQTT URL is blocked per field instead of saving an unstartable profile', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setFormSnapshot({
+      status: 'ready',
+      value: { server: 'access.example', mqtt_url: 'mqtts://access.example:8883', access_url: 'https://access.example', host_id: 'host-real', host_token: 'hidden', log_level: 'info' },
+      user: { server: 'access.example' }, base: {}, writable: true, revision: 4,
+    })
+    runtime.render()
+    await runtime.settle()
+    const server = field(runtime, '服务器')
+    server.props.onChange({ target: { value: '' } })
+    await saveButton(runtime).props.onClick()
+    assert.deepEqual(runtime.mutations, [])
+    assert.deepEqual(runtime.writes, [])
+    const tree = runtime.render()
+    assert.match(text(tree), /请输入服务器地址/)
+    const invalid = find(tree, (node) => node.props?.['aria-describedby']?.includes('server-error') && node.type === UI.Input)
+    assert.ok(invalid)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('saving writes every changed field in one atomic mutation at the revision the draft was read from', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    field(runtime, '服务器').props.onChange({ target: { value: 'access.example' } })
+    field(runtime, '服务端口').props.onChange({ target: { value: '8443' } })
+    await saveButton(runtime).props.onClick()
+    assert.equal(runtime.mutations.length, 1)
+    assert.equal(runtime.mutations[0].revision, 3)
+    const ops = runtime.mutations[0].ops
+    assert.ok(ops.some((op) => op.op === 'set' && op.path[0] === 'server' && op.value === 'access.example'))
+    assert.ok(ops.some((op) => op.op === 'set' && op.path[0] === 'access_port' && op.value === '8443'))
+    assert.ok(ops.some((op) => op.op === 'unset' && op.path[0] === 'mqtt_url'))
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a rejected atomic save keeps the draft and distinguishes a concurrent revision change', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    field(runtime, '服务器').props.onChange({ target: { value: 'draft.example' } })
+    runtime.form.mutate = async () => { runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), revision: 9 }); return false }
+    await saveButton(runtime).props.onClick()
+    assert.match(text(runtime.render()), /设置已在另一个窗口修改/)
+    assert.equal(field(runtime, '服务器').props.value, 'draft.example')
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('an external revision keeps a dirty draft, offers the saved values, and guards the unload', async () => {
+  const runtime = await createSettingsRuntime()
+  const listeners = new Map()
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = { ...originalWindow,
+      addEventListener: (name, handler) => listeners.set(name, handler),
+      removeEventListener: (name) => listeners.delete(name) }
+    runtime.render()
+    await runtime.settle()
+    field(runtime, '服务器').props.onChange({ target: { value: 'typed.example' } })
+    runtime.render()
+    assert.ok(listeners.has('beforeunload'))
+    let prevented = false
+    listeners.get('beforeunload')({ preventDefault() { prevented = true }, returnValue: '' })
+    assert.equal(prevented, true)
+
+    runtime.setFormSnapshot({
+      status: 'ready',
+      value: { server: 'saved.example', mqtt_url: 'mqtts://saved.example:8883', host_id: 'host-real', host_token: 'hidden', log_level: 'debug' },
+      user: { server: 'saved.example' }, base: {}, writable: true, revision: 5,
+    })
+    runtime.render()
+    await runtime.settle()
+    runtime.render()
+    assert.equal(field(runtime, '服务器').props.value, 'typed.example')
+    assert.match(text(runtime.render()), /设置已在另一个窗口修改/)
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '载入已保存的值').props.onClick()
+    assert.equal(field(runtime, '服务器').props.value, 'saved.example')
+    assert.doesNotMatch(text(runtime.render()), /设置已在另一个窗口修改/)
+    assert.equal(listeners.has('beforeunload'), false)
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('changing the host ID requires explicit confirmation because it creates a new host identity', async () => {
+  const runtime = await createSettingsRuntime()
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = { ...originalWindow, confirm: () => false }
+    runtime.render()
+    await runtime.settle()
+    field(runtime, '主机 ID').props.onChange({ target: { value: 'renamed-host' } })
+    await saveButton(runtime).props.onClick()
+    assert.deepEqual(runtime.writes, [])
+    globalThis.window = { ...originalWindow, confirm: () => true }
+    await saveButton(runtime).props.onClick()
+    assert.ok(runtime.writes.some(([op, key, value]) => op === 'set' && key === 'host_id' && value === 'renamed-host'))
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('an expired pairing link keeps its expiry and disables copying with a clear reason', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setInvite({ ok: true, value: { pairingUri: 'whalerein://pair?v=1&host=host-real&token=once', expiresAtUnixMs: Date.now() - 1000, fingerprint: 'f' } })
+    runtime.render()
+    await runtime.settle()
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '生成配对链接').props.onClick()
+    const tree = runtime.render()
+    assert.match(text(tree), /该配对链接已过期/)
+    assert.doesNotMatch(text(tree), /已复制配对链接/)
+    const copy = find(tree, (node) => node.type === UI.Button && text(node) === '复制配对链接')
+    assert.equal(copy.props.disabled, true)
+    const copied = []
+    const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async (value) => copied.push(value) } } })
+    try {
+      await copy.props.onClick()
+      assert.deepEqual(copied, [])
+    } finally {
+      if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+      else delete globalThis.navigator
+    }
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('one revoke runs at a time and a second row cannot retarget the in-flight confirmation', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    let finish
+    runtime.remote.whalerein.revoke = (deviceId) => { runtime.revoked.push(deviceId); return new Promise((resolve) => { finish = resolve }) }
+    runtime.render()
+    await runtime.settle()
+    const phone = deviceRow(runtime, 'device-phone')
+    await find(phone, (node) => node.type === UI.Button && text(node) === '撤销配对').props.onClick()
+    const confirmButton = find(deviceRow(runtime, 'device-phone'), (node) => node.type === UI.Button && text(node) === '确认撤销')
+    const pending = confirmButton.props.onClick()
+    const laptopAsk = find(deviceRow(runtime, 'device-laptop'), (node) => node.type === UI.Button && text(node) === '撤销配对')
+    assert.equal(laptopAsk.props.disabled, true)
+    await laptopAsk.props.onClick()
+    assert.match(text(deviceRow(runtime, 'device-phone')), /正在撤销/)
+    await confirmButton.props.onClick()
+    assert.deepEqual(runtime.revoked, ['device-phone'])
+    finish({ ok: true, value: { deviceId: 'device-phone' } })
+    await pending
+    await runtime.settle()
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a double click on generate pairing link requests only one one-time invitation', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    let calls = 0
+    let finish
+    runtime.remote.whalerein.invite = () => { calls += 1; return new Promise((resolve) => { finish = resolve }) }
+    runtime.render()
+    await runtime.settle()
+    const generate = find(runtime.render(), (node) => node.type === UI.Button && text(node) === '生成配对链接')
+    const first = generate.props.onClick()
+    const second = generate.props.onClick()
+    finish({ ok: true, value: { pairingUri: 'whalerein://pair?v=1&host=host-real&token=once', expiresAtUnixMs: Date.now() + 60_000 } })
+    await Promise.all([first, second])
+    await runtime.settle()
+    assert.equal(calls, 1)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('one failed status poll keeps the last known device list instead of showing an empty host', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    runtime.render()
+    assert.match(text(runtime.render()), /device-phone/)
+    runtime.setRemoteFailure(true)
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.match(text(tree), /暂时无法获取连接状态/)
+    assert.match(text(tree), /device-phone/)
+    assert.match(text(tree), /device-laptop/)
+    runtime.setRemoteFailure(false)
+    await runtime.refresh()
+    assert.match(text(runtime.render()), /device-phone/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('revocation confirmation is keyboard reachable and Escape cancels it with focus returned', async () => {
+  const runtime = await createSettingsRuntime()
+  const focused = []
+  const originalDocument = globalThis.document
+  try {
+    globalThis.document = { getElementById: (id) => ({ focus: () => focused.push(id) }) }
+    runtime.render()
+    await runtime.settle()
+    await find(deviceRow(runtime, 'device-phone'), (node) => node.type === UI.Button && text(node) === '撤销配对').props.onClick()
+    const tree = runtime.render()
+    const cancel = find(tree, (node) => node.type === UI.Button && text(node) === '取消')
+    assert.equal(cancel.props.autoFocus, true)
+    const confirm = find(tree, (node) => node.type === UI.Button && text(node) === '确认撤销')
+    assert.equal(confirm.props.autoFocus, undefined)
+    const actions = find(tree, (node) => typeof node.props?.onKeyDown === 'function')
+    assert.ok(actions)
+    actions.props.onKeyDown({ key: 'Escape', preventDefault() {} })
+    const after = runtime.render()
+    assert.equal(find(after, (node) => node.type === UI.Button && text(node) === '确认撤销'), undefined)
+    const ask = find(deviceRow(runtime, 'device-phone'), (node) => node.type === UI.Button && text(node) === '撤销配对')
+    assert.equal(ask.props.autoFocus, true)
+    assert.ok(focused.some((id) => id.endsWith('-revoke-device-phone')), 'focus returned to the revoke trigger')
+  } finally {
+    globalThis.document = originalDocument
+    await runtime.dispose()
+  }
+})
+
+test('the settings layout declares a narrow single-column layout and uses theme variables only', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    const css = text(find(runtime.render(), (node) => node.type === 'style'))
+    assert.match(css, /@media \(max-width: 560px\)/)
+    assert.match(css, /whalerein-field-row \{ grid-template-columns: minmax\(0, 1fr\)/)
+    assert.match(css, /whalerein-diagnostic-row \{ grid-template-columns: minmax\(0, 1fr\)/)
+    assert.match(css, /var\(--dsw-alias-/)
+    assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|\brgba?\(/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('advanced ports and CA bundle save and clear atomically', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setFormSnapshot({
+      status: 'ready',
+      value: { server: 'access.example', mqtt_url: 'mqtts://access.example:8883', access_url: 'https://access.example', host_id: 'host-real', host_token: 'hidden', access_port: '8443', mqtt_port: '8884', ca_file: '/etc/ca.pem', log_level: 'info' },
+      user: { server: 'access.example', access_port: '8443', mqtt_port: '8884', ca_file: '/etc/ca.pem' }, base: {}, writable: true, revision: 6,
+    })
+    runtime.render()
+    await runtime.settle()
+    const ca = find(runtime.render(), (node) => node.type === UI.Input && node.props['aria-label'] === 'CA 证书路径')
+    assert.equal(ca.props.value, '/etc/ca.pem')
+    ca.props.onChange({ target: { value: '' } })
+    await saveButton(runtime).props.onClick()
+    assert.ok(runtime.mutations[0].ops.some((op) => op.op === 'unset' && op.path[0] === 'ca_file'))
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('every network failure class has a short actionable settings message', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    const cases = [
+      ['dns', /无法解析服务器地址/],
+      ['refused', /连接被拒绝/],
+      ['timeout', /连接超时/],
+      ['tls', /证书或 TLS 验证失败/],
+      ['network', /网络连接失败/],
+    ]
+    for (const [code, message] of cases) {
+      runtime.remote.whalerein.testConnection = async () => ({ ok: true, value: {
+        configuration: { ok: true }, access: { ok: true }, mqtt: { ok: false, code }, running: 'not_checked',
+      } })
+      await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '测试连接').props.onClick()
+      const rendered = text(runtime.render())
+      assert.match(rendered, message)
+      assert.doesNotMatch(rendered, /private|stack/)
+    }
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('an invalid stored configuration explains the field and does not claim zero paired devices', async () => {
+  const runtime = await createSettingsRuntime({ connected: false })
+  try {
+    runtime.setStatus({
+      available: false, connected: false, hostId: '', pairingCode: '', devices: [],
+      configError: { code: 'invalid_config', field: 'mqtt_url', reason: 'mqtt_url is required' },
+    })
+    runtime.render()
+    await runtime.settle()
+    const tree = runtime.render()
+    const rendered = text(tree)
+    assert.match(rendered, /已保存的配置无效/)
+    assert.match(rendered, /mqtt_url/)
+    assert.match(rendered, /mqtt_url is required/)
+    assert.doesNotMatch(rendered, /暂无已配对设备/)
+    assert.equal(find(tree, (node) => node.props?.id === 'whalerein-devices-title'), undefined)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a pairing link without an expiry stays copyable and reports unknown lifetime', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setInvite({ ok: true, value: { pairingUri: 'whalerein://pair?v=1&host=host-real&token=once', expiresAtUnixMs: 0 } })
+    runtime.render()
+    await runtime.settle()
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '生成配对链接').props.onClick()
+    const tree = runtime.render()
+    assert.match(text(tree), /只能使用一次/)
+    assert.equal(find(tree, (node) => node.type === UI.Button && text(node) === '复制配对链接').props.disabled, false)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('an invitation result that is not a pairing URI is reported without rendering it', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setInvite({ ok: true, value: { pairingUri: 'https://private.example/token', expiresAtUnixMs: Date.now() + 1000 } })
+    runtime.render()
+    await runtime.settle()
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '生成配对链接').props.onClick()
+    const rendered = text(runtime.render())
+    assert.match(rendered, /暂时无法生成配对链接/)
+    assert.doesNotMatch(rendered, /private\.example/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a clipboard rejection keeps the link visible and reports a copy failure', async () => {
+  const runtime = await createSettingsRuntime()
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  try {
+    runtime.render()
+    await runtime.settle()
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '生成配对链接').props.onClick()
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async () => { throw new Error('denied') } } } })
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '复制配对链接').props.onClick()
+    const rendered = text(runtime.render())
+    assert.match(rendered, /无法复制链接/)
+    assert.match(rendered, /whalerein:\/\/pair\?/)
+  } finally {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+    await runtime.dispose()
+  }
+})
+
+test('a host without atomic mutate support still saves changed fields in order', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    delete runtime.form.mutate
+    field(runtime, '服务器').props.onChange({ target: { value: 'access.example' } })
+    await saveButton(runtime).props.onClick()
+    assert.ok(runtime.writes.some(([op, key, value]) => op === 'set' && key === 'server' && value === 'access.example'))
+    assert.ok(runtime.writes.some(([op, key]) => op === 'unset' && key === 'mqtt_url'))
+    assert.match(text(runtime.render()), /设置已保存/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a blocked confirmation dialog never renames the host', async () => {
+  const runtime = await createSettingsRuntime()
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = { ...originalWindow, confirm: () => { throw new Error('blocked') } }
+    runtime.render()
+    await runtime.settle()
+    field(runtime, '主机 ID').props.onChange({ target: { value: 'renamed-host' } })
+    await saveButton(runtime).props.onClick()
+    assert.deepEqual(runtime.writes, [])
+    assert.equal(field(runtime, '主机 ID').props.value, 'renamed-host')
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('a busy or unavailable test service is reported in one sentence without protocol names', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.render()
+    await runtime.settle()
+    runtime.remote.whalerein.testConnection = async () => ({ ok: true, value: { configuration: { ok: false, code: 'busy' } } })
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '测试连接').props.onClick()
+    assert.match(text(runtime.render()), /测试过于频繁/)
+    runtime.remote.whalerein.testConnection = async () => ({ ok: false, error: { code: 'gateway/service-unavailable' } })
+    await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '测试连接').props.onClick()
+    assert.match(text(runtime.render()), /测试接口尚未就绪/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('two devices with the same display name keep distinct short-id headings', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      devices: [
+        { deviceId: 'device-alpha1111', displayName: 'MacBook Air', pairedAt: Date.now(), connected: true },
+        { deviceId: 'device-bravo2222', displayName: 'MacBook Air', pairedAt: Date.now(), connected: false },
+      ],
+    })
+    await runtime.refresh()
+    const alpha = deviceRow(runtime, 'device-alpha1111')
+    const bravo = deviceRow(runtime, 'device-bravo2222')
+    assert.match(text(alpha), /MacBook Air · alpha1111/)
+    assert.match(text(bravo), /MacBook Air · bravo2222/)
+    assert.notEqual(text(alpha), text(bravo))
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('unknown device OS labels, invalid pairing times and missing optional metadata stay out of the row', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      devices: [
+        { deviceId: 'device-unknown', os: 'plan9', pairedAt: 'not-a-time', connected: false },
+        { deviceId: 'device-linux', os: 'linux', pairedAt: Date.now(), connected: false },
+      ],
+    })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.match(text(tree), /device-unknown/)
+    assert.match(text(tree), /device-linux/)
+    assert.match(text(tree), /Linux/)
+    assert.doesNotMatch(text(tree), /plan9|not-a-time/)
   } finally {
     await runtime.dispose()
   }

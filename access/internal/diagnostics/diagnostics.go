@@ -10,10 +10,20 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
+
+// MaxRedactedLength bounds a redacted diagnostic message so one malformed
+// backend error cannot flood a log line.
+const MaxRedactedLength = 512
+
+// sqlLiteral matches a quoted SQL string literal. Backend errors sometimes
+// embed parameter values that way; the content is replaced before logging.
+var sqlLiteral = regexp.MustCompile(`'(?:[^']|'')*'`)
 
 // Masker produces process-local salted identifiers for logs. The salt is
 // random on every process start, so identifiers cannot be correlated across
@@ -55,6 +65,34 @@ func (m *Masker) Device(id string) string { return m.id("d", id) }
 
 // Request returns the salted diagnostic id for a request identifier.
 func (m *Masker) Request(id string) string { return m.id("r", id) }
+
+// Redact replaces every known raw identifier in text with its salted form,
+// removes control characters (so a crafted value cannot forge log lines) and
+// bounds the result. Unknown content is preserved for diagnosis.
+func (m *Masker) Redact(text string, replacements map[string]string) string {
+	for raw, masked := range replacements {
+		if raw == "" || masked == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, raw, masked)
+	}
+	text = sqlLiteral.ReplaceAllString(text, "'?'")
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+	if len(cleaned) > MaxRedactedLength {
+		if runes := []rune(cleaned); len(runes) > MaxRedactedLength {
+			cleaned = string(runes[:MaxRedactedLength]) + "…"
+		}
+	}
+	return cleaned
+}
 
 // NewLogger returns a JSON structured logger at the configured level.
 func NewLogger(level string, w io.Writer) *slog.Logger {
@@ -148,6 +186,25 @@ func (r *Readiness) ReadyHandler() http.Handler {
 			"checks": failures,
 		})
 	})
+}
+
+// DatabaseHealth is the durable-state check used by readiness. Ping alone
+// cannot distinguish a writable primary from a read-only replica or an
+// exhausted pool, so readiness also requires a bounded write probe.
+type DatabaseHealth interface {
+	Ping(context.Context) error
+	WriteProbe(context.Context) error
+}
+
+// DatabaseReadiness returns the readiness check for durable state. A database
+// that answers Ping but rejects a write keeps the instance out of rotation.
+func DatabaseReadiness(db DatabaseHealth) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if err := db.Ping(ctx); err != nil {
+			return err
+		}
+		return db.WriteProbe(ctx)
+	}
 }
 
 // WithTraceID carries only the ephemeral operation ID across internal services.

@@ -34,7 +34,7 @@ broker:
 line:
   # Broker policy validity sent with each update. Must exceed heartbeat_interval.
   policy_ttl: 10s
-  reconcile_interval: 30s
+  reconcile_interval: 10s
   heartbeat_interval: 5s
   operation_timeout: 5s
 
@@ -73,7 +73,7 @@ revocation:
   ack_timeout: 10s
 
 presence:
-  cache_ttl: 15s
+  cache_ttl: 45s
 
 cleanup:
   interval: 1m

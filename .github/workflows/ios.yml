@@ -1,0 +1,325 @@
+name: iOS
+
+# Cost tiers:
+# - pull request: build once, then the Unit plan plus a small UI smoke selection.
+# - merge queue, main push, nightly, and a manual "full" dispatch: the complete
+#   UI plan. A merge queue would run it once per queued entry instead of once
+#   per push, so a long UI job cannot be cancelled by the next commit. This
+#   personal repository cannot enable that ruleset yet, but the merge_group
+#   tier is already wired for when it can.
+
+on:
+  # No path filter: the `iOS gate` check is required on main, so every PR
+  # revision must receive a conclusion. The changes job below decides whether
+  # the heavy jobs run.
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/ios/**"
+      - "apps/mobile-bindings/**"
+      - "core/**"
+      - "proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ios.yml"
+      - ".github/actions/select-ios-simulator/**"
+  schedule:
+    # 02:47 Asia/Shanghai, before the 03:17 full-integration sweep.
+    - cron: '47 18 * * *'
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Which plan to verify: the unit plan, a UI smoke selection, or the full UI plan.'
+        type: choice
+        options: [full, smoke, unit]
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  # A pull request cancels its own superseded run; queued, main and scheduled
+  # tiers never cancel so a completed entry can report its own result.
+  group: ios-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect iOS-facing changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      build: ${{ steps.diff.outputs.build }}
+      ios: ${{ steps.diff.outputs.ios }}
+    steps:
+      - name: Check out the merge revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Compare the tested revision
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request|merge_group)
+              changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --) ;;
+            *)
+              # Main, scheduled and manual runs always verify the full tier.
+              changed=$'apps/ios/app\n' ;;
+          esac
+          build=false
+          ios=false
+          if printf '%s\n' "$changed" | grep -qE '^(apps/ios/|apps/mobile-bindings/|core/|proto/|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/(workflows/ios\.yml|actions/select-ios-simulator/))'; then
+            build=true
+          fi
+          if printf '%s\n' "$changed" | grep -qE '^(apps/ios/|\.github/(workflows/ios\.yml|actions/select-ios-simulator/))'; then
+            ios=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "ios=$ios" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: iOS build
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+
+      - name: Set up Rust iOS targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          rustc --version
+
+      - name: Install protoc for the bindings build
+        run: brew install protobuf
+
+      - name: Cache Rust dependencies and iOS builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-ios-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Build Rust XCFramework and Swift bindings
+        run: bash apps/mobile-bindings/scripts/build-xcframework.sh
+
+      - name: Select an available iPhone simulator
+        id: simulator
+        uses: ./.github/actions/select-ios-simulator
+
+      - name: Build testable products
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project apps/ios/WhaleRein.xcodeproj \
+            -scheme WhaleRein \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}"
+
+      - name: Upload testable products
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-products
+          path: ${{ runner.temp }}/DerivedData/Build/Products
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 3
+
+  unit:
+    name: iOS unit plan
+    needs: [changes, build]
+    if: needs.build.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select an available iPhone simulator
+        id: simulator
+        uses: ./.github/actions/select-ios-simulator
+      - name: Download testable products
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ios-products
+          path: ${{ runner.temp }}/Products
+      - name: Run the unit plan
+        run: |
+          set -euo pipefail
+          xctestrun=$(find "$RUNNER_TEMP/Products" -maxdepth 1 -name 'WhaleRein_Unit_*.xctestrun' -print -quit)
+          test -n "$xctestrun"
+          xcodebuild test-without-building \
+            -xctestrun "$xctestrun" \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
+            -resultBundlePath "$RUNNER_TEMP/Unit.xcresult"
+      - name: Upload unit result bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/Unit.xcresult
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  smoke:
+    name: iOS UI smoke
+    needs: [changes, build]
+    if: >-
+      needs.build.result == 'success' &&
+      ((github.event_name == 'pull_request' && needs.changes.outputs.ios == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke'))
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select an available iPhone simulator
+        id: simulator
+        uses: ./.github/actions/select-ios-simulator
+      - name: Download testable products
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ios-products
+          path: ${{ runner.temp }}/Products
+      - name: Run the UI smoke selection
+        run: |
+          set -euo pipefail
+          xctestrun=$(find "$RUNNER_TEMP/Products" -maxdepth 1 -name 'WhaleRein_UI_*.xctestrun' -print -quit)
+          test -n "$xctestrun"
+          xcodebuild test-without-building \
+            -xctestrun "$xctestrun" \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
+            -only-testing:WhaleReinUITests/NavigationAndConversationUITests/testPairingToConversation \
+            -only-testing:WhaleReinUITests/NavigationAndConversationUITests/testSendWhileIdleAndWhileRunning \
+            -only-testing:WhaleReinUITests/ApprovalUITests/testAllowOnceUpdatesOriginalCard \
+            -only-testing:WhaleReinUITests/LifecycleAndRecoveryUITests/testRemoteRevocationBlocksConversationAndPairsAgain \
+            -only-testing:WhaleReinUITests/LifecycleAndRecoveryUITests/testWatchEndedDisablesSendAndReconnects \
+            -only-testing:WhaleReinUITests/AdaptiveLayoutUITests/testLandscapeShowsSidebarAndSwitchesConversation \
+            -resultBundlePath "$RUNNER_TEMP/Smoke.xcresult"
+      - name: Upload smoke result bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/Smoke.xcresult
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  full:
+    name: iOS full UI plan
+    needs: [changes, build]
+    if: >-
+      needs.build.result == 'success' &&
+      ((github.event_name == 'merge_group' && needs.changes.outputs.build == 'true') ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full'))
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select an available iPhone simulator
+        id: simulator
+        uses: ./.github/actions/select-ios-simulator
+      - name: Download testable products
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ios-products
+          path: ${{ runner.temp }}/Products
+      - name: Run the full UI plan
+        run: |
+          set -euo pipefail
+          xctestrun=$(find "$RUNNER_TEMP/Products" -maxdepth 1 -name 'WhaleRein_UI_*.xctestrun' -print -quit)
+          test -n "$xctestrun"
+          xcodebuild test-without-building \
+            -xctestrun "$xctestrun" \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
+            -resultBundlePath "$RUNNER_TEMP/UI.xcresult"
+      - name: Upload full UI result bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/UI.xcresult
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  gate:
+    name: iOS gate
+    if: always() && !cancelled()
+    needs: [changes, build, unit, smoke, full]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check required results
+        env:
+          EVENT: ${{ github.event_name }}
+          SUITE: ${{ github.event.inputs.suite || 'full' }}
+          IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          FULL_RESULT: ${{ needs.full.result }}
+        run: |
+          set -euo pipefail
+          # A revision with no iOS-facing build input skips every heavy job and
+          # still passes the required gate.
+          if [ "$BUILD_REQUIRED" != 'true' ]; then
+            test "$BUILD_RESULT" = skipped
+            test "$UNIT_RESULT" = skipped
+            test "$SMOKE_RESULT" = skipped
+            test "$FULL_RESULT" = skipped
+            exit 0
+          fi
+          test "$BUILD_RESULT" = success
+          test "$UNIT_RESULT" = success
+          case "$EVENT" in
+            pull_request)
+              if [ "$IOS_CHANGED" = 'true' ]; then
+                test "$SMOKE_RESULT" = success
+              else
+                test "$SMOKE_RESULT" = skipped
+              fi
+              test "$FULL_RESULT" = skipped
+              ;;
+            workflow_dispatch)
+              case "$SUITE" in
+                unit)  test "$SMOKE_RESULT" = skipped; test "$FULL_RESULT" = skipped ;;
+                smoke) test "$SMOKE_RESULT" = success; test "$FULL_RESULT" = skipped ;;
+                *)     test "$SMOKE_RESULT" = skipped; test "$FULL_RESULT" = success ;;
+              esac
+              ;;
+            *)
+              test "$SMOKE_RESULT" = skipped
+              test "$FULL_RESULT" = success
+              ;;
+          esac

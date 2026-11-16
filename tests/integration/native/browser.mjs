@@ -13,7 +13,7 @@ let httpStatus
 const browserErrors = []
 const consoleErrors = []
 try {
-  browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] })
+  browser = await chromium.launch({ headless: true, executablePath: process.env.WHALEREIN_CHROMIUM_PATH || undefined, args: ['--no-sandbox', '--disable-dev-shm-usage'] })
   const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1280, height: 900 } })
   page = await context.newPage()
   page.on('pageerror', error => browserErrors.push({ kind: error.name, modules: [...error.message.matchAll(/@deepseek-ai\/[a-z0-9-]+/g)].map(match => match[0]) }))
@@ -109,6 +109,115 @@ try {
       stage = 'revoke-confirm'
       await panel.getByRole('button', { name: /Revoke this device|确认撤销/ }).click()
       await panel.getByText(/No paired devices yet|还没有已配对设备|暂无已配对设备/).waitFor()
+    } else if (input.action === 'settings-advanced') {
+      stage = 'advanced-open'
+      await panel.getByRole('button', { name: /^Advanced$|^高级配置$/ }).click()
+      const servicePort = panel.getByRole('textbox', { name: /^Service port$|^服务端口$/ })
+      const transportPort = panel.getByRole('textbox', { name: /^Transport port$|^传输端口$/ })
+      const caBundle = panel.getByRole('textbox', { name: /^CA bundle$|^CA 证书路径$/ })
+      await servicePort.waitFor(); await transportPort.waitFor(); await caBundle.waitFor()
+      stage = 'advanced-values'
+      await servicePort.fill('8443')
+      await transportPort.fill('8884')
+      await caBundle.fill('/etc/whalerein/missing-ca.pem')
+      assert.equal(await servicePort.inputValue(), '8443')
+      assert.equal(await transportPort.inputValue(), '8884')
+      assert.equal(await caBundle.inputValue(), '/etc/whalerein/missing-ca.pem')
+      stage = 'network-failure'
+      // Keep the draft otherwise valid: a missing CA path would fail the
+      // configuration stage before DNS is ever attempted.
+      await caBundle.fill('')
+      await server.fill('no-such-host.invalid')
+      await panel.getByRole('button', { name: /Test connection|测试连接/ }).click()
+      await panel.getByText(/Hostname could not be resolved|Network connection failed|无法解析服务器地址|网络连接失败/).first().waitFor()
+      const failureText = await panel.innerText()
+      assert(!/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|MQTT URL|mqtt:\/\//.test(failureText))
+      await server.fill('')
+    } else if (input.action === 'settings-layout') {
+      stage = 'narrow-layout'
+      await page.setViewportSize({ width: 390, height: 844 })
+      const narrow = await page.evaluate(() => {
+        const panel = document.querySelector('.whalerein-settings')
+        return {
+          scrollWidth: document.documentElement.scrollWidth,
+          innerWidth: window.innerWidth,
+          panelRight: panel.getBoundingClientRect().right,
+          panelScrollWidth: panel.scrollWidth,
+          panelClientWidth: panel.clientWidth,
+          media: window.matchMedia('(max-width: 560px)').matches,
+        }
+      })
+      assert(narrow.scrollWidth <= narrow.innerWidth + 1, 'document must not overflow at 390px')
+      assert(narrow.panelRight <= 391, 'WhaleRein panel must fit the narrow viewport')
+      assert(narrow.panelScrollWidth <= narrow.panelClientWidth + 1, 'panel must not scroll horizontally')
+      const fieldRows = panel.locator('.whalerein-field-row')
+      if ((await fieldRows.count()) === 0) {
+        // The settings hub may restore a collapsed disclosure; open it so the
+        // layout assertions observe real field rows rather than an empty panel.
+        await panel.getByRole('button', { name: /^Connection settings$|^连接配置$/ }).click()
+      }
+      await expect(fieldRows.first()).toBeVisible({ timeout: 15000 })
+      const fieldRow = fieldRows.first()
+      const columns = await fieldRow.evaluate((element) => getComputedStyle(element).gridTemplateColumns)
+      assert.equal(
+        columns.trim().split(/\s+/).length,
+        1,
+        `field rows collapse to one column (innerWidth=${narrow.innerWidth}, media=${narrow.media}, columns=${columns})`,
+      )
+      stage = 'theme-dark'
+      const colors = () => page.evaluate(() => {
+        const panel = document.querySelector('.whalerein-settings')
+        const root = getComputedStyle(document.documentElement)
+        return {
+          panelColor: getComputedStyle(panel).color,
+          background: getComputedStyle(document.body).backgroundColor,
+          alias: root.getPropertyValue('--dsw-alias-bg-base').trim(),
+          scheme: root.colorScheme,
+        }
+      })
+      await page.emulateMedia({ colorScheme: 'dark' })
+      await page.waitForTimeout(250)
+      const dark = await colors()
+      await page.emulateMedia({ colorScheme: 'light' })
+      await page.waitForTimeout(250)
+      const light = await colors()
+      assert(dark.panelColor !== light.panelColor || dark.background !== light.background || dark.alias !== light.alias,
+        `theme tokens did not change: dark=${JSON.stringify(dark)} light=${JSON.stringify(light)}`)
+      stage = 'keyboard-disclosure'
+      await page.setViewportSize({ width: 1280, height: 900 })
+      const connection = panel.getByRole('button', { name: /^Connection settings$|^连接配置$/ })
+      await expect(connection).toHaveAttribute('aria-expanded', 'true')
+      await connection.focus()
+      await page.keyboard.press('Enter')
+      await expect(connection).toHaveAttribute('aria-expanded', 'false')
+      await page.keyboard.press('Enter')
+      await expect(connection).toHaveAttribute('aria-expanded', 'true')
+      stage = 'keyboard-advanced-menu'
+      const advanced = panel.getByRole('button', { name: /^Advanced$|^高级配置$/ })
+      await expect(advanced).toHaveAttribute('aria-expanded', 'false')
+      await advanced.focus()
+      await page.keyboard.press('Enter')
+      await expect(advanced).toHaveAttribute('aria-expanded', 'true')
+      const menu = panel.locator('button[aria-haspopup="menu"]')
+      await menu.focus()
+      await page.keyboard.press('Enter')
+      await page.getByRole('menuitem').first().waitFor()
+      await page.keyboard.press('Escape')
+      await expect(menu).toHaveAttribute('aria-expanded', 'false')
+      stage = 'keyboard-revoke'
+      if (input.deviceId) {
+        const revoke = panel.getByRole('button', { name: /Revoke pairing|撤销配对/ }).first()
+        await revoke.focus()
+        await page.keyboard.press('Enter')
+        const cancel = panel.getByRole('button', { name: /^Cancel$|^取消$/ })
+        await cancel.waitFor()
+        const cancelFocused = await page.evaluate(() => /Cancel|取消/.test(document.activeElement?.textContent ?? ''))
+        assert(cancelFocused, 'revoke confirmation must focus its first control')
+        await page.keyboard.press('Escape')
+        await expect(cancel).toHaveCount(0)
+        const triggerFocused = await page.evaluate(() => /Revoke pairing|撤销配对/.test(document.activeElement?.textContent ?? ''))
+        assert(triggerFocused, 'focus must return to the revoke trigger after cancellation')
+      }
     } else {
       throw new Error('unknown fixture action')
     }
@@ -116,11 +225,12 @@ try {
   stage = 'browser-health'
   assert.equal(browserErrors.length, 0)
   process.stdout.write(JSON.stringify({ ok: true, stage: 'complete' }))
-} catch {
-  const diagnostics = page ? { httpStatus, buttons: await page.getByRole('button').count(),
+} catch (error) {
+  const diagnostics = page ? { detail: String(error?.message ?? error).slice(0, 400), httpStatus, buttons: await page.getByRole('button').count(),
     sessionRow: input.sessionId ? await page.locator(`[data-row-key="session:${input.sessionId}"]`).count() : undefined,
     treeRows: await page.getByRole('treeitem').count(),
     workspaceRows: await page.locator('[data-row-key^="workspace:"]').count(),
+    fieldRows: await page.locator('.whalerein-field-row').count(),
     passwordFields: await page.locator('input[type=password]').count(),
     whalereinPanels: await page.locator('.whalerein-settings').count(),
     settingsSlot: await page.locator('[data-slot="sidebar.settings"]').count(),

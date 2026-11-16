@@ -189,6 +189,13 @@ pub fn mqtt_url_from_env() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Environment variables are process-global; mutate them serially.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     fn config(_dir: &Path) -> PersistedConfig {
         PersistedConfig::new(
             "https://access.test".into(),
@@ -274,7 +281,45 @@ mod tests {
     }
 
     #[test]
+    fn data_directory_environment_edge_cases_keep_the_documented_precedence() {
+        let _guard = serial();
+        let previous = std::env::var("WHALEREIN_DATA_DIR").ok();
+        // An empty value means "unset", not "current directory".
+        std::env::set_var("WHALEREIN_DATA_DIR", "");
+        let default = default_data_dir();
+        assert!(!default.as_os_str().is_empty());
+        assert_ne!(default, PathBuf::from(""));
+        // A relative override is preserved verbatim; the CLI resolves nothing.
+        std::env::set_var("WHALEREIN_DATA_DIR", "relative/profile");
+        assert_eq!(default_data_dir(), PathBuf::from("relative/profile"));
+        // A path with a trailing separator is kept as written.
+        std::env::set_var("WHALEREIN_DATA_DIR", "/tmp/profile/");
+        assert_eq!(default_data_dir(), PathBuf::from("/tmp/profile/"));
+        match previous {
+            Some(previous) => std::env::set_var("WHALEREIN_DATA_DIR", previous),
+            None => std::env::remove_var("WHALEREIN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_ca_file_is_reported_by_the_caller() {
+        let _guard = serial();
+        let previous = std::env::var("WHALEREIN_CA_FILE").ok();
+        std::env::set_var("WHALEREIN_CA_FILE", "/definitely/not/a/ca.pem");
+        // Core's accessor stays an Option so startup validation owns the error;
+        // the CLI rejects it as invalid_configuration before any command runs.
+        assert!(ca_pem_from_env().is_none());
+        std::env::set_var("WHALEREIN_CA_FILE", "");
+        assert!(ca_pem_from_env().is_none());
+        match previous {
+            Some(previous) => std::env::set_var("WHALEREIN_CA_FILE", previous),
+            None => std::env::remove_var("WHALEREIN_CA_FILE"),
+        }
+    }
+
+    #[test]
     fn uses_environment_override_for_default_data_directory() {
+        let _guard = serial();
         let previous = std::env::var("WHALEREIN_DATA_DIR").ok();
         std::env::set_var("WHALEREIN_DATA_DIR", "/tmp/whalerein-test-dir");
         assert_eq!(default_data_dir(), PathBuf::from("/tmp/whalerein-test-dir"));

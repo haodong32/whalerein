@@ -175,6 +175,11 @@ static uint64_t next_conn_id = 1;
 static uint64_t next_seq = 1;
 static uint64_t next_fence_order = 1;
 static time_t policy_fresh_until_ms = 0;
+/* True once Access confirmed the policy validity window in this broker
+ * lifetime. After that, an expired window fails new external connections
+ * closed even if the Access HTTP listener still answers, so a client cannot
+ * bootstrap policy that Access never reconciled. */
+static bool policy_confirmed = false;
 static bool access_ready = false;
 static uint64_t applied_revision = 0;
 
@@ -950,8 +955,22 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 			}
 		}
 		if (strcmp(kick, "1") == 0 && client->connected && kick_count < 16) {
-			snprintf(kick_ids[kick_count], sizeof(kick_ids[0]), "%s", client->client_id);
-			kick_count++;
+			/* Kick only when no Host-scoped authority remains. One device
+			 * connection can carry grants for several Hosts; revoking one Host
+			 * must not disconnect a connection that still holds another Host's
+			 * live authority. Device-wide entries (the owner's Will topic) do
+			 * not represent Host authority. */
+			size_t remaining_hosts = 0;
+
+			for (i = 0; i < client->acl_count; i++) {
+				if (client->acls[i].host_id && acl_still_valid_locked(client, &client->acls[i])) {
+					remaining_hosts++;
+				}
+			}
+			if (remaining_hosts == 0) {
+				snprintf(kick_ids[kick_count], sizeof(kick_ids[0]), "%s", client->client_id);
+				kick_count++;
+			}
 		}
 	}
 	pthread_mutex_unlock(&lock);
@@ -1038,6 +1057,7 @@ static void handle_ping(struct request *request, char *body, size_t body_len)
 	deadline = now_ms() + cfg.ttl_ms;
 	pthread_mutex_lock(&lock);
 	policy_fresh_until_ms = deadline;
+	policy_confirmed = true;
 	access_ready = true;
 	for (client = clients; client; client = client->next) {
 		if (client->connected && client->kind != KIND_ACCESS) {
@@ -1308,6 +1328,12 @@ static struct auth_result *result_parse(const char *client_id, const char *body,
 		return NULL;
 	}
 	if (http_rc != 0 || !body) {
+		/* The policy/auth source is unreachable, which is a transport
+		 * availability failure, not a credential decision. Mosquitto maps
+		 * MOSQ_ERR_SERVER_UNAVAILABLE to CONNACK 0x88 (server unavailable)
+		 * instead of 0x87 (not authorized) for MQTT 5 clients, so an operator
+		 * does not misread a policy outage as revoked credentials. */
+		result->rc = MOSQ_ERR_SERVER_UNAVAILABLE;
 		snprintf(result->error, sizeof(result->error), "auth service unavailable");
 		return result;
 	}
@@ -1334,6 +1360,15 @@ static struct auth_result *result_parse(const char *client_id, const char *body,
 			result->rc = MOSQ_ERR_AUTH;
 			snprintf(result->error, sizeof(result->error), "%.*s",
 				 (int)strcspn(line + 4, " "), line + 4);
+			/* Access distinguishes a policy projection outage ("unavailable")
+			 * from a credential decision ("unauthorized"). Mosquitto 2.1.2's
+			 * deferred completion collapses every non-success result to
+			 * not-authorized, so this only takes effect if that broker path
+			 * preserves the reason. The synchronous stale-policy gate in
+			 * basic_auth_callback is the path that does reach CONNACK 0x88. */
+			if (line[4] == ' ' && strncmp(line + 5, "unavailable", 11) == 0) {
+				result->rc = MOSQ_ERR_SERVER_UNAVAILABLE;
+			}
 		} else if (strncmp(line, "kind ", 5) == 0) {
 			const char *value = line + 5;
 
@@ -1411,7 +1446,9 @@ static struct auth_result *result_parse(const char *client_id, const char *body,
 	}
 	free(copy);
 	if (!ok) {
-		result->rc = MOSQ_ERR_AUTH;
+		if (result->rc != MOSQ_ERR_SERVER_UNAVAILABLE) {
+			result->rc = MOSQ_ERR_AUTH;
+		}
 		if (result->error[0] == '\0') {
 			snprintf(result->error, sizeof(result->error), "denied by access");
 		}
@@ -1614,6 +1651,22 @@ static int basic_auth_callback(int event, void *event_data, void *userdata)
 	local_kind = kind_from_username(username);
 	if (local_kind == KIND_NONE) {
 		return MOSQ_ERR_AUTH;
+	}
+	{
+		bool stale;
+
+		pthread_mutex_lock(&lock);
+		stale = policy_confirmed && !policy_fresh_locked();
+		pthread_mutex_unlock(&lock);
+		if (stale) {
+			/* Access has not confirmed policy within the validity window.
+			 * Fail closed and report server-unavailable rather than
+			 * not-authorized so the client does not misread this as revoked
+			 * credentials. */
+			mosquitto_log_printf(MOSQ_LOG_WARNING,
+					     "whalerein: external CONNECT refused while policy is stale");
+			return MOSQ_ERR_SERVER_UNAVAILABLE;
+		}
 	}
 	job = calloc(1, sizeof(*job));
 	if (!job) {

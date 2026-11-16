@@ -44,6 +44,8 @@ type transportRacePresence struct{}
 
 func (transportRacePresence) IsHostOnline(context.Context, string) bool { return true }
 
+func (transportRacePresence) Available() bool { return true }
+
 // A stale preflight failure must not finalize a command published by a later lease.
 func TestTransportPreflightCannotRejectConcurrentPublication(t *testing.T) {
 	db, _ := storetest.New(t)

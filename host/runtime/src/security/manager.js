@@ -42,7 +42,9 @@ const TOKEN_HASH = /^[0-9a-fA-F]{64}$/
 const PENDING_TTL_MS = 120_000
 
 function protocolMismatch(value, expected) {
-  return value !== undefined && value !== null && Number(value) !== expected
+  // WIRE treats 0/absent as an old peer that must upgrade. A missing field is
+  // never proof that the peer speaks the current contract.
+  return value === undefined || value === null || Number(value) !== expected
 }
 
 function normalizeFingerprint(value) {

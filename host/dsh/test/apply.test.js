@@ -4,7 +4,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import plugin, { name, inject, Config, apply, createHost } from '../index.js'
+import plugin, { name, inject, Config, apply, configFailure, createHost } from '../index.js'
+import { ConfigError } from '../src/config.js'
 
 test('when a profile has a host ID, apply preserves it; otherwise it generates one', async () => {
   const dirs = [0, 1, 2].map((index) => mkdtempSync(join(tmpdir(), `whalerein-apply-host-${index}-`)))
@@ -137,4 +138,47 @@ test('when createHost receives valid configuration, it resolves it; invalid inpu
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+
+test('a stored-config failure names its field for the settings page without exposing values', () => {
+  const failure = configFailure(new ConfigError('invalid_config', 'mqtt_url is required'))
+  assert.equal(failure.code, 'invalid_config')
+  assert.equal(failure.field, 'mqtt_url')
+  assert.equal(failure.reason, 'mqtt_url is required')
+  const boolean = configFailure(new ConfigError('invalid_config', 'boolean value expected'))
+  assert.equal(boolean.field, '')
+  assert.equal(boolean.reason, 'boolean value expected')
+})
+
+test('configuration helpers tolerate schemastery getters, plain errors and failing diagnostics', () => {
+  const plain = configFailure(new Error('invalid_config: host_token is required'))
+  assert.equal(plain.code, 'invalid_config')
+  assert.equal(plain.field, '')
+  assert.equal(plain.reason, 'configuration could not be resolved')
+
+  const original = process.stderr.write.bind(process.stderr)
+  process.stderr.write = () => { throw new Error('closed stderr') }
+  try {
+    assert.equal(apply({}, { mqtt_url: 'bad', host_id: 'host-apply', host_token: 't' }), undefined)
+  } finally {
+    process.stderr.write = original
+  }
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-no-fiber-'))
+  try {
+    const generated = apply({ emit() {} }, { adapter: 'fake', mqtt_url: 'mqtts://127.0.0.1:1', host_token: 'token', state_dir: directory, host_id: '' })
+    assert.match(generated.config.hostId, /^[a-z0-9_.:-]+-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('documented values wrapped by schemastery are materialized through the same config path', async () => {
+  const { materializeConfig } = await import('../index.js')
+  const wrapped = Object.fromEntries([
+    ['approval_mode', 'delegate'], ['event_batch_ms', '3'], ['shutdown_timeout_ms', '153'],
+  ].map(([key, value]) => [key, { get: () => value }]))
+  assert.deepEqual(materializeConfig(wrapped), {
+    approval_mode: 'delegate', event_batch_ms: '3', shutdown_timeout_ms: '153',
+  })
 })

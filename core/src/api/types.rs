@@ -5,6 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Explicit wire label for an enum projection.
+///
+/// A value this build does not know becomes `UNKNOWN_ENUM_<number>` instead of
+/// the zero value, so a newer peer is visible instead of being rendered as a
+/// valid unspecified value. This is the Core side of the unknown-enum policy in
+/// `proto/v1/WIRE.md`.
+fn enum_label<E>(value: i32, known_name: impl Fn(E) -> &'static str) -> String
+where
+    E: TryFrom<i32>,
+{
+    match E::try_from(value) {
+        Ok(known) => known_name(known).to_owned(),
+        Err(_) => format!("UNKNOWN_ENUM_{value}"),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnlineStatus {
@@ -97,14 +113,12 @@ impl From<whalerein_proto::Approval> for ApprovalInfo {
             digest: value.digest,
             version: value.version,
             expires_at_unix_ms: value.expires_at_unix_ms,
-            state: format!(
-                "{:?}",
-                whalerein_proto::ApprovalState::try_from(value.state).unwrap_or_default()
-            ),
-            decision: format!(
-                "{:?}",
-                whalerein_proto::ApprovalDecision::try_from(value.decision).unwrap_or_default()
-            ),
+            state: enum_label::<whalerein_proto::ApprovalState>(value.state, |state| {
+                state.as_str_name()
+            }),
+            decision: enum_label::<whalerein_proto::ApprovalDecision>(value.decision, |decision| {
+                decision.as_str_name()
+            }),
         }
     }
 }
@@ -366,10 +380,9 @@ impl From<whalerein_proto::ModelCatalog> for ModelCatalog {
                 .map(|failure| ModelProviderFailure {
                     id: failure.id,
                     name: failure.name,
-                    code: whalerein_proto::ErrorCode::try_from(failure.code)
-                        .unwrap_or_default()
-                        .as_str_name()
-                        .to_owned(),
+                    code: enum_label::<whalerein_proto::ErrorCode>(failure.code, |code| {
+                        code.as_str_name()
+                    }),
                 })
                 .collect(),
         }
@@ -642,6 +655,103 @@ mod tests {
     }
 
     #[test]
+    fn unknown_enums_never_project_as_the_zero_value() {
+        let approval: ApprovalInfo = whalerein_proto::Approval {
+            state: 99,
+            decision: 98,
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(approval.state, "UNKNOWN_ENUM_99");
+        assert_eq!(approval.decision, "UNKNOWN_ENUM_98");
+
+        let unspecified: ApprovalInfo = whalerein_proto::Approval::default().into();
+        assert_eq!(unspecified.state, "APPROVAL_STATE_UNSPECIFIED");
+        assert_eq!(unspecified.decision, "APPROVAL_DECISION_UNSPECIFIED");
+
+        let batch: QuestionBatchInfo = whalerein_proto::QuestionBatch {
+            phase: 99,
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(batch.phase, "UNKNOWN_ENUM_99");
+
+        let queue: PendingQueue = whalerein_proto::PendingQueue {
+            items: vec![whalerein_proto::PendingQueueItem {
+                placement: 97,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(queue.items[0].placement, "UNKNOWN_ENUM_97");
+
+        let catalog: ModelCatalog = whalerein_proto::ModelCatalog {
+            failures: vec![whalerein_proto::ModelProviderFailure {
+                id: "p".into(),
+                name: "p".into(),
+                code: 96,
+            }],
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(catalog.failures[0].code, "UNKNOWN_ENUM_96");
+    }
+
+    #[test]
+    fn capability_projection_keeps_every_flag_and_never_invents_a_delivery_mode() {
+        let capabilities: SessionCapabilities = whalerein_proto::SourceCapabilities {
+            history: true,
+            resumable_history: true,
+            live_text: true,
+            interrupt: true,
+            approvals: true,
+            delivery_modes: vec![whalerein_proto::DeliveryMode::StartIfIdle as i32, 99],
+            model_selection: true,
+            pending_queue_read: true,
+            pending_queue_edit: false,
+            pending_queue_remove: false,
+            pending_queue_steer: true,
+            questions_read: true,
+            questions_answer_open: false,
+            questions_answer_continued: true,
+            session_fork: true,
+        }
+        .into();
+        assert!(capabilities.history);
+        assert!(capabilities.model_selection);
+        assert!(capabilities.pending_queue_read);
+        assert!(!capabilities.pending_queue_edit);
+        assert!(capabilities.pending_queue_steer);
+        assert!(capabilities.questions_read);
+        assert!(!capabilities.questions_answer_open);
+        assert!(capabilities.questions_answer_continued);
+        assert!(capabilities.session_fork);
+        // An unknown delivery mode is not advertised as a supported mode.
+        assert_eq!(capabilities.delivery_modes, vec!["START_IF_IDLE"]);
+        let back: whalerein_proto::SourceCapabilities = capabilities.into();
+        assert_eq!(back.delivery_modes.len(), 1);
+        assert!(!back.pending_queue_edit);
+    }
+
+    #[test]
+    fn shared_identifier_and_clock_contract_is_enforced_before_a_call() {
+        use whalerein_proto::{validate_id, IdKind};
+        assert!(validate_id(IdKind::Request, "req-1").is_ok());
+        assert!(validate_id(IdKind::Request, "req|1").is_err());
+        assert!(validate_id(IdKind::Session, "session/ü").is_ok());
+        assert!(validate_id(IdKind::Command, "").is_ok());
+        assert!(validate_id(IdKind::Request, "").is_err());
+        assert!(validate_id(IdKind::Request, &"a".repeat(129)).is_err());
+
+        let now = 1_000_000;
+        assert!(whalerein_proto::validate_pairing_signature_time(now - 120_000, now).is_ok());
+        assert!(whalerein_proto::validate_pairing_signature_time(now - 120_001, now).is_err());
+        assert!(!whalerein_proto::is_expired(now + 1, now));
+        assert!(whalerein_proto::is_expired(now, now));
+    }
+
+    #[test]
     fn converts_proto_session_list_with_source_and_completeness() {
         let list = SessionList::from_proto(
             whalerein_proto::SessionList {
@@ -746,10 +856,10 @@ impl From<whalerein_proto::PendingQueue> for PendingQueue {
                 .into_iter()
                 .map(|item| PendingQueueItem {
                     item_id: item.item_id,
-                    placement: whalerein_proto::QueuePlacement::try_from(item.placement)
-                        .unwrap_or_default()
-                        .as_str_name()
-                        .to_owned(),
+                    placement: enum_label::<whalerein_proto::QueuePlacement>(
+                        item.placement,
+                        |placement| placement.as_str_name(),
+                    ),
                     delivery_id: if item.delivery_id.is_empty() {
                         None
                     } else {
@@ -877,9 +987,9 @@ impl From<whalerein_proto::QuestionBatch> for QuestionBatchInfo {
             source_epoch: value.source_epoch,
             version: value.version,
             digest: value.digest,
-            phase: whalerein_proto::QuestionPhase::try_from(value.phase)
-                .map(|phase| phase.as_str_name().to_owned())
-                .unwrap_or_else(|_| "QUESTION_PHASE_UNSPECIFIED".into()),
+            phase: enum_label::<whalerein_proto::QuestionPhase>(value.phase, |phase| {
+                phase.as_str_name()
+            }),
             questions: value
                 .questions
                 .into_iter()

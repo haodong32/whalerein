@@ -7,6 +7,7 @@ export class DshConversation {
   #streams=new Map()
   #origins=new Map()
   #settlements=new Map()
+  #interruptSerial=0
   constructor(source) { this.source=source;this.history=new DshHistory(source);this.epoch=randomUUID() }
   async state(sessionId,{signal}={}) {
     if(signal?.aborted)throw new AdapterError('unavailable')
@@ -36,7 +37,7 @@ export class DshConversation {
     let stream=this.#streams.get(id)
     if(!stream) {
       if(this.#streams.size>=64)this.#streams.delete(this.#streams.keys().next().value)
-      stream={seq:0,revision:-1,blocks:new Map(),attempt:{live_epoch:this.epoch,attempt_id:id}}
+      stream={sessionId:event.sessionId,seq:0,revision:-1,blocks:new Map(),attempt:{live_epoch:this.epoch,attempt_id:id},ended:false}
       this.#streams.set(id,stream)
     }
     if(!Number.isSafeInteger(data.revision)||data.revision<=stream.revision)return null
@@ -68,6 +69,26 @@ export class DshConversation {
       payload={ended:{outcome:data.outcome==='committed'?'COMMITTED':'ABANDONED'}}
     }
     const seq=++stream.seq
+    if(data.phase==='end')stream.ended=true
     return {session:{session_id:event.sessionId},live:{attempt:stream.attempt,block_id:data.block_id??'text',first_seq:seq,last_seq:seq,...payload}}
+  }
+
+  // Interrupt has no guaranteed native terminal frame. Close every observed
+  // attempt for this session, and synthesize one terminal attempt when the
+  // caller knows a turn was running but no live stream was observed.
+  interrupt(sessionId,{synthetic=true}={}) {
+    const updates=[]
+    for(const [id,stream] of this.#streams) {
+      if(stream.sessionId!==sessionId||stream.ended)continue
+      stream.ended=true
+      const seq=++stream.seq
+      updates.push({session:{session_id:sessionId},live:{attempt:{...stream.attempt},block_id:'text',first_seq:seq,last_seq:seq,ended:{outcome:'INTERRUPTED'}}})
+      this.#streams.delete(id)
+    }
+    if(!updates.length&&synthetic) {
+      const attempt={live_epoch:this.epoch,attempt_id:`interrupted-${++this.#interruptSerial}`}
+      updates.push({session:{session_id:sessionId},live:{attempt,block_id:'text',first_seq:1,last_seq:1,ended:{outcome:'INTERRUPTED'}}})
+    }
+    return updates
   }
 }

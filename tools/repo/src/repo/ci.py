@@ -15,7 +15,10 @@ def plan(root: Path, paths: list[str]) -> dict:
     ids = {p["id"] for p in entries}
     selected = set()
     for path in paths:
-        if path.endswith(".md") or path.startswith(("docs/", ".local-docs/")):
+        if path.endswith(".md") or path.startswith(
+            ("docs/", ".local-docs/", "apps/ios/", "tools/ios-stack/")
+        ):
+            # The iOS application and its local stack have their own macOS workflow.
             continue
         owners = {
             p["id"]
@@ -68,7 +71,21 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
 
 
 def native_plan(root: Path, paths: list[str]) -> dict:
-    rust = next((g["projects"] for g in plan(root, paths)["include"] if g["kind"] == "rust"), [])
+    # Mobile bindings are a pure Rust surface exercised by the Linux coverage
+    # gate; the OS-gated jobs target Core/CLI/proto/noise-peer instead.
+    bindings = {"mobile-bindings"}
+    rust = [
+        identity
+        for identity in next(
+            (
+                group["projects"]
+                for group in plan(root, paths)["include"]
+                if group["kind"] == "rust"
+            ),
+            [],
+        )
+        if identity not in bindings
+    ]
     return {
         "include": [{"os": os, "projects": rust} for os in ("macos-15", "windows-2025") if rust]
     }
@@ -91,19 +108,61 @@ def run_projects(root: Path, projects: list[str]) -> None:
             subprocess.run(command, cwd=root, check=True)
 
 
+def native_commands(root: Path, matrix: dict) -> list[list[str]]:
+    """Native unit commands for a non-Linux runner.
+
+    The macOS and Windows jobs cannot use ``./repo`` for execution: its
+    streaming process runner relies on POSIX process groups and selector
+    support for pipes. They still honor the Linux job's affected-project
+    selection, so each selected project maps to its native unit command. These
+    jobs intentionally do not measure coverage; Linux remains the coverage
+    gate and the platform jobs prove OS-gated behavior.
+    """
+    from .projects import go_test_paths, load_projects, select_projects
+
+    groups = matrix.get("include", [])
+    identities = [identity for group in groups for identity in group.get("projects", [])]
+    if not identities:
+        return []
+    selected = select_projects(load_projects(root), identities)
+    commands: list[list[str]] = []
+    for project in selected:
+        if project.kind == "rust":
+            commands.append(["cargo", "test", "--package", project.name])
+        elif project.kind == "go":
+            commands.append(["go", "test", *go_test_paths(project)])
+        elif project.kind == "node":
+            commands.append(["pnpm", "--filter", project.name, "test"])
+        elif project.kind == "python":
+            commands.append(["uv", "run", "--project", "tools/repo", "pytest", "tools/repo/tests"])
+    return commands
+
+
+def run_native(root: Path, matrix: dict) -> None:
+    """Run every selected project's native unit tests without the repo runner."""
+    commands = native_commands(root, matrix)
+    if not commands:
+        return
+    for command in commands:
+        subprocess.run(command, cwd=root, check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("plan", "native-plan", "run"))
+    parser.add_argument("operation", choices=("plan", "native-plan", "run", "native"))
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--projects", default="[]")
+    parser.add_argument("--matrix", default='{"include": []}')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[4]
     if args.operation in ("plan", "native-plan"):
         planner = plan if args.operation == "plan" else native_plan
         print(json.dumps(planner(root, changed_paths(root, args.base, args.head))))
-    else:
+    elif args.operation == "run":
         run_projects(root, json.loads(args.projects))
+    else:
+        run_native(root, json.loads(args.matrix))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
+	"regexp"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
@@ -32,12 +32,17 @@ const (
 	InternalHeader = "X-Whalerein-Internal-Token"
 )
 
+// traceIDPattern is the accepted client-supplied correlation alphabet. It
+// excludes quotes, spaces and newlines so a trace id can never forge a log
+// record or an HTTP header value.
+var traceIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
 // AuthService is the auth package boundary used by HTTP.
 type AuthService interface {
 	AuthenticateAdmin(token string) error
 	AuthenticateDeviceToken(ctx context.Context, token string) (auth.Identity, error)
 	AuthorizeHost(ctx context.Context, identity auth.Identity, hostID string) error
-	ListHosts(ctx context.Context, identity auth.Identity) ([]auth.HostView, error)
+	ListHosts(ctx context.Context, identity auth.Identity, limit, offset int) ([]auth.HostView, bool, error)
 	RevokeDevice(ctx context.Context, deviceID string) error
 	AuthenticateHostRequest(ctx context.Context, proof auth.HostProof) error
 	RevokeHostGrant(ctx context.Context, hostID, deviceID string) error
@@ -137,16 +142,14 @@ func (s *Server) publicRoutes() []routeSpec {
 		{method: http.MethodGet, pattern: "/readyz", handler: s.handleReady},
 		{method: http.MethodGet, pattern: "/metrics", handler: s.handleMetrics},
 	}
-	// External account mode adds its own endpoints and never removes the
-	// Standalone ones, so a deployment can test either path.
-	if s.deps.External != nil {
-		routes = append(routes,
-			routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
-			routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
-			routeSpec{method: http.MethodGet, pattern: "/v1/operations/{operation_id}", handler: s.handleOperationStatus},
-		)
-	}
-	return routes
+	// External endpoints are registered in every build. A deployment that did
+	// not enable external account mode answers 501 unsupported_capability, so
+	// a mistyped path (404) stays distinguishable from a disabled mode.
+	return append(routes,
+		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
+		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
+		routeSpec{method: http.MethodGet, pattern: "/v1/operations/{operation_id}", handler: s.handleOperationStatus},
+	)
 }
 
 func (s *Server) internalRoutes() []routeSpec {
@@ -219,7 +222,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 }
 
 func traceID(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get(TraceHeader)); value != "" && len(value) <= 128 {
+	if value := r.Header.Get(TraceHeader); validTraceID(value) {
 		return value
 	}
 	raw := make([]byte, 16)
@@ -227,6 +230,13 @@ func traceID(r *http.Request) string {
 		return hex.EncodeToString(raw)
 	}
 	return fmt.Sprintf("t-%d", time.Now().UnixNano())
+}
+
+// validTraceID accepts the bounded correlation-id alphabet. Arbitrary client
+// text is rejected and replaced with a fresh server id, so a caller cannot
+// inject log structure or make two operations share a trace.
+func validTraceID(value string) bool {
+	return traceIDPattern.MatchString(value)
 }
 
 func (s *Server) internalTokenOK(value string) bool {
@@ -243,6 +253,7 @@ type requestMeta struct {
 	route     string
 	requestID string
 	errorCode string
+	params    map[string]string
 }
 
 type statusWriter struct {

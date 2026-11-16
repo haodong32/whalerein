@@ -1,14 +1,15 @@
 //! SQLite cache.
 //!
 //! Only `sync` writes session/event/cursor rows. Only `commands` writes the
-//! command projection. Sensitive payload columns are encrypted with a random
-//! cache key held by `SecretStore`; the key never enters the database.
+//! command projection. Only `drafts` writes draft rows, and it seals their text
+//! before storage. Sensitive payload columns are encrypted with a random cache
+//! key held by `SecretStore`; the key never enters the database.
 
 mod conversation;
 #[cfg(windows)]
 mod windows;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chacha20poly1305::aead::{Aead, Payload};
@@ -20,6 +21,10 @@ use crate::api::{HostInfo, OnlineStatus, PendingCommand, SessionSummary};
 pub const CACHE_NONCE_LEN: usize = 12;
 pub const SCHEMA_VERSION: i64 = 2;
 const HISTORY_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+/// How long an unknown send keeps its idempotency record. It is deliberately
+/// longer than one command request lifetime so a retry after reconnecting can
+/// still recover instead of submitting duplicate user text.
+const SEND_INTENT_TTL_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -45,6 +50,38 @@ impl From<rusqlite::Error> for CacheError {
     fn from(_: rusqlite::Error) -> Self {
         CacheError::Database
     }
+}
+
+/// Why a cache was quarantined and rebuilt. Pairing identity is never part of
+/// the cache, so both variants preserve it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheRebuild {
+    /// The cache key is missing, was replaced, or no longer decrypts payloads.
+    KeyMismatch,
+    /// The file is not a SQLite database at all (file-level corruption).
+    CorruptFile,
+}
+
+impl CacheRebuild {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::KeyMismatch => "cache_key_invalid",
+            Self::CorruptFile => "cache_file_corrupt",
+        }
+    }
+}
+
+/// A missing or empty file is a valid new cache; a non-SQLite header is not.
+fn has_sqlite_header(path: &Path) -> Result<bool, CacheError> {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Err(CacheError::Database),
+    };
+    let mut header = [0u8; 16];
+    let read = file.read(&mut header).map_err(|_| CacheError::Database)?;
+    Ok(read == 0 || (read == header.len() && &header == b"SQLite format 3\0"))
 }
 
 pub(crate) struct CommandIntent<'a> {
@@ -185,6 +222,54 @@ impl Cache {
         self.key == key
     }
 
+    /// Open the cache, rebuilding a cache that cannot be read with `key`.
+    ///
+    /// Only two cases are rebuilt automatically: a key that does not match the
+    /// database (missing or tampered cache key) and a file whose header is not
+    /// SQLite (file-level corruption). A busy or future-schema database is
+    /// returned as an error instead of being destroyed. Pairing lives in the
+    /// configuration and SecretStore, so rebuilding never changes identity.
+    pub fn open_recovering(
+        path: &Path,
+        key: [u8; 32],
+    ) -> Result<(Self, Option<CacheRebuild>), CacheError> {
+        if !has_sqlite_header(path)? {
+            Self::quarantine(path)?;
+            return Ok((Self::open(path, key)?, Some(CacheRebuild::CorruptFile)));
+        }
+        match Self::open(path, key) {
+            Ok(cache) => Ok((cache, None)),
+            Err(CacheError::InvalidKey) => {
+                Self::quarantine(path)?;
+                Ok((Self::open(path, key)?, Some(CacheRebuild::KeyMismatch)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Move a corrupt or undecryptable cache aside so a fresh one can be
+    /// created without touching pairing configuration or credentials.
+    fn quarantine(path: &Path) -> Result<(), CacheError> {
+        let target = path.with_file_name("cache.sqlite3.quarantine");
+        if target.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+            std::fs::remove_file(&target).map_err(|_| CacheError::Database)?;
+        }
+        let mut moved = false;
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let source = PathBuf::from(format!("{}{suffix}", path.display()));
+            match std::fs::rename(&source, format!("{}{suffix}", target.display())) {
+                Ok(()) => moved = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(CacheError::Database),
+            }
+        }
+        if moved {
+            Ok(())
+        } else {
+            Err(CacheError::Missing)
+        }
+    }
+
     pub fn open(path: &Path, key: [u8; 32]) -> Result<Self, CacheError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| CacheError::Database)?;
@@ -207,6 +292,7 @@ impl Cache {
             history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
+        cache.verify_key()?;
         #[cfg(any(unix, windows))]
         {
             cache.provenance = cache.capture_provenance(path);
@@ -225,7 +311,69 @@ impl Cache {
             history_budget_bytes: HISTORY_CACHE_BYTES,
         };
         cache.initialize_schema()?;
+        cache.verify_key()?;
         Ok(cache)
+    }
+
+    /// Prove that this database belongs to `self.key`.
+    ///
+    /// New databases store a public tag derived from the random key. A legacy
+    /// database without the tag is verified by decrypting one existing sealed
+    /// payload; a failure means the cache key was lost or replaced and the
+    /// payloads are unreadable.
+    fn verify_key(&self) -> Result<(), CacheError> {
+        let tag = hex::encode(&crate::util::sha256(&self.key)[..16]);
+        let conn = self.conn.lock().expect("cache mutex");
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='cache_key_tag'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(stored) = stored {
+            return if stored == tag {
+                Ok(())
+            } else {
+                Err(CacheError::InvalidKey)
+            };
+        }
+        let probe: Option<(String, String, Vec<u8>)> = conn
+            .query_row(
+                "SELECT host_id,session_id,summary FROM sessions LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((host_id, session_id, blob)) = probe {
+            let key = whalerein_proto::SessionKey {
+                host_id,
+                session_id,
+            };
+            self.open_blob(&session_aad(&key), &blob)
+                .map_err(|_| CacheError::InvalidKey)?;
+        } else {
+            let probe: Option<(String, String, String, Vec<u8>)> = conn
+                .query_row(
+                    "SELECT host_id,session_id,message_id,payload FROM conversation_messages LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            if let Some((host, session, message_id, blob)) = probe {
+                let key = whalerein_proto::SessionKey {
+                    host_id: host,
+                    session_id: session,
+                };
+                self.open_blob(&conversation::aad(&key, &message_id), &blob)
+                    .map_err(|_| CacheError::InvalidKey)?;
+            }
+        }
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('cache_key_tag',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![tag],
+        )?;
+        Ok(())
     }
 
     fn initialize_schema(&self) -> Result<(), CacheError> {
@@ -297,8 +445,27 @@ impl Cache {
                  status TEXT NOT NULL,
                  error_code TEXT,
                  updated_at_unix_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS drafts (
+                 host_id TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 sealed_text BLOB NOT NULL,
+                 updated_at_unix_ms INTEGER NOT NULL,
+                 PRIMARY KEY(host_id,session_id)
+             );
+             CREATE TABLE IF NOT EXISTS send_intents (
+                 host_id TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 request_id TEXT NOT NULL,
+                 command_id TEXT NOT NULL,
+                 created_at_unix_ms INTEGER NOT NULL,
+                 PRIMARY KEY(host_id,session_id,digest)
              );",
         )?;
+        // The drafts table is additive: an existing version-2 database gains it
+        // in the same migration transaction without a version bump, and older
+        // binaries safely ignore the extra table.
         // Add recovery routing without rebuilding the durable command journal.
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(commands)")?
@@ -410,7 +577,55 @@ impl Cache {
         source: &str,
         complete: bool,
     ) -> Result<(), CacheError> {
-        let sealed = sessions
+        let sealed = self.sealed_sessions(host_id, sessions)?;
+        let mut conn = self.conn.lock().expect("cache mutex");
+        let tx = conn.transaction()?;
+        for (id, body) in sealed {
+            tx.execute("INSERT INTO sessions VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(host_id,session_id) DO UPDATE SET summary=excluded.summary,complete=excluded.complete,source=excluded.source,updated_at_unix_ms=excluded.updated_at_unix_ms",params![host_id,id,body,complete as i64,source,crate::util::now_unix_ms()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace the complete cached session list for one Host.
+    ///
+    /// A completed remote listing is authoritative: sessions the source no
+    /// longer reports (deleted, archived or otherwise filtered) must disappear
+    /// from the offline view instead of lingering as stale rows.
+    pub fn replace_sessions(
+        &self,
+        host_id: &str,
+        sessions: &[SessionSummary],
+        source: &str,
+        complete: bool,
+    ) -> Result<(), CacheError> {
+        let sealed = self.sealed_sessions(host_id, sessions)?;
+        let mut conn = self.conn.lock().expect("cache mutex");
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM sessions WHERE host_id=?1", params![host_id])?;
+        for (id, body) in sealed {
+            tx.execute(
+                "INSERT INTO sessions VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    host_id,
+                    id,
+                    body,
+                    complete as i64,
+                    source,
+                    crate::util::now_unix_ms()
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn sealed_sessions(
+        &self,
+        host_id: &str,
+        sessions: &[SessionSummary],
+    ) -> Result<Vec<(String, Vec<u8>)>, CacheError> {
+        sessions
             .iter()
             .map(|session| {
                 let key = whalerein_proto::SessionKey {
@@ -423,15 +638,9 @@ impl Cache {
                     self.seal(&session_aad(&key), &bytes)?,
                 ))
             })
-            .collect::<Result<Vec<_>, CacheError>>()?;
-        let mut conn = self.conn.lock().expect("cache mutex");
-        let tx = conn.transaction()?;
-        for (id, body) in sealed {
-            tx.execute("INSERT INTO sessions VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(host_id,session_id) DO UPDATE SET summary=excluded.summary,complete=excluded.complete,source=excluded.source,updated_at_unix_ms=excluded.updated_at_unix_ms",params![host_id,id,body,complete as i64,source,crate::util::now_unix_ms()])?;
-        }
-        tx.commit()?;
-        Ok(())
+            .collect()
     }
+
     pub fn load_sessions(&self, host_id: &str) -> Result<Vec<SessionSummary>, CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
         let mut statement = conn.prepare(
@@ -450,6 +659,7 @@ impl Cache {
             let bytes = self.open_blob(&session_aad(&key), &body)?;
             sessions.push(serde_json::from_slice(&bytes).map_err(|_| CacheError::Corrupt)?);
         }
+        sort_sessions(&mut sessions);
         Ok(sessions)
     }
     pub fn get_session(
@@ -864,6 +1074,59 @@ impl Cache {
         Ok((non_terminal as u64, unknown as u64))
     }
 
+    /// Draft text is sealed by `drafts` before it reaches this storage layer;
+    /// the cache only stores the opaque nonce/ciphertext blob.
+    pub(crate) fn put_draft(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        sealed: &[u8],
+    ) -> Result<(), CacheError> {
+        let conn = self.conn.lock().expect("cache mutex");
+        conn.execute(
+            "INSERT INTO drafts(host_id, session_id, sealed_text, updated_at_unix_ms)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(host_id,session_id) DO UPDATE SET
+                 sealed_text = excluded.sealed_text,
+                 updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![host_id, session_id, sealed, crate::util::now_unix_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn get_draft(
+        &self,
+        host_id: &str,
+        session_id: &str,
+    ) -> Result<Option<Vec<u8>>, CacheError> {
+        self.conn
+            .lock()
+            .expect("cache mutex")
+            .query_row(
+                "SELECT sealed_text FROM drafts WHERE host_id=?1 AND session_id=?2",
+                params![host_id, session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn delete_draft(&self, host_id: &str, session_id: &str) -> Result<(), CacheError> {
+        self.conn.lock().expect("cache mutex").execute(
+            "DELETE FROM drafts WHERE host_id=?1 AND session_id=?2",
+            params![host_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_host_drafts(&self, host_id: &str) -> Result<(), CacheError> {
+        self.conn
+            .lock()
+            .expect("cache mutex")
+            .execute("DELETE FROM drafts WHERE host_id=?1", params![host_id])?;
+        Ok(())
+    }
+
     #[cfg(any(not(unix), test))]
     pub fn clear(&self) -> Result<(), CacheError> {
         #[cfg(windows)]
@@ -872,9 +1135,83 @@ impl Cache {
         }
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(
-            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages;",
+            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts; DELETE FROM send_intents;",
         )?;
-        drop(conn);
+        Ok(())
+    }
+
+    /// Keyed digest of outgoing text: it binds a retry to the same profile
+    /// without storing the message in plaintext.
+    pub(crate) fn send_intent_digest(&self, text: &str) -> String {
+        let mut material = self.key.to_vec();
+        material.extend_from_slice(text.as_bytes());
+        crate::util::sha256_hex(&material)
+    }
+
+    /// Remember a send whose observation ended unknown so an identical resend
+    /// recovers the original command instead of creating a second user message.
+    pub(crate) fn record_send_intent(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        digest: &str,
+        request_id: &str,
+        command_id: &str,
+    ) -> Result<(), CacheError> {
+        self.conn
+            .lock()
+            .expect("cache mutex")
+            .execute(
+                "INSERT INTO send_intents(host_id,session_id,digest,request_id,command_id,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(host_id,session_id,digest) DO UPDATE SET request_id=excluded.request_id,command_id=excluded.command_id,created_at_unix_ms=excluded.created_at_unix_ms",
+                params![
+                    host_id,
+                    session_id,
+                    digest,
+                    request_id,
+                    command_id,
+                    crate::util::now_unix_ms()
+                ],
+            )?;
+        Ok(())
+    }
+
+    /// The retained request for an identical send that has not been confirmed
+    /// yet, if one is still inside the idempotency window.
+    pub(crate) fn unresolved_send_intent(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<Option<String>, CacheError> {
+        let conn = self.conn.lock().expect("cache mutex");
+        let now = crate::util::now_unix_ms();
+        conn.execute(
+            "DELETE FROM send_intents WHERE created_at_unix_ms < ?1",
+            params![now - SEND_INTENT_TTL_MS],
+        )?;
+        Ok(conn
+            .query_row(
+                "SELECT request_id FROM send_intents WHERE host_id=?1 AND session_id=?2 AND digest=?3",
+                params![host_id, session_id, digest],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn resolve_send_intent(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<(), CacheError> {
+        {
+            let conn = self.conn.lock().expect("cache mutex");
+            conn.execute(
+                "DELETE FROM send_intents WHERE host_id=?1 AND session_id=?2 AND digest=?3",
+                params![host_id, session_id, digest],
+            )?;
+        }
         #[cfg(windows)]
         self.release_for_revocation()?;
         Ok(())
@@ -884,6 +1221,20 @@ impl Cache {
 fn session_aad(key: &whalerein_proto::SessionKey) -> Vec<u8> {
     serde_json::to_vec(&["session", key.host_id.as_str(), key.session_id.as_str()])
         .expect("string tuple")
+}
+
+/// One order for remote and cached session listings.
+///
+/// Most recently updated sessions come first, with the session identity as a
+/// deterministic tie-break. Without a shared order a cache-only view would sort
+/// by identity and the list would visibly jump when the Host reconnects.
+pub(crate) fn sort_sessions(sessions: &mut [SessionSummary]) {
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at_unix_ms
+            .cmp(&left.updated_at_unix_ms)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
 }
 
 #[cfg(test)]
@@ -1002,6 +1353,44 @@ mod tests {
     }
 
     #[test]
+    fn adds_opaque_draft_storage_to_an_existing_version_two_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO meta VALUES('schema_version','2');
+             CREATE TABLE commands(request_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at_unix_ms INTEGER NOT NULL);
+             INSERT INTO commands VALUES('legacy','old-command','unknown',NULL,1);",
+        )
+        .unwrap();
+        drop(conn);
+        let cache = Cache::open(&path, [1; 32]).unwrap();
+        assert!(cache.get_draft("h", "s").unwrap().is_none());
+        cache.put_draft("h", "s", b"sealed").unwrap();
+        assert_eq!(
+            cache.get_draft("h", "s").unwrap().as_deref(),
+            Some(&b"sealed"[..])
+        );
+        assert!(cache.get_command("legacy").unwrap().is_some());
+        cache.delete_host_drafts("h").unwrap();
+        assert!(cache.get_draft("h", "s").unwrap().is_none());
+        assert_eq!(
+            cache
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM meta WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
+    }
+
+    #[test]
     fn replacing_the_development_cache_preserves_command_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -1019,5 +1408,160 @@ mod tests {
         let cache = Cache::open(&path, [1; 32]).unwrap();
         assert!(cache.get_command("r").unwrap().is_some());
         assert_eq!(cache.command_counts().unwrap(), (1, 0));
+    }
+}
+
+#[cfg(test)]
+mod session_list_tests {
+    use super::*;
+
+    fn session(session_id: &str, updated_at_unix_ms: i64) -> SessionSummary {
+        SessionSummary::from(whalerein_proto::SessionSummary {
+            session_id: session_id.into(),
+            title: session_id.into(),
+            updated_at_unix_ms,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_complete_session_snapshot_replaces_removed_entries() {
+        let cache = Cache::open_in_memory([7; 32]).unwrap();
+        cache
+            .replace_sessions(
+                "host-1",
+                &[session("session-b", 20), session("session-a", 10)],
+                "remote",
+                true,
+            )
+            .unwrap();
+        assert_eq!(cache.load_sessions("host-1").unwrap().len(), 2);
+
+        cache
+            .replace_sessions("host-1", &[session("session-a", 10)], "remote", true)
+            .unwrap();
+        let sessions = cache.load_sessions("host-1").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "session-a");
+        assert!(cache
+            .get_session(&whalerein_proto::SessionKey {
+                host_id: "host-1".into(),
+                session_id: "session-b".into(),
+            })
+            .unwrap()
+            .is_none());
+
+        // A single-summary refresh (get_session) upserts without deleting the
+        // rest of the authoritative snapshot.
+        cache
+            .put_sessions("host-1", &[session("session-c", 5)], "remote", true)
+            .unwrap();
+        assert_eq!(cache.load_sessions("host-1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cached_sessions_sort_by_update_time_then_identity() {
+        let cache = Cache::open_in_memory([7; 32]).unwrap();
+        cache
+            .replace_sessions(
+                "host-1",
+                &[
+                    session("session-c", 10),
+                    session("session-a", 10),
+                    session("session-b", 20),
+                ],
+                "remote",
+                true,
+            )
+            .unwrap();
+        let ids = cache
+            .load_sessions("host-1")
+            .unwrap()
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["session-b", "session-a", "session-c"]);
+    }
+
+    #[test]
+    fn replacement_is_scoped_to_one_host() {
+        let cache = Cache::open_in_memory([7; 32]).unwrap();
+        cache
+            .replace_sessions("host-1", &[session("session-1", 1)], "remote", true)
+            .unwrap();
+        cache
+            .replace_sessions("host-2", &[session("session-2", 1)], "remote", true)
+            .unwrap();
+        cache
+            .replace_sessions("host-1", &[], "remote", true)
+            .unwrap();
+        assert!(cache.load_sessions("host-1").unwrap().is_empty());
+        assert_eq!(cache.load_sessions("host-2").unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn path(directory: &Path) -> PathBuf {
+        directory.join("cache.sqlite3")
+    }
+
+    #[test]
+    fn a_replaced_cache_key_is_detected_and_recovery_quarantines_the_old_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = path(directory.path());
+        {
+            let cache = Cache::open(&path, [1u8; 32]).unwrap();
+            cache
+                .put_sessions(
+                    "host-1",
+                    &[crate::api::SessionSummary::from(
+                        whalerein_proto::SessionSummary {
+                            session_id: "s-1".into(),
+                            ..Default::default()
+                        },
+                    )],
+                    "remote",
+                    true,
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            Cache::open(&path, [2u8; 32]),
+            Err(CacheError::InvalidKey)
+        ));
+        let (cache, rebuilt) = Cache::open_recovering(&path, [2u8; 32]).unwrap();
+        assert_eq!(rebuilt, Some(CacheRebuild::KeyMismatch));
+        assert!(cache.load_sessions("host-1").unwrap().is_empty());
+        let quarantine = directory.path().join("cache.sqlite3.quarantine");
+        assert!(quarantine.is_file());
+        assert!(std::fs::metadata(&quarantine).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn a_non_sqlite_file_is_quarantined_and_rebuilt_without_erroring() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = path(directory.path());
+        std::fs::write(&path, b"garbage cache file").unwrap();
+        let (cache, rebuilt) = Cache::open_recovering(&path, [3u8; 32]).unwrap();
+        assert_eq!(rebuilt, Some(CacheRebuild::CorruptFile));
+        assert!(cache.load_sessions("host-1").unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(directory.path().join("cache.sqlite3.quarantine")).unwrap(),
+            b"garbage cache file"
+        );
+    }
+
+    #[test]
+    fn a_fresh_cache_stores_a_tag_and_reopens_with_the_same_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = path(directory.path());
+        drop(Cache::open(&path, [4u8; 32]).unwrap());
+        let (cache, rebuilt) = Cache::open_recovering(&path, [4u8; 32]).unwrap();
+        assert_eq!(rebuilt, None);
+        assert!(cache.load_sessions("host-1").unwrap().is_empty());
+        assert!(!directory.path().join("cache.sqlite3.quarantine").exists());
     }
 }

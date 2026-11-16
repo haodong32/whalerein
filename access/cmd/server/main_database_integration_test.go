@@ -203,7 +203,7 @@ func TestRunCleanupStopsPromptlyWhenContextIsCanceled(t *testing.T) {
 	cancel()
 	done := make(chan struct{})
 	go func() {
-		runCleanup(ctx, s, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		runCleanup(ctx, s, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 		close(done)
 	}()
 	select {
@@ -241,7 +241,7 @@ func TestRunCleanupClearsExpiredDataAndLogsCleanupCounts(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runCleanup(runCtx, s, 5*time.Millisecond, time.Hour, logger)
+		runCleanup(runCtx, s, 5*time.Millisecond, time.Hour, logger, nil)
 		close(done)
 	}()
 	waitFor(t, time.Second, func() bool {
@@ -266,7 +266,7 @@ func TestRunCleanupLogsStoreFailures(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	runCleanup(ctx, s, time.Millisecond, time.Hour, logger)
+	runCleanup(ctx, s, time.Millisecond, time.Hour, logger, nil)
 	if !strings.Contains(logs.String(), "cleanup failed") {
 		t.Fatalf("logs = %s", logs.String())
 	}

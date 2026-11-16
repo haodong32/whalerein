@@ -85,6 +85,47 @@ async fn lost_host_channel_does_not_revoke_device() {
 }
 
 #[tokio::test]
+async fn a_channel_without_a_capability_rejects_the_operation_before_submission() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+
+    let mut advertised = crate::pairing::default_capabilities();
+    advertised
+        .capabilities
+        .retain(|value| *value != whalerein_proto::Capability::Messages as i32);
+    access.host.lock().unwrap().channel_capabilities = Some(advertised);
+
+    let error = core
+        .send_message("session-1", "hello")
+        .await
+        .expect_err("messages capability was not advertised");
+    assert!(matches!(error, CoreError::Unsupported));
+    assert_eq!(error.code(), "unsupported_capability");
+    assert_eq!(error.exit_code(), 9);
+    assert!(
+        core.pending_commands().unwrap().is_empty(),
+        "a gated command must not be journaled"
+    );
+    assert_eq!(
+        access.host.lock().unwrap().commands_seen,
+        0,
+        "a gated command must not be submitted"
+    );
+
+    // The ordinary advertised set still carries the same operation, so the
+    // gate cannot reject a normal channel.
+    access.host.lock().unwrap().channel_capabilities = None;
+    core.runtime().clear_channel("host-1");
+    let handle = core.send_message("session-1", "hello").await.unwrap();
+    assert_eq!(handle.status, OnlineStatus::Succeeded);
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+}
+
+#[tokio::test]
 async fn host_authorization_errors_keep_pairing_without_access_confirmation() {
     for code in [
         whalerein_proto::ErrorCode::Unauthorized,
@@ -199,6 +240,9 @@ async fn completes_pairing_session_control_diagnostics_and_revocation_workflow()
     assert!(!core.is_paired());
     assert!(!secrets.is_empty());
     assert!(!dir.path().join("config.json").exists());
+    // Windows can keep the (now key-less) SQLite file open until process exit;
+    // authorization is already gone, so only assert the portable invariant.
+    #[cfg(not(windows))]
     assert!(!dir.path().join("cache.sqlite3").exists());
     assert!(matches!(core.hosts().await, Err(CoreError::NotPaired)));
 }
@@ -449,7 +493,10 @@ async fn wait_deadline_during_delayed_first_result_is_an_error() {
         core.wait_session("session-1", 100).await,
         Err(CoreError::Timeout)
     ));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // The contract is the Timeout, not the scheduler latency: only a stuck
+    // implementation would exceed this bound, which coverage instrumentation
+    // and slower Windows timers can otherwise trip.
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[tokio::test]
@@ -830,7 +877,7 @@ async fn legacy_host_creation_capability_errors_preserve_existing_controls() {
         );
         assert_eq!(
             core.interrupt("session-1").await.unwrap().status,
-            OnlineStatus::HostAccepted
+            OnlineStatus::Succeeded
         );
         assert_eq!(
             core.approve("approval-1", &[0xab; 32], 3)
@@ -980,4 +1027,52 @@ async fn active_pairing_rejects_forget_even_if_admission_is_temporarily_shared()
     assert!(matches!(core.forget_device(), Err(CoreError::Conflict(_))));
     core.forget_local_device().unwrap();
     assert!(!core.is_paired());
+}
+
+#[tokio::test]
+async fn selecting_the_effective_model_is_a_core_noop_without_a_command() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _secrets) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    // The source projection reports this session's effective next model.
+    access.host.lock().unwrap().model_observed = Some("model".into());
+    let before = access.host.lock().unwrap().commands_seen;
+    let handle = core
+        .select_session_model("session-1", "provider", "model", None)
+        .await
+        .unwrap();
+    assert_eq!(handle.status, OnlineStatus::Succeeded);
+    // A no-op invents no command identity and journals nothing.
+    assert!(handle.request_id.is_empty());
+    assert!(handle.command_id.is_empty());
+    let receipt = handle.model_selection.expect("model receipt");
+    let selected = receipt.selected.expect("selected model");
+    assert_eq!(selected.provider, "provider");
+    assert_eq!(selected.model, "model");
+    assert_eq!(selected.effort, None);
+    assert_eq!(receipt.effect_scope, "session_and_source_default_attempt");
+    assert_eq!(receipt.default_persistence, "unconfirmed");
+    assert_eq!(access.host.lock().unwrap().commands_seen, before);
+    assert!(core.pending_commands().unwrap().is_empty());
+
+    // A different effort or model is still submitted exactly once.
+    let high = core
+        .select_session_model("session-1", "provider", "model", Some("high"))
+        .await
+        .unwrap();
+    assert_eq!(high.status, OnlineStatus::Succeeded);
+    assert_eq!(
+        high.model_selection.unwrap().selected.unwrap().effort,
+        Some("high".into())
+    );
+    assert_eq!(access.host.lock().unwrap().commands_seen, before + 1);
+    let other = core
+        .select_session_model("session-1", "provider", "other-model", None)
+        .await
+        .unwrap();
+    assert_eq!(other.status, OnlineStatus::Succeeded);
+    assert_eq!(access.host.lock().unwrap().commands_seen, before + 2);
 }

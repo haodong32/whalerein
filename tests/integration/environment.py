@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 import select
 import signal
 import subprocess
@@ -120,11 +121,39 @@ def http(path, body=None, token=None, *, return_status=False, include_conflict_c
 
 
 class Device:
-    def __init__(self, directory):
-        self.directory = directory
-        self.identity = None
+    """One independently paired CLI identity rooted below a case directory.
 
-    def invoke(self, *args, success=True, stdin_text=None):
+    `namespace` separates the data directory, secret store and cache for a
+    second physical device. The default keeps every existing case on the
+    original `client`/`secrets` paths.
+    """
+
+    def __init__(self, directory, namespace="client"):
+        self.directory = directory
+        self.namespace = namespace
+        self.identity = None
+        self.extra_env = {}
+
+    @property
+    def data_dir(self):
+        return self.directory / self.namespace
+
+    @property
+    def secret_dir(self):
+        return self.directory / (
+            "secrets" if self.namespace == "client" else self.namespace + "-secrets"
+        )
+
+    def env(self, **overrides):
+        return {
+            **os.environ,
+            "WHALEREIN_SECRET_BACKEND": "file:" + str(self.secret_dir),
+            "WHALEREIN_LOG": "error",
+            **self.extra_env,
+            **overrides,
+        }
+
+    def invoke(self, *args, success=True, stdin_text=None, env=None):
         # `stdin_text` is an explicit pipe: passing nothing must not inherit the
         # terminal, and an empty string must still close the stream.
         streams = {} if stdin_text is None else {"input": stdin_text}
@@ -135,16 +164,11 @@ class Device:
                     "--json",
                     "--yes",
                     "--data-dir",
-                    str(self.directory / "client"),
+                    str(self.data_dir),
                     *args,
                 ],
                 cwd=ROOT,
-                env={
-                    **os.environ,
-                    "WHALEREIN_SECRET_BACKEND": "file:"
-                    + str(self.directory / "secrets"),
-                    "WHALEREIN_LOG": "error",
-                },
+                env=self.env(**(env or {})),
                 capture_output=True,
                 text=True,
                 timeout=90,
@@ -200,7 +224,7 @@ class Device:
         """Read committed identity/cursor metadata without decrypting or exporting payloads."""
         import sqlite3
 
-        with sqlite3.connect(self.directory / "client" / "cache.sqlite3") as cache:
+        with sqlite3.connect(self.data_dir / "cache.sqlite3") as cache:
             row = cache.execute(
                 "SELECT cursor FROM conversation_views WHERE host_id=? AND session_id=?",
                 (host, session),
@@ -218,7 +242,7 @@ class Device:
 
     def transport_token(self):
         key = "whalerein:v1:device-token:" + self.identity["device_id"]
-        return (self.directory / "secrets" / key.encode().hex()).read_text()
+        return (self.secret_dir / key.encode().hex()).read_text()
 
     def revoked_access_denied(self):
         try:
@@ -243,6 +267,132 @@ class Device:
     def sessions_exit(self, host):
         return self.invoke("sessions", "--host", host, success=False)[0]
 
+    def start_watch(self, *args, env=None):
+        """Start a long-running command whose NDJSON output is observed live."""
+        return Watcher(self, *args, env=env)
+
+
+class Watcher:
+    """A long-running CLI command (tail/wait) whose NDJSON output is read live.
+
+    Cases that need two concurrent viewers or a send racing an approval use
+    this instead of one-shot `Device.invoke`, which would serialize the
+    observation behind command completion.
+    """
+
+    def __init__(self, device, *args, env=None):
+        self.device = device
+        self.values = []
+        self._lines = queue.Queue()
+        self.stderr = []
+        self.process = subprocess.Popen(
+            [
+                str(ROOT / "target/debug/whalerein"),
+                "--json",
+                "--yes",
+                "--data-dir",
+                str(device.data_dir),
+                *args,
+            ],
+            cwd=ROOT,
+            env=device.env(**(env or {})),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        self._threads = [
+            threading.Thread(target=self._pump_stdout, daemon=True),
+            threading.Thread(target=self._pump_stderr, daemon=True),
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _pump_stdout(self):
+        for line in self.process.stdout or ():
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            self.values.append(value)
+            self._lines.put(value)
+        self._lines.put(None)
+
+    def _pump_stderr(self):
+        for line in self.process.stderr or ():
+            self.stderr.append(line)
+
+    def next(self, timeout=10):
+        try:
+            value = self._lines.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("CLI watcher produced no event") from None
+        if value is None:
+            raise AssertionError(
+                "CLI watcher exited before an event: " + "".join(self.stderr)[-500:]
+            )
+        return value
+
+    def wait(self, predicate, timeout=15):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(0.01, deadline - time.monotonic())
+            value = self.next(timeout=remaining)
+            if predicate(value):
+                return value
+        raise TimeoutError("Expected CLI watcher event was not observed")
+
+    def wait_exit(self, timeout=15):
+        return self.process.wait(timeout=timeout)
+
+    def close(self):
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=5)
+        for stream in (self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def approval_card(value):
+    """Normalize a FakeDSH approval snapshot to the public CLI card shape.
+
+    The control channel returns the native adapter snapshot: camelCase fields
+    with the digest as a serialized byte map. Cases pass cards back to the CLI,
+    whose arguments use the public card shape (snake_case, hex digest).
+    """
+    digest = value.get("digest")
+    if isinstance(digest, dict):
+        try:
+            digest = bytes(
+                digest[str(index)] for index in range(len(digest))
+            ).hex()
+        except (KeyError, TypeError, ValueError):
+            digest = None
+    return {
+        "approval_id": value.get("approvalId", ""),
+        "session_id": value.get("sessionId", ""),
+        "tool_name": value.get("toolName", ""),
+        "call_id": value.get("callId", ""),
+        "reason": value.get("reason", ""),
+        "digest": digest,
+        "version": value.get("version"),
+        "expires_at_unix_ms": value.get("expiresAt"),
+        "state": value.get("state", ""),
+        "decision": value.get("decision", ""),
+    }
+
 
 class FakeDsh:
     def __init__(self, process):
@@ -253,8 +403,17 @@ class FakeDsh:
         self.process.control("create_session", session_id=session_id)
         return session_id
 
-    def request_approval(self, session_id):
-        return self.process.control("request_approval", session_id=session_id)
+    def request_approval(self, session_id, ttl_ms=None, reason=None, tool_name=None):
+        extra = {}
+        if ttl_ms is not None:
+            extra["ttl_ms"] = int(ttl_ms)
+        if reason is not None:
+            extra["reason"] = reason
+        if tool_name is not None:
+            extra["tool_name"] = tool_name
+        return approval_card(
+            self.process.control("request_approval", session_id=session_id, **extra)
+        )
 
     def snapshot(self, session_id):
         return self.process.control("snapshot", session_id=session_id)
@@ -302,6 +461,8 @@ line:
   reconcile_interval: 30s
   heartbeat_interval: 5s
   operation_timeout: 5s
+presence:
+  cache_ttl: 60s
 admission:
   max_entries: 10000
   ttl: 5m
@@ -313,11 +474,36 @@ log:
   level: error
 """.replace("__ACCESS_CLIENT_ID__", self.access_client_id))
 
-    def start_dsh(self):
+    def configure_tls(self, ca_file, broker_url="mqtts://127.0.0.1:8883"):
+        """Point Access, the plugin and future devices at the case TLS listener.
+
+        Idempotent: cases re-run it with a different trust bundle after a
+        certificate rotation, so an existing ca_file/server_name pair is
+        replaced rather than duplicated (duplicate YAML keys fail validation).
+        """
+        ca_file = str(ca_file)
+        lines = [
+            line
+            for line in self.config.read_text().splitlines()
+            if not line.strip().startswith(("ca_file:", "server_name:"))
+        ]
+        updated = "\n".join(lines) + "\n"
+        updated = updated.replace('url: "mqtt://127.0.0.1:1883"', f'url: "{broker_url}"', 1)
+        updated = updated.replace(
+            'public_url: "mqtt://127.0.0.1:1883"', f'public_url: "{broker_url}"', 1
+        )
+        updated = updated.replace(
+            "broker:\n", f'broker:\n  ca_file: "{ca_file}"\n  server_name: "localhost"\n', 1
+        )
+        self.config.write_text(updated)
+        self.tls_ca = ca_file
+        self.tls_url = broker_url
+
+    def start_dsh(self, extra_env=None):
         authority = Process(
             ["node", str(ROOT / "tests/integration/fixtures/dsh.mjs")],
             self.directory,
-            {"WHALEREIN_DSH_SOCKET": str(self.socket)},
+            {"WHALEREIN_DSH_SOCKET": str(self.socket), **(extra_env or {})},
             control=True,
         )
         self.processes.append(authority)
@@ -346,19 +532,28 @@ log:
         self.start_access_process()
         self.wait_access_ready()
 
-    def start_plugin(self):
+    def start_plugin(self, extra_env=None):
         self.plugin = Process(
             ["node", str(ROOT / "tests/integration/fixtures/plugin.mjs")],
             self.directory,
             {
                 "WHALEREIN_DSH_SOCKET": str(self.socket),
-                "WHALEREIN_MQTT_URL": "mqtt://127.0.0.1:1883",
+                "WHALEREIN_MQTT_URL": getattr(self, "tls_url", "mqtt://127.0.0.1:1883"),
                 "WHALEREIN_HOST_ID": self.host,
                 "WHALEREIN_HOST_TOKEN": self.env["WHALEREIN_HOST_PROVISIONING_TOKEN"],
                 "WHALEREIN_STATE_DIR": str(self.directory / "plugin"),
                 "WHALEREIN_HOST_CREDENTIAL_FILE": str(
                     self.directory / "credentials.json"
                 ),
+                **(
+                    {
+                        "WHALEREIN_CA_FILE": self.tls_ca,
+                        "WHALEREIN_ALLOW_INSECURE_MQTT": "0",
+                    }
+                    if getattr(self, "tls_ca", None)
+                    else {}
+                ),
+                **(extra_env or {}),
             },
             control=False,
         )
@@ -369,11 +564,17 @@ log:
             process=self.plugin,
         )
 
-    def pair(self):
-        device = Device(self.directory)
+    def pair(self, namespace="client"):
+        device = Device(self.directory, namespace)
+        if getattr(self, "tls_ca", None):
+            device.extra_env = {"WHALEREIN_CA_FILE": self.tls_ca}
         invitation = http("/v1/pairing/invitations", {"hostId": self.host}, self.admin)
         device.identity = device.call("pair", invitation["pairingUri"])
         return device
+
+    def pair_second(self):
+        """Pair a second independent device to the same host identity."""
+        return self.pair(namespace="client-2")
 
     def host_peer_exists(self, device_id):
         import sqlite3

@@ -13,7 +13,7 @@ _OPERATIONS = [
     ("interrupt", "interrupt"), ("model", "selectSessionModel"),
     ("queue_edit", "updatePendingQueue"), ("queue_remove", "updatePendingQueue"),
     ("queue_promote", "updatePendingQueue"), ("question_open", "answerOpenQuestion"),
-    ("question_continued", "answerContinuedQuestion"),
+    ("question_continued", "answerContinuedQuestion"), ("approval", "resolveApproval"),
 ]
 
 
@@ -35,6 +35,9 @@ def test_gx04_fake_mutation_recovery(operation, source_method, fault, scenario, 
         scenario.dsh.process.control("create_queue_session", session_id=session)
         paired_device.sessions(scenario.host)
         item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    if operation == "approval":
+        scenario.dsh.request_approval(session)
+        approval = paired_device.approvals(session)[0]
     if operation.startswith("question_"):
         method = "request_question_open" if operation == "question_open" else "request_question"
         scenario.dsh.process.control(method, session_id=session)
@@ -53,6 +56,8 @@ def test_gx04_fake_mutation_recovery(operation, source_method, fault, scenario, 
         args[operation] = ["queue", action, "--session", session, "--item", item] + (["synthetic replacement"] if action == "edit" else [])
     if operation.startswith("question_"):
         args[operation] = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
+    if operation == "approval":
+        args[operation] = ["approve", "--request", approval["approval_id"], "--digest", approval["digest"], "--version", str(approval["version"])]
     before = scenario.dsh.process.control("gx_effect_counts")[source_method]
     marker = scenario.directory / "plugin" / ("gx-fail-terminal" if fault == "journal" else "gx-drop-terminal")
     marker.write_text("armed")
@@ -84,8 +89,8 @@ def test_gx04_fake_mutation_recovery(operation, source_method, fault, scenario, 
         assert code == 7 and values[-1]["error"]["code"] == "unknown"
     else:
         assert code == 0
-        recovered = values[-1]["data"]
-        assert recovered["status"] == "succeeded" and recovered["command_id"] == original["command_id"]
+        recovered = values[-1].get("data")
+        assert recovered and recovered["status"] == "succeeded" and recovered["command_id"] == original["command_id"]
         for key in ("lifecycle_receipt", "model_selection", "question_receipt", "delivery_id"):
             if original.get(key) is not None:
                 assert recovered[key] == original[key]

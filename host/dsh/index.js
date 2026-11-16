@@ -4,7 +4,9 @@
 // connection, may call Access to mint a pairing URI, and never listens or links Rust.
 
 import os from 'node:os'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
+import { validateTopicId } from 'whalerein-host/config.js'
 import { ConfigError, resolveConfig } from './src/config.js'
 import { generateHostId } from 'whalerein-host/host-id.js'
 import { HostRuntime } from 'whalerein-host/host.js'
@@ -39,7 +41,16 @@ export const Config = z.object({
   allow_insecure_mqtt: z.boolean().default(false).volatile(),
   pending_queue_enabled: z.boolean().default(true).volatile(),
   enable_open_question_broker: z.boolean().default(true).volatile(),
+  approval_mode: z.string().default('claim').volatile(),
   approval_ttl_ms: z.number().default(300000).volatile(),
+  event_batch_ms: z.number().default(20).volatile(),
+  outbox_per_device_limit: z.number().default(100).volatile(),
+  outbox_total_limit: z.number().default(1000).volatile(),
+  snapshot_max_events: z.number().default(5000).volatile(),
+  reconnect_min_ms: z.number().default(500).volatile(),
+  reconnect_max_ms: z.number().default(30000).volatile(),
+  shutdown_timeout_ms: z.number().default(5000).volatile(),
+  proto_path: z.string().default('').volatile(),
 })
 
 function configValue(raw, key) {
@@ -47,7 +58,7 @@ function configValue(raw, key) {
   return value && typeof value.get === 'function' ? value.get() : value
 }
 
-function materializeConfig(raw) {
+export function materializeConfig(raw) {
   const keys = [
     'server',
     'admin_token',
@@ -64,7 +75,16 @@ function materializeConfig(raw) {
     'allow_insecure_mqtt',
     'pending_queue_enabled',
     'enable_open_question_broker',
+    'approval_mode',
     'approval_ttl_ms',
+    'event_batch_ms',
+    'outbox_per_device_limit',
+    'outbox_total_limit',
+    'snapshot_max_events',
+    'reconnect_min_ms',
+    'reconnect_max_ms',
+    'shutdown_timeout_ms',
+    'proto_path',
   ]
   const out = {}
   for (const key of keys) {
@@ -84,6 +104,37 @@ function fallbackLog(code, reason) {
     })}\n`)
   } catch {
     // nothing else to do without a logger
+  }
+}
+
+// A generated id must survive a failed profile write. The profile user layer is
+// the primary store; this bounded file in the existing state directory is the
+// fallback that keeps MQTT identity stable when that write is rejected.
+function hostIdFile(stateDir) {
+  return join(stateDir, 'host-id')
+}
+
+function readPersistedHostId(stateDir) {
+  try {
+    const value = readFileSync(hostIdFile(stateDir), 'utf8').trim()
+    if (!value) return ''
+    validateTopicId(value, 'host_id')
+    return value
+  } catch {
+    return ''
+  }
+}
+
+function persistHostId(stateDir, hostId) {
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    const file = hostIdFile(stateDir)
+    const temporary = `${file}.tmp-${process.pid}`
+    writeFileSync(temporary, `${hostId}\n`, { mode: 0o600 })
+    renameSync(temporary, file)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -121,19 +172,38 @@ function createRuntime(config, options) {
  * Cordis plugin apply. Starts the endpoint in the plugin fiber and stops it on
  * unload/reload, releasing MQTT, timers, and DSH subscriptions.
  */
-function withHostId(ctx, rawConfig) {
+export function withHostId(ctx, rawConfig) {
   const materialized = materializeConfig(rawConfig)
   if (String(materialized.host_id ?? '').trim()) return materialized
-  const next = { ...materialized, host_id: generateHostId(os.hostname()) }
+  const stateDir = String(materialized.state_dir ?? '').trim() || join(os.homedir(), '.whalerein', 'dsh')
+  const persisted = readPersistedHostId(stateDir)
+  const hostId = persisted || generateHostId(os.hostname())
+  const next = { ...materialized, host_id: hostId }
+  if (!persisted) persistHostId(stateDir, hostId)
   if (ctx && typeof ctx.emit === 'function' && ctx.fiber) {
     try {
       ctx.emit('internal/commit', ctx.fiber, next)
     } catch {
-      // This process still uses the generated id. The next start generates
-      // another one only when the profile is still empty.
+      // The state-directory fallback above still keeps this identity stable on
+      // the next start even when the profile user layer rejects the write.
     }
   }
   return next
+}
+
+// Name the field a stored-configuration failure belongs to so the settings
+// page can explain it instead of looking like an unpaired/offline host.
+export function configFailure(error) {
+  const code = typeof error?.code === 'string' ? error.code : 'invalid_config'
+  const reason = error instanceof ConfigError
+    ? error.message.replace(`${error.code}: `, '')
+    : undefined
+  const names = ['server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
+    'host_token', 'adapter', 'approval_mode', 'approval_ttl_ms', 'event_batch_ms',
+    'outbox_per_device_limit', 'outbox_total_limit', 'snapshot_max_events',
+    'reconnect_min_ms', 'reconnect_max_ms', 'shutdown_timeout_ms', 'ca_file', 'state_dir']
+  const field = reason ? names.find(name => reason.startsWith(`${name} `) || reason === name) ?? '' : ''
+  return { code, field, reason: reason ?? 'configuration could not be resolved' }
 }
 
 export function apply(ctx, rawConfig = {}) {
@@ -141,11 +211,21 @@ export function apply(ctx, rawConfig = {}) {
   try {
     config = resolveConfig(withHostId(ctx, rawConfig))
   } catch (error) {
-    const code = typeof error?.code === 'string' ? error.code : 'invalid_config'
-    const reason = error instanceof ConfigError
-      ? error.message.replace(`${error.code}: `, '')
-      : undefined
-    fallbackLog(code, reason)
+    const failure = configFailure(error)
+    fallbackLog(failure.code, failure.reason)
+    // Keep the settings surface available while the Host is stopped so the
+    // page can name the invalid field and still test a corrected draft.
+    if (ctx && typeof ctx.get === 'function' && ctx.get('typertGateway')) {
+      createSettingsService(ctx, {
+        started: false,
+        config: { hostId: String(configValue(rawConfig, 'host_id') ?? '') },
+        security: null,
+        store: null,
+        access: null,
+        diagnostics: () => null,
+        configError: failure,
+      })
+    }
     return
   }
   const host = createRuntime(config, { ctx })

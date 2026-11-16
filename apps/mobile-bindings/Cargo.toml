@@ -1,0 +1,40 @@
+[package]
+name = "whalerein-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UniFFI mobile bindings for WhaleRein Core"
+
+[lib]
+name = "whalerein_mobile"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# Bindings generator entry point; only needed when producing Swift sources.
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "revision"
+path = "src/bin/revision.rs"
+
+[dependencies]
+whalerein-core = { path = "../../core", default-features = false }
+uniffi = "0.29"
+thiserror = { workspace = true }
+hex = { workspace = true }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+whalerein-proto = { workspace = true }
+# Deterministic fake Access/Host fixtures for Rust tests only. Production
+# builds never enable Core's `test-support` feature.
+whalerein-core = { path = "../../core", default-features = false, features = ["test-support"] }

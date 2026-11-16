@@ -91,8 +91,11 @@ On Access reconnect the plugin answers `snapshot` with the connection registry
 and the sequence boundary observed under the same lock that assigns sequences.
 Access discards notification sequences at or below the boundary, so a snapshot
 followed by later notifications cannot lose or duplicate a transition.
-The existing device last-will, Host `HostReady` and HTTP heartbeat fallbacks
-remain available when a notification is lost.
+The device last will is a fallback only while presence is unknown: it does not
+identify the connection that ended, so it cannot override a live broker
+connection. Host `HostReady` confirms the request subscription before a Host is
+treated as online, and the next sequenced snapshot repairs a lost notification.
+There is no HTTP/REST presence fallback.
 
 ## Bounds and failure behavior
 
@@ -104,7 +107,9 @@ remain available when a notification is lost.
   checks fail closed and new external connections are denied.
 - A revocation is complete only after PostgreSQL commits, the plugin
   acknowledges the matching fence, and the superseded connection is closed or
-  confirmed absent. Access keeps its own admission closed until then.
+  confirmed absent. Access keeps its own admission closed until then. A
+  Host-scoped `deny` closes a device connection only when no other Host's grant
+  remains on it; one device connection can hold several Host scopes.
 - Reconciliation projects only connections present in the broker snapshot and
   skips a policy whose durable revision already matches, so historical grants
   cannot turn each pass into an O(all grants) control sweep.

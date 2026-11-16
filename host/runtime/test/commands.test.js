@@ -277,7 +277,7 @@ test('when approval fields are valid, it resolves once; invalid digest, version,
     },
   })
   const unknown = await service.handle({ request: makeRequest(), payload: resolve('APPROVAL_DECISION_APPROVE', { approvalId: 'missing' }) })
-  assert.equal(unknown.status, 'rejected')
+  assert.equal(unknown.status, 'failed')
   assert.equal(unknown.errorCode, 'approval_unavailable')
   const badDecision = await service.handle({ request: makeRequest(), payload: resolve('APPROVAL_DECISION_UNSPECIFIED') })
   assert.equal(badDecision.errorCode, 'invalid_argument')
@@ -2444,4 +2444,142 @@ test('lifecycle receipts never carry private cwd or native diagnostics', async (
   const receipt = lifecycleReceiptOf(await service.handle({ request: makeRequest(), payload: { create_session: { workspace_id: 'w' } } }))
   assert.equal(JSON.stringify(receipt).includes('/private/workspace'), false)
   assert.equal(JSON.stringify(receipt).includes('private native error'), false)
+})
+
+
+test('definitive approval precheck rejections are journaled and replay the exact approval code after restart', async () => {
+  const { service, adapter, store, advance } = makeService()
+  const pending = adapter.requestApproval({ sessionId: 's1', ttlMs: 1000 })
+  const payload = (extra = {}) => ({ resolve_approval: {
+    approval_id: extra.approvalId ?? pending.approvalId,
+    decision: extra.decision ?? 'APPROVAL_DECISION_APPROVE',
+    expected_digest: extra.digest ?? pending.digest,
+    expected_version: extra.version ?? pending.version,
+  } })
+  const cases = [
+    ['approval-unknown', payload({ approvalId: 'missing' }), 'approval_unavailable'],
+    ['approval-decision', payload({ decision: 'APPROVAL_DECISION_UNSPECIFIED' }), 'invalid_argument'],
+    ['approval-digest', payload({ digest: new Uint8Array(32) }), 'approval_version_mismatch'],
+    ['approval-version', payload({ version: 99 }), 'approval_version_mismatch'],
+  ]
+  for (const [commandId, body, code] of cases) {
+    const request = makeRequest({ commandId })
+    const result = await service.handle({ request, payload: body })
+    assert.equal(result.status, 'failed', commandId)
+    assert.equal(result.errorCode, code, commandId)
+    const stored = store.getCommand('device-1', commandId)
+    assert.equal(stored.status, 'failed')
+    assert.equal(stored.errorCode, code)
+    assert.ok(stored.resultPayload instanceof Uint8Array && stored.resultPayload.length > 0)
+    const replay = await service.handle({ request, payload: body })
+    assert.equal(replay.status, 'failed')
+    assert.equal(replay.errorCode, code)
+    assert.deepEqual([...replay.resultPayload], [...result.resultPayload])
+  }
+  const expired = adapter.requestApproval({ sessionId: 's1', ttlMs: 10 })
+  advance(20)
+  const expiredRequest = makeRequest({ commandId: 'approval-expired' })
+  const expiredResult = await service.handle({ request: expiredRequest, payload: {
+    resolve_approval: { approval_id: expired.approvalId, decision: 'APPROVAL_DECISION_REJECT', expected_digest: expired.digest, expected_version: expired.version },
+  } })
+  assert.equal(expiredResult.status, 'failed')
+  assert.equal(expiredResult.errorCode, 'approval_expired')
+  assert.equal(store.getCommand('device-1', 'approval-expired').errorCode, 'approval_expired')
+
+  const approved = await service.handle({ request: makeRequest({ commandId: 'approval-first' }), payload: payload() })
+  assert.equal(approved.status, 'succeeded')
+  const repeatedRequest = makeRequest({ commandId: 'approval-repeated' })
+  const repeated = await service.handle({ request: repeatedRequest, payload: payload() })
+  assert.equal(repeated.status, 'failed')
+  assert.equal(repeated.errorCode, 'approval_already_resolved')
+  assert.equal(store.getCommand('device-1', 'approval-repeated').errorCode, 'approval_already_resolved')
+  assert.equal(store.countCommands('accepted'), 0)
+})
+
+test('a model selection that expires during acceptance never reaches the source', async () => {
+  const ctx = makeService()
+  ctx.adapter.describe = () => ({ mode: 'fixture', available: true, capabilities: ['model-select'] })
+  ctx.service.onAccepted = async () => ctx.advance(50)
+  let sourceCalls = 0
+  ctx.adapter.execute = async () => {
+    sourceCalls++
+    return { model_selection_receipt: { selected: { provider: 'p', model: 'm' },
+      effect_scope: 'session_and_source_default_attempt', default_persistence: 'unconfirmed' } }
+  }
+  const result = await ctx.service.handle({ request: makeRequest({ expiresAt: 1050 }),
+    payload: { select_session_model: { session_id: 's1', provider: 'p', model: 'm' } } })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorCode, 'expired')
+  assert.equal(sourceCalls, 0)
+  // The same command replays its stored terminal outcome without a new native call.
+  assert.equal((await ctx.service.handle({ request: makeRequest({ expiresAt: 1050 }),
+    payload: { select_session_model: { session_id: 's1', provider: 'p', model: 'm' } } })).errorCode, 'expired')
+  assert.equal(sourceCalls, 0)
+})
+
+test('question pagination cursors survive a Host restart through the persisted key', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-pager-'))
+  const statePath = join(directory, 'state.sqlite')
+  const batch = (id, size = 20) => ({ session_id: 's', batch_id: id, source_epoch: 'e', version: 1,
+    digest: new Uint8Array(32), phase: 'QUESTION_OPEN', answerable: true,
+    questions: [{ id: 'q', question: 'x'.repeat(size) }] })
+  const build = () => {
+    const store = new StateStore({ path: statePath, now: () => 1000 })
+    const service = new CommandService({ store, adapter: new TestSource({ sessions: [{ sessionId: 's1' }] }),
+      events: {}, now: () => 1000 })
+    return { store, service }
+  }
+  try {
+    const first = build()
+    const source = { batches: [batch('one'), batch('two'), batch('three')] }
+    const inputs = { deviceId: 'device-1', sessionId: 's', source }
+    let budget = 1
+    while (budget < 1000) {
+      try { if (first.service.questionPager.page({ ...inputs, maxBytes: budget }).batches[0]?.questions?.length === 1) break } catch {}
+      budget++
+    }
+    const page = first.service.questionPager.page({ ...inputs, maxBytes: budget })
+    assert.ok(page.next_cursor)
+    const expected = first.service.questionPager.page({ ...inputs, cursor: page.next_cursor, maxBytes: budget }).batches[0].batch_id
+    first.store.close()
+
+    const restarted = build()
+    try {
+      assert.equal(restarted.service.questionPager.page({ ...inputs, cursor: page.next_cursor, maxBytes: budget }).batches[0].batch_id, expected)
+    } finally { restarted.store.close() }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('concurrent start-if-idle sends serialize so the loser observes the started turn instead of passing the idle check', async () => {
+  const { service, adapter, store } = makeService()
+  const session = adapter.sessions.get('s1')
+  session.running = false
+  let entered
+  let release
+  const started = new Promise((resolve) => { entered = resolve })
+  const barrier = new Promise((resolve) => { release = resolve })
+  let sends = 0
+  const sendMessage = adapter.sendMessage.bind(adapter)
+  adapter.sendMessage = async (...args) => {
+    sends += 1
+    entered()
+    await barrier
+    session.running = true
+    return sendMessage(...args)
+  }
+  const payload = { send_message: { session_id: 's1', text: 'first', delivery_mode: 'START_IF_IDLE' } }
+  const first = service.handle({ request: makeRequest({ commandId: 'start-first' }), payload })
+  await started
+  const second = service.handle({ request: makeRequest({ commandId: 'start-second' }), payload })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(sends, 1, 'the second send waits behind the per-session gate')
+  release()
+  const results = await Promise.all([first, second])
+  assert.equal(sends, 1)
+  assert.deepEqual(results.map((result) => result.status).sort(), ['failed', 'succeeded'])
+  assert.equal(results.find((result) => result.status === 'failed').errorCode, 'conflict')
+  assert.equal(store.getCommand('device-1', 'start-second').errorCode, 'conflict')
+  store.close()
 })

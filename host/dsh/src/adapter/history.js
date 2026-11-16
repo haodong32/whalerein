@@ -3,6 +3,44 @@ import { AdapterError } from 'whalerein-host/errors.js'
 import { codec } from 'whalerein-host/protocol.js'
 import { projectMessage } from './projection.js'
 
+const TRUNCATION_TEXT = 'Content truncated to the history page budget'
+function encodedSize(message) {
+  return message ? codec().encode('whalerein.v1.ConversationMessage', message).length + 32 : 0
+}
+function textHolders(block) {
+  const holders = []
+  if (block?.text && typeof block.text.text === 'string') holders.push(block.text)
+  if (block?.tool_result && typeof block.tool_result.text === 'string') holders.push(block.tool_result)
+  return holders
+}
+// A single native message can exceed the page budget. Bound the projected
+// Message itself so the first page always honors max_bytes without splitting a
+// Unicode code point; the retained prefix is marked as truncated.
+function fitMessage(message, budget) {
+  if (encodedSize(message) <= budget) return message
+  const copy = { ...message, blocks: message.blocks.map(block => ({
+    ...block,
+    ...(block.text ? { text: { ...block.text } } : {}),
+    ...(block.tool_result ? { tool_result: { ...block.tool_result } } : {}),
+  })) }
+  copy.blocks.push({ block_id: 'truncated', notice: { category: 'unsupported_content', text: TRUNCATION_TEXT } })
+  for (let index = copy.blocks.length - 2; index >= 0; index--) {
+    for (const holder of textHolders(copy.blocks[index])) {
+      const original = Array.from(holder.text)
+      if (original.length === 0 || encodedSize(copy) <= budget) continue
+      let low = 0, high = original.length - 1, best = 0
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2)
+        holder.text = original.slice(0, middle).join('')
+        if (encodedSize(copy) <= budget) { best = middle; low = middle + 1 } else high = middle - 1
+      }
+      holder.text = original.slice(0, best).join('')
+    }
+  }
+  if (encodedSize(copy) <= budget) return copy
+  return { ...message, blocks: [{ block_id: 'truncated', notice: { category: 'unsupported_content', text: TRUNCATION_TEXT } }] }
+}
+
 // Tokens are source/session/view positions. Clients never do integer arithmetic.
 export class DshHistory {
   #views = new Map()
@@ -65,8 +103,9 @@ export class DshHistory {
     const changes=[]
     let inspected=after,bytes=0,count=0
     for(const event of selected) {
-      const message=projectMessage(sessionId,view.id,event)
-      const size=message?codec().encode('whalerein.v1.ConversationMessage',message).length+32:0
+      const projected=projectMessage(sessionId,view.id,event)
+      const message=projected?fitMessage(projected,budget):null
+      const size=encodedSize(message)
       if(count&&(bytes+size>budget||count>=limit))break
       inspected=event.dshSeq;count++;bytes+=size
       if(message) { const origin=this.source.conversation.originFor(event); changes.push({message,...(origin?{origin}:{})}) }

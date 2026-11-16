@@ -1,0 +1,28 @@
+name: Select an available iPhone simulator
+description: >-
+  Resolve one currently available iPhone simulator UDID so builds and tests do
+  not depend on a device name that a runner image may have retired.
+
+outputs:
+  udid:
+    description: UDID of the selected iPhone simulator
+    value: ${{ steps.select.outputs.udid }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select an available iPhone simulator
+      id: select
+      shell: bash
+      run: |
+        udid=$(xcrun simctl list devices available --json | python3 -c '
+        import json, sys
+        devices = json.load(sys.stdin)["devices"]
+        for runtime in sorted(devices, reverse=True):
+            for device in devices[runtime]:
+                if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                    print(device["udid"])
+                    raise SystemExit
+        raise SystemExit("no available iPhone simulator")
+        ')
+        echo "udid=$udid" >> "$GITHUB_OUTPUT"

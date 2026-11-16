@@ -1,0 +1,232 @@
+# WhaleRein mobile bindings
+
+UniFFI 0.29 binding between WhaleRein Core and the iOS app. The crate is
+`whalerein-mobile` (library `whalerein_mobile`); Swift imports the module
+`WhaleReinMobile`.
+
+The crate projects Core's transport-neutral state into flat, typed values. It
+does not implement protocol, pairing, cache, draft or command logic: those stay
+in `core/`. `SecretStore` is the only injected capability; the app implements
+it with the Keychain.
+
+## Layout
+
+```
+apps/mobile-bindings/
+  build.rs                    revision/Core-version provenance
+  uniffi.toml                 Swift module names
+  src/lib.rs                  uniffi::setup_scaffolding!("WhaleReinMobile")
+  src/secret.rs               foreign SecretStore + MemorySecretStore
+  src/client.rs               MobileCore, runtime, pairing/watch, event queue
+  src/types.rs                exported records/enums and total conversions
+  src/error.rs                flat MobileError and Core error mapping
+  src/bin/uniffi-bindgen.rs   bindings generator entry point
+  src/bin/revision.rs         prints the embedded revision
+  swift/WhaleReinMobileError.swift   stable `code`/`message` accessors
+  scripts/build-xcframework.sh       XCFramework + Swift binding build
+  tests/mobile_core.rs               fixture-backed behavior tests
+```
+
+## Build
+
+```bash
+# Rust checks
+cargo fmt --all -- --check
+cargo clippy -p whalerein-mobile --all-targets -- -D warnings
+cargo test -p whalerein-mobile
+
+# Generated iOS artifacts (requires Xcode; DEVELOPER_DIR is set automatically
+# to /Applications/Xcode.app/Contents/Developer when present)
+bash apps/mobile-bindings/scripts/build-xcframework.sh
+
+# Optional Intel Simulator slice
+SIM_TARGETS="aarch64-apple-ios-sim x86_64-apple-ios" \
+  bash apps/mobile-bindings/scripts/build-xcframework.sh
+```
+
+The script builds device (`aarch64-apple-ios`) and Simulator
+(`aarch64-apple-ios-sim` by default) static libraries with
+`--no-default-features`, generates Swift bindings from a host library built in
+the same run, assembles `WhaleReinMobileFFI.framework` per platform, and runs
+`xcodebuild -create-xcframework`. Output paths:
+
+- `apps/ios/Vendor/WhaleReinMobile.xcframework` (contains
+  `WhaleReinMobileFFI.framework`)
+- `apps/ios/Vendor/WhaleReinMobile/WhaleReinMobile.swift`
+- `apps/ios/Vendor/WhaleReinMobile/WhaleReinMobileError.swift`
+- `apps/ios/Vendor/WhaleReinMobile/WhaleReinMobile.revision`
+- `apps/ios/Vendor/revision.txt`
+
+`apps/ios/Vendor/` is generated and gitignored. Link
+`WhaleReinMobile.xcframework` and add both Swift files from
+`apps/ios/Vendor/WhaleReinMobile/` to the app target; the C module comes from
+the framework. Core's `keyring` feature stays off; `test-support` is enabled
+only by dev-dependencies in Rust tests.
+
+## Provenance
+
+`coreRevision()` returns a build-time value from `build.rs`:
+
+```
+git:<12-char HEAD>[-dirty] core:<Core package version>
+```
+
+`git:unknown core:<version>` is the fallback when git metadata is unavailable.
+The same string is written to `WhaleReinMobile.revision` and `revision.txt`.
+`DiagnosticsReportView.coreVersion` is the Core package version, independent of
+the git marker.
+
+## Swift API surface
+
+Module `WhaleReinMobile`; C module `WhaleReinMobileFFI`. Errors are
+`MobileError` (or `SecretStoreError` from a secret store implementation).
+
+```swift
+// Errors: MobileError has `code: String` and `message: String` from the
+// companion source file. Cases: InvalidInput, NotPaired, NotFound, Revoked,
+// HostOffline, Unavailable, Conflict, Timeout, Cancelled, Security, Internal.
+
+func coreRevision() -> String
+
+final class MobileCore {
+    convenience init(dataDir: String, secretStore: SecretStore, appVersion: String) throws
+    static func newWithMemorySecretStore(dataDir: String, appVersion: String) throws -> MobileCore
+    func coreRevision() -> String
+
+    // Pairing
+    func pairingStart(invitation: String) throws -> PairingPromptView
+    func pairingDecide(approved: Bool, expectedFingerprint: String?) throws
+    func pairingCancel()
+
+    // Hosts, sessions, connection
+    func hosts() throws -> [HostSummary]
+    func sessions(hostId: String) throws -> [SessionSummaryView]
+    func cachedSessions(hostId: String) throws -> [SessionSummaryView]
+    func cachedMessages(hostId: String, sessionId: String) throws -> [MessageView]
+    func capabilities(hostId: String, sessionId: String) throws -> SessionCapabilitiesView
+    func connectionState(hostId: String) -> String
+
+    // Observation
+    func startWatch(hostId: String, sessionId: String) throws
+    func stopWatch()
+    func pollEvents(timeoutMs: UInt64) -> [ConversationEvent]
+
+    // Commands and approvals
+    func send(hostId: String, sessionId: String, text: String,
+              delivery: DeliveryChoice) throws -> CommandView
+    func stop(hostId: String, sessionId: String) throws -> CommandView
+    func approvals(hostId: String, sessionId: String) throws -> [ApprovalView]
+    func resolveApproval(hostId: String, sessionId: String, approvalId: String,
+                         version: Int64, digestHex: String, allow: Bool) throws -> CommandView
+
+    // Drafts
+    func saveDraft(hostId: String, sessionId: String, text: String) throws
+    func loadDraft(hostId: String, sessionId: String) throws -> String?
+    func clearDraft(hostId: String, sessionId: String) throws
+
+    // Diagnostics and lifecycle
+    func diagnosticsPreview() throws -> DiagnosticsReportView
+    func exportDiagnostics(path: String) throws -> DiagnosticsReportView
+    func forgetDevice() throws
+    func revoke() throws
+}
+
+protocol SecretStore: AnyObject, Sendable {
+    func load(key: String) throws -> Data?
+    func save(key: String, value: Data) throws
+    func delete(key: String) throws
+}
+
+final class MemorySecretStore {          // Rust object; process-local, test only
+    convenience init()
+    func count() -> UInt64
+    func load(key: String) throws -> Data?
+    func save(key: String, value: Data) throws
+    func delete(key: String) throws
+}
+```
+
+Records: `HostSummary { hostId, online, fingerprint, protocolVersion }`,
+`SessionSummaryView { sessionId, title, updatedAtUnixMs, cwd, running,
+capabilities: SessionCapabilitiesView? }`,
+`SessionCapabilitiesView { history, resumableHistory, liveText, interrupt,
+approvals, deliveryModes: [String], modelSelection, pendingQueueRead,
+pendingQueueEdit, pendingQueueRemove, pendingQueueSteer, questionsRead,
+questionsAnswerOpen, questionsAnswerContinued, sessionFork }`,
+`PairingPromptView { hostId, accessUrl, fingerprint, fingerprintDisplay }`,
+`ApprovalView { approvalId, sessionId, toolName, callId, reason, version,
+expiresAtUnixMs, digestHex, state }`, `MessageView { messageId, role, blocks,
+createdAtUnixMs }`, `BlockView { blockId, kind, text, toolName }`,
+`CommandView { requestId, commandId, status, messageId, deliveryId }`,
+`DiagnosticsReportView { json, redactionFields, lastFailureCode, appVersion,
+coreVersion }`.
+
+Enums: `DeliveryChoice { steer, queue, send }`;
+`ConversationEvent { state(runPhase:running:revision:approvals:), historyReset,
+message(message:), preview(attemptId:text:replace:incomplete:),
+attemptEnded(attemptId:outcome:), connection(hostId:status:),
+pairingPrompt(prompt:), pairingFinished(hostId:code:),
+commandStatus(command:), approvalChanged(approval:),
+error(code:message:), droppedEvents(count:), watchEnded }`.
+
+Semantics:
+
+- `send` maps `send` to start-if-idle, `queue` to enqueue-after-run and `steer`
+  to steer. Delivery capability remains a Source decision; the app chooses the
+  mode.
+- `resolveApproval` submits exactly the reviewed `version` and `digestHex`.
+  `digestHex` is the 32-byte approval digest rendered as hex.
+- `cachedMessages` reads Core's encrypted local cache only (no channel), in
+  committed order. An empty cache returns `[]`; an unpaired profile throws
+  `not_paired`. On `historyReset`, replay these before live updates and dedupe
+  by `messageId`. It shares the exact `MessageView`/`BlockView` projection used
+  by live `message` events.
+- `capabilities` resolves the session through the Host's session list; an
+  absent session throws `not_found` and a Source that reported no capabilities
+  throws `unavailable`. `deliveryModes` contains stable lowercase values
+  (`start_if_idle`, `enqueue_after_run`, `steer`) and preserves unknown modes in
+  lowercase. `state.running` is true while `runPhase` is `running` or
+  `stopping`; `runPhase` distinguishes them.
+- `pollEvents` blocks the calling thread up to `timeoutMs` (capped at 30 s) and
+  returns an empty array on timeout; call it off the main thread.
+- `send`, `stop` and `resolveApproval` return their `CommandView` and also queue
+  a `commandStatus` event. The queue is bounded at 512 events; overflow drops the
+  oldest and reports `droppedEvents(count:)` before the retained events.
+- `startWatch` replaces an earlier watch; stale updates are discarded.
+  `stopWatch` aborts the Rust task and emits `watchEnded`.
+- `pairingStart` waits up to 20 s for Core's Noise-verified prompt and returns
+  it (also queued as `pairingPrompt`). A timeout is typed; the task continues
+  and can still deliver `pairingPrompt`/`pairingFinished`.
+- `revoke` blocks until Core confirms revocation, then stops the watch.
+  `forgetDevice` also stops the watch; Core requires the profile to be revoked
+  (or unpaired) first, so a paired unrevoked profile returns `conflict`.
+- `role` values are `user`, `assistant`, `tool`, `notice`, `unknown`; `kind`
+  values are `text`, `tool`, `notice`, `attachment`, `unknown`; `runPhase`,
+  `outcome` and approval `state` use `unknown` for unrecognized protocol values.
+- `DiagnosticsReportView.json` uses Core's redacted preview/export. It excludes
+  message and draft text, tool arguments, credentials, invitation/device tokens,
+  private keys, full ciphertext and raw Host/device ids.
+
+`MobileError` codes: `invalid_input`, `not_paired`, `not_found`, `revoked`,
+`host_offline`, `unavailable`, `conflict`, `timeout`, `cancelled`, `security`,
+`internal`.
+
+## Contract notes
+
+- UniFFI 0.29 requires trait arguments to be `Arc<dyn SecretStore>`; Swift still
+  sees the `SecretStore` protocol, so the `Box` in the plan is an FFI detail.
+- `ApprovalView` exposes `digestHex` in addition to the plan's fields because
+  `resolveApproval` must bind the reviewed digest.
+- `pairingPrompt`, `pairingFinished`, `state`, and `commandStatus` carry their
+  payloads; `droppedEvents` is the explicit loss counter required for a bounded
+  queue.
+- `MemorySecretStore` is a UniFFI object, not a foreign trait implementation, so
+  Swift cannot pass it directly as `SecretStore`; use
+  `newWithMemorySecretStore` or wrap its methods in a `SecretStore`
+  conformance. No `unwrap`/panic path exists on FFI input paths.
+
+## Security
+
+No logs are emitted. No `unwrap` is used on FFI inputs; ids, text, invitation
+and fingerprint lengths are validated before use. `MobileError` messages are
+fixed neutral strings and never include Core error text.
