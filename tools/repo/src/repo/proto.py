@@ -56,9 +56,7 @@ def _normalize_go(text: str) -> str:
 
 def _check_protoc(runner: Runner) -> None:
     if runner.which("protoc") is None:
-        raise ToolMissingError(
-            "required tool not found on PATH: protoc (install protobuf-compiler)"
-        )
+        raise ToolMissingError("required tool not found on PATH: protoc (install protoc 36.2)")
 
 
 def protoc_gen_go_path(runner: Runner) -> str | None:
@@ -76,7 +74,7 @@ def _check_protoc_gen_go(runner: Runner) -> str:
     if path is None:
         raise ToolMissingError(
             "protoc-gen-go not found on PATH or ~/go/bin; install it with "
-            "`go install google.golang.org/protobuf/cmd/protoc-gen-go@latest`"
+            "`go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12`"
         )
     return path
 

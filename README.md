@@ -110,9 +110,10 @@ There is no second plugin to install.
 
 ## Prerequisites
 
-- Toolchains: Rust 1.85+ (rustfmt, Clippy), Go 1.26+, Node.js 22.5+,
-  pnpm 12.18.0, Python 3.11+, and uv.
-- Build tools: Git, Git LFS, Bash, a C/C++ compiler, protoc, and protoc-gen-go.
+- CI toolchains: Rust 1.100.0 (via rustup), Go 1.27.4, Node.js 26.13.1 LTS,
+  pnpm 12.18.0, Python 3.15.2, and uv 0.13.8.
+- Build tools: Git, Git LFS, Bash, a C/C++ compiler, protoc 36.2, and
+  protoc-gen-go 1.36.12.
 - Local server stack: Docker with Compose. Integration tests: Docker with
   buildx/BuildKit. PostgreSQL and Mosquitto run in containers.
 - Optional: cargo-llvm-cov and llvm-tools-preview for Rust coverage;

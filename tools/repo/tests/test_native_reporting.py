@@ -564,3 +564,30 @@ def test_failed_rust_case_exports_only_its_failure_block(tmp_path):
     assert "panicked at src/lib.rs:4" in message
     assert "fixture-value" not in message
     assert "test result:" not in message
+
+
+def test_rust_stderr_panic_keeps_only_the_source_location(tmp_path):
+    from conftest import ok
+
+    from repo.projects import Project
+    from repo.runners.rust import collect as collect_rust
+
+    manifest = tmp_path / "Cargo.toml"
+    manifest.write_text('[package]\nname="p"\nversion="0.1.0"\n[lib]\ndoctest=false\n')
+    artifact = {
+        "reason": "compiler-artifact",
+        "target": {"name": "p"},
+        "profile": {"test": True},
+        "executable": "test.exe",
+    }
+    output = "test broken ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n"
+    error = (
+        "thread 'broken' (123) panicked at core\\src\\sample.rs:42:9:\nsynthetic-private-value\n"
+    )
+    runner = FakeRunner(
+        responses=[ok(json.dumps(artifact)), ok("broken: test\n"), ok(output, 1, stderr=error)]
+    )
+    result = collect_rust(Project("p", "rust", tmp_path, manifest, tmp_path), runner, True)
+    assert result["tests"][0]["diagnostics"] == [
+        {"phase": "test", "message": "Rust panic at core\\src\\sample.rs:42:9"}
+    ]

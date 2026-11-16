@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -69,6 +70,27 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
     return result.stdout.decode().rstrip("\0").split("\0") if result.stdout else []
 
 
+def native_plan(root: Path, paths: list[str]) -> dict:
+    # Mobile bindings are a pure Rust surface exercised by the Linux coverage
+    # gate; the OS-gated jobs target Core/CLI/proto/noise-peer instead.
+    bindings = {"mobile-bindings"}
+    rust = [
+        identity
+        for identity in next(
+            (
+                group["projects"]
+                for group in plan(root, paths)["include"]
+                if group["kind"] == "rust"
+            ),
+            [],
+        )
+        if identity not in bindings
+    ]
+    return {
+        "include": [{"os": os, "projects": rust} for os in ("macos-15", "windows-2025") if rust]
+    }
+
+
 def run_projects(root: Path, projects: list[str]) -> None:
     from .projects import load_projects, select_projects
 
@@ -78,7 +100,7 @@ def run_projects(root: Path, projects: list[str]) -> None:
     for operation in ("check", "build", "test"):
         supported = [p.id for p in selected if operation in p.capabilities]
         if supported:
-            command = [str(root / "repo"), operation]
+            command = [sys.executable, "-m", "repo", operation]
             for identity in supported:
                 command += ["--project", identity]
             if operation == "test":
@@ -127,15 +149,16 @@ def run_native(root: Path, matrix: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("plan", "run", "native"))
+    parser.add_argument("operation", choices=("plan", "native-plan", "run", "native"))
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--projects", default="[]")
     parser.add_argument("--matrix", default='{"include": []}')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[4]
-    if args.operation == "plan":
-        print(json.dumps(plan(root, changed_paths(root, args.base, args.head))))
+    if args.operation in ("plan", "native-plan"):
+        planner = plan if args.operation == "plan" else native_plan
+        print(json.dumps(planner(root, changed_paths(root, args.base, args.head))))
     elif args.operation == "run":
         run_projects(root, json.loads(args.projects))
     else:

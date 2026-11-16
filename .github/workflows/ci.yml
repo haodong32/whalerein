@@ -16,23 +16,18 @@ concurrency:
 jobs:
   changes:
     name: Select affected projects
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       matrix: ${{ steps.changes.outputs.matrix }}
-      rust: ${{ steps.changes.outputs.rust }}
-      go: ${{ steps.changes.outputs.go }}
-      node: ${{ steps.changes.outputs.node }}
-      python: ${{ steps.changes.outputs.python }}
-      native: ${{ steps.changes.outputs.native }}
-      contract: ${{ steps.changes.outputs.contract }}
+      native_matrix: ${{ steps.changes.outputs.native_matrix }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Set up Go for workflow lint
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.0'
+          go-version: '1.27.4'
       - name: Lint workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Select projects
@@ -43,52 +38,35 @@ jobs:
         run: |
           matrix=$(python3 tools/repo/src/repo/ci.py plan --base "$BASE_SHA" --head "$HEAD_SHA")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          python3 - "$matrix" <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import sys
-
-          matrix = json.loads(sys.argv[1])
-          kinds = {group["kind"] for group in matrix.get("include", [])}
-          projects = {project for group in matrix.get("include", []) for project in group["projects"]}
-          for kind in ("rust", "go", "node", "python"):
-              print(f'{kind}={"true" if kind in kinds else "false"}')
-          print(f'native={"true" if kinds & {"rust", "go", "node"} else "false"}')
-          print(f'contract={"true" if "proto" in projects else "false"}')
-          PY
+          native_matrix=$(python3 tools/repo/src/repo/ci.py native-plan --base "$BASE_SHA" --head "$HEAD_SHA")
+          echo "native_matrix=$native_matrix" >> "$GITHUB_OUTPUT"
 
   fast:
     name: Checks and coverage (${{ matrix.kind }})
     needs: changes
     if: >-
       needs.changes.outputs.matrix != '{"include": []}'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - name: Check out source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
         if: matrix.kind == 'go' || matrix.kind == 'node'
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.0'
-          cache-dependency-path: go.sum
-
-      - name: Set up Go for CLI diagnostics acceptance
-        if: matrix.kind == 'rust' && contains(matrix.projects, 'cli')
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
-        with:
-          go-version: '1.26.0'
+          go-version: '1.27.4'
           cache-dependency-path: go.sum
 
       - name: Set up Node.js
         if: matrix.kind == 'node'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.14.0'
+          node-version: '26.13.1'
 
       - name: Set up pnpm
         if: matrix.kind == 'node'
@@ -96,40 +74,40 @@ jobs:
 
       - name: Restore pnpm cache
         if: matrix.kind == 'node'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.14.0'
+          node-version: '26.13.1'
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Set up uv and Python
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.11.7'
-          python-version: '3.11'
+          version: '0.13.8'
+          python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
       - name: Cache Rust dependencies and builds
         if: matrix.kind == 'rust'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-${{ hashFiles('Cargo.lock') }}-
-            rust-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt') }}-
+            rust-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-
 
       - name: Cache Rust coverage tool
         if: matrix.kind == 'rust'
         id: coverage-tool
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-llvm-cov
-          key: llvm-cov-ubuntu-24.04-${{ hashFiles('rust-toolchain.toml') }}-0.9.1
+          key: llvm-cov-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml') }}-0.9.1
 
       - name: Set up Rust
         if: matrix.kind == 'rust'
@@ -144,12 +122,14 @@ jobs:
         run: |
           sudo apt-get update
           xargs -r sudo apt-get install --yes < tools/repo/linux-rust-packages.txt
+          bash tools/repo/protoc-linux.sh "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
 
       - name: Set up protocol tools
         if: matrix.kind == 'node'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes protobuf-compiler
+          bash tools/repo/protoc-linux.sh "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -166,15 +146,9 @@ jobs:
           PROJECTS: ${{ toJSON(matrix.projects) }}
         run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
 
-      - name: Run CLI diagnostics acceptance
-        if: matrix.kind == 'rust' && contains(matrix.projects, 'cli')
-        env:
-          WHALEREIN_ACCEPTANCE_CLI: target/debug/whalerein
-        run: go test -tags acceptance ./tests/acceptance -run TestCLIDoctorDegradedEnvironment -count=1 -v -timeout 10m
-
       - name: Upload reports and local build outputs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-${{ matrix.kind }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
@@ -190,39 +164,40 @@ jobs:
   contract:
     name: Contract checks
     needs: changes
-    if: needs.changes.outputs.contract == 'true'
-    runs-on: ubuntu-24.04
+    if: >-
+      needs.changes.outputs.matrix != '{"include": []}'
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.0'
+          go-version: '1.27.4'
           cache-dependency-path: go.sum
 
       - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.14.0'
+          node-version: '26.13.1'
 
       - name: Set up pnpm
         run: npm install --global pnpm@12.18.0
 
       - name: Set up uv and Python
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.11.7'
-          python-version: '3.11'
+          version: '0.13.8'
+          python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
       - name: Set up protocol tools
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes protobuf-compiler
+          bash tools/repo/protoc-linux.sh "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -247,80 +222,92 @@ jobs:
           }
 
   native:
-    name: Native unit tests (${{ matrix.os }})
+    name: Native Rust checks and coverage (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.native == 'true'
+    if: >-
+      needs.changes.outputs.native_matrix != '{"include": []}'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.native_matrix) }}
     defaults:
       run:
         shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, windows-2025]
     steps:
       - name: Check out source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Go
-        if: needs.changes.outputs.go == 'true'
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
-        with:
-          go-version: '1.26.0'
-          cache-dependency-path: go.sum
-
-      - name: Set up Node.js
-        if: needs.changes.outputs.node == 'true'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: '22.14.0'
-
-      - name: Set up pnpm
-        if: needs.changes.outputs.node == 'true'
-        run: npm install --global pnpm@12.18.0
-
-      - name: Restore pnpm cache
-        if: needs.changes.outputs.node == 'true'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: '22.14.0'
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install JavaScript workspace
-        if: needs.changes.outputs.node == 'true'
-        run: pnpm install --frozen-lockfile
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv and Python
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.11.7'
-          python-version: '3.11'
-
-      - name: Set up Rust
-        if: needs.changes.outputs.rust == 'true'
-        run: |
-          rustc --version
-          cargo --version
+          version: '0.13.8'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
 
       - name: Cache Rust dependencies and builds
-        if: needs.changes.outputs.rust == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
             target
-          key: rust-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
-            rust-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+            rust-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-
 
-      - name: Run selected native unit tests
+      - name: Install native protoc and Rust coverage tool
+        run: |
+          uv run --project tools/repo python -m repo.native_ci protoc .data/native-protoc
+          echo "$GITHUB_WORKSPACE/.data/native-protoc" >> "$GITHUB_PATH"
+          rustc --version
+          if ! cargo llvm-cov --version; then
+            cargo install cargo-llvm-cov --version 0.9.1 --locked
+          fi
+
+      - name: Verify Windows repository process handling
+        if: runner.os == 'Windows'
+        run: uv run --project tools/repo python -m repo test --project repo --only windows
+
+      - name: Check, build and test selected native projects
         env:
-          MATRIX: ${{ needs.changes.outputs.matrix }}
-        run: uv run --project tools/repo python -m repo.ci native --matrix "$MATRIX"
+          PROJECTS: ${{ toJSON(matrix.projects) }}
+        run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
+
+      - name: Verify the macOS Keychain explicitly
+        if: runner.os == 'macOS' && contains(matrix.projects, 'core')
+        run: uv run --project tools/repo python -m repo.native_ci keychain .data/runs/keychain/result.json
+
+      - name: Upload native test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-native-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            .data/runs/keychain/result.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Retain native build cache after verification
+        if: >-
+          !cancelled() && steps.native-cache.outcome == 'success' &&
+          steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
 
   deployment:
     name: Deployment acceptance
@@ -394,17 +381,16 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [changes, fast, contract, native, deployment]
-    runs-on: ubuntu-24.04
+    needs: [changes, fast, native, contract, deployment]
+    runs-on: ubuntu-26.04
     steps:
       - name: Check required results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_RESULT: ${{ needs.fast.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
-          NATIVE_REQUIRED: ${{ needs.changes.outputs.native }}
+          NATIVE_MATRIX: ${{ needs.changes.outputs.native_matrix }}
           CONTRACT_RESULT: ${{ needs.contract.result }}
-          CONTRACT_REQUIRED: ${{ needs.changes.outputs.contract }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
           MATRIX: ${{ needs.changes.outputs.matrix }}
         run: |
@@ -416,15 +402,11 @@ jobs:
             test "$DEPLOYMENT_RESULT" = skipped
           else
             test "$TEST_RESULT" = success
+            test "$CONTRACT_RESULT" = success
             test "$DEPLOYMENT_RESULT" = success
-            if [ "$NATIVE_REQUIRED" = true ]; then
-              test "$NATIVE_RESULT" = success
-            else
+            if [ "$NATIVE_MATRIX" = '{"include": []}' ]; then
               test "$NATIVE_RESULT" = skipped
-            fi
-            if [ "$CONTRACT_REQUIRED" = true ]; then
-              test "$CONTRACT_RESULT" = success
             else
-              test "$CONTRACT_RESULT" = skipped
+              test "$NATIVE_RESULT" = success
             fi
           fi

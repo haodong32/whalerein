@@ -37,8 +37,8 @@ func validKey(t *testing.T) config.ExternalVerificationKey {
 	return config.ExternalVerificationKey{
 		ID:        "issuer-1",
 		PublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
-		NotBefore: config.Duration(time.Hour),
-		NotAfter:  config.Duration(2 * time.Hour),
+		NotBefore: config.Timestamp(time.Now().Add(-time.Hour).UTC()),
+		NotAfter:  config.Timestamp(time.Now().Add(2 * time.Hour).UTC()),
 	}
 }
 

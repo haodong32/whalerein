@@ -157,8 +157,8 @@ func externalTrust(cfg config.Config) (external.Trust, error) {
 		trust.Keys = append(trust.Keys, external.VerificationKey{
 			ID:        key.ID,
 			PublicKey: ed25519.PublicKey(material),
-			NotBefore: time.Unix(0, 0).Add(key.NotBefore.D()),
-			NotAfter:  time.Unix(0, 0).Add(key.NotAfter.D()),
+			NotBefore: key.NotBefore.Time(),
+			NotAfter:  key.NotAfter.Time(),
 		})
 	}
 	return trust, nil

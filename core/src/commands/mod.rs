@@ -313,6 +313,8 @@ impl CommandService {
                 .ok_or(CoreError::NotPaired)?;
             if let Some(state) = crate::api::core::revoked_commands::marker_in(guard.directory())? {
                 return Err(if state.starts_with("confirmed") {
+                    #[cfg(windows)]
+                    self.cache.release_for_revocation()?;
                     CoreError::Revoked
                 } else {
                     CoreError::Unavailable("authorization verification is pending; inspect the pairing or retry revocation".into())

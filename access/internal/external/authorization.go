@@ -166,10 +166,13 @@ func (t Trust) Verify(auth *whalereinv1.ExternalAuthorization, purpose string, n
 	}
 	issuedAt := time.UnixMilli(auth.GetIssuedAtUnixMs())
 	skew := t.ClockSkew
-	if issuedAt.Add(-skew).Before(key.NotBefore) {
+	// An omitted bound is open on that side. Reading a zero bound as an instant
+	// turned "no not_after configured" into "ended in 1970", which refused every
+	// authorization and looked like a bad signature.
+	if !key.NotBefore.IsZero() && issuedAt.Add(-skew).Before(key.NotBefore) {
 		return fmt.Errorf("%w: %s starts at %s", ErrKeyNotValid, key.ID, key.NotBefore.UTC())
 	}
-	if !issuedAt.Add(-skew).Before(key.NotAfter) {
+	if !key.NotAfter.IsZero() && !issuedAt.Add(-skew).Before(key.NotAfter) {
 		return fmt.Errorf("%w: %s ended at %s", ErrKeyNotValid, key.ID, key.NotAfter.UTC())
 	}
 	if len(key.PublicKey) != ed25519.PublicKeySize || len(auth.GetSignature()) != ed25519.SignatureSize {

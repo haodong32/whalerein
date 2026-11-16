@@ -3,7 +3,12 @@
 //! The crate also owns the executable compatibility policy: see [`compat`].
 
 include!(concat!(env!("OUT_DIR"), "/whalerein.v1.rs"));
-include!(concat!(env!("OUT_DIR"), "/whalerein.v1.serde.rs"));
+// pbjson-build 0.9 borrows field lists in its generated formatting calls.
+#[allow(clippy::useless_borrows_in_formatting)]
+mod serde_impls {
+    use super::*;
+    include!(concat!(env!("OUT_DIR"), "/whalerein.v1.serde.rs"));
+}
 
 mod compat;
 pub use compat::*;

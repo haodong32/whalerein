@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from conftest import FakeRunner, ok
 
 from repo import testing
@@ -330,3 +331,36 @@ def test_parallel_interrupt_stops_every_launched_container(tmp_path, out):
     assert len(names) == 2
     assert runner.progress is sentinel
     assert names <= set(runner.removes)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_image_build_releases_report_reserve_after_failure(tmp_path, monkeypatch, interrupted):
+    from repo.runners import integration
+
+    opened = []
+    factory = integration.tempfile.TemporaryFile
+
+    def reserve(**kwargs):
+        handle = factory(**kwargs)
+        opened.append(handle)
+        return handle
+
+    class FailedBuild(FakeRunner):
+        def run(self, argv, cwd, **kwargs):
+            if tuple(argv[1:3]) == ("buildx", "build"):
+                assert not opened[0].closed
+                assert opened[0].tell() == 32 * 1024 * 1024
+                if interrupted:
+                    raise KeyboardInterrupt
+                return ok("build failed", returncode=1)
+            return ok()
+
+    monkeypatch.setattr(integration.tempfile, "TemporaryFile", reserve)
+    scope = {"errors": [], "exit_code": 0}
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            integration._build_image(tmp_path, FailedBuild(), tmp_path, scope)
+    else:
+        assert integration._build_image(tmp_path, FailedBuild(), tmp_path, scope) is None
+        assert "build failed" in scope["errors"][0]
+    assert opened[0].closed

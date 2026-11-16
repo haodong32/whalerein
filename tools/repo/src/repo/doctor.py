@@ -24,17 +24,24 @@ class ToolSpec:
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
-    ToolSpec("go", ("version",), hint="install Go 1.26+", min_version=(1, 26)),
+    ToolSpec("go", ("version",), hint="install Go 1.27.4 (minimum 1.26)", min_version=(1, 26)),
     ToolSpec("cargo", ("--version",), hint="install Rust via rustup"),
-    ToolSpec("rustc", ("--version",), hint="install Rust 1.85+ via rustup", min_version=(1, 85)),
-    ToolSpec("node", ("--version",), hint="install Node.js 22.5+", min_version=(22, 5)),
+    ToolSpec(
+        "rustc",
+        ("--version",),
+        hint="install the pinned Rust toolchain via rustup",
+        min_version=(1, 85),
+    ),
+    ToolSpec(
+        "node", ("--version",), hint="install Node.js 26 LTS (minimum 22.5)", min_version=(22, 5)
+    ),
     ToolSpec("pnpm", ("--version",), hint="install pnpm"),
     ToolSpec("uv", ("--version",), hint="install uv"),
-    ToolSpec("protoc", ("--version",), hint="install protobuf-compiler 3.20+"),
+    ToolSpec("protoc", ("--version",), hint="install protoc 36.2"),
     ToolSpec(
         "protoc-gen-go",
         ("--version",),
-        hint="go install google.golang.org/protobuf/cmd/protoc-gen-go@latest",
+        hint="go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12",
     ),
     ToolSpec("docker", ("--version",), hint="install Docker"),
     ToolSpec("git", ("--version",), required=False),

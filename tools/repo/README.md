@@ -61,6 +61,26 @@ project in the same checkout. Each group installs only its required toolchains,
 checks supported operations and saves its own coverage reports as an artifact.
 The `CI gate` job requires all selected groups to pass, including on retries.
 
+Affected Rust projects additionally run on `macos-15` and `windows-2025` native
+runners, with their own checks, builds and per-crate coverage gates. The native
+matrix uses the same project inventory and consumer expansion as Linux; a
+non-Rust change does not schedule it. Native job failures block `CI gate`.
+The macOS Core job explicitly runs the otherwise ignored Keychain round-trip
+in a temporary keychain and verifies execution and cleanup. Windows also runs
+focused repository-runner tests for its native pipes and process-tree deadlines.
+The Windows runner buffers child output because Windows selectors cannot watch
+subprocess pipes; timeout/interruption retains observed output and terminates
+the child tree. CI invokes the repository module through its active Python
+interpreter so Windows does not need to execute the Unix `./repo` launcher.
+For the same entry on Windows, use
+`uv run --project tools/repo python -m repo <command>`.
+`repo.native_ci` installs checksummed native protoc 36.2 and owns the isolated
+Keychain check; it does not start development services. macOS/Windows reports
+are uploaded as `ci-native-<os>-<sha>-<attempt>` Artifacts.
+Native dependency/build caches are also retained after failed verification so
+debugging does not repeatedly rebuild the same toolchain. These caches contain
+build artifacts, not successful-test receipts.
+
 Inspect selection locally without running tests or contacting GitHub:
 
 ```bash
@@ -89,6 +109,17 @@ re-add the label to verify the new revision. Leaving the label attached does not
 enable automatic integration runs. Reports are uploaded as
 `pr-integration-<pr-number>-<run-id>-<attempt>` Artifacts; PR runs do not establish
 the scheduled main-branch cache baseline.
+
+The PR job first builds the image and collects the complete inventory, uploading
+preparation evidence before executing all cases. Inventory is not a test pass.
+Both integration workflows reclaim unused preinstalled images and SDKs on their
+disposable GitHub-hosted Linux VM and require 24 GiB free before image building.
+The storage helper rejects local, self-hosted and non-Linux environments.
+Image builds temporarily reserve 32 MiB on the report filesystem, then release
+it before saving failure reports so build storage exhaustion does not mask its
+original error. Verbose exception diagnostics include numeric OS error codes
+without exception messages or filenames.
+
 
 Inspect its content fingerprint locally:
 

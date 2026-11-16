@@ -498,7 +498,7 @@ impl Core {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn admission_revocation_error(state: Option<&str>, warning: bool) -> Option<CoreError> {
         match state.and_then(revoked_commands::confirmed_phase) {
             Some("saved") if !warning => Some(CoreError::Revoked),
@@ -508,22 +508,26 @@ impl Core {
     }
 
     fn cache(&self) -> CoreResult<Arc<Cache>> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let (state, warning) =
                 revoked_commands::marker_with_retention_warning(&self.options.data_dir)?;
             if let Some(error) = Self::admission_revocation_error(state.as_deref(), warning) {
+                #[cfg(windows)]
+                if let Some(cache) = self.cache.lock().expect("cache lock").take() {
+                    cache.release_for_revocation()?;
+                }
                 return Err(error);
             }
         }
         let config = self.require_config()?;
         let mut slot = self.cache.lock().expect("cache lock");
         if let Some(cache) = slot.as_ref() {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if !cache.is_revocation_only() {
                 return Ok(cache.clone());
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             return Ok(cache.clone());
         }
         #[cfg(all(unix, feature = "protocol-testing"))]
@@ -549,7 +553,7 @@ impl Core {
             }
             guard
         };
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             slot.take();
         }
@@ -620,7 +624,7 @@ impl Core {
         self.options.data_dir.join("cache.sqlite3.quarantine")
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn try_prepare_revocation_cache(&self, directory: &std::fs::File) -> bool {
         let mut slot = match self.cache.try_lock() {
             Ok(slot) => slot,
@@ -2485,7 +2489,7 @@ impl Core {
             .await
             .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
             self.verify_access_generation(&access)?;
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 let deadline = tokio::time::Instant::now()
                     + Duration::from_millis(crate::commands::REQUEST_TTL_MS as u64);
@@ -2588,7 +2592,7 @@ impl Core {
             .await
             .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
             self.verify_access_generation(&access)?;
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 let deadline = tokio::time::Instant::now()
                     + Duration::from_millis(crate::commands::REQUEST_TTL_MS as u64);
@@ -2799,7 +2803,42 @@ impl Core {
         device_id: &str,
         expected_marker: &str,
     ) -> CoreResult<()> {
-        self.clear_local_pairing_inner(device_id, false, Some(expected_marker))
+        let guard = crate::security::device::ProfileLock::acquire_admission_async(
+            &self.options.data_dir,
+            std::time::Instant::now()
+                + Duration::from_millis(crate::commands::REQUEST_TTL_MS as u64),
+        )
+        .await
+        .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
+        if revoked_commands::marker_in(guard.directory())?.as_deref() != Some(expected_marker) {
+            return Err(CoreError::Conflict(
+                "pairing changed while clearing authorization".into(),
+            ));
+        }
+        // Match the Unix ordering: durably confirm revocation, attempt identity
+        // retention, and erase the FINISH credential before final cleanup. A
+        // failed retention attempt remains visible through the sticky lost phase.
+        if crate::security::device::existing_device_id(
+            &self.options.secrets,
+            &self.options.data_dir,
+        )?
+        .as_deref()
+            != Some(device_id)
+        {
+            return Err(CoreError::Conflict(
+                "profile identity changed during cleanup".into(),
+            ));
+        }
+        let confirmed = revoked_commands::write_marker_in(guard.directory(), "confirmed-waiting");
+        if self
+            .redact_pending_pairing_after_revocation(device_id, guard.directory())
+            .is_err()
+        {
+            let _ = revoked_commands::write_marker_in(guard.directory(), "confirmed-lost");
+        }
+        let _ = self.clear_local_pairing_secrets(device_id);
+        self.clear_local_pairing_prepared(device_id, false, None, Some(guard))?;
+        confirmed
     }
 
     fn clear_local_pairing_inner(
@@ -2848,9 +2887,10 @@ impl Core {
             }),
             Err(error) => Err(error.into()),
         };
-        // Windows has no verified fd-relative SQLite opening path yet.
+        // Never create a new cache during revocation: a missing database cannot
+        // prove that all pending identities were retained.
         #[cfg(not(unix))]
-        let cache = self.cache();
+        let cache = self.cache.lock().expect("cache lock").clone();
         let _admission = match prepared {
             Some(guard) => guard,
             None => crate::security::device::ProfileLock::acquire_admission_waiting(
@@ -2968,15 +3008,28 @@ impl Core {
             )),
         };
         #[cfg(not(unix))]
-        let snapshot_missing = false;
+        let snapshot_missing = cache.is_none();
         #[cfg(not(unix))]
         let snapshot = cache
-            .and_then(|cache| cache.pending_commands().map_err(Into::into))
+            .ok_or(crate::cache::CacheError::Missing)
+            .map_err(CoreError::from)
+            .and_then(|cache| {
+                #[cfg(windows)]
+                {
+                    cache
+                        .pending_commands_verified(_admission.directory(), &self.options.data_dir)
+                        .map_err(Into::into)
+                }
+                #[cfg(not(windows))]
+                {
+                    cache.pending_commands().map_err(Into::into)
+                }
+            })
             .and_then(|pending| revoked_commands::preserve_in(_admission.directory(), &pending));
         let retention = if fence.is_ok() {
             revoked_commands::write_marker_in(
                 _admission.directory(),
-                if snapshot.is_ok() {
+                if snapshot.is_ok() && pending_cleanup.is_ok() {
                     "confirmed-saved"
                 } else {
                     "confirmed-lost"
@@ -3058,6 +3111,8 @@ impl Core {
         // Attempt every cleanup independently. The fence remains in place so
         // a new process can retry failed deletions using the profile identity.
         let mut failed = self.clear_local_pairing_secrets(device_id).is_err();
+        #[cfg(windows)]
+        let mut database_bound = true;
         let cached = match self.cache.try_lock() {
             Ok(mut slot) => slot.take(),
             Err(_) => {
@@ -3071,7 +3126,17 @@ impl Core {
             // remove only the entries bound to the held profile directory.
             #[cfg(unix)]
             drop(cache);
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            {
+                if cache.matches_profile(directory, &self.options.data_dir) {
+                    failed |= cache.clear().is_err();
+                } else {
+                    database_bound = false;
+                    failed = true;
+                    let _ = cache.release_for_revocation();
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
             {
                 failed |= cache.clear().is_err();
             }
@@ -3091,7 +3156,11 @@ impl Core {
                     revoked_commands::remove_profile_entry(directory, "cache.sqlite3").is_err();
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        if database_bound {
+            failed |= revoked_commands::remove_profile_entry(directory, "cache.sqlite3").is_err();
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             failed |= revoked_commands::remove_profile_entry(directory, "cache.sqlite3").is_err();
         }

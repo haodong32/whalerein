@@ -376,7 +376,7 @@ mod lock_tests {
             Ok(_) => panic!("a held lock must not be acquired"),
             Err(error) => error,
         };
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(retryable_admission_error(&error));
         assert!(started.elapsed() >= std::time::Duration::from_millis(25));
         drop(held);
     }
@@ -389,22 +389,21 @@ mod lock_tests {
     /// tests by inheriting their lock descriptors, which would be its own bug).
     #[cfg(unix)]
     #[test]
-    fn an_open_file_description_kept_by_another_descriptor_is_retried() {
+    fn duplicate_file_description_holds_admission_until_last_close() {
         use std::os::fd::{AsRawFd, FromRawFd};
         let dir = tempfile::tempdir().unwrap();
         let held = ProfileLock::acquire_admission(dir.path()).unwrap();
         let duplicate = unsafe { libc::dup(held._file.as_raw_fd()) };
         assert!(duplicate >= 0);
         let duplicate = unsafe { std::fs::File::from_raw_fd(duplicate) };
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            drop(duplicate);
-        });
         drop(held);
-        let started = std::time::Instant::now();
+        let error = match ProfileLock::acquire_admission(dir.path()) {
+            Ok(_) => panic!("the duplicate descriptor must retain the lock"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(duplicate);
         let guard = ProfileLock::acquire_admission_waiting(dir.path()).unwrap();
-        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
         drop(guard);
-        releaser.join().unwrap();
     }
 }

@@ -114,6 +114,17 @@ def collect(project, runner, execute, only=None):
                     cases[block[1]]["diagnostics"] = [
                         {"phase": "test", "message": sanitize(block[2].strip())}
                     ]
+            # Panic headers can be on stderr without a captured stdout block.
+            # Preserve only source locations in that case, never assertion values.
+            for panic in re.finditer(
+                r"thread '([^'\n]+)'(?: \([^\n)]*\))? panicked at "
+                r"([A-Za-z0-9_./\\-]+\.rs:\d+(?::\d+)?):",
+                result.output,
+            ):
+                if panic[1] in cases and cases[panic[1]]["status"] == "failed":
+                    cases[panic[1]].setdefault(
+                        "diagnostics", [{"phase": "test", "message": "Rust panic at " + panic[2]}]
+                    )
             summary = re.search(
                 r"test result: .*? (\d+) passed; (\d+) failed; (\d+) ignored;", result.stdout
             )

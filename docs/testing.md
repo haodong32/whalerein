@@ -29,10 +29,17 @@ macOS or Windows validation.
   (`pytest.mark.skipif`, `test.skip`).
 - The Linux container integration suite remains Linux-only; it does not establish
   macOS or Windows behavior.
-- Cross-OS verification belongs to the GitHub Actions matrix: Linux, macOS and
-  Windows VMs run their native unit/platform tests. macOS SecretStore/keychain
-  checks and Windows file-lock/sharing checks run only in their matching jobs.
-  The Linux job owns the container integration suite.
+- The CI workflow runs affected Rust projects' checks, builds, unit tests and
+  per-crate coverage on Linux, macOS 15 and Windows Server 2025. Linux also owns
+  the Go, Node.js and Python groups and the separate container integration suite.
+  All selected native matrix jobs must pass the `CI gate`.
+- Windows runs the Core file-lock/sharing and reparse-point cases natively,
+  plus focused repository-runner tests for Windows pipes and process-tree
+  termination. macOS additionally invokes the ignored SecretStore Keychain
+  round-trip explicitly against a temporary unlocked keychain. The helper
+  restores the prior default/search list and deletes its keychain, including
+  on test failure; failed cleanup or zero executed cases fails the job.
+  Native reports are uploaded as `ci-native-<os>-<sha>-<attempt>` Artifacts.
 - Platform-specific tests and the jobs that cover them should be named in the
   change record; a missing local OS is an environmental limitation, not a reason
   to fail or silently pass the local run.

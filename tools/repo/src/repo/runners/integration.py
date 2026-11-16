@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -110,23 +111,29 @@ def _build_image(root, runner, directory, scope):
         if not probe.ok:
             scope["errors"].append("Docker buildx is required")
             return None
-        built = runner.run(
-            [
-                "docker",
-                "buildx",
-                "build",
-                "--load",
-                "--progress=plain",
-                "-f",
-                str(root / "tests/integration/Dockerfile"),
-                "--iidfile",
-                str(image_file),
-                str(root),
-            ],
-            root,
-            timeout=1800,
-            quiet=True,
-        )
+        # Release reserved physical space before serializing failure evidence.
+        # A full Docker disk must not hide the build error behind report I/O.
+        with tempfile.TemporaryFile(dir=directory) as reserve:
+            for _ in range(32):
+                reserve.write(b"\0" * (1024 * 1024))
+            reserve.flush()
+            built = runner.run(
+                [
+                    "docker",
+                    "buildx",
+                    "build",
+                    "--load",
+                    "--progress=plain",
+                    "-f",
+                    str(root / "tests/integration/Dockerfile"),
+                    "--iidfile",
+                    str(image_file),
+                    str(root),
+                ],
+                root,
+                timeout=1800,
+                quiet=True,
+            )
         if not built.ok:
             scope["errors"].append("Integration image build failed: " + sanitize(built.tail()))
             scope["exit_code"] = built.returncode

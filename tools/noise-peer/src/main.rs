@@ -429,10 +429,9 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn exercise_line_handshake(role: Role) {
         use std::io::BufReader;
-        use std::os::unix::net::UnixStream;
+        use std::net::{TcpListener, TcpStream};
         use std::time::Duration;
 
         fn line(reader: &mut impl BufRead) -> String {
@@ -448,7 +447,9 @@ mod tests {
             hex::decode(encoded).expect("handshake hex")
         }
 
-        let (tool, mut peer) = UnixStream::pair().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (tool, _) = listener.accept().unwrap();
         tool.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let tool_reader = BufReader::new(tool.try_clone().unwrap());
@@ -539,13 +540,11 @@ mod tests {
         assert!(worker.join().unwrap().is_ok());
     }
 
-    #[cfg(unix)]
     #[test]
     fn responder_line_protocol_completes_handshake_and_authenticated_frames() {
         exercise_line_handshake(Role::Responder);
     }
 
-    #[cfg(unix)]
     #[test]
     fn initiator_line_protocol_completes_handshake_and_authenticated_frames() {
         exercise_line_handshake(Role::Initiator);

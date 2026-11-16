@@ -56,13 +56,13 @@ pub(crate) fn marker(path: &Path) -> CoreResult<Option<String>> {
     marker_in(&directory)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn marker_with_retention_warning(path: &Path) -> CoreResult<(Option<String>, bool)> {
     let directory = anchored::profile(path)?;
     Ok((marker_in(&directory)?, retention_warning_in(&directory)))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn retention_warning_in(directory: &std::fs::File) -> bool {
     !matches!(
         anchored::open(directory, "revocation-retention-warning", false),

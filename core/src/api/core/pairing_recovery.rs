@@ -1133,6 +1133,9 @@ mod multi_host_tests {
             .await
             .unwrap();
         core.sessions("host-1").await.unwrap();
+        // Descriptor-anchored SQLite provenance is a Unix-only precondition;
+        // the credential-erasure and unverified-retention assertions run on all OSes.
+        #[cfg(unix)]
         {
             let guard =
                 crate::security::device::ProfileLock::acquire_admission(dir.path()).unwrap();
