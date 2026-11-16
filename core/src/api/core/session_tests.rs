@@ -3,7 +3,7 @@
 //! These assert the Core-observable behavior the CLI relies on: routing
 //! classification, cache fallback shape and order, lifecycle receipts and the
 //! local pre-submission validation contract.
-use super::test_support::core;
+use super::test_support::{core, key};
 use super::*;
 use crate::api::test_support::{FakeAccess, LifecycleReply};
 use crate::api::CreateSessionInput;
@@ -197,7 +197,10 @@ async fn fork_returns_every_lifecycle_disposition() {
     let dir = tempfile::tempdir().unwrap();
     let client = paired(&access, &dir).await;
 
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
     let ready = handle.lifecycle_receipt.unwrap();
     assert_eq!(ready.operation, "fork");
@@ -215,7 +218,10 @@ async fn fork_returns_every_lifecycle_disposition() {
         warning_code: "workspace_attach_failed".into(),
         warning_detail: Some("attach incomplete".into()),
     };
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     let warning = handle.lifecycle_receipt.unwrap();
     assert_eq!(warning.disposition, "READY_WITH_WARNING");
     assert_eq!(warning.session_id, "forked-1");
@@ -228,7 +234,10 @@ async fn fork_returns_every_lifecycle_disposition() {
         reason_code: "SOURCE_NO_COMPLETE_TURN".into(),
         retryable: false,
     };
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     let failed = handle.lifecycle_receipt.unwrap();
     assert_eq!(failed.disposition, "FAILED");
     assert_eq!(
@@ -244,7 +253,10 @@ async fn fork_returns_every_lifecycle_disposition() {
         reconcile_mode: "PARENT_SESSION_ID".into(),
         reconcile_key: Some("session-1".into()),
     };
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     let unknown = handle.lifecycle_receipt.unwrap();
     assert_eq!(unknown.disposition, "UNKNOWN");
     assert_eq!(unknown.reconcile_mode.as_deref(), Some("PARENT_SESSION_ID"));
@@ -261,7 +273,10 @@ async fn fork_requires_the_advertised_host_capability_without_submitting() {
     let client = paired(&access, &dir).await;
 
     access.host.lock().unwrap().session_fork_supported = false;
-    let error = client.fork_session("session-1").await.unwrap_err();
+    let error = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap_err();
     assert!(matches!(error, CoreError::Unsupported), "{error:?}");
     assert_eq!(error.code(), "unsupported_capability");
     assert_eq!(error.exit_code(), 9);
@@ -273,7 +288,7 @@ async fn fork_requires_the_advertised_host_capability_without_submitting() {
         host.legacy_capabilities_error = Some(whalerein_proto::ErrorCode::UnsupportedCapability);
     }
     assert!(matches!(
-        client.fork_session("session-1").await,
+        client.fork_session(&key("host-1", "session-1")).await,
         Err(CoreError::Unsupported)
     ));
     assert_eq!(access.host.lock().unwrap().fork_calls, 0);
@@ -281,7 +296,7 @@ async fn fork_requires_the_advertised_host_capability_without_submitting() {
     access.host.lock().unwrap().legacy_capabilities_error = None;
     access.host.lock().unwrap().host_online = false;
     assert!(matches!(
-        client.fork_session("session-1").await,
+        client.fork_session(&key("host-1", "session-1")).await,
         Err(CoreError::HostOffline)
     ));
     assert_eq!(access.host.lock().unwrap().fork_calls, 0);
@@ -297,7 +312,10 @@ async fn fork_without_a_completed_turn_is_a_non_retryable_failure_not_unknown() 
         reason_code: "SOURCE_NO_COMPLETE_TURN".into(),
         retryable: false,
     };
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
     let receipt = handle.lifecycle_receipt.unwrap();
     assert_eq!(receipt.disposition, "FAILED");
@@ -336,7 +354,10 @@ async fn sessions_preserve_fork_lineage_and_parent_identity() {
         .unwrap();
     assert_eq!(listed.parent_session_id, "session-1");
     assert_eq!(listed.origin, "fork");
-    let fetched = client.get_session("session-2").await.unwrap();
+    let fetched = client
+        .get_session(&key("host-1", "session-2"))
+        .await
+        .unwrap();
     assert_eq!(fetched.parent_session_id, "session-1");
 
     // The same lineage survives a cache-only view.
@@ -515,7 +536,10 @@ async fn lifecycle_failure_reason_codes_are_preserved_without_rewriting() {
             reason_code: reason.into(),
             retryable,
         };
-        let handle = client.fork_session("session-1").await.unwrap();
+        let handle = client
+            .fork_session(&key("host-1", "session-1"))
+            .await
+            .unwrap();
         let receipt = handle.lifecycle_receipt.unwrap();
         assert_eq!(receipt.disposition, "FAILED", "{reason}");
         assert_eq!(receipt.reason_code.as_deref(), Some(reason));
@@ -534,7 +558,7 @@ async fn lifecycle_failure_reason_codes_are_preserved_without_rewriting() {
         reconcile_key: Some("session-1".into()),
     };
     assert!(matches!(
-        client.fork_session("session-1").await,
+        client.fork_session(&key("host-1", "session-1")).await,
         Err(CoreError::UnknownResult)
     ));
 }
@@ -589,14 +613,20 @@ async fn repeated_forks_form_a_parent_child_chain_in_session_listing() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let client = paired(&access, &dir).await;
-    let first = client.fork_session("session-1").await.unwrap();
+    let first = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     let first = first.lifecycle_receipt.unwrap();
     assert_eq!(first.session_id, "forked-1");
 
     access.host.lock().unwrap().fork_reply = LifecycleReply::Ready {
         session_id: "forked-2".into(),
     };
-    let second = client.fork_session("forked-1").await.unwrap();
+    let second = client
+        .fork_session(&key("host-1", "forked-1"))
+        .await
+        .unwrap();
     let second = second.lifecycle_receipt.unwrap();
     assert_eq!(second.parent_session_id.as_deref(), Some("forked-1"));
 
@@ -622,9 +652,9 @@ async fn repeated_forks_form_a_parent_child_chain_in_session_listing() {
     assert_eq!(access.host.lock().unwrap().fork_calls, 2);
 }
 
-// SESS-17
+// AC-02.explicit / AC-02.denied
 #[tokio::test]
-async fn explicit_sessions_host_must_agree_with_the_global_host_scope() {
+async fn scoped_session_key_requires_a_live_authorized_host_and_keys_fail_closed() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let client = paired(&access, &dir).await;
@@ -636,18 +666,44 @@ async fn explicit_sessions_host_must_agree_with_the_global_host_scope() {
     client.config_store().save(&config).unwrap();
     *client.config.write().unwrap() = Some(config);
 
-    let scoped = client.with_session_host("host-2").unwrap();
-    let list = scoped.sessions("host-2").await.unwrap();
-    assert_eq!(list.sessions[0].session_id, "session-1");
-    let error = scoped.sessions("host-1").await.unwrap_err();
-    assert!(matches!(error, CoreError::Conflict(_)), "{error:?}");
-    assert_eq!(error.code(), "conflict");
-    assert_eq!(error.exit_code(), 8);
-    assert!(error.to_string().contains("--host"));
+    // An explicit key may only name a Host that the live listing advertises.
+    let scoped = client
+        .scoped_session_key("host-2", "session-1")
+        .await
+        .unwrap();
+    assert_eq!(scoped.host_id, "host-2");
+    assert!(matches!(
+        client.scoped_session_key("host-3", "session-1").await,
+        Err(CoreError::NotFound(_))
+    ));
+    access.host.lock().unwrap().extra_host = false;
+    assert!(matches!(
+        client.scoped_session_key("host-2", "session-1").await,
+        Err(CoreError::NotFound(_))
+    ));
 
-    // Without an explicit sessions Host the global scope is authoritative.
-    let global = scoped.sessions("host-2").await.unwrap();
-    assert_eq!(global.source, "remote");
+    // A key whose Host is not locally authorized fails before any Host request.
+    let denied = key("host-9", "session-1");
+    let before_traces = access.host.lock().unwrap().request_traces.len();
+    let before_commands = access.host.lock().unwrap().commands_seen;
+    assert!(matches!(
+        client.get_session(&denied).await,
+        Err(CoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        client.send_message(&denied, "hello").await,
+        Err(CoreError::NotFound(_))
+    ));
+    assert_eq!(
+        access.host.lock().unwrap().request_traces.len(),
+        before_traces,
+        "an unauthorized key must not reach a Host request"
+    );
+    assert_eq!(
+        access.host.lock().unwrap().commands_seen,
+        before_commands,
+        "an unauthorized key must not submit a session action"
+    );
 }
 
 // SESS-08
@@ -658,7 +714,10 @@ async fn fork_reports_an_unreadable_child_working_directory_explicitly() {
     let client = paired(&access, &dir).await;
     access.host.lock().unwrap().fail_get_session_for =
         Some(("forked-1".into(), whalerein_proto::ErrorCode::NotFound));
-    let outcome = client.fork_session_outcome("session-1").await.unwrap();
+    let outcome = client
+        .fork_session_outcome(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(
         outcome
             .handle
@@ -676,12 +735,18 @@ async fn fork_reports_an_unreadable_child_working_directory_explicitly() {
     );
 
     access.host.lock().unwrap().fail_get_session_for = None;
-    let outcome = client.fork_session_outcome("session-1").await.unwrap();
+    let outcome = client
+        .fork_session_outcome(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(outcome.working_directory.as_deref(), Some("/work-child"));
     assert!(outcome.working_directory_error.is_none());
     // The plain handle API remains available for callers that do not present
     // the child location.
-    let handle = client.fork_session("session-1").await.unwrap();
+    let handle = client
+        .fork_session(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(handle.status, OnlineStatus::Succeeded);
 }
 
@@ -702,7 +767,7 @@ fn host_absolute_path_rules_cover_posix_and_windows_forms() {
     }
 }
 
-// JRNY-20
+// JRNY-20 / AC-02.duplicate
 #[tokio::test]
 async fn unqualified_session_resolution_names_the_candidate_hosts() {
     let access = FakeAccess::start().await;
@@ -730,11 +795,39 @@ async fn unqualified_session_resolution_names_the_candidate_hosts() {
         "the ambiguity message must not repeat session content: {message}"
     );
 
-    let scoped = client.with_session_host("host-2").unwrap();
     assert_eq!(
-        scoped.session_key("session-1").await.unwrap().host_id,
+        client
+            .scoped_session_key("host-2", "session-1")
+            .await
+            .unwrap()
+            .host_id,
         "host-2"
     );
+}
+
+// AC-02.incomplete
+#[tokio::test]
+async fn an_incomplete_host_listing_fails_unqualified_resolution() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = paired(&access, &dir).await;
+    // Cache a complete listing first so the failure is the live discovery path,
+    // not an empty cache.
+    client.sessions("host-1").await.unwrap();
+    access.host.lock().unwrap().extra_host = true;
+    let mut config = client.current_config().unwrap();
+    config
+        .host_fingerprints
+        .insert("host-2".into(), config.host_fingerprint.clone().unwrap());
+    client.config_store().save(&config).unwrap();
+    *client.config.write().unwrap() = Some(config);
+    access.host.lock().unwrap().extra_host_online = false;
+    // A cache fallback or an unreachable Host cannot prove uniqueness, so an
+    // unqualified resolve fails closed instead of guessing.
+    assert!(matches!(
+        client.session_key("session-1").await,
+        Err(CoreError::Unavailable(_))
+    ));
 }
 
 // PAIR-16

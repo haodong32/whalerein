@@ -21,6 +21,80 @@ where
     }
 }
 
+/// Delivery choice for a new user message.
+///
+/// The wire enum stays behind the protocol boundary; callers choose a Core
+/// value and unknown peers are rejected before submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    StartIfIdle,
+    EnqueueAfterRun,
+    Steer,
+}
+
+impl DeliveryMode {
+    pub fn as_str_name(self) -> &'static str {
+        match self {
+            Self::StartIfIdle => "START_IF_IDLE",
+            Self::EnqueueAfterRun => "ENQUEUE_AFTER_RUN",
+            Self::Steer => "STEER",
+        }
+    }
+}
+
+impl From<DeliveryMode> for whalerein_proto::DeliveryMode {
+    fn from(value: DeliveryMode) -> Self {
+        match value {
+            DeliveryMode::StartIfIdle => Self::StartIfIdle,
+            DeliveryMode::EnqueueAfterRun => Self::EnqueueAfterRun,
+            DeliveryMode::Steer => Self::Steer,
+        }
+    }
+}
+
+/// A question phase the client can act on without reading the wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuestionPhase {
+    Open,
+    Continued,
+    Settled,
+    ReplyQueued,
+}
+
+impl QuestionPhase {
+    /// Parse one wire phase label. Unknown or unavailable phases return `None`.
+    pub fn parse(label: &str) -> Option<Self> {
+        match label {
+            "QUESTION_OPEN" => Some(Self::Open),
+            "QUESTION_CONTINUED" => Some(Self::Continued),
+            "QUESTION_SETTLED" => Some(Self::Settled),
+            "QUESTION_REPLY_QUEUED" => Some(Self::ReplyQueued),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "QUESTION_OPEN",
+            Self::Continued => "QUESTION_CONTINUED",
+            Self::Settled => "QUESTION_SETTLED",
+            Self::ReplyQueued => "QUESTION_REPLY_QUEUED",
+        }
+    }
+
+    pub fn is_answerable(self) -> bool {
+        matches!(self, Self::Open | Self::Continued)
+    }
+
+    pub fn receipt_phase(self) -> &'static str {
+        match self {
+            Self::Open => "QUESTION_SETTLED",
+            _ => "QUESTION_REPLY_QUEUED",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnlineStatus {
@@ -1028,5 +1102,13 @@ impl From<whalerein_proto::QuestionBatch> for QuestionBatchInfo {
             answerable: value.answerable,
             content_unavailable: value.content_unavailable,
         }
+    }
+}
+
+impl QuestionBatchInfo {
+    /// Typed phase for client validation. An unknown wire label stays `None`
+    /// so a newer Host cannot be silently treated as answerable.
+    pub fn phase_value(&self) -> Option<QuestionPhase> {
+        QuestionPhase::parse(&self.phase)
     }
 }

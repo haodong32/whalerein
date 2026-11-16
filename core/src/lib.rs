@@ -15,6 +15,7 @@ mod pairing;
 mod profiles;
 mod runtime;
 mod security;
+mod session;
 mod sync;
 
 pub(crate) mod util;

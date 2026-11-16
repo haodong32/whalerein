@@ -1,7 +1,7 @@
 //! Test-only Core driver for bounded delivery acceptance without command-line payloads.
 use std::path::PathBuf;
 use std::sync::Arc;
-use whalerein_core::api::PendingQueueAction;
+use whalerein_core::api::{PendingQueueAction, SessionKey};
 use whalerein_core::{Core, CoreOptions, FileSecretStore};
 
 #[tokio::main]
@@ -21,11 +21,15 @@ async fn main() {
         std::process::exit(1);
     }
     let text = "x".repeat(size);
+    let key = SessionKey {
+        host_id: args[3].clone(),
+        session_id: args[4].clone(),
+    };
     let result = if args.len() == 7 {
-        core.update_pending_queue(&args[4], &args[6], PendingQueueAction::Edit, &text)
+        core.update_pending_queue(&key, &args[6], PendingQueueAction::Edit, &text)
             .await
     } else {
-        core.send_message(&args[4], &text).await
+        core.send_message(&key, &text).await
     };
     match result {
         Ok(handle) => println!(

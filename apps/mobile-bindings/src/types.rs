@@ -186,11 +186,8 @@ fn normalize_approval_state(value: &str) -> String {
     }
 }
 
-fn approval_state_name(value: i32) -> String {
-    match ApprovalState::try_from(value) {
-        Ok(state) => normalize_approval_state(state.as_str_name()),
-        Err(_) => "unknown".into(),
-    }
+fn approval_state_name(value: ApprovalState) -> String {
+    normalize_approval_state(value.as_str_name())
 }
 
 /// One content block of a committed message. `kind` is stable text:
@@ -254,41 +251,38 @@ fn block_view(block_id: &str, content: Option<&content_block::Content>) -> Block
     }
 }
 
-fn message_role_name(value: i32) -> String {
-    match MessageRole::try_from(value) {
-        Ok(MessageRole::User) => "user".into(),
-        Ok(MessageRole::Assistant) => "assistant".into(),
-        Ok(MessageRole::Tool) => "tool".into(),
-        Ok(MessageRole::Notice) => "notice".into(),
-        Ok(MessageRole::Unspecified) | Err(_) => "unknown".into(),
+fn message_role_name(value: MessageRole) -> String {
+    match value {
+        MessageRole::User => "user".into(),
+        MessageRole::Assistant => "assistant".into(),
+        MessageRole::Tool => "tool".into(),
+        MessageRole::Notice => "notice".into(),
+        MessageRole::Unspecified => "unknown".into(),
     }
 }
 
-fn run_phase_name(value: i32) -> String {
-    match RunPhase::try_from(value) {
-        Ok(RunPhase::Idle) => "idle".into(),
-        Ok(RunPhase::Running) => "running".into(),
-        Ok(RunPhase::Stopping) => "stopping".into(),
-        Ok(RunPhase::SourceUnavailable) => "source_unavailable".into(),
-        Ok(RunPhase::Unspecified) | Err(_) => "unknown".into(),
+fn run_phase_name(value: RunPhase) -> String {
+    match value {
+        RunPhase::Idle => "idle".into(),
+        RunPhase::Running => "running".into(),
+        RunPhase::Stopping => "stopping".into(),
+        RunPhase::SourceUnavailable => "source_unavailable".into(),
+        RunPhase::Unspecified => "unknown".into(),
     }
 }
 
 /// A turn is active while RUNNING or STOPPING; `run_phase` distinguishes them.
-fn run_phase_running(value: i32) -> bool {
-    matches!(
-        RunPhase::try_from(value),
-        Ok(RunPhase::Running | RunPhase::Stopping)
-    )
+fn run_phase_running(value: RunPhase) -> bool {
+    matches!(value, RunPhase::Running | RunPhase::Stopping)
 }
 
-fn attempt_outcome_name(value: i32) -> String {
-    match AttemptOutcome::try_from(value) {
-        Ok(AttemptOutcome::Committed) => "committed".into(),
-        Ok(AttemptOutcome::Abandoned) => "abandoned".into(),
-        Ok(AttemptOutcome::Interrupted) => "interrupted".into(),
-        Ok(AttemptOutcome::AttemptFailed) => "attempt_failed".into(),
-        Ok(AttemptOutcome::Unspecified) | Err(_) => "unknown".into(),
+fn attempt_outcome_name(value: AttemptOutcome) -> String {
+    match value {
+        AttemptOutcome::Committed => "committed".into(),
+        AttemptOutcome::Abandoned => "abandoned".into(),
+        AttemptOutcome::Interrupted => "interrupted".into(),
+        AttemptOutcome::AttemptFailed => "attempt_failed".into(),
+        AttemptOutcome::Unspecified => "unknown".into(),
     }
 }
 
@@ -427,7 +421,7 @@ pub(crate) fn convert_update(
             let mut events = vec![ConversationEvent::State {
                 run_phase: run_phase_name(state.run_phase),
                 running: run_phase_running(state.run_phase),
-                revision: state.revision,
+                revision: state.revision as u64,
                 approvals: approvals.clone(),
             }];
             let mut next = HashMap::with_capacity(approvals.len());
@@ -472,12 +466,17 @@ pub(crate) fn convert_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use whalerein_proto::{
-        content_block, Approval, AttachmentContent, ContentBlock, NoticeContent, SessionKey,
-        SessionState, TextContent, ToolCallContent, ToolResultContent,
+    use whalerein_core::conversation::content_block::{
+        AttachmentContent, NoticeContent, TextContent, ToolCallContent, ToolResultContent,
+    };
+    use whalerein_core::conversation::{
+        Approval, ApprovalDecision, AttemptRef, ContentBlock, SessionKey, SessionState,
     };
 
-    fn message_with(role: i32, content: Option<content_block::Content>) -> ConversationMessage {
+    fn message_with(
+        role: MessageRole,
+        content: Option<content_block::Content>,
+    ) -> ConversationMessage {
         ConversationMessage {
             message_id: "m-1".into(),
             role,
@@ -489,7 +488,7 @@ mod tests {
         }
     }
 
-    fn approval(state: i32, version: i64) -> Approval {
+    fn approval(state: ApprovalState, version: i64) -> Approval {
         Approval {
             approval_id: "a-1".into(),
             session_id: "s-1".into(),
@@ -500,11 +499,11 @@ mod tests {
             version,
             expires_at_unix_ms: 1,
             state,
-            decision: 0,
+            decision: ApprovalDecision::Unspecified,
         }
     }
 
-    fn state(approvals: Vec<Approval>, run_phase: i32) -> SessionState {
+    fn state(approvals: Vec<Approval>, run_phase: RunPhase) -> SessionState {
         SessionState {
             session: Some(SessionKey {
                 host_id: "h".into(),
@@ -520,7 +519,7 @@ mod tests {
 
     #[test]
     fn unknown_role_and_missing_block_content_are_total() {
-        let message = message_with(999, None);
+        let message = message_with(MessageRole::try_from(999).unwrap_or_default(), None);
         let view = MessageView::from(&message);
         assert_eq!(view.role, "unknown");
         assert_eq!(view.message_id, "m-1");
@@ -530,7 +529,10 @@ mod tests {
         assert_eq!(view.blocks[0].kind, "unknown");
         assert!(view.blocks[0].text.is_empty());
         assert!(view.blocks[0].tool_name.is_none());
-        assert_eq!(message_role_name(-5), "unknown");
+        assert_eq!(
+            message_role_name(MessageRole::try_from(-5).unwrap_or_default()),
+            "unknown"
+        );
     }
 
     #[test]
@@ -589,7 +591,13 @@ mod tests {
 
     #[test]
     fn state_and_attempt_unknown_enum_values_are_total() {
-        let update = ViewUpdate::State(state(vec![approval(999, 1)], 999));
+        let update = ViewUpdate::State(state(
+            vec![approval(
+                ApprovalState::try_from(999).unwrap_or_default(),
+                1,
+            )],
+            RunPhase::try_from(999).unwrap_or_default(),
+        ));
         let mut seen = None;
         let events = convert_update(&update, &mut seen);
         match &events[0] {
@@ -610,11 +618,11 @@ mod tests {
         }
 
         let update = ViewUpdate::AttemptEnded {
-            attempt: whalerein_core::conversation::AttemptRef {
+            attempt: AttemptRef {
                 live_epoch: "e".into(),
                 attempt_id: "a".into(),
             },
-            outcome: 4242,
+            outcome: AttemptOutcome::try_from(4242).unwrap_or_default(),
         };
         let events = convert_update(&update, &mut seen);
         assert_eq!(
@@ -633,7 +641,7 @@ mod tests {
     #[test]
     fn conversion_is_deterministic_and_approval_changes_are_flagged_once() {
         let mut seen = None;
-        let first = state(vec![approval(1, 4)], 2);
+        let first = state(vec![approval(ApprovalState::Pending, 4)], RunPhase::Running);
         let update = ViewUpdate::State(first.clone());
         let events = convert_update(&update, &mut seen);
         assert_eq!(events.len(), 1, "baseline does not flag a change");
@@ -642,7 +650,7 @@ mod tests {
         // A newer revision of the same approval is flagged.
         let mut changed = first.clone();
         changed.revision = 5;
-        changed.approvals = vec![approval(1, 5)];
+        changed.approvals = vec![approval(ApprovalState::Pending, 5)];
         let events = convert_update(&ViewUpdate::State(changed), &mut seen);
         assert!(matches!(
             events.as_slice(),
@@ -654,7 +662,7 @@ mod tests {
         // Repeating the same state does not duplicate the change event.
         let mut repeated = first;
         repeated.revision = 6;
-        repeated.approvals = vec![approval(1, 5)];
+        repeated.approvals = vec![approval(ApprovalState::Pending, 5)];
         let events = convert_update(&ViewUpdate::State(repeated), &mut seen);
         assert_eq!(events.len(), 1);
     }
@@ -662,7 +670,7 @@ mod tests {
     #[test]
     fn message_and_preview_conversions_keep_ids_and_flags() {
         let message = message_with(
-            1,
+            MessageRole::User,
             Some(content_block::Content::Text(TextContent {
                 text: "hi".into(),
             })),
@@ -691,7 +699,7 @@ mod tests {
         );
 
         let update = ViewUpdate::Preview {
-            attempt: whalerein_core::conversation::AttemptRef {
+            attempt: AttemptRef {
                 live_epoch: "e".into(),
                 attempt_id: "a".into(),
             },
@@ -714,7 +722,7 @@ mod tests {
     #[test]
     fn cached_history_and_live_message_projection_are_identical() {
         let mut message = message_with(
-            2,
+            MessageRole::Assistant,
             Some(content_block::Content::Text(TextContent {
                 text: "answer".into(),
             })),
@@ -912,6 +920,7 @@ mod tests {
         ];
         for (phase, name, running) in cases {
             let mut seen = None;
+            let phase = RunPhase::try_from(phase).unwrap_or_default();
             let events = convert_update(&ViewUpdate::State(state(Vec::new(), phase)), &mut seen);
             match &events[0] {
                 ConversationEvent::State {

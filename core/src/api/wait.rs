@@ -94,11 +94,12 @@ impl Core {
     }
 
     /// Read source state without activating a cold Agent.
-    pub async fn read_wait_state(&self, session_id: &str) -> CoreResult<WaitState> {
-        let key = self.session_key(session_id).await?;
+    pub async fn read_wait_state(&self, key: &SessionKey) -> CoreResult<WaitState> {
+        self.authorized_session(key)?;
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &key.host_id,
+                key.host_id.as_str(),
                 RequestPayload {
                     payload: Some(request_payload::Payload::ReadWaitState(ReadWaitState {
                         session_id: session_id.into(),
@@ -123,7 +124,7 @@ impl Core {
     /// Observe the native stopping condition without starting or cancelling Agent work.
     pub async fn wait_session(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         timeout_ms: u64,
     ) -> CoreResult<WaitObservation> {
         if timeout_ms == 0 || timeout_ms > 2_147_483_647 {
@@ -131,10 +132,9 @@ impl Core {
                 "wait timeout is outside the supported timer range".into(),
             ));
         }
+        self.authorized_session(key)?;
+        let session_id = key.session_id.as_str();
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let key = tokio::time::timeout_at(deadline, self.session_key(session_id))
-            .await
-            .map_err(|_| CoreError::Timeout)??;
         let mut last = None;
         let mut fresh = false;
         let mut stale_channel_id = None;

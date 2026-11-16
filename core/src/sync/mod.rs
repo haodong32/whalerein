@@ -3,11 +3,11 @@
 use crate::api::{CoreError, CoreResult, HostInfo, SessionSummary};
 use crate::cache::Cache;
 use crate::security::{EventAad, SecureChannel};
+use crate::session::SessionKey;
 use prost::Message;
 use std::sync::Arc;
 use whalerein_proto::{
-    EventEnvelope, EventPayload, HistoryBatch, HistoryPage, MessageUpsert, SessionKey,
-    SessionUpdate,
+    EventEnvelope, EventPayload, HistoryBatch, HistoryPage, MessageUpsert, SessionUpdate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl SyncService {
         Ok(self.cache.next_history_message(key, after)?)
     }
     pub fn apply_page(&self, key: &SessionKey, page: &HistoryPage) -> CoreResult<bool> {
-        if page.session.as_ref() != Some(key)
+        if page.session.as_ref() != Some(&key.into())
             || page.cut_cursor.is_empty()
             || page.cut_cursor.len() > 4096
         {

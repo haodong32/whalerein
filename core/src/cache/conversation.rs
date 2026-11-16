@@ -1,8 +1,10 @@
 //! Host-scoped, encrypted conversation views. Snapshot staging never replaces
 //! a complete view until its final page commits.
 use super::*;
+use crate::conversation::ConversationMessage;
+use crate::session::SessionKey;
 use prost::Message;
-use whalerein_proto::{ConversationMessage, HistoryPage, MessageUpsert, SessionKey};
+use whalerein_proto::{HistoryPage, MessageUpsert};
 
 pub(super) fn aad(key: &SessionKey, id: &str) -> Vec<u8> {
     serde_json::to_vec(&[
@@ -26,7 +28,7 @@ fn trim_history(
         if bytes as u64 <= budget {
             return Ok(());
         }
-        let excluded = protected.cloned().unwrap_or_default();
+        let excluded: whalerein_proto::SessionKey = protected.map(Into::into).unwrap_or_default();
         let candidate:Option<(String,String)>=conn.query_row("SELECT host_id,session_id FROM (SELECT host_id,session_id,rowid AS position FROM conversation_views UNION ALL SELECT host_id,session_id,rowid AS position FROM conversation_stages) WHERE NOT(host_id=?1 AND session_id=?2) ORDER BY position,host_id,session_id LIMIT 1",params![excluded.host_id,excluded.session_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
         let Some((host, session)) = candidate else {
             return Err(CacheError::HistoryBudget);
@@ -113,12 +115,11 @@ impl Cache {
         for row in rows {
             let (id, blob) = row?;
             let bytes = self.open_blob(&aad(key, &id), &blob)?;
-            messages.push(
-                MessageUpsert::decode(bytes.as_slice())
-                    .map_err(|_| CacheError::Corrupt)?
-                    .message
-                    .ok_or(CacheError::Corrupt)?,
-            );
+            let message = MessageUpsert::decode(bytes.as_slice())
+                .map_err(|_| CacheError::Corrupt)?
+                .message
+                .ok_or(CacheError::Corrupt)?;
+            messages.push(message.into());
         }
         Ok(messages)
     }
@@ -151,7 +152,7 @@ impl Cache {
         Ok(())
     }
     pub fn apply_history_page(&self, page: &HistoryPage) -> Result<bool, CacheError> {
-        let key = page.session.as_ref().ok_or(CacheError::Corrupt)?;
+        let key = SessionKey::from(page.session.clone().ok_or(CacheError::Corrupt)?);
         let batch = page.batch.as_ref().ok_or(CacheError::Corrupt)?;
         if key.host_id.is_empty()
             || key.session_id.is_empty()
@@ -183,7 +184,7 @@ impl Cache {
                 }
                 Ok((
                     message.message_id.clone(),
-                    self.seal(&aad(key, &message.message_id), &change.encode_to_vec())?,
+                    self.seal(&aad(&key, &message.message_id), &change.encode_to_vec())?,
                 ))
             })
             .collect::<Result<_, CacheError>>()?;
@@ -260,7 +261,7 @@ impl Cache {
         }
         tx.execute("INSERT INTO history_receipts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(host_id,session_id,batch_id) DO NOTHING",params![key.host_id,key.session_id,batch.batch_id,protected_digest,crate::util::now_unix_ms()])?;
         tx.execute("DELETE FROM history_receipts WHERE host_id=?1 AND session_id=?2 AND batch_id NOT IN (SELECT batch_id FROM history_receipts WHERE host_id=?1 AND session_id=?2 ORDER BY applied_at DESC,rowid DESC LIMIT 512)",params![key.host_id,key.session_id])?;
-        if let Err(error) = trim_history(&tx, Some(key), self.history_budget_bytes) {
+        if let Err(error) = trim_history(&tx, Some(&key), self.history_budget_bytes) {
             tx.rollback()?;
             // Earlier pages of an abandoned replacement must not pin the budget.
             // Keep the last committed view and its recovery metadata intact.
@@ -286,7 +287,7 @@ impl Cache {
         batch: &whalerein_proto::HistoryBatch,
     ) -> Result<bool, CacheError> {
         self.apply_history_page(&HistoryPage {
-            session: Some(key.clone()),
+            session: Some(key.into()),
             batch: Some(batch.clone()),
             cut_cursor: batch.to_cursor.clone(),
             complete: true,
@@ -298,7 +299,10 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use whalerein_proto::{content_block, ContentBlock, HistoryBatch, MessageRole, TextContent};
+    use whalerein_proto::{
+        content_block, ContentBlock, ConversationMessage as WireConversationMessage, HistoryBatch,
+        MessageRole, TextContent,
+    };
     fn key(host: &str) -> SessionKey {
         SessionKey {
             host_id: host.into(),
@@ -315,7 +319,7 @@ mod tests {
         id: &str,
     ) -> HistoryPage {
         HistoryPage {
-            session: Some(key(host)),
+            session: Some((&key(host)).into()),
             batch: Some(HistoryBatch {
                 from_cursor: from.into(),
                 to_cursor: to.into(),
@@ -324,7 +328,7 @@ mod tests {
                     vec![]
                 } else {
                     vec![MessageUpsert {
-                        message: Some(ConversationMessage {
+                        message: Some(WireConversationMessage {
                             message_id: id.into(),
                             role: MessageRole::Assistant as i32,
                             blocks: vec![ContentBlock {
@@ -389,10 +393,10 @@ mod tests {
             session_id: "child".into(),
         };
         let mut original = page("host", "start", "cut", "cut", true, true, "same-id");
-        original.session = Some(parent.clone());
+        original.session = Some((&parent).into());
         cache.apply_history_page(&original).unwrap();
         let mut inherited = original.clone();
-        inherited.session = Some(child.clone());
+        inherited.session = Some((&child).into());
         cache.apply_history_page(&inherited).unwrap();
         let mut child_delta = page(
             "host",
@@ -403,7 +407,7 @@ mod tests {
             false,
             "same-id",
         );
-        child_delta.session = Some(child.clone());
+        child_delta.session = Some((&child).into());
         child_delta.batch.as_mut().unwrap().changes[0]
             .message
             .as_mut()
@@ -493,11 +497,14 @@ mod tests {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
-    use whalerein_proto::{content_block, ContentBlock, HistoryBatch, MessageRole, TextContent};
+    use whalerein_proto::{
+        content_block, ContentBlock, ConversationMessage as WireConversationMessage, HistoryBatch,
+        MessageRole, TextContent,
+    };
 
     fn page(host: &str, from: &str, to: &str, text: &str, complete: bool) -> HistoryPage {
         HistoryPage {
-            session: Some(SessionKey {
+            session: Some(whalerein_proto::SessionKey {
                 host_id: host.into(),
                 session_id: "s".into(),
             }),
@@ -506,7 +513,7 @@ mod retention_tests {
                 to_cursor: to.into(),
                 batch_id: format!("{from}:{to}"),
                 changes: vec![MessageUpsert {
-                    message: Some(ConversationMessage {
+                    message: Some(WireConversationMessage {
                         message_id: to.into(),
                         role: MessageRole::Assistant as i32,
                         blocks: vec![ContentBlock {
@@ -622,10 +629,13 @@ mod retention_tests {
 #[cfg(test)]
 mod reconnect_tests {
     use super::*;
-    use whalerein_proto::{content_block, ContentBlock, HistoryBatch, MessageRole, TextContent};
+    use whalerein_proto::{
+        content_block, ContentBlock, ConversationMessage as WireConversationMessage, HistoryBatch,
+        MessageRole, TextContent,
+    };
 
-    fn text_message(id: &str) -> ConversationMessage {
-        ConversationMessage {
+    fn text_message(id: &str) -> WireConversationMessage {
+        WireConversationMessage {
             message_id: id.into(),
             role: MessageRole::Assistant as i32,
             blocks: vec![ContentBlock {
@@ -654,7 +664,7 @@ mod reconnect_tests {
     fn page(batch: HistoryBatch, snapshot: bool) -> HistoryPage {
         let cut = batch.to_cursor.clone();
         HistoryPage {
-            session: Some(SessionKey {
+            session: Some(whalerein_proto::SessionKey {
                 host_id: "host".into(),
                 session_id: "s".into(),
             }),

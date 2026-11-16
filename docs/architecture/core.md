@@ -11,6 +11,20 @@ security, pairing, command, synchronization and runtime modules are private.
 clients do not construct internal protocol services. Repository-only protocol
 drivers opt into `protocol-testing` and use the explicit `testing` exports.
 
+Client-facing values are Core-owned. Conversation messages, content blocks,
+attempt references and watch state are Core types exported by `conversation`;
+the versioned wire messages are decoded inside `access`, `cache` and `sync` and
+converted at those boundaries, so consumers never construct protocol types. A
+session operation takes an explicit `SessionKey(host_id, session_id)`; there is
+no ambient Host scope on a `Core`.
+Callers resolve a key once with `session_key` (unqualified, rejected when the
+authorized listing cannot prove uniqueness) or `scoped_session_key` (explicit
+Host, checked against the current Access listing), then pass that value to every
+session operation. An operation re-checks that the key's Host is still locally
+authorized before any I/O, so a stale or substituted key fails closed rather
+than routing a request to another Host. Delivery choices and question phases are
+Core enums; the versioned wire enums are converted at the protocol boundary.
+
 | Module | Responsibility |
 | --- | --- |
 | `api` | Pairing, commands and typed watch orchestration; one overall deadline. |
@@ -61,13 +75,16 @@ gates pass; official presets cannot override endpoints, and a custom descriptor
 must provide distinct HTTPS (or loopback test) API, issuer and optional Access
 origins plus a public native client identifier.
 
-Every open `Core` holds a shared OS activation lock. A profile switch takes the
-exclusive form and fails with `conflict` while any client process is running,
-so a long watch or in-flight operation stops old traffic before the new selection
-is published. The lock is released on crash; there is no daemon or owner record.
-A switch preserves pending journals and never deletes local profile state. An
-older binary ignores the registry, so managed selections report a rollback
-warning and downgrade requires stopping those clients.
+Every open `Core` holds a shared OS activation lock. The shared lease is acquired
+before the active selection is resolved, so an open either observes a switch that
+already completed or holds the lease that prevents a later one; it never opens a
+selection the lease does not cover. A profile switch takes the exclusive form and
+fails with `conflict` while any client process is running, so a long watch or
+in-flight operation stops old traffic before the new selection is published. The
+lock is released on crash; there is no daemon or owner record. A switch preserves
+pending journals and never deletes local profile state. An older binary ignores
+the registry, so managed selections report a rollback warning and downgrade
+requires stopping those clients.
 
 A SessionKey is `(host_id, session_id)`. Resolve an unqualified session ID
 against the current authorized Host set. With multiple Hosts, every source
@@ -86,8 +103,9 @@ updated first, then session identity, so an offline list does not jump when the
 Host reconnects. A complete remote listing replaces the cached rows for that
 Host, and deleted or archived sessions disappear from the offline view. An
 explicit `sessions --host` accepts only a locally authorized Host identity; an
-unknown or unpinned Host is `not_found`, never a reason to pair again, and two
-disagreeing explicit Host scopes are a conflict.
+unknown or unpinned Host is `not_found`, never a reason to pair again. That Host
+argument describes the listing; it is not an ambient scope that changes other
+operations, which take the key resolved for them.
 
 Watching subscribes MQTT before registering a source Watch and synchronizing its
 fixed history cut. A bounded background pump continues processing receipts during
@@ -229,6 +247,11 @@ already present in doctor output, command counts, connection state and metrics.
 Message content, tool parameters, drafts, credentials, invitation tokens and
 private keys are excluded.
 
+
+The storage and wire formats are unchanged by the explicit-key cutover. A
+profile written by the new binary reopens under the previous binary (verified
+with a synthetic post-cutover fixture read through the pre-cutover API), so a
+stopped-client rollback keeps identity, pins, drafts and command intents.
 
 A cache is rebuildable local state; pairing lives in configuration and the
 `SecretStore`. A missing or replaced cache key and a non-SQLite cache file are

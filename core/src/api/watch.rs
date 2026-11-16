@@ -7,8 +7,8 @@ use std::sync::atomic::AtomicUsize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use whalerein_proto::{
-    request_payload, response_payload, session_update, HistoryRead, RefreshWatches, SessionKey,
-    UnwatchSession, WatchSession,
+    request_payload, response_payload, session_update, HistoryRead, RefreshWatches, UnwatchSession,
+    WatchSession,
 };
 
 // The v1 device transport owns one MQTT subscription. Reject competing
@@ -165,7 +165,30 @@ fn bounded_host_candidates(hosts: &[String]) -> String {
 }
 
 impl Core {
-    /// Resolve against a fresh authorized Host listing. A partial discovery cannot prove uniqueness.
+    /// Resolve an explicit Host and session once, verifying that the Host is
+    /// still advertised by the current Access listing.
+    pub async fn scoped_session_key(
+        &self,
+        host_id: &str,
+        session_id: &str,
+    ) -> CoreResult<SessionKey> {
+        let key = SessionKey::new(host_id, session_id)?;
+        let hosts = self.hosts().await.map_err(|error| match error {
+            CoreError::Revoked | CoreError::RevokedRetentionUnverified | CoreError::NotPaired => {
+                error
+            }
+            _ => CoreError::Unavailable(
+                "cannot verify authorized Hosts; specify a Host when available".into(),
+            ),
+        })?;
+        if !hosts.iter().any(|host| host.host_id == key.host_id) {
+            return Err(CoreError::NotFound("Host is not authorized".into()));
+        }
+        Ok(key)
+    }
+
+    /// Resolve an unqualified session against a fresh authorized Host listing.
+    /// A partial discovery cannot prove uniqueness.
     pub async fn session_key(&self, session_id: &str) -> CoreResult<SessionKey> {
         if session_id.is_empty() {
             return Err(CoreError::InvalidInput("session identity missing".into()));
@@ -178,20 +201,8 @@ impl Core {
                 "cannot verify authorized Hosts; specify a Host when available".into(),
             ),
         })?;
-        if let Some(host) = &self.session_host {
-            if !hosts.iter().any(|item| &item.host_id == host) {
-                return Err(CoreError::NotFound("Host is not authorized".into()));
-            }
-            return Ok(SessionKey {
-                host_id: host.clone(),
-                session_id: session_id.into(),
-            });
-        }
         if hosts.len() == 1 {
-            return Ok(SessionKey {
-                host_id: hosts[0].host_id.clone(),
-                session_id: session_id.into(),
-            });
+            return SessionKey::new(hosts[0].host_id.clone(), session_id);
         }
         let mut matches = Vec::new();
         for host in hosts {
@@ -231,10 +242,7 @@ impl Core {
             }
         }
         match matches.as_slice() {
-            [host] => Ok(SessionKey {
-                host_id: host.clone(),
-                session_id: session_id.into(),
-            }),
+            [host] => SessionKey::new(host.clone(), session_id),
             [] => Err(CoreError::NotFound(
                 "session not found on authorized Hosts".into(),
             )),
@@ -267,6 +275,7 @@ impl Core {
         F: FnMut(&ViewUpdate) -> bool,
     {
         let sync = self.sync_service()?;
+        let wire_key = whalerein_proto::SessionKey::from(key);
         self.runtime
             .set_sync_state(&key.host_id, crate::sync::SyncState::Syncing);
         let mut snapshot = force_snapshot || sync.cursor(key)?.is_none();
@@ -314,7 +323,7 @@ impl Core {
             let Some(response_payload::Payload::HistoryPage(page)) = response.payload else {
                 return Err(CoreError::Security("unexpected history response".into()));
             };
-            if page.session.as_ref() != Some(key) || page.snapshot != snapshot {
+            if page.session.as_ref() != Some(&wire_key) || page.snapshot != snapshot {
                 return Err(CoreError::Security("history scope mismatch".into()));
             }
             let batch = page
@@ -394,6 +403,7 @@ impl Core {
     where
         F: FnMut(&ViewUpdate) -> bool,
     {
+        self.authorized_session(key)?;
         let _lease = WatchLease::acquire(&self.options.data_dir)?;
         self.watch_active
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -576,7 +586,8 @@ impl Core {
         let initial = ready
             .state
             .ok_or_else(|| CoreError::Security("missing watch baseline".into()))?;
-        if initial.session.as_ref() != Some(key)
+        let wire_key = whalerein_proto::SessionKey::from(key);
+        if initial.session.as_ref() != Some(&wire_key)
             || initial.live_epoch.is_empty()
             || ready.watch_id.is_empty()
         {
@@ -610,7 +621,7 @@ impl Core {
         let _ = self
             .runtime
             .set_state(&key.host_id, ConnectionState::Connected);
-        if !on_update(&ViewUpdate::State(initial)) {
+        if !on_update(&ViewUpdate::State(initial.into())) {
             pump.finish().await;
             return Ok(true);
         }
@@ -639,7 +650,7 @@ impl Core {
                     let Some(envelope)=envelope else{if let Some(failure)=error.lock().expect("watch error mutex").take(){return Err(failure)}pump.finish().await;return Ok(false)};
                     queued.fetch_sub(envelope.ciphertext.len(),Ordering::SeqCst);
                     let update=sync.open_update(&channel,&envelope)?;
-                    if update.session.as_ref()!=Some(key)||update.watch_id!=ready.watch_id{continue}
+                    if update.session.as_ref()!=Some(&wire_key)||update.watch_id!=ready.watch_id{continue}
                     match update.payload {
                         Some(session_update::Payload::Live(frame))=>{if let Some(view)=conversation.live(&frame)?{*emitted+=1;if !on_update(&view){pump.finish().await;return Ok(true)}}},
                         Some(session_update::Payload::History(batch))=>{
@@ -653,9 +664,9 @@ impl Core {
                             }
                         },
                         Some(session_update::Payload::State(state))=>{
-                            if state.session.as_ref()!=Some(key){return Err(CoreError::Security("state update scope mismatch".into()))}
+                            if state.session.as_ref()!=Some(&wire_key){return Err(CoreError::Security("state update scope mismatch".into()))}
                             if state.live_epoch!=epoch{pump.finish().await;return Ok(false)}
-                            if state.revision>state_revision {state_revision=state.revision;if !on_update(&ViewUpdate::State(state)){pump.finish().await;return Ok(true)}}
+                            if state.revision>state_revision {state_revision=state.revision;if !on_update(&ViewUpdate::State(state.into())){pump.finish().await;return Ok(true)}}
                         },
                         Some(session_update::Payload::Reset(_))=>{conversation.reset("");sync.discard_stage(key)?;pump.finish().await;return Ok(false)},
                         None=>return Err(CoreError::Security("empty typed update".into())),
@@ -667,12 +678,12 @@ impl Core {
                     let response=match response{Err(e)if e.code()=="expired"=>{pump.finish().await;return Ok(false)},other=>other?};
                     let Some(response_payload::Payload::WatchStates(states))=response.payload else{return Err(CoreError::Security("unexpected watch refresh".into()))};
                     let state=states.watches.into_iter().find(|w|w.watch_id==ready.watch_id).and_then(|w|w.state).ok_or_else(||CoreError::Security("missing watch refresh".into()))?;
-                    if state.session.as_ref()!=Some(key){return Err(CoreError::Security("watch refresh scope mismatch".into()))}
+                    if state.session.as_ref()!=Some(&wire_key){return Err(CoreError::Security("watch refresh scope mismatch".into()))}
                     if state.live_epoch != epoch { pump.finish().await; return Ok(false) }
                     // The head moved past the local cursor: this is a recovery
                     // gap, not a cold baseline, so deliver the unseen messages.
                     if sync.cursor(key)?.as_deref()!=Some(state.history_head.as_str()) {*emitted+=self.sync_conversation(key,conversation,true,false,&mut |u|{keep_going=on_update(u);keep_going}).await?;}
-                    if state.revision>state_revision {state_revision=state.revision;if !on_update(&ViewUpdate::State(state)){pump.finish().await;return Ok(true)}}
+                    if state.revision>state_revision {state_revision=state.revision;if !on_update(&ViewUpdate::State(state.into())){pump.finish().await;return Ok(true)}}
                 }
             }
             if !keep_going {

@@ -1,4 +1,4 @@
-use super::test_support::core;
+use super::test_support::{core, key};
 use super::*;
 use crate::api::test_support::FakeAccess;
 use crate::api::OnlineStatus;
@@ -14,7 +14,8 @@ async fn lost_submit_receipts_are_recoverable_after_reopening_without_another_na
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
     assert!(matches!(
-        core.send_message("session-1", "fixture").await,
+        core.send_message(&key("host-1", "session-1"), "fixture")
+            .await,
         Err(CoreError::Unavailable(_))
     ));
     let pending = core.pending_commands().unwrap();
@@ -52,7 +53,10 @@ async fn recovery_rejects_a_changed_host_key_before_msg3_and_preserves_the_paire
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let pending = core.pending_commands().unwrap();
     let config = std::fs::read(dir.path().join("config.json")).unwrap();
     let original = {
@@ -164,7 +168,10 @@ async fn recovery_rejects_mismatched_receipt_identity_and_domain_errors_without_
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let pending = core.pending_commands().unwrap();
     let entry = &pending[0];
     for field in 0..3 {
@@ -218,7 +225,12 @@ async fn lost_model_receipt_recovers_original_effect_without_resubmission() {
     core.sessions("host-1").await.unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
     assert!(core
-        .select_session_model("session-1", "provider", "model", Some("high"))
+        .select_session_model(
+            &key("host-1", "session-1"),
+            "provider",
+            "model",
+            Some("high")
+        )
         .await
         .is_err());
     let pending = core.pending_commands().unwrap();
@@ -232,7 +244,10 @@ async fn lost_model_receipt_recovers_original_effect_without_resubmission() {
         host.drop_command_receipts = false;
         host.model_observed = Some("later-local-model".into());
     }
-    let observed = reopened.read_session_model("session-1").await.unwrap();
+    let observed = reopened
+        .read_session_model(&key("host-1", "session-1"))
+        .await
+        .unwrap();
     assert_eq!(observed.next.unwrap().model, "later-local-model");
     let recovered = reopened
         .recover_pending_command(&pending[0].request_id)
@@ -289,14 +304,20 @@ async fn lost_question_answer_receipts_recover_without_another_source_call() {
         .await
         .unwrap();
     core.sessions("host-1").await.unwrap();
-    let question = core.get_question("session-1", "batch-1").await.unwrap();
+    let question = core
+        .get_question(&key("host-1", "session-1"), "batch-1")
+        .await
+        .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
     let answer = crate::api::QuestionAnswer {
         id: "q".into(),
         selected: vec!["A".into()],
         custom: None,
     };
-    assert!(core.answer_question(&question, vec![answer]).await.is_err());
+    assert!(core
+        .answer_question(&key("host-1", "session-1"), &question, vec![answer])
+        .await
+        .is_err());
     let pending = core.pending_commands().unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
@@ -331,7 +352,10 @@ async fn accepted_command_recovery_handshake_failure_remains_unknown_and_keeps_i
         host.drop_channel_after_command = true;
         host.reject_channel_handshakes = true;
     }
-    let error = core.send_message("session-1", "fixture").await.unwrap_err();
+    let error = core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "unknown");
     let pending = core.pending_commands().unwrap();
     assert_eq!(pending.len(), 1);
@@ -355,7 +379,10 @@ async fn authenticated_recovery_preserves_a_confirmed_native_failure() {
         host.drop_channel_after_command = true;
         host.settled_command_status = whalerein_proto::OnlineStatus::Failed;
     }
-    let error = core.send_message("session-1", "fixture").await.unwrap_err();
+    let error = core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .unwrap_err();
     assert!(!matches!(error, CoreError::UnknownResult));
     assert!(core.pending_commands().unwrap().is_empty());
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
@@ -577,7 +604,7 @@ async fn revocation_retains_only_opaque_unconfirmed_identity_and_clears_credenti
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
     assert!(core
-        .send_message("session-1", "synthetic private fixture")
+        .send_message(&key("host-1", "session-1"), "synthetic private fixture")
         .await
         .is_err());
     let pending = core.pending_commands().unwrap();
@@ -637,7 +664,10 @@ async fn revocation_storage_failure_still_clears_credentials_and_reports_failure
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     std::fs::write(dir.path().join("unconfirmed-commands"), b"obstruction").unwrap();
     assert!(matches!(core.revoke().await, Err(CoreError::Internal(_))));
@@ -665,7 +695,10 @@ async fn revocation_loads_dormant_cache_before_preserving_identity() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let request = core.pending_commands().unwrap()[0].request_id.clone();
     let options = core.options.clone();
     drop(core);
@@ -727,7 +760,10 @@ async fn interrupted_revocation_resumes_snapshot_and_cleanup_on_reopen() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     super::revoked_commands::write_marker(dir.path(), "confirmed").unwrap();
     let options = core.options.clone();
@@ -759,7 +795,10 @@ async fn revocation_fence_write_failure_does_not_revoke_without_durable_intent()
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let request = core.pending_commands().unwrap()[0].request_id.clone();
     let original_cache = core.cache().unwrap();
     std::fs::create_dir(dir.path().join("admission-revoked")).unwrap();
@@ -1181,7 +1220,10 @@ async fn restart_after_uncertain_snapshot_never_claims_retention_succeeded() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     super::revoked_commands::write_marker(dir.path(), "confirmed").unwrap();
     let options = core.options.clone();
@@ -1369,7 +1411,10 @@ async fn readonly_revocation_snapshot_rejects_profile_after_replacement() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     let foreign_path = outside.path().join("cache.sqlite3");
     {
@@ -1735,7 +1780,10 @@ async fn transient_external_writer_commit_or_rollback_preserves_identity() {
             .await
             .unwrap();
         access.host.lock().unwrap().drop_command_receipts = true;
-        assert!(core.send_message("session-1", "fixture").await.is_err());
+        assert!(core
+            .send_message(&key("host-1", "session-1"), "fixture")
+            .await
+            .is_err());
         let identity = core.pending_commands().unwrap()[0].request_id.clone();
         assert!(core.cache().unwrap().has_revocation_provenance());
         let script = r#"import sqlite3,sys
@@ -1815,7 +1863,10 @@ async fn cancelling_wait_then_new_process_reports_unverified_without_old_connect
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     let script = r#"import sqlite3,sys
 c=sqlite3.connect(sys.argv[1],timeout=1)
@@ -1904,7 +1955,10 @@ async fn transient_writer_deadline_clears_credentials_and_reports_unverified() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     let script = r#"import sqlite3,sys
 c=sqlite3.connect(sys.argv[1],timeout=1)
@@ -1972,7 +2026,10 @@ async fn restart_with_active_writer_and_no_connection_reports_unverified() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     let script = r#"import sqlite3,sys
 c=sqlite3.connect(sys.argv[1],timeout=1)
@@ -2090,7 +2147,10 @@ async fn fresh_core_revocation_initializes_and_reuses_existing_cache_connection(
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let identity = core.pending_commands().unwrap()[0].request_id.clone();
     let options = core.options.clone();
     drop(core);
@@ -2122,7 +2182,10 @@ async fn fresh_revocation_rejects_group_writable_profile_provenance() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     assert_eq!(core.pending_commands().unwrap().len(), 1);
     let options = core.options.clone();
     drop(core);
@@ -2252,7 +2315,10 @@ async fn fresh_core_revocation_automatically_initializes_existing_pending_cache(
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let identity = core.pending_commands().unwrap()[0].request_id.clone();
     let options = core.options.clone();
     drop(core);
@@ -2278,7 +2344,10 @@ async fn fresh_core_revocation_waits_for_transient_writer_and_preserves_identity
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let identity = core.pending_commands().unwrap()[0].request_id.clone();
     let options = core.options.clone();
     drop(core);
@@ -2338,7 +2407,10 @@ async fn recovery_after_the_access_request_row_expires_uses_the_host_journal() {
         .await
         .unwrap();
     access.host.lock().unwrap().drop_command_receipts = true;
-    assert!(core.send_message("session-1", "fixture").await.is_err());
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
     let pending = core.pending_commands().unwrap();
     access.host.lock().unwrap().drop_command_receipts = false;
     // Access now answers 410 expired for the control-plane row (a long wait or

@@ -839,3 +839,162 @@ fn profile_registry_contains_no_secret_material() {
     assert!(!registry.contains("private_key"));
     assert!(!registry.contains("device-token"));
 }
+
+// AC-01.remove
+#[test]
+fn active_profile_cannot_be_removed_while_a_core_holds_the_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_official_staging("official-staging", true, &secrets)
+        .unwrap();
+    profiles.activate("official-staging").unwrap();
+    let core = crate::api::Core::new(crate::api::CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: secrets.clone(),
+    })
+    .unwrap();
+    assert_eq!(core.profile().name.as_deref(), Some("official-staging"));
+
+    let error = profiles
+        .remove("official-staging", &secrets)
+        .expect_err("a held activation lease must block active removal");
+    assert!(matches!(error, CoreError::Conflict(_)), "{error:?}");
+
+    drop(core);
+    let removed = profiles.remove("official-staging", &secrets).unwrap();
+    assert_eq!(removed.removed.name, "official-staging");
+    assert_eq!(
+        removed
+            .active
+            .active
+            .as_ref()
+            .map(|value| value.name.as_str()),
+        Some(PRODUCTION_PROFILE_NAME)
+    );
+}
+
+// AC-01.switch-first
+#[test]
+fn a_selection_opened_first_blocks_a_competing_switch_until_core_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_official_staging("official-staging", true, &secrets)
+        .unwrap();
+    profiles.activate("official-staging").unwrap();
+
+    let core = crate::api::Core::new(crate::api::CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: secrets.clone(),
+    })
+    .unwrap();
+    assert_eq!(core.profile().name.as_deref(), Some("official-staging"));
+    assert!(matches!(
+        profiles.activate(PRODUCTION_PROFILE_NAME),
+        Err(CoreError::Conflict(_))
+    ));
+
+    drop(core);
+    let outcome = profiles.activate(PRODUCTION_PROFILE_NAME).unwrap();
+    assert_eq!(outcome.profile.name, PRODUCTION_PROFILE_NAME);
+}
+
+// AC-01.release
+#[cfg(any(unix, windows))]
+#[test]
+fn a_crashed_core_process_releases_the_activation_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_official_staging("official-staging", true, &secrets)
+        .unwrap();
+    profiles.activate("official-staging").unwrap();
+    // The helper opens the active selection and is killed; the OS must release
+    // its shared activation lock so a later switch can take the exclusive lock.
+    let ready = dir.path().join("lease-holder-ready");
+    let exe = std::env::current_exe().unwrap();
+    let mut child = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "profiles::tests::activation_lease_holder_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("WHALEREIN_TEST_LEASE_HOLDER", dir.path())
+        .env("WHALEREIN_TEST_LEASE_READY", &ready)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready.exists() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("lease helper did not open Core in time");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(matches!(
+        profiles.activate(PRODUCTION_PROFILE_NAME),
+        Err(CoreError::Conflict(_))
+    ));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let replaced = profiles.activate(PRODUCTION_PROFILE_NAME).unwrap();
+    assert_eq!(replaced.profile.name, PRODUCTION_PROFILE_NAME);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+#[ignore = "subprocess helper for a_crashed_core_process_releases_the_activation_lease"]
+fn activation_lease_holder_helper() {
+    let Some(data_dir) = std::env::var_os("WHALEREIN_TEST_LEASE_HOLDER") else {
+        return;
+    };
+    let ready = std::env::var_os("WHALEREIN_TEST_LEASE_READY").expect("ready marker path");
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let _core = crate::api::Core::new(crate::api::CoreOptions {
+        data_dir: data_dir.into(),
+        secrets,
+    })
+    .unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+// AC-01.open-first
+#[test]
+fn open_while_a_switch_holds_the_exclusive_lease_is_a_conflict_not_an_old_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    profiles
+        .add_official_staging("official-staging", true, &secrets)
+        .unwrap();
+    profiles.activate("official-staging").unwrap();
+    // A switch in progress owns the exclusive lease. Opening must retry with a
+    // conflict instead of resolving the previous selection without the lease.
+    let switching = ActivationGuard::exclusive(dir.path()).unwrap();
+    let error = match crate::api::Core::new(crate::api::CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: secrets.clone(),
+    }) {
+        Ok(_) => panic!("an in-progress switch must block opening"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, CoreError::Conflict(_)), "{error:?}");
+    drop(switching);
+    let core = crate::api::Core::new(crate::api::CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets,
+    })
+    .unwrap();
+    assert_eq!(core.profile().name.as_deref(), Some("official-staging"));
+}

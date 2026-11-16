@@ -62,6 +62,14 @@ keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"], 
 tempfile = { workspace = true }
 tokio = { workspace = true }
 
+[[test]]
+name = "baseline_profile"
+required-features = ["test-support"]
+
+[[test]]
+name = "rollback_writer"
+required-features = ["test-support"]
+
 [[example]]
 name = "mqtt_transport_driver"
 required-features = ["protocol-testing"]

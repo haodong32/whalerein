@@ -9,8 +9,7 @@ use whalerein_core::api::{
 use crate::cli::{Command, ModelAction};
 
 use whalerein_core::conversation::{
-    content_block, ApprovalState, AttemptOutcome, ConversationMessage, MessageRole, RunPhase,
-    ViewUpdate,
+    content_block, AttemptOutcome, ConversationMessage, RunPhase, ViewUpdate,
 };
 
 /// Render one committed message's blocks in source order.
@@ -1068,14 +1067,14 @@ pub fn tail_event_json(update: &ViewUpdate) -> Value {
                 Some(content_block::Content::Attachment(t))=>json!({"block_id":b.block_id,"type":"attachment","name":t.name,"media_type":t.media_type,"size":t.size,"available":t.available}),
                 None=>json!({"block_id":b.block_id,"type":"unavailable"}),
             }).collect();
-            json!({"type":"message","message_id":message.message_id,"role":MessageRole::try_from(message.role).unwrap_or_default().as_str_name(),"blocks":blocks,"authored_at_unix_ms":message.authored_at_unix_ms,"origin":origin.as_ref().map(|a|json!({"live_epoch":a.live_epoch,"attempt_id":a.attempt_id}))})
+            json!({"type":"message","message_id":message.message_id,"role":message.role.as_str_name(),"blocks":blocks,"authored_at_unix_ms":message.authored_at_unix_ms,"origin":origin.as_ref().map(|a|json!({"live_epoch":a.live_epoch,"attempt_id":a.attempt_id}))})
         }
         ViewUpdate::AttemptEnded { attempt, outcome } => {
-            json!({"type":"attempt_ended","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"outcome":AttemptOutcome::try_from(*outcome).unwrap_or_default().as_str_name()})
+            json!({"type":"attempt_ended","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"outcome":outcome.as_str_name()})
         }
         ViewUpdate::State(state) => {
-            let approvals:Vec<Value>=state.approvals.iter().map(|a|json!({"approval_id":a.approval_id,"session_id":a.session_id,"tool_name":a.tool_name,"call_id":a.call_id,"reason":a.reason,"digest":hex::encode(&a.digest),"version":a.version,"expires_at_unix_ms":a.expires_at_unix_ms,"state":ApprovalState::try_from(a.state).unwrap_or_default().as_str_name()})).collect();
-            json!({"type":"state","run_phase":RunPhase::try_from(state.run_phase).unwrap_or_default().as_str_name(),"approvals":approvals})
+            let approvals:Vec<Value>=state.approvals.iter().map(|a|json!({"approval_id":a.approval_id,"session_id":a.session_id,"tool_name":a.tool_name,"call_id":a.call_id,"reason":a.reason,"digest":hex::encode(&a.digest),"version":a.version,"expires_at_unix_ms":a.expires_at_unix_ms,"state":a.state.as_str_name()})).collect();
+            json!({"type":"state","run_phase":state.run_phase.as_str_name(),"approvals":approvals})
         }
         ViewUpdate::Reset => json!({"type":"reset"}),
     };
@@ -1137,9 +1136,7 @@ impl TailRenderer {
                 self.attempt = None;
                 self.block = None;
                 let body = render_message_blocks(message, 0);
-                let role = MessageRole::try_from(message.role)
-                    .unwrap_or_default()
-                    .as_str_name();
+                let role = message.role.as_str_name();
                 if body.is_empty() {
                     format!("{prefix}[{role}]\n")
                 } else {
@@ -1147,7 +1144,7 @@ impl TailRenderer {
                 }
             }
             ViewUpdate::State(state) => {
-                let phase = RunPhase::try_from(state.run_phase).unwrap_or_default();
+                let phase = state.run_phase;
                 let mut line = format!("[state] {}", run_phase_label(phase));
                 if !state.approvals.is_empty() {
                     let tools: Vec<String> = state
@@ -1172,14 +1169,11 @@ impl TailRenderer {
                 self.block = None;
                 self.finish_line()
             }
-            ViewUpdate::AttemptEnded { outcome, .. }
-                if *outcome != AttemptOutcome::Committed as i32 =>
-            {
+            ViewUpdate::AttemptEnded { outcome, .. } if *outcome != AttemptOutcome::Committed => {
                 self.attempt = None;
                 self.block = None;
                 let prefix = self.finish_line();
-                let label =
-                    attempt_outcome_label(AttemptOutcome::try_from(*outcome).unwrap_or_default());
+                let label = attempt_outcome_label(*outcome);
                 format!("{prefix}[attempt {label}]\n")
             }
             _ => String::new(),
@@ -1208,7 +1202,7 @@ pub fn is_tail_output(update: &ViewUpdate) -> bool {
         || matches!(update,ViewUpdate::Preview{text,..} if !text.is_empty())
         // An interrupted/abandoned turn is the only output of that attempt:
         // `tail --once` must surface it instead of timing out silently.
-        || matches!(update, ViewUpdate::AttemptEnded { outcome, .. } if *outcome != AttemptOutcome::Committed as i32)
+        || matches!(update, ViewUpdate::AttemptEnded { outcome, .. } if *outcome != AttemptOutcome::Committed)
 }
 
 pub fn render_pair(outcome: &whalerein_core::api::PairingOutcome) -> String {
@@ -1590,7 +1584,7 @@ mod tests {
 #[cfg(test)]
 mod typed_output_tests {
     use super::*;
-    use whalerein_core::conversation::{AttemptRef, ConversationMessage};
+    use whalerein_core::conversation::{AttemptRef, ConversationMessage, MessageRole};
     fn attempt() -> AttemptRef {
         AttemptRef {
             live_epoch: "epoch".into(),
@@ -1600,7 +1594,7 @@ mod typed_output_tests {
     fn message() -> ConversationMessage {
         ConversationMessage {
             message_id: "m".into(),
-            role: MessageRole::Assistant as i32,
+            role: MessageRole::Assistant,
             blocks: vec![],
             authored_at_unix_ms: 1,
         }
@@ -1633,14 +1627,14 @@ mod typed_output_tests {
         assert_eq!(
             renderer.render(&ViewUpdate::AttemptEnded {
                 attempt: attempt(),
-                outcome: AttemptOutcome::Abandoned as i32
+                outcome: AttemptOutcome::Abandoned
             }),
             "\n[attempt abandoned]\n"
         );
         assert!(renderer
             .render(&ViewUpdate::AttemptEnded {
                 attempt: attempt(),
-                outcome: AttemptOutcome::Committed as i32
+                outcome: AttemptOutcome::Committed
             })
             .is_empty());
         renderer.render(&preview);
@@ -1660,13 +1654,14 @@ mod typed_output_tests {
     }
     #[test]
     fn human_tail_renders_blocks_in_source_order_with_attachments_and_notices() {
-        use whalerein_proto::{
-            content_block::Content, AttachmentContent, ContentBlock, NoticeContent, TextContent,
-            ToolCallContent, ToolResultContent,
+        use whalerein_core::conversation::content_block::{
+            AttachmentContent, Content, NoticeContent, TextContent, ToolCallContent,
+            ToolResultContent,
         };
+        use whalerein_core::conversation::ContentBlock;
         let message = ConversationMessage {
             message_id: "m".into(),
-            role: MessageRole::Assistant as i32,
+            role: MessageRole::Assistant,
             blocks: vec![
                 ContentBlock {
                     block_id: "text".into(),
@@ -1734,37 +1729,37 @@ mod typed_output_tests {
         let mut renderer = TailRenderer::default();
         let interrupted = ViewUpdate::AttemptEnded {
             attempt: attempt(),
-            outcome: AttemptOutcome::Interrupted as i32,
+            outcome: AttemptOutcome::Interrupted,
         };
         assert!(is_tail_output(&interrupted));
         assert_eq!(renderer.render(&interrupted), "[attempt interrupted]\n");
         // A committed attempt is described by its Message, not a synthetic line.
         assert!(!is_tail_output(&ViewUpdate::AttemptEnded {
             attempt: attempt(),
-            outcome: AttemptOutcome::Committed as i32,
+            outcome: AttemptOutcome::Committed,
         }));
     }
 
     #[test]
     fn human_tail_prints_state_transitions_including_input_required() {
-        use whalerein_proto::{Approval, ApprovalState, RunPhase, SessionState};
+        use whalerein_core::conversation::{Approval, ApprovalState, RunPhase, SessionState};
         let mut renderer = TailRenderer::default();
         let mut state = SessionState {
-            run_phase: RunPhase::Running as i32,
+            run_phase: RunPhase::Running,
             ..Default::default()
         };
         assert!(renderer
             .render(&ViewUpdate::State(state.clone()))
             .contains("[state] running"));
-        state.run_phase = RunPhase::Stopping as i32;
+        state.run_phase = RunPhase::Stopping;
         assert!(renderer
             .render(&ViewUpdate::State(state.clone()))
             .contains("[state] stopping"));
-        state.run_phase = RunPhase::Idle as i32;
+        state.run_phase = RunPhase::Idle;
         state.approvals = vec![Approval {
             approval_id: "a".into(),
             tool_name: "Write".into(),
-            state: ApprovalState::Pending as i32,
+            state: ApprovalState::Pending,
             ..Default::default()
         }];
         let rendered = renderer.render(&ViewUpdate::State(state));
@@ -1796,7 +1791,7 @@ mod typed_output_tests {
         assert!(value["data"]["event"].get("data_json").is_none());
         let ended = tail_event_json(&ViewUpdate::AttemptEnded {
             attempt: attempt(),
-            outcome: AttemptOutcome::Committed as i32,
+            outcome: AttemptOutcome::Committed,
         });
         assert_eq!(ended["data"]["event"]["outcome"], "COMMITTED");
     }
@@ -1845,13 +1840,13 @@ mod typed_output_tests {
 #[cfg(test)]
 mod typed_content_tests {
     use super::*;
-    use whalerein_core::conversation::ConversationMessage;
+    use whalerein_core::conversation::{ApprovalState, ConversationMessage, MessageRole};
     #[test]
     fn json_formats_every_declared_content_family_without_native_payloads() {
         use content_block::Content;
         let mut message = ConversationMessage {
             message_id: "m".into(),
-            role: MessageRole::Assistant as i32,
+            role: MessageRole::Assistant,
             ..Default::default()
         };
         for content in [
@@ -1888,8 +1883,8 @@ mod typed_content_tests {
             a.approval_id = "a".into();
             a.digest = vec![1; 32];
             a.version = 3;
-            a.state = ApprovalState::Pending as i32;
-            s.run_phase = RunPhase::Idle as i32;
+            a.state = ApprovalState::Pending;
+            s.run_phase = RunPhase::Idle;
         }
         let value = tail_event_json(&state);
         assert_eq!(value["data"]["event"]["run_phase"], "IDLE");
@@ -2520,7 +2515,7 @@ mod cli_contract_tests {
         let mut renderer = TailRenderer::default();
         let mut state = whalerein_core::conversation::ViewUpdate::State(Default::default());
         if let whalerein_core::conversation::ViewUpdate::State(inner) = &mut state {
-            inner.run_phase = whalerein_proto::RunPhase::Running as i32;
+            inner.run_phase = whalerein_core::conversation::RunPhase::Running;
             inner.approvals.push(Default::default());
             inner.approvals[0].tool_name = "bash\u{1b}[0m".into();
         }
@@ -2540,12 +2535,10 @@ mod cli_contract_tests {
             !is_tail_output(&state),
             "state alone does not satisfy --once"
         );
-        let idle = whalerein_core::conversation::ViewUpdate::State(
-            whalerein_proto::SessionState::default(),
-        );
+        let idle = whalerein_core::conversation::ViewUpdate::State(Default::default());
         let mut idle_mut = idle.clone();
         if let whalerein_core::conversation::ViewUpdate::State(inner) = &mut idle_mut {
-            inner.run_phase = whalerein_proto::RunPhase::Idle as i32;
+            inner.run_phase = whalerein_core::conversation::RunPhase::Idle;
         }
         let rendered = renderer.render(&idle_mut);
         assert!(rendered.contains("[state] idle"), "{rendered}");
@@ -2637,8 +2630,10 @@ mod cli_contract_tests {
 #[cfg(test)]
 mod block_preview_tests {
     use super::*;
-    use whalerein_core::conversation::{AttemptRef, ConversationMessage, MessageRole};
-    use whalerein_proto::{content_block::Content, ContentBlock, TextContent, ToolCallContent};
+    use whalerein_core::conversation::content_block::{Content, TextContent, ToolCallContent};
+    use whalerein_core::conversation::{
+        AttemptRef, ContentBlock, ConversationMessage, MessageRole,
+    };
 
     fn attempt() -> AttemptRef {
         AttemptRef {
@@ -2665,7 +2660,7 @@ mod block_preview_tests {
         assert_eq!(renderer.render(&preview("b", "TWO", true)), "\nTWO");
         let message = ConversationMessage {
             message_id: "m".into(),
-            role: MessageRole::Assistant as i32,
+            role: MessageRole::Assistant,
             blocks: vec![
                 ContentBlock {
                     block_id: "a".into(),

@@ -17,6 +17,7 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::api::{HostInfo, OnlineStatus, PendingCommand, SessionSummary};
+use crate::session::SessionKey;
 
 pub const CACHE_NONCE_LEN: usize = 12;
 pub const SCHEMA_VERSION: i64 = 2;
@@ -346,7 +347,7 @@ impl Cache {
             )
             .optional()?;
         if let Some((host_id, session_id, blob)) = probe {
-            let key = whalerein_proto::SessionKey {
+            let key = SessionKey {
                 host_id,
                 session_id,
             };
@@ -361,7 +362,7 @@ impl Cache {
                 )
                 .optional()?;
             if let Some((host, session, message_id, blob)) = probe {
-                let key = whalerein_proto::SessionKey {
+                let key = SessionKey {
                     host_id: host,
                     session_id: session,
                 };
@@ -628,7 +629,7 @@ impl Cache {
         sessions
             .iter()
             .map(|session| {
-                let key = whalerein_proto::SessionKey {
+                let key = SessionKey {
                     host_id: host_id.into(),
                     session_id: session.session_id.clone(),
                 };
@@ -652,7 +653,7 @@ impl Cache {
         let mut sessions = Vec::new();
         for row in rows {
             let (id, body) = row?;
-            let key = whalerein_proto::SessionKey {
+            let key = SessionKey {
                 host_id: host_id.into(),
                 session_id: id,
             };
@@ -662,10 +663,7 @@ impl Cache {
         sort_sessions(&mut sessions);
         Ok(sessions)
     }
-    pub fn get_session(
-        &self,
-        key: &whalerein_proto::SessionKey,
-    ) -> Result<Option<SessionSummary>, CacheError> {
+    pub fn get_session(&self, key: &SessionKey) -> Result<Option<SessionSummary>, CacheError> {
         let body: Option<Vec<u8>> = self
             .conn
             .lock()
@@ -1218,7 +1216,7 @@ impl Cache {
     }
 }
 
-fn session_aad(key: &whalerein_proto::SessionKey) -> Vec<u8> {
+fn session_aad(key: &SessionKey) -> Vec<u8> {
     serde_json::to_vec(&["session", key.host_id.as_str(), key.session_id.as_str()])
         .expect("string tuple")
 }
@@ -1256,11 +1254,11 @@ mod tests {
         cache
             .put_sessions("b", &[summary("y")], "source", true)
             .unwrap();
-        let a = whalerein_proto::SessionKey {
+        let a = SessionKey {
             host_id: "a".into(),
             session_id: "same".into(),
         };
-        let b = whalerein_proto::SessionKey {
+        let b = SessionKey {
             host_id: "b".into(),
             session_id: "same".into(),
         };
@@ -1444,7 +1442,7 @@ mod session_list_tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "session-a");
         assert!(cache
-            .get_session(&whalerein_proto::SessionKey {
+            .get_session(&SessionKey {
                 host_id: "host-1".into(),
                 session_id: "session-b".into(),
             })

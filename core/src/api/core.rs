@@ -15,11 +15,11 @@ use whalerein_proto::{
 use super::config::{self, ConfigStore, PersistedConfig};
 use super::error::{CoreError, CoreResult};
 use super::types::{
-    ApprovalInfo, CommandHandle, CreateSessionInput, DoctorReport, ExportManifest,
+    ApprovalInfo, CommandHandle, CreateSessionInput, DeliveryMode, DoctorReport, ExportManifest,
     HostCapabilities, HostInfo, ModelCatalog, ModelChoice, ModelSelectionReceipt, OnlineStatus,
     PairingOutcome, PairingPrompt, PendingCommand, PendingQueue, PendingQueueAction,
-    QuestionAnswer, QuestionBatchInfo, QuestionPageInfo, RevocationOutcome, RevocationRetention,
-    SessionList, SessionModel, SessionSummary,
+    QuestionAnswer, QuestionBatchInfo, QuestionPageInfo, QuestionPhase, RevocationOutcome,
+    RevocationRetention, SessionList, SessionModel, SessionSummary,
 };
 use crate::access::{AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
 use crate::cache::Cache;
@@ -29,6 +29,7 @@ use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, P
 use crate::runtime::channel::{ensure_channel, ensure_channel_after, require_payload_capability};
 use crate::runtime::{ConnectionState, Runtime};
 use crate::security::{keys, load_device_token, load_or_create_cache_key, SecretStore};
+use crate::session::SessionKey;
 use crate::sync::SyncService;
 
 pub(crate) mod revoked_commands;
@@ -148,10 +149,19 @@ fn bounded_approval_host_candidates(hosts: &[HostInfo]) -> String {
     shown
 }
 
+/// Convert a Core question phase to its wire value for a guarded answer.
+fn wire_question_phase(phase: QuestionPhase) -> i32 {
+    match phase {
+        QuestionPhase::Open => whalerein_proto::QuestionPhase::QuestionOpen as i32,
+        QuestionPhase::Continued => whalerein_proto::QuestionPhase::QuestionContinued as i32,
+        QuestionPhase::Settled => whalerein_proto::QuestionPhase::QuestionSettled as i32,
+        QuestionPhase::ReplyQueued => whalerein_proto::QuestionPhase::QuestionReplyQueued as i32,
+    }
+}
+
 #[derive(Clone)]
 pub struct Core {
     options: CoreOptions,
-    session_host: Option<String>,
     config: Arc<RwLock<Option<PersistedConfig>>>,
     runtime: Arc<Runtime>,
     journal: Arc<diagnostics::journal::Journal>,
@@ -166,16 +176,6 @@ pub struct Core {
 }
 
 impl Core {
-    /// Return an independently scoped facade for session operations on one Host.
-    pub fn with_session_host(&self, host_id: &str) -> CoreResult<Self> {
-        if host_id.trim().is_empty() {
-            return Err(CoreError::InvalidInput("Host identity missing".into()));
-        }
-        let mut scoped = self.clone();
-        scoped.session_host = Some(host_id.to_owned());
-        Ok(scoped)
-    }
-
     /// Allocate a non-secret command identity before starting a control.
     pub fn new_command_id() -> String {
         crate::util::random_id(16)
@@ -211,8 +211,11 @@ impl Core {
         }
         #[cfg(not(unix))]
         let _ = existed;
-        let profile = crate::profiles::Profiles::new(&root).resolve_active(&options.secrets)?;
+        // The shared activation lease is acquired before the active profile is
+        // resolved: a switch that completes while this process waits cannot
+        // leave Core on a selection the lease no longer covers.
         let activation = Arc::new(crate::profiles::ActivationGuard::shared(&root)?);
+        let profile = crate::profiles::Profiles::new(&root).resolve_active(&options.secrets)?;
         options.data_dir = profile.state_dir.clone();
         let store = ConfigStore::new(&options.data_dir);
         let startup_marker = revoked_commands::marker(&options.data_dir)?;
@@ -244,7 +247,6 @@ impl Core {
         };
         let core = Self {
             options,
-            session_host: None,
             config: Arc::new(RwLock::new(config)),
             runtime: Arc::new(Runtime::new()),
             journal: Arc::new(diagnostics::journal::Journal::default()),
@@ -700,8 +702,37 @@ impl Core {
         }
     }
 
-    async fn host_for_session(&self, session_id: &str) -> CoreResult<String> {
-        Ok(self.session_key(session_id).await?.host_id)
+    /// Reject a key whose Host this profile does not authorize before I/O.
+    ///
+    /// Scope authorization is checked at the operation boundary so a key that
+    /// was valid at resolution time cannot be used after revocation or after
+    /// this profile stopped authorizing that Host.
+    fn authorized_session(&self, key: &SessionKey) -> CoreResult<()> {
+        if key.session_id.is_empty() {
+            return Err(CoreError::InvalidInput("session identity missing".into()));
+        }
+        self.ensure_authorized_host(&key.host_id)?;
+        if self.runtime.is_revoked() {
+            return Err(CoreError::Revoked);
+        }
+        Ok(())
+    }
+
+    /// Resolve a Host that the current Access listing still advertises.
+    async fn live_authorized_host(&self, host_id: &str) -> CoreResult<String> {
+        if host_id.trim().is_empty() {
+            return Err(CoreError::InvalidInput("Host identity missing".into()));
+        }
+        if self
+            .hosts()
+            .await?
+            .iter()
+            .any(|host| host.host_id == host_id)
+        {
+            Ok(host_id.to_owned())
+        } else {
+            Err(CoreError::NotFound("Host is not authorized".into()))
+        }
     }
 
     fn confirmed_host_fingerprint(&self, host_id: &str) -> CoreResult<String> {
@@ -1381,15 +1412,6 @@ impl Core {
     }
 
     pub async fn sessions(&self, host_id: &str) -> CoreResult<SessionList> {
-        // Two explicit scopes must not silently disagree about which Host the
-        // listing describes.
-        if let Some(scoped) = &self.session_host {
-            if scoped != host_id {
-                return Err(CoreError::Conflict(format!(
-                    "--host {scoped} and sessions --host {host_id} disagree"
-                )));
-            }
-        }
         self.ensure_authorized_host(host_id)?;
         let payload = RequestPayload {
             payload: Some(whalerein_proto::request_payload::Payload::ListSessions(
@@ -1441,16 +1463,17 @@ impl Core {
         self.sessions(host_id).await
     }
 
-    pub async fn get_session(&self, session_id: &str) -> CoreResult<SessionSummary> {
-        let key = self.session_key(session_id).await?;
+    pub async fn get_session(&self, key: &SessionKey) -> CoreResult<SessionSummary> {
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let cache = self.cache()?;
-        if let Some(session) = cache.get_session(&key)? {
+        if let Some(session) = cache.get_session(key)? {
             return Ok(session);
         }
-        let host = key.host_id;
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::GetSession(
                         GetSession {
@@ -1467,7 +1490,7 @@ impl Core {
             _ => return Err(CoreError::Internal("unexpected session response".into())),
         };
         let sync = self.sync_service()?;
-        sync.store_sessions(&host, std::slice::from_ref(&summary), "remote", true)?;
+        sync.store_sessions(host, std::slice::from_ref(&summary), "remote", true)?;
         Ok(summary)
     }
 
@@ -1534,14 +1557,16 @@ impl Core {
     }
 
     /// Fetch a passive source observation without activating the session.
-    pub async fn read_session_model(&self, session_id: &str) -> CoreResult<SessionModel> {
-        let host = self.host_for_session(session_id).await?;
-        if !self.host_capabilities(&host).await?.model_read {
+    pub async fn read_session_model(&self, key: &SessionKey) -> CoreResult<SessionModel> {
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
+        if !self.host_capabilities(host).await?.model_read {
             return Err(CoreError::Unsupported);
         }
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::ReadSessionModel(
                         whalerein_proto::ReadSessionModel {
@@ -1564,15 +1589,17 @@ impl Core {
     /// Submit exactly one journaled source selection; no prompt is sent.
     pub async fn select_session_model(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         provider: &str,
         model: &str,
         effort: Option<&str>,
     ) -> CoreResult<CommandHandle> {
-        let host = self.host_for_session(session_id).await?;
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::GetSession(
                         GetSession {
@@ -1597,7 +1624,7 @@ impl Core {
         // synthesized receipt here avoids journaling a second indistinguishable
         // pending command. A read failure is not proof of a mismatch, so it
         // falls through to the normal submission path.
-        if let Ok(current) = self.read_session_model(session_id).await {
+        if let Ok(current) = self.read_session_model(key).await {
             let same = current.next.as_ref().is_some_and(|next| {
                 next.provider == provider
                     && next.model == model
@@ -1627,7 +1654,7 @@ impl Core {
         }
         let handle = self
             .control(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(
                         whalerein_proto::request_payload::Payload::SelectSessionModel(
@@ -1645,7 +1672,7 @@ impl Core {
         if handle.status != OnlineStatus::HostAccepted {
             return Ok(handle);
         }
-        self.await_command_terminal(&host, handle).await
+        self.await_command_terminal(host, handle).await
     }
 
     // -----------------------------------------------------------------
@@ -1760,8 +1787,8 @@ impl Core {
     /// directory is known. Callers that show the child location should use
     /// [`Core::fork_session_outcome`] so an unreadable directory is reported
     /// instead of silently omitted.
-    pub async fn fork_session(&self, session_id: &str) -> CoreResult<CommandHandle> {
-        Ok(self.fork_session_outcome(session_id).await?.handle)
+    pub async fn fork_session(&self, key: &SessionKey) -> CoreResult<CommandHandle> {
+        Ok(self.fork_session_outcome(key).await?.handle)
     }
 
     /// Fork and resolve the confirmed child's working directory.
@@ -1770,8 +1797,8 @@ impl Core {
     /// child summary is a second, best-effort read. Its failure cannot undo the
     /// fork, so it is returned as an explicit error code next to the handle
     /// rather than dropped.
-    pub async fn fork_session_outcome(&self, session_id: &str) -> CoreResult<ForkOutcome> {
-        let handle = self.fork_session_receipt(session_id).await?;
+    pub async fn fork_session_outcome(&self, key: &SessionKey) -> CoreResult<ForkOutcome> {
+        let handle = self.fork_session_receipt(key).await?;
         let created = handle.lifecycle_receipt.as_ref().is_some_and(|receipt| {
             !receipt.session_id.is_empty()
                 && matches!(receipt.disposition.as_str(), "READY" | "READY_WITH_WARNING")
@@ -1790,7 +1817,11 @@ impl Core {
             .as_ref()
             .map(|receipt| receipt.session_id.clone())
             .unwrap_or_default();
-        match self.get_session(&child).await {
+        let child_key = SessionKey {
+            host_id: key.host_id.clone(),
+            session_id: child,
+        };
+        match self.get_session(&child_key).await {
             Ok(summary) if !summary.cwd.is_empty() => outcome.working_directory = Some(summary.cwd),
             Ok(_) => outcome.working_directory_error = Some("not_available".into()),
             Err(error) => outcome.working_directory_error = Some(error.code().to_owned()),
@@ -1798,11 +1829,13 @@ impl Core {
         Ok(outcome)
     }
 
-    async fn fork_session_receipt(&self, session_id: &str) -> CoreResult<CommandHandle> {
-        let host = self.host_for_session(session_id).await?;
+    async fn fork_session_receipt(&self, key: &SessionKey) -> CoreResult<CommandHandle> {
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(
                         whalerein_proto::request_payload::Payload::GetHostCapabilities(
@@ -1832,7 +1865,7 @@ impl Core {
         }
         let handle = self
             .control(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::ForkSession(
                         whalerein_proto::ForkSession {
@@ -1843,7 +1876,7 @@ impl Core {
             )
             .await?;
         let handle = if handle.status == OnlineStatus::HostAccepted {
-            self.await_command_terminal(&host, handle).await?
+            self.await_command_terminal(host, handle).await?
         } else {
             handle
         };
@@ -1861,11 +1894,13 @@ impl Core {
     }
 
     /// Observe the source queue without caching its contents.
-    pub async fn pending_queue(&self, session_id: &str) -> CoreResult<PendingQueue> {
-        let host = self.host_for_session(session_id).await?;
+    pub async fn pending_queue(&self, key: &SessionKey) -> CoreResult<PendingQueue> {
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::ReadPendingQueue(
                         whalerein_proto::ReadPendingQueue {
@@ -1888,15 +1923,17 @@ impl Core {
     /// Apply one source-owned queued item action. A separate read refreshes the view.
     pub async fn update_pending_queue(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         item_id: &str,
         action: PendingQueueAction,
         text: &str,
     ) -> CoreResult<CommandHandle> {
-        let host = self.host_for_session(session_id).await?;
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let handle = self
             .control(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(
                         whalerein_proto::request_payload::Payload::UpdatePendingQueue(
@@ -1914,35 +1951,30 @@ impl Core {
         if handle.status != OnlineStatus::HostAccepted {
             return Ok(handle);
         }
-        self.await_command_terminal(&host, handle).await
+        self.await_command_terminal(host, handle).await
     }
 
-    pub async fn send_message(&self, session_id: &str, text: &str) -> CoreResult<CommandHandle> {
-        self.send_message_with_delivery(
-            session_id,
-            text,
-            whalerein_proto::DeliveryMode::EnqueueAfterRun,
-        )
-        .await
+    pub async fn send_message(&self, key: &SessionKey, text: &str) -> CoreResult<CommandHandle> {
+        self.send_message_with_delivery(key, text, DeliveryMode::EnqueueAfterRun)
+            .await
     }
 
     pub async fn send_message_with_delivery(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         text: &str,
-        mode: whalerein_proto::DeliveryMode,
+        mode: DeliveryMode,
     ) -> CoreResult<CommandHandle> {
-        let host = self.host_for_session(session_id).await?;
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         // A non-default delivery mode is a source capability. Reject one the
         // Host does not advertise before any command is submitted; an empty
         // advertisement is a legacy Host and keeps the old pass-through path.
-        if matches!(
-            mode,
-            whalerein_proto::DeliveryMode::StartIfIdle | whalerein_proto::DeliveryMode::Steer
-        ) {
+        if matches!(mode, DeliveryMode::StartIfIdle | DeliveryMode::Steer) {
             // Read the Source's current advertisement rather than the cached
             // session summary, which may predate this Host build.
-            let list = self.sessions(&host).await?;
+            let list = self.sessions(host).await?;
             if let Some(capabilities) = list
                 .sessions
                 .iter()
@@ -1964,7 +1996,7 @@ impl Core {
         // A blind resend after an unknown observation is recovered instead of
         // being submitted as a second user message. Once a send resolves, the
         // intent is removed and identical text is a new message again.
-        if let Some(retained) = cache.unresolved_send_intent(&host, session_id, &digest)? {
+        if let Some(retained) = cache.unresolved_send_intent(host, session_id, &digest)? {
             match self.recover_pending_command(&retained).await {
                 Ok(handle) => {
                     if handle.status == OnlineStatus::HostAccepted
@@ -1974,42 +2006,42 @@ impl Core {
                         let command_id = handle.command_id.clone();
                         return self
                             .observe_send_terminal(
-                                &host, session_id, &digest, request_id, command_id, handle,
+                                host, session_id, &digest, request_id, command_id, handle,
                             )
                             .await;
                     }
-                    cache.resolve_send_intent(&host, session_id, &digest)?;
+                    cache.resolve_send_intent(host, session_id, &digest)?;
                     return Ok(handle);
                 }
                 Err(CoreError::NotFound(_)) => {
                     // The original command is gone; a fresh send cannot
                     // duplicate a message the Host no longer has.
-                    cache.resolve_send_intent(&host, session_id, &digest)?;
+                    cache.resolve_send_intent(host, session_id, &digest)?;
                 }
                 Err(error) => return Err(error),
             }
         }
         let handle = self
             .control(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::SendMessage(
                         SendMessage {
                             session_id: session_id.to_owned(),
                             text: text.to_owned(),
-                            delivery_mode: mode as i32,
+                            delivery_mode: whalerein_proto::DeliveryMode::from(mode) as i32,
                         },
                     )),
                 },
             )
             .await?;
         if handle.status != OnlineStatus::HostAccepted {
-            cache.resolve_send_intent(&host, session_id, &digest)?;
+            cache.resolve_send_intent(host, session_id, &digest)?;
             return Ok(handle);
         }
         let request_id = handle.request_id.clone();
         let command_id = handle.command_id.clone();
-        self.observe_send_terminal(&host, session_id, &digest, request_id, command_id, handle)
+        self.observe_send_terminal(host, session_id, &digest, request_id, command_id, handle)
             .await
     }
 
@@ -2104,18 +2136,15 @@ impl Core {
     /// unambiguous; several authorized Hosts produce a bounded, actionable
     /// conflict instead of guessing. The approval identity is Host-scoped and
     /// is never probed across Hosts.
-    async fn approval_host(&self) -> CoreResult<String> {
+    pub async fn approval_host(&self, explicit_host: Option<&str>) -> CoreResult<String> {
+        if let Some(host) = explicit_host {
+            return self.live_authorized_host(host).await;
+        }
         let hosts = self.hosts().await?;
         self.approval_host_from(&hosts)
     }
 
     fn approval_host_from(&self, hosts: &[HostInfo]) -> CoreResult<String> {
-        if let Some(host) = &self.session_host {
-            if !hosts.iter().any(|item| &item.host_id == host) {
-                return Err(CoreError::NotFound("Host is not authorized".into()));
-            }
-            return Ok(host.clone());
-        }
         match hosts {
             [host] => Ok(host.host_id.clone()),
             [] => Err(CoreError::NotFound("no authorized Host".into())),
@@ -2129,14 +2158,15 @@ impl Core {
     /// Read one approval's live or terminal state. The read path is the same
     /// Host-scoped identity used by approve/reject; it never guesses between
     /// several authorized Hosts.
-    pub async fn get_approval(&self, approval_id: &str) -> CoreResult<ApprovalInfo> {
+    pub async fn get_approval(&self, host_id: &str, approval_id: &str) -> CoreResult<ApprovalInfo> {
         if approval_id.is_empty() {
             return Err(CoreError::InvalidInput("approval identity missing".into()));
         }
-        let host = self.approval_host().await?;
+        self.ensure_authorized_host(host_id)?;
+        let host = host_id;
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::GetApproval(
                         GetApproval {
@@ -2171,16 +2201,16 @@ impl Core {
     /// Host (and stays ambiguous when the session exists on several Hosts).
     /// This is the read half of the approval path; approve/reject remain
     /// encrypted control commands.
-    pub async fn list_approvals(&self, session_id: &str) -> CoreResult<Vec<ApprovalInfo>> {
-        let host = if self.session_host.is_some() {
-            let hosts = self.hosts().await?;
-            self.approval_host_from(&hosts)?
-        } else {
-            self.host_for_session(session_id).await?
-        };
+    pub async fn list_approvals(
+        &self,
+        host_id: &str,
+        session_id: &str,
+    ) -> CoreResult<Vec<ApprovalInfo>> {
+        self.ensure_authorized_host(host_id)?;
+        let host = host_id;
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::ListApprovals(
                         whalerein_proto::ListApprovals {
@@ -2202,13 +2232,15 @@ impl Core {
 
     pub async fn list_questions(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         cursor: &str,
     ) -> CoreResult<QuestionPageInfo> {
-        let host = self.host_for_session(session_id).await?;
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::ListQuestions(
                         whalerein_proto::ListQuestions {
@@ -2243,13 +2275,15 @@ impl Core {
 
     pub async fn get_question(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         batch_id: &str,
     ) -> CoreResult<QuestionBatchInfo> {
-        let host = self.host_for_session(session_id).await?;
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::GetQuestion(
                         whalerein_proto::GetQuestion {
@@ -2272,28 +2306,32 @@ impl Core {
 
     pub async fn answer_question(
         &self,
+        key: &SessionKey,
         batch: &QuestionBatchInfo,
         answers: Vec<QuestionAnswer>,
     ) -> CoreResult<CommandHandle> {
-        self.answer_question_with_id(batch, answers, None).await
+        self.answer_question_with_id(key, batch, answers, None)
+            .await
     }
 
     /// A caller-supplied command ID allows a different client to explicitly
     /// cancel the accepted open answer without exposing its content.
     pub async fn answer_question_with_id(
         &self,
+        key: &SessionKey,
         batch: &QuestionBatchInfo,
         answers: Vec<QuestionAnswer>,
         command_id: Option<&str>,
     ) -> CoreResult<CommandHandle> {
-        let phase = whalerein_proto::QuestionPhase::from_str_name(&batch.phase)
-            .filter(|phase| {
-                matches!(
-                    phase,
-                    whalerein_proto::QuestionPhase::QuestionOpen
-                        | whalerein_proto::QuestionPhase::QuestionContinued
-                )
-            })
+        self.authorized_session(key)?;
+        if batch.session_id != key.session_id {
+            return Err(CoreError::Conflict(
+                "question batch belongs to another session".into(),
+            ));
+        }
+        let phase = batch
+            .phase_value()
+            .filter(|phase| phase.is_answerable())
             .ok_or_else(|| CoreError::InvalidInput("question phase is not answerable".into()))?;
         if !batch.answerable
             || batch.content_unavailable
@@ -2304,10 +2342,10 @@ impl Core {
                 "question guard is unavailable".into(),
             ));
         }
-        let host = self.host_for_session(&batch.session_id).await?;
+        let host = key.host_id.as_str();
         let handle = self
             .control_with_id(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::AnswerQuestion(
                         whalerein_proto::AnswerQuestion {
@@ -2316,7 +2354,7 @@ impl Core {
                             source_epoch: batch.source_epoch.clone(),
                             expected_version: batch.version,
                             expected_digest: batch.digest.clone(),
-                            expected_phase: phase as i32,
+                            expected_phase: wire_question_phase(phase),
                             answers: answers
                                 .into_iter()
                                 .map(|answer| whalerein_proto::QuestionAnswerItem {
@@ -2332,15 +2370,12 @@ impl Core {
             )
             .await?;
         let handle = if handle.status == OnlineStatus::HostAccepted {
-            self.await_command_terminal(&host, handle).await?
+            self.await_command_terminal(host, handle).await?
         } else {
             handle
         };
         if handle.status == OnlineStatus::Succeeded {
-            let expected_receipt_phase = match phase {
-                whalerein_proto::QuestionPhase::QuestionOpen => "QUESTION_SETTLED",
-                _ => "QUESTION_REPLY_QUEUED",
-            };
+            let expected_receipt_phase = phase.receipt_phase();
             if !handle.question_receipt.as_ref().is_some_and(|receipt| {
                 receipt.batch_id == batch.batch_id && receipt.phase == expected_receipt_phase
             }) {
@@ -2355,18 +2390,20 @@ impl Core {
     /// already or not yet reached the Host. Recover its command result instead.
     pub async fn cancel_question_answer(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         command_id: &str,
     ) -> CoreResult<bool> {
-        if session_id.is_empty() || command_id.is_empty() {
+        self.authorized_session(key)?;
+        if command_id.is_empty() {
             return Err(CoreError::InvalidInput(
                 "session and command are required".into(),
             ));
         }
-        let host = self.host_for_session(session_id).await?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let response = self
             .query(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(
                         whalerein_proto::request_payload::Payload::CancelQuestionAnswer(
@@ -2391,11 +2428,13 @@ impl Core {
 
     pub async fn approve(
         &self,
+        host_id: &str,
         approval_id: &str,
         expected_digest: &[u8],
         expected_version: i64,
     ) -> CoreResult<CommandHandle> {
         self.resolve_approval(
+            host_id,
             approval_id,
             ApprovalDecision::Approve,
             expected_digest,
@@ -2406,11 +2445,13 @@ impl Core {
 
     pub async fn reject(
         &self,
+        host_id: &str,
         approval_id: &str,
         expected_digest: &[u8],
         expected_version: i64,
     ) -> CoreResult<CommandHandle> {
         self.resolve_approval(
+            host_id,
             approval_id,
             ApprovalDecision::Reject,
             expected_digest,
@@ -2421,14 +2462,15 @@ impl Core {
 
     async fn resolve_approval(
         &self,
+        host_id: &str,
         approval_id: &str,
         decision: ApprovalDecision,
         expected_digest: &[u8],
         expected_version: i64,
     ) -> CoreResult<CommandHandle> {
-        let host = self.approval_host().await?;
+        self.ensure_authorized_host(host_id)?;
         self.control(
-            &host,
+            host_id,
             RequestPayload {
                 payload: Some(whalerein_proto::request_payload::Payload::ResolveApproval(
                     ResolveApproval {
@@ -2443,11 +2485,13 @@ impl Core {
         .await
     }
 
-    pub async fn interrupt(&self, session_id: &str) -> CoreResult<CommandHandle> {
-        let host = self.host_for_session(session_id).await?;
+    pub async fn interrupt(&self, key: &SessionKey) -> CoreResult<CommandHandle> {
+        self.authorized_session(key)?;
+        let host = key.host_id.as_str();
+        let session_id = key.session_id.as_str();
         let handle = self
             .control(
-                &host,
+                host,
                 RequestPayload {
                     payload: Some(whalerein_proto::request_payload::Payload::Interrupt(
                         Interrupt {
@@ -2464,7 +2508,7 @@ impl Core {
             handle.status,
             OnlineStatus::HostAccepted | OnlineStatus::Received
         ) {
-            match self.await_command_terminal(&host, handle).await {
+            match self.await_command_terminal(host, handle).await {
                 Ok(handle) => handle,
                 // An accepted stop whose terminal result cannot be read may
                 // still have happened; it is unknown, never a success.
@@ -3227,10 +3271,10 @@ impl Core {
     // -----------------------------------------------------------------
 
     /// Synchronize the Source-owned committed conversation through opaque cursors.
-    pub async fn sync_session(&self, session_id: &str) -> CoreResult<u64> {
-        let key = self.session_key(session_id).await?;
+    pub async fn sync_session(&self, key: &SessionKey) -> CoreResult<u64> {
+        self.authorized_session(key)?;
         let mut conversation = crate::conversation::Conversation::default();
-        self.sync_conversation(&key, &mut conversation, true, true, &mut |_| true)
+        self.sync_conversation(key, &mut conversation, true, true, &mut |_| true)
             .await
     }
 
@@ -3355,8 +3399,8 @@ impl Core {
 
     pub fn cached_messages(
         &self,
-        key: &whalerein_proto::SessionKey,
-    ) -> CoreResult<Vec<whalerein_proto::ConversationMessage>> {
+        key: &SessionKey,
+    ) -> CoreResult<Vec<crate::conversation::ConversationMessage>> {
         Ok(self.cache()?.history_messages(key)?)
     }
 
