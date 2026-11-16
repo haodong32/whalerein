@@ -3320,6 +3320,20 @@ mod forget_tests {
         // Every wait slice reports its deadline, so the observation stays
         // active until the injected signal arrives.
         access.host.lock().unwrap().wait_timeouts = usize::MAX;
+        // Signal only after the Host has received a wait observation. A slow
+        // instrumented profile or Windows runner can otherwise spend the old
+        // fixed delay in discovery, leaving nothing for Ctrl-C to cancel.
+        let observed = access.host.clone();
+        let signal = async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            while observed.lock().unwrap().wait_queries == 0 {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         let outcome = run_with_signal(
             cli(&[
                 "whalerein",
@@ -3332,9 +3346,7 @@ mod forget_tests {
                 dir.path().to_str().unwrap(),
             ]),
             secrets.clone(),
-            async {
-                tokio::time::sleep(Duration::from_millis(350)).await;
-            },
+            signal,
         )
         .await;
         assert_eq!(outcome.exit, 2, "{}", outcome.to_json());
@@ -3787,6 +3799,9 @@ mod cli_contract_tests {
             0
         );
         access.host.lock().unwrap().wait_timeouts = usize::MAX;
+        // The total deadline now includes authorized-Host discovery, so a
+        // coverage-instrumented or slow Windows runner needs headroom before
+        // the first wait slice can report its timeout observation.
         let outcome = run_with(
             cli(&[
                 "whalerein",
@@ -3797,7 +3812,7 @@ mod cli_contract_tests {
                 "--session",
                 "session-1",
                 "--timeout",
-                "1",
+                "3",
                 "--fail-on-timeout",
             ]),
             secrets.clone(),
@@ -3818,7 +3833,7 @@ mod cli_contract_tests {
                 "--session",
                 "session-1",
                 "--timeout",
-                "1",
+                "3",
             ]),
             secrets,
         )
