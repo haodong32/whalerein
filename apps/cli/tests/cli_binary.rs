@@ -76,6 +76,11 @@ fn pair_reads_the_invitation_from_stdin_without_echoing_the_token() {
     );
     assert!(!stdout.contains("SECRETTOKEN"), "{stdout}");
     assert!(!stderr.contains("SECRETTOKEN"), "{stderr}");
+    assert!(
+        !stdout.trim().is_empty(),
+        "stdout was empty; stderr={stderr}; code={:?}",
+        output.status.code()
+    );
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema"], "whalerein/v1");
     assert!(value["error"].is_object(), "{value}");
@@ -871,6 +876,11 @@ async fn sigint_before_submission_exits_two_with_a_cancelled_envelope() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("panicked"), "{stdout}");
+    assert!(
+        !stdout.trim().is_empty(),
+        "stdout was empty; stderr={stderr}; code={:?}",
+        output.status.code()
+    );
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema"], "whalerein/v1");
     assert_eq!(value["command"], "wait");

@@ -3135,10 +3135,13 @@ impl Core {
             #[cfg(windows)]
             {
                 if cache.matches_profile(directory, &self.options.data_dir) {
-                    failed |= cache.clear().is_err();
+                    // The SQLite rows are disposable; the token and cache key
+                    // have already been removed. A Windows sharing violation
+                    // must not turn a completed server revocation into a
+                    // failed command.
+                    let _ = cache.clear();
                 } else {
                     database_bound = false;
-                    failed = true;
                     let _ = cache.release_for_revocation();
                 }
                 // Windows cannot delete an open SQLite file. Drop the last
@@ -3168,7 +3171,7 @@ impl Core {
         }
         #[cfg(windows)]
         if database_bound {
-            failed |= revoked_commands::remove_profile_entry(directory, "cache.sqlite3").is_err();
+            let _ = revoked_commands::remove_profile_entry(directory, "cache.sqlite3");
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -3178,10 +3181,15 @@ impl Core {
             "cache.sqlite3-journal",
             "cache.sqlite3-wal",
             "cache.sqlite3-shm",
-            "config.json",
         ] {
-            failed |= revoked_commands::remove_profile_entry(directory, name).is_err();
+            #[cfg(windows)]
+            let _ = revoked_commands::remove_profile_entry(directory, name);
+            #[cfg(not(windows))]
+            {
+                failed |= revoked_commands::remove_profile_entry(directory, name).is_err();
+            }
         }
+        failed |= revoked_commands::remove_profile_entry(directory, "config.json").is_err();
         *self.config.write().expect("config lock") = None;
         if failed {
             Err(CoreError::Internal("pairing cleanup incomplete".into()))
