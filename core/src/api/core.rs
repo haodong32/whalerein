@@ -2565,7 +2565,12 @@ impl Core {
                             | CoreError::Unavailable(_)
                             | CoreError::RevokedRetentionUnverified
                     ) || (cfg!(windows)
-                        && matches!(&error, CoreError::Internal(message) if message == "pairing cleanup incomplete"));
+                        && matches!(
+                            &error,
+                            CoreError::Internal(message)
+                                if message == "pairing cleanup incomplete"
+                                    || message.starts_with("sensitive credentials were cleared")
+                        ));
                     if !cleanup_only {
                         return Err(error);
                     }
