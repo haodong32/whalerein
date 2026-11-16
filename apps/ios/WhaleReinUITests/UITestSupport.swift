@@ -30,6 +30,12 @@ class WhaleReinUITestCase: XCTestCase {
         }
         arguments += extraArguments
         app.launchArguments = arguments
+        // XCTest can fail to terminate a previous test's app instance when it
+        // is still settling. Terminate explicitly first so launch starts from
+        // a known state instead of failing the whole test at launch().
+        if app.state != .notRunning {
+            app.terminate()
+        }
         app.launch()
         return app
     }
