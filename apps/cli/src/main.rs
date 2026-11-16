@@ -21,8 +21,27 @@ use serde_json::json;
 use crate::cli::{Cli, Command};
 use crate::output::CliOutcome;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Windows gives the main thread a 1 MiB stack while the pairing future is
+    // larger than that once the Access client and TLS state are inlined. Run
+    // the async entry point on a dedicated thread with the same headroom the
+    // other platforms provide instead of overflowing before the first output.
+    std::thread::Builder::new()
+        .name("whalerein".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(async_main())
+        })
+        .expect("cli thread")
+        .join()
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+async fn async_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let wants_json = argv_requests_json(&args);
     // Help and version stay usable even when the environment is misconfigured:
