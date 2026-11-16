@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -102,7 +103,8 @@ type harness struct {
 	provider *provider
 	// prepared keeps one signed request per Host so a retry replays the exact
 	// payload instead of generating new keys.
-	prepared map[string]*whalereinv1.HostEnrollmentRequest
+	prepared    map[string]*whalereinv1.HostEnrollmentRequest
+	signingKeys map[string]ed25519.PrivateKey
 }
 
 func newHarness(t *testing.T) harness {
@@ -124,7 +126,8 @@ func newHarness(t *testing.T) harness {
 			NotAfter:  issuer.to,
 		}},
 	}
-	service := external.New(trust, data, "mqtts://access.fixture.test:8883")
+	service := external.New(trust, data, "mqtts://access.fixture.test:8883",
+		external.WithHostEnforcer(acceptEnforcer{}))
 
 	api, err := httpapi.New(httpapi.Dependencies{
 		Auth:          &acceptAdmin{},
@@ -140,7 +143,11 @@ func newHarness(t *testing.T) harness {
 	}
 	server := httptest.NewServer(api.PublicHandler())
 	t.Cleanup(server.Close)
-	return harness{server: server, provider: provider, prepared: map[string]*whalereinv1.HostEnrollmentRequest{}}
+	return harness{
+		server: server, provider: provider,
+		prepared:    map[string]*whalereinv1.HostEnrollmentRequest{},
+		signingKeys: map[string]ed25519.PrivateKey{},
+	}
 }
 
 // enroll signs and posts one enrollment request.
@@ -184,6 +191,7 @@ func (h harness) enroll(t *testing.T, hostID, workspace, operationID string, iss
 		[]byte(external.ProofInput(authorization, operationID, signingPublic)))
 
 	h.prepared[hostID] = request
+	h.signingKeys[hostID] = signingPrivate
 	return h.post(t, request)
 }
 
@@ -233,6 +241,58 @@ func (h harness) get(t *testing.T, path, token string) (int, []byte) {
 		t.Fatal(err)
 	}
 	return response.StatusCode, payload
+}
+
+// acceptEnforcer records no state; the real durable disable is covered by the
+// store lifecycle test. This fixture only needs the HTTP surface to succeed.
+type acceptEnforcer struct{}
+
+func (acceptEnforcer) DisableHostScope(context.Context, string, map[string]uint64) error {
+	return nil
+}
+
+// do sends one request with explicit headers and returns the status and body.
+func (h harness) do(t *testing.T, method, path string, body []byte, headers map[string]string) (int, []byte) {
+	t.Helper()
+	request, err := http.NewRequest(method, h.server.URL+path, strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, payload
+}
+
+// hostProof signs the documented newline-joined proof text with a Host key.
+func hostProof(t *testing.T, signingKey ed25519.PrivateKey, purpose, hostID, subjectID string, at time.Time, nonce string) external.HostOwnershipProof {
+	t.Helper()
+	signature := ed25519.Sign(signingKey, []byte(external.HostOwnershipProofInput(purpose, hostID, subjectID, at.UnixMilli(), nonce)))
+	return external.HostOwnershipProof{
+		HostID: hostID, IssuedAtUnixMs: at.UnixMilli(), Nonce: nonce,
+		Signature: base64.RawURLEncoding.EncodeToString(signature),
+	}
+}
+
+func encodedHostProof(t *testing.T, proof external.HostOwnershipProof) string {
+	t.Helper()
+	data, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
 }
 
 // TestEnrollmentCommitsOnceAndDeliversTheCredentialOnce proves that stock
@@ -469,3 +529,157 @@ func (stubRequests) Get(context.Context, string, string) (store.Request, error) 
 }
 
 func (stubRequests) Touch(string, string, whalereinv1.OnlineStatus) {}
+
+// TestHostProofStatusReadsTheEnrollmentWithoutACredential proves that the
+// original Host can read state/revision with a scoped proof while a bare id,
+// the admin bearer and a replayed proof are refused.
+func TestHostProofStatusReadsTheEnrollmentWithoutACredential(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	status, enrolled := h.enroll(t, "host-1", "ws-fixture-1", "op-1", now, now.Add(5*time.Minute))
+	if status != http.StatusOK || enrolled.GetCredential() == nil {
+		t.Fatalf("enrollment failed: %d", status)
+	}
+	proof := hostProof(t, h.signingKeys["host-1"], external.PurposeEnrollmentStatus,
+		"host-1", "op-1", now, "c3RhdHVzLWludC1ub25jZQ")
+	header := encodedHostProof(t, proof)
+
+	code, payload := h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil, nil)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("a bare host id must be unauthorized, got %d", code)
+	}
+	code, _ = h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{"Authorization": "Bearer " + adminToken})
+	if code != http.StatusUnauthorized {
+		t.Fatalf("the admin bearer must not authorize the Host read, got %d", code)
+	}
+	code, payload = h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{"X-Whalerein-Host-Proof": header})
+	if code != http.StatusOK {
+		t.Fatalf("the proof read failed: %d %s", code, payload)
+	}
+	decoded := &whalereinv1.HostEnrollmentStatus{}
+	if err := protojson.Unmarshal(payload, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GetState() != whalereinv1.EnrollmentState_enrollment_pending ||
+		decoded.GetEnrollmentRevision() != enrolled.GetStatus().GetEnrollmentRevision() {
+		t.Fatalf("unexpected status %+v", decoded)
+	}
+	if strings.Contains(strings.ToLower(string(payload)), "credential") {
+		t.Fatalf("a status read must not mention credentials: %s", payload)
+	}
+	// The nonce is single-use.
+	code, _ = h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{"X-Whalerein-Host-Proof": header})
+	if code != http.StatusForbidden {
+		t.Fatalf("a replayed proof must be forbidden, got %d", code)
+	}
+}
+
+// TestCredentialReplacementDeliversOneNewCredentialAndRejectsReplay proves
+// the proof-bound replacement surface against stock Access and a real schema.
+func TestCredentialReplacementDeliversOneNewCredentialAndRejectsReplay(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	status, enrolled := h.enroll(t, "host-1", "ws-fixture-1", "op-1", now, now.Add(5*time.Minute))
+	if status != http.StatusOK || enrolled.GetCredential() == nil {
+		t.Fatalf("enrollment failed: %d", status)
+	}
+	authorization := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-recover-int",
+		Purpose:            external.PurposeHostCredentialRecovery,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-recover-int",
+		HostId:             "host-1",
+		EnrollmentRevision: enrolled.GetStatus().GetEnrollmentRevision(),
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("0123456789abcdef"),
+	})
+	proof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", authorization.GetAuthorizationId(), now, "cmVwbGFjZS1pbnQtbm9uY2U")
+	body, err := json.Marshal(map[string]any{"authorization": authorization})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, proof)}
+
+	code, payload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body, headers)
+	if code != http.StatusOK {
+		t.Fatalf("replacement failed: %d %s", code, payload)
+	}
+	var replaced struct {
+		Credential struct {
+			HostID   string `json:"hostId"`
+			MQTTURL  string `json:"mqttUrl"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"credential"`
+		State    string `json:"state"`
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(payload, &replaced); err != nil {
+		t.Fatal(err)
+	}
+	if replaced.Credential.Password == "" || replaced.Credential.Username != "host:host-1" {
+		t.Fatalf("unexpected credential %+v", replaced.Credential)
+	}
+	if replaced.Credential.Password == enrolled.GetCredential().GetPassword() {
+		t.Fatal("the replacement must invalidate the previous credential")
+	}
+	// A fresh proof for the same authorization id cannot mint a second one.
+	freshProof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", authorization.GetAuthorizationId(), now, "cmVwbGFjZS1pbnQtbm9uY2UtMg")
+	code, _ = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body,
+		map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, freshProof)})
+	if code != http.StatusConflict {
+		t.Fatalf("a replayed authorization must conflict, got %d", code)
+	}
+}
+
+// TestDisableEndpointIsIdempotent proves the admin-only disable response and
+// that a repeated call preserves the original disabledAt.
+func TestDisableEndpointIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	status, _ := h.enroll(t, "host-1", "ws-fixture-1", "op-1", now, now.Add(5*time.Minute))
+	if status != http.StatusOK {
+		t.Fatalf("enrollment failed: %d", status)
+	}
+	headers := map[string]string{"Authorization": "Bearer " + adminToken}
+	code, payload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/disable", nil, headers)
+	if code != http.StatusOK {
+		t.Fatalf("disable failed: %d %s", code, payload)
+	}
+	var first struct {
+		State      string `json:"state"`
+		DisabledAt string `json:"disabledAt"`
+	}
+	if err := json.Unmarshal(payload, &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.State != "disabled" || first.DisabledAt == "" {
+		t.Fatalf("unexpected disable response %+v", first)
+	}
+	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/disable", nil, headers)
+	if code != http.StatusOK {
+		t.Fatalf("repeated disable failed: %d %s", code, payload)
+	}
+	var repeated struct {
+		DisabledAt string `json:"disabledAt"`
+	}
+	if err := json.Unmarshal(payload, &repeated); err != nil {
+		t.Fatal(err)
+	}
+	if repeated.DisabledAt != first.DisabledAt {
+		t.Fatalf("repeated disable changed disabledAt: %q -> %q", first.DisabledAt, repeated.DisabledAt)
+	}
+	// The enrollment is disabled for both retry and broker admission.
+	code, payload = h.get(t, "/v1/enrollments/hosts/host-1", adminToken)
+	if code != http.StatusOK || !strings.Contains(string(payload), "enrollment_disabled") {
+		t.Fatalf("status after disable = %d %s", code, payload)
+	}
+}

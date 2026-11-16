@@ -3,6 +3,8 @@ package external
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -21,6 +23,10 @@ type fakeStore struct {
 	credential  string
 	request     *whalereinv1.HostEnrollmentRequest
 	signingKey  ed25519.PrivateKey
+	nonces      map[string]bool
+	readyCalls  int
+	disabled    map[string]time.Time
+	revocations map[string]uint64
 }
 
 func newFakeStore() *fakeStore {
@@ -29,6 +35,8 @@ func newFakeStore() *fakeStore {
 		operations:  map[string]store.ExternalOperation{},
 		byPayload:   map[string]store.ExternalOperation{},
 		credential:  "credential-once",
+		nonces:      map[string]bool{},
+		disabled:    map[string]time.Time{},
 	}
 }
 
@@ -72,10 +80,89 @@ func (f *fakeStore) NextEnrollmentRevision(context.Context, string) (string, err
 	return "1", nil
 }
 
+func (f *fakeStore) MarkEnrollmentReady(_ context.Context, hostID string, at time.Time) (store.ExternalEnrollment, bool, error) {
+	f.readyCalls++
+	enrollment, ok := f.enrollments[hostID]
+	if !ok {
+		return store.ExternalEnrollment{}, false, store.ErrNotFound
+	}
+	if enrollment.DisabledAt != nil || enrollment.State == "enrollment_disabled" || enrollment.State == "enrollment_ready" {
+		return enrollment, false, nil
+	}
+	enrollment.State = "enrollment_ready"
+	f.enrollments[hostID] = enrollment
+	if operation, ok := f.operations[enrollment.OperationID]; ok {
+		operation.State = "operation_committed"
+		f.operations[enrollment.OperationID] = operation
+	}
+	return enrollment, true, nil
+}
+
+func (f *fakeStore) DisableEnrollment(_ context.Context, hostID string, at time.Time) (store.DisabledEnrollment, error) {
+	enrollment, ok := f.enrollments[hostID]
+	if !ok {
+		return store.DisabledEnrollment{}, store.ErrNotFound
+	}
+	disabledAt, repeated := f.disabled[hostID]
+	if !repeated {
+		disabledAt = at
+		f.disabled[hostID] = at
+	}
+	enrollment.DisabledAt = &disabledAt
+	enrollment.State = "enrollment_disabled"
+	f.enrollments[hostID] = enrollment
+	revocations := map[string]uint64{}
+	if !repeated {
+		for deviceID, generation := range f.revocations {
+			revocations[deviceID] = generation
+		}
+	}
+	return store.DisabledEnrollment{HostID: hostID, DisabledAt: disabledAt, Revocations: revocations}, nil
+}
+
+func (f *fakeStore) ReplaceHostCredential(_ context.Context, operation store.ExternalOperation) (store.ExternalEnrollment, string, error) {
+	if _, ok := f.byPayload[operation.AuthorizationID]; ok {
+		return store.ExternalEnrollment{}, "", store.ErrOperationConflict
+	}
+	enrollment, ok := f.enrollments[operation.HostID]
+	if !ok {
+		return store.ExternalEnrollment{}, "", store.ErrNotFound
+	}
+	if enrollment.DisabledAt != nil || enrollment.EnrollmentRevision != operation.EnrollmentRevision {
+		return store.ExternalEnrollment{}, "", store.ErrConflict
+	}
+	f.byPayload[operation.AuthorizationID] = operation
+	f.operations[operation.OperationID] = operation
+	f.commits++
+	return enrollment, f.credential + "-replacement", nil
+}
+
+func (f *fakeStore) ConsumeHostProofNonce(_ context.Context, nonceHash []byte, purpose string, _ time.Time) (bool, error) {
+	key := purpose + ":" + string(nonceHash)
+	if f.nonces[key] {
+		return false, nil
+	}
+	f.nonces[key] = true
+	return true, nil
+}
+
 type harness struct {
-	service *Service
-	data    *fakeStore
-	signer  issuer
+	service  *Service
+	data     *fakeStore
+	signer   issuer
+	enforcer *fakeEnforcer
+}
+
+type fakeEnforcer struct {
+	calls       []string
+	generations map[string]uint64
+	err         error
+}
+
+func (f *fakeEnforcer) DisableHostScope(_ context.Context, hostID string, grantGenerations map[string]uint64) error {
+	f.calls = append(f.calls, hostID)
+	f.generations = grantGenerations
+	return f.err
 }
 
 func newService(t *testing.T) (*Service, *fakeStore, issuer) {
@@ -93,13 +180,15 @@ func newHarness(t *testing.T) harness {
 	t.Helper()
 	signer, _, request, signingKey := enrollmentFixtureWithKey(t)
 	data := newFakeStore()
-	service := New(trustFor(signer), data, "mqtts://access.fixture.test:8883")
+	enforcer := &fakeEnforcer{}
+	service := New(trustFor(signer), data, "mqtts://access.fixture.test:8883",
+		WithHostEnforcer(enforcer))
 	service.now = func() time.Time { return issued }
 	// Keep the signed request with the harness so every test starts from a
 	// request the service actually trusts.
 	data.request = request
 	data.signingKey = signingKey
-	return harness{service: service, data: data, signer: signer}
+	return harness{service: service, data: data, signer: signer, enforcer: enforcer}
 }
 
 func freshRequest(t *testing.T) *whalereinv1.HostEnrollmentRequest {
@@ -363,5 +452,255 @@ func TestEnrollHostRefusesAProofForAnotherHost(t *testing.T) {
 	}
 	if h.data.commits != 0 {
 		t.Fatal("a mismatched host must not commit")
+	}
+}
+
+// signedHostProof builds the exact signed JSON document the Host sends in the
+// X-Whalerein-Host-Proof header.
+func signedHostProof(t *testing.T, signingKey ed25519.PrivateKey, purpose, hostID, subjectID string, at time.Time, nonce string) HostOwnershipProof {
+	t.Helper()
+	input := HostOwnershipProofInput(purpose, hostID, subjectID, at.UnixMilli(), nonce)
+	signature := ed25519.Sign(signingKey, []byte(input))
+	return HostOwnershipProof{
+		HostID:         hostID,
+		IssuedAtUnixMs: at.UnixMilli(),
+		Nonce:          nonce,
+		Signature:      base64.RawURLEncoding.EncodeToString(signature),
+	}
+}
+
+func recoveryAuthorization(signer issuer, hostID, workspace, revision, authorizationID string) *whalereinv1.ExternalAuthorization {
+	auth := baseAuth("fixture://issuer/a")
+	auth.AuthorizationId = authorizationID
+	auth.Purpose = PurposeHostCredentialRecovery
+	auth.OperationId = "op-recover-1"
+	auth.WorkspaceId = workspace
+	auth.EnrollmentRevision = revision
+	auth.HostId = hostID
+	auth.Precondition = "credential_recovery"
+	return auth
+}
+
+func TestHandleHostReadyAdvancesOnlyPendingEnrollments(t *testing.T) {
+	h := newHarness(t)
+	// A standalone Host has no external enrollment and is ignored.
+	if err := h.service.HandleHostReady(context.Background(), "host-standalone"); err != nil {
+		t.Fatalf("an unenrolled Host must be ignored: %v", err)
+	}
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.service.HandleHostReady(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	enrollment := h.data.enrollments[request.GetHostId()]
+	if enrollment.State != "enrollment_ready" {
+		t.Fatalf("HostReady must advance the enrollment, got %q", enrollment.State)
+	}
+	if operation := h.data.operations[enrollment.OperationID]; operation.State != "operation_committed" {
+		t.Fatalf("the operation outcome was not recorded: %+v", operation)
+	}
+	// A repeated HostReady is a no-op.
+	if err := h.service.HandleHostReady(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.data.enrollments[request.GetHostId()].State; got != "enrollment_ready" {
+		t.Fatalf("repeated readiness changed state to %q", got)
+	}
+}
+
+func TestHandleHostReadyDoesNotAdvanceDisabledEnrollment(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.DisableHost(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.service.HandleHostReady(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.data.enrollments[request.GetHostId()].State; got != "enrollment_disabled" {
+		t.Fatalf("a disabled enrollment became %q after HostReady", got)
+	}
+}
+
+func TestDisableHostIsIdempotentAndClosesTheLiveScope(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	h.data.revocations = map[string]uint64{"device-1": 4, "device-2": 7}
+	first, err := h.service.DisableHost(context.Background(), request.GetHostId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.enforcer.calls) != 1 || h.enforcer.calls[0] != request.GetHostId() {
+		t.Fatalf("expected one enforcement call, got %v", h.enforcer.calls)
+	}
+	if len(h.enforcer.generations) != 2 {
+		t.Fatalf("expected both revoked grants to reach the line, got %v", h.enforcer.generations)
+	}
+	second, err := h.service.DisableHost(context.Background(), request.GetHostId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Equal(first) {
+		t.Fatalf("repeated disable changed disabled_at from %s to %s", first, second)
+	}
+	if len(h.enforcer.generations) != 0 {
+		t.Fatalf("repeated disable revoked %v twice", h.enforcer.generations)
+	}
+	if _, err := h.service.DisableHost(context.Background(), "host-missing"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected not found for an unknown Host, got %v", err)
+	}
+}
+
+func TestDisableHostSurfacesEnforcementUnavailability(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	h.enforcer.err = errors.New("line unavailable")
+	if _, err := h.service.DisableHost(context.Background(), request.GetHostId()); !errors.Is(err, ErrEnforcementUnavailable) {
+		t.Fatalf("expected an enforcement refusal, got %v", err)
+	}
+}
+
+func TestEnrollmentStatusForHostRequiresTheCurrentSigningKey(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	proof := signedHostProof(t, h.data.signingKey, PurposeEnrollmentStatus,
+		request.GetHostId(), "op-1", issued, "c3RhdHVzLW5vbmNl")
+	status, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.GetState() != whalereinv1.EnrollmentState_enrollment_pending {
+		t.Fatalf("unexpected state %v", status.GetState())
+	}
+	// The same proof is single-use.
+	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), proof); !errors.Is(err, ErrProofReplay) {
+		t.Fatalf("expected a replay refusal, got %v", err)
+	}
+	// The Host may sign an empty subject when it lost the operation id.
+	other := signedHostProof(t, h.data.signingKey, PurposeEnrollmentStatus,
+		request.GetHostId(), "", issued, "c3RhdHVzLW5vbmNlLTI")
+	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), other); err != nil {
+		t.Fatalf("an empty subject must be accepted: %v", err)
+	}
+	// A proof from another key is refused.
+	_, otherKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := signedHostProof(t, otherKey, PurposeEnrollmentStatus,
+		request.GetHostId(), "op-1", issued, "c3RhdHVzLW5vbmNlLTM")
+	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), foreign); !errors.Is(err, ErrProofInvalid) {
+		t.Fatalf("expected a proof refusal, got %v", err)
+	}
+	// A bare host id carries no proof.
+	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), HostOwnershipProof{HostID: request.GetHostId()}); err == nil {
+		t.Fatal("a bare host id must not read enrollment status")
+	}
+}
+
+func TestEnrollmentStatusForHostRefusesDisabledEnrollments(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.DisableHost(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	proof := signedHostProof(t, h.data.signingKey, PurposeEnrollmentStatus,
+		request.GetHostId(), "op-1", issued, "c3RhdHVzLW5vbmNlLTQ")
+	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), proof); !errors.Is(err, ErrEnrollmentDisabled) {
+		t.Fatalf("expected a disabled refusal, got %v", err)
+	}
+}
+
+func TestRecoverCredentialReplacesOnceAndRejectsReplays(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	created, err := h.service.EnrollHost(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := recoveryAuthorization(h.signer, request.GetHostId(), "ws-fixture-1", "1", "auth-recover-1")
+	h.signer.authorize(t, auth)
+	proof := signedHostProof(t, h.data.signingKey, PurposeCredentialReplacement,
+		request.GetHostId(), auth.GetAuthorizationId(), issued, "cmVjb3Zlci1ub25jZQ")
+	replacement, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, proof)
+	if err != nil {
+		t.Fatalf("unexpected replacement error: %v", err)
+	}
+	if replacement.Credential.Password == "" || replacement.Credential.Username != "host:host-1" {
+		t.Fatalf("unexpected one-time credential %+v", replacement.Credential)
+	}
+	if replacement.Revision != created.GetStatus().GetEnrollmentRevision() {
+		t.Fatalf("unexpected revision %q", replacement.Revision)
+	}
+	// The same proof nonce is single-use and fails before the store.
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, proof); !errors.Is(err, ErrProofReplay) {
+		t.Fatalf("expected a proof replay refusal, got %v", err)
+	}
+	// A fresh proof for the same authorization id still cannot mint a second
+	// credential: the durable operation records one intent only.
+	replayProof := signedHostProof(t, h.data.signingKey, PurposeCredentialReplacement,
+		request.GetHostId(), auth.GetAuthorizationId(), issued, "cmVjb3Zlci1ub25jZS00")
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, replayProof); !errors.Is(err, store.ErrOperationConflict) {
+		t.Fatalf("expected an authorization replay conflict, got %v", err)
+	}
+}
+
+func TestRecoverCredentialRefusesExpiredStaleDisabledAndForeignProofs(t *testing.T) {
+	h := newHarness(t)
+	request := h.data.request
+	if _, err := h.service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	auth := recoveryAuthorization(h.signer, request.GetHostId(), "ws-fixture-1", "1", "auth-recover-2")
+	h.signer.authorize(t, auth)
+	proof := signedHostProof(t, h.data.signingKey, PurposeCredentialReplacement,
+		request.GetHostId(), auth.GetAuthorizationId(), issued, "cmVjb3Zlci1ub25jZS0y")
+
+	// A stale enrollment revision is refused before the credential changes.
+	stale := recoveryAuthorization(h.signer, request.GetHostId(), "ws-fixture-1", "9", "auth-recover-3")
+	h.signer.authorize(t, stale)
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), stale, proof); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("expected a stale-revision refusal, got %v", err)
+	}
+	// An expired authorization is refused.
+	expired := recoveryAuthorization(h.signer, request.GetHostId(), "ws-fixture-1", "1", "auth-recover-4")
+	expired.ExpiresAtUnixMs = issued.Add(-time.Minute).UnixMilli()
+	h.signer.authorize(t, expired)
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), expired, proof); !errors.Is(err, ErrAuthorizationExpired) {
+		t.Fatalf("expected an expiry refusal, got %v", err)
+	}
+	// A proof from another key is refused.
+	_, otherKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := signedHostProof(t, otherKey, PurposeCredentialReplacement,
+		request.GetHostId(), auth.GetAuthorizationId(), issued, "cmVjb3Zlci1ub25jZS0z")
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, foreign); !errors.Is(err, ErrProofInvalid) {
+		t.Fatalf("expected a proof refusal, got %v", err)
+	}
+	// A disabled enrollment cannot be recovered.
+	if _, err := h.service.DisableHost(context.Background(), request.GetHostId()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, proof); !errors.Is(err, ErrEnrollmentDisabled) {
+		t.Fatalf("expected a disabled refusal, got %v", err)
 	}
 }

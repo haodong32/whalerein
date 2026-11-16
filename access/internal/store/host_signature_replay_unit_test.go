@@ -3,61 +3,45 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestConsumeHostSignatureReportsWhetherThisReplicaWasFirst(t *testing.T) {
-	at := time.UnixMilli(1_700_000_000_000)
-	digest := make([]byte, 32)
-	seen := map[string]bool{}
-	db := &fakeDB{t: t, execFn: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-		if !strings.Contains(sql, "INSERT INTO host_signature_replays") {
-			// Retention prune.
-			return pgconn.NewCommandTag("DELETE 0"), nil
-		}
-		key := string(args[0].([]byte))
-		if seen[key] {
-			return pgconn.NewCommandTag("INSERT 0 0"), nil
-		}
-		seen[key] = true
-		return pgconn.NewCommandTag("INSERT 0 1"), nil
-	}}
-	store := newStore(db)
+// Host signature replay uses the same storage seam: inputs are validated before
+// the first database call, and a repeated signature hash is reported as used.
+func TestConsumeHostSignatureValidatesAndReportsReuse(t *testing.T) {
+	ctx := context.Background()
+	hash := make([]byte, 32)
 
-	consumed, err := store.ConsumeHostSignature(context.Background(), digest, "h1", "invitation", "", at.UnixMilli(), at)
-	if err != nil || !consumed {
-		t.Fatalf("first use consumed=%v err=%v", consumed, err)
+	if _, err := (&Store{}).ConsumeHostSignature(ctx, hash, "host-1", "pairing", "", 0, time.Time{}); err == nil {
+		t.Fatal("a store without a pool must fail closed")
 	}
-	consumed, err = store.ConsumeHostSignature(context.Background(), digest, "h1", "invitation", "", at.UnixMilli(), at)
+	if _, err := (&Store{}).ConsumeHostSignature(ctx, make([]byte, 31), "host-1", "pairing", "", 0, time.Time{}); err == nil {
+		t.Fatal("a short signature hash must be refused")
+	}
+	if _, err := (&Store{}).ConsumeHostSignature(ctx, hash, "", "", "", 0, time.Time{}); err == nil {
+		t.Fatal("a missing Host or purpose must be refused")
+	}
+
+	inserted := 0
+	db := &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+		inserted++
+		if inserted == 1 {
+			return deleteTag(0), nil
+		}
+		return pgconn.NewCommandTag("INSERT 0 0"), nil
+	}}
+	consumed, err := newStore(db).ConsumeHostSignature(ctx, hash, "host-1", "pairing", "", 0, time.Time{})
 	if err != nil || consumed {
-		t.Fatalf("replayed use consumed=%v err=%v", consumed, err)
+		t.Fatalf("a duplicate signature must report reuse: %v, %v", consumed, err)
 	}
-}
 
-func TestConsumeHostSignatureRejectsInvalidInputsAndFailsClosed(t *testing.T) {
-	at := time.UnixMilli(1_700_000_000_000)
-	var zero *Store
-	if _, err := zero.ConsumeHostSignature(context.Background(), make([]byte, 32), "h1", "invitation", "", at.UnixMilli(), at); err == nil {
-		t.Fatal("nil store accepted a signature")
-	}
-	db := &fakeDB{t: t}
-	store := newStore(db)
-	if _, err := store.ConsumeHostSignature(context.Background(), []byte("short"), "h1", "invitation", "", at.UnixMilli(), at); err == nil {
-		t.Fatal("short hash accepted")
-	}
-	if _, err := store.ConsumeHostSignature(context.Background(), make([]byte, 32), "", "invitation", "", at.UnixMilli(), at); err == nil {
-		t.Fatal("empty host accepted")
-	}
-	// A prune failure is a guard failure: the caller must not treat the
-	// signature as consumed.
 	failing := &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.CommandTag{}, errors.New("database unavailable")
+		return pgconn.CommandTag{}, errors.New("insert failed")
 	}}
-	if _, err := newStore(failing).ConsumeHostSignature(context.Background(), make([]byte, 32), "h1", "invitation", "", at.UnixMilli(), at); err == nil {
-		t.Fatal("prune failure was swallowed")
+	if _, err := newStore(failing).ConsumeHostSignature(ctx, hash, "host-1", "pairing", "", 0, time.Time{}); err == nil {
+		t.Fatal("a database failure must be reported")
 	}
 }

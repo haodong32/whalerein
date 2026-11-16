@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -291,6 +292,34 @@ func (m *Manager) RevokeDevice(ctx context.Context, deviceID string) error {
 	}
 	if _, err := m.request(ctx, "kick", "username device:"+deviceID); err != nil {
 		return fmt.Errorf("line: disconnect device: %w", err)
+	}
+	return nil
+}
+
+// RevokeHost denies every revoked grant incarnation of one disabled Host and
+// closes its live broker session. It is idempotent: an already closed session
+// is not an error, and an empty revocation set still closes the Host.
+func (m *Manager) RevokeHost(ctx context.Context, hostID string, grantGenerations map[string]uint64) error {
+	deviceIDs := make([]string, 0, len(grantGenerations))
+	for deviceID := range grantGenerations {
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	// Map iteration is unordered; sort so a retry issues the same control
+	// operations in the same order.
+	sort.Strings(deviceIDs)
+	for _, deviceID := range deviceIDs {
+		m.forget(deviceID)
+		if _, err := m.request(ctx, "deny",
+			"device "+deviceID,
+			fmt.Sprintf("generation %d", grantGenerations[deviceID]),
+			"host "+hostID,
+			"kick 1",
+		); err != nil && !isNotConnected(err) {
+			return fmt.Errorf("line: deny disabled host grant: %w", err)
+		}
+	}
+	if _, err := m.request(ctx, "kick", "username host:"+hostID); err != nil && !isNotConnected(err) {
+		return fmt.Errorf("line: close disabled host session: %w", err)
 	}
 	return nil
 }

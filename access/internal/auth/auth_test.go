@@ -18,32 +18,35 @@ import (
 )
 
 type fakeStore struct {
-	hosts        map[string]store.Host
-	devices      map[string]store.Device
-	grants       map[string]bool // host|device
-	keys         map[string][]byte
-	keyErr       error
-	revokeErr    error
-	pending      []store.Revocation
-	pendingErr   error
-	markErr      error
-	markCalls    []string
-	revokeHosts  []string
-	revokeExists bool
-	ensureErr    error
-	activeErr    error
-	grantErr     error
-	listGrantErr error
-	listCalls    int
-	events       *[]string
+	hosts         map[string]store.Host
+	devices       map[string]store.Device
+	grants        map[string]bool // host|device
+	keys          map[string][]byte
+	keyErr        error
+	revokeErr     error
+	pending       []store.Revocation
+	pendingErr    error
+	markErr       error
+	markCalls     []string
+	revokeHosts   []string
+	revokeExists  bool
+	ensureErr     error
+	activeErr     error
+	credentialErr error
+	grantErr      error
+	listGrantErr  error
+	listCalls     int
+	credentials   map[string]store.EnrollmentCredential
+	events        *[]string
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		hosts:   map[string]store.Host{},
-		devices: map[string]store.Device{},
-		grants:  map[string]bool{},
-		keys:    map[string][]byte{},
+		hosts:       map[string]store.Host{},
+		devices:     map[string]store.Device{},
+		grants:      map[string]bool{},
+		keys:        map[string][]byte{},
+		credentials: map[string]store.EnrollmentCredential{},
 	}
 }
 
@@ -201,6 +204,17 @@ func (f *fakeStore) HostAuthorizationKey(_ context.Context, hostID string) ([]by
 	return append([]byte(nil), key...), nil
 }
 
+func (f *fakeStore) HostBrokerCredential(_ context.Context, hostID string) (store.EnrollmentCredential, error) {
+	if f.credentialErr != nil {
+		return store.EnrollmentCredential{}, f.credentialErr
+	}
+	credential, ok := f.credentials[hostID]
+	if !ok {
+		return store.EnrollmentCredential{}, store.ErrNotFound
+	}
+	return credential, nil
+}
+
 func (f *fakeStore) RevokeGrant(_ context.Context, hostID, deviceID string, _ time.Time) error {
 	if f.events != nil {
 		*f.events = append(*f.events, "store.revoke_grant")
@@ -328,6 +342,14 @@ func (f *fakeEnforcer) RevokeGrant(_ context.Context, hostID, deviceID string) e
 
 func (f *fakeEnforcer) RevokeDevice(_ context.Context, deviceID string) error {
 	f.calls = append(f.calls, "device:"+deviceID)
+	return f.err
+}
+
+func (f *fakeEnforcer) RevokeHost(_ context.Context, hostID string, generations map[string]uint64) error {
+	f.calls = append(f.calls, "host:"+hostID)
+	for deviceID := range generations {
+		f.calls = append(f.calls, "host-grant:"+hostID+":"+deviceID)
+	}
 	return f.err
 }
 
@@ -983,5 +1005,116 @@ func TestReplayCarriesEachGrantGenerationAndUsesItForAcknowledgement(t *testing.
 	}
 	if err := service.ReplayPendingRevocations(context.Background(), "h"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAuthenticateBrokerUsesAnEnrollmentCredentialForManagedHosts(t *testing.T) {
+	service, fs, _, _ := newService(t)
+	ctx := context.Background()
+	fs.credentials["h1"] = store.EnrollmentCredential{
+		HostID:               "h1",
+		BrokerCredentialHash: HashToken("enrollment-secret"),
+		State:                "enrollment_pending",
+	}
+
+	identity, err := service.AuthenticateBroker(ctx, "whalerein-host-h1", "host:h1", "enrollment-secret")
+	if err != nil {
+		t.Fatalf("an enrolled Host credential was refused: %v", err)
+	}
+	if identity.Kind != KindHost || identity.HostID != "h1" {
+		t.Fatalf("unexpected identity %+v", identity)
+	}
+	if _, ok := fs.hosts["h1"]; !ok {
+		t.Fatal("the Host projection row was not ensured")
+	}
+	// The shared provisioning token is not accepted for a managed enrollment.
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-h1", "host:h1", "host-token"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("the shared token must not authenticate a managed Host: %v", err)
+	}
+	// A credential issued for another Host is cross-profile and must fail.
+	fs.credentials["h2"] = store.EnrollmentCredential{
+		HostID:               "h2",
+		BrokerCredentialHash: HashToken("h2-secret"),
+		State:                "enrollment_ready",
+	}
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-h1", "host:h1", "h2-secret"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("a cross-profile credential was accepted: %v", err)
+	}
+	// A disabled enrollment is revoked even with the previously valid
+	// credential and even when the shared token is configured.
+	disabled := time.Now().UTC()
+	fs.credentials["h1"] = store.EnrollmentCredential{
+		HostID:               "h1",
+		BrokerCredentialHash: HashToken("enrollment-secret"),
+		State:                "enrollment_disabled",
+		DisabledAt:           &disabled,
+	}
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-h1", "host:h1", "enrollment-secret"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("a disabled enrollment was accepted: %v", err)
+	}
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-h1", "host:h1", "host-token"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("a disabled enrollment fell back to the shared token: %v", err)
+	}
+}
+
+func TestAuthenticateBrokerKeepsStandaloneHostProvisioning(t *testing.T) {
+	service, fs, _, _ := newService(t)
+	ctx := context.Background()
+	// No external enrollment row exists for a Standalone Host. The shared
+	// provisioning token remains the only Standalone credential, so this path
+	// preserves existing deployments and the identity-transport fixture.
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-standalone", "host:standalone", "host-token"); err != nil {
+		t.Fatalf("standalone Host provisioning was refused: %v", err)
+	}
+	if _, ok := fs.hosts["standalone"]; !ok {
+		t.Fatal("the standalone Host projection row was not ensured")
+	}
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-standalone", "host:standalone", "wrong"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("a wrong standalone credential was accepted: %v", err)
+	}
+	// External account mode removes the shared-token fallback entirely, so an
+	// unenrolled Host principal is denied before the projection is created.
+	service.cfg.RequireHostEnrollment = true
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-unknown", "host:unknown", "host-token"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("external mode accepted an unenrolled Host: %v", err)
+	}
+	if _, ok := fs.hosts["unknown"]; ok {
+		t.Fatal("external mode projected an unenrolled Host")
+	}
+	service.cfg.RequireHostEnrollment = false
+
+	fs.credentialErr = errors.New("database unavailable")
+	if _, err := service.AuthenticateBroker(ctx, "whalerein-host-standalone", "host:standalone", "host-token"); err == nil {
+		t.Fatal("a store failure must be surfaced")
+	}
+}
+
+func TestDisableHostScopeFencesAdmissionAndClosesTheHost(t *testing.T) {
+	service, fs, admission, _, _, enforcer := newServiceWithFakes(t)
+	ctx := context.Background()
+	fs.grants[grantKey("h1", "d1")] = true
+	fs.grants[grantKey("h1", "d2")] = true
+	if err := service.DisableHostScope(ctx, "h1", map[string]uint64{"d1": 4, "d2": 7}); err != nil {
+		t.Fatal(err)
+	}
+	if !admission.denied[grantKey("h1", "d1")] || !admission.denied[grantKey("h1", "d2")] {
+		t.Fatalf("local admission was not fenced: %+v", admission.denied)
+	}
+	seen := map[string]bool{}
+	for _, call := range enforcer.calls {
+		seen[call] = true
+	}
+	if !seen["host:h1"] {
+		t.Fatalf("the Host session was not closed: %v", enforcer.calls)
+	}
+	if !seen["host-grant:h1:d1"] || !seen["host-grant:h1:d2"] {
+		t.Fatalf("the revoked grants were not denied: %v", enforcer.calls)
+	}
+	if err := service.DisableHostScope(ctx, "", nil); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("an empty host id must be refused, got %v", err)
+	}
+	enforcer.err = errors.New("line unavailable")
+	if err := service.DisableHostScope(ctx, "h1", nil); err == nil {
+		t.Fatal("an enforcement failure must be surfaced")
 	}
 }

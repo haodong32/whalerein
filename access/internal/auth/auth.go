@@ -81,6 +81,7 @@ type Store interface {
 	RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error
 	SetHostAuthorizationKey(ctx context.Context, hostID string, publicKey []byte) error
 	HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error)
+	HostBrokerCredential(ctx context.Context, hostID string) (store.EnrollmentCredential, error)
 	PendingRevocations(ctx context.Context, hostID string) ([]store.Revocation, error)
 	MarkRevocationsReplayed(ctx context.Context, hostID string, deviceIDs []string, revokedBefore, at time.Time, generations map[string]uint64) error
 }
@@ -107,6 +108,7 @@ type PolicyObserver interface {
 type LineEnforcer interface {
 	RevokeGrant(ctx context.Context, hostID, deviceID string) error
 	RevokeDevice(ctx context.Context, deviceID string) error
+	RevokeHost(ctx context.Context, hostID string, grantGenerations map[string]uint64) error
 }
 
 // Presence is broker-derived host connectivity. It never reads the database.
@@ -130,6 +132,10 @@ type Config struct {
 	AccessPassword        string
 	ProtocolVersion       uint32
 	RevocationAckTimeout  time.Duration
+	// RequireHostEnrollment is set in external account mode. It removes the
+	// Standalone shared-token fallback so an unenrolled Host principal is
+	// denied instead of being projected from a deployment-wide secret.
+	RequireHostEnrollment bool
 }
 
 // Dependencies wires the auth service.
@@ -360,8 +366,31 @@ func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, pa
 		}
 		return identity, nil
 	case KindHost:
-		if !tokenEqual(password, s.cfg.HostProvisioningToken) {
-			return BrokerIdentity{}, ErrUnauthorized
+		// A managed Host authenticates with the per-enrollment broker
+		// credential. The credential hash is the only stored form, and a
+		// disabled or unknown enrollment never falls back to another secret.
+		credential, err := s.store.HostBrokerCredential(ctx, identity.HostID)
+		switch {
+		case err == nil:
+			if credential.DisabledAt != nil || credential.State == "enrollment_disabled" {
+				return BrokerIdentity{}, ErrUnauthorized
+			}
+			presented := HashToken(password)
+			if len(credential.BrokerCredentialHash) != sha256.Size ||
+				subtle.ConstantTimeCompare(presented, credential.BrokerCredentialHash) != 1 {
+				return BrokerIdentity{}, ErrUnauthorized
+			}
+		case errors.Is(err, store.ErrNotFound):
+			// External account mode denies an unknown enrollment outright. A
+			// Standalone deployment has no external enrollment table content,
+			// so it keeps the existing deployment provisioning token; managed
+			// enrollments never accept that shared token.
+			if s.cfg.RequireHostEnrollment || s.cfg.HostProvisioningToken == "" ||
+				!tokenEqual(password, s.cfg.HostProvisioningToken) {
+				return BrokerIdentity{}, ErrUnauthorized
+			}
+		default:
+			return BrokerIdentity{}, fmt.Errorf("authenticate host broker: %w", err)
 		}
 		if _, err := s.store.EnsureHost(ctx, identity.HostID); err != nil {
 			return BrokerIdentity{}, fmt.Errorf("provision host: %w", err)

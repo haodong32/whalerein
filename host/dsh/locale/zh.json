@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "WhaleRein 远程控制",
-    "description": "查看 Broker 连接状态、当前主机配对码和已配对设备，并配置远程控制连接。"
+    "title": "WhaleRein Cloud 连接",
+    "description": "将这台电脑连接到 WhaleRein Cloud，查看连接状态并管理已配对设备。"
   }
 }

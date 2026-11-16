@@ -7,7 +7,8 @@ import os from 'node:os'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { validateTopicId } from 'whalerein-host/config.js'
-import { ConfigError, resolveConfig } from './src/config.js'
+import { ConfigError, resolveConfig, resolveConnectionMode, resolveManagerConfig } from './src/config.js'
+import { createAuthorizationVerifier } from './src/verifier.js'
 import { generateHostId } from 'whalerein-host/host-id.js'
 import { HostRuntime } from 'whalerein-host/host.js'
 import { MemoryHostCredentials } from 'whalerein-host/security/credentials.js'
@@ -26,6 +27,12 @@ export const inject = ['sessions', 'sessionController', 'credentials']
  * only input. Empty strings are missing and fall back to the schema default.
  * Secret tokens have no default, so an absent token stays unset. */
 export const Config = z.object({
+  connection_mode: z.string().default('auto').volatile(),
+  state_root: z.string().default('').volatile(),
+  enrollment_issuer_public_key: z.string().default('').volatile(),
+  enrollment_issuer: z.string().default('').volatile(),
+  profile_id: z.string().default('').volatile(),
+  developer_tools_enabled: z.boolean().default(false).volatile(),
   server: z.string().default('').volatile(),
   admin_token: z.string().role('secret').volatile(),
   access_port: z.string().default('').volatile(),
@@ -60,6 +67,12 @@ function configValue(raw, key) {
 
 export function materializeConfig(raw) {
   const keys = [
+    'connection_mode',
+    'state_root',
+    'enrollment_issuer_public_key',
+    'enrollment_issuer',
+    'profile_id',
+    'developer_tools_enabled',
     'server',
     'admin_token',
     'access_port',
@@ -198,7 +211,9 @@ export function configFailure(error) {
   const reason = error instanceof ConfigError
     ? error.message.replace(`${error.code}: `, '')
     : undefined
-  const names = ['server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
+  const names = ['connection_mode', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
+    'profile_id', 'developer_tools_enabled',
+    'server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
     'host_token', 'adapter', 'approval_mode', 'approval_ttl_ms', 'event_batch_ms',
     'outbox_per_device_limit', 'outbox_total_limit', 'snapshot_max_events',
     'reconnect_min_ms', 'reconnect_max_ms', 'shutdown_timeout_ms', 'ca_file', 'state_dir']
@@ -206,7 +221,167 @@ export function configFailure(error) {
   return { code, field, reason: reason ?? 'configuration could not be resolved' }
 }
 
-export function apply(ctx, rawConfig = {}) {
+/**
+ * Load the managed connection manager lazily. The runtime package owns this
+ * module; a plugin built before that runtime lands keeps the settings surface
+ * available and reports a closed configuration error instead of pretending to
+ * be a standalone host.
+ */
+async function loadManagerFactory() {
+  const module = await import('whalerein-host/manager.js')
+  if (typeof module.createConnectionManager !== 'function') {
+    throw Object.assign(new Error('connection manager export missing'), { code: 'manager_unavailable' })
+  }
+  return module.createConnectionManager
+}
+
+function registerSettings(ctx, host) {
+  if (ctx && typeof ctx.get === 'function' && ctx.get('typertGateway')) {
+    createSettingsService(ctx, host)
+  }
+}
+
+/**
+ * Build the managed Host surface around the frozen ConnectionManager API.
+ * Credentials are passed through per profile; this plugin never stores keys in
+ * plaintext or hands them to the browser.
+ */
+export async function createManagedHost(rawConfig = {}, options = {}) {
+  const config = resolveManagerConfig(materializeConfig(rawConfig))
+  const managerFactory = options.managerFactory ?? await loadManagerFactory()
+  const credentials = options.credentials ?? new DshHostCredentials({
+    ctx: options.ctx,
+    profileId: config.profileId,
+  })
+  // The manager needs the native source adapter for the real DSH connection.
+  // Custom factories in tests may supply their own source; do not build a real
+  // adapter when the caller deliberately replaced the manager.
+  const source = options.source ?? (options.managerFactory
+    ? null
+    : createAdapter({
+      mode: config.adapter,
+      ctx: options.ctx,
+      config: {
+        pendingQueueEnabled: config.pendingQueueEnabled,
+        enableOpenQuestionBroker: config.enableOpenQuestionBroker,
+      },
+      now: options.now,
+      logger: options.logger,
+    }))
+  // A configured pinned key makes the Host verify the account service's
+  // signature before it sends anything; Access verifies independently.
+  const verifyAuthorization = createAuthorizationVerifier({
+    publicKey: config.issuerPublicKey,
+    expectedIssuer: config.expectedIssuer,
+  })
+  let manager
+  try {
+    manager = await managerFactory({
+      ctx: options.ctx,
+      credentials,
+      stateRoot: config.stateRoot,
+      now: options.now,
+      fetch: options.fetch,
+      mqtt: options.mqtt,
+      log: options.logger,
+      source,
+      verifyAuthorization,
+      expectedIssuer: config.expectedIssuer,
+      runtimeConfig: config.runtimeConfig,
+      selectedProfile: config.profileId,
+      developerToolsEnabled: config.developerToolsEnabled,
+    })
+  } catch {
+    // Runtime diagnostic text may contain private state or paths.
+    throw Object.assign(new Error('connection manager unavailable'), { code: 'manager_unavailable' })
+  }
+  if (!manager || typeof manager.snapshot !== 'function') {
+    throw Object.assign(new Error('connection manager contract missing'), { code: 'manager_unavailable' })
+  }
+  if (manager.ready && typeof manager.ready.then === 'function') {
+    try {
+      await manager.ready
+    } catch {
+      throw Object.assign(new Error('connection manager initialization failed'), { code: 'manager_unavailable' })
+    }
+  }
+  let stopped = false
+  return {
+    managed: true,
+    mode: 'managed',
+    config,
+    manager,
+    credentials,
+    developerToolsEnabled: config.developerToolsEnabled,
+    get started() { return !stopped },
+    start() { return this },
+    async stop() {
+      if (stopped) return
+      stopped = true
+      await manager.dispose?.()
+    },
+  }
+}
+
+async function applyManaged(ctx, rawConfig, options) {
+  let config
+  try {
+    config = resolveManagerConfig(materializeConfig(rawConfig))
+  } catch (error) {
+    const failure = configFailure(error)
+    fallbackLog(failure.code, failure.reason)
+    registerSettings(ctx, {
+      managed: true,
+      manager: null,
+      config,
+      configError: failure,
+      developerToolsEnabled: false,
+    })
+    return undefined
+  }
+  let host
+  try {
+    host = await createManagedHost(rawConfig, { ...options, ctx })
+  } catch (error) {
+    // This is an integration state, not a user configuration problem. Do not
+    // log paths, credentials or manager internals.
+    fallbackLog(typeof error?.code === 'string' ? error.code : 'manager_unavailable')
+    registerSettings(ctx, {
+      managed: true,
+      manager: null,
+      config,
+      developerToolsEnabled: config.developerToolsEnabled,
+      configError: { code: 'manager_unavailable', field: '', reason: 'the connection manager is unavailable in this runtime' },
+    })
+    return undefined
+  }
+  registerSettings(ctx, host)
+  const dispose = () => host.stop().catch(() => {})
+  if (ctx && typeof ctx.effect === 'function') {
+    ctx.effect(() => {
+      host.start()
+      return dispose
+    }, 'whalerein-dsh')
+  }
+  return host
+}
+
+export function apply(ctx, rawConfig = {}, options = {}) {
+  const materialized = materializeConfig(rawConfig)
+  let mode
+  try {
+    mode = resolveConnectionMode(materialized)
+  } catch (error) {
+    const failure = configFailure(error)
+    fallbackLog(failure.code, failure.reason)
+    registerSettings(ctx, { managed: true, manager: null, config: materialized, configError: failure })
+    return undefined
+  }
+  if (mode === 'managed') return applyManaged(ctx, materialized, options)
+  return applyStandalone(ctx, materialized)
+}
+
+function applyStandalone(ctx, rawConfig) {
   let config
   try {
     config = resolveConfig(withHostId(ctx, rawConfig))

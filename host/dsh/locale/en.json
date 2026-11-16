@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "WhaleRein remote control",
-    "description": "View broker connectivity, the host pairing code, and paired devices, and configure remote control."
+    "title": "WhaleRein Cloud connection",
+    "description": "Connect this computer to WhaleRein Cloud, view connection status, and manage paired devices."
   }
 }

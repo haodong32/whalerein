@@ -30,9 +30,10 @@ const ProofPrefix = "whalerein/v1/enrollment"
 
 // Purposes this package knows.
 const (
-	PurposeHostEnrollment = "host_enrollment"
-	PurposeDevicePairing  = "device_pairing"
-	PurposeDeviceRecovery = "device_recovery"
+	PurposeHostEnrollment         = "host_enrollment"
+	PurposeHostCredentialRecovery = "host_credential_recovery"
+	PurposeDevicePairing          = "device_pairing"
+	PurposeDeviceRecovery         = "device_recovery"
 )
 
 // VerificationKey is one pinned issuer key with its validity window.

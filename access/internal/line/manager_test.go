@@ -592,3 +592,48 @@ func TestRevokeGrantSurfacesGrantReadFailure(t *testing.T) {
 		t.Fatal("deny sent without a durable revision")
 	}
 }
+
+func TestRevokeHostDeniesCurrentGrantIncarnationsThenClosesTheHost(t *testing.T) {
+	fs := &fakeStore{grantFor: map[string]store.AdmissionGrant{}}
+	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
+	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
+	if err := manager.RevokeHost(context.Background(), "h1", map[string]uint64{"d2": 9, "d1": 4}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) != 3 {
+		t.Fatalf("requests = %+v", *requests)
+	}
+	// Device iteration is sorted so a retry issues the same operations.
+	if (*requests)[0].op != "deny" || !strings.Contains(strings.Join((*requests)[0].fields, " "), "device d1") ||
+		!strings.Contains(strings.Join((*requests)[0].fields, " "), "generation 4") {
+		t.Fatalf("first deny = %+v", (*requests)[0])
+	}
+	if (*requests)[1].op != "deny" || !strings.Contains(strings.Join((*requests)[1].fields, " "), "device d2") ||
+		!strings.Contains(strings.Join((*requests)[1].fields, " "), "generation 9") {
+		t.Fatalf("second deny = %+v", (*requests)[1])
+	}
+	if (*requests)[2].op != "kick" || !strings.Contains(strings.Join((*requests)[2].fields, " "), "username host:h1") {
+		t.Fatalf("host kick = %+v", (*requests)[2])
+	}
+}
+
+func TestRevokeHostSwallowsAnAlreadyClosedSessionAndSurfacesOtherFailures(t *testing.T) {
+	control, _ := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "kick" {
+			return "", errors.New("client not connected")
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{grantFor: map[string]store.AdmissionGrant{}}, control, &fakeApplier{}, testPresence(t))
+	if err := manager.RevokeHost(context.Background(), "h1", nil); err != nil {
+		t.Fatalf("an already closed Host session is not an error: %v", err)
+	}
+
+	failing, _ := newTestControl(t, func(request recordedRequest) (string, error) {
+		return "", errors.New("broker unavailable")
+	})
+	manager = newTestManager(t, &fakeStore{grantFor: map[string]store.AdmissionGrant{}}, failing, &fakeApplier{}, testPresence(t))
+	if err := manager.RevokeHost(context.Background(), "h1", map[string]uint64{"d1": 1}); err == nil {
+		t.Fatal("a line failure must be surfaced")
+	}
+}

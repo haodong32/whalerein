@@ -79,45 +79,92 @@ function findAll(node, predicate, found = []) {
 }
 
 function createReactRuntime() {
-  const state = []
-  const effects = []
-  let stateIndex = 0
-  let effectIndex = 0
-  let pending = []
+  // A tiny React-shaped renderer with per-component hook frames. Components
+  // are resolved into a plain element tree so assertions observe the same tree
+  // a browser would commit, and effects run for nested components too.
+  const frames = new Map()
+  let current = null
   const React = {
     createElement(type, props, ...children) {
       return { type, props: props ?? {}, children }
     },
     useId() { return 'whalerein-test' },
-    useRef(value) { return React.useState(() => ({ current: value }))[0] },
+    useRef(value) {
+      const frame = current
+      const index = frame.refIndex++
+      if (!(index in frame.refs)) frame.refs[index] = { current: value }
+      return frame.refs[index]
+    },
     useState(initial) {
-      const index = stateIndex++
-      if (state[index] === undefined) state[index] = typeof initial === 'function' ? initial() : initial
-      return [state[index], (value) => {
-        state[index] = typeof value === 'function' ? value(state[index]) : value
+      const frame = current
+      const index = frame.stateIndex++
+      if (!(index in frame.state)) frame.state[index] = typeof initial === 'function' ? initial() : initial
+      return [frame.state[index], (value) => {
+        frame.state[index] = typeof value === 'function' ? value(frame.state[index]) : value
       }]
     },
     useEffect(callback, deps) {
-      const index = effectIndex++
-      const previous = effects[index]
+      const frame = current
+      const index = frame.effectIndex++
+      const previous = frame.effects[index]
       const changed = !previous || !deps || deps.length !== previous.deps?.length
         || deps.some((value, i) => !Object.is(value, previous.deps[i]))
-      if (changed) pending.push({ index, callback, deps })
+      if (changed) frame.pending.push({ index, callback, deps })
     },
   }
-  function render(component, props) {
-    stateIndex = 0
-    effectIndex = 0
-    pending = []
-    const tree = component(props)
-    for (const effect of pending) {
-      effects[effect.index]?.cleanup?.()
-      effects[effect.index] = { deps: effect.deps, cleanup: effect.callback() }
+  function frameFor(key) {
+    let frame = frames.get(key)
+    if (!frame) {
+      frame = { state: [], refs: [], effects: [], pending: [], stateIndex: 0, refIndex: 0, effectIndex: 0 }
+      frames.set(key, frame)
     }
-    return tree
+    return frame
+  }
+  function callComponent(type, props, key) {
+    const frame = frameFor(key)
+    const previous = current
+    current = frame
+    frame.stateIndex = 0
+    frame.refIndex = 0
+    frame.effectIndex = 0
+    frame.pending = []
+    try {
+      const output = type(props)
+      for (const effect of frame.pending) {
+        const prior = frame.effects[effect.index]
+        prior?.cleanup?.()
+        frame.effects[effect.index] = { deps: effect.deps, cleanup: effect.callback() }
+      }
+      return output
+    } finally {
+      current = previous
+    }
+  }
+  function resolve(node, path) {
+    if (node === null || node === undefined || typeof node !== 'object') return node
+    if (Array.isArray(node)) return node.map((item, index) => resolve(item, `${path}.${index}`))
+    if (typeof node.type === 'function') {
+      const key = `${node.type.name || 'Component'}#${path}`
+      return resolve(callComponent(node.type, node.props, key), `${path}>`)
+    }
+    return {
+      type: node.type,
+      props: {
+        ...node.props,
+        anchor: resolve(node.props?.anchor, `${path}.anchor`),
+        headerAccessory: resolve(node.props?.headerAccessory, `${path}.accessory`),
+      },
+      children: resolve(node.children, `${path}.children`),
+    }
+  }
+  function render(component, props) {
+    return resolve({ type: component, props: props ?? {}, children: [] }, 'root')
   }
   async function dispose() {
-    for (const effect of effects) await effect?.cleanup?.()
+    for (const frame of frames.values()) {
+      for (const effect of frame.effects) await effect?.cleanup?.()
+    }
+    frames.clear()
   }
   return { React, render, dispose }
 }
@@ -148,7 +195,10 @@ function savedSecrets() {
   }
 }
 
-async function createSettingsRuntime({ connected = true, development = false, remoteFailure = false, describe = savedSecrets, writable = true } = {}) {
+async function createSettingsRuntime({
+  connected = true, development = false, remoteFailure = false, describe = savedSecrets,
+  writable = true, managed = false,
+} = {}) {
   const writes = []
   let currentRemoteFailure = remoteFailure
   const disposers = []
@@ -167,7 +217,26 @@ async function createSettingsRuntime({ connected = true, development = false, re
       fingerprint: 'abcd ef01 2345 6789',
     },
   }
-  let currentStatus = {
+  let currentStatus = managed ? {
+    available: true,
+    managed: true,
+    state: 'idle',
+    environment: 'production',
+    profileId: 'profile-production',
+    label: 'WhaleRein Cloud',
+    hostName: 'Studio Mac',
+    stagingEnabled: false,
+    developerToolsEnabled: false,
+    approvalUrl: '',
+    error: null,
+    connected: false,
+    pendingOperation: false,
+    profiles: [
+      { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
+    ],
+    capabilities: [],
+    configError: null,
+  } : {
     available: true,
     connected,
     hostId: 'host-real',
@@ -230,6 +299,14 @@ async function createSettingsRuntime({ connected = true, development = false, re
     },
   }
   const react = createReactRuntime()
+  const calls = []
+  const actionResults = {}
+  const managerAction = (name) => async (...args) => {
+    calls.push([name, ...args])
+    const result = actionResults[name]
+    if (result instanceof Error) throw result
+    return result ?? { ok: true, value: managed ? currentStatus : {} }
+  }
   const remote = {
     $mount: async (contribution) => {
       registered.push({ contribution })
@@ -248,6 +325,17 @@ async function createSettingsRuntime({ connected = true, development = false, re
         if (revokeResult instanceof Error) throw revokeResult
         return revokeResult
       },
+      details: managerAction('details'),
+      startConnect: managerAction('startConnect'),
+      cancel: managerAction('cancel'),
+      retry: managerAction('retry'),
+      disconnect: managerAction('disconnect'),
+      reconnect: managerAction('reconnect'),
+      remove: managerAction('remove'),
+      switchProfile: managerAction('switchProfile'),
+      enableStaging: managerAction('enableStaging'),
+      addCustomService: managerAction('addCustomService'),
+      deleteProfile: managerAction('deleteProfile'),
     },
     settings: {
       describe: async () => describe(),
@@ -330,6 +418,11 @@ async function createSettingsRuntime({ connected = true, development = false, re
     setStatus(value) {
       currentStatus = value
     },
+    setCloudState(state, extra = {}) {
+      currentStatus = { ...currentStatus, state, ...extra }
+    },
+    calls,
+    setActionResult(name, value) { actionResults[name] = value },
     async refresh() {
       await injected.status.refresh()
     },
@@ -674,6 +767,8 @@ test('when developer mode is enabled, diagnostics appear and configuration stays
 test('the official password input shows presence and stores only a typed replacement', async () => {
   const runtime = await createSettingsRuntime()
   try {
+    runtime.render()
+    await runtime.settle()
     runtime.render()
     await runtime.settle()
     const host = find(runtime.render(), (node) => node.type === UI.Input && node.props.type === 'password')
@@ -1434,6 +1529,406 @@ test('unknown device OS labels, invalid pairing times and missing optional metad
     assert.match(text(tree), /Linux/)
     assert.doesNotMatch(text(tree), /plan9|not-a-time/)
   } finally {
+    await runtime.dispose()
+  }
+})
+
+async function createManagedRuntime(options = {}) {
+  const runtime = await createSettingsRuntime({ managed: true, ...options })
+  runtime.render()
+  await runtime.settle()
+  runtime.render()
+  await runtime.settle()
+  return runtime
+}
+
+const managedButton = (runtime, label) => find(runtime.render(), (node) => node.type === UI.Button && text(node) === label)
+const managedDisclosure = (runtime, title) => find(runtime.render(), (node) => node.type === UI.DisclosureRow && node.props.title === title)
+
+test('a fresh managed install shows one cloud action and no technical fields or automatic enrollment', async () => {
+  const opened = []
+  const originalWindow = globalThis.window
+  const runtime = await createManagedRuntime()
+  try {
+    globalThis.window = { ...originalWindow, open: (...args) => { opened.push(args); return null } }
+    const tree = runtime.render()
+    const rendered = text(tree)
+    assert.match(rendered, /连接到 WhaleRein Cloud/)
+    assert.match(rendered, /账号登录始终留在浏览器中/)
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.variant, 'primary')
+    assert.equal(find(tree, (node) => node.type === UI.Menu), undefined)
+    for (const label of ['服务器', '主机 ID', '主机 Token', '主机凭据', '服务端口', '传输端口']) {
+      assert.equal(find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === label), undefined)
+    }
+    assert.deepEqual(runtime.calls, [], 'loading the page must not start enrollment')
+    assert.deepEqual(opened, [], 'loading the page must not open a browser')
+    assert.doesNotMatch(rendered, /生成配对链接|已配对设备/)
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('duplicate clicks start one managed connection and browser blocking leaves a usable approval link', async () => {
+  const originalWindow = globalThis.window
+  const opened = []
+  const runtime = await createManagedRuntime()
+  try {
+    globalThis.window = { ...originalWindow, open: (...args) => { opened.push(args); return null } }
+    let finish
+    runtime.remote.whalerein.startConnect = (request) => {
+      runtime.calls.push(['startConnect', request])
+      return new Promise((resolve) => { finish = resolve })
+    }
+    const connect = managedButton(runtime, '连接到 WhaleRein Cloud')
+    const first = connect.props.onClick()
+    const second = connect.props.onClick()
+    assert.equal(runtime.calls.length, 1, 'a second click while requesting must not create another intent')
+    runtime.setCloudState('awaiting_approval', { approvalUrl: 'https://app.example/approve/request-1' })
+    finish({ ok: true, value: { approvalUrl: 'https://app.example/approve/request-1' } })
+    await Promise.all([first, second])
+    await runtime.settle()
+    const tree = runtime.render()
+    assert.match(text(tree), /浏览器阻止了新标签页/)
+    const link = find(tree, (node) => node.type === 'a' && text(node) === '打开浏览器')
+    assert.ok(link)
+    assert.equal(link.props.href, 'https://app.example/approve/request-1?locale=zh-CN')
+    assert.equal(link.props.target, '_blank')
+    assert.equal(opened.length, 1)
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('an explicit connection action opens the reserved browser tab when allowed', async () => {
+  const originalWindow = globalThis.window
+  const tab = { location: { href: '' }, close() {} }
+  const opened = []
+  const runtime = await createManagedRuntime()
+  try {
+    globalThis.window = { ...originalWindow, open: (...args) => { opened.push(args); return tab } }
+    runtime.setActionResult('startConnect', { ok: true, value: { approvalUrl: 'https://app.example/approve/request-2' } })
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    await runtime.settle()
+    assert.equal(opened.length, 1)
+    assert.equal(tab.location.href, 'https://app.example/approve/request-2?locale=zh-CN')
+    assert.equal(tab.opener, null)
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('every managed lifecycle state has actionable localized text and no false connected state', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const states = ['idle', 'requesting', 'awaiting_approval', 'enrolling', 'recovering',
+      'connecting', 'connected', 'reconnecting', 'disconnected', 'denied', 'expired',
+      'action_required', 'removing', 'removed']
+    for (const state of states) {
+      runtime.setCloudState(state, {
+        connected: state === 'connected',
+        approvalUrl: state === 'awaiting_approval' ? 'https://app.example/approve/x' : '',
+      })
+      await runtime.refresh()
+      const tree = runtime.render()
+      const rendered = text(tree)
+      assert.match(rendered, new RegExp(runtime.locales.dictionaries.zh[`state_${state}`]), state)
+      assert.equal(find(tree, (node) => node.props?.role === 'status') !== undefined, true, state)
+      if (state !== 'connected') assert.doesNotMatch(rendered, /这台电脑已连接，可以进行远程控制/)
+      if (state === 'awaiting_approval') assert.match(rendered, /打开浏览器/)
+      if (['requesting', 'awaiting_approval', 'enrolling', 'recovering'].includes(state)) assert.match(rendered, /取消/)
+      if (['denied', 'expired', 'action_required'].includes(state)) assert.match(rendered, /重试/)
+    }
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('active staging stays labeled and switchable when details and Developer tools are collapsed', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      state: 'connected',
+      connected: true,
+      environment: 'staging',
+      stagingEnabled: true,
+      profileId: 'profile-staging',
+      label: 'WhaleRein Cloud Staging',
+      profiles: [
+        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: false, managed: true },
+        { id: 'profile-staging', label: 'WhaleRein Cloud Staging', environment: 'staging', active: true, managed: true },
+      ],
+    })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.ok(find(tree, (node) => node.props?.['data-whalerein-staging'] === 'true'), 'staging label is visible')
+    assert.match(text(tree), /Staging/)
+    assert.equal(managedDisclosure(runtime, '连接详情').props.open, false)
+    assert.equal(managedDisclosure(runtime, '开发者工具'), undefined)
+    const switchBack = managedButton(runtime, '切换回生产环境')
+    assert.ok(switchBack, 'production switch is reachable without Developer tools')
+    await switchBack.props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'profile-production']])
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('enabling staging never activates it and explicit profile selection does', async () => {
+  const runtime = await createManagedRuntime({ development: true })
+  try {
+    assert.match(text(runtime.render()), /开发者工具/)
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      profiles: [
+        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
+      ],
+    })
+    await runtime.refresh()
+    runtime.render()
+    await managedButton(runtime, '启用 Staging').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.map(([name]) => name), ['enableStaging'])
+    assert.equal(runtime.getStatus().environment, 'production', 'enabling staging does not switch')
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      stagingEnabled: true,
+      profiles: [
+        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
+        { id: 'profile-staging', label: 'WhaleRein Cloud Staging', environment: 'staging', active: false, managed: true },
+      ],
+    })
+    await runtime.refresh()
+    runtime.render()
+    await managedButton(runtime, '使用 Staging').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'profile-staging']])
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('disconnect, remote removal and local profile deletion use distinct wording and calls', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    const tree = runtime.render()
+    const rendered = text(tree)
+    assert.match(rendered, /断开连接只会在本地暂停这台电脑/)
+    assert.match(rendered, /移除这台电脑需要新的浏览器授权/)
+    const remove = managedButton(runtime, '移除这台电脑')
+    assert.ok(remove)
+    await findAll(tree, (node) => node.type === UI.Button && text(node) === '断开连接')[0].props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.map(([name]) => name), ['disconnect'])
+    runtime.setCloudState('removing', { connected: true })
+    await runtime.refresh()
+    const removing = text(runtime.render())
+    assert.match(removing, /正在移除这台电脑/)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    runtime.setCloudState('removed', { connected: false })
+    await runtime.refresh()
+    const removed = text(runtime.render())
+    assert.match(removed, /这台电脑已被移除/)
+    assert.match(removed, /重新添加这台电脑需要新的浏览器授权/)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    assert.equal(runtime.calls.some(([name]) => name === 'remove'), false)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('managed state changes announce through role=status and move focus to the status region', async () => {
+  const originalDocument = globalThis.document
+  const focused = []
+  const runtime = await createManagedRuntime()
+  try {
+    globalThis.document = { getElementById: (id) => ({ focus: () => focused.push(id) }) }
+    const tree = runtime.render()
+    const status = find(tree, (node) => node.props?.role === 'status')
+    assert.ok(status)
+    assert.equal(status.props['aria-live'], 'assertive')
+    assert.equal(status.props['aria-atomic'], 'true')
+    assert.equal(status.props.tabIndex, -1)
+    runtime.setCloudState('awaiting_approval', { approvalUrl: 'https://app.example/approve/x' })
+    await runtime.refresh()
+    runtime.render()
+    assert.ok(focused.length >= 1)
+    assert.match(focused.at(-1), /-state$/)
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.render()
+    assert.equal(find(runtime.render(), (node) => node.props?.role === 'status').props['aria-live'], 'polite')
+  } finally {
+    globalThis.document = originalDocument
+    await runtime.dispose()
+  }
+})
+
+test('connection details are collapsed by default and show only redacted diagnostics', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    assert.equal(managedDisclosure(runtime, '连接详情').props.open, false)
+    runtime.setActionResult('details', {
+      ok: true,
+      value: {
+        state: 'connected', environment: 'production', region: 'eu-west', accessOrigin: 'https://access.example',
+        revision: 7, lastErrorCode: 'temporarily_unavailable',
+        hostId: 'host-private', route: 'mqtts://private.example', token: 'secret-token',
+        authorization: { signature: 'private' },
+      },
+    })
+    managedDisclosure(runtime, '连接详情').props.onToggle()
+    await runtime.settle()
+    await managedButton(runtime, '刷新详情').props.onClick()
+    await runtime.settle()
+    const rendered = text(runtime.render())
+    assert.match(rendered, /eu-west/)
+    assert.match(rendered, /https:\/\/access\.example/)
+    assert.match(rendered, /temporarily_unavailable/)
+    assert.doesNotMatch(rendered, /host-private|private\.example|secret-token|private/)
+    assert.doesNotMatch(rendered, /主机 ID|host-private|mqtts:/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('advanced custom services and inactive local profile deletion are explicit manager calls', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      profileId: 'profile-production',
+      profiles: [
+        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
+        { id: 'profile-old', label: 'Old staging', environment: 'staging', active: false, managed: true },
+      ],
+    })
+    await runtime.refresh()
+    const tree = runtime.render()
+    const label = find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === '服务名称')
+    const origin = find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === 'API 来源')
+    label.props.onChange({ target: { value: 'Reviewed service' } })
+    origin.props.onChange({ target: { value: 'https://service.example' } })
+    await managedButton(runtime, '添加自定义服务').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'addCustomService'),
+      [['addCustomService', { label: 'Reviewed service', apiOrigin: 'https://service.example' }]])
+    const deletes = findAll(runtime.render(), (node) => node.type === UI.Button && /删除本地配置/.test(node.props?.['aria-label'] ?? ''))
+    assert.equal(deletes.length, 2)
+    assert.equal(deletes[0].props.disabled, true, 'active profile cannot be deleted')
+    assert.equal(deletes[1].props.disabled, false)
+    await deletes[1].props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'deleteProfile'), [['deleteProfile', 'profile-old']])
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a failed managed action is announced without exposing the private failure text', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('awaiting_approval', { approvalUrl: 'https://app.example/approve/x' })
+    await runtime.refresh()
+    runtime.setActionResult('cancel', new Error('private runtime detail'))
+    await managedButton(runtime, '取消').props.onClick()
+    await runtime.settle()
+    const tree = runtime.render()
+    const alert = find(tree, (node) => node.props?.role === 'alert')
+    assert.equal(text(alert), '无法完成连接操作，请重试。')
+    assert.doesNotMatch(text(tree), /private runtime detail/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('an unsafe approval URL is never rendered as an open-browser action', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('awaiting_approval', { approvalUrl: 'javascript:alert(1)' })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.equal(find(tree, (node) => node.type === 'a' && /打开浏览器/.test(text(node))), undefined)
+    assert.doesNotMatch(text(tree), /javascript:/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('staging switching falls back to manager-returned opaque ids when the snapshot has no profile list', async () => {
+  const runtime = await createManagedRuntime({ development: true })
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      profileId: 'production-id-1',
+      environment: 'production',
+      profiles: [],
+      stagingEnabled: false,
+    })
+    await runtime.refresh()
+    runtime.setActionResult('enableStaging', {
+      ok: true,
+      value: {
+        ...runtime.getStatus(), stagingEnabled: true,
+        action: { id: 'staging-id-1', label: 'WhaleRein Cloud Staging', environment: 'staging', active: false },
+      },
+    })
+    runtime.render()
+    await managedButton(runtime, '启用 Staging').props.onClick()
+    await runtime.settle()
+    runtime.setStatus({ ...runtime.getStatus(), stagingEnabled: true })
+    await runtime.refresh()
+    runtime.render()
+    await managedButton(runtime, '使用 Staging').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'staging-id-1']])
+    runtime.setStatus({ ...runtime.getStatus(), environment: 'staging', profileId: 'staging-id-1' })
+    await runtime.refresh()
+    runtime.render()
+    await managedButton(runtime, '切换回生产环境').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'),
+      [['switchProfile', 'staging-id-1'], ['switchProfile', 'production-id-1']])
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('Remove this computer opens the browser-authorized management URL and stays removing', async () => {
+  const originalWindow = globalThis.window
+  const runtime = await createManagedRuntime()
+  try {
+    globalThis.window = { ...originalWindow, open: () => null }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('remove', {
+      ok: true,
+      value: {
+        ...runtime.getStatus(), state: 'removing',
+        action: { state: 'removing', url: 'https://app.example/hosts/host-1', remoteRevocation: 'pending' },
+      },
+    })
+    await managedButton(runtime, '移除这台电脑').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'remove'), [['remove']])
+    runtime.setCloudState('removing', { connected: true })
+    await runtime.refresh()
+    const tree = runtime.render()
+    const link = find(tree, (node) => node.type === 'a' && text(node) === '打开浏览器')
+    assert.equal(link.props.href, 'https://app.example/hosts/host-1?locale=zh-CN')
+    assert.match(text(tree), /浏览器阻止了新标签页/)
+    assert.match(text(tree), /请在浏览器中确认移除/)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+  } finally {
+    globalThis.window = originalWindow
     await runtime.dispose()
   }
 })

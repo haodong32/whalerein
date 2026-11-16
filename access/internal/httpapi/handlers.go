@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -341,21 +342,36 @@ func bearerToken(r *http.Request) (string, error) {
 }
 
 func (s *Server) decodeProto(w http.ResponseWriter, r *http.Request, message proto.Message) error {
-	if err := requireJSONContentType(r); err != nil {
+	data, err := s.readJSONBody(w, r)
+	if err != nil {
 		return err
+	}
+	return decodeJSONMessage(data, message)
+}
+
+// readJSONBody applies the shared content-type and body bounds, then returns
+// the raw bytes so a wrapper document can be decoded before its embedded
+// protobuf message.
+func (s *Server) readJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	if err := requireJSONContentType(r); err != nil {
+		return nil, err
 	}
 	reader := http.MaxBytesReader(w, r.Body, s.deps.MaxBodyBytes)
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return errBodyTooLarge
+			return nil, errBodyTooLarge
 		}
-		return errInvalidBody
+		return nil, errInvalidBody
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return errInvalidBody
+		return nil, errInvalidBody
 	}
+	return data, nil
+}
+
+func decodeJSONMessage(data []byte, message proto.Message) error {
 	// DecodeJSON owns the cross-version policy: an additive field from a newer
 	// peer is ignored, while an enum value this build does not know is an
 	// explicit incompatibility instead of a silent zero value. Syntax and type
@@ -393,6 +409,21 @@ func (s *Server) writeProto(w http.ResponseWriter, status int, message proto.Mes
 	data, err := (protojson.MarshalOptions{EmitUnpopulated: false}).Marshal(message)
 	if err != nil {
 		s.deps.Logger.Error("http response encode failed")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":"internal","message":"internal error"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
+// writeJSON encodes one small non-protobuf response document.
+func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		s.deps.Logger.Error("http JSON response encode failed")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"code":"internal","message":"internal error"}`))

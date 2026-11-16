@@ -49,6 +49,85 @@ function optionalPort(raw, name) {
   return integer(value, undefined, { min: 1, max: 65535, name })
 }
 
+const CONNECTION_MODES = ['auto', 'managed', 'standalone']
+
+function connectionMode(raw) {
+  const value = String(pick(raw, ['connection_mode'], 'auto') ?? 'auto').trim()
+  if (!CONNECTION_MODES.includes(value)) {
+    throw new ConfigError('invalid_config', 'connection_mode must be auto, managed, or standalone')
+  }
+  return value
+}
+
+/** A profile that already has manual connection material stays Standalone. */
+export function hasStandaloneConfig(raw = {}) {
+  return ['server', 'mqtt_url', 'host_token'].some((name) => String(pick(raw, [name], '') ?? '').trim() !== '')
+}
+
+/**
+ * Decide how this profile connects. Auto preserves every existing manual
+ * installation and treats a fresh profile without connection material as the
+ * managed WhaleRein Cloud flow.
+ */
+export function resolveConnectionMode(raw = {}) {
+  const mode = connectionMode(raw)
+  if (mode !== 'auto') return mode
+  return hasStandaloneConfig(raw) ? 'standalone' : 'managed'
+}
+
+/**
+ * Validate manager-owned profile options. These keys are additive: an existing
+ * Standalone profile keeps resolving through resolveConfig unchanged.
+ */
+export function resolveManagerConfig(raw = {}) {
+  const adapter = pick(raw, ['adapter'], 'auto')
+  if (!['auto', 'fake', 'real'].includes(adapter)) {
+    throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
+  }
+  const stateRoot = pick(raw, ['state_root', 'state_dir'], join(homedir(), '.whalerein', 'dsh'))
+  if (typeof stateRoot !== 'string' || stateRoot.trim() === '' || stateRoot.includes('\0') || stateRoot.length > 4096) {
+    throw new ConfigError('invalid_config', 'state_root must be a non-empty path')
+  }
+  const profileId = pick(raw, ['profile_id'], '')
+  if (typeof profileId !== 'string' || (profileId !== '' && (!/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(profileId)))) {
+    throw new ConfigError('invalid_config', 'profile_id must be an opaque profile identifier')
+  }
+  const issuerPublicKey = pick(raw, ['enrollment_issuer_public_key'], '')
+  if (issuerPublicKey !== '' && (typeof issuerPublicKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(issuerPublicKey))) {
+    throw new ConfigError('invalid_config', 'enrollment_issuer_public_key must be one base64url Ed25519 public key')
+  }
+  const expectedIssuer = pick(raw, ['enrollment_issuer'], '')
+  if (expectedIssuer !== '') {
+    try {
+      void new URL(expectedIssuer)
+    } catch {
+      throw new ConfigError('invalid_config', 'enrollment_issuer must be an absolute URL')
+    }
+  }
+  return {
+    connectionMode: 'managed',
+    adapter,
+    stateRoot: stateRoot.trim(),
+    stateDir: stateRoot.trim(),
+    profileId,
+    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
+    issuerPublicKey,
+    expectedIssuer,
+    pendingQueueEnabled: boolean(pick(raw, ['pending_queue_enabled'], true), true),
+    enableOpenQuestionBroker: boolean(pick(raw, ['enable_open_question_broker'], true), true),
+    logLevel: pick(raw, ['log_level'], 'info'),
+    runtimeConfig: {
+      caFile: pick(raw, ['ca_file'], '') || '',
+      outboxPerDeviceLimit: integer(raw.outbox_per_device_limit, 100, { min: 1, max: 100_000, name: 'outbox_per_device_limit' }),
+      outboxTotalLimit: integer(raw.outbox_total_limit, 1000, { min: 1, max: 1_000_000, name: 'outbox_total_limit' }),
+      reconnectMinMs: integer(raw.reconnect_min_ms, 500, { min: 50, max: 60_000, name: 'reconnect_min_ms' }),
+      reconnectMaxMs: integer(raw.reconnect_max_ms, 30_000, { min: 100, max: 600_000, name: 'reconnect_max_ms' }),
+      shutdownTimeoutMs: integer(raw.shutdown_timeout_ms, 5000, { min: 100, max: 120_000, name: 'shutdown_timeout_ms' }),
+      logLevel: pick(raw, ['log_level'], 'info'),
+    },
+  }
+}
+
 /** Host name or IPv4 address. Ports and schemes belong in the advanced fields. */
 export function serverHost(value) {
   const text = String(value ?? '').trim()
@@ -140,7 +219,13 @@ export function resolveConfig(raw = {}) {
     throw new ConfigError('invalid_config', 'approval_mode must be claim or delegate')
   }
 
+  const mode = connectionMode(raw)
+  const stateRoot = pick(raw, ['state_root', 'state_dir'], stateDir)
   return {
+    connectionMode: mode === 'auto' ? 'standalone' : mode,
+    stateRoot,
+    profileId: String(pick(raw, ['profile_id'], '') ?? ''),
+    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
     accessUrl: accessUrl || '',
     server,
     adminToken,

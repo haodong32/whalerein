@@ -158,3 +158,34 @@ test('probe login uses a unique isolated identity and terminates on CONNACK', as
     assert.equal(ended, 1)
   }
 })
+
+test('a draft is testable while the plugin hosts a managed cloud profile', async () => {
+  const access = http.createServer((req, res) => { res.writeHead(200); res.end() })
+  const mqttServer = net.createServer((socket) => {
+    socket.once('data', () => socket.write(Buffer.from([0x20, 3, 0, 0, 0])))
+    socket.on('error', () => {})
+  })
+  try {
+    const accessPort = await listen(access)
+    const mqttPort = await listen(mqttServer)
+    const host = {
+      managed: true,
+      manager: { snapshot: () => ({ state: 'idle' }) },
+      started: true,
+      config: {
+        connectionMode: 'managed', stateRoot: '/tmp/whalerein-state',
+        allowInsecureMqtt: true, hostId: '', hostToken: '', accessUrl: '', mqttUrl: '', caFile: '',
+      },
+    }
+    assert.deepEqual(await testConnection(host, {}), { configuration: { ok: false, code: 'invalid_config' } })
+    const result = await testConnection(host, {
+      server: '127.0.0.1', host_id: 'managed-test-host', host_token: 'managed-test-token',
+      access_port: String(accessPort), mqtt_port: String(mqttPort), ca_file: '', log_level: 'info',
+    })
+    assert.deepEqual(result, {
+      configuration: { ok: true }, access: { ok: true }, mqtt: { ok: true, authenticated: true }, running: 'not_checked',
+    })
+  } finally {
+    await Promise.all([close(access), close(mqttServer)])
+  }
+})

@@ -663,3 +663,23 @@ func TestCheckConfigRejectsAMissingBrokerCAFile(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
+
+func TestRunCleanupRepeatsOnItsIntervalUntilCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	recorder := &cleanupRecorder{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCleanup(ctx, recorder, 5*time.Millisecond, time.Hour, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), nil)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup did not stop after cancellation")
+	}
+	if len(recorder.calls) <= 3 {
+		t.Fatalf("expected more than the first pass, got %d calls", len(recorder.calls))
+	}
+}
