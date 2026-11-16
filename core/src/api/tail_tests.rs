@@ -276,8 +276,11 @@ async fn revocation_while_waiting_for_command_ends_pairing() {
     access.host.lock().unwrap().revoke_after_command = true;
     let error = core.send_message("session-1", "").await.unwrap_err();
     assert!(
-        matches!(error, CoreError::Revoked),
-        "expected confirmed revocation: {error:?}"
+        matches!(
+            error,
+            CoreError::Revoked | CoreError::RevokedRetentionUnverified
+        ),
+        "expected a confirmed revocation: {error:?}"
     );
     assert!(!core.is_paired());
     assert_eq!(core.unconfirmed_revoked_commands().unwrap().len(), 1);

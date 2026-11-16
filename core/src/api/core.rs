@@ -2544,7 +2544,12 @@ impl Core {
                     .clear_local_pairing_async(&device_id, &revocation_intent)
                     .await
                 {
-                    if !matches!(error, CoreError::Cache(_) | CoreError::Unavailable(_)) {
+                    if !matches!(
+                        error,
+                        CoreError::Cache(_)
+                            | CoreError::Unavailable(_)
+                            | CoreError::RevokedRetentionUnverified
+                    ) {
                         return Err(error);
                     }
                 }
