@@ -57,6 +57,12 @@ acceptance claim.
   scoped directory, membership enforcement or capacity model, and its regional
   client still uses a deployment admin bearer rather than a scoped service
   identity.
+- **Account authentication is deferred.** The official client does not ship a
+  Bearer account session: device-bound credentials remain required, and the
+  pinned provider does not yet support DPoP. When a maintained provider
+  officially supports DPoP, re-run the native feasibility gate before
+  implementing login, refresh, directory, device registration or pairing
+  authorization. Do not add a Bearer fallback in the meantime.
 
 Treat the operations table below as the target contract, not current behavior.
 
