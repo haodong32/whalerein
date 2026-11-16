@@ -358,9 +358,11 @@ jobs:
       - name: Capture stack state and logs
         if: always()
         run: |
-          mkdir -p .data/runs/deployment
+          set +e
+          mkdir -p .data/runs/deployment || true
           docker compose -f deploy/compose/stack.yaml ps > .data/runs/deployment/ps.txt 2>&1 || true
           docker compose -f deploy/compose/stack.yaml logs --no-color > .data/runs/deployment/stack.log 2>&1 || true
+          exit 0
 
       - name: Upload deployment acceptance evidence
         if: always()
