@@ -85,7 +85,10 @@ func TestPostgresRestartAndReadOnlyFence(t *testing.T) {
 		// Access: a read-only database would also block startup migrations, so
 		// that path would test startup failure instead of a failing write.
 		terminateDatabaseSessions(t, s.db)
-		waitReady(t, s.accessURL)
+		// The write probe intentionally fails closed on a read-only database:
+		// /readyz must leave rotation even though the process still serves
+		// direct requests. Send the revoke directly and assert the write fence.
+		waitNotReady(t, s.accessURL)
 
 		status, body := s.request(t, http.MethodDelete, "/v1/devices/"+device, s.adminToken)
 		if status == http.StatusNoContent {

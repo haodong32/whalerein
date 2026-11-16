@@ -115,13 +115,19 @@ class WhaleReinUITestCase: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        tap(waitFor("host.picker", file: file, line: line))
+        let picker = waitFor("host.picker", file: file, line: line)
+        tap(picker, file: file, line: line)
         let byIdentifier = app.buttons["host.row.\(hostId)"]
         if byIdentifier.waitForExistence(timeout: 3) {
             byIdentifier.tap()
             return
         }
         let byLabel = app.buttons[hostId]
+        // A rotation or re-layout can dismiss the menu between the wait and
+        // the tap; reopen it once before declaring the item missing.
+        if !byLabel.waitForExistence(timeout: 2) {
+            tap(picker, file: file, line: line)
+        }
         XCTAssertTrue(
             byLabel.waitForExistence(timeout: 10),
             "Host menu item \(hostId) was not found",

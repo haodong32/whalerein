@@ -382,6 +382,22 @@ func waitReady(t *testing.T, accessURL string) {
 	t.Fatal("Access did not become ready")
 }
 
+func waitNotReady(t *testing.T, accessURL string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(accessURL + "/readyz")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatal("Access stayed ready on a read-only database")
+}
+
 func eventPayload(hostID, deviceID string) []byte {
 	envelope := &whalereinv1.EventEnvelope{
 		HostId:          hostID,
