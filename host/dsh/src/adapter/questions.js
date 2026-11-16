@@ -5,6 +5,13 @@ import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js
 import { bytesEqual } from 'whalerein-host/security/digest.js'
 
 function invalid() { throw new AdapterError('invalid_argument', 'invalid question answer') }
+function aborted(signal) {
+  return new Promise((_, reject) => {
+    const fail = () => reject(new DefinitiveExecutionError('conflict'))
+    if (signal.aborted) return fail()
+    signal.addEventListener('abort', fail, { once: true })
+  })
+}
 export function assertQuestionAdmission(context, now = Date.now) {
   const expiresAt = Number(context?.expiresAt ?? 0)
   if (expiresAt > 0 && now() >= expiresAt) throw new DefinitiveExecutionError('expired')
@@ -281,7 +288,9 @@ export class OpenQuestionBroker {
     catch { throw new DefinitiveExecutionError('invalid_argument') }
     record.busy = true
     const claimAbort = new AbortController()
-    const claimSignal = AbortSignal.any([signal, claimAbort.signal, record.sourceSignal].filter(Boolean))
+    const attempt = new AbortController()
+    record.answerAbort = attempt
+    const claimSignal = AbortSignal.any([signal, claimAbort.signal, record.sourceSignal, attempt.signal].filter(Boolean))
     let iterator
     try {
       if (record.request.wait?.timed) {
@@ -290,22 +299,43 @@ export class OpenQuestionBroker {
         const opening = await iterator.next()
         assertQuestionAdmission({ ...context, signal }, this.#now)
         if (opening.done) throw new DefinitiveExecutionError('conflict')
-        if (this.#records.get(JSON.stringify([sessionId, callId])) !== record || signal?.aborted || record.sourceSignal?.aborted || !this.#isRoot(record.agent) || record.agent.session !== record.ownerSession) {
+        if (attempt.signal.aborted || this.#records.get(JSON.stringify([sessionId, callId])) !== record || signal?.aborted || record.sourceSignal?.aborted || !this.#isRoot(record.agent) || record.agent.session !== record.ownerSession) {
           throw new DefinitiveExecutionError('conflict')
         }
         record.claim = this.#handles.register(sessionId, callId, () => claimAbort.abort())
       }
-      if (this.#records.get(JSON.stringify([sessionId, callId])) !== record || signal?.aborted || record.sourceSignal?.aborted || !this.#isRoot(record.agent) || record.agent.session !== record.ownerSession) throw new DefinitiveExecutionError('conflict')
+      if (attempt.signal.aborted || this.#records.get(JSON.stringify([sessionId, callId])) !== record || signal?.aborted || record.sourceSignal?.aborted || !this.#isRoot(record.agent) || record.agent.session !== record.ownerSession) throw new DefinitiveExecutionError('conflict')
       // This is the last synchronous boundary before native settlement.
       assertQuestionAdmission({ ...context, signal }, this.#now)
       record.remote.resolve({ kind: 'remote', value: { answers } })
-      const winner = await record.completed.promise
+      const winner = await Promise.race([record.completed.promise, aborted(attempt.signal)])
       if (winner !== 'remote') throw new DefinitiveExecutionError('conflict')
       return { batch_id: batch.batch_id, phase: 'QUESTION_SETTLED' }
     } finally {
       claimAbort.abort()
-      if (record.claim) { try { record.claim.release() } catch { /* Return path does not fabricate settlement. */ }; record.claim = null }
+      attempt.abort()
+      // A later interrupt may have released the claim and allowed a new answer
+      // to start. Only this attempt may clear the busy flag and claim it owns.
+      if (record.answerAbort === attempt) {
+        record.answerAbort = null
+        if (record.claim) { try { record.claim.release() } catch { /* Return path does not fabricate settlement. */ }; record.claim = null }
+        record.busy = false
+      }
       if (iterator) await iterator.return()
+    }
+  }
+
+  // A session interrupt cancels the source turn that owns the claim. Release the
+  // claim and settle only this adapter's in-flight answer so a later question is
+  // not permanently rejected by a leaked `busy` flag or handle.
+  interruptSession(sessionId) {
+    for (const record of this.#records.values()) {
+      if (record.agent?.id !== sessionId) continue
+      try { record.answerAbort?.abort() } catch { /* teardown continues */ }
+      if (record.claim) {
+        try { record.claim.release('interrupted') } catch { /* the answer finally also resets busy */ }
+        record.claim = null
+      }
       record.busy = false
     }
   }

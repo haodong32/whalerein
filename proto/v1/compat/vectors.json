@@ -1,0 +1,161 @@
+{
+  "schema": "whalerein/proto-compat-vectors/v1",
+  "comment": "Portable old/new reader vectors. Unknown fields are additive; unknown enums require an explicit validator error; a oneof must carry one known variant; 64-bit JSON integers stay exact.",
+  "vectors": [
+    {
+      "id": "json-unknown-field-is-ignored",
+      "kind": "json-decode",
+      "message": "whalerein.v1.HostRequest",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "requestId": "req-1",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "kind": "REQUEST_KIND_QUERY",
+        "expiresAtUnixMs": "1700000000000",
+        "protocolVersion": 1,
+        "futureField": {
+          "nested": [
+            1,
+            2,
+            3
+          ]
+        },
+        "futureFieldTwo": "ignored"
+      },
+      "expect": {
+        "requestId": "req-1",
+        "kind": "REQUEST_KIND_QUERY",
+        "protocolVersion": 1
+      }
+    },
+    {
+      "id": "json-old-reader-accepts-missing-new-fields",
+      "kind": "json-decode",
+      "message": "whalerein.v1.HostResult",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "requestId": "req-2",
+        "status": "succeeded"
+      },
+      "expect": {
+        "requestId": "req-2",
+        "status": "succeeded"
+      }
+    },
+    {
+      "id": "binary-unknown-tag-is-ignored",
+      "kind": "binary-decode",
+      "message": "whalerein.v1.HostRequest",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "hex": "0a057265712d317801",
+      "expect": {
+        "requestId": "req-1"
+      }
+    },
+    {
+      "id": "json-unknown-enum-name-is-explicit",
+      "kind": "json-reject-unknown-enum",
+      "message": "whalerein.v1.HostRequest",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "requestId": "req-3",
+        "kind": "REQUEST_KIND_FUTURE"
+      },
+      "errorCode": "protocol_version_incompatible"
+    },
+    {
+      "id": "json-unknown-enum-number-needs-validation",
+      "kind": "json-enum-number-validation",
+      "message": "whalerein.v1.HostRequest",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "requestId": "req-4",
+        "kind": 99
+      },
+      "errorCode": "protocol_version_incompatible"
+    },
+    {
+      "id": "request-payload-missing-oneof",
+      "kind": "oneof-required",
+      "message": "whalerein.v1.RequestPayload",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {},
+      "errorCode": "invalid_argument"
+    },
+    {
+      "id": "request-payload-unknown-oneof-variant",
+      "kind": "oneof-required",
+      "message": "whalerein.v1.RequestPayload",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "futureCommand": {
+          "sessionId": "s-1"
+        }
+      },
+      "errorCode": "invalid_argument"
+    },
+    {
+      "id": "int64-near-two-to-the-53",
+      "kind": "json-int64-string",
+      "message": "whalerein.v1.HostRequest",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "requestId": "req-5",
+        "expiresAtUnixMs": "9007199254740993",
+        "protocolVersion": 1
+      },
+      "expect": {
+        "requestId": "req-5",
+        "expiresAtUnixMs": "9007199254740993"
+      }
+    },
+    {
+      "id": "zero-values-are-omitted",
+      "kind": "json-zero-omission",
+      "message": "whalerein.v1.HostResult",
+      "languages": [
+        "rust",
+        "go"
+      ],
+      "json": {
+        "requestId": "req-6"
+      },
+      "expect": {
+        "requestId": "req-6"
+      }
+    }
+  ]
+}

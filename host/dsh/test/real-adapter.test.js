@@ -439,7 +439,7 @@ test('when approval digest/version, expiry, session state, or decision is invali
   now += 200
   assert.equal((await adapter.getApproval(third.approvalId)).state, 'expired')
   await assert.rejects(adapter.resolveApproval(third.approvalId, 'approve', third.digest, third.version), (error) => error.code === 'approval_expired')
-  assert.equal(await outcome, 'unavailable')
+  assert.equal(await outcome, 'cancelled')
   await adapter.close()
 })
 
@@ -1410,4 +1410,81 @@ test('pending queue and open question broker can be opted out without closing de
     assert.deepEqual(adapter.supportedDeliveryModes(), ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER'])
     await assert.rejects(adapter.readPendingQueue('s1'), error => error.code === 'unsupported_capability')
   } finally { await adapter.close() }
+})
+
+test('queue action availability re-reads once when the session becomes running', async () => {
+  let reads = 0, updates = 0
+  const item = { id: 'q', placement: 'queued', rpcId: 'r', content: [{ type: 'text', text: 'fixture' }] }
+  const ctx = makeCtx({})
+  ctx.sessionController.state = async () => {
+    reads++
+    // The first observation happens while idle (PROMOTE is not offered); the
+    // session starts running before the native update.
+    return { running: reads > 1, queue: [item] }
+  }
+  ctx.sessionController.updateQueue = async request => { updates++; assert.deepEqual(request.action, { kind: 'steer' }) }
+  const adapter = new RealDshAdapter({ ctx, config: { pendingQueueEnabled: true } })
+  await adapter.updatePendingQueue('s1', { item_id: 'q', action: 'PROMOTE' })
+  assert.equal(reads, 2)
+  assert.equal(updates, 1)
+})
+
+test('queue action availability stays a definitive conflict when the action never appears', async () => {
+  let reads = 0, updates = 0
+  const item = { id: 'q', placement: 'queued', rpcId: 'r', content: [{ type: 'text', text: 'fixture' }] }
+  const ctx = makeCtx({})
+  ctx.sessionController.state = async () => { reads++; return { running: false, queue: [item] } }
+  ctx.sessionController.updateQueue = async () => { updates++ }
+  const adapter = new RealDshAdapter({ ctx, config: { pendingQueueEnabled: true } })
+  await assert.rejects(adapter.updatePendingQueue('s1', { item_id: 'q', action: 'PROMOTE' }),
+    error => error.code === 'conflict' && error.name === 'DefinitiveExecutionError')
+  assert.equal(reads, 2)
+  assert.equal(updates, 0)
+})
+
+test('interrupt releases a claimed approval and emits a typed INTERRUPTED attempt end', async () => {
+  const live = new Map()
+  const session = makeLiveSession({ running: true })
+  live.set('s1', session)
+  const ctx = makeCtx({ live })
+  const adapter = new RealDshAdapter({ ctx, config: { approvalTtlMs: 60_000 } })
+  await adapter.open()
+  try {
+    const seen = []
+    adapter.watch('s1', (update) => seen.push(update))
+    const outcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash', reason: 'fixture' }, async () => 'unavailable')[0]
+    const [approval] = await adapter.listApprovals('s1')
+    assert.ok(approval)
+    await adapter.interrupt('s1')
+    assert.equal(await outcome, 'cancelled')
+    assert.equal((await adapter.getApproval(approval.approvalId)).state, 'unavailable')
+    assert.equal((await adapter.listApprovals('s1')).length, 0)
+    const wait = await adapter.readWaitState('s1', new AbortController().signal)
+    assert.equal(wait.pendingInput.includes('approval'), false)
+    const ended = seen.filter((update) => update.live?.ended?.outcome === 'INTERRUPTED')
+    assert.equal(ended.length, 1)
+    assert.equal(ended[0].live.attempt.live_epoch, adapter.conversation.epoch)
+  } finally {
+    await adapter.close()
+  }
+})
+
+test('delegate mode claims no approval and still publishes an interrupt attempt end', async () => {
+  const live = new Map()
+  const session = makeLiveSession({ running: true })
+  live.set('s1', session)
+  const ctx = makeCtx({ live })
+  const adapter = new RealDshAdapter({ ctx, config: { approvalMode: 'delegate' } })
+  await adapter.open()
+  try {
+    const seen = []
+    adapter.watch('s1', (update) => seen.push(update))
+    const outcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash' }, async () => 'allowed-once')[0]
+    assert.equal(await outcome, 'allowed-once')
+    await adapter.interrupt('s1')
+    assert.equal((await adapter.listApprovals('s1')).length, 0)
+    assert.equal(seen.filter((update) => update.live?.ended?.outcome === 'INTERRUPTED').length, 1)
+  } finally {
+    await adapter.close()
+  }
 })

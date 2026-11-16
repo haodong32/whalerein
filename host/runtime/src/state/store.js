@@ -1,14 +1,15 @@
 // Plugin-owned SQLite state. This is the only datastore in the plugin: host
 // public identity reference, peer public keys, applied revocations, command
-// dedupe/status/results, per-session sequence bases, and the bounded ciphertext
-// outbox. Message content, private keys, and a second event log never enter it.
+// dedupe/status/results, a bounded approval identity/terminal-state ledger,
+// per-session sequence bases, and the bounded ciphertext outbox. Message
+// content, approval reasons, private keys, and a second event log never enter it.
 
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { PluginError } from '../errors.js'
 
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 
 function blob(value) {
   if (value === null || value === undefined) return null
@@ -40,6 +41,25 @@ function rowCommand(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresAt: row.expires_at,
+  }
+}
+
+function rowApproval(row) {
+  if (!row) return null
+  return {
+    approvalId: row.approval_id,
+    sessionId: row.session_id,
+    toolName: row.tool_name ?? '',
+    callId: row.call_id ?? '',
+    digest: Buffer.from(row.digest),
+    version: row.version,
+    expiresAt: row.expires_at,
+    state: row.state,
+    decision: row.decision ?? 'unspecified',
+    revision: row.revision,
+    invalidatedReason: row.invalidated_reason ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 
@@ -82,7 +102,7 @@ export class StateStore {
     const hasMeta=this.#db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get()
     if (hasMeta) {
       const current=this.getMeta('schema_version')
-      if (current!==null && current!=='1' && current!=='2' && current!=='3' && current!=='4' && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
+      if (current!==null && !['1','2','3','4','5'].includes(current) && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -153,6 +173,27 @@ export class StateStore {
         this.#db.exec(`ALTER TABLE ${table} ADD COLUMN grant_generation INTEGER NOT NULL DEFAULT 0`)
       }
     }
+    // Approval ledger: identifiers, guard and terminal state only. The native
+    // reason is deliberately not stored (no second plaintext content log);
+    // pending approvals are observable through the live adapter.
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS approvals (
+        approval_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL DEFAULT '',
+        call_id TEXT NOT NULL DEFAULT '',
+        digest BLOB NOT NULL,
+        version INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'unspecified',
+        revision INTEGER NOT NULL DEFAULT 1,
+        invalidated_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS approvals_session ON approvals (session_id, created_at);
+    `)
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS event_outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,7 +206,7 @@ export class StateStore {
     `)
     this.#db.exec('DROP TABLE IF EXISTS session_seqs; DROP TABLE IF EXISTS session_seq_points;')
     const current = this.getMeta('schema_version')
-    if (current === null || current === '1' || current === '2' || current === '3' || current === '4') this.setMeta('schema_version', String(SCHEMA_VERSION))
+    if (current === null || ['1','2','3','4','5'].includes(current)) this.setMeta('schema_version', String(SCHEMA_VERSION))
     else if (Number(current) !== SCHEMA_VERSION) {
       throw new PluginError('internal', 'state schema version unsupported')
     }
@@ -445,6 +486,95 @@ export class StateStore {
   countCommands(status) {
     return this.#db.prepare('SELECT COUNT(*) AS n FROM commands WHERE status = ?').get(status).n
   }
+
+  // --- approval ledger ----------------------------------------------------
+
+  /**
+   * Record an approval identity/guard the first time the Host observes it.
+   * An approved/rejected record is never reopened. An observed live pending
+   * approval may reopen an `unavailable` (restart-invalidated) or `expired`
+   * record only when the adapter itself proves it is still pending.
+   */
+  recordApproval({ approvalId, sessionId, toolName = '', callId = '', digest, version, expiresAt, now = this.#now() }) {
+    const existing = this.getApprovalRecord(approvalId)
+    if (!existing) {
+      this.#db.prepare(`
+        INSERT INTO approvals (approval_id, session_id, tool_name, call_id, digest, version, expires_at,
+          state, decision, revision, invalidated_reason, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'unspecified', 1, NULL, ?, ?)
+      `).run(approvalId, sessionId, toolName, callId, blob(digest), version, expiresAt, now, now)
+      return this.getApprovalRecord(approvalId)
+    }
+    if (existing.state === 'approved' || existing.state === 'rejected') return existing
+    if (existing.state === 'pending') {
+      this.#db.prepare(`
+        UPDATE approvals SET session_id = ?, tool_name = ?, call_id = ?, digest = ?, version = ?,
+          expires_at = ?, updated_at = ?
+        WHERE approval_id = ?
+      `).run(sessionId, toolName, callId, blob(digest), version, expiresAt, now, approvalId)
+      return this.getApprovalRecord(approvalId)
+    }
+    this.#db.prepare(`
+      UPDATE approvals SET session_id = ?, tool_name = ?, call_id = ?, digest = ?, version = ?,
+        expires_at = ?, state = 'pending', decision = 'unspecified', invalidated_reason = NULL,
+        revision = revision + 1, updated_at = ?
+      WHERE approval_id = ?
+    `).run(sessionId, toolName, callId, blob(digest), version, expiresAt, now, approvalId)
+    return this.getApprovalRecord(approvalId)
+  }
+
+  getApprovalRecord(approvalId) {
+    const row = this.#db.prepare('SELECT * FROM approvals WHERE approval_id = ?').get(approvalId)
+    return row ? rowApproval(row) : null
+  }
+
+  /** Stable creation order, then approval identity, for deterministic lists. */
+  listApprovalRecords({ sessionId = '', state = null, limit = 64 } = {}) {
+    const rows = state === null
+      ? this.#db.prepare('SELECT * FROM approvals WHERE (? = \'\' OR session_id = ?) ORDER BY created_at ASC, rowid ASC LIMIT ?').all(sessionId, sessionId, limit)
+      : this.#db.prepare('SELECT * FROM approvals WHERE (? = \'\' OR session_id = ?) AND state = ? ORDER BY created_at ASC, rowid ASC LIMIT ?').all(sessionId, sessionId, state, limit)
+    return rows.map(rowApproval)
+  }
+
+  /**
+   * Apply one terminal approval transition. Repeating the same terminal state
+   * is a no-op and does not advance the revision; every real transition does.
+   */
+  settleApproval({ approvalId, state, decision = 'unspecified', invalidatedReason = null, now = this.#now() }) {
+    const existing = this.getApprovalRecord(approvalId)
+    if (!existing) return null
+    if (existing.state === state) return existing
+    this.#db.prepare(`
+      UPDATE approvals SET state = ?, decision = ?, invalidated_reason = ?, revision = revision + 1, updated_at = ?
+      WHERE approval_id = ?
+    `).run(state, decision, invalidatedReason, now, approvalId)
+    return this.getApprovalRecord(approvalId)
+  }
+
+  /**
+   * Startup recovery: a pending native approval cannot survive the process
+   * that owned its waterfall. Keep the identity and mark it unavailable so a
+   * late decision fails as `approval_unavailable`, not as an unknown outcome.
+   */
+  invalidatePendingApprovals({ reason = 'process_interrupted', now = this.#now() } = {}) {
+    const info = this.#db.prepare(`
+      UPDATE approvals SET state = 'unavailable', decision = 'unspecified', invalidated_reason = ?,
+        revision = revision + 1, updated_at = ?
+      WHERE state = 'pending'
+    `).run(reason, now)
+    return Number(info.changes)
+  }
+
+  /** Bounded retention: terminal records age out and the newest 256 survive. */
+  pruneApprovalRecords(now = this.#now(), { retentionMs = 24 * 60 * 60 * 1000, limit = 256 } = {}) {
+    const cutoff = now - retentionMs
+    const aged = this.#db.prepare(`DELETE FROM approvals WHERE state <> 'pending' AND updated_at < ?`).run(cutoff)
+    const bounded = this.#db.prepare(`DELETE FROM approvals WHERE state <> 'pending' AND approval_id IN (
+      SELECT approval_id FROM approvals WHERE state <> 'pending' ORDER BY updated_at DESC, rowid DESC LIMIT -1 OFFSET ?
+    )`).run(limit)
+    return Number(aged.changes) + Number(bounded.changes)
+  }
+
 
   // --- bounded ciphertext outbox -----------------------------------------
 

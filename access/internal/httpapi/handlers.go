@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
@@ -17,6 +20,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// resourceIDPattern is the cross-component identifier contract: the same
+// bound the Host runtime applies to MQTT topic ids. Anything else would reach
+// SQL as an unbounded value and fail as an internal error.
+var resourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+
+const (
+	// Host list bounds. The default equals the hard cap so ordinary devices
+	// keep one request; a larger grant set pages with limit/offset and sees
+	// explicit truncation headers.
+	defaultHostListLimit = 500
+	maxHostListLimit     = 500
+	maxHostListOffset    = 1_000_000
+)
+
 func (s *Server) handleInvitation(w http.ResponseWriter, r *http.Request, _ map[string]string) {
 	var request whalereinv1.PairingInvitationRequest
 	if err := s.decodeProto(w, r, &request); err != nil {
@@ -24,7 +41,7 @@ func (s *Server) handleInvitation(w http.ResponseWriter, r *http.Request, _ map[
 		return
 	}
 	hostID := strings.TrimSpace(request.GetHostId())
-	if hostID == "" {
+	if !validResourceID(hostID) {
 		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
@@ -80,7 +97,7 @@ func (s *Server) handleHostRevocation(w http.ResponseWriter, r *http.Request, pa
 }
 
 func validResourceID(value string) bool {
-	return value != "" && !strings.ContainsAny(value, "/+#\x00")
+	return resourceIDPattern.MatchString(value)
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, _ map[string]string) {
@@ -103,7 +120,12 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request, _ map[strin
 		s.writeError(w, r, err)
 		return
 	}
-	views, err := s.deps.Auth.ListHosts(r.Context(), identity)
+	limit, offset, err := hostListBounds(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	views, truncated, err := s.deps.Auth.ListHosts(r.Context(), identity, limit, offset)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -117,7 +139,35 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request, _ map[strin
 			Fingerprint:     view.Fingerprint,
 		})
 	}
+	// The wire message has no page fields, so the response stays bounded and
+	// reports the page in headers. A client that sees Truncated: true must
+	// continue with offset+limit.
+	w.Header().Set("X-Whalerein-Hosts-Limit", strconv.Itoa(limit))
+	w.Header().Set("X-Whalerein-Hosts-Offset", strconv.Itoa(offset))
+	w.Header().Set("X-Whalerein-Hosts-Returned", strconv.Itoa(len(list.Hosts)))
+	w.Header().Set("X-Whalerein-Hosts-Truncated", strconv.FormatBool(truncated))
 	s.writeProto(w, http.StatusOK, list)
+}
+
+func hostListBounds(r *http.Request) (int, int, error) {
+	query := r.URL.Query()
+	limit := defaultHostListLimit
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxHostListLimit {
+			return 0, 0, errInvalidPagination
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := query.Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > maxHostListOffset {
+			return 0, 0, errInvalidPagination
+		}
+		offset = parsed
+	}
+	return limit, offset, nil
 }
 
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map[string]string) {
@@ -127,8 +177,8 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map
 		return
 	}
 	hostID := params["host_id"]
-	if hostID == "" {
-		s.writeError(w, r, errRouteNotFound)
+	if !validResourceID(hostID) {
+		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
 	if err := s.deps.Auth.AuthorizeHost(r.Context(), identity, hostID); err != nil {
@@ -138,6 +188,13 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map
 	var request whalereinv1.HostRequest
 	if err := s.decodeProto(w, r, &request); err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	// Client-generated identities become durable keys and later path
+	// parameters, so they obey the same bounded contract as route ids.
+	if !validResourceID(request.GetRequestId()) ||
+		(request.GetCommandId() != "" && !validResourceID(request.GetCommandId())) {
+		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
 	if request.GetHostId() != "" && request.GetHostId() != hostID {
@@ -178,7 +235,12 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, err)
 		return
 	}
-	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, params["request_id"])
+	requestID := params["request_id"]
+	if !validResourceID(requestID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -206,7 +268,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params 
 		s.writeError(w, r, err)
 		return
 	}
-	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, params["request_id"])
+	requestID := params["request_id"]
+	if !validResourceID(requestID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -217,8 +284,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params 
 
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, params map[string]string) {
 	deviceID := params["device_id"]
-	if deviceID == "" {
-		s.writeError(w, r, errRouteNotFound)
+	if !validResourceID(deviceID) {
+		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
 	token, err := bearerToken(r)
@@ -274,6 +341,9 @@ func bearerToken(r *http.Request) (string, error) {
 }
 
 func (s *Server) decodeProto(w http.ResponseWriter, r *http.Request, message proto.Message) error {
+	if err := requireJSONContentType(r); err != nil {
+		return err
+	}
 	reader := http.MaxBytesReader(w, r.Body, s.deps.MaxBodyBytes)
 	data, err := io.ReadAll(reader)
 	if err != nil {
@@ -286,8 +356,35 @@ func (s *Server) decodeProto(w http.ResponseWriter, r *http.Request, message pro
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return errInvalidBody
 	}
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data, message); err != nil {
+	// DecodeJSON owns the cross-version policy: an additive field from a newer
+	// peer is ignored, while an enum value this build does not know is an
+	// explicit incompatibility instead of a silent zero value. Syntax and type
+	// errors stay distinguishable from that incompatibility.
+	if err := whalereinv1.DecodeJSON(data, message); err != nil {
+		var enumErr *whalereinv1.UnknownEnumError
+		if errors.As(err, &enumErr) {
+			return err
+		}
+		var oneofErr *whalereinv1.MissingOneofError
+		if errors.As(err, &oneofErr) {
+			return fmt.Errorf("%w: a required message variant is missing", errInvalidBody)
+		}
 		return errInvalidBody
+	}
+	return nil
+}
+
+// requireJSONContentType enforces the documented JSON body contract. A missing
+// or different media type fails with 415 before any parsing, so a version
+// mismatch or a form-encoded retry is distinguishable from malformed JSON.
+func requireJSONContentType(r *http.Request) error {
+	raw := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if raw == "" {
+		return errUnsupportedMediaType
+	}
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil || mediaType != "application/json" {
+		return errUnsupportedMediaType
 	}
 	return nil
 }
@@ -308,15 +405,21 @@ func (s *Server) writeProto(w http.ResponseWriter, status int, message proto.Mes
 
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	info := classify(err)
+	meta := requestMetaFrom(r.Context())
 	if info.status >= 500 && s.deps.Logger != nil {
-		s.deps.Logger.Error("http handler error", "status", info.status, "error", err.Error())
+		// A 500 can carry raw SQL text and identifiers. Log the routed
+		// identifiers only in their salted form and strip control characters so
+		// the message cannot forge a log line.
+		s.deps.Logger.Error("http handler error",
+			"status", info.status,
+			"error", s.deps.Masker.Redact(err.Error(), s.redactions(meta)))
 	}
-	if meta := requestMetaFrom(r.Context()); meta != nil && meta.errorCode == "" {
+	if meta != nil && meta.errorCode == "" {
 		meta.errorCode = codeName(info.code)
 	}
 	trace := ""
 	requestID := ""
-	if meta := requestMetaFrom(r.Context()); meta != nil {
+	if meta != nil {
 		trace = meta.traceID
 		requestID = meta.requestID
 	}
@@ -326,6 +429,32 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		TraceId:   trace,
 		RequestId: requestID,
 	})
+}
+
+// redactions maps every identifier that reached this handler to its salted
+// diagnostic form. It is the only channel by which raw identifiers may appear
+// in a log message.
+func (s *Server) redactions(meta *requestMeta) map[string]string {
+	if meta == nil || len(meta.params) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(meta.params))
+	for name, value := range meta.params {
+		if value == "" {
+			continue
+		}
+		switch name {
+		case "host_id":
+			out[value] = s.deps.Masker.Host(value)
+		case "device_id":
+			out[value] = s.deps.Masker.Device(value)
+		case "request_id":
+			out[value] = s.deps.Masker.Request(value)
+		case "operation_id":
+			out[value] = s.deps.Masker.Request(value)
+		}
+	}
+	return out
 }
 
 // handleBrokerConnect answers one deferred Mosquitto CONNECT validation. The

@@ -1,0 +1,35 @@
+{
+  "description": "Shared host authorization signing vectors. Both the Go Access verifier and the Host runtime signer must produce the same message bytes and signature for these inputs.",
+  "seed_hex": "21650e7669362110509c55b1f8f95401c5edc71a47ec0930de0af736793d28eb",
+  "public_key_hex": "783139a685577d630ab7683dfcf1c3ba2a2e485a25196a6b5fcb157ba86b2727",
+  "window": {
+    "past_ms": 120000,
+    "future_ms": 60000
+  },
+  "cases": [
+    {
+      "purpose": "invitation",
+      "host_id": "host-fixed-1",
+      "device_id": "",
+      "signed_at_unix_ms": 1700000000000,
+      "message": "whalerein/v1/host-auth|invitation|host-fixed-1||1700000000000",
+      "signature_hex": "1d165f433472b54af694408ac02415f647675012e688f4c0da3a292e4e320e84e3ac80ef78585cb7ec742d639375c1f911c558e91f93448070b184d828611805"
+    },
+    {
+      "purpose": "revoke",
+      "host_id": "host-fixed-1",
+      "device_id": "device-fixed-1",
+      "signed_at_unix_ms": 1700000000123,
+      "message": "whalerein/v1/host-auth|revoke|host-fixed-1|device-fixed-1|1700000000123",
+      "signature_hex": "ac9373c66f63e1f9178c956c6b53c80bf343d8111174d6aa9b3ddea231ca4a83c994b788af3ec78d081f9c58d7b51fd83b9e9a70c6d96da6d2a52e6e890e3a0f"
+    },
+    {
+      "purpose": "invitation",
+      "host_id": "host-fixed-2",
+      "device_id": "",
+      "signed_at_unix_ms": 1700000000456,
+      "message": "whalerein/v1/host-auth|invitation|host-fixed-2||1700000000456",
+      "signature_hex": "187fa02975e4a6f7e05d3bad6730ac78283e46fd09e1f772321597ee86c60035292ee8d0500dbaf7c51875a38e2fa81182849dd06eb762f31c95df39f482700d"
+    }
+  ]
+}

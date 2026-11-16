@@ -139,9 +139,20 @@ pnpm install --frozen-lockfile
 # 4. In another terminal, start the plugin against real DSH.
 (cd host/dsh && pnpm start)
 
-# 5. Pair the CLI with the host.
-./target/debug/whalerein pair   # then hosts/sessions/tail/send/approve/reject/interrupt/sync/revoke
+# 5. Pair the CLI with the host, then inspect and drive it.
+./target/debug/whalerein pair
+./target/debug/whalerein hosts
+./target/debug/whalerein sessions --host <host-id>
+./target/debug/whalerein tail --session <session-id>
+./target/debug/whalerein send --session <session-id> <text>
+./target/debug/whalerein doctor
+./target/debug/whalerein revoke --yes
 ```
+
+`--json` may be placed before or after the command, `--timeout` is always in
+seconds, and `revoke`, `forget` and `doctor --export` require `--yes` without a
+terminal. See [apps/cli/README.md](apps/cli/README.md) for the full command list,
+the JSON/exit-code contract and `--` for hyphen-leading message text.
 
 See [deploy/README.md](deploy/README.md) for the Compose layout and smoke tests.
 

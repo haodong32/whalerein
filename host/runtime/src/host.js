@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { createLogger, createLogSalt } from './log.js'
 import { isErrorCode, PluginError, publicMessage } from './errors.js'
 import { PROTOCOL_VERSION } from './config.js'
-import { codec as defaultCodec, resolveCodec } from './protocol.js'
+import { codec as defaultCodec, protocolVersionCompatibility, resolveCodec } from './protocol.js'
+import { assertRequestIdentity, validateId } from './contracts/ids.js'
+import { isExpired } from './contracts/time.js'
 import { lockInstance } from './state/instance-lock.js'
 import { StateStore } from './state/store.js'
 import { SecurityManager } from './security/manager.js'
@@ -18,6 +20,21 @@ import { MESSAGE_BYTES } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
 
 const EMPTY = new Uint8Array(0)
+
+/** Request kinds this Host understands. An unknown value is a version mismatch. */
+const REQUEST_KINDS = new Set([
+  'REQUEST_KIND_HANDSHAKE',
+  'REQUEST_KIND_QUERY',
+  'REQUEST_KIND_COMMAND',
+  'REQUEST_KIND_PAIRING_CLAIM',
+  'REQUEST_KIND_PAIRING_AUTHORIZE',
+  'REQUEST_KIND_REVOCATION',
+])
+
+function sanitizeDetail(value) {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  return value.replace(/[\r\n]/g, ' ').slice(0, 200)
+}
 
 export class HostRuntime {
   #started = false
@@ -35,6 +52,8 @@ export class HostRuntime {
   presenceEvents = 0
   #access = null
   #codec = null
+  #readyRetryTimer = null
+  #readyRetryAttempt = 0
   #config
 
   /**
@@ -172,10 +191,12 @@ export class HostRuntime {
         onRequest: (request) => this.#track(this.#handleRequest(request)),
         onConnected: () => {
           this.#clearChannels()
+          this.#readyRetryAttempt = 0
           this.#security.setRevocationsPending(true)
         },
         onReady: () => {
           this.#events.flushOutbox().catch(() => {})
+          this.#scheduleRevocationReplay()
         },
         onDisconnected: () => {
           this.#clearChannels()
@@ -215,6 +236,29 @@ export class HostRuntime {
     this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32), closed: closed.length })
   }
 
+  // A reconnect can publish HostReady before Access has resubscribed to the
+  // result topic, so the one-shot readiness signal and its final revocation
+  // replay are lost. Re-announce with bounded backoff until revocations clear.
+  #scheduleRevocationReplay() {
+    if (this.#readyRetryTimer !== null) clearTimeout(this.#readyRetryTimer)
+    if (this.#stopping || !this.#security?.revocationsPending) return
+    const delay = Math.min(1000 * 2 ** this.#readyRetryAttempt, 10_000)
+    this.#readyRetryTimer = setTimeout(async () => {
+      this.#readyRetryTimer = null
+      if (this.#stopping || !this.#security?.revocationsPending) return
+      if (!this.#access?.connected) return
+      this.#logger?.info('host_ready_retry', { attempt: this.#readyRetryAttempt + 1 })
+      try {
+        await this.#access.publishReady?.()
+      } catch {
+        // The next scheduled attempt covers a failed re-announcement.
+      }
+      this.#readyRetryAttempt = Math.min(this.#readyRetryAttempt + 1, 4)
+      this.#scheduleRevocationReplay()
+    }, delay)
+    this.#readyRetryTimer.unref?.()
+  }
+
   #clearChannels() {
     const closed = this.#security?.clearChannels() ?? []
     this.#events?.onChannelsCleared(closed)
@@ -250,6 +294,11 @@ export class HostRuntime {
   }
 
   async #teardown({ closeStore, force }) {
+    if (this.#readyRetryTimer !== null) {
+      clearTimeout(this.#readyRetryTimer)
+      this.#readyRetryTimer = null
+    }
+    this.#readyRetryAttempt = 0
     this.#commands?.closeRequests()
     this.#commands?.closeWaits()
     this.#commands?.closeQuestionAnswers()
@@ -317,22 +366,47 @@ export class HostRuntime {
   async #handleRequest(request) {
     try {
       const kind = request.kind
+      try {
+        assertRequestIdentity(request)
+      } catch (error) {
+        // Never echo or log an unbounded identifier; warn with the reason only.
+        this.#logger?.warn('request_identity_invalid', { code: codeOf(error), layer: 'host' })
+        if (request?.request_id && validateId('request_id', request.request_id).ok) {
+          return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
+        }
+        return
+      }
       this.#logger?.info('host_request_received', { trace: request.trace_id, request: request.request_id, kind, bytes: request.body?.length ?? 0, layer: 'host' })
+      if (kind === 'REQUEST_KIND_UNSPECIFIED') {
+        return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'request kind is unspecified' })
+      }
+      if (typeof kind !== 'string' || !REQUEST_KINDS.has(kind)) {
+        return await this.#reply(request, {
+          status: 'rejected',
+          errorCode: 'protocol_version_incompatible',
+          errorDetail: `unsupported request kind ${String(kind).slice(0, 32)}; this Host implements the v${PROTOCOL_VERSION} request kinds and the sender must upgrade`,
+        })
+      }
       if (kind === 'REQUEST_KIND_REVOCATION') return await this.#handleRevocation(request)
       if (!request.request_id) throw new PluginError('invalid_argument', 'request_id missing')
       if (request.host_id && request.host_id !== this.#config.hostId) {
         return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
       }
-      const needsVersion = kind === 'REQUEST_KIND_PAIRING_CLAIM' || kind === 'REQUEST_KIND_PAIRING_AUTHORIZE'
-        || kind === 'REQUEST_KIND_HANDSHAKE' || kind === 'REQUEST_KIND_QUERY' || kind === 'REQUEST_KIND_COMMAND'
       if ((kind === 'REQUEST_KIND_PAIRING_CLAIM' || kind === 'REQUEST_KIND_PAIRING_AUTHORIZE') && request.relay_transport_version !== 2) {
-        return await this.#reply(request, { status: 'rejected', errorCode: 'protocol_version_incompatible' })
+        return await this.#reply(request, { status: 'rejected', errorCode: 'protocol_version_incompatible', errorDetail: 'pairing requires relay transport version 2; upgrade Access' })
       }
-      if (needsVersion && Number(request.protocol_version) !== PROTOCOL_VERSION) {
-        return await this.#reply(request, { status: 'rejected', errorCode: 'protocol_version_incompatible' })
+      const compatibility = protocolVersionCompatibility(Number(request.protocol_version))
+      if (!compatibility.compatible) {
+        return await this.#reply(request, { status: 'rejected', errorCode: 'protocol_version_incompatible', errorDetail: compatibility.message })
       }
-      if (request.expires_at_unix_ms && request.expires_at_unix_ms <= this.now()) {
-        return await this.#reply(request, { status: 'rejected', errorCode: 'expired' })
+      if (request.expires_at_unix_ms !== undefined && request.expires_at_unix_ms !== 0 && request.expires_at_unix_ms !== '0') {
+        const expires = Number(request.expires_at_unix_ms)
+        if (!Number.isSafeInteger(expires) || expires < 0) {
+          return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'expires_at_unix_ms is not a safe Unix-millisecond value' })
+        }
+        if (isExpired(expires, this.now())) {
+          return await this.#reply(request, { status: 'rejected', errorCode: 'expired' })
+        }
       }
       if (kind === 'REQUEST_KIND_PAIRING_CLAIM' || kind === 'REQUEST_KIND_PAIRING_AUTHORIZE') {
         return await this.#handlePairing(request)
@@ -345,7 +419,7 @@ export class HostRuntime {
       this.#logger?.error('request_failed', { code, request: request?.request_id, trace: request?.trace_id })
       if (request?.request_id) {
         try {
-          await this.#reply(request, { status: 'failed', errorCode: code })
+          await this.#reply(request, { status: 'failed', errorCode: code, errorDetail: error instanceof PluginError ? error.detail : undefined })
         } catch {
           // access down; Access times the request out on its own
         }
@@ -420,6 +494,22 @@ export class HostRuntime {
     } catch {
       return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
     }
+    const enumProblems = this.#codec.unknownEnums('whalerein.v1.RequestPayload', payload)
+    if (enumProblems.length > 0) {
+      const problem = enumProblems[0]
+      return await this.#reply(request, {
+        status: 'rejected',
+        errorCode: 'protocol_version_incompatible',
+        errorDetail: `unknown ${problem.enum} value ${String(problem.value).slice(0, 32)} in ${problem.field}; upgrade the reader`,
+      })
+    }
+    if (!this.#codec.hasOneof('whalerein.v1.RequestPayload', payload, 'payload')) {
+      return await this.#reply(request, {
+        status: 'failed',
+        errorCode: 'invalid_argument',
+        errorDetail: 'RequestPayload carries no known payload variant; the sender may use a newer protocol version',
+      })
+    }
     let completedAt
     const questionBudget = payload.list_questions ? () => {
       completedAt = this.now()
@@ -461,8 +551,12 @@ export class HostRuntime {
     return null
   }
 
-  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, completedAt }) {
-    const error = isErrorCode(errorCode) ? errorCode : 'internal'
+  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, completedAt, errorDetail }) {
+    const known = isErrorCode(errorCode)
+    if (!known && errorCode !== 'error_code_unspecified') {
+      this.#logger?.warn('unknown_error_code', { code: typeof errorCode === 'string' ? errorCode.slice(0, 32) : 'non_string' })
+    }
+    const error = known ? errorCode : 'internal'
     const result = {
       request_id: request.request_id ?? '',
       host_id: this.#config.hostId,
@@ -473,7 +567,7 @@ export class HostRuntime {
       result_body: resultBody instanceof Uint8Array ? resultBody : EMPTY,
       error_code: error,
       trace_id: request.trace_id ?? '',
-      error_message: error === 'error_code_unspecified' ? '' : publicMessage(error),
+      error_message: sanitizeDetail(errorDetail) ?? (error === 'error_code_unspecified' ? '' : publicMessage(error)),
       completed_at_unix_ms: completedAt ?? this.now(),
       protocol_version: PROTOCOL_VERSION,
       channel_id: request.channel_id ?? '',
@@ -511,12 +605,13 @@ export class HostRuntime {
       revocationsPending: this.#security?.revocationsPending ?? false,
       cursors: {
         sessions: conversation?.sessions ?? null,
-        snapshotRequired: null,
+        snapshotRequired: conversation?.snapshotRequired ?? null,
       },
       commands: { unknown: unknownCommands, accepted: acceptedCommands },
       pendingCiphertext: {
         count: this.#store?.countOutbox() ?? 0,
         limit: this.#config.outboxTotalLimit,
+        dropped: conversation?.outboxDrops ?? 0,
       },
       activeChannels: channelIds.length,
     }

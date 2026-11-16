@@ -22,6 +22,23 @@ pub(super) fn pairing_admission_error(error: std::io::Error) -> CoreError {
     }
 }
 
+/// Upper bound for retained forensic pairing records. The oldest record is
+/// dropped first, so `pairing-history` stays readable on long-lived profiles.
+const MAX_PAIRING_HISTORY: usize = 32;
+
+/// Errors that close a retained FINISH: the original invitation can never be
+/// used again, so retrying `pair-resume` would loop forever.
+fn pairing_terminal(error: &CoreError) -> bool {
+    error.pairing_closed()
+        || matches!(
+            error,
+            CoreError::Api {
+                code: Some(whalerein_proto::ErrorCode::Expired),
+                ..
+            }
+        )
+}
+
 impl Core {
     /// Return minimal durable records of pairings that committed but can no longer be recovered.
     pub fn pairing_history(&self) -> CoreResult<Vec<crate::api::PairingHistoryRecord>> {
@@ -39,8 +56,43 @@ impl Core {
         else {
             return Ok(Vec::new());
         };
-        serde_json::from_slice(&bytes)
-            .map_err(|_| CoreError::Security("invalid pairing history".into()))
+        let mut records: Vec<crate::api::PairingHistoryRecord> = serde_json::from_slice(&bytes)
+            .map_err(|_| CoreError::Security("invalid pairing history".into()))?;
+        if records.len() > MAX_PAIRING_HISTORY {
+            records.drain(0..records.len() - MAX_PAIRING_HISTORY);
+        }
+        Ok(records)
+    }
+
+    /// Persist a bounded history snapshot. Oldest records are dropped first.
+    fn save_pairing_history(
+        &self,
+        device_id: &str,
+        records: &mut Vec<crate::api::PairingHistoryRecord>,
+    ) -> CoreResult<()> {
+        if records.len() > MAX_PAIRING_HISTORY {
+            records.drain(0..records.len() - MAX_PAIRING_HISTORY);
+        }
+        let encoded = serde_json::to_vec(records)
+            .map_err(|_| CoreError::Internal("could not encode pairing history".into()))?;
+        self.options
+            .secrets
+            .save(&keys::pairing_history(device_id), &encoded)?;
+        Ok(())
+    }
+
+    /// A newly confirmed pairing supersedes records that a previous recovery
+    /// already resolved. Unresolved records stay: they may still describe an
+    /// uncertain grant that needs manual verification.
+    fn prune_resolved_pairing_history_for_host(&self, device_id: &str, host_id: &str) {
+        let Ok(mut records) = self.pairing_history() else {
+            return;
+        };
+        let before = records.len();
+        records.retain(|item| !(item.host_id == host_id && item.status == "confirmed"));
+        if records.len() != before {
+            let _ = self.save_pairing_history(device_id, &mut records);
+        }
     }
 
     pub(super) fn settle_pairing_terminal(
@@ -95,13 +147,9 @@ impl Core {
             } else {
                 records.push(record);
             }
-            let encoded = serde_json::to_vec(&records)
-                .map_err(|_| CoreError::Internal("could not encode pairing history".into()))?;
-            self.options
-                .secrets
-                .save(&keys::pairing_history(&pending.config.device_id), &encoded)?;
+            self.save_pairing_history(&pending.config.device_id, &mut records)?;
         }
-        if error.pairing_closed() {
+        if pairing_terminal(error) {
             self.options
                 .secrets
                 .delete(&keys::pending_pairing(&pending.config.device_id))?;
@@ -124,11 +172,7 @@ impl Core {
             }
             if record.status == "committed_host_confirmation_unknown" {
                 record.status = "confirmed".into();
-                let encoded = serde_json::to_vec(&records)
-                    .map_err(|_| CoreError::Internal("could not encode pairing history".into()))?;
-                self.options
-                    .secrets
-                    .save(&keys::pairing_history(&pending.config.device_id), &encoded)?;
+                self.save_pairing_history(&pending.config.device_id, &mut records)?;
             }
         }
         Ok(())
@@ -207,11 +251,7 @@ impl Core {
             } else {
                 history.push(record);
             }
-            let encoded = serde_json::to_vec(&history)
-                .map_err(|_| CoreError::Internal("could not encode pairing history".into()))?;
-            self.options
-                .secrets
-                .save(&keys::pairing_history(device_id), &encoded)?;
+            self.save_pairing_history(device_id, &mut history)?;
             Ok(())
         })();
         // Attempt deletion even if the redacted snapshot cannot be written.
@@ -277,6 +317,12 @@ impl Core {
         }
         let bytes = serde_json::to_vec(pending)
             .map_err(|_| CoreError::Internal("could not encode pending pairing".into()))?;
+        // A confirmed fingerprint for this Host supersedes resolved forensic
+        // records from earlier pairing attempts; keep unresolved ones.
+        self.prune_resolved_pairing_history_for_host(
+            &pending.config.device_id,
+            &pending.config.host_id,
+        );
         self.options
             .secrets
             .save(&keys::pending_pairing(&pending.config.device_id), &bytes)?;
@@ -288,9 +334,18 @@ impl Core {
     pub async fn resume_pairing(&self) -> CoreResult<PairingOutcome> {
         let guard = self.identity_lock()?;
         let identity = self.device_identity_locked(&guard)?;
-        let pending = self
-            .load_pending_pairing(&identity.device_id)?
-            .ok_or_else(|| CoreError::NotFound("no pending pairing".into()))?;
+        let Some(pending) = self.load_pending_pairing(&identity.device_id)? else {
+            return Err(if self.is_paired() {
+                CoreError::Conflict(
+                    "this device is already paired; use `whalerein pair <invitation>` to add a Host, or `whalerein revoke` before pairing again".into(),
+                )
+            } else {
+                CoreError::NotFound(
+                    "no pending pairing; start a new pairing with `whalerein pair <invitation>`"
+                        .into(),
+                )
+            });
+        };
         self.resume_pending_pairing(pending, &identity).await
     }
 
@@ -424,7 +479,7 @@ impl Core {
                     Err(_) => {
                         return Err(CoreError::Internal(
                             "retention warning could not be saved".into(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -564,7 +619,7 @@ mod tests {
             .is_none());
         assert!(matches!(
             restarted.resume_pairing().await,
-            Err(CoreError::NotFound(_))
+            Err(CoreError::Conflict(_))
         ));
     }
 

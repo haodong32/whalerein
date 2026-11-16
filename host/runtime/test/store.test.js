@@ -244,9 +244,12 @@ test('a version-four journal upgrades without losing peer or command identity', 
     db.close()
     const restored=new StateStore({path})
     try {
-      assert.equal(restored.getMeta('schema_version'),'5')
+      assert.equal(restored.getMeta('schema_version'),'6')
       assert.equal(restored.getPeerKey('fixture-device').fingerprint,'fixture-pin')
       assert.equal(restored.getCommand('fixture-device','fixture-command').status,'accepted')
+      // The approval ledger is additive; an older journal upgrades empty.
+      assert.equal(restored.getApprovalRecord('missing'),null)
+      assert.equal(restored.invalidatePendingApprovals({now:1000}),0)
     } finally {restored.close()}
   } finally {rmSync(dir,{recursive:true,force:true})}
 })
@@ -300,4 +303,35 @@ test('an in-flight lifecycle operation survives status changes and reopen withou
       assert.equal(restored.updateLifecycleOperation({ deviceId: 'd', commandId: 'missing', phase: 'NATIVE' }), false)
     } finally { restored.close() }
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the approval ledger records guard identity, terminal revisions and bounded retention', () => {
+  let now = 1_000
+  const store = new StateStore({ path: ':memory:', now: () => now })
+  const digest = new Uint8Array(32).fill(7)
+  const first = store.recordApproval({ approvalId: 'a1', sessionId: 's1', toolName: 'bash', callId: 'c1', digest, version: 1, expiresAt: 5_000 })
+  assert.equal(first.state, 'pending')
+  assert.equal(first.revision, 1)
+  assert.equal(first.reason, undefined)
+  const reopened = store.recordApproval({ approvalId: 'a1', sessionId: 's1', toolName: 'bash', callId: 'c1', digest, version: 2, expiresAt: 6_000 })
+  assert.equal(reopened.revision, 1)
+  assert.equal(reopened.version, 2)
+  assert.equal(store.settleApproval({ approvalId: 'a1', state: 'approved', decision: 'approve' }).revision, 2)
+  assert.equal(store.settleApproval({ approvalId: 'a1', state: 'approved', decision: 'approve' }).revision, 2)
+  const second = store.recordApproval({ approvalId: 'a2', sessionId: 's1', toolName: 'write', callId: 'c2', digest, version: 1, expiresAt: 7_000 })
+  assert.equal(second.revision, 1)
+  // A live pending observation reopens an invalidated record but never an
+  // approved one.
+  assert.equal(store.invalidatePendingApprovals({ reason: 'process_interrupted', now }), 1)
+  assert.equal(store.getApprovalRecord('a2').state, 'unavailable')
+  assert.equal(store.getApprovalRecord('a2').invalidatedReason, 'process_interrupted')
+  assert.equal(store.recordApproval({ approvalId: 'a2', sessionId: 's1', toolName: 'write', callId: 'c2', digest, version: 1, expiresAt: 7_000 }).state, 'pending')
+  assert.equal(store.recordApproval({ approvalId: 'a1', sessionId: 's1', toolName: 'bash', callId: 'c1', digest, version: 2, expiresAt: 6_000 }).state, 'approved')
+  assert.deepEqual(store.listApprovalRecords({ sessionId: 's1' }).map((record) => record.approvalId), ['a1', 'a2'])
+  assert.deepEqual(store.listApprovalRecords({ state: 'pending' }).map((record) => record.approvalId), ['a2'])
+  now += 2 * 24 * 60 * 60 * 1000
+  assert.equal(store.pruneApprovalRecords(now, { retentionMs: 24 * 60 * 60 * 1000 }), 1)
+  assert.equal(store.getApprovalRecord('a1'), null)
+  assert.equal(store.getApprovalRecord('a2').state, 'pending')
+  store.close()
 })

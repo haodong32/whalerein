@@ -118,7 +118,7 @@ test('when FakeDSH requests approval, the client reads it and the host reports i
         expected_version: approval.version,
       },
     }, { commandId: 'cmd-resolve-again' })
-    assert.equal(second.status, 'rejected')
+    assert.equal(second.status, 'failed')
     assert.equal(second.errorCode, 'approval_already_resolved')
   } finally {
     await harness.stop()
@@ -200,7 +200,13 @@ test('when a two MiB command crosses a 64 KiB broker frame limit, exact committe
     }
     assert.equal(delivered,2)
     assert.equal(new Set(messages.map(message=>message.message_id)).size,2)
-    for(const message of messages)assert.ok(message.blocks.some(block=>block.text?.text===payload),'History must preserve the complete fixture text')
+    // A single native message larger than the page budget cannot be split
+    // across history cursors, so history returns a bounded prefix and marks the
+    // truncation. Live event delivery above still carries the complete text.
+    for(const message of messages) {
+      assert.ok(message.blocks.at(-1)?.notice?.text.includes('truncated'),'History marks the bounded fixture text')
+      assert.ok(message.blocks.some(block=>block.text?.text.startsWith('x')),'History keeps the fixture prefix')
+    }
     const repeated=await device.send(sent.request)
     assert.equal(repeated.status,'succeeded')
     assert.deepEqual(repeated.response,sent.response)

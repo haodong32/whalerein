@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -43,11 +44,16 @@ func (s *Server) handleEnrollmentStatus(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, r, errExternalNotConfigured)
 		return
 	}
+	hostID := params["host_id"]
+	if !validResourceID(hostID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
 	if err := s.externalReadAuth(r); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	status, err := s.deps.External.EnrollmentStatus(r.Context(), params["host_id"])
+	status, err := s.deps.External.EnrollmentStatus(r.Context(), hostID)
 	if err != nil {
 		s.writeError(w, r, classifyExternal(err))
 		return
@@ -61,11 +67,16 @@ func (s *Server) handleOperationStatus(w http.ResponseWriter, r *http.Request, p
 		s.writeError(w, r, errExternalNotConfigured)
 		return
 	}
+	operationID := params["operation_id"]
+	if !validResourceID(operationID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
 	if err := s.externalReadAuth(r); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	status, err := s.deps.External.OperationStatus(r.Context(), params["operation_id"])
+	status, err := s.deps.External.OperationStatus(r.Context(), operationID)
 	if err != nil {
 		s.writeError(w, r, classifyExternal(err))
 		return

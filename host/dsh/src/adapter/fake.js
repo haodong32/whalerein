@@ -6,7 +6,9 @@ import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js
 import { approvalDigest, bytesEqual, randomId } from 'whalerein-host/security/digest.js'
 import { QuestionProjection, validateQuestionAnswers } from './questions.js'
 import {
+  APPROVAL_REASON_MAX,
   DshAdapter,
+  boundedApprovalText,
   normalizeApproval,
   normalizeEvent,
   normalizeSummary,
@@ -17,6 +19,7 @@ export class FakeDshAdapter extends DshAdapter {
   #eventSubscribers = new Set()
   #approvalSubscribers = new Set()
   #approvals = new Map()
+  #approvalVersion = 0
   #crashed = false
   #failNext = new Map()
   #hangNext = new Set()
@@ -26,6 +29,7 @@ export class FakeDshAdapter extends DshAdapter {
   #questions = new Map()
   #heldQuestions = new Set()
   #waitingQuestions = new Set()
+  #questionInterrupts = new Map()
 
   /**
    * @param {object} [options]
@@ -47,6 +51,7 @@ export class FakeDshAdapter extends DshAdapter {
   } = {}) {
     super({ now, ...rest })
     this.deliveryModes = ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER']
+    this.approvalMode = behavior.approvalMode === 'delegate' ? 'delegate' : 'claim'
     this.defaultApprovalTtlMs = defaultApprovalTtlMs
     this.behavior = {
       emitOutputOnMessage: behavior.emitOutputOnMessage !== false,
@@ -56,6 +61,9 @@ export class FakeDshAdapter extends DshAdapter {
       approvalEveryMessage: behavior.approvalEveryMessage === true,
       approvalTtlMs: behavior.approvalTtlMs ?? defaultApprovalTtlMs,
       modelOperations: behavior.modelOperations === true,
+      modelFailures: Array.isArray(behavior.modelFailures) ? behavior.modelFailures.map(failure => ({
+        id: String(failure?.id ?? ''), name: String(failure?.name ?? failure?.id ?? ''),
+      })).filter(failure => failure.id !== '') : [],
       questions: behavior.questions === true,
       questionsOpen: behavior.questionsOpen === true,
     }
@@ -77,31 +85,68 @@ export class FakeDshAdapter extends DshAdapter {
     return {
       mode: 'fake',
       available: !this.#crashed,
-      capabilities: ['sessions', 'events', 'messages', 'approvals', 'interrupt', 'sync', 'snapshot', 'session-fork', ...(this.behavior.modelOperations ? ['model-catalog', 'model-read', 'model-select'] : []), ...(this.behavior.pendingQueueEnabled ? ['pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer'] : []), ...(this.behavior.questions ? ['questions-read','questions-answer-continued'] : []), ...(this.behavior.questions && this.behavior.questionsOpen ? ['questions-answer-open'] : [])],
+      capabilities: ['sessions', 'events', 'messages', ...(this.approvalMode === 'delegate' ? [] : ['approvals']), 'interrupt', 'sync', 'snapshot', 'session-fork', ...(this.behavior.modelOperations ? ['model-catalog', 'model-read', 'model-select'] : []), ...(this.behavior.pendingQueueEnabled ? ['pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer'] : []), ...(this.behavior.questions ? ['questions-read','questions-answer-continued'] : []), ...(this.behavior.questions && this.behavior.questionsOpen ? ['questions-answer-open'] : [])],
     }
   }
 
   async listModels() {
     this.#check('listModels')
     if (!this.behavior.modelOperations) throw new AdapterError('unsupported_capability')
-    return { default_selection: { ...this.#defaultModel }, effect_scope: 'session_and_source_default_attempt', complete: true, groups: [{ id: 'fixture-provider', name: 'Fixture', models: [{ id: 'fixture-model', name: 'Fixture model', efforts: [{ id: 'high', name: 'High' }] }] }], failures: [] }
+    return {
+      default_selection: { ...this.#defaultModel },
+      effect_scope: 'session_and_source_default_attempt',
+      complete: this.behavior.modelFailures.length === 0,
+      groups: [{ id: 'fixture-provider', name: 'Fixture', models: [
+        { id: 'fixture-model', name: 'Fixture model', efforts: [{ id: 'high', name: 'High' }] },
+        { id: 'fixture-model-2', name: 'Fixture model two', efforts: [{ id: 'high', name: 'High' }] },
+      ] }],
+      failures: this.behavior.modelFailures.map(failure => ({ id: failure.id, name: failure.name, code: 'unavailable' })),
+    }
+  }
+
+  // `pending` is the recorded next selection; `last_used` is the model the
+  // source reports for the most recent turn. They stay per-session so selecting
+  // a model for one session cannot silently change another session's model.
+  #modelView(session) {
+    const pending = session.modelSelection ?? null
+    const lastUsed = session.lastUsedModel ?? null
+    const next = pending ?? lastUsed
+    return {
+      next,
+      pending,
+      pending_known: true,
+      last_used: lastUsed,
+      default_selection: { ...this.#defaultModel },
+      default_is_fallback: next === null,
+    }
   }
 
   async readSessionModel(sessionId) {
     this.#check('readSessionModel')
     if (!this.behavior.modelOperations) throw new AdapterError('unsupported_capability')
-    const session = this.#session(sessionId)
-    return { pending: session.modelSelection ?? null, next: session.modelSelection ?? null, pending_known: true, last_used: null, default_selection: { ...this.#defaultModel }, default_is_fallback: true }
+    return this.#modelView(this.#session(sessionId))
   }
 
-  async selectSessionModel(sessionId, selection) {
+  async selectSessionModel(sessionId, selection, context = {}) {
     this.#checkCommand('selectSessionModel')
     if (!this.behavior.modelOperations) throw new DefinitiveExecutionError('unsupported_capability')
+    this.assertCommandFresh(context)
     const session = this.#session(sessionId)
-    if (selection.provider !== 'fixture-provider' || selection.model !== 'fixture-model' || (selection.effort && selection.effort !== 'high')) throw new DefinitiveExecutionError('invalid_argument')
+    const failed = this.behavior.modelFailures.some(failure => failure.id === selection.provider)
+    if (failed) throw new DefinitiveExecutionError('invalid_argument', 'provider is not advertised in the current catalog')
+    if (selection.provider !== 'fixture-provider' || !['fixture-model', 'fixture-model-2'].includes(selection.model) ||
+        (selection.effort && selection.effort !== 'high')) {
+      throw new DefinitiveExecutionError('invalid_argument', 'model is not advertised')
+    }
     const selected = { provider: selection.provider, model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) }
+    // Re-selecting the effective next model is a no-op: the source receives no
+    // mutation and no second indistinguishable pending command is created.
+    const before = this.#modelView(session)
+    if (before.next && before.next.provider === selected.provider && before.next.model === selected.model &&
+        (before.next.effort ?? '') === (selected.effort ?? '')) {
+      return { selected: before.next, effect_scope: 'session_and_source_default_attempt', default_persistence: 'unconfirmed' }
+    }
     session.modelSelection = selected
-    this.#defaultModel = selected
     return { selected, effect_scope: 'session_and_source_default_attempt', default_persistence: 'unconfirmed' }
   }
 
@@ -167,7 +212,7 @@ export class FakeDshAdapter extends DshAdapter {
     let end = lastEnd + 1
     while (end < parent.events.length && !['turn/start', 'user/message', 'agent/inbox/spliced'].includes(parent.events[end].type)) end++
     const childId = `session-${randomId()}`
-    this.createSession({ sessionId: childId, cwd: parent.cwd, parentSessionId: sessionId })
+    this.createSession({ sessionId: childId, cwd: parent.cwd, parentSessionId: sessionId, origin: 'fork' })
     const child = this.#sessions.get(childId)
     child.events = structuredClone(parent.events.slice(0, end))
     child.nextSeq = child.events.reduce((max, event) => Math.max(max, event.seq ?? 0), 0) + 1
@@ -205,6 +250,8 @@ export class FakeDshAdapter extends DshAdapter {
       queuedPrompts,
       pendingDeliveries: [],
       queue: structuredClone(queue),
+      modelSelection: null,
+      lastUsedModel: null,
       events: [],
       nextSeq: 1,
     }
@@ -228,6 +275,18 @@ export class FakeDshAdapter extends DshAdapter {
     this.#questions.set(sessionId, nativeQuestions)
   }
 
+  appendFixtureQuestion(sessionId, nativeQuestion) {
+    this.#session(sessionId)
+    if (!this.behavior.questions || !nativeQuestion) throw new AdapterError('unsupported_capability')
+    this.#questions.set(sessionId, [...(this.#questions.get(sessionId) ?? []), nativeQuestion])
+  }
+
+  removeFixtureQuestion(sessionId, callId) {
+    const remaining = (this.#questions.get(sessionId) ?? []).filter(question => question.callId !== callId)
+    if (remaining.length) this.#questions.set(sessionId, remaining)
+    else this.#questions.delete(sessionId)
+  }
+
   holdFixtureQuestion(sessionId) { this.#heldQuestions.add(sessionId) }
   fixtureQuestionWaiting(sessionId) { return this.#waitingQuestions.has(sessionId) }
 
@@ -237,7 +296,7 @@ export class FakeDshAdapter extends DshAdapter {
     if (query.cursor) throw new AdapterError('invalid_argument')
     const native = this.#questions.get(sessionId)
     const batches = this.#questionProjection.project(sessionId, { active: native ?? [] })
-    return { batches: batches.map(batch => ({ ...batch, answerable: batch.phase === 'QUESTION_CONTINUED' || this.behavior.questionsOpen })), next_cursor: '' }
+    return { batches: batches.map(batch => ({ ...batch, answerable: batch.phase === 'QUESTION_CONTINUED' || (batch.phase === 'QUESTION_OPEN' && this.behavior.questionsOpen) })), next_cursor: '' }
   }
 
   async getQuestion(sessionId, batchId) {
@@ -266,13 +325,29 @@ export class FakeDshAdapter extends DshAdapter {
     catch { throw new DefinitiveExecutionError('invalid_argument') }
     if (signal?.aborted) throw new DefinitiveExecutionError('unavailable')
     if (this.#heldQuestions.has(request.session_id)) {
+      const interrupt = new AbortController()
+      this.#questionInterrupts.set(request.session_id, interrupt)
       this.#waitingQuestions.add(request.session_id)
+      let remove = () => {}
       try {
         await new Promise((_, reject) => {
-          if (!signal || signal.aborted) return reject(new DefinitiveExecutionError('unavailable'))
-          signal.addEventListener('abort', () => reject(new DefinitiveExecutionError('unavailable')), { once: true })
+          const onAbort = () => fail('answer cancelled')
+          const onInterrupt = () => fail('session interrupted')
+          const fail = cause => { remove(); reject(new DefinitiveExecutionError('unavailable', cause)) }
+          remove = () => {
+            signal?.removeEventListener?.('abort', onAbort)
+            interrupt.signal.removeEventListener('abort', onInterrupt)
+          }
+          if (signal?.aborted) return fail('answer cancelled')
+          if (interrupt.signal.aborted) return fail('session interrupted')
+          signal?.addEventListener?.('abort', onAbort, { once: true })
+          interrupt.signal.addEventListener('abort', onInterrupt, { once: true })
         })
-      } finally { this.#waitingQuestions.delete(request.session_id) }
+      } finally {
+        remove()
+        if (this.#questionInterrupts.get(request.session_id) === interrupt) this.#questionInterrupts.delete(request.session_id)
+        this.#waitingQuestions.delete(request.session_id)
+      }
     }
     this.#removeFixtureQuestion(request.session_id, batch.batch_id)
     return { batch_id: batch.batch_id, phase: 'QUESTION_SETTLED' }
@@ -447,6 +522,10 @@ export class FakeDshAdapter extends DshAdapter {
       }
       session.running = true
       session.updatedAt = this.now()
+      // A started turn observes (and consumes) the recorded next selection, so
+      // a later read can prove which model the source actually used.
+      session.lastUsedModel = session.modelSelection ?? { ...this.#defaultModel }
+      session.modelSelection = null
       this.emit(sessionId, { type: 'user/message', kind: 'output', data: { text: message } })
       if (this.behavior.emitOutputOnMessage) {
         this.emit(sessionId, { type: 'assistant/message', kind: 'output', data: { text: message } })
@@ -478,14 +557,32 @@ export class FakeDshAdapter extends DshAdapter {
     if (hang) return hang
     const session = this.#session(sessionId)
     return applyAction(() => {
+      // The interrupted turn owns any held question and approval claims;
+      // release them even if the summary no longer reports the turn running,
+      // so a later answer/wait is not permanently conflicted (STREAM-06).
+      this.#questionInterrupts.get(sessionId)?.abort()
+      this.#releaseApprovals(sessionId)
+      // Interrupting an idle session is accepted but emits no state or attempt
+      // event: there is no running attempt to end (STREAM-05).
+      if (session.running !== true) return { accepted: true }
       session.running = false
       session.updatedAt = this.now()
       this.emit(sessionId, { type: 'session/interrupted', kind: 'session_state', data: { interrupted: true } })
+      this.publishInterruptedAttempt(sessionId)
       return { accepted: true }
     })
   }
 
   // --- approvals ----------------------------------------------------------
+
+  #releaseApprovals(sessionId) {
+    for (const approval of this.#approvals.values()) {
+      if (approval.sessionId !== sessionId || approval.state !== 'pending') continue
+      approval.state = 'unavailable'
+      approval.decision = 'unspecified'
+      this.#emitApproval('resolved', approval)
+    }
+  }
 
   subscribeApprovals(callback) {
     this.#approvalSubscribers.add(callback)
@@ -507,6 +604,17 @@ export class FakeDshAdapter extends DshAdapter {
     if (approval.state === 'pending' && approval.expiresAt <= this.now()) {
       approval.state = 'expired'
       this.#emitApproval('resolved', approval)
+      // A TTL expiry releases the native turn. Mirror DSH: the session becomes
+      // idle when no other approval still holds it, so the next turn remains
+      // usable instead of staying input-required forever.
+      const session = this.#sessions.get(approval.sessionId)
+      const stillHeld = [...this.#approvals.values()].some((item) =>
+        item.sessionId === approval.sessionId && item.state === 'pending')
+      if (session && session.running && !stillHeld) {
+        session.running = false
+        session.updatedAt = this.now()
+        this.emit(approval.sessionId, { type: 'turn/end', kind: 'session_state', data: { running: false } })
+      }
       return true
     }
     return false
@@ -522,23 +630,28 @@ export class FakeDshAdapter extends DshAdapter {
     callId = randomId(8),
     reason = '',
     ttlMs = this.defaultApprovalTtlMs,
-    version = 1,
+    version = null,
     approvalId = randomId(),
   } = {}) {
     this.#check('requestApproval')
     this.#session(sessionId)
+    const approvalVersion = Number.isSafeInteger(version) && version > 0 ? version : ++this.#approvalVersion
+    this.#approvalVersion = Math.max(this.#approvalVersion, approvalVersion)
     const expiresAt = this.now() + ttlMs
+    const toolNameValue = boundedApprovalText(toolName)
+    const callIdValue = boundedApprovalText(callId)
+    const reasonValue = boundedApprovalText(reason, APPROVAL_REASON_MAX)
     const approval = {
       approvalId,
       sessionId,
-      toolName,
-      callId,
-      reason,
-      version,
+      toolName: toolNameValue,
+      callId: callIdValue,
+      reason: reasonValue,
+      version: approvalVersion,
       expiresAt,
       state: 'pending',
       decision: 'unspecified',
-      digest: approvalDigest({ approvalId, sessionId, toolName, callId, reason, version, expiresAt }),
+      digest: approvalDigest({ approvalId, sessionId, toolName: toolNameValue, callId: callIdValue, reason: reasonValue, version: approvalVersion, expiresAt }),
       createdAt: this.now(),
     }
     this.#approvals.set(approvalId, approval)
@@ -597,6 +710,12 @@ export class FakeDshAdapter extends DshAdapter {
       this.logger?.info('approval_resolved', { approval: approvalId, status: approval.state })
       return { state: approval.state, decision: approval.decision }
     })
+  }
+
+  /** Test-only: model a native authority that lost a pending approval. */
+  forgetApproval(approvalId) {
+    this.#check('forgetApproval')
+    return this.#approvals.delete(approvalId)
   }
 
   /** Simulate another answerer consuming the approval first. */

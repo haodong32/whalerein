@@ -77,33 +77,7 @@ fi
 
 # First launch writes the local Compose defaults into the profile. Later launches
 # leave that file alone; the settings page is the editor.
-python3 - "$PROFILE_DIR/cordis.patch.yml" "$HOST_ID" "$STATE_DIR" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path, host_id, state_dir = sys.argv[1:]
-file = Path(path)
-text = file.read_text(encoding="utf-8") if file.exists() else ""
-if "id: whalerein-dsh" in text:
-    sys.exit(0)
-block = f"""- id: whalerein-dsh
-  name: whalerein-dsh
-  config:
-    server: 127.0.0.1
-    host_id: {json.dumps(host_id)}
-    host_token: !!js process.env.WHALEREIN_HOST_TOKEN
-    admin_token: !!js process.env.WHALEREIN_ADMIN_TOKEN ?? ''
-    state_dir: {json.dumps(state_dir)}
-    adapter: real
-    allow_insecure_mqtt: true
-    log_level: debug
-"""
-stripped = text.strip()
-if stripped in {"", "[]"}:
-    text = ""
-file.write_text(text.rstrip() + ("\n" if text.strip() else "") + block, encoding="utf-8")
-PY
+python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PROFILE_DIR/cordis.patch.yml" "$HOST_ID" "$STATE_DIR"
 
 if [[ -n "$HOST_ID" ]]; then
   echo "starting real DSH: profile=$PROFILE host=$HOST_ID port=$PORT"

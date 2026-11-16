@@ -9,11 +9,11 @@ export const HOST_KEY_CREDENTIAL = 'whalerein.host-private-key.v1'
 
 function decodePrivateKey(value) {
   if (value instanceof Uint8Array) return value
-  if (typeof value !== 'string' || value.length === 0) throw new PluginError('internal', 'host identity credential invalid')
+  if (typeof value !== 'string' || value.length === 0) throw new PluginError('internal', 'host identity credential is unreadable; restore the credential store backup instead of rotating the Host identity')
   try {
     return new Uint8Array(Buffer.from(value, 'base64'))
   } catch {
-    throw new PluginError('internal', 'host identity credential invalid')
+    throw new PluginError('internal', 'host identity credential is unreadable; restore the credential store backup instead of rotating the Host identity')
   }
 }
 
@@ -35,7 +35,7 @@ export async function loadOrCreateHostIdentity({ credentials, store, logger }) {
   if (!stored) {
     if (recorded) {
       logger?.warn('host_identity_missing', { code: 'internal' })
-      throw new PluginError('internal', 'host identity credential missing')
+      throw new PluginError('internal', 'host identity private key is missing; restore the credential store backup, or revoke every paired device and create a new Host identity; do not delete the state database')
     }
     const keypair = generateKeypair()
     await credentials.setCredential(HOST_KEY_CREDENTIAL, Buffer.from(keypair.privateKey).toString('base64'))
@@ -45,12 +45,12 @@ export async function loadOrCreateHostIdentity({ credentials, store, logger }) {
     return { ...keypair, fingerprint: fp, fingerprintDisplay: formatFingerprint(keypair.publicKey) }
   }
   const privateKey = decodePrivateKey(stored)
-  if (privateKey.length !== 32) throw new PluginError('internal', 'host identity credential invalid')
+  if (privateKey.length !== 32) throw new PluginError('internal', 'host identity credential is unreadable; restore the credential store backup instead of rotating the Host identity')
   const keypair = parseKeypair(privateKey)
   const fp = fingerprint(keypair.publicKey)
   if (recorded && !bytesEqual(recorded.publicKey, keypair.publicKey)) {
     logger?.error('host_identity_mismatch', { code: 'internal' })
-    throw new PluginError('internal', 'host identity does not match stored public key')
+    throw new PluginError('internal', 'host identity does not match the recorded public key; restore the matching credential store, or revoke every paired device before creating a new identity')
   }
   if (!recorded) store.saveHostPublicKey(keypair.publicKey, fp)
   return { ...keypair, fingerprint: fp, fingerprintDisplay: formatFingerprint(keypair.publicKey) }

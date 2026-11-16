@@ -154,13 +154,17 @@ func TestOperationStatusEndpointReportsRefusals(t *testing.T) {
 	}
 }
 
-func TestExternalRoutesAreAbsentWithoutTheMode(t *testing.T) {
+func TestExternalRoutesReportAnExplicitCapabilityErrorWithoutTheMode(t *testing.T) {
 	server := newAPIFixture(t).server
-	for _, path := range []string{"/v1/enrollments/hosts", "/v1/operations/op-1"} {
-		recorder := doRequest(t, server.PublicHandler(), http.MethodGet, path, nil,
-			map[string]string{adminHeaderName: "Bearer admin-token"})
-		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("%s should not exist in standalone mode, got %d", path, recorder.Code)
-		}
-	}
+	recorder := doRequest(t, server.PublicHandler(), http.MethodPost, "/v1/enrollments/hosts", []byte(`{"hostId":"host-1"}`), nil)
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/enrollments/hosts/host-1", nil,
+		map[string]string{adminHeaderName: "Bearer admin-token"})
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/operations/op-1", nil,
+		map[string]string{adminHeaderName: "Bearer admin-token"})
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
+	// A mistyped path stays a plain 404 so the two conditions differ.
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/enrollment", nil, nil)
+	assertError(t, recorder, http.StatusNotFound, whalereinv1.ErrorCode_not_found)
 }

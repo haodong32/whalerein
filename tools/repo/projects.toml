@@ -17,6 +17,13 @@ kind = "rust"
 role = "bindings"
 
 [[projects]]
+id = "mobile-bindings"
+depends_on = ["core", "proto"]
+path = "apps/mobile-bindings"
+kind = "rust"
+role = "bindings"
+
+[[projects]]
 id = "noise-peer"
 depends_on = ["core"]
 path = "tools/noise-peer"

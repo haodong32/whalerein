@@ -21,6 +21,12 @@ type claimReviewPresence struct{}
 
 func (claimReviewPresence) IsHostOnline(context.Context, string) bool { return true }
 
+func (claimReviewPresence) Available() bool { return true }
+
+type claimReviewPolicy struct{}
+
+func (claimReviewPolicy) ApplyPairing(context.Context, string, string) error { return nil }
+
 type claimReviewTransport struct{ calls int }
 
 func (*claimReviewTransport) SupportsPairing(string) bool { return true }
@@ -88,7 +94,7 @@ func TestClaimDoesNotPublishContradictoryRetainedCommit(t *testing.T) {
 				}
 			}
 			transport := &claimReviewTransport{}
-			service, err := pairing.New(pairing.Dependencies{Store: s, Transport: transport, Presence: claimReviewPresence{},
+			service, err := pairing.New(pairing.Dependencies{Store: s, Policy: claimReviewPolicy{}, Transport: transport, Presence: claimReviewPresence{},
 				Config: pairing.Config{ProtocolVersion: 1, ClaimTTL: time.Minute, ClaimTimeout: time.Second}})
 			if err != nil {
 				t.Fatal(err)

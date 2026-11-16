@@ -8,25 +8,25 @@ use std::time::Duration;
 
 use url::Url;
 use whalerein_proto::{
-    ApprovalDecision, GetSession, Interrupt, ListSessions, RequestPayload, ResolveApproval,
-    ResponsePayload, SendMessage,
+    ApprovalDecision, GetApproval, GetSession, Interrupt, ListSessions, RequestPayload,
+    ResolveApproval, ResponsePayload, SendMessage,
 };
 
 use super::config::{self, ConfigStore, PersistedConfig};
 use super::error::{CoreError, CoreResult};
 use super::types::{
     ApprovalInfo, CommandHandle, CreateSessionInput, DoctorReport, ExportManifest,
-    HostCapabilities, HostInfo, ModelCatalog, OnlineStatus, PairingOutcome, PairingPrompt,
-    PendingCommand, PendingQueue, PendingQueueAction, QuestionAnswer, QuestionBatchInfo,
-    QuestionPageInfo, RevocationOutcome, RevocationRetention, SessionList, SessionModel,
-    SessionSummary,
+    HostCapabilities, HostInfo, ModelCatalog, ModelChoice, ModelSelectionReceipt, OnlineStatus,
+    PairingOutcome, PairingPrompt, PendingCommand, PendingQueue, PendingQueueAction,
+    QuestionAnswer, QuestionBatchInfo, QuestionPageInfo, RevocationOutcome, RevocationRetention,
+    SessionList, SessionModel, SessionSummary,
 };
 use crate::access::{AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
 use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, PairingInitiator};
-use crate::runtime::channel::{ensure_channel, ensure_channel_after};
+use crate::runtime::channel::{ensure_channel, ensure_channel_after, require_payload_capability};
 use crate::runtime::{ConnectionState, Runtime};
 use crate::security::{keys, load_device_token, load_or_create_cache_key, SecretStore};
 use crate::sync::SyncService;
@@ -46,6 +46,105 @@ impl std::fmt::Debug for CoreOptions {
             .field("data_dir", &self.data_dir)
             .finish_non_exhaustive()
     }
+}
+
+/// Fork result for callers that present the child location.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForkOutcome {
+    pub handle: CommandHandle,
+    /// Confirmed child working directory, when the child summary was readable.
+    pub working_directory: Option<String>,
+    /// Why the directory could not be resolved; the fork itself still
+    /// succeeded and must not be retried or deleted.
+    pub working_directory_error: Option<String>,
+}
+
+/// Refuse to write a diagnostic bundle through a symbolic link.
+///
+/// The check runs before any create/write so the target is untouched. On Unix
+/// the write itself also uses `O_NOFOLLOW`, closing the check-then-write race.
+fn ensure_export_target_is_not_a_symlink(path: &Path) -> CoreResult<()> {
+    if std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(CoreError::InvalidInput(
+            "diagnostic export target must not be a symbolic link".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn export_symlink_error() -> CoreError {
+    CoreError::InvalidInput("diagnostic export target must not be a symbolic link".into())
+}
+
+fn write_private_bundle(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                if error.raw_os_error() == Some(libc::ELOOP) {
+                    export_symlink_error()
+                } else {
+                    CoreError::Internal("diagnostic bundle could not be written".into())
+                }
+            })?;
+        file.write_all(bytes)
+            .map_err(|_| CoreError::Internal("diagnostic bundle could not be written".into()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        ensure_export_target_is_not_a_symlink(path)?;
+        std::fs::write(path, bytes)
+            .map_err(|_| CoreError::Internal("diagnostic bundle could not be written".into()))?;
+    }
+    Ok(())
+}
+
+/// Whether a Host path is absolute under either POSIX or Windows rules.
+///
+/// The value is interpreted on the Host, so the local platform must not decide
+/// its validity. Accept both absolute forms and reject clearly relative paths.
+fn is_absolute_host_path(value: &str) -> bool {
+    if value.starts_with('/') || value.starts_with("\\\\") {
+        return true;
+    }
+    let mut chars = value.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(drive), Some(':'), Some('/' | '\\')) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// Bounded, secret-free candidate Host list for an ambiguous approval choice.
+/// Mirrors the session-routing ambiguity message so the CLI can render an
+/// actionable `--host` choice without dumping every Host.
+fn bounded_approval_host_candidates(hosts: &[HostInfo]) -> String {
+    const MAX_HOSTS: usize = 8;
+    const MAX_HOST_CHARS: usize = 48;
+    let mut shown = hosts
+        .iter()
+        .take(MAX_HOSTS)
+        .map(|host| {
+            host.host_id
+                .chars()
+                .take(MAX_HOST_CHARS)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if hosts.len() > MAX_HOSTS {
+        shown.push_str(&format!(" and {} more", hosts.len() - MAX_HOSTS));
+    }
+    shown
 }
 
 #[derive(Clone)]
@@ -129,7 +228,10 @@ impl Core {
                         Self::clear_pairing_secrets_with(&options.secrets, &device_id)?;
                     }
                 }
-                return Err(CoreError::Internal(format!("revocation cleanup requires manual inspection; configuration could not be read ({})",error.code())));
+                return Err(CoreError::Internal(format!(
+                    "revocation cleanup requires manual inspection; configuration could not be read ({})",
+                    error.code()
+                )));
             }
             Err(error) => return Err(error),
         };
@@ -451,25 +553,71 @@ impl Core {
         {
             slot.take();
         }
-        let key = match self
-            .options
-            .secrets
-            .load(&keys::cache_key(&config.device_id))?
-        {
-            Some(bytes) => bytes
-                .try_into()
-                .map_err(|_| crate::security::SecurityError::InvalidKey)?,
+        let key_name = keys::cache_key(&config.device_id);
+        let key = match self.options.secrets.load(&key_name)? {
+            Some(bytes) => match <[u8; 32]>::try_from(bytes) {
+                Ok(key) => key,
+                Err(_) => {
+                    // A malformed cache key cannot decrypt anything. Replace
+                    // it under the identity lock; the cache is rebuilt below
+                    // while pairing configuration and credentials stay intact.
+                    let _guard = self.identity_lock()?;
+                    self.options.secrets.delete(&key_name)?;
+                    load_or_create_cache_key(&self.options.secrets, &config.device_id)?
+                }
+            },
             None => {
                 let _guard = self.identity_lock()?;
                 load_or_create_cache_key(&self.options.secrets, &config.device_id)?
             }
         };
-        let cache = Arc::new(Cache::open(
-            &self.options.data_dir.join("cache.sqlite3"),
-            key,
-        )?);
+        let (cache, rebuilt) =
+            Cache::open_recovering(&self.options.data_dir.join("cache.sqlite3"), key)?;
+        if let Some(reason) = rebuilt {
+            self.record_cache_rebuild(reason);
+        }
+        let cache = Arc::new(cache);
         *slot = Some(cache.clone());
         Ok(cache)
+    }
+
+    /// Leave a bounded, secret-free marker when a cache is quarantined and
+    /// rebuilt. `doctor` and diagnostics can report the storage state without
+    /// opening the cache, and the pairing identity is explicitly preserved.
+    fn record_cache_rebuild(&self, reason: crate::cache::CacheRebuild) {
+        self.journal
+            .record("storage", "cache_rebuild", "succeeded", reason.reason());
+        let marker = serde_json::json!({
+            "reason": reason.reason(),
+            "quarantine": "cache.sqlite3.quarantine",
+            "pairing_preserved": true,
+            "at_unix_ms": crate::util::now_unix_ms(),
+        });
+        if let Ok(bytes) = serde_json::to_vec(&marker) {
+            let _ = std::fs::write(self.options.data_dir.join("cache-recovery.json"), bytes);
+        }
+    }
+
+    /// Why the local cache was last rebuilt, if it ever was. Plain local state;
+    /// it never contains message content or credentials.
+    pub fn cache_recovery_reason(&self) -> CoreResult<Option<String>> {
+        let path = self.options.data_dir.join("cache-recovery.json");
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(CoreError::Cache("cache recovery marker unreadable".into())),
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| CoreError::Cache("cache recovery marker corrupt".into()))?;
+        Ok(value
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .map(str::to_owned))
+    }
+
+    /// Path of the quarantined database, whether or not it exists.
+    pub fn cache_quarantine_path(&self) -> std::path::PathBuf {
+        self.options.data_dir.join("cache.sqlite3.quarantine")
     }
 
     #[cfg(unix)]
@@ -641,6 +789,7 @@ impl Core {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
+            require_payload_capability(&self.runtime, host_id, &payload)?;
             let commands = self.command_service()?;
             match commands
                 .query(host_id, &config.device_id, &channel, payload.clone())
@@ -662,6 +811,7 @@ impl Core {
                     let fresh = self
                         .ensure_channel_after(host_id, channel.channel_id())
                         .await?;
+                    require_payload_capability(&self.runtime, host_id, &payload)?;
                     commands
                         .query(host_id, &config.device_id, &fresh, payload)
                         .await
@@ -699,6 +849,7 @@ impl Core {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
+            require_payload_capability(&self.runtime, host_id, &payload)?;
             let commands = self
                 .command_service()?
                 .with_host_fingerprint(Some(self.confirmed_host_fingerprint(host_id)?));
@@ -776,7 +927,13 @@ impl Core {
                 // copy cannot override the authenticated Host command journal;
                 // query the original command on a fresh channel below.
             }
-            Err(error) if error.status == Some(404) => {}
+            // No Access copy at all, or one whose request TTL has passed:
+            // the durable Host journal is still authoritative for a command
+            // that may have executed. Do not discard recoverable work just
+            // because the control-plane row expired.
+            Err(error)
+                if error.status == Some(404)
+                    || error.code == Some(whalerein_proto::ErrorCode::Expired) => {}
             Err(error) => return self.settle(Err(error.into())).await,
         }
         let result = self
@@ -871,7 +1028,7 @@ impl Core {
                 .await
             {
                 Ok(result) => {
-                    return commands.handle_from_command_result(request_id, command_id, &result)
+                    return commands.handle_from_command_result(request_id, command_id, &result);
                 }
                 Err(CoreError::UnknownResult) if attempt < 9 => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -957,7 +1114,7 @@ impl Core {
                     Ok(_) => {
                         return Err(CoreError::Conflict(
                             "previous pairing recovered; retry the new invitation".into(),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -1190,7 +1347,30 @@ impl Core {
         self.runtime.state(host_id)
     }
 
+    /// Confirm that this profile currently authorizes one Host identity.
+    ///
+    /// Discovery must never imply that an unknown or unpinned Host can be used:
+    /// an unqualified Host argument is a lookup, not a reason to re-pair.
+    fn ensure_authorized_host(&self, host_id: &str) -> CoreResult<()> {
+        let config = self.require_config()?;
+        if host_id == config.host_id || config.host_fingerprints.contains_key(host_id) {
+            Ok(())
+        } else {
+            Err(CoreError::NotFound("Host is not authorized".into()))
+        }
+    }
+
     pub async fn sessions(&self, host_id: &str) -> CoreResult<SessionList> {
+        // Two explicit scopes must not silently disagree about which Host the
+        // listing describes.
+        if let Some(scoped) = &self.session_host {
+            if scoped != host_id {
+                return Err(CoreError::Conflict(format!(
+                    "--host {scoped} and sessions --host {host_id} disagree"
+                )));
+            }
+        }
+        self.ensure_authorized_host(host_id)?;
         let payload = RequestPayload {
             payload: Some(whalerein_proto::request_payload::Payload::ListSessions(
                 ListSessions {},
@@ -1202,10 +1382,13 @@ impl Core {
                     Some(whalerein_proto::response_payload::Payload::SessionList(list)) => list,
                     _ => return Err(CoreError::Internal("unexpected query response".into())),
                 };
-                let sessions: Vec<SessionSummary> =
+                let mut sessions: Vec<SessionSummary> =
                     list.sessions.into_iter().map(Into::into).collect();
-                let sync = self.sync_service()?;
-                sync.store_sessions(host_id, &sessions, "remote", true)?;
+                crate::cache::sort_sessions(&mut sessions);
+                // A complete remote listing replaces the cached one, so
+                // deleted/archived sessions cannot survive offline.
+                self.cache()?
+                    .replace_sessions(host_id, &sessions, "remote", true)?;
                 Ok(SessionList {
                     sessions,
                     source: "remote".into(),
@@ -1386,9 +1569,41 @@ impl Core {
                     .as_ref()
                     .is_some_and(|capabilities| capabilities.model_selection) => {}
             Some(whalerein_proto::response_payload::Payload::SessionInfo(_)) => {
-                return Err(CoreError::Unsupported)
+                return Err(CoreError::Unsupported);
             }
             _ => return Err(CoreError::Internal("unexpected session response".into())),
+        }
+        // Re-selecting the effective next model is a no-op: returning a
+        // synthesized receipt here avoids journaling a second indistinguishable
+        // pending command. A read failure is not proof of a mismatch, so it
+        // falls through to the normal submission path.
+        if let Ok(current) = self.read_session_model(session_id).await {
+            let same = current.next.as_ref().is_some_and(|next| {
+                next.provider == provider
+                    && next.model == model
+                    && next.effort.as_deref().unwrap_or("") == effort.unwrap_or("")
+            });
+            if same {
+                return Ok(CommandHandle {
+                    // No command identity is invented for a no-op.
+                    request_id: String::new(),
+                    command_id: String::new(),
+                    status: OnlineStatus::Succeeded,
+                    message_id: None,
+                    delivery_id: None,
+                    model_selection: Some(ModelSelectionReceipt {
+                        selected: Some(ModelChoice {
+                            provider: provider.to_owned(),
+                            model: model.to_owned(),
+                            effort: effort.map(str::to_owned),
+                        }),
+                        effect_scope: "session_and_source_default_attempt".into(),
+                        default_persistence: "unconfirmed".into(),
+                    }),
+                    lifecycle_receipt: None,
+                    question_receipt: None,
+                });
+            }
         }
         let handle = self
             .control(
@@ -1448,11 +1663,48 @@ impl Core {
         }
     }
 
+    /// Reject create values the Host would reject in preflight.
+    ///
+    /// These rules describe the request, not Host state: blank option values,
+    /// a relative working directory, and a working directory plus workspace
+    /// together can never succeed, so the client fails before submitting a
+    /// lifecycle command that could otherwise create an unclear journal entry.
+    fn validate_create_input(input: &CreateSessionInput) -> CoreResult<()> {
+        for (name, value) in [
+            ("cwd", &input.cwd),
+            ("workspace", &input.workspace_id),
+            ("preset", &input.agent_preset),
+            ("session id", &input.preferred_session_id),
+        ] {
+            if let Some(value) = value {
+                if value.trim().is_empty() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "create {name} must not be blank"
+                    )));
+                }
+            }
+        }
+        if input.cwd.is_some() && input.workspace_id.is_some() {
+            return Err(CoreError::InvalidInput(
+                "create cwd and workspace are mutually exclusive".into(),
+            ));
+        }
+        if let Some(cwd) = &input.cwd {
+            if !is_absolute_host_path(cwd) {
+                return Err(CoreError::InvalidInput(
+                    "create cwd must be an absolute Host path".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn create_session(
         &self,
         host_id: &str,
         input: CreateSessionInput,
     ) -> CoreResult<CommandHandle> {
+        Self::validate_create_input(&input)?;
         if !self.session_create_supported(host_id).await? {
             return Err(CoreError::Unsupported);
         }
@@ -1483,7 +1735,50 @@ impl Core {
     }
 
     /// Fork the latest complete source prefix without starting the child.
+    ///
+    /// A confirmed child is only described completely once its working
+    /// directory is known. Callers that show the child location should use
+    /// [`Core::fork_session_outcome`] so an unreadable directory is reported
+    /// instead of silently omitted.
     pub async fn fork_session(&self, session_id: &str) -> CoreResult<CommandHandle> {
+        Ok(self.fork_session_outcome(session_id).await?.handle)
+    }
+
+    /// Fork and resolve the confirmed child's working directory.
+    ///
+    /// Fork creates a child that shares the parent's working directory; the
+    /// child summary is a second, best-effort read. Its failure cannot undo the
+    /// fork, so it is returned as an explicit error code next to the handle
+    /// rather than dropped.
+    pub async fn fork_session_outcome(&self, session_id: &str) -> CoreResult<ForkOutcome> {
+        let handle = self.fork_session_receipt(session_id).await?;
+        let created = handle.lifecycle_receipt.as_ref().is_some_and(|receipt| {
+            !receipt.session_id.is_empty()
+                && matches!(receipt.disposition.as_str(), "READY" | "READY_WITH_WARNING")
+        });
+        let mut outcome = ForkOutcome {
+            handle,
+            working_directory: None,
+            working_directory_error: None,
+        };
+        if !created {
+            return Ok(outcome);
+        }
+        let child = outcome
+            .handle
+            .lifecycle_receipt
+            .as_ref()
+            .map(|receipt| receipt.session_id.clone())
+            .unwrap_or_default();
+        match self.get_session(&child).await {
+            Ok(summary) if !summary.cwd.is_empty() => outcome.working_directory = Some(summary.cwd),
+            Ok(_) => outcome.working_directory_error = Some("not_available".into()),
+            Err(error) => outcome.working_directory_error = Some(error.code().to_owned()),
+        }
+        Ok(outcome)
+    }
+
+    async fn fork_session_receipt(&self, session_id: &str) -> CoreResult<CommandHandle> {
         let host = self.host_for_session(session_id).await?;
         let response = self
             .query(
@@ -1502,16 +1797,16 @@ impl Core {
                 Some(whalerein_proto::response_payload::Payload::HostCapabilities(c))
                     if c.session_fork => {}
                 Some(whalerein_proto::response_payload::Payload::HostCapabilities(_)) => {
-                    return Err(CoreError::Unsupported)
+                    return Err(CoreError::Unsupported);
                 }
                 _ => {
                     return Err(CoreError::Internal(
                         "unexpected host capabilities response".into(),
-                    ))
+                    ));
                 }
             },
             Err(error) if matches!(error.code(), "unsupported_capability" | "invalid_argument") => {
-                return Err(CoreError::Unsupported)
+                return Err(CoreError::Unsupported);
             }
             Err(error) => return Err(error),
         }
@@ -1618,6 +1913,62 @@ impl Core {
         mode: whalerein_proto::DeliveryMode,
     ) -> CoreResult<CommandHandle> {
         let host = self.host_for_session(session_id).await?;
+        // A non-default delivery mode is a source capability. Reject one the
+        // Host does not advertise before any command is submitted; an empty
+        // advertisement is a legacy Host and keeps the old pass-through path.
+        if matches!(
+            mode,
+            whalerein_proto::DeliveryMode::StartIfIdle | whalerein_proto::DeliveryMode::Steer
+        ) {
+            // Read the Source's current advertisement rather than the cached
+            // session summary, which may predate this Host build.
+            let list = self.sessions(&host).await?;
+            if let Some(capabilities) = list
+                .sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .and_then(|session| session.source_capabilities.as_ref())
+            {
+                if !capabilities.delivery_modes.is_empty()
+                    && !capabilities
+                        .delivery_modes
+                        .iter()
+                        .any(|advertised| advertised == mode.as_str_name())
+                {
+                    return Err(CoreError::Unsupported);
+                }
+            }
+        }
+        let cache = self.cache()?;
+        let digest = cache.send_intent_digest(text);
+        // A blind resend after an unknown observation is recovered instead of
+        // being submitted as a second user message. Once a send resolves, the
+        // intent is removed and identical text is a new message again.
+        if let Some(retained) = cache.unresolved_send_intent(&host, session_id, &digest)? {
+            match self.recover_pending_command(&retained).await {
+                Ok(handle) => {
+                    if handle.status == OnlineStatus::HostAccepted
+                        || handle.status == OnlineStatus::Received
+                    {
+                        let request_id = handle.request_id.clone();
+                        let command_id = handle.command_id.clone();
+                        return self
+                            .observe_send_terminal(
+                                &host, session_id, &digest, request_id, command_id, handle,
+                            )
+                            .await;
+                    }
+                    cache.resolve_send_intent(&host, session_id, &digest)?;
+                    return Ok(handle);
+                }
+                Err(CoreError::NotFound(_)) => {
+                    // The original command is gone; a fresh send cannot
+                    // duplicate a message the Host no longer has.
+                    cache.resolve_send_intent(&host, session_id, &digest)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let handle = self
             .control(
                 &host,
@@ -1633,9 +1984,52 @@ impl Core {
             )
             .await?;
         if handle.status != OnlineStatus::HostAccepted {
+            cache.resolve_send_intent(&host, session_id, &digest)?;
             return Ok(handle);
         }
-        self.await_command_terminal(&host, handle).await
+        let request_id = handle.request_id.clone();
+        let command_id = handle.command_id.clone();
+        self.observe_send_terminal(&host, session_id, &digest, request_id, command_id, handle)
+            .await
+    }
+
+    /// Follow an accepted send to a terminal receipt. An unknown observation
+    /// keeps the command identity (and an idempotency record) instead of
+    /// inviting a resend that would duplicate the user message.
+    async fn observe_send_terminal(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        digest: &str,
+        request_id: String,
+        command_id: String,
+        handle: CommandHandle,
+    ) -> CoreResult<CommandHandle> {
+        let result = self.await_command_terminal(host_id, handle).await;
+        let cache = self.cache()?;
+        match result {
+            Ok(handle) => {
+                cache.resolve_send_intent(host_id, session_id, digest)?;
+                Ok(handle)
+            }
+            Err(CoreError::Timeout) => {
+                // The accepted command may still deliver. Report unknown and
+                // retain its identity so the retry recovers it.
+                let _ =
+                    cache.record_send_intent(host_id, session_id, digest, &request_id, &command_id);
+                Err(CoreError::UnknownResult)
+            }
+            Err(CoreError::UnknownResult) => {
+                let _ =
+                    cache.record_send_intent(host_id, session_id, digest, &request_id, &command_id);
+                Err(CoreError::UnknownResult)
+            }
+            Err(error) => {
+                // A definitive rejection cannot create a message.
+                let _ = cache.resolve_send_intent(host_id, session_id, digest);
+                Err(error)
+            }
+        }
     }
 
     /// Convert `host_accepted` into a confirmed terminal result by asking the
@@ -1684,11 +2078,86 @@ impl Core {
         self.settle(result).await
     }
 
+    /// Resolve the authorized Host that owns an approval identity.
+    ///
+    /// An explicit `--host` always wins; a single authorized Host is
+    /// unambiguous; several authorized Hosts produce a bounded, actionable
+    /// conflict instead of guessing. The approval identity is Host-scoped and
+    /// is never probed across Hosts.
+    async fn approval_host(&self) -> CoreResult<String> {
+        let hosts = self.hosts().await?;
+        self.approval_host_from(&hosts)
+    }
+
+    fn approval_host_from(&self, hosts: &[HostInfo]) -> CoreResult<String> {
+        if let Some(host) = &self.session_host {
+            if !hosts.iter().any(|item| &item.host_id == host) {
+                return Err(CoreError::NotFound("Host is not authorized".into()));
+            }
+            return Ok(host.clone());
+        }
+        match hosts {
+            [host] => Ok(host.host_id.clone()),
+            [] => Err(CoreError::NotFound("no authorized Host".into())),
+            _ => Err(CoreError::Conflict(format!(
+                "approval is Host-scoped and multiple Hosts are authorized ({}); specify a Host with --host",
+                bounded_approval_host_candidates(hosts)
+            ))),
+        }
+    }
+
+    /// Read one approval's live or terminal state. The read path is the same
+    /// Host-scoped identity used by approve/reject; it never guesses between
+    /// several authorized Hosts.
+    pub async fn get_approval(&self, approval_id: &str) -> CoreResult<ApprovalInfo> {
+        if approval_id.is_empty() {
+            return Err(CoreError::InvalidInput("approval identity missing".into()));
+        }
+        let host = self.approval_host().await?;
+        let response = self
+            .query(
+                &host,
+                RequestPayload {
+                    payload: Some(whalerein_proto::request_payload::Payload::GetApproval(
+                        GetApproval {
+                            approval_id: approval_id.to_owned(),
+                        },
+                    )),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                CoreError::Host {
+                    code: Some(whalerein_proto::ErrorCode::NotFound),
+                    ..
+                } => CoreError::NotFound("approval not found".into()),
+                other => other,
+            })?;
+        match response.payload {
+            Some(whalerein_proto::response_payload::Payload::Approval(approval))
+                if approval.approval_id == approval_id =>
+            {
+                Ok(ApprovalInfo::from(approval))
+            }
+            Some(whalerein_proto::response_payload::Payload::Approval(_)) => Err(
+                CoreError::Internal("approval response identity mismatch".into()),
+            ),
+            _ => Err(CoreError::Internal("unexpected approval response".into())),
+        }
+    }
+
     /// List the host's pending approvals, optionally scoped to one session.
+    /// An explicit `--host` scope wins; otherwise the session identifies the
+    /// Host (and stays ambiguous when the session exists on several Hosts).
     /// This is the read half of the approval path; approve/reject remain
     /// encrypted control commands.
     pub async fn list_approvals(&self, session_id: &str) -> CoreResult<Vec<ApprovalInfo>> {
-        let host = self.host_for_session(session_id).await?;
+        let host = if self.session_host.is_some() {
+            let hosts = self.hosts().await?;
+            self.approval_host_from(&hosts)?
+        } else {
+            self.host_for_session(session_id).await?
+        };
         let response = self
             .query(
                 &host,
@@ -1937,19 +2406,7 @@ impl Core {
         expected_digest: &[u8],
         expected_version: i64,
     ) -> CoreResult<CommandHandle> {
-        let hosts = self.hosts().await?;
-        let host = if let Some(host) = &self.session_host {
-            if !hosts.iter().any(|item| &item.host_id == host) {
-                return Err(CoreError::NotFound("Host is not authorized".into()));
-            }
-            host.clone()
-        } else if hosts.len() == 1 {
-            hosts[0].host_id.clone()
-        } else {
-            return Err(CoreError::Conflict(
-                "specify a Host for approval resolution".into(),
-            ));
-        };
+        let host = self.approval_host().await?;
         self.control(
             &host,
             RequestPayload {
@@ -1968,17 +2425,45 @@ impl Core {
 
     pub async fn interrupt(&self, session_id: &str) -> CoreResult<CommandHandle> {
         let host = self.host_for_session(session_id).await?;
-        self.control(
-            &host,
-            RequestPayload {
-                payload: Some(whalerein_proto::request_payload::Payload::Interrupt(
-                    Interrupt {
-                        session_id: session_id.to_owned(),
-                    },
-                )),
-            },
-        )
-        .await
+        let handle = self
+            .control(
+                &host,
+                RequestPayload {
+                    payload: Some(whalerein_proto::request_payload::Payload::Interrupt(
+                        Interrupt {
+                            session_id: session_id.to_owned(),
+                        },
+                    )),
+                },
+            )
+            .await?;
+        // Acceptance is not proof that the Agent stopped. Follow the accepted
+        // command to its terminal receipt exactly as send does, so a slow Host
+        // cannot make the client report success for an unconfirmed stop.
+        let handle = if matches!(
+            handle.status,
+            OnlineStatus::HostAccepted | OnlineStatus::Received
+        ) {
+            match self.await_command_terminal(&host, handle).await {
+                Ok(handle) => handle,
+                // An accepted stop whose terminal result cannot be read may
+                // still have happened; it is unknown, never a success.
+                Err(CoreError::Timeout) => return Err(CoreError::UnknownResult),
+                Err(error) => return Err(error),
+            }
+        } else {
+            handle
+        };
+        match handle.status {
+            OnlineStatus::Succeeded => Ok(handle),
+            // A terminal unknown/failed/rejected interrupt never confirms the
+            // stop. Keep the command identity recoverable and report it.
+            OnlineStatus::Unknown | OnlineStatus::HostAccepted | OnlineStatus::Received => {
+                Err(CoreError::UnknownResult)
+            }
+            OnlineStatus::Failed | OnlineStatus::Rejected => Err(CoreError::HostRejected),
+            OnlineStatus::HostOffline => Err(CoreError::HostOffline),
+        }
     }
 
     /// Revoke grants and stop reconnects while preserving the profile identity.
@@ -2044,8 +2529,20 @@ impl Core {
                     }
                 }
                 self.runtime.revoke();
-                self.clear_local_pairing_async(&device_id, &revocation_intent)
-                    .await?;
+                // The server grant is already gone and the local credentials
+                // were cleared before the cache loop. A concurrent watch may
+                // still hold a SQLite read transaction, so a busy/missing
+                // cache must downgrade retention to "unverified" instead of
+                // failing the whole revocation (which would leave the CLI
+                // believing it is still paired).
+                if let Err(error) = self
+                    .clear_local_pairing_async(&device_id, &revocation_intent)
+                    .await
+                {
+                    if !matches!(error, CoreError::Cache(_) | CoreError::Unavailable(_)) {
+                        return Err(error);
+                    }
+                }
                 Ok(RevocationOutcome {
                     device_id,
                     retention: if self.revoked_identity_retention_unverified()? {
@@ -2211,7 +2708,7 @@ impl Core {
             _ => {
                 return Err(CoreError::Conflict(
                     "profile identity changed during cleanup".into(),
-                ))
+                ));
             }
         }
         #[cfg(test)]
@@ -2371,7 +2868,7 @@ impl Core {
             _ => {
                 return Err(CoreError::Conflict(
                     "profile identity changed during cleanup".into(),
-                ))
+                ));
             }
         }
         let current_marker = revoked_commands::marker_in(_admission.directory())?;
@@ -2622,7 +3119,7 @@ impl Core {
     pub async fn sync_session(&self, session_id: &str) -> CoreResult<u64> {
         let key = self.session_key(session_id).await?;
         let mut conversation = crate::conversation::Conversation::default();
-        self.sync_conversation(&key, &mut conversation, &mut |_| true)
+        self.sync_conversation(&key, &mut conversation, true, true, &mut |_| true)
             .await
     }
 
@@ -2645,21 +3142,83 @@ impl Core {
 
     /// Snapshot stored on disk. This does not open a channel.
     pub fn doctor(&self) -> CoreResult<DoctorReport> {
-        let cache = self.cache_or_empty()?;
+        self.doctor_with_cache_status().map(|(report, _)| report)
+    }
+
+    /// Snapshot stored on disk plus an explicit local-cache warning.
+    ///
+    /// A corrupt `cache.sqlite3` must not make diagnostics unavailable: the
+    /// report is built from an empty in-memory cache and the second value is
+    /// `Some("cache_unavailable")`. Operations that need the real cache keep
+    /// failing through [`Core::cache`]. Callers that can present the warning
+    /// should use this method; [`Core::doctor`] stays source-compatible.
+    pub fn doctor_with_cache_status(&self) -> CoreResult<(DoctorReport, Option<&'static str>)> {
         let address = self
             .current_config()
             .map(|config| config.access_url.clone());
-        Ok(diagnostics::build_report(&cache, address))
+        match self.cache_or_empty() {
+            Ok(cache) => Ok((diagnostics::build_report(&cache, address), None)),
+            Err(CoreError::Cache(_)) => {
+                let empty = Cache::open_in_memory([0u8; 32])?;
+                Ok((
+                    diagnostics::build_report(&empty, address),
+                    Some("cache_unavailable"),
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// JSON preview for an in-app diagnostic share. It reads only local state:
+    /// no file is written and no channel is opened. The payload preserves the
+    /// existing export redaction policy (schema/versions, Access address,
+    /// redacted Host labels with in-memory connection state, command counts,
+    /// metrics, last failure code and the field/redaction manifest) and never
+    /// contains message or draft text, tool arguments, credentials, invitation
+    /// or device tokens, private keys or full invitation URIs.
+    pub fn diagnostics_preview(&self) -> CoreResult<String> {
+        let (report, cache_warning) = self.doctor_with_cache_status()?;
+        let failure = diagnostics::journal::load_failure(&self.options.data_dir);
+        let config = self.current_config();
+        let mut host_ids = Vec::new();
+        if let Some(config) = &config {
+            host_ids.push(config.host_id.clone());
+            host_ids.extend(config.host_fingerprints.keys().cloned());
+        }
+        host_ids.sort();
+        host_ids.dedup();
+        let hosts = host_ids
+            .iter()
+            .enumerate()
+            .map(|(index, host_id)| diagnostics::PreviewHost {
+                label: format!("host-{}", index + 1),
+                connection_state: self.get_connection_state(host_id).as_str().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        diagnostics::render_preview(
+            &report,
+            cache_warning,
+            failure.as_ref(),
+            &hosts,
+            &self.metrics(),
+            config.as_ref().map(|config| config.protocol_version),
+        )
     }
 
     /// Write a redacted JSON diagnostic bundle. The caller must confirm first.
+    ///
+    /// A symbolic-link target is refused before anything is written: following
+    /// the link would apply the private permissions to, and overwrite, a file
+    /// the user did not name.
     pub fn export_diagnostics(&self, path: &Path) -> CoreResult<ExportManifest> {
-        let report = self.doctor()?;
+        ensure_export_target_is_not_a_symlink(path)?;
+        let (report, cache_warning) = self.doctor_with_cache_status()?;
         let mut manifest = diagnostics::render_export(&report);
         let bundle = serde_json::json!({
             "schema": "whalerein/v1",
             "generated_at_unix_ms": crate::util::now_unix_ms(),
             "report": report,
+            "cache_warning": cache_warning,
             "last_failure": diagnostics::journal::load_failure(&self.options.data_dir),
             "fields": manifest.fields,
             "redactions": manifest.redactions,
@@ -2671,8 +3230,7 @@ impl Core {
         }
         let bytes = serde_json::to_vec_pretty(&bundle)
             .map_err(|_| CoreError::Internal("diagnostic bundle could not encode".into()))?;
-        std::fs::write(path, &bytes)
-            .map_err(|_| CoreError::Internal("diagnostic bundle could not be written".into()))?;
+        write_private_bundle(path, &bytes)?;
         config::set_private_permissions(path)?;
         manifest.path = path.display().to_string();
         manifest.bytes = bytes.len() as u64;
@@ -2689,6 +3247,60 @@ impl Core {
         key: &whalerein_proto::SessionKey,
     ) -> CoreResult<Vec<whalerein_proto::ConversationMessage>> {
         Ok(self.cache()?.history_messages(key)?)
+    }
+
+    // -----------------------------------------------------------------
+    // Conversation drafts
+    // -----------------------------------------------------------------
+
+    /// Load the cache key that encrypts the local draft store. Reads never
+    /// create a missing key unless the profile lock is held.
+    fn profile_cache_key(&self) -> CoreResult<[u8; 32]> {
+        let config = self.require_config()?;
+        match self
+            .options
+            .secrets
+            .load(&keys::cache_key(&config.device_id))?
+        {
+            Some(bytes) => bytes
+                .try_into()
+                .map_err(|_| CoreError::Security("cache key is invalid".into())),
+            None => {
+                let _guard = self.identity_lock()?;
+                Ok(load_or_create_cache_key(
+                    &self.options.secrets,
+                    &config.device_id,
+                )?)
+            }
+        }
+    }
+
+    /// Persist an encrypted draft for one explicit Host and session scope.
+    /// Empty text deletes the draft, matching an emptied editor.
+    pub fn save_draft(&self, host_id: &str, session_id: &str, text: &str) -> CoreResult<()> {
+        let cache = self.cache()?;
+        let key = self.profile_cache_key()?;
+        crate::drafts::save(&cache, &key, host_id, session_id, text)
+    }
+
+    /// Load a draft for one explicit Host and session scope.
+    pub fn load_draft(&self, host_id: &str, session_id: &str) -> CoreResult<Option<String>> {
+        let cache = self.cache()?;
+        let key = self.profile_cache_key()?;
+        crate::drafts::load(&cache, &key, host_id, session_id)
+    }
+
+    /// Remove the draft for one explicit Host and session scope.
+    pub fn clear_draft(&self, host_id: &str, session_id: &str) -> CoreResult<()> {
+        let cache = self.cache()?;
+        crate::drafts::clear(&cache, host_id, session_id)
+    }
+
+    /// Remove every local draft for one Host, for example when the app
+    /// discards a paired Host.
+    pub fn clear_host_drafts(&self, host_id: &str) -> CoreResult<()> {
+        let cache = self.cache()?;
+        crate::drafts::clear_host(&cache, host_id)
     }
 
     /// Decode an approval event payload's base64 digest for CLI comparison.
@@ -2722,7 +3334,16 @@ mod test_support;
 mod tests;
 
 #[cfg(test)]
+mod queue_tests;
+
+#[cfg(test)]
 mod cache_tests;
+
+#[cfg(test)]
+mod session_tests;
+
+#[cfg(test)]
+mod draft_tests;
 
 #[cfg(test)]
 mod command_recovery_tests;

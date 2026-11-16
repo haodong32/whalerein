@@ -125,7 +125,7 @@ type startupStoreOps struct {
 	open    func(context.Context, string) (*store.Store, error)
 	migrate func(context.Context, *store.Store) error
 	close   func(*store.Store)
-	cleanup func(context.Context, cleanupStore, time.Duration, time.Duration, *slog.Logger)
+	cleanup func(context.Context, cleanupStore, time.Duration, time.Duration, *slog.Logger, *diagnostics.Metrics)
 }
 
 func defaultStartupStoreOps() startupStoreOps {
@@ -322,7 +322,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	service.SetHostKeyHandler(authService.RememberHostAuthorizationKey)
 
 	readiness := diagnostics.NewReadiness()
-	readiness.Add("database", func(ctx context.Context) error { return db.Ping(ctx) })
+	// A ping-only check would keep a read-only replica or an exhausted pool in
+	// rotation. The write probe is a no-op transaction that proves writability.
+	readiness.Add("database", diagnostics.DatabaseReadiness(db))
 	readiness.Add("broker", func(context.Context) error {
 		if !service.Ready() {
 			return errors.New("mqtt session is not ready")
@@ -393,7 +395,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			return runLine(runCtx, lineManager, cfg, logger)
 		},
 		func(runCtx context.Context) {
-			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger)
+			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger, metrics)
 		}, logger, 10*time.Second)
 }
 
@@ -489,38 +491,55 @@ type cleanupStore interface {
 	DeleteExpiredQueries(context.Context, time.Time) (int64, error)
 }
 
-func runCleanup(ctx context.Context, db cleanupStore, interval, retention time.Duration, logger *slog.Logger) {
+// maxCleanupRounds bounds one operation's catch-up work in a single tick, so a
+// shutdown cannot be delayed indefinitely by a very large backlog.
+const maxCleanupRounds = 100
+
+// cleanupTask names one bounded retention statement and its operator-facing
+// log lines.
+type cleanupTask struct {
+	operation string
+	success   string
+	failure   string
+	// cutoff computes the retention boundary from the pass start time.
+	cutoff func(time.Time) time.Time
+	run    func(context.Context, time.Time) (int64, error)
+}
+
+func runCleanup(ctx context.Context, db cleanupStore, interval, retention time.Duration, logger *slog.Logger, metrics *diagnostics.Metrics) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	if retention <= 0 {
 		retention = 24 * time.Hour
 	}
+	tasks := []cleanupTask{
+		{operation: "bodies", success: "expired request bodies cleared", failure: "expired request body cleanup failed",
+			cutoff: func(now time.Time) time.Time { return now },
+			run:    func(ctx context.Context, cutoff time.Time) (int64, error) { return db.ClearExpiredBodies(ctx, cutoff) }},
+		{operation: "tokens", success: "expired pairing tokens deleted", failure: "pairing token cleanup failed",
+			cutoff: func(now time.Time) time.Time { return now.Add(-retention) },
+			run: func(ctx context.Context, cutoff time.Time) (int64, error) {
+				return db.DeleteExpiredPairingTokens(ctx, cutoff)
+			}},
+		// Read-only request identities have a finite window. Control identities
+		// are never part of this sweep, even when their payloads have expired.
+		{operation: "queries", success: "expired query records deleted", failure: "query record cleanup failed",
+			cutoff: func(now time.Time) time.Time { return now.Add(-24 * time.Hour) },
+			run: func(ctx context.Context, cutoff time.Time) (int64, error) {
+				return db.DeleteExpiredQueries(ctx, cutoff)
+			}},
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	cleanup := func() {
 		now := time.Now().UTC()
-		cleared, err := db.ClearExpiredBodies(ctx, now)
-		if err != nil {
-			logger.Warn("expired request body cleanup failed", "error", err.Error())
-		} else if cleared > 0 {
-			logger.Info("expired request bodies cleared", "count", cleared)
-		}
-		deleted, err := db.DeleteExpiredPairingTokens(ctx, now.Add(-retention))
-		if err != nil {
-			logger.Warn("pairing token cleanup failed", "error", err.Error())
-		} else if deleted > 0 {
-			logger.Info("expired pairing tokens deleted", "count", deleted)
-		}
-		// Read-only request identities have a finite window. Control identities
-		// are never part of this sweep, even when their payloads have expired.
-		pruned, err := db.DeleteExpiredQueries(ctx, now.Add(-24*time.Hour))
-		if err != nil {
-			logger.Warn("query record cleanup failed", "error", err.Error())
-		} else if pruned > 0 {
-			logger.Info("expired query records deleted", "count", pruned)
+		for _, task := range tasks {
+			drainCleanupTask(ctx, task, now, logger, metrics)
 		}
 	}
+	// The first pass runs immediately: after a long pause (a restart or a
+	// suspended worker) the backlog is drained without waiting one interval.
 	cleanup()
 	for {
 		select {
@@ -530,6 +549,33 @@ func runCleanup(ctx context.Context, db cleanupStore, interval, retention time.D
 			cleanup()
 		}
 	}
+}
+
+// drainCleanupTask repeats one bounded statement until it returns fewer rows
+// than the batch bound. A full batch is the backlog signal: it is counted and
+// logged so an alert can fire even though the work keeps making progress.
+func drainCleanupTask(ctx context.Context, task cleanupTask, now time.Time, logger *slog.Logger, metrics *diagnostics.Metrics) {
+	cutoff := task.cutoff(now)
+	for round := 0; round < maxCleanupRounds; round++ {
+		count, err := task.run(ctx, cutoff)
+		if err != nil {
+			logger.Warn(task.failure, "error", err.Error())
+			return
+		}
+		metrics.CleanupBatch(task.operation, int(count))
+		if count > 0 {
+			logger.Info(task.success, "count", count, "operation", task.operation)
+		}
+		if count < store.CleanupBatchSize {
+			return
+		}
+		metrics.CleanupBacklog()
+		logger.Warn("retention cleanup batch reached its bound; more work remains", "operation", task.operation)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+	logger.Warn("retention cleanup stopped after the per-tick round limit", "operation", task.operation)
 }
 
 // runLine keeps the broker policy validity window fresh and periodically

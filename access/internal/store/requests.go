@@ -255,6 +255,67 @@ func (s *Store) MarkPublishFailure(ctx context.Context, requestID string, now ti
 	return nil
 }
 
+// statusTransitions is the single durable HostResult status matrix. It is both
+// the predicate the store applies and the table the unit tests exercise, so a
+// widened rollback (for example host_accepted back to rejected or host_offline)
+// fails a test before it can reach SQL.
+var statusTransitions = map[whalereinv1.OnlineStatus][]whalereinv1.OnlineStatus{
+	whalereinv1.OnlineStatus_received: {
+		whalereinv1.OnlineStatus_host_offline,
+		whalereinv1.OnlineStatus_rejected,
+		whalereinv1.OnlineStatus_host_accepted,
+		whalereinv1.OnlineStatus_succeeded,
+		whalereinv1.OnlineStatus_failed,
+		whalereinv1.OnlineStatus_unknown,
+	},
+	whalereinv1.OnlineStatus_host_accepted: {
+		whalereinv1.OnlineStatus_succeeded,
+		whalereinv1.OnlineStatus_failed,
+		whalereinv1.OnlineStatus_unknown,
+	},
+	whalereinv1.OnlineStatus_unknown: {
+		whalereinv1.OnlineStatus_succeeded,
+		whalereinv1.OnlineStatus_failed,
+	},
+}
+
+// statusTransitionSources fixes the predicate order for stable SQL and tests.
+var statusTransitionSources = []whalereinv1.OnlineStatus{
+	whalereinv1.OnlineStatus_received,
+	whalereinv1.OnlineStatus_host_accepted,
+	whalereinv1.OnlineStatus_unknown,
+}
+
+// hostResultStatusPredicate is generated from statusTransitions and embedded in
+// the applyHostResult UPDATE. There is no second hand-written SQL matrix.
+var hostResultStatusPredicate = buildStatusPredicate(statusTransitions, statusTransitionSources)
+
+func buildStatusPredicate(transitions map[whalereinv1.OnlineStatus][]whalereinv1.OnlineStatus, sources []whalereinv1.OnlineStatus) string {
+	parts := make([]string, 0, len(sources))
+	for _, from := range sources {
+		targets := transitions[from]
+		if len(targets) == 0 {
+			continue
+		}
+		quoted := make([]string, len(targets))
+		for index, target := range targets {
+			quoted[index] = "'" + StatusName(target) + "'"
+		}
+		parts = append(parts, fmt.Sprintf("(status = '%s' AND $4 IN (%s))", StatusName(from), strings.Join(quoted, ",")))
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// statusTransitionAllowed reports the matrix decision for tests and diagnostics.
+func statusTransitionAllowed(from, to whalereinv1.OnlineStatus) bool {
+	for _, allowed := range statusTransitions[from] {
+		if allowed == to {
+			return true
+		}
+	}
+	return false
+}
+
 // ApplyHostResult conditionally updates the same request row. The WHERE clause
 // encodes exactly the allowed online status transitions.
 func (s *Store) ApplyHostResult(ctx context.Context, update HostResultUpdate) (bool, error) {
@@ -317,11 +378,7 @@ func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, e
 		    forward_state = 'none',
 		    updated_at = GREATEST(updated_at,$9,$11,$12)
 		WHERE request_id = $1 AND host_id = $2 AND device_id = $3
-		  AND (
-		      (status = 'received' AND $4 IN ('host_offline','rejected','host_accepted','succeeded','failed','unknown'))
-		      OR (status = 'host_accepted' AND $4 IN ('succeeded','failed','unknown'))
-		      OR (status = 'unknown' AND $4 IN ('succeeded','failed'))
-		  )`,
+		  AND (`+hostResultStatusPredicate+`)`,
 		update.RequestID,
 		update.HostID,
 		update.DeviceID,
@@ -365,11 +422,17 @@ func (s *Store) ClearExpiredBodies(ctx context.Context, now time.Time) (int64, e
 	if err := s.reconcilePairingOutcomes(ctx, now, false); err != nil {
 		return 0, fmt.Errorf("reconcile pairing outcomes: %w", err)
 	}
+	// Bounded so one cleanup pass cannot hold a long lock after a long pause;
+	// the caller repeats until a pass returns fewer than CleanupBatchSize rows.
 	cmd, err := s.db.Exec(ctx, `
 		UPDATE requests
 		SET request_body = ''::bytea, result_body = ''::bytea, bodies_cleared=true, updated_at = GREATEST(updated_at,$1)
-		WHERE expires_at <= $1
-		  AND (request_body <> ''::bytea OR result_body <> ''::bytea OR bodies_cleared IS DISTINCT FROM true)`, now)
+		WHERE request_id IN (
+			SELECT request_id FROM requests
+			WHERE expires_at <= $1
+			  AND (request_body <> ''::bytea OR result_body <> ''::bytea OR bodies_cleared IS DISTINCT FROM true)
+			ORDER BY expires_at, request_id
+			LIMIT $2)`, now, CleanupBatchSize)
 	if err != nil {
 		return 0, fmt.Errorf("clear expired request bodies: %w", err)
 	}

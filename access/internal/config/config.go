@@ -7,6 +7,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -181,6 +182,33 @@ type LogConfig struct {
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)
 
+// Supported wire protocol versions. A version outside this range would start
+// Access successfully and then reject every real client, so configuration
+// rejects it before any listener opens.
+const (
+	MinSupportedProtocolVersion = 1
+	MaxSupportedProtocolVersion = 1
+)
+
+// tlsBrokerSchemes are the broker URL schemes that require TLS verification.
+func tlsBrokerScheme(scheme string) bool {
+	switch scheme {
+	case "tls", "mqtts", "ssl":
+		return true
+	default:
+		return false
+	}
+}
+
+// loopbackHost reports whether a broker target is a local test endpoint.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Default returns the baseline configuration used with a YAML overlay.
 func Default() Config {
 	return Config{
@@ -197,8 +225,10 @@ func Default() Config {
 			ReconnectMax:   Duration(30 * time.Second),
 		},
 		Line: LineConfig{
-			PolicyTTL:         Duration(10 * time.Second),
-			ReconcileInterval: Duration(30 * time.Second),
+			PolicyTTL: Duration(10 * time.Second),
+			// Reconcile must stay well inside the presence TTL: a snapshot is
+			// the only repair for a lost disconnect event.
+			ReconcileInterval: Duration(10 * time.Second),
 			HeartbeatInterval: Duration(5 * time.Second),
 			OperationTimeout:  Duration(5 * time.Second),
 		},
@@ -230,7 +260,7 @@ func Default() Config {
 			BatchSize:       50,
 		},
 		Revocation: RevocationConfig{AckTimeout: Duration(10 * time.Second)},
-		Presence:   PresenceConfig{CacheTTL: Duration(15 * time.Second)},
+		Presence:   PresenceConfig{CacheTTL: Duration(45 * time.Second)},
 		Cleanup: CleanupConfig{
 			Interval:              Duration(time.Minute),
 			PairingTokenRetention: Duration(24 * time.Hour),
@@ -400,6 +430,26 @@ func (c Config) Validate() error {
 		if err != nil || u.Host == "" {
 			problems = append(problems, "broker.url must be an absolute URL")
 		}
+		switch {
+		case tlsBrokerScheme(u.Scheme):
+			if c.Broker.InsecureSkipVerify {
+				if !loopbackHost(u.Hostname()) {
+					problems = append(problems, "broker.insecure_skip_verify is only allowed for a loopback broker; configure broker.ca_file for a remote TLS broker")
+				}
+				if c.Broker.CAFile != "" {
+					problems = append(problems, "broker.ca_file has no effect while broker.insecure_skip_verify is true")
+				}
+			}
+			if c.Broker.CAFile != "" {
+				if err := validateCAFile(c.Broker.CAFile); err != nil {
+					problems = append(problems, "broker.ca_file: "+err.Error())
+				}
+			}
+		default:
+			if c.Broker.CAFile != "" || c.Broker.ServerName != "" || c.Broker.InsecureSkipVerify {
+				problems = append(problems, "broker.ca_file, broker.server_name and broker.insecure_skip_verify require a TLS broker.url")
+			}
+		}
 	}
 	require("broker.username", c.Broker.Username)
 	require("broker.password", c.Broker.Password)
@@ -440,12 +490,21 @@ func (c Config) Validate() error {
 	}
 	if c.Presence.CacheTTL <= 0 {
 		problems = append(problems, "presence.cache_ttl must be positive")
+	} else {
+		if c.Presence.CacheTTL.D() < c.Line.ReconcileInterval.D() {
+			problems = append(problems, "presence.cache_ttl must be at least line.reconcile_interval")
+		}
+		if c.Line.HeartbeatInterval.D() >= c.Presence.CacheTTL.D() {
+			problems = append(problems, "line.heartbeat_interval must be shorter than presence.cache_ttl")
+		}
 	}
 	if c.Cleanup.Interval <= 0 || c.Cleanup.PairingTokenRetention <= 0 {
 		problems = append(problems, "cleanup durations must be positive")
 	}
-	if c.Protocol.Version == 0 {
-		problems = append(problems, "protocol.version must be positive")
+	if c.Protocol.Version < MinSupportedProtocolVersion || c.Protocol.Version > MaxSupportedProtocolVersion {
+		problems = append(problems, fmt.Sprintf(
+			"protocol.version %d is unsupported; supported versions: %d-%d",
+			c.Protocol.Version, MinSupportedProtocolVersion, MaxSupportedProtocolVersion))
 	}
 	switch c.Broker.ConnectTimeout.D() <= 0 || c.Broker.PublishTimeout.D() <= 0 || c.Broker.KeepAlive.D() <= 0 ||
 		c.Broker.ReconnectMin.D() <= 0 || c.Broker.ReconnectMax.D() <= 0 {
@@ -459,6 +518,20 @@ func (c Config) Validate() error {
 	}
 	if len(problems) > 0 {
 		return errors.New("invalid config: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// validateCAFile reads the configured CA bundle at startup so a missing or
+// non-PEM file fails check-config instead of the first TLS handshake.
+func validateCAFile(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("cannot be read")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(raw) {
+		return errors.New("contains no PEM certificate")
 	}
 	return nil
 }

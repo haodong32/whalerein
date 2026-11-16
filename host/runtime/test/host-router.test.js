@@ -87,7 +87,7 @@ function baseRequest(overrides = {}) {
   }
 }
 
-function encryptedQuery({ security, store, channel, payload, overrides = {}, kind = 'REQUEST_KIND_QUERY', commandId = '' }) {
+function encryptedQuery({ security, store, channel, payload, plaintext: rawPayload, overrides = {}, kind = 'REQUEST_KIND_QUERY', commandId = '' }) {
   const requestId = overrides.request_id ?? `r-${Math.random()}`
   const expiresAt = overrides.expires_at_unix_ms ?? Date.now() + 60_000
   const channelId = channel.channelId
@@ -99,7 +99,7 @@ function encryptedQuery({ security, store, channel, payload, overrides = {}, kin
     commandId,
     expiresAt,
   })
-  const plaintext = proto.encode('whalerein.v1.RequestPayload', payload)
+  const plaintext = rawPayload ?? proto.encode('whalerein.v1.RequestPayload', payload)
   const sealed = seal(channel.c2h, aad, plaintext)
   const frame = proto.encode('whalerein.v1.EncryptedFrame', {
     channel_id: channelId,
@@ -589,7 +589,7 @@ test('question reads enforce the complete encrypted HostResult budget without le
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
 })
 
-test('question pages use authenticated device and snapshot cursors without dropping entries', async () => {
+test('question pages use authenticated device cursors that resume across a source change', async () => {
   const ctx = setup()
   try {
     await ctx.host.start(); ctx.host.security.setRevocationsPending(false)
@@ -617,7 +617,14 @@ test('question pages use authenticated device and snapshot cursors without dropp
     assert.deepEqual(second.batches.map(batch => batch.batch_id), ['two'])
     assert.equal(second.next_cursor ?? '', '')
     revision++
-    assert.equal((await query(first.next_cursor)).result.error_code, 'conflict')
+    // The source changed between pages (a batch was added). The authenticated
+    // cursor still resumes at the recorded successor instead of conflicting.
+    const changed = id => ({ session_id: 's1', batch_id: id, source_epoch: 'epoch', version: revision,
+      digest: new Uint8Array(32), phase: 'QUESTION_OPEN', questions: [{ id: 'q', question: huge }] })
+    ctx.adapter.listQuestionPage = async () => ({ batches: [changed('one'), changed('two'), changed('three')] })
+    const resumed = await query(first.next_cursor)
+    assert.equal(resumed.result.status, 'succeeded')
+    assert.deepEqual(resumed.page.batches.map(batch => batch.batch_id), ['two'])
     assert.equal((await query(first.next_cursor + 'x')).result.error_code, 'conflict')
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
 })
@@ -716,5 +723,80 @@ test('an expired duplicate can be rejected after the same command already succee
     assert.equal(delayedDuplicate.error_code, 'expired')
     assert.equal(ctx.adapter.messages.length, 1)
     assert.equal(ctx.store.getCommand('d1', 'stable-command').status, 'succeeded')
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+
+test('when a request kind is unknown, the host reports a protocol version mismatch and names the kind', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    const result = await send(ctx.access, baseRequest({ request_id: 'r-kind', kind: 99 }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'protocol_version_incompatible')
+    assert.match(result.error_message, /unsupported request kind 99/)
+    assert.match(result.error_message, /upgrade/)
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('when a protocol version is outside the window, the host names the side that must upgrade', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    const newer = await send(ctx.access, baseRequest({ request_id: 'r-newer', protocol_version: 2 }))
+    assert.equal(newer.status, 'rejected')
+    assert.equal(newer.error_code, 'protocol_version_incompatible')
+    assert.match(newer.error_message, /upgrade this client/)
+
+    const missing = await send(ctx.access, baseRequest({ request_id: 'r-missing', protocol_version: 0 }))
+    assert.equal(missing.error_code, 'protocol_version_incompatible')
+    assert.match(missing.error_message, /upgrade the older peer/)
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('when an identifier exceeds the wire bound, the host neither logs nor replies with it', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    const before = ctx.access.results.length
+    await ctx.access.handlers.onRequest(baseRequest({ request_id: 'r'.repeat(200) }))
+    assert.equal(ctx.access.results.length, before)
+    await ctx.access.handlers.onRequest(baseRequest({ request_id: 'r-identity', host_id: 'host|other' }))
+    const rejected = ctx.access.lastResult()
+    assert.equal(rejected.request_id, 'r-identity')
+    assert.equal(rejected.error_code, 'invalid_argument')
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('when an encrypted payload carries no known oneof variant, the host rejects it instead of returning an empty success', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const result = await send(ctx.access, encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, payload: {}, overrides: { request_id: 'r-empty' } }))
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error_code, 'invalid_argument')
+    assert.match(result.error_message, /no known payload variant/)
+  } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('when an encrypted payload carries an unknown enum value, the host reports an actionable version mismatch', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    // RequestPayload.send_message is tag 0x32. SendMessage.delivery_mode is tag 3.
+    const message = Buffer.concat([
+      Buffer.from([0x0a, 0x02]), Buffer.from('s1'),
+      Buffer.from([0x12, 0x01]), Buffer.from('x'),
+      Buffer.from([0x18, 99]),
+    ])
+    const payload = Buffer.concat([Buffer.from([0x32, message.length]), message])
+    const result = await send(ctx.access, encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, plaintext: payload, overrides: { request_id: 'r-enum' } }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'protocol_version_incompatible')
+    assert.match(result.error_message, /DeliveryMode/)
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
 })

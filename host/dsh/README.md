@@ -51,6 +51,8 @@ host/runtime/
 
 The running DSH profile is the only connection config. Settings → WhaleRein writes `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (entry id `whalerein-dsh`). The plugin reads that document after Cordis has evaluated any `!!js` expression stored in it. It does not consult `WHALEREIN_*` environment variables on its own.
 
+Every documented key below is part of the shipped `Config` schema and is read from the profile. Saving applies all changed fields in one atomic namespace mutation at the revision the draft was read from; a rejected save keeps the draft, and clearing a field restores inheritance. If the stored configuration cannot resolve at startup, the plugin keeps the settings page available and names the invalid field instead of looking like an unpaired host. Clearing `server` is blocked while it is the only source of `mqtt_url`; save a legacy `mqtt_url` first or keep the server address.
+
 A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` so the value stays out of the file. The process still has to export that variable. `pnpm start` does this for the host token and the administrator token.
 
 | Key | Default | Meaning |
@@ -60,7 +62,7 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 | `access_port` | `443`, or `8080` when plaintext is allowed | Access port. `443` and plaintext `80` are omitted from the URL |
 | `mqtt_port` | `8883`, or `1883` when plaintext is allowed | MQTT port |
 | `mqtt_url` | required when `server` is empty | legacy `mqtts://...`; `mqtt://` only when `allow_insecure_mqtt` is true |
-| `host_id` | generated once from the computer name when the profile has none | topic-safe host id. A saved value stays. Clearing the settings field keeps the saved value |
+| `host_id` | generated once from the computer name when the profile has none | topic-safe host id. A saved value stays. Clearing the settings field keeps the saved value. Changing it requires confirmation and creates a new host identity: paired devices must pair again. The Host credential record key stays stable so a rename does not brick the next start |
 | `host_token` | required | broker provisioning token (never logged) |
 | `ca_file` | none | TLS CA bundle. Empty uses the system trust store |
 | `state_dir` | `~/.whalerein/dsh` | Not shown in settings. SQLite directory |
@@ -71,7 +73,7 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 | `proto_path` | repo descriptor | protobuf JSON descriptor |
 | `approval_mode` | `claim` | `claim` answers `approval/request`; `delegate` calls `next()` |
 | `approval_ttl_ms` | `300000` | pending approval lifetime |
-| `event_batch_ms` | `5` | ordinary-output batch window |
+| `event_batch_ms` | `20` | ordinary-output batch window |
 | `outbox_per_device_limit` | `100` | pending ciphertext rows per device |
 | `outbox_total_limit` | `1000` | pending ciphertext rows overall |
 | `snapshot_max_events` | `5000` | DSH snapshot read bound |

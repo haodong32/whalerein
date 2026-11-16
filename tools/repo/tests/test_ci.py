@@ -16,13 +16,16 @@ ROOT = Path(__file__).resolve().parents[3]
     [
         ([], set()),
         (["docs/testing.md", "README.md", ".local-docs/acceptance/result"], set()),
-        (["core/src/api.rs"], {"core", "cli", "noise-peer"}),
+        (["apps/ios/WhaleRein/App/WhaleReinApp.swift"], set()),
+        (["tools/ios-stack/ios_stack.py"], set()),
+        (["core/src/api.rs"], {"core", "cli", "noise-peer", "mobile-bindings"}),
         (["apps/cli/src/main.rs"], {"cli"}),
+        (["apps/mobile-bindings/src/lib.rs"], {"mobile-bindings"}),
         (["host/runtime/src/host.js"], {"host", "dsh"}),
         (["host/dsh/client.js"], {"dsh"}),
         (["access/internal/config/config.go"], {"access"}),
         (["go.sum"], {"access"}),
-        (["Cargo.lock"], {"core", "cli", "proto", "noise-peer"}),
+        (["Cargo.lock"], {"core", "cli", "proto", "noise-peer", "mobile-bindings"}),
         (["pnpm-lock.yaml"], {"host", "dsh"}),
     ],
 )
@@ -45,7 +48,7 @@ def test_plan_selects_only_affected_consumers(paths, expected):
 )
 def test_shared_and_unknown_inputs_select_every_project(path):
     matrix = ci.plan(ROOT, [path])
-    assert sum(len(job["projects"]) for job in matrix["include"]) == 8
+    assert sum(len(job["projects"]) for job in matrix["include"]) == 9
 
 
 def test_diff_preserves_deleted_and_renamed_paths(monkeypatch):
@@ -89,3 +92,54 @@ def test_cli_plan_and_run(monkeypatch, capsys):
     monkeypatch.setattr(ci, "run_projects", lambda *args: calls.append(args[1]))
     ci.main()
     assert calls == [["cli"]]
+
+
+def test_native_commands_follow_the_affected_selection():
+    matrix = ci.plan(ROOT, ["core/src/api.rs", "access/internal/config/config.go"])
+    commands = ci.native_commands(ROOT, matrix)
+    assert ["cargo", "test", "--package", "whalerein-core"] in commands
+    assert ["cargo", "test", "--package", "whalerein-cli"] in commands
+    assert ["cargo", "test", "--package", "noise-peer"] in commands
+    assert ["cargo", "test", "--package", "whalerein-mobile"] in commands
+    assert ["go", "test", "./access/...", "./proto/v1/bindings/go/..."] in commands
+
+
+def test_native_commands_cover_node_and_python_projects():
+    node = ci.plan(ROOT, ["host/runtime/src/host.js"])
+    assert ci.native_commands(ROOT, node) == [
+        ["pnpm", "--filter", "whalerein-host", "test"],
+        ["pnpm", "--filter", "whalerein-dsh", "test"],
+    ]
+    python = ci.plan(ROOT, ["tools/repo/src/repo/testing.py"])
+    assert [
+        "uv",
+        "run",
+        "--project",
+        "tools/repo",
+        "pytest",
+        "tools/repo/tests",
+    ] in ci.native_commands(ROOT, python)
+
+
+def test_native_runs_selected_commands_without_coverage(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ci.subprocess, "run", lambda cmd, **kwargs: calls.append((cmd, kwargs)))
+    ci.run_native(ROOT, {"include": [{"kind": "rust", "projects": ["cli"]}]})
+    assert calls == [
+        (["cargo", "test", "--package", "whalerein-cli"], {"cwd": ROOT, "check": True})
+    ]
+    assert all("--coverage" not in command for command, _ in calls)
+    calls.clear()
+    ci.run_native(ROOT, {"include": []})
+    assert calls == []
+
+
+def test_cli_native_passes_the_selected_matrix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "sys.argv",
+        ["ci", "native", "--matrix", '{"include": [{"kind": "go", "projects": ["access"]}]}'],
+    )
+    monkeypatch.setattr(ci, "run_native", lambda root, matrix: calls.append(matrix))
+    ci.main()
+    assert calls == [{"include": [{"kind": "go", "projects": ["access"]}]}]

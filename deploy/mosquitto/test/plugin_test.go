@@ -81,7 +81,7 @@ func dial(t *testing.T, address, id, username, password string) (*client, *paho.
 	})
 	if err != nil {
 		c.close()
-		return nil, nil, err
+		return c, connack, err
 	}
 	if connack.ReasonCode != 0 {
 		c.close()
@@ -180,7 +180,11 @@ func (p *authPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !ok || !ready {
+	if !ok {
+		fmt.Fprint(w, "whalerein/1\ndeny unauthorized\n")
+		return
+	}
+	if !ready {
 		fmt.Fprint(w, "whalerein/1\ndeny unavailable\n")
 		return
 	}
@@ -318,20 +322,44 @@ func pluginPath(t *testing.T) string {
 	return plugin
 }
 
-func hostPolicy(revision uint64) string {
+func hostPolicyFor(revision uint64, host string) string {
 	return fmt.Sprintf(`whalerein/1
 ok
 kind host
-host host1
+host %s
 revision %d
 ready 1
-acl subscribe %d - whalerein/v1/h/host1/request
-acl read %d - whalerein/v1/h/host1/request
-acl write %d - whalerein/v1/h/host1/result
-acl write %d - whalerein/v1/h/host1/event
-acl subscribe %d - whalerein/v1/h/host1/presence
-acl read %d - whalerein/v1/h/host1/presence
-`, revision, revision, revision, revision, revision, revision, revision)
+acl subscribe %d - whalerein/v1/h/%s/request
+acl read %d - whalerein/v1/h/%s/request
+acl write %d - whalerein/v1/h/%s/result
+acl write %d - whalerein/v1/h/%s/event
+acl subscribe %d - whalerein/v1/h/%s/presence
+acl read %d - whalerein/v1/h/%s/presence
+`, host, revision, revision, host, revision, host, revision, host, revision, host, revision, host, revision, host)
+}
+
+func hostPolicy(revision uint64) string { return hostPolicyFor(revision, "host1") }
+
+// devicePolicyFor builds one device policy with live grants for each host,
+// modelling one device identity authorized by several Hosts on one connection.
+func devicePolicyFor(revision uint64, hosts ...string) string {
+	builder := fmt.Sprintf(`whalerein/1
+ok
+kind device
+device dev1
+revision %d
+ready 1
+will whalerein/v1/presence/device/dev1
+`, revision)
+	for _, host := range hosts {
+		builder += fmt.Sprintf(`acl subscribe %d %s whalerein/v1/h/%s/d/dev1/event
+acl read %d %s whalerein/v1/h/%s/d/dev1/event
+acl write %d %s whalerein/v1/h/%s/d/dev1/ack
+`, revision, host, host, revision, host, host, revision, host, host)
+	}
+	builder += fmt.Sprintf(`acl write %d - whalerein/v1/presence/device/dev1
+`, revision)
+	return builder
 }
 
 func devicePolicy(revision uint64) string {
@@ -350,8 +378,12 @@ acl write %d host1 whalerein/v1/presence/device/dev1
 }
 
 func controlClient(t *testing.T, b *broker) *client {
+	return controlClientID(t, b, "whalerein-access")
+}
+
+func controlClientID(t *testing.T, b *broker, id string) *client {
 	t.Helper()
-	c, _, err := dial(t, b.address, "whalerein-access", "access", "bootstrap-password")
+	c, _, err := dial(t, b.address, id, "access", "bootstrap-password")
 	if err != nil {
 		t.Fatalf("access connect: %v", err)
 	}
@@ -608,6 +640,7 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 	})
 
 	t.Run("unauthorized_will_is_denied", func(t *testing.T) {
+		sendControl(t, control, "ping-will", "ping", "revision 0\n")
 		if err := control.subscribe(t, "whalerein/v1/presence/device/dev2"); err != nil {
 			t.Fatalf("subscribe will topic: %v", err)
 		}
@@ -641,6 +674,7 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 	})
 
 	t.Run("late_policy_cannot_restore_revoked_authority", func(t *testing.T) {
+		sendControl(t, control, "ping-fence", "ping", "revision 0\n")
 		policy.set("device:dev1", devicePolicy(1))
 		sendControl(t, control, "deny-fence", "deny", "device dev1\ngeneration 3\nhost host1\nkick 0\n")
 		device, _, err := dial(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token")
@@ -670,6 +704,7 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 	})
 
 	t.Run("authorization_requests_only_on_connect", func(t *testing.T) {
+		sendControl(t, control, "ping-auth", "ping", "revision 0\n")
 		before := policy.count()
 		host, _, err := dial(t, b.address, "whalerein-host-host1", "host:host1", "host-token")
 		if err != nil {
@@ -690,6 +725,7 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 	})
 
 	t.Run("access_outage_denies_new_external_connections", func(t *testing.T) {
+		sendControl(t, control, "ping-outage", "ping", "revision 0\n")
 		policy.mu.Lock()
 		policy.fail = true
 		policy.mu.Unlock()
@@ -725,6 +761,212 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 		defer host.close()
 		if err := host.publish(t, "whalerein/v1/h/host1/result", []byte("ok")); err != nil {
 			t.Fatalf("publish after restart: %v", err)
+		}
+	})
+}
+
+// dialWithWill connects an external principal that registers a last will, which
+// a clean DISCONNECT must not publish and an abrupt socket close must.
+func dialWithWill(t *testing.T, address, id, username, password, willTopic string) (*client, *paho.Connack, error) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := &client{id: id, conn: conn, msgs: make(chan paho.PublishReceived, 64), closed: make(chan struct{})}
+	c.paho = paho.NewClient(paho.ClientConfig{
+		ClientID: id,
+		Conn:     packets.NewThreadSafeConn(conn),
+		OnPublishReceived: []func(paho.PublishReceived) (bool, error){
+			func(received paho.PublishReceived) (bool, error) {
+				select {
+				case c.msgs <- received:
+				default:
+				}
+				return true, nil
+			},
+		},
+		OnClientError: func(err error) { close(c.closed) },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connack, err := c.paho.Connect(ctx, &paho.Connect{
+		ClientID:     id,
+		CleanStart:   true,
+		KeepAlive:    30,
+		UsernameFlag: true,
+		Username:     username,
+		PasswordFlag: password != "",
+		Password:     []byte(password),
+		WillMessage:  &paho.WillMessage{Topic: willTopic, Payload: []byte(`{"event":"device_offline","device_id":"dev1"}`), QoS: 1},
+	})
+	if err != nil {
+		c.close()
+		return c, connack, err
+	}
+	if connack.ReasonCode != 0 {
+		c.close()
+		return c, connack, fmt.Errorf("connack reason %d", connack.ReasonCode)
+	}
+	return c, connack, nil
+}
+
+// nextEventContaining consumes control events until one carries every marker.
+func nextEventContaining(t *testing.T, control *client, markers ...string) []byte {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case received := <-control.msgs:
+			if received.Packet.Topic != "whalerein/v1/control/events" {
+				continue
+			}
+			payload := received.Packet.Payload
+			matched := true
+			for _, marker := range markers {
+				if !strings.Contains(string(payload), marker) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return payload
+			}
+		case <-deadline:
+			t.Fatalf("no control event containing %v", markers)
+		}
+	}
+}
+
+// TestNativeBrokerPresenceLifecycleAndRevocationScopes covers the broker-side
+// edges the Go unit fixtures cannot reach: a real last will on a clean versus
+// abrupt close, duplicate client-id takeover, one device connection holding
+// grants for two Hosts, and the CONNACK reason that distinguishes stale policy
+// from invalid credentials.
+func TestNativeBrokerPresenceLifecycleAndRevocationScopes(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("C compiler not available")
+	}
+	policy := newAuthPolicy()
+	auth := httptest.NewServer(policy)
+	t.Cleanup(auth.Close)
+	policy.set("host:host1", hostPolicyFor(1, "host1"))
+	policy.set("host:host2", hostPolicyFor(1, "host2"))
+	policy.set("device:dev1", devicePolicyFor(5, "host1"))
+
+	port := freePort(t)
+	b := startBroker(t, port, auth.URL+"/internal/broker/connect", 5*time.Second)
+	control := controlClientID(t, b, "whalerein-access-lifecycle")
+	sendControl(t, control, "ping-lifecycle", "ping", "revision 0\n")
+
+	t.Run("clean_close_does_not_publish_a_will_but_abrupt_close_does", func(t *testing.T) {
+		if err := control.subscribe(t, "whalerein/v1/presence/device/dev1"); err != nil {
+			t.Fatalf("subscribe will: %v", err)
+		}
+		clean, _, err := dialWithWill(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token", "whalerein/v1/presence/device/dev1")
+		if err != nil {
+			t.Fatalf("clean connect: %v", err)
+		}
+		// A clean MQTT DISCONNECT must not be reported as an ungraceful edge.
+		clean.close()
+		control.expectNoMessage(t, "whalerein/v1/presence/device/dev1", 500*time.Millisecond)
+
+		abrupt, _, err := dialWithWill(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token", "whalerein/v1/presence/device/dev1")
+		if err != nil {
+			t.Fatalf("abrupt connect: %v", err)
+		}
+		// Close the transport without DISCONNECT: the broker publishes the will.
+		_ = abrupt.conn.Close()
+		payload := control.next(t, "whalerein/v1/presence/device/dev1")
+		if !strings.Contains(string(payload), "device_offline") {
+			t.Fatalf("will payload = %q", payload)
+		}
+	})
+
+	t.Run("duplicate_client_id_takeover_suppresses_the_superseded_disconnect", func(t *testing.T) {
+		events := controlClientID(t, b, "whalerein-access-takeover")
+		first, _, err := dial(t, b.address, "whalerein-host-host1", "host:host1", "host-token")
+		if err != nil {
+			t.Fatalf("first connect: %v", err)
+		}
+		connected := nextEventContaining(t, events, "whalerein-host-host1", "event connected")
+		_ = connected
+		second, _, err := dial(t, b.address, "whalerein-host-host1", "host:host1", "host-token")
+		if err != nil {
+			t.Fatalf("takeover connect: %v", err)
+		}
+		nextEventContaining(t, events, "whalerein-host-host1", "event connected")
+		// The superseded connection's close must not report the newer
+		// connection offline; the plugin owns that branch.
+		first.close()
+		events.expectNoMessage(t, "whalerein/v1/control/events", 400*time.Millisecond)
+		second.close()
+		nextEventContaining(t, events, "whalerein-host-host1", "event disconnected")
+	})
+
+	t.Run("host_scoped_revocation_keeps_another_hosts_connection", func(t *testing.T) {
+		policy.set("device:dev1", devicePolicyFor(5, "host1", "host2"))
+		revoke := controlClientID(t, b, "whalerein-access-revoke")
+		device, _, err := dial(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token")
+		if err != nil {
+			t.Fatalf("device connect: %v", err)
+		}
+		defer device.close()
+		if err := device.subscribe(t, "whalerein/v1/h/host2/d/dev1/event"); err != nil {
+			t.Fatalf("host2 subscribe: %v", err)
+		}
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("before")); err != nil {
+			t.Fatalf("host1 publish before revoke: %v", err)
+		}
+		fields := sendControl(t, revoke, "deny-host1", "deny",
+			"device dev1\ngeneration 5\nhost host1\nkick 1\n")
+		if fields["matched"] != "1" {
+			t.Fatalf("host1 deny matched %q", fields["matched"])
+		}
+		// The connection still holds host2 authority, so it must stay open.
+		select {
+		case <-device.closed:
+			t.Fatal("host-scoped revocation closed a connection with another Host's grant")
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := device.publish(t, "whalerein/v1/h/host2/d/dev1/ack", []byte("after")); err != nil {
+			t.Fatalf("host2 publish after revoking host1: %v", err)
+		}
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("after")); err == nil {
+			t.Fatal("revoked host1 topic still accepts publishes")
+		}
+		sendControl(t, revoke, "deny-host2", "deny",
+			"device dev1\ngeneration 5\nhost host2\nkick 1\n")
+		if !waitFor(t, 3*time.Second, func() bool {
+			select {
+			case <-device.closed:
+				return true
+			default:
+				return false
+			}
+		}) {
+			t.Fatal("last Host revocation did not close the connection")
+		}
+	})
+
+	t.Run("stale_policy_connack_is_distinct_from_invalid_credentials", func(t *testing.T) {
+		stalePort := freePort(t)
+		stale := startBroker(t, stalePort, auth.URL+"/internal/broker/connect", time.Second)
+		staleControl := controlClientID(t, stale, "whalerein-access-stale")
+		sendControl(t, staleControl, "ping-stale", "ping", "revision 0\n")
+		// Invalid credentials while policy is fresh: not authorized.
+		_, connack, _ := dial(t, stale.address, "whalerein-host-unknown", "host:unknown", "token")
+		if connack == nil || connack.ReasonCode != 0x87 {
+			t.Fatalf("invalid credential connack = %+v", connack)
+		}
+		// Let the confirmed policy window lapse without a refresh. The stale
+		// gate runs synchronously in the auth callback, so Mosquitto preserves
+		// server-unavailable; the deferred completion path collapses every
+		// failure to not-authorized and cannot carry a distinct reason.
+		time.Sleep(1300 * time.Millisecond)
+		_, connack, _ = dial(t, stale.address, "whalerein-host-host1", "host:host1", "host-token")
+		if connack == nil || connack.ReasonCode != 0x88 {
+			t.Fatalf("stale policy connack = %+v", connack)
 		}
 	})
 }

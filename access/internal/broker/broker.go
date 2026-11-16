@@ -667,6 +667,13 @@ func (s *Service) IsHostOnline(ctx context.Context, hostID string) bool {
 	return s.presence.IsHostOnline(ctx, hostID)
 }
 
+// Available reports whether broker presence has been established since this
+// Access session started. Callers must not interpret an unavailable presence
+// view as a terminal offline host.
+func (s *Service) Available() bool {
+	return s.presence.Available()
+}
+
 // DisconnectDevice implements auth.Transport's explicit device disconnect.
 // One targeted kick covers every connection of the device username; the reply
 // confirms whether such a connection still existed.

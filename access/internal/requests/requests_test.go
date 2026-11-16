@@ -121,9 +121,28 @@ func (f *fakeBroker) PublishPresence(_ context.Context, hostID string, payload [
 	return f.err
 }
 
-type fakePresence struct{ online map[string]bool }
+type fakePresence struct {
+	online map[string]bool
+	// observed models a reconciled presence view: a host missing here is
+	// unknown rather than explicitly offline. A nil map keeps the legacy
+	// behaviour for tests that only script the online set.
+	observed  map[string]bool
+	available *bool
+}
 
-func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool { return f.online[hostID] }
+func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
+	if f.observed != nil && !f.observed[hostID] {
+		return false
+	}
+	return f.online[hostID]
+}
+
+func (f *fakePresence) Available() bool {
+	if f.available != nil {
+		return *f.available
+	}
+	return true
+}
 
 type fixture struct {
 	service  *Service
@@ -255,6 +274,88 @@ func TestSubmitMarksOfflineHostWithoutPublishing(t *testing.T) {
 	}
 	if len(f.broker.published) != 0 {
 		t.Fatal("host offline request was published")
+	}
+}
+
+func TestSubmitQueuesWhilePresenceIsUnavailableInsteadOfClosingHostOffline(t *testing.T) {
+	f := newFixture(t)
+	unavailable := false
+	f.presence.available = &unavailable
+	f.presence.online["h1"] = false // an unavailable view must not be read as offline
+	request := validRequest(f.now, "c1")
+	row, created, err := f.service.Submit(context.Background(), input(request))
+	if err != nil || !created {
+		t.Fatalf("row=%+v created=%v err=%v", row, created, err)
+	}
+	if row.Status != whalereinv1.OnlineStatus_received || row.ForwardState != store.ForwardPending {
+		t.Fatalf("unavailable presence closed the request: %+v", row)
+	}
+	if len(f.broker.published) != 0 || len(f.store.applyCalls) != 0 {
+		t.Fatal("request was published or finalized while presence was unavailable")
+	}
+
+	// Once broker state is established and the host is online, the retry loop
+	// forwards the queued request exactly once.
+	available := true
+	f.presence.available = &available
+	f.presence.online["h1"] = true
+	f.store.claimRows = []store.Request{row}
+	if err := f.service.ForwardDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 1 || len(f.store.published) != 1 {
+		t.Fatalf("queued request was not forwarded: broker=%d store=%d", len(f.broker.published), len(f.store.published))
+	}
+}
+
+func TestForwardLoopSkipsUnavailablePresenceAndClosesKnownOfflineHost(t *testing.T) {
+	f := newFixture(t)
+	queued := store.Request{
+		RequestID: "r1", HostID: "h1", DeviceID: "d1", CommandID: "c1",
+		Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND, Status: whalereinv1.OnlineStatus_received,
+		ForwardState: store.ForwardPending, ExpiresAt: f.now.Add(time.Minute),
+	}
+	f.store.claimRows = []store.Request{queued}
+	unavailable := false
+	f.presence.available = &unavailable
+	if err := f.service.ForwardDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 0 || len(f.store.applyCalls) != 0 {
+		t.Fatal("unavailable presence published or finalized a queued request")
+	}
+
+	available := true
+	f.presence.available = &available
+	f.presence.online["h1"] = false
+	if err := f.service.ForwardDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 0 {
+		t.Fatal("known-offline host received a publish")
+	}
+	if len(f.store.applyCalls) != 1 || f.store.applyCalls[0].Status != whalereinv1.OnlineStatus_host_offline {
+		t.Fatalf("known-offline request was not closed as host_offline: %+v", f.store.applyCalls)
+	}
+}
+
+func TestForwardLoopRetainsPairingCommitWhileHostIsOffline(t *testing.T) {
+	f := newFixture(t)
+	f.presence.online["h1"] = false
+	f.store.claimRows = []store.Request{{
+		RequestID: "pair-1", HostID: "h1", DeviceID: "d1",
+		Kind:   whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE,
+		Status: whalereinv1.OnlineStatus_received, ForwardState: store.ForwardPending,
+		ExpiresAt: f.now.Add(time.Minute),
+	}}
+	if err := f.service.ForwardDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 0 {
+		t.Fatal("pairing commit was published to an offline host")
+	}
+	if len(f.store.applyCalls) != 0 {
+		t.Fatal("pairing commit was finalized while the host was offline")
 	}
 }
 
@@ -405,7 +506,10 @@ func TestRunStopsForwardingWhenContextIsCanceled(t *testing.T) {
 
 func TestGetRequestReturnsStoredRowAndPropagatesLookupErrors(t *testing.T) {
 	f := newFixture(t)
-	f.store.rows["r1"] = store.Request{RequestID: "r1", DeviceID: "d1"}
+	f.store.rows["r1"] = store.Request{
+		RequestID: "r1", DeviceID: "d1",
+		Status: whalereinv1.OnlineStatus_host_accepted, ExpiresAt: f.now.Add(time.Minute),
+	}
 	row, err := f.service.Get(context.Background(), "d1", "r1")
 	if err != nil || row.RequestID != "r1" {
 		t.Fatalf("row=%+v err=%v", row, err)
@@ -419,6 +523,24 @@ func TestGetRequestReturnsStoredRowAndPropagatesLookupErrors(t *testing.T) {
 	f.store.getErr = errors.New("db down")
 	if _, err := f.service.Get(context.Background(), "d1", "r1"); err == nil {
 		t.Fatal("expected store error")
+	}
+}
+
+func TestGetRequestReportsExpiredNonTerminalRowsButKeepsTerminalRows(t *testing.T) {
+	f := newFixture(t)
+	f.store.rows["pending"] = store.Request{
+		RequestID: "pending", DeviceID: "d1",
+		Status: whalereinv1.OnlineStatus_host_accepted, ExpiresAt: f.now.Add(-time.Second),
+	}
+	if _, err := f.service.Get(context.Background(), "d1", "pending"); !errors.Is(err, ErrExpired) {
+		t.Fatalf("expired pending request = %v", err)
+	}
+	f.store.rows["done"] = store.Request{
+		RequestID: "done", DeviceID: "d1",
+		Status: whalereinv1.OnlineStatus_succeeded, ExpiresAt: f.now.Add(-time.Second),
+	}
+	if row, err := f.service.Get(context.Background(), "d1", "done"); err != nil || row.RequestID != "done" {
+		t.Fatalf("terminal row after expiry = %+v, %v", row, err)
 	}
 }
 
@@ -662,5 +784,72 @@ func TestClientPollSweepPublishFailureIsCounted(t *testing.T) {
 	f.service.SweepClientClaims(context.Background())
 	if len(f.broker.presence) != 1 {
 		t.Fatalf("publish attempt missing: %v", f.broker.presence)
+	}
+}
+
+// TestPresenceUnavailableKnownUnknownAndOnlineAreDistinct covers the three
+// presence states a send can observe: the view is not reconciled yet (queue and
+// retry), the host is explicitly offline (terminal host_offline), and the host
+// is absent from the reconciled view (also offline, but reached through the
+// "unknown" fake dimension rather than an explicit offline entry).
+func TestPresenceUnavailableKnownUnknownAndOnlineAreDistinct(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	available, unavailable := true, false
+
+	submit := func(id, command string) store.Request {
+		t.Helper()
+		request := validRequest(f.now, command)
+		request.RequestId = id
+		row, created, err := f.service.Submit(ctx, input(request))
+		if err != nil || !created {
+			t.Fatalf("%s row=%+v created=%v err=%v", id, row, created, err)
+		}
+		return row
+	}
+
+	// State 1: presence unavailable. The host lookup is deliberately false, but
+	// it must not be read as a terminal offline answer.
+	f.presence.available = &unavailable
+	f.presence.observed = map[string]bool{"h1": true}
+	f.presence.online["h1"] = false
+	queued := submit("req-unavailable", "c-unavailable")
+	if queued.Status != whalereinv1.OnlineStatus_received || queued.ForwardState != store.ForwardPending {
+		t.Fatalf("unavailable presence closed the request: %+v", queued)
+	}
+
+	// State 2: presence reconciled but the host was never observed. That is a
+	// known absence, not an unreconciled view, so it is terminally offline.
+	f.presence.available = &available
+	f.presence.observed = map[string]bool{}
+	unknown := submit("req-unknown", "c-unknown")
+	if unknown.Status != whalereinv1.OnlineStatus_host_offline || unknown.ForwardState != store.ForwardNone {
+		t.Fatalf("unknown host was not treated as known offline: %+v", unknown)
+	}
+
+	// State 3: presence reconciled and the host is explicitly offline.
+	f.presence.observed = map[string]bool{"h1": true}
+	f.presence.online["h1"] = false
+	offline := submit("req-offline", "c-offline")
+	if offline.Status != whalereinv1.OnlineStatus_host_offline || offline.ForwardState != store.ForwardNone {
+		t.Fatalf("known-offline host was not terminal: %+v", offline)
+	}
+	if queued.Status == unknown.Status || queued.Status == offline.Status {
+		t.Fatal("unavailable and known-offline states collapsed")
+	}
+
+	// State 4: presence reconciled and the host online. The queued row is
+	// forwarded, proving the retry path stays open after an unavailable view.
+	f.presence.online["h1"] = true
+	online := submit("req-online", "c-online")
+	if online.Status != whalereinv1.OnlineStatus_received || online.ForwardState != store.ForwardPending {
+		t.Fatalf("online host was not left forwardable: %+v", online)
+	}
+	f.store.claimRows = []store.Request{online}
+	if err := f.service.ForwardDue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 1 || len(f.store.published) != 1 {
+		t.Fatalf("online request not forwarded: broker=%d store=%d", len(f.broker.published), len(f.store.published))
 	}
 }

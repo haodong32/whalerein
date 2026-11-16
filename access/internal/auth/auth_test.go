@@ -83,6 +83,18 @@ func (f *fakeStore) ListAuthorizedHosts(_ context.Context, deviceID string) ([]s
 	return out, nil
 }
 
+func (f *fakeStore) ListAuthorizedHostsPage(ctx context.Context, deviceID string, limit, offset int) ([]store.Host, error) {
+	all, err := f.ListAuthorizedHosts(ctx, deviceID)
+	if err != nil || offset >= len(all) {
+		return nil, err
+	}
+	page := all[offset:]
+	if len(page) > limit {
+		page = page[:limit]
+	}
+	return page, nil
+}
+
 func (f *fakeStore) ActiveDeviceByAuthHash(_ context.Context, authHash []byte) (store.Device, error) {
 	if f.activeErr != nil {
 		return store.Device{}, f.activeErr
@@ -453,9 +465,15 @@ func TestDeviceAuthenticationReturnsOnlyGrantedHosts(t *testing.T) {
 	if err := service.AuthorizeHost(ctx, identity, "h2"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("forbidden err = %v", err)
 	}
-	hosts, err := service.ListHosts(ctx, identity)
-	if err != nil || len(hosts) != 1 || !hosts[0].Online || hosts[0].Fingerprint != "fp" {
-		t.Fatalf("hosts = %+v err=%v", hosts, err)
+	hosts, truncated, err := service.ListHosts(ctx, identity, 10, 0)
+	if err != nil || truncated || len(hosts) != 1 || !hosts[0].Online || hosts[0].Fingerprint != "fp" {
+		t.Fatalf("hosts = %+v truncated=%v err=%v", hosts, truncated, err)
+	}
+	if _, _, err := service.ListHosts(ctx, identity, 0, 0); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("zero limit err = %v", err)
+	}
+	if _, _, err := service.ListHosts(ctx, identity, 10, -1); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("negative offset err = %v", err)
 	}
 	fs.grants[grantKey("h1", "d1")] = false
 	if err := service.AuthorizeHost(ctx, identity, "h1"); !errors.Is(err, ErrForbidden) {
@@ -478,6 +496,10 @@ func TestIdentityFromCredentialsRejectsMalformedPrincipals(t *testing.T) {
 		{"whalerein-host-h1", "host:h1", KindHost, "h1", "", false},
 		{"wrong", "host:h1", "", "", "", true},
 		{"whalerein-device-d1", "device:d1", KindDevice, "", "d1", false},
+		{"whalerein-device-d1-abc123", "device:d1", KindDevice, "", "d1", false},
+		{"whalerein-device-d1-", "device:d1", "", "", "", true},
+		{"whalerein-device-d1-ABC", "device:d1", "", "", "", true},
+		{"whalerein-device-d1-abcdefghijklmnopqrstuvwxyz0123456", "device:d1", "", "", "", true},
 		{"whalerein-device-d1", "device:d2", "", "", "", true},
 		{"x", "other", "", "", "", true},
 	}

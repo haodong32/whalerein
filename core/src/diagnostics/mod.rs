@@ -100,6 +100,53 @@ pub fn render_export(report: &DoctorReport) -> ExportManifest {
     }
 }
 
+/// One authorized Host in a preview, identified only by a local ordinal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewHost {
+    pub label: String,
+    pub connection_state: String,
+}
+
+/// Render an in-app diagnostic preview without writing a file or opening a
+/// channel.
+///
+/// The preview keeps the same redaction policy as diagnostic exports: it
+/// includes only schema/version fields, the paired Access address, redacted
+/// Host labels with in-memory connection state, command counts, metric
+/// samples, the last failure code and the export field/redaction manifest.
+/// Message content, draft text, tool arguments, credentials, pairing and
+/// device tokens, private keys and full invitation URIs are never read or
+/// encoded. `last_failure` intentionally carries the stable code only; its
+/// event stages are bounded but are not needed for a preview.
+pub fn render_preview(
+    report: &DoctorReport,
+    cache_warning: Option<&'static str>,
+    failure: Option<&journal::FailureRecord>,
+    hosts: &[PreviewHost],
+    metrics: &[MetricSample],
+    protocol_version: Option<u32>,
+) -> crate::api::CoreResult<String> {
+    let manifest = render_export(report);
+    let last_failure = failure
+        .and_then(|record| record.events.last())
+        .map(|event| serde_json::json!({ "code": event.code }));
+    let preview = serde_json::json!({
+        "schema": "whalerein/v1",
+        "core_version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": protocol_version,
+        "generated_at_unix_ms": crate::util::now_unix_ms(),
+        "report": report,
+        "cache_warning": cache_warning,
+        "hosts": hosts,
+        "metrics": metrics,
+        "last_failure": last_failure,
+        "fields": manifest.fields,
+        "redactions": manifest.redactions,
+    });
+    serde_json::to_string_pretty(&preview)
+        .map_err(|_| crate::api::CoreError::Internal("diagnostic preview could not encode".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

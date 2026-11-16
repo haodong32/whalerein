@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -335,6 +336,9 @@ func TestCreateInvitationStoresOnlyHashAndReturnsBoundToken(t *testing.T) {
 	if query.Get("v") != "1" || query.Get("access") != "https://access.example.com" || query.Get("host") != "h1" || query.Get("token") != invitation.GetToken() || query.Get("mqtt") != "mqtts://access.example.com:443" {
 		t.Fatalf("query = %v", query)
 	}
+	if query.Get("exp") != strconv.FormatInt(f.now.Add(10*time.Minute).Unix(), 10) {
+		t.Fatalf("exp = %q, want Unix seconds %d", query.Get("exp"), f.now.Add(10*time.Minute).Unix())
+	}
 	if _, err := f.service.CreateInvitation(context.Background(), "missing"); !errors.Is(err, ErrHostNotFound) {
 		t.Fatalf("missing host = %v", err)
 	}
@@ -349,6 +353,92 @@ func TestCreateInvitationStoresOnlyHashAndReturnsBoundToken(t *testing.T) {
 	f.service.random = bytes.NewReader(nil)
 	if _, err := f.service.CreateInvitation(context.Background(), "h1"); err == nil {
 		t.Fatal("expected random error")
+	}
+}
+
+// The mobile invitation parser rejects an expired or malformed link locally,
+// so the URI contract must carry a whole-second `exp` and a URL-safe token.
+func TestInvitationURIExpiryUsesUnixSecondsForClientParsers(t *testing.T) {
+	f := newFixture(t)
+	invitation, err := f.service.CreateInvitation(context.Background(), "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(invitation.GetPairingUri())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp, err := strconv.ParseInt(uri.Query().Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatalf("exp is not an integer: %v", err)
+	}
+	if exp != invitation.GetExpiresAtUnixMs()/1000 {
+		t.Fatalf("exp = %d, expires_at_unix_ms = %d", exp, invitation.GetExpiresAtUnixMs())
+	}
+	for _, character := range invitation.GetToken() {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') && character != '-' && character != '_' && character != '.' && character != '~' {
+			t.Fatalf("token contains a character mobile clients reject: %q", character)
+		}
+	}
+}
+
+// A consumed invitation must not reach the Host again and must never produce a
+// second grant. Device B receives the deterministic used-token conflict; A
+// remains the only paired device.
+func TestConsumedInvitationRejectsSecondDeviceWithoutHostContact(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	if _, err := f.service.Claim(ctx, helloRequest(token, "claim-a", "device-a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.Claim(ctx, finishRequest(token, "claim-a", "device-a")); err != nil {
+		t.Fatal(err)
+	}
+	hostCalls := len(f.transport.requests)
+	if _, err := f.service.Claim(ctx, helloRequest(token, "claim-b", "device-b")); !errors.Is(err, ErrTokenUsed) {
+		t.Fatalf("second device = %v, want ErrTokenUsed", err)
+	}
+	if len(f.transport.requests) != hostCalls {
+		t.Fatal("second device reached the Host with a consumed invitation")
+	}
+	if len(f.store.devices) != 1 || len(f.store.grants) != 1 {
+		t.Fatalf("devices=%d grants=%d, want exactly one grant", len(f.store.devices), len(f.store.grants))
+	}
+	if _, ok := f.store.devices["device-a"]; !ok {
+		t.Fatal("first device lost its grant")
+	}
+	if _, ok := f.store.devices["device-b"]; ok {
+		t.Fatal("second device obtained a grant")
+	}
+}
+
+// An unused invitation stays valid across Host metadata/key rotation. The
+// fingerprint a client pins is the one the live Host proves during HELLO, not a
+// snapshot taken when the invitation was minted. Admin-token rotation is
+// likewise irrelevant: the stored invitation is bound to the Host, never to the
+// bearer that minted it.
+func TestUnusedInvitationSurvivesHostMetadataRotationUntilUse(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	f.store.hosts["h1"] = store.Host{HostID: "h1", Fingerprint: "rotated-fingerprint"}
+	hello, err := f.service.Claim(ctx, helloRequest(token, "claim-1", "device-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hello.GetHostFingerprint() != "host-fp" {
+		t.Fatalf("rotated Host fingerprint = %q, want the live HELLO proof", hello.GetHostFingerprint())
+	}
+	if _, err := f.service.Claim(ctx, finishRequest(token, "claim-1", "device-a")); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.store.devices) != 1 || len(f.store.grants) != 1 {
+		t.Fatalf("devices=%d grants=%d, want one rotated grant", len(f.store.devices), len(f.store.grants))
+	}
+	if len(f.store.meta) != 1 || f.store.meta[0] != "h1:host-fp:1" {
+		t.Fatalf("host metadata = %v", f.store.meta)
 	}
 }
 
@@ -457,16 +547,16 @@ func TestHelloRejectsOfflineHostAndInvalidInvitation(t *testing.T) {
 	if _, err := f.service.Claim(ctx, helloRequest(token, "c1", "d1")); !errors.Is(err, ErrHostOffline) {
 		t.Fatalf("offline = %v", err)
 	}
-	if f.store.failures[hashKey(hash[:])] != 1 {
-		t.Fatalf("failures = %d", f.store.failures[hashKey(hash[:])])
+	if f.store.failures[hashKey(hash[:])] != 0 {
+		t.Fatalf("an offline host consumed the failure budget: %d", f.store.failures[hashKey(hash[:])])
 	}
 	f.presence.online["h1"] = true
 	f.transport.err = errors.New("mqtt down")
 	if _, err := f.service.Claim(ctx, helloRequest(token, "c2", "d1")); !errors.Is(err, ErrHostUnavailable) {
 		t.Fatalf("transport = %v", err)
 	}
-	if f.store.failures[hashKey(hash[:])] != 2 {
-		t.Fatalf("failures = %d", f.store.failures[hashKey(hash[:])])
+	if f.store.failures[hashKey(hash[:])] != 0 {
+		t.Fatalf("an unreachable host consumed the failure budget: %d", f.store.failures[hashKey(hash[:])])
 	}
 	f.transport.err = nil
 
@@ -487,8 +577,21 @@ func TestHelloRejectsOfflineHostAndInvalidInvitation(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f.transport.awaitFn = fn
+			before := f.store.failures[hashKey(hash[:])]
 			if _, err := f.service.Claim(ctx, helloRequest(token, "cx", "d1")); err == nil {
 				t.Fatal("expected error")
+			}
+			after := f.store.failures[hashKey(hash[:])]
+			// A Host that reports failure without a proof rejection (status
+			// failed) is unavailable, not a failed authentication.
+			wantDelta := 0
+			if name == "rejects HELLO when host reports rejected status" ||
+				name == "rejects HELLO with malformed host response" ||
+				name == "rejects HELLO response without Noise message" {
+				wantDelta = 1
+			}
+			if after-before != wantDelta {
+				t.Fatalf("failure delta = %d, want %d", after-before, wantDelta)
 			}
 		})
 	}
@@ -665,7 +768,7 @@ func TestFinishFailuresPreserveUncommittedStateAndExistingAuthorization(t *testi
 			t.Fatal("token marked used after failure")
 		}
 		if f.store.failures[hashKey(mustHash(token))] == 0 {
-			t.Fatal("failure not counted")
+			t.Fatal("a Host authorization denial did not consume the failure budget")
 		}
 		assertUncommitted(t, f, token)
 	})
@@ -737,8 +840,8 @@ func TestFinishFailuresPreserveUncommittedStateAndExistingAuthorization(t *testi
 		if _, err := f.service.Claim(ctx, finishRequest(token, "claim", "d1")); !errors.Is(err, ErrInternal) {
 			t.Fatalf("err = %v", err)
 		}
-		if f.store.failures[hashKey(mustHash(token))] == 0 {
-			t.Fatal("failure not counted")
+		if f.store.failures[hashKey(mustHash(token))] != 0 {
+			t.Fatal("a durable storage failure consumed the repair invitation budget")
 		}
 		assertUncommitted(t, f, token)
 	})

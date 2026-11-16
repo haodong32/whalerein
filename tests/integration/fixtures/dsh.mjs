@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline'
 import { DefinitiveExecutionError } from '../../../host/runtime/src/errors.js'
 import { FakeDshAdapter } from '../../../host/dsh/src/adapter/fake.js'
 import { encode,decode } from './adapter.mjs'
-const adapter=new FakeDshAdapter({behavior:{modelOperations:true,pendingQueueEnabled:true,questions:true,questionsOpen:true}})
+const adapter=new FakeDshAdapter({behavior:{modelOperations:true,pendingQueueEnabled:true,questions:process.env.WHALEREIN_QUESTIONS!=='false',questionsOpen:process.env.WHALEREIN_QUESTIONS!=='false'}})
 let queueReadCount=0
 const readQueue=adapter.readPendingQueue.bind(adapter)
 adapter.readPendingQueue=(...args)=>{queueReadCount++;return readQueue(...args)}
@@ -71,7 +71,7 @@ for (const method of Object.keys(modelCalls)) {
   adapter[method] = (...args) => { modelCalls[method]++; return invoke(...args) }
 }
 // Count test fixture operations without retaining message or parameter data.
-const effectCounts = Object.fromEntries(['executeHost','forkSession','sendUserMessage','interrupt','selectSessionModel','updatePendingQueue','answerOpenQuestion','answerContinuedQuestion'].map(name => [name,0]))
+const effectCounts = Object.fromEntries(['executeHost','forkSession','sendUserMessage','interrupt','selectSessionModel','updatePendingQueue','answerOpenQuestion','answerContinuedQuestion','resolveApproval'].map(name => [name,0]))
 for (const method of Object.keys(effectCounts)) {
   const original = adapter[method].bind(adapter)
   adapter[method] = (...args) => { effectCounts[method]++; return original(...args) }
@@ -106,7 +106,7 @@ net.createServer(socket=>{
 }).listen(process.env.WHALEREIN_DSH_SOCKET)
 createInterface({input:process.stdin}).on('line',async line=>{
   try {
-    const {id,method,approval_id,session_id,size,count,attempt_id,index,text,duplicate,stream_id,updates,gap_ms,start_ms,final_ms,delay_ms,duplicate_after_ms,fault}=JSON.parse(line)
+    const {id,method,method_name,ttl_ms,approval_id,session_id,size,count,attempt_id,index,text,duplicate,stream_id,updates,gap_ms,start_ms,final_ms,delay_ms,duplicate_after_ms,fault,reason,tool_name}=JSON.parse(line)
     let value
     if(method==='fail_next_session_refresh') { adapter.failNext('listSessions'); value=true }
     else if(method==='queue_read_count') value=queueReadCount
@@ -120,27 +120,37 @@ createInterface({input:process.stdin}).on('line',async line=>{
     else if(method==='set_queue_budget_size') { if(!Number.isSafeInteger(size)||size<1||size>17*1024*1024) throw new Error('invalid_argument'); await adapter.updatePendingQueue(session_id,{item_id:'queue-budget-1',action:'EDIT',text:'x'.repeat(size)}); value=true }
     else if(method==='queue_budget_state') { const queue=await adapter.readPendingQueue(session_id);value=queue.items.map(item=>({id:item.item_id,length:item.blocks.reduce((sum,block)=>sum+(block.text?.text?.length ?? 0),0)})) }
     else if(method==='create_queue_session') value=adapter.createSession({sessionId:session_id,running:true,queue:[{id:'queue-fixture',text:'fixture'}]})
+    else if(method==='create_cold_session') value=adapter.createSession({sessionId:session_id,agentAvailable:false})
+    else if(method==='set_queue_idle') { adapter.setRunning(session_id,false); value=true }
+    else if(method==='set_model_failures') { adapter.behavior.modelFailures=Array.isArray(text)?text.map(id=>({id,name:id})):[]; value=true }
+    else if(method==='set_questions_enabled') { adapter.behavior.questions=text!==false; adapter.behavior.questionsOpen=text!==false; value=true }
     else if(method==='request_question') { adapter.setFixtureQuestion(session_id,{callId:'fixture-call',state:'continued',questions:[{id:'q1',question:'Fixture question',options:[{label:'Yes'},{label:'No'}]}]}); value=true }
     else if(method==='request_question_open') { adapter.setFixtureQuestion(session_id,{callId:'fixture-call',state:'open',questions:[{id:'q1',question:'Fixture question',options:[{label:'Yes'},{label:'No'}]}]}); value=true }
     else if(method==='request_question_pages') { adapter.setFixtureQuestions(session_id,['first','second'].map(callId => ({callId,state:'continued',questions:[{id:'q1',question:'x'.repeat(9*1024*1024)}]}))); value=true }
+    else if(method==='request_question_custom') { adapter.setFixtureQuestion(session_id,{callId:'custom-call',state:'continued',questions:[{id:'q1',question:text}]}); value=true }
+    else if(method==='request_question_unanswerable') { adapter.setFixtureQuestion(session_id,{callId:'answered-call',state:'reply_queued',questions:[{id:'q1',question:'Fixture answered question'}]}); value=true }
+    else if(method==='append_question_page') { adapter.appendFixtureQuestion(session_id,{callId:text,state:'continued',questions:[{id:'q1',question:'x'.repeat(9*1024*1024)}]}); value=true }
+    else if(method==='remove_question_page') { adapter.removeFixtureQuestion(session_id,text); value=true }
     else if(method==='request_question_oversized') { adapter.setFixtureQuestion(session_id,{callId:'oversized',state:'continued',questions:[{id:'q1',question:'x'.repeat(17*1024*1024)}]}); value=true }
     else if(method==='hold_question_answer') { adapter.holdFixtureQuestion(session_id); value=true }
     else if(method==='question_answer_waiting') value=adapter.fixtureQuestionWaiting(session_id)
-    else if(method==='request_approval') {adapter.setRunning(session_id,true);value=adapter.requestApproval({sessionId:session_id,toolName:'fixture-tool'})}
+    else if(method==='request_approval') {adapter.setRunning(session_id,true);value=adapter.requestApproval({sessionId:session_id,toolName:typeof tool_name==='string'&&tool_name!==''?tool_name:'fixture-tool',...(typeof reason==='string'?{reason}:{}),...(Number.isSafeInteger(ttl_ms)&&ttl_ms>0?{ttlMs:ttl_ms}:{})})}
+    else if(method==='hang_next') { if(typeof method_name!=='string'||!method_name) throw new Error('invalid_argument'); adapter.hangNext(method_name); value=true }
     else if(method==='approval') value=await adapter.getApproval(approval_id)
+    else if(method==='forget_approval') value=adapter.forgetApproval(approval_id)
     else if(method==='snapshot') value=await adapter.getSessionSnapshot(session_id)
     else if(method==='running'){adapter.setRunning(session_id,true);value=true}
     else if(method==='idle'){adapter.setRunning(session_id,false);value=true}
     else if(method==='preview_start' || method==='preview_chunk') {
       const start=method==='preview_start'
       adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:start
-        ? {stream_id:'fixture-attempt',revision:1,phase:'start',reply_id:'1:1'}
-        : {stream_id:'fixture-attempt',revision:2,phase:'chunk',index:0,text:'x'}})
+        ? {stream_id:'fixture-attempt',revision:1,phase:'start',reply_id:'1:1',block_id:'text-0'}
+        : {stream_id:'fixture-attempt',revision:2,phase:'chunk',index:0,block_id:'text-0',text:'x'}})
       value=true
     }
     else if(method==='preview_final') {
       const event=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{reply_id:'1:1',message:{content:[{type:'text',text:'xy'}]}}})
-      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:3,phase:'end',outcome:'committed',committed_seq:event.seq}})
+      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:3,phase:'end',block_id:'text-0',outcome:'committed',committed_seq:event.seq}})
       value=true
     }
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})

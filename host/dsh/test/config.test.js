@@ -155,3 +155,45 @@ test('production capability switches default open and accept an explicit opt-out
   assert.throws(() => resolveConfig({ ...base, pending_queue_enabled: 'maybe' }), ConfigError)
   assert.throws(() => resolveConfig({ ...base, enable_open_question_broker: 'maybe' }), ConfigError)
 })
+
+test('every documented profile key materializes through the shipped Config schema', async () => {
+  const { Config, materializeConfig } = await import('../index.js')
+  const documented = [
+    'server', 'admin_token', 'access_port', 'mqtt_port', 'mqtt_url', 'host_id',
+    'host_token', 'ca_file', 'state_dir', 'adapter', 'access_url', 'proto_path',
+    'allow_insecure_mqtt', 'pending_queue_enabled', 'enable_open_question_broker',
+    'approval_mode', 'approval_ttl_ms', 'event_batch_ms', 'outbox_per_device_limit',
+    'outbox_total_limit', 'snapshot_max_events', 'reconnect_min_ms',
+    'reconnect_max_ms', 'shutdown_timeout_ms', 'log_level',
+  ]
+  for (const key of documented) {
+    assert.ok(Object.hasOwn(Config.dict, key), `Config schema is missing documented key ${key}`)
+  }
+  const raw = materializeConfig({
+    approval_mode: 'delegate',
+    approval_ttl_ms: 1000,
+    event_batch_ms: 3,
+    outbox_per_device_limit: 7,
+    outbox_total_limit: 8,
+    snapshot_max_events: 9,
+    reconnect_min_ms: 151,
+    reconnect_max_ms: 252,
+    shutdown_timeout_ms: 153,
+    proto_path: '/tmp/descriptor.json',
+    ignored_key: 'drop',
+  })
+  assert.equal('ignored_key' in raw, false)
+  const config = resolveConfig({ ...base, ...raw })
+  assert.equal(config.approvalMode, 'delegate')
+  assert.equal(config.approvalTtlMs, 1000)
+  assert.equal(config.eventBatchMs, 3)
+  assert.equal(config.outboxPerDeviceLimit, 7)
+  assert.equal(config.outboxTotalLimit, 8)
+  assert.equal(config.snapshotMaxEvents, 9)
+  assert.equal(config.reconnectMinMs, 151)
+  assert.equal(config.reconnectMaxMs, 252)
+  assert.equal(config.shutdownTimeoutMs, 153)
+  assert.equal(config.protoPath, '/tmp/descriptor.json')
+  assert.equal(resolveConfig(base).eventBatchMs, 20)
+  assert.throws(() => resolveConfig({ ...base, event_batch_ms: 0 }), ConfigError)
+})

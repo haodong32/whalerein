@@ -82,6 +82,12 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The line readiness hook applies a sequenced snapshot before external
+	// traffic. Presence stays unavailable until then.
+	service.SetReadyHook(func(context.Context) error {
+		presence.ApplySnapshot(nil, 0)
+		return nil
+	})
 	results := make(chan *whalereinv1.HostResult, 8)
 	service.SetResultHandler(func(_ context.Context, _ string, result *whalereinv1.HostResult) error {
 		results <- result
@@ -116,16 +122,13 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		t.Fatalf("host subscribe: %v", err)
 	}
 
-	// Broker connection notifications are presence-authoritative.
-	deadline = time.Now().Add(5 * time.Second)
-	for !presence.IsHostOnline(context.Background(), "h-e2e") && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !presence.IsHostOnline(context.Background(), "h-e2e") {
-		t.Fatal("$SYS presence did not report the host online")
+	// A broker CONNECT alone is not presence: the Host must confirm its request
+	// subscription with HostReady before publishing is safe.
+	if presence.IsHostOnline(context.Background(), "h-e2e") {
+		t.Fatal("connected-but-unready host reported online")
 	}
 
-	// Host Ready triggers the readiness handler.
+	// Host Ready triggers the readiness handler and confirms presence.
 	readyBody, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h-e2e", ConnectedAtUnixMs: time.Now().UnixMilli()})
 	publishProto(t, host, ResultTopic("h-e2e"), &whalereinv1.HostResult{
 		HostId: "h-e2e", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: readyBody,
@@ -137,6 +140,13 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("host Ready not delivered")
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for !presence.IsHostOnline(context.Background(), "h-e2e") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !presence.IsHostOnline(context.Background(), "h-e2e") {
+		t.Fatal("HostReady did not confirm host presence")
 	}
 
 	// Access -> host request publish.

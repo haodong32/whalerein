@@ -157,6 +157,7 @@ export function resolveConfig(raw = {}) {
     protocolVersion: PROTOCOL_VERSION,
     // Events
     eventRecentLimit: integer(raw.event_recent_limit, 500, { min: 1, max: 100_000, name: 'event_recent_limit' }),
+    eventBatchMs: integer(raw.event_batch_ms, 20, { min: 1, max: 60_000, name: 'event_batch_ms' }),
     outboxPerDeviceLimit: integer(raw.outbox_per_device_limit, 100, { min: 1, max: 100_000, name: 'outbox_per_device_limit' }),
     outboxTotalLimit: integer(raw.outbox_total_limit, 1000, { min: 1, max: 1_000_000, name: 'outbox_total_limit' }),
     // Snapshots

@@ -54,8 +54,14 @@ type Broker interface {
 }
 
 // Presence is broker-derived host connectivity.
+//
+// Available distinguishes "the broker has not told us the current state yet"
+// from "the host is known to be offline". During an Access restart or broker
+// reconnect the first answer is unavailable, not offline; treating it as
+// offline would terminally fail every in-flight request.
 type Presence interface {
 	IsHostOnline(ctx context.Context, hostID string) bool
+	Available() bool
 }
 
 // Config holds forwarding and retention tunables.
@@ -158,10 +164,18 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
 		return store.Request{}, false, validationErr
 	}
-	if !s.presence.IsHostOnline(ctx, input.HostID) {
+	switch {
+	case !s.presence.Available():
+		// Presence has not established broker state yet. Queue the request as
+		// non-terminal; the forward loop will publish it once presence is
+		// known, or close it as host_offline if the host is genuinely offline.
+		req.Status = whalereinv1.OnlineStatus_received
+		req.ForwardState = store.ForwardPending
+		req.ForwardAfter = s.now()
+	case !s.presence.IsHostOnline(ctx, input.HostID):
 		req.Status = whalereinv1.OnlineStatus_host_offline
 		req.ForwardState = store.ForwardNone
-	} else {
+	default:
 		req.Status = whalereinv1.OnlineStatus_received
 		req.ForwardState = store.ForwardPending
 		req.ForwardAfter = s.now()
@@ -267,6 +281,12 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 // lease transaction and records the publish outcome on the same row.
 func (s *Service) ForwardDue(ctx context.Context) error {
 	now := s.now()
+	if !s.presence.Available() {
+		// Broker state is not established yet. Leave queued rows untouched so
+		// the next tick can forward them instead of publishing into a topic
+		// with no subscriber or closing them as host_offline.
+		return nil
+	}
 	requeued, err := s.store.RequeueDuePublished(ctx, now, s.cfg.MaxAttempts)
 	if err != nil {
 		return err
@@ -281,6 +301,27 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			return nil
+		}
+		if !s.presence.IsHostOnline(ctx, row.HostID) {
+			if row.Kind == whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE {
+				// Pairing COMMIT is a durable outbox item. Keep it leased for
+				// the next retry instead of publishing while the host is gone.
+				continue
+			}
+			if _, applyErr := s.store.ApplyHostResult(ctx, store.HostResultUpdate{
+				RequestID: row.RequestID,
+				HostID:    row.HostID,
+				DeviceID:  row.DeviceID,
+				Status:    whalereinv1.OnlineStatus_host_offline,
+				At:        now,
+			}); applyErr != nil {
+				return applyErr
+			}
+			s.logger.Info("host request closed while host offline",
+				"host", s.masker.Host(row.HostID),
+				"request", s.masker.Request(row.RequestID),
+				"trace_id", row.TraceID)
+			continue
 		}
 		envelope := &whalereinv1.HostRequest{
 			RequestId:              row.RequestID,
@@ -471,6 +512,12 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 	}
 	if req.DeviceID != deviceID {
 		return store.Request{}, ErrNotFound
+	}
+	if !terminalStatus(req.Status) && !s.now().Before(req.ExpiresAt) {
+		// A request that never reached a terminal state is expired, not still
+		// host_accepted. Returning the row would make the CLI poll a status
+		// that can never change.
+		return req, ErrExpired
 	}
 	return req, nil
 }

@@ -4,6 +4,7 @@ members = [
   "proto/v1/bindings/rust",
   "core",
   "apps/cli",
+  "apps/mobile-bindings",
   "tools/noise-peer",
 ]
 

@@ -82,6 +82,14 @@ and reusable release-gate execution. See [CI integration timing](../../docs/test
 for trigger, evidence, concurrency and report rules. It calls the existing
 `./repo test --suite integration`; it does not require local server services.
 
+To request full integration on a PR, add the `run-integration` label. The separate
+**PR integration / Full integration (manual)** check runs the same command on
+Linux against that event's PR merge revision. After another push, remove and
+re-add the label to verify the new revision. Leaving the label attached does not
+enable automatic integration runs. Reports are uploaded as
+`pr-integration-<pr-number>-<run-id>-<attempt>` Artifacts; PR runs do not establish
+the scheduled main-branch cache baseline.
+
 Inspect its content fingerprint locally:
 
 ```bash

@@ -12,6 +12,9 @@ export class WatchedEvents {
   #sources=new Map()
   #lanes=new Map()
   #timer=null
+  outboxDrops=0
+  droppedByDevice=new Map()
+  outboxSnapshotRequired=new Set()
   constructor({hostId,store,security,adapter,access,codec=defaultCodec,now=Date.now,config={},logger}) {
     Object.assign(this,{hostId,store,security,adapter,access,now,config,logger});this.codec=resolveCodec(codec)
   }
@@ -48,7 +51,7 @@ export class WatchedEvents {
       this.#watches.set(watch.id,watch)
       let source=this.#sources.get(sessionId)
       if(!source) {
-        source={recipients:new Set(),controller:new AbortController(),buffer:new LiveBuffer(update=>this.#fanout(sessionId,update))};this.#sources.set(sessionId,source)
+        source={recipients:new Set(),controller:new AbortController(),buffer:new LiveBuffer(update=>this.#fanout(sessionId,update),this.config.eventBatchMs??20)};this.#sources.set(sessionId,source)
         source.recipients.add(watch.id)
         try {
           const subscription=await this.adapter.watch(sessionId,update=>this.#receive(sessionId,update))
@@ -129,7 +132,15 @@ export class WatchedEvents {
       lane.live=lane.live.then(()=>{if(this.now()-at<=1000&&this.#watches.has(watch.id)&&this.security.getChannel(watch.channelId)&&this.access.connected)return this.access.publishEvent(envelope)}).catch(()=>{}).finally(()=>{lane.count--;lane.bytes-=envelope.length})
     } else {
       const row=this.store.addOutbox({deviceId:watch.deviceId,channelId:watch.channelId,payload:envelope,now:at,perDeviceLimit:this.config.outboxPerDeviceLimit??100,totalLimit:this.config.outboxTotalLimit??1000})
-      if(row.overflow){this.logger?.warn('event_outbox_full',{code:'snapshot_required'});return}
+      if(row.overflow){
+        // A dropped committed envelope is a cursor gap. Keep bounded drop
+        // accounting and require a snapshot instead of silently continuing.
+        this.outboxDrops+=1
+        this.droppedByDevice.set(watch.deviceId,(this.droppedByDevice.get(watch.deviceId)??0)+1)
+        this.outboxSnapshotRequired.add(watch.deviceId)
+        this.logger?.warn('event_outbox_full',{code:'snapshot_required',reason:row.reason})
+        return
+      }
       if(this.access?.connected)lane.committed=lane.committed.then(async()=>{if(!this.#watches.has(watch.id))return;await this.access.publishEvent(envelope);this.store.removeOutbox(row.id)}).catch(()=>this.logger?.warn('event_publish_failed',{code:'unavailable'}))
     }
   }
@@ -146,7 +157,12 @@ export class WatchedEvents {
     for(const [id,w] of this.#watches)if(w.deviceId===deviceId&&w.channelId===channelId)this.#remove(id)
     this.store.deleteOutboxForChannel(deviceId,channelId)
     this.#lanes.delete(deviceId)
+    // A replaced/cleared channel starts a new client view; the resync demand
+    // belongs to the previous channel and must not leak across identities.
+    this.outboxSnapshotRequired.delete(deviceId)
+    this.droppedByDevice.delete(deviceId)
   }
   onChannelsCleared(channels) {for(const {deviceId,channelId} of channels??[])this.onChannelReplaced(deviceId,channelId)}
-  describe(){return {watches:this.#watches.size,sessions:this.#sources.size,pending:this.store.countOutbox()}}
+  describe(){return {watches:this.#watches.size,sessions:this.#sources.size,pending:this.store.countOutbox(),
+    outboxDrops:this.outboxDrops,snapshotRequired:this.outboxSnapshotRequired.size,droppedDevices:this.droppedByDevice.size}}
 }

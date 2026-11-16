@@ -72,6 +72,7 @@ type Store interface {
 	EnsureHost(ctx context.Context, hostID string) (store.Host, error)
 	GetHost(ctx context.Context, hostID string) (store.Host, error)
 	ListAuthorizedHosts(ctx context.Context, deviceID string) ([]store.Host, error)
+	ListAuthorizedHostsPage(ctx context.Context, deviceID string, limit, offset int) ([]store.Host, error)
 	ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (store.Device, error)
 	DeviceByID(ctx context.Context, deviceID string) (store.Device, error)
 	HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error)
@@ -259,12 +260,22 @@ func (s *Service) AuthorizeHost(ctx context.Context, identity Identity, hostID s
 	return nil
 }
 
-// ListHosts lists hosts the device may access and their current broker
-// presence.
-func (s *Service) ListHosts(ctx context.Context, identity Identity) ([]HostView, error) {
-	hosts, err := s.store.ListAuthorizedHosts(ctx, identity.DeviceID)
+// ListHosts returns one bounded page of the hosts the device may access and
+// their current broker presence. truncated reports that another page exists.
+func (s *Service) ListHosts(ctx context.Context, identity Identity, limit, offset int) ([]HostView, bool, error) {
+	if limit <= 0 {
+		return nil, false, ErrBadRequest
+	}
+	if offset < 0 {
+		return nil, false, ErrBadRequest
+	}
+	hosts, err := s.store.ListAuthorizedHostsPage(ctx, identity.DeviceID, limit+1, offset)
 	if err != nil {
-		return nil, fmt.Errorf("list hosts: %w", err)
+		return nil, false, fmt.Errorf("list hosts: %w", err)
+	}
+	truncated := len(hosts) > limit
+	if truncated {
+		hosts = hosts[:limit]
 	}
 	views := make([]HostView, 0, len(hosts))
 	for _, host := range hosts {
@@ -275,11 +286,23 @@ func (s *Service) ListHosts(ctx context.Context, identity Identity) ([]HostView,
 			Online:          s.presence.IsHostOnline(ctx, host.HostID),
 		})
 	}
-	return views, nil
+	return views, truncated, nil
 }
 
 // IdentityFromCredentials parses the broker username/client id convention
 // without validating the password.
+func validDeviceClientSuffix(suffix string) bool {
+	if suffix == "" || len(suffix) > 32 {
+		return false
+	}
+	for _, character := range suffix {
+		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) IdentityFromCredentials(clientID, username string) (BrokerIdentity, error) {
 	switch {
 	case username == s.cfg.AccessUsername && username != "":
@@ -301,7 +324,13 @@ func (s *Service) IdentityFromCredentials(clientID, username string) (BrokerIden
 		return BrokerIdentity{Kind: KindHost, HostID: hostID}, nil
 	case strings.HasPrefix(username, "device:"):
 		deviceID := strings.TrimPrefix(username, "device:")
-		if deviceID == "" || clientID != "whalerein-device-"+deviceID {
+		prefix := "whalerein-device-" + deviceID
+		// A device may open more than one broker session (a live watch and a
+		// send in another process). The username still carries the device id;
+		// an optional bounded suffix keeps the sessions distinct without
+		// letting one device assume another's identity.
+		validClient := clientID == prefix || (strings.HasPrefix(clientID, prefix+"-") && validDeviceClientSuffix(clientID[len(prefix)+1:]))
+		if deviceID == "" || !validClient {
 			return BrokerIdentity{}, ErrBadRequest
 		}
 		return BrokerIdentity{Kind: KindDevice, DeviceID: deviceID}, nil

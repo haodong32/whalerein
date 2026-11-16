@@ -203,7 +203,7 @@ func TestRunCleanupStopsPromptlyWhenContextIsCanceled(t *testing.T) {
 	cancel()
 	done := make(chan struct{})
 	go func() {
-		runCleanup(ctx, s, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		runCleanup(ctx, s, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 		close(done)
 	}()
 	select {
@@ -241,7 +241,7 @@ func TestRunCleanupClearsExpiredDataAndLogsCleanupCounts(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runCleanup(runCtx, s, 5*time.Millisecond, time.Hour, logger)
+		runCleanup(runCtx, s, 5*time.Millisecond, time.Hour, logger, nil)
 		close(done)
 	}()
 	waitFor(t, time.Second, func() bool {
@@ -266,13 +266,13 @@ func TestRunCleanupLogsStoreFailures(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	runCleanup(ctx, s, time.Millisecond, time.Hour, logger)
+	runCleanup(ctx, s, time.Millisecond, time.Hour, logger, nil)
 	if !strings.Contains(logs.String(), "cleanup failed") {
 		t.Fatalf("logs = %s", logs.String())
 	}
 }
 
-// When line, broker or listener configuration is invalid, Access rejects startup.
+// When broker or listener configuration is invalid, Access rejects startup.
 func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	newConfig := func(t *testing.T, db *storetest.DB) config.Config {
 		t.Helper()
@@ -285,19 +285,13 @@ func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	t.Run("rejects server startup when REST client configuration is invalid", func(t *testing.T) {
-		db := storetest.NewSchema(t)
-		cfg := newConfig(t, db)
-		cfg.Line.HeartbeatInterval = cfg.Line.PolicyTTL
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "heartbeat_interval") {
-			t.Fatalf("err = %v", err)
-		}
-	})
 	t.Run("rejects server startup when broker connector is invalid", func(t *testing.T) {
 		db := storetest.NewSchema(t)
 		cfg := newConfig(t, db)
 		cfg.Broker.URL = "bad://host"
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "broker") {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runServer(ctx, cfg, logger); err == nil || !strings.Contains(err.Error(), "broker") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -310,7 +304,9 @@ func TestRunServerRejectsInvalidStartupConfiguration(t *testing.T) {
 		defer occupied.Close()
 		cfg := newConfig(t, db)
 		cfg.InternalListen = occupied.Addr().String()
-		if err := runServer(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "internal") {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runServer(ctx, cfg, logger); err == nil || !strings.Contains(err.Error(), "internal") {
 			t.Fatalf("err = %v", err)
 		}
 	})

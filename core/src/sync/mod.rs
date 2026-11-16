@@ -47,6 +47,9 @@ impl SyncService {
     pub fn cursor(&self, key: &SessionKey) -> CoreResult<Option<String>> {
         Ok(self.cache.history_cursor(key)?)
     }
+    pub fn history_message_ids(&self, key: &SessionKey) -> CoreResult<Vec<String>> {
+        Ok(self.cache.history_message_ids(key)?)
+    }
     pub fn discard_stage(&self, key: &SessionKey) -> CoreResult<()> {
         Ok(self.cache.discard_history_stage(key)?)
     }

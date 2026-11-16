@@ -231,7 +231,7 @@ impl Core {
                 Ok(Err((error, _))) => {
                     return timeout_at(deadline, self.settle(Err(error)))
                         .await
-                        .unwrap_or(Err(CoreError::Timeout))
+                        .unwrap_or(Err(CoreError::Timeout));
                 }
                 Err(_) => {
                     if let Some(error) = transport.latest_error() {
@@ -264,14 +264,14 @@ impl Core {
                         session_id: session_id.into(),
                         reason: WaitReason::Idle,
                         state,
-                    })
+                    });
                 }
                 Ok(WireReason::WaitInputRequired) => {
                     return Ok(WaitObservation {
                         session_id: session_id.into(),
                         reason: WaitReason::InputRequired,
                         state,
-                    })
+                    });
                 }
                 Ok(WireReason::WaitTimeout) => last = Some(state),
                 _ => return Err(CoreError::Internal("invalid wait reason".into())),

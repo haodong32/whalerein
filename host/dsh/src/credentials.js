@@ -4,6 +4,10 @@ import { AdapterError } from 'whalerein-host/errors.js'
 import { sha256Text } from 'whalerein-host/security/digest.js'
 const HOST_KEY_SCOPE = 'whalerein-dsh'
 const HOST_KEY_REF = 'WHALEREIN_HOST_PRIVATE_KEY'
+// The record key is intentionally independent of host_id. Renaming a host must
+// not move its credential namespace: otherwise the next start finds a public
+// key reference in SQLite with no credential and refuses to start (PLUG-05).
+const HOST_KEY_SUFFIX = 'host-key'
 
 export class DshHostCredentials {
   constructor({ctx, hostId = ''} = {}) { this.ctx=ctx; this.hostId=hostId }
@@ -12,10 +16,33 @@ export class DshHostCredentials {
 
   #credentialKey() {
     // DSH credential record keys are slash-separated segments matching
-    // /^[a-z][a-z0-9-]*$/. Hash to lowercase hex, never interpolate the
-    // Uint8Array digest (which would produce comma-separated bytes).
+    // /^[a-z][a-z0-9-]*$/.
+    return `${HOST_KEY_SCOPE}/${HOST_KEY_SUFFIX}`
+  }
+
+  // Earlier releases derived the record key from host_id. Read that location
+  // once and migrate it so an upgrade preserves the existing host identity.
+  #legacyCredentialKey() {
+    if (!this.hostId) return ''
     const suffix = Buffer.from(sha256Text(this.hostId).slice(0, 8)).toString('hex')
     return `${HOST_KEY_SCOPE}/host-key-${suffix}`
+  }
+
+  async #readRecord(credentials, key) {
+    if (typeof credentials.readRecord !== 'function') return undefined
+    const record = await credentials.readRecord(key)
+    if (!record || record.kind !== 'grant') return null
+    const value = record.payload && typeof record.payload === 'object'
+      ? record.payload.privateKeyBase64
+      : undefined
+    return typeof value === 'string' ? value : null
+  }
+
+  async #writeRecord(credentials, key, value) {
+    await credentials.modifyRecord(key, async () => ({
+      kind: 'grant',
+      payload: { privateKeyBase64: String(value) },
+    }))
   }
 
   async getCredential() {
@@ -23,12 +50,20 @@ export class DshHostCredentials {
     if (!credentials) return null
     try {
       if (typeof credentials.readRecord === 'function') {
-        const record = await credentials.readRecord(this.#credentialKey())
-        if (!record || record.kind !== 'grant') return null
-        const value = record.payload && typeof record.payload === 'object'
-          ? record.payload.privateKeyBase64
-          : undefined
-        return typeof value === 'string' ? value : null
+        const current = await this.#readRecord(credentials, this.#credentialKey())
+        if (current !== null && current !== undefined) return current
+        const legacyKey = this.#legacyCredentialKey()
+        if (!legacyKey || legacyKey === this.#credentialKey()) return current ?? null
+        const legacy = await this.#readRecord(credentials, legacyKey)
+        if (legacy === null) return null
+        try {
+          // Best-effort migration: a failed copy still returns the legacy key,
+          // and the next start retries the same read.
+          await this.#writeRecord(credentials, this.#credentialKey(), legacy)
+        } catch {
+          // The legacy record remains authoritative for this run.
+        }
+        return legacy
       }
       if (typeof credentials.resolve === 'function') {
         const resolved = await credentials.resolve(HOST_KEY_REF)
@@ -45,10 +80,7 @@ export class DshHostCredentials {
     if (!credentials) throw new AdapterError('unavailable', 'credential store unavailable')
     try {
       if (typeof credentials.modifyRecord === 'function') {
-        await credentials.modifyRecord(this.#credentialKey(), async () => ({
-          kind: 'grant',
-          payload: { privateKeyBase64: String(value) },
-        }))
+        await this.#writeRecord(credentials, this.#credentialKey(), value)
         return
       }
       if (typeof credentials.set === 'function') {

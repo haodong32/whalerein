@@ -1,8 +1,24 @@
 // Memory-only, authenticated cursors over a complete source snapshot. Question
 // contents are encoded for sizing/fingerprinting but never logged or stored.
+//
+// Cursor semantics (v2) are stable across mid-pagination source changes and
+// Host restarts:
+//  - the cursor binds the issuing device, the session and the pager key id;
+//  - it stores the last delivered batch id (`anchor`), the identity of the next
+//    batch (`next_id`) and that next position (`index`) as a fallback hint;
+//  - a later page resumes after the anchor when it still exists, otherwise at
+//    `next_id`, otherwise at the clamped index. Adding, answering or removing a
+//    batch therefore never turns a valid cursor into an opaque conflict;
+//  - the key is supplied by the Host (persisted in the state store), so a
+//    restart keeps paging. A cursor from a different key generation is
+//    reported as `snapshot_required` (restart from the first page) instead of a
+//    misleading conflict.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { AdapterError } from '../errors.js'
 import { MESSAGE_BYTES } from '../access/transport.js'
+
+const CURSOR_VERSION = 2
+const MAX_INDEX = 1_000_000
 
 function varintBytes(value) {
   let n = value, count = 1
@@ -39,48 +55,85 @@ export function questionResponseBudget(codec, request, hostId, completedAt, prot
 }
 
 export class QuestionPager {
-  #key = randomBytes(32)
-  constructor(codec) { this.codec = codec }
+  #key
+  #kid
 
-  #token(deviceId, sessionId, fingerprint, index) {
-    const body = Buffer.from(JSON.stringify({ v: 1, index })).toString('base64url')
-    const auth = createHmac('sha256', this.#key).update(JSON.stringify([deviceId, sessionId, fingerprint, body])).digest('base64url')
-    return `${body}.${auth}`
+  /**
+   * @param {object} codec protobuf codec.
+   * @param {object} [options]
+   * @param {Buffer|Uint8Array} [options.key] stable Host-scoped pager key.
+   *   Omit only for an ephemeral pager (tests/memory-only state).
+   */
+  constructor(codec, { key } = {}) {
+    this.codec = codec
+    this.#key = key ? Buffer.from(key) : randomBytes(32)
+    this.#kid = createHash('sha256').update(this.#key).digest('hex').slice(0, 16)
   }
 
-  #offset(cursor, deviceId, sessionId, fingerprint, length) {
-    if (!cursor) return 0
+  #auth(deviceId, sessionId, encoded) {
+    return createHmac('sha256', this.#key).update(JSON.stringify([deviceId, sessionId, encoded])).digest('base64url')
+  }
+
+  #token(deviceId, sessionId, body) {
+    const encoded = Buffer.from(JSON.stringify(body)).toString('base64url')
+    return `${encoded}.${this.#auth(deviceId, sessionId, encoded)}`
+  }
+
+  #cursor(cursor, deviceId, sessionId) {
+    if (cursor === undefined || cursor === null || cursor === '') return null
     if (typeof cursor !== 'string') throw new AdapterError('invalid_argument')
     const parts = cursor.split('.')
     if (parts.length !== 2 || !parts[0] || !parts[1]) throw new AdapterError('conflict')
-    const expected = this.#token(deviceId, sessionId, fingerprint, (() => {
-      try { return JSON.parse(Buffer.from(parts[0], 'base64url').toString()).index } catch { return NaN }
-    })())
-    const a = Buffer.from(cursor), b = Buffer.from(expected)
+    let body
+    try { body = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) } catch { throw new AdapterError('conflict') }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AdapterError('conflict')
+    // A cursor issued before this Host (or before an upgrade) cannot be
+    // authenticated any more. Report an explicit restart instead of pretending
+    // the source snapshot changed.
+    if (body.v !== CURSOR_VERSION || body.kid !== this.#kid) throw new AdapterError('snapshot_required', 'question pagination state changed; restart from the first page')
+    const expected = this.#auth(deviceId, sessionId, parts[0])
+    const a = Buffer.from(parts[1]), b = Buffer.from(expected)
     if (a.length !== b.length || !timingSafeEqual(a, b)) throw new AdapterError('conflict')
-    let data
-    try { data = JSON.parse(Buffer.from(parts[0], 'base64url').toString()) } catch { throw new AdapterError('conflict') }
-    if (data.v !== 1 || !Number.isSafeInteger(data.index) || data.index < 1 || data.index >= length) throw new AdapterError('conflict')
-    return data.index
+    if (typeof body.anchor !== 'string' || typeof body.next_id !== 'string' ||
+        !Number.isSafeInteger(body.index) || body.index < 0 || body.index > MAX_INDEX) throw new AdapterError('conflict')
+    return { anchor: body.anchor, nextId: body.next_id, index: body.index }
+  }
+
+  // Resolve where the next page starts in the current snapshot. The anchor wins
+  // so insertions before it never shift the continuation; the recorded next
+  // identity covers an answered/removed anchor; the index is only a last-resort
+  // hint for a fully replaced snapshot.
+  #start(cursor, ids) {
+    if (!cursor) return 0
+    const anchor = cursor.anchor ? ids.indexOf(cursor.anchor) : -1
+    if (anchor >= 0) return anchor + 1
+    const next = cursor.nextId ? ids.indexOf(cursor.nextId) : -1
+    if (next >= 0) return next
+    return Math.min(cursor.index, ids.length)
   }
 
   page({ deviceId, sessionId, cursor, source, maxBytes }) {
     if (!deviceId || !sessionId || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new AdapterError('invalid_argument')
     if (!source || !Array.isArray(source.batches) || source.next_cursor) throw new AdapterError('unsupported_capability')
-    const ids = new Set(), digest = createHash('sha256'), sizes = []
+    // Authenticate the cursor before inspecting the snapshot so a cursor from
+    // another device/session is rejected as such, not as a source error.
+    const resolved = this.#cursor(cursor, deviceId, sessionId)
+    const ids = new Set(), sizes = [], order = []
     for (const batch of source.batches) {
       if (batch.session_id !== sessionId || !batch.batch_id || ids.has(batch.batch_id)) throw new AdapterError('unavailable')
       ids.add(batch.batch_id)
-      const encoded = this.codec.encode('whalerein.v1.QuestionBatch', batch)
-      sizes.push(encoded.length)
-      const length = Buffer.alloc(8); length.writeBigUInt64BE(BigInt(encoded.length))
-      digest.update(length).update(encoded)
+      order.push(batch.batch_id)
+      sizes.push(this.codec.encode('whalerein.v1.QuestionBatch', batch).length)
     }
-    const fingerprint = digest.digest('hex')
-    const index = this.#offset(cursor, deviceId, sessionId, fingerprint, source.batches.length)
+    const index = this.#start(resolved, order)
     const chosen = []
     let batchBytes = 0
-    const build = next => ({ batches: chosen, next_cursor: next < source.batches.length ? this.#token(deviceId, sessionId, fingerprint, next) : '' })
+    const build = next => {
+      const anchor = chosen.at(-1)?.batch_id ?? ''
+      const nextId = next < order.length ? order[next] : ''
+      const body = { v: CURSOR_VERSION, kid: this.#kid, anchor, next_id: nextId, index: next }
+      return { batches: chosen, next_cursor: next < order.length ? this.#token(deviceId, sessionId, body) : '' }
+    }
     const fits = next => {
       const pageBase = this.codec.encode('whalerein.v1.QuestionPage', { next_cursor: build(next).next_cursor }).length
       const pageBytes = pageBase + batchBytes

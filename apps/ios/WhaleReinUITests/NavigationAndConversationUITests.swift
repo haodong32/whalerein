@@ -1,0 +1,128 @@
+// Core navigation and conversation flows: pairing, host/session selection,
+// reading while streaming, sending idle/running, tool expansion, copy and jump.
+
+import XCTest
+
+final class NavigationAndConversationUITests: WhaleReinUITestCase {
+    func testPairingToConversation() {
+        launchApp()
+        waitForLabel("Pair your iPhone")
+        completePairing()
+
+        // The paired app restores a conversation directly; the toolbar switcher
+        // is the only Host/session entry point.
+        let connection = waitFor("conversation.connectionStatus")
+        XCTAssertEqual(connection.value as? String, "Connected")
+        XCTAssertTrue(element("message.msg-0320").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("approval.card.\(Self.approvalId)").exists)
+
+        openSwitcher()
+        let picker = waitFor("host.picker")
+        XCTAssertTrue((picker.value as? String ?? "").contains("Online"))
+        XCTAssertTrue((picker.value as? String ?? "").contains("Selected"))
+        tap(waitFor("switcher.close"))
+        waitFor("composer.field")
+    }
+
+    func testSendWhileIdleAndWhileRunning() {
+        launchAndOpenConversation()
+
+        let field = waitFor("composer.field")
+        tap(field)
+        field.typeText("UI test message one")
+        tap(waitFor("composer.send"))
+
+        XCTAssertTrue(app.staticTexts["UI test message one"].waitForExistence(timeout: 10))
+        let running = waitFor("conversation.running")
+        XCTAssertTrue(running.exists)
+        let delivery = waitFor("composer.delivery")
+        XCTAssertEqual(delivery.value as? String, "Steer", "Running work should default to Steer")
+        _ = waitFor("conversation.sendStatus")
+
+        field.tap()
+        field.typeText("UI test message two")
+        tap(waitFor("composer.send"))
+        XCTAssertTrue(app.staticTexts["UI test message two"].waitForExistence(timeout: 10))
+    }
+
+    func testCopyCodeBlockShowsConfirmation() {
+        launchAndOpenConversation()
+
+        let copy = waitFor("code.copy.msg-0320-1")
+        if !copy.isHittable {
+            scrollConversationUp(times: 1)
+        }
+        tap(copy)
+        XCTAssertTrue(waitFor("code.copied").exists)
+    }
+
+    func testToolResultExpandsAndCollapses() {
+        launchAndOpenConversation()
+
+        let expand = waitFor("tool.expand.msg-0319-block-0")
+        if !expand.isHittable {
+            scrollConversationUp(times: 1)
+        }
+        tap(expand)
+        XCTAssertTrue(waitFor("tool.details.msg-0319-block-0").exists)
+
+        tap(expand)
+        XCTAssertTrue(waitFor("tool.expand.msg-0319-block-0").exists)
+    }
+
+    func testReadingOlderRowsWhileStreamingRetainsAnchorAndJumps() {
+        // Pairing restores the conversation directly, which starts the scripted
+        // stream. Do not open the switcher first or the short stream may end.
+        launchApp(["-ui-stream-on-open"])
+        completePairing()
+        XCTAssertTrue(waitFor("conversation.preview").exists)
+
+        scrollConversationUp(times: 4)
+        guard let anchor = firstVisibleMessageRow() else {
+            XCTFail("Expected a visible message row after scrolling up")
+            return
+        }
+        let identifier = anchor.identifier
+        let initialFrame = anchor.frame
+
+        Thread.sleep(forTimeInterval: 2.0)
+
+        let restored = element(identifier)
+        XCTAssertTrue(restored.exists, "The row being read should remain realised")
+        XCTAssertEqual(Double(restored.frame.minY), Double(initialFrame.minY), accuracy: 8, "The reading position should not move while streaming")
+
+        // The jump affordance must appear while output is still streaming.
+        XCTAssertTrue(waitFor("conversation.jumpToLatest").exists)
+
+        // Let the scripted stream settle before jumping. Tapping mid-update races
+        // the animation on a loaded Simulator; the reading-position assertion
+        // above already covers the streaming case.
+        XCTAssertTrue(
+            waitForDisappearance("conversation.preview", timeout: 40),
+            "The scripted stream did not finish"
+        )
+
+        let jump = waitFor("conversation.jumpToLatest")
+        tap(jump)
+        XCTAssertTrue(
+            waitForDisappearance("conversation.jumpToLatest", timeout: 15),
+            "Jump to latest stayed visible after returning to the end of the transcript"
+        )
+    }
+
+    func testSwitchingHostsDropsLateEventsFromThePreviousWatch() {
+        launchApp(["-ui-late-event"])
+        completePairing()
+        _ = waitFor("approval.card.\(Self.approvalId)")
+
+        openSwitcher()
+        chooseHost("travel-laptop")
+        let session = waitFor("session.row.s-101")
+        tap(session)
+        waitFor("composer.field")
+
+        Thread.sleep(forTimeInterval: 2.5)
+        assertNoElement(containing: "LATE-EVENT-LEAK")
+        XCTAssertTrue(waitFor("message.msg-0014").exists)
+    }
+}

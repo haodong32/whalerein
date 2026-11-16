@@ -1,0 +1,107 @@
+{
+  "format": "whalerein/v1/approval",
+  "canonical": "sha256(\"whalerein/v1/approval|{approval_id}|{session_id}|{tool_name}|{call_id}|{reason}|{version}|{expires_at_unix_ms}\") with \\ and | escaped as \\\\ and \\| inside every string field",
+  "cases": [
+    {
+      "name": "base",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000
+      },
+      "digest_hex": "6537dd17e336f8d69a8b82eb0cceaf501614b59de04d81b091e472c67393bece"
+    },
+    {
+      "name": "empty fields",
+      "fields": {
+        "approval_id": "",
+        "session_id": "",
+        "tool_name": "",
+        "call_id": "",
+        "reason": "",
+        "version": 0,
+        "expires_at_unix_ms": 0
+      },
+      "digest_hex": "648d3c49ade2f46e3abc2bf87ea2e1c419bd147e3db35a26fe4055e5b77762b3"
+    },
+    {
+      "name": "pipe in reason",
+      "fields": {
+        "approval_id": "a",
+        "session_id": "s",
+        "tool_name": "bash",
+        "call_id": "c",
+        "reason": "a|b",
+        "version": 1,
+        "expires_at_unix_ms": 99
+      },
+      "digest_hex": "977543f4fbdfe0d489df31f2421da900e01bc567e93cc92eded0aca87523bdf7"
+    },
+    {
+      "name": "boundary left",
+      "fields": {
+        "approval_id": "a",
+        "session_id": "s",
+        "tool_name": "bash|b",
+        "call_id": "c",
+        "reason": "r",
+        "version": 1,
+        "expires_at_unix_ms": 99
+      },
+      "digest_hex": "f9f9d25ff81dab90aa37e610d4f8b87ce864706babd0fc3599d7efedb001fe50"
+    },
+    {
+      "name": "boundary right",
+      "fields": {
+        "approval_id": "a",
+        "session_id": "s",
+        "tool_name": "bash",
+        "call_id": "b|c",
+        "reason": "r",
+        "version": 1,
+        "expires_at_unix_ms": 99
+      },
+      "digest_hex": "d3d2bfbec29ccf3321c301d3de1db22c95dcbed9145e9b8bd56a7b47b419e650"
+    },
+    {
+      "name": "backslash",
+      "fields": {
+        "approval_id": "a",
+        "session_id": "s",
+        "tool_name": "bash",
+        "call_id": "c",
+        "reason": "path\\|cmd",
+        "version": 1,
+        "expires_at_unix_ms": 99
+      },
+      "digest_hex": "36d28ed0d29c2f005689a28cc9b8396e0577aa1a3e1456a07747d137f8929b79"
+    },
+    {
+      "name": "unicode",
+      "fields": {
+        "approval_id": "a",
+        "session_id": "s",
+        "tool_name": "Bash🛠",
+        "call_id": "c",
+        "reason": "é漢字|新行\n",
+        "version": 2,
+        "expires_at_unix_ms": 1700000000123
+      },
+      "digest_hex": "c93493b9725a4c208b51c5dc683a1f866e3d25bffd531d217593183b0f650478"
+    }
+  ],
+  "must_differ": [
+    [
+      "boundary left",
+      "boundary right"
+    ],
+    [
+      "pipe in reason",
+      "base"
+    ]
+  ]
+}

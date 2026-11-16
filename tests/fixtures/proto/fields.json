@@ -1,541 +1,503 @@
 {
   "enums": {
-    "ApprovalDecision": {
-      "values": [
-        {
-          "name": "APPROVAL_DECISION_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "APPROVAL_DECISION_APPROVE",
-          "number": 1
-        },
-        {
-          "name": "APPROVAL_DECISION_REJECT",
-          "number": 2
-        }
-      ]
-    },
-    "ApprovalState": {
-      "values": [
-        {
-          "name": "APPROVAL_STATE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "APPROVAL_STATE_PENDING",
-          "number": 1
-        },
-        {
-          "name": "APPROVAL_STATE_APPROVED",
-          "number": 2
-        },
-        {
-          "name": "APPROVAL_STATE_REJECTED",
-          "number": 3
-        },
-        {
-          "name": "APPROVAL_STATE_EXPIRED",
-          "number": 4
-        },
-        {
-          "name": "APPROVAL_STATE_UNAVAILABLE",
-          "number": 5
-        }
-      ]
-    },
-    "AttemptOutcome": {
-      "values": [
-        {
-          "name": "ATTEMPT_OUTCOME_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "COMMITTED",
-          "number": 1
-        },
-        {
-          "name": "ABANDONED",
-          "number": 2
-        },
-        {
-          "name": "INTERRUPTED",
-          "number": 3
-        },
-        {
-          "name": "ATTEMPT_FAILED",
-          "number": 4
-        }
-      ]
-    },
-    "Capability": {
-      "values": [
-        {
-          "name": "capability_unspecified",
-          "number": 0
-        },
-        {
-          "name": "sessions",
-          "number": 1
-        },
-        {
-          "name": "events",
-          "number": 2
-        },
-        {
-          "name": "messages",
-          "number": 3
-        },
-        {
-          "name": "approvals",
-          "number": 4
-        },
-        {
-          "name": "interrupt",
-          "number": 5
-        },
-        {
-          "name": "sync",
-          "number": 6
-        },
-        {
-          "name": "snapshot",
-          "number": 7
-        }
-      ]
-    },
-    "DeliveryMode": {
-      "values": [
-        {
-          "name": "DELIVERY_MODE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "START_IF_IDLE",
-          "number": 1
-        },
-        {
-          "name": "ENQUEUE_AFTER_RUN",
-          "number": 2
-        },
-        {
-          "name": "STEER",
-          "number": 3
-        }
-      ]
-    },
-    "EnrollmentState": {
-      "values": [
-        {
-          "name": "ENROLLMENT_STATE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "enrollment_pending",
-          "number": 1
-        },
-        {
-          "name": "enrollment_ready",
-          "number": 2
-        },
-        {
-          "name": "enrollment_disabled",
-          "number": 3
-        }
-      ]
-    },
-    "ErrorCode": {
-      "values": [
-        {
-          "name": "error_code_unspecified",
-          "number": 0
-        },
-        {
-          "name": "invalid_argument",
-          "number": 1
-        },
-        {
-          "name": "unauthorized",
-          "number": 2
-        },
-        {
-          "name": "forbidden",
-          "number": 3
-        },
-        {
-          "name": "not_found",
-          "number": 4
-        },
-        {
-          "name": "conflict",
-          "number": 5
-        },
-        {
-          "name": "expired",
-          "number": 6
-        },
-        {
-          "name": "unsupported_capability",
-          "number": 7
-        },
-        {
-          "name": "protocol_version_incompatible",
-          "number": 8
-        },
-        {
-          "name": "payload_digest_mismatch",
-          "number": 9
-        },
-        {
-          "name": "approval_expired",
-          "number": 10
-        },
-        {
-          "name": "approval_version_mismatch",
-          "number": 11
-        },
-        {
-          "name": "approval_already_resolved",
-          "number": 12
-        },
-        {
-          "name": "approval_unavailable",
-          "number": 13
-        },
-        {
-          "name": "snapshot_required",
-          "number": 14
-        },
-        {
-          "name": "revocations_pending",
-          "number": 15
-        },
-        {
-          "name": "rate_limited",
-          "number": 16
-        },
-        {
-          "name": "internal",
-          "number": 17
-        },
-        {
-          "name": "unavailable",
-          "number": 18
-        },
-        {
-          "name": "payload_too_large",
-          "number": 19
-        },
-        {
-          "name": "pairing_fenced",
-          "number": 20
-        },
-        {
-          "name": "pairing_committed_unavailable",
-          "number": 21
-        },
-        {
-          "name": "pairing_committed_unconfirmed",
-          "number": 22
-        },
-        {
-          "name": "channel_replaced",
-          "number": 220
-        }
-      ]
-    },
-    "InputKind": {
-      "values": [
-        {
-          "name": "INPUT_KIND_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "INPUT_APPROVAL",
-          "number": 1
-        },
-        {
-          "name": "INPUT_QUESTION",
-          "number": 2
-        },
-        {
-          "name": "INPUT_OTHER",
-          "number": 3
-        }
-      ]
-    },
-    "LifecycleDisposition": {
-      "values": [
-        {
-          "name": "LIFECYCLE_DISPOSITION_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "READY",
-          "number": 1
-        },
-        {
-          "name": "READY_WITH_WARNING",
-          "number": 2
-        },
-        {
-          "name": "FAILED",
-          "number": 3
-        },
-        {
-          "name": "UNKNOWN",
-          "number": 4
-        }
-      ]
-    },
-    "MessageRole": {
-      "values": [
-        {
-          "name": "MESSAGE_ROLE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "USER",
-          "number": 1
-        },
-        {
-          "name": "ASSISTANT",
-          "number": 2
-        },
-        {
-          "name": "TOOL",
-          "number": 3
-        },
-        {
-          "name": "NOTICE",
-          "number": 4
-        }
-      ]
-    },
-    "OnlineStatus": {
-      "values": [
-        {
-          "name": "online_status_unspecified",
-          "number": 0
-        },
-        {
-          "name": "received",
-          "number": 1
-        },
-        {
-          "name": "host_offline",
-          "number": 2
-        },
-        {
-          "name": "rejected",
-          "number": 3
-        },
-        {
-          "name": "host_accepted",
-          "number": 4
-        },
-        {
-          "name": "succeeded",
-          "number": 5
-        },
-        {
-          "name": "failed",
-          "number": 6
-        },
-        {
-          "name": "unknown",
-          "number": 7
-        }
-      ]
-    },
-    "OperationState": {
-      "values": [
-        {
-          "name": "OPERATION_STATE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "operation_pending",
-          "number": 1
-        },
-        {
-          "name": "operation_committed",
-          "number": 2
-        },
-        {
-          "name": "operation_conflict",
-          "number": 3
-        },
-        {
-          "name": "operation_refused",
-          "number": 4
-        }
-      ]
-    },
-    "PairingPhase": {
-      "values": [
-        {
-          "name": "PAIRING_PHASE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "PAIRING_PHASE_HELLO",
-          "number": 1
-        },
-        {
-          "name": "PAIRING_PHASE_FINISH",
-          "number": 2
-        },
-        {
-          "name": "PAIRING_PHASE_AUTHORIZE",
-          "number": 3
-        },
-        {
-          "name": "PAIRING_PHASE_COMMIT",
-          "number": 4
-        }
-      ]
-    },
-    "QuestionPhase": {
-      "values": [
-        {
-          "name": "QUESTION_PHASE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "QUESTION_OPEN",
-          "number": 1
-        },
-        {
-          "name": "QUESTION_CONTINUED",
-          "number": 2
-        },
-        {
-          "name": "QUESTION_REPLY_QUEUED",
-          "number": 3
-        },
-        {
-          "name": "QUESTION_SETTLED",
-          "number": 4
-        }
-      ]
-    },
-    "QueueAction": {
-      "values": [
-        {
-          "name": "QUEUE_ACTION_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "EDIT",
-          "number": 1
-        },
-        {
-          "name": "REMOVE",
-          "number": 2
-        },
-        {
-          "name": "PROMOTE",
-          "number": 3
-        }
-      ]
-    },
-    "QueuePlacement": {
-      "values": [
-        {
-          "name": "QUEUE_PLACEMENT_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "QUEUED",
-          "number": 1
-        },
-        {
-          "name": "STEERING",
-          "number": 2
-        },
-        {
-          "name": "CONTEXT",
-          "number": 3
-        }
-      ]
-    },
-    "RequestKind": {
-      "values": [
-        {
-          "name": "REQUEST_KIND_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "REQUEST_KIND_HANDSHAKE",
-          "number": 1
-        },
-        {
-          "name": "REQUEST_KIND_QUERY",
-          "number": 2
-        },
-        {
-          "name": "REQUEST_KIND_COMMAND",
-          "number": 3
-        },
-        {
-          "name": "REQUEST_KIND_PAIRING_CLAIM",
-          "number": 4
-        },
-        {
-          "name": "REQUEST_KIND_PAIRING_AUTHORIZE",
-          "number": 5
-        },
-        {
-          "name": "REQUEST_KIND_REVOCATION",
-          "number": 6
-        }
-      ]
-    },
-    "RunPhase": {
-      "values": [
-        {
-          "name": "RUN_PHASE_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "IDLE",
-          "number": 1
-        },
-        {
-          "name": "RUNNING",
-          "number": 2
-        },
-        {
-          "name": "STOPPING",
-          "number": 3
-        },
-        {
-          "name": "SOURCE_UNAVAILABLE",
-          "number": 4
-        }
-      ]
-    },
-    "WaitReason": {
-      "values": [
-        {
-          "name": "WAIT_REASON_UNSPECIFIED",
-          "number": 0
-        },
-        {
-          "name": "WAIT_IDLE",
-          "number": 1
-        },
-        {
-          "name": "WAIT_INPUT_REQUIRED",
-          "number": 2
-        },
-        {
-          "name": "WAIT_TIMEOUT",
-          "number": 3
-        }
-      ]
-    }
+    "ApprovalDecision": [
+      {
+        "name": "APPROVAL_DECISION_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "APPROVAL_DECISION_APPROVE",
+        "number": 1
+      },
+      {
+        "name": "APPROVAL_DECISION_REJECT",
+        "number": 2
+      }
+    ],
+    "ApprovalState": [
+      {
+        "name": "APPROVAL_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "APPROVAL_STATE_PENDING",
+        "number": 1
+      },
+      {
+        "name": "APPROVAL_STATE_APPROVED",
+        "number": 2
+      },
+      {
+        "name": "APPROVAL_STATE_REJECTED",
+        "number": 3
+      },
+      {
+        "name": "APPROVAL_STATE_EXPIRED",
+        "number": 4
+      },
+      {
+        "name": "APPROVAL_STATE_UNAVAILABLE",
+        "number": 5
+      }
+    ],
+    "AttemptOutcome": [
+      {
+        "name": "ATTEMPT_OUTCOME_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "COMMITTED",
+        "number": 1
+      },
+      {
+        "name": "ABANDONED",
+        "number": 2
+      },
+      {
+        "name": "INTERRUPTED",
+        "number": 3
+      },
+      {
+        "name": "ATTEMPT_FAILED",
+        "number": 4
+      }
+    ],
+    "Capability": [
+      {
+        "name": "capability_unspecified",
+        "number": 0
+      },
+      {
+        "name": "sessions",
+        "number": 1
+      },
+      {
+        "name": "events",
+        "number": 2
+      },
+      {
+        "name": "messages",
+        "number": 3
+      },
+      {
+        "name": "approvals",
+        "number": 4
+      },
+      {
+        "name": "interrupt",
+        "number": 5
+      },
+      {
+        "name": "sync",
+        "number": 6
+      },
+      {
+        "name": "snapshot",
+        "number": 7
+      }
+    ],
+    "DeliveryMode": [
+      {
+        "name": "DELIVERY_MODE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "START_IF_IDLE",
+        "number": 1
+      },
+      {
+        "name": "ENQUEUE_AFTER_RUN",
+        "number": 2
+      },
+      {
+        "name": "STEER",
+        "number": 3
+      }
+    ],
+    "EnrollmentState": [
+      {
+        "name": "ENROLLMENT_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "enrollment_pending",
+        "number": 1
+      },
+      {
+        "name": "enrollment_ready",
+        "number": 2
+      },
+      {
+        "name": "enrollment_disabled",
+        "number": 3
+      }
+    ],
+    "ErrorCode": [
+      {
+        "name": "error_code_unspecified",
+        "number": 0
+      },
+      {
+        "name": "invalid_argument",
+        "number": 1
+      },
+      {
+        "name": "unauthorized",
+        "number": 2
+      },
+      {
+        "name": "forbidden",
+        "number": 3
+      },
+      {
+        "name": "not_found",
+        "number": 4
+      },
+      {
+        "name": "conflict",
+        "number": 5
+      },
+      {
+        "name": "expired",
+        "number": 6
+      },
+      {
+        "name": "unsupported_capability",
+        "number": 7
+      },
+      {
+        "name": "protocol_version_incompatible",
+        "number": 8
+      },
+      {
+        "name": "payload_digest_mismatch",
+        "number": 9
+      },
+      {
+        "name": "approval_expired",
+        "number": 10
+      },
+      {
+        "name": "approval_version_mismatch",
+        "number": 11
+      },
+      {
+        "name": "approval_already_resolved",
+        "number": 12
+      },
+      {
+        "name": "approval_unavailable",
+        "number": 13
+      },
+      {
+        "name": "snapshot_required",
+        "number": 14
+      },
+      {
+        "name": "revocations_pending",
+        "number": 15
+      },
+      {
+        "name": "rate_limited",
+        "number": 16
+      },
+      {
+        "name": "internal",
+        "number": 17
+      },
+      {
+        "name": "unavailable",
+        "number": 18
+      },
+      {
+        "name": "payload_too_large",
+        "number": 19
+      },
+      {
+        "name": "pairing_fenced",
+        "number": 20
+      },
+      {
+        "name": "pairing_committed_unavailable",
+        "number": 21
+      },
+      {
+        "name": "pairing_committed_unconfirmed",
+        "number": 22
+      },
+      {
+        "name": "channel_replaced",
+        "number": 220
+      }
+    ],
+    "InputKind": [
+      {
+        "name": "INPUT_KIND_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "INPUT_APPROVAL",
+        "number": 1
+      },
+      {
+        "name": "INPUT_QUESTION",
+        "number": 2
+      },
+      {
+        "name": "INPUT_OTHER",
+        "number": 3
+      }
+    ],
+    "LifecycleDisposition": [
+      {
+        "name": "LIFECYCLE_DISPOSITION_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "READY",
+        "number": 1
+      },
+      {
+        "name": "READY_WITH_WARNING",
+        "number": 2
+      },
+      {
+        "name": "FAILED",
+        "number": 3
+      },
+      {
+        "name": "UNKNOWN",
+        "number": 4
+      }
+    ],
+    "MessageRole": [
+      {
+        "name": "MESSAGE_ROLE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "USER",
+        "number": 1
+      },
+      {
+        "name": "ASSISTANT",
+        "number": 2
+      },
+      {
+        "name": "TOOL",
+        "number": 3
+      },
+      {
+        "name": "NOTICE",
+        "number": 4
+      }
+    ],
+    "OnlineStatus": [
+      {
+        "name": "online_status_unspecified",
+        "number": 0
+      },
+      {
+        "name": "received",
+        "number": 1
+      },
+      {
+        "name": "host_offline",
+        "number": 2
+      },
+      {
+        "name": "rejected",
+        "number": 3
+      },
+      {
+        "name": "host_accepted",
+        "number": 4
+      },
+      {
+        "name": "succeeded",
+        "number": 5
+      },
+      {
+        "name": "failed",
+        "number": 6
+      },
+      {
+        "name": "unknown",
+        "number": 7
+      }
+    ],
+    "OperationState": [
+      {
+        "name": "OPERATION_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "operation_pending",
+        "number": 1
+      },
+      {
+        "name": "operation_committed",
+        "number": 2
+      },
+      {
+        "name": "operation_conflict",
+        "number": 3
+      },
+      {
+        "name": "operation_refused",
+        "number": 4
+      }
+    ],
+    "PairingPhase": [
+      {
+        "name": "PAIRING_PHASE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "PAIRING_PHASE_HELLO",
+        "number": 1
+      },
+      {
+        "name": "PAIRING_PHASE_FINISH",
+        "number": 2
+      },
+      {
+        "name": "PAIRING_PHASE_AUTHORIZE",
+        "number": 3
+      },
+      {
+        "name": "PAIRING_PHASE_COMMIT",
+        "number": 4
+      }
+    ],
+    "QuestionPhase": [
+      {
+        "name": "QUESTION_PHASE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "QUESTION_OPEN",
+        "number": 1
+      },
+      {
+        "name": "QUESTION_CONTINUED",
+        "number": 2
+      },
+      {
+        "name": "QUESTION_REPLY_QUEUED",
+        "number": 3
+      },
+      {
+        "name": "QUESTION_SETTLED",
+        "number": 4
+      }
+    ],
+    "QueueAction": [
+      {
+        "name": "QUEUE_ACTION_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "EDIT",
+        "number": 1
+      },
+      {
+        "name": "REMOVE",
+        "number": 2
+      },
+      {
+        "name": "PROMOTE",
+        "number": 3
+      }
+    ],
+    "QueuePlacement": [
+      {
+        "name": "QUEUE_PLACEMENT_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "QUEUED",
+        "number": 1
+      },
+      {
+        "name": "STEERING",
+        "number": 2
+      },
+      {
+        "name": "CONTEXT",
+        "number": 3
+      }
+    ],
+    "RequestKind": [
+      {
+        "name": "REQUEST_KIND_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "REQUEST_KIND_HANDSHAKE",
+        "number": 1
+      },
+      {
+        "name": "REQUEST_KIND_QUERY",
+        "number": 2
+      },
+      {
+        "name": "REQUEST_KIND_COMMAND",
+        "number": 3
+      },
+      {
+        "name": "REQUEST_KIND_PAIRING_CLAIM",
+        "number": 4
+      },
+      {
+        "name": "REQUEST_KIND_PAIRING_AUTHORIZE",
+        "number": 5
+      },
+      {
+        "name": "REQUEST_KIND_REVOCATION",
+        "number": 6
+      }
+    ],
+    "RunPhase": [
+      {
+        "name": "RUN_PHASE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "IDLE",
+        "number": 1
+      },
+      {
+        "name": "RUNNING",
+        "number": 2
+      },
+      {
+        "name": "STOPPING",
+        "number": 3
+      },
+      {
+        "name": "SOURCE_UNAVAILABLE",
+        "number": 4
+      }
+    ],
+    "WaitReason": [
+      {
+        "name": "WAIT_REASON_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "WAIT_IDLE",
+        "number": 1
+      },
+      {
+        "name": "WAIT_INPUT_REQUIRED",
+        "number": 2
+      },
+      {
+        "name": "WAIT_TIMEOUT",
+        "number": 3
+      }
+    ]
   },
   "file": "proto/v1/whalerein.proto",
   "messages": {
@@ -544,45 +506,51 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "batchId",
           "name": "batch_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "sourceEpoch",
           "name": "source_epoch",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "expectedVersion",
           "name": "expected_version",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "expectedDigest",
           "name": "expected_digest",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "expectedPhase",
           "name": "expected_phase",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QuestionPhase"
         },
         {
           "json_name": "answers",
-          "label": "LABEL_REPEATED",
           "name": "answers",
-          "number": "7",
+          "number": 7,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionAnswerItem"
         }
@@ -593,64 +561,74 @@
         {
           "json_name": "approvalId",
           "name": "approval_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "decision",
-          "name": "decision",
-          "number": "10",
-          "type": "TYPE_ENUM",
-          "type_name": "whalerein.v1.ApprovalDecision"
         },
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "toolName",
           "name": "tool_name",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "callId",
           "name": "call_id",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "reason",
           "name": "reason",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "digest",
           "name": "digest",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "version",
           "name": "version",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "expiresAtUnixMs",
           "name": "expires_at_unix_ms",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ApprovalState"
+        },
+        {
+          "json_name": "decision",
+          "name": "decision",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ApprovalDecision"
         }
       ]
     },
@@ -658,9 +636,9 @@
       "fields": [
         {
           "json_name": "approvals",
-          "label": "LABEL_REPEATED",
           "name": "approvals",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Approval"
         }
@@ -671,25 +649,29 @@
         {
           "json_name": "mediaType",
           "name": "media_type",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "size",
           "name": "size",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "available",
           "name": "available",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -699,7 +681,8 @@
         {
           "json_name": "outcome",
           "name": "outcome",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.AttemptOutcome"
         }
@@ -710,13 +693,15 @@
         {
           "json_name": "liveEpoch",
           "name": "live_epoch",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "attemptId",
           "name": "attempt_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -729,13 +714,15 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -745,13 +732,15 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "waitId",
           "name": "wait_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -760,16 +749,17 @@
       "fields": [
         {
           "json_name": "capabilities",
-          "label": "LABEL_REPEATED",
           "name": "capabilities",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.Capability"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -779,32 +769,37 @@
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "capabilities",
           "name": "capabilities",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CapabilitySet"
         },
         {
           "json_name": "clientNonce",
           "name": "client_nonce",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -814,32 +809,37 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "capabilities",
           "name": "capabilities",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CapabilitySet"
         },
         {
           "json_name": "hostNonce",
           "name": "host_nonce",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -849,13 +849,15 @@
         {
           "json_name": "messageId",
           "name": "message_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deliveryId",
           "name": "delivery_id",
-          "number": "180",
+          "number": 180,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -865,26 +867,30 @@
         {
           "json_name": "found",
           "name": "found",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "status",
           "name": "status",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.OnlineStatus"
         },
         {
           "json_name": "resultPayload",
           "name": "result_payload",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "errorCode",
           "name": "error_code",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         }
@@ -895,46 +901,52 @@
         {
           "json_name": "blockId",
           "name": "block_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "text",
           "name": "text",
-          "number": "2",
-          "oneof_index": "0",
+          "number": 2,
+          "oneof": "content",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.TextContent"
         },
         {
           "json_name": "toolCall",
           "name": "tool_call",
-          "number": "3",
-          "oneof_index": "0",
+          "number": 3,
+          "oneof": "content",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ToolCallContent"
         },
         {
           "json_name": "toolResult",
           "name": "tool_result",
-          "number": "4",
-          "oneof_index": "0",
+          "number": 4,
+          "oneof": "content",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ToolResultContent"
         },
         {
           "json_name": "notice",
           "name": "notice",
-          "number": "5",
-          "oneof_index": "0",
+          "number": 5,
+          "oneof": "content",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.NoticeContent"
         },
         {
           "json_name": "attachment",
           "name": "attachment",
-          "number": "6",
-          "oneof_index": "0",
+          "number": 6,
+          "oneof": "content",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttachmentContent"
         }
@@ -945,28 +957,31 @@
         {
           "json_name": "messageId",
           "name": "message_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "role",
           "name": "role",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.MessageRole"
         },
         {
           "json_name": "blocks",
-          "label": "LABEL_REPEATED",
           "name": "blocks",
-          "number": "3",
+          "number": 3,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ContentBlock"
         },
         {
           "json_name": "authoredAtUnixMs",
           "name": "authored_at_unix_ms",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -976,33 +991,33 @@
         {
           "json_name": "cwd",
           "name": "cwd",
-          "number": "1",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 1,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "workspaceId",
           "name": "workspace_id",
-          "number": "2",
-          "oneof_index": "1",
-          "proto3_optional": "true",
+          "number": 2,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "agentPreset",
           "name": "agent_preset",
-          "number": "3",
-          "oneof_index": "2",
-          "proto3_optional": "true",
+          "number": 3,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "preferredSessionId",
           "name": "preferred_session_id",
-          "number": "4",
-          "oneof_index": "3",
-          "proto3_optional": "true",
+          "number": 4,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1012,19 +1027,22 @@
         {
           "json_name": "channelId",
           "name": "channel_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "nonce",
           "name": "nonce",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "ciphertext",
           "name": "ciphertext",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -1034,26 +1052,30 @@
         {
           "json_name": "code",
           "name": "code",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         },
         {
           "json_name": "message",
           "name": "message",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "traceId",
           "name": "trace_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "requestId",
           "name": "request_id",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1063,43 +1085,50 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "channelId",
           "name": "channel_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "nonce",
           "name": "nonce",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "ciphertext",
           "name": "ciphertext",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "createdAtUnixMs",
           "name": "created_at_unix_ms",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "traceId",
           "name": "trace_id",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1109,7 +1138,8 @@
         {
           "json_name": "update",
           "name": "update",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionUpdate"
         }
@@ -1120,124 +1150,142 @@
         {
           "json_name": "authVersion",
           "name": "auth_version",
-          "number": "1",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "precondition",
-          "name": "precondition",
-          "number": "10",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "expectedRevision",
-          "name": "expected_revision",
-          "number": "11",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "hostId",
-          "name": "host_id",
-          "number": "12",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "hostPublicKeys",
-          "label": "LABEL_REPEATED",
-          "name": "host_public_keys",
-          "number": "13",
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "deviceId",
-          "name": "device_id",
-          "number": "14",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "devicePublicKeys",
-          "label": "LABEL_REPEATED",
-          "name": "device_public_keys",
-          "number": "15",
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "issuedAtUnixMs",
-          "name": "issued_at_unix_ms",
-          "number": "16",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "expiresAtUnixMs",
-          "name": "expires_at_unix_ms",
-          "number": "17",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "nonce",
-          "name": "nonce",
-          "number": "18",
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "keyId",
-          "name": "key_id",
-          "number": "19",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "authorizationId",
           "name": "authorization_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "signature",
-          "name": "signature",
-          "number": "20",
-          "type": "TYPE_BYTES"
         },
         {
           "json_name": "issuer",
           "name": "issuer",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "audience",
           "name": "audience",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "purpose",
           "name": "purpose",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "workspaceId",
           "name": "workspace_id",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "regionId",
           "name": "region_id",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "operationId",
           "name": "operation_id",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "enrollmentRevision",
           "name": "enrollment_revision",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "precondition",
+          "name": "precondition",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expectedRevision",
+          "name": "expected_revision",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostPublicKeys",
+          "name": "host_public_keys",
+          "number": 13,
+          "repeated": true,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "devicePublicKeys",
+          "name": "device_public_keys",
+          "number": 15,
+          "repeated": true,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "issuedAtUnixMs",
+          "name": "issued_at_unix_ms",
+          "number": 16,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 17,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "nonce",
+          "name": "nonce",
+          "number": 18,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "keyId",
+          "name": "key_id",
+          "number": 19,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": 20,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -1246,7 +1294,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1256,7 +1305,8 @@
         {
           "json_name": "approvalId",
           "name": "approval_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1266,7 +1316,8 @@
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1279,13 +1330,15 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "batchId",
           "name": "batch_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1295,7 +1348,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1305,26 +1359,29 @@
         {
           "json_name": "fromCursor",
           "name": "from_cursor",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "toCursor",
           "name": "to_cursor",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "batchId",
           "name": "batch_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "changes",
-          "label": "LABEL_REPEATED",
           "name": "changes",
-          "number": "4",
+          "number": 4,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.MessageUpsert"
         }
@@ -1335,33 +1392,38 @@
         {
           "json_name": "session",
           "name": "session",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionKey"
         },
         {
           "json_name": "batch",
           "name": "batch",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HistoryBatch"
         },
         {
           "json_name": "cutCursor",
           "name": "cut_cursor",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "complete",
           "name": "complete",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "snapshot",
           "name": "snapshot",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -1371,37 +1433,43 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "snapshot",
           "name": "snapshot",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "afterCursor",
           "name": "after_cursor",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "cutCursor",
           "name": "cut_cursor",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "maxBytes",
           "name": "max_bytes",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "maxMessages",
           "name": "max_messages",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -1411,7 +1479,8 @@
         {
           "json_name": "reason",
           "name": "reason",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1421,25 +1490,29 @@
         {
           "json_name": "modelCatalog",
           "name": "model_catalog",
-          "number": "200",
+          "number": 200,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "modelRead",
           "name": "model_read",
-          "number": "201",
+          "number": 201,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "sessionCreate",
           "name": "session_create",
-          "number": "240",
+          "number": 240,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "sessionFork",
           "name": "session_fork",
-          "number": "300",
+          "number": 300,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -1449,25 +1522,29 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "mqttUrl",
           "name": "mqtt_url",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "username",
           "name": "username",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "password",
           "name": "password",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1477,38 +1554,44 @@
         {
           "json_name": "authorization",
           "name": "authorization",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ExternalAuthorization"
         },
         {
           "json_name": "operationId",
           "name": "operation_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostSigningPublicKey",
           "name": "host_signing_public_key",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostNoisePublicKey",
           "name": "host_noise_public_key",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "proofSignature",
           "name": "proof_signature",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -1518,14 +1601,16 @@
         {
           "json_name": "status",
           "name": "status",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HostEnrollmentStatus"
         },
         {
           "json_name": "credential",
           "name": "credential",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HostCredential"
         }
@@ -1536,44 +1621,51 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "workspaceId",
           "name": "workspace_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "enrollmentRevision",
           "name": "enrollment_revision",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.EnrollmentState"
         },
         {
           "json_name": "operationId",
           "name": "operation_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostSigningPublicKey",
           "name": "host_signing_public_key",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostNoisePublicKey",
           "name": "host_noise_public_key",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -1583,13 +1675,15 @@
         {
           "json_name": "signedAtUnixMs",
           "name": "signed_at_unix_ms",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "signature",
           "name": "signature",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -1599,25 +1693,29 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "online",
           "name": "online",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "fingerprint",
           "name": "fingerprint",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1626,9 +1724,9 @@
       "fields": [
         {
           "json_name": "hosts",
-          "label": "LABEL_REPEATED",
           "name": "hosts",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HostInfo"
         }
@@ -1639,25 +1737,29 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "connectedAtUnixMs",
           "name": "connected_at_unix_ms",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "authorizationPublicKey",
           "name": "authorization_public_key",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "transportVersion",
           "name": "transport_version",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -1667,80 +1769,93 @@
         {
           "json_name": "requestId",
           "name": "request_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "channelId",
-          "name": "channel_id",
-          "number": "10",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "body",
-          "name": "body",
-          "number": "11",
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "clientTransportVersion",
-          "name": "client_transport_version",
-          "number": "12",
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "relayTransportVersion",
-          "name": "relay_transport_version",
-          "number": "13",
-          "type": "TYPE_UINT32"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "kind",
           "name": "kind",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.RequestKind"
         },
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "payloadDigest",
           "name": "payload_digest",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "expiresAtUnixMs",
           "name": "expires_at_unix_ms",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "traceId",
           "name": "trace_id",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "body",
+          "name": "body",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "clientTransportVersion",
+          "name": "client_transport_version",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "relayTransportVersion",
+          "name": "relay_transport_version",
+          "number": 13,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -1750,81 +1865,94 @@
         {
           "json_name": "requestId",
           "name": "request_id",
-          "number": "1",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "errorMessage",
-          "name": "error_message",
-          "number": "10",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "completedAtUnixMs",
-          "name": "completed_at_unix_ms",
-          "number": "11",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "protocolVersion",
-          "name": "protocol_version",
-          "number": "12",
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "channelId",
-          "name": "channel_id",
-          "number": "13",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "status",
           "name": "status",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.OnlineStatus"
         },
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "payloadDigest",
           "name": "payload_digest",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "resultBody",
           "name": "result_body",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "errorCode",
           "name": "error_code",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         },
         {
           "json_name": "traceId",
           "name": "trace_id",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "errorMessage",
+          "name": "error_message",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "completedAtUnixMs",
+          "name": "completed_at_unix_ms",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": 13,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1834,7 +1962,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1844,77 +1973,88 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "reconcileMode",
-          "name": "reconcile_mode",
-          "number": "10",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "reconcileKey",
-          "name": "reconcile_key",
-          "number": "11",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "warningDetail",
-          "name": "warning_detail",
-          "number": "12",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "operation",
           "name": "operation",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "disposition",
           "name": "disposition",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.LifecycleDisposition"
         },
         {
           "json_name": "warningCode",
           "name": "warning_code",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "parentSessionId",
           "name": "parent_session_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "operationId",
           "name": "operation_id",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "reasonCode",
           "name": "reason_code",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "retryable",
           "name": "retryable",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "reconcileMode",
+          "name": "reconcile_mode",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reconcileKey",
+          "name": "reconcile_key",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "warningDetail",
+          "name": "warning_detail",
+          "number": 12,
+          "optional": true,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1923,7 +2063,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1936,13 +2077,15 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "cursor",
           "name": "cursor",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -1955,57 +2098,65 @@
         {
           "json_name": "attempt",
           "name": "attempt",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttemptRef"
         },
         {
           "json_name": "blockId",
           "name": "block_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "firstSeq",
           "name": "first_seq",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "lastSeq",
           "name": "last_seq",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "started",
           "name": "started",
-          "number": "5",
-          "oneof_index": "0",
+          "number": 5,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttemptStarted"
         },
         {
           "json_name": "delta",
           "name": "delta",
-          "number": "6",
-          "oneof_index": "0",
+          "number": 6,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.TextContent"
         },
         {
           "json_name": "reset",
           "name": "reset",
-          "number": "7",
-          "oneof_index": "0",
+          "number": 7,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.TextContent"
         },
         {
           "json_name": "ended",
           "name": "ended",
-          "number": "8",
-          "oneof_index": "0",
+          "number": 8,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttemptEnded"
         }
@@ -2016,14 +2167,16 @@
         {
           "json_name": "message",
           "name": "message",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ConversationMessage"
         },
         {
           "json_name": "origin",
           "name": "origin",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttemptRef"
         }
@@ -2034,36 +2187,39 @@
         {
           "json_name": "defaultSelection",
           "name": "default_selection",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "groups",
-          "label": "LABEL_REPEATED",
           "name": "groups",
-          "number": "2",
+          "number": 2,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelProvider"
         },
         {
           "json_name": "failures",
-          "label": "LABEL_REPEATED",
           "name": "failures",
-          "number": "3",
+          "number": 3,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelProviderFailure"
         },
         {
           "json_name": "effectScope",
           "name": "effect_scope",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "complete",
           "name": "complete",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -2073,21 +2229,23 @@
         {
           "json_name": "provider",
           "name": "provider",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "model",
           "name": "model",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "effort",
           "name": "effort",
-          "number": "3",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 3,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2097,13 +2255,15 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2113,27 +2273,30 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "efforts",
-          "label": "LABEL_REPEATED",
           "name": "efforts",
-          "number": "3",
+          "number": 3,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelEffort"
         },
         {
           "json_name": "defaultEffort",
           "name": "default_effort",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2143,20 +2306,22 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "models",
-          "label": "LABEL_REPEATED",
           "name": "models",
-          "number": "3",
+          "number": 3,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelEntry"
         }
@@ -2167,19 +2332,22 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "code",
           "name": "code",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         }
@@ -2190,20 +2358,23 @@
         {
           "json_name": "selected",
           "name": "selected",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "effectScope",
           "name": "effect_scope",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "defaultPersistence",
           "name": "default_persistence",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2213,13 +2384,15 @@
         {
           "json_name": "category",
           "name": "category",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "text",
           "name": "text",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2229,56 +2402,65 @@
         {
           "json_name": "operationId",
           "name": "operation_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "purpose",
           "name": "purpose",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.OperationState"
         },
         {
           "json_name": "workspaceId",
           "name": "workspace_id",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "enrollmentRevision",
           "name": "enrollment_revision",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "authorizationId",
           "name": "authorization_id",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "payloadDigest",
           "name": "payload_digest",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "committedAtUnixMs",
           "name": "committed_at_unix_ms",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -2288,56 +2470,65 @@
         {
           "json_name": "claimId",
           "name": "claim_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "tokenHash",
           "name": "token_hash",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.PairingPhase"
         },
         {
           "json_name": "noiseMessage",
           "name": "noise_message",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "devicePublicKey",
           "name": "device_public_key",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "expiresAtUnixMs",
           "name": "expires_at_unix_ms",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "grantGeneration",
           "name": "grant_generation",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "deviceAuthHash",
           "name": "device_auth_hash",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -2347,50 +2538,58 @@
         {
           "json_name": "token",
           "name": "token",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "claimId",
           "name": "claim_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.PairingPhase"
         },
         {
           "json_name": "noiseMessage",
           "name": "noise_message",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "confirmed",
           "name": "confirmed",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "deviceToken",
           "name": "device_token",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2400,69 +2599,80 @@
         {
           "json_name": "claimId",
           "name": "claim_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "expiresAtUnixMs",
-          "name": "expires_at_unix_ms",
-          "number": "10",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "protocolVersion",
-          "name": "protocol_version",
-          "number": "11",
-          "type": "TYPE_UINT32"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.PairingPhase"
         },
         {
           "json_name": "noiseMessage",
           "name": "noise_message",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostPublicKey",
           "name": "host_public_key",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostFingerprint",
           "name": "host_fingerprint",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "devicePublicKey",
           "name": "device_public_key",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "deviceToken",
           "name": "device_token",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "protocolVersion",
+          "name": "protocol_version",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -2471,43 +2681,50 @@
         {
           "json_name": "noiseMessage",
           "name": "noise_message",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostPublicKey",
           "name": "host_public_key",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "hostFingerprint",
           "name": "host_fingerprint",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "devicePublicKey",
           "name": "device_public_key",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "authorized",
           "name": "authorized",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "deviceAuthHash",
           "name": "device_auth_hash",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -2517,25 +2734,29 @@
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostFingerprint",
           "name": "host_fingerprint",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceAuthHash",
           "name": "device_auth_hash",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -2545,44 +2766,51 @@
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "capabilities",
           "name": "capabilities",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CapabilitySet"
         },
         {
           "json_name": "deviceNonce",
           "name": "device_nonce",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "displayName",
           "name": "display_name",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "os",
           "name": "os",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2592,32 +2820,37 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "protocolVersion",
           "name": "protocol_version",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "capabilities",
           "name": "capabilities",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CapabilitySet"
         },
         {
           "json_name": "hostNonce",
           "name": "host_nonce",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2627,25 +2860,29 @@
         {
           "json_name": "token",
           "name": "token",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "expiresAtUnixMs",
           "name": "expires_at_unix_ms",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "pairingUri",
           "name": "pairing_uri",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2655,19 +2892,22 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "signedAtUnixMs",
           "name": "signed_at_unix_ms",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "signature",
           "name": "signature",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BYTES"
         }
       ]
@@ -2677,26 +2917,29 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "available",
           "name": "available",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "running",
           "name": "running",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "items",
-          "label": "LABEL_REPEATED",
           "name": "items",
-          "number": "4",
+          "number": 4,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.PendingQueueItem"
         }
@@ -2707,35 +2950,38 @@
         {
           "json_name": "itemId",
           "name": "item_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "placement",
           "name": "placement",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QueuePlacement"
         },
         {
           "json_name": "deliveryId",
           "name": "delivery_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "blocks",
-          "label": "LABEL_REPEATED",
           "name": "blocks",
-          "number": "4",
+          "number": 4,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ContentBlock"
         },
         {
           "json_name": "actions",
-          "label": "LABEL_REPEATED",
           "name": "actions",
-          "number": "5",
+          "number": 5,
+          "repeated": true,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QueueAction"
         }
@@ -2746,7 +2992,8 @@
         {
           "json_name": "clientTimeUnixMs",
           "name": "client_time_unix_ms",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -2756,7 +3003,8 @@
         {
           "json_name": "hostTimeUnixMs",
           "name": "host_time_unix_ms",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -2766,22 +3014,23 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "selected",
-          "label": "LABEL_REPEATED",
           "name": "selected",
-          "number": "2",
+          "number": 2,
+          "repeated": true,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "custom",
           "name": "custom",
-          "number": "3",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 3,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -2791,58 +3040,66 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "batchId",
           "name": "batch_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "sourceEpoch",
           "name": "source_epoch",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "version",
           "name": "version",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "digest",
           "name": "digest",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QuestionPhase"
         },
         {
           "json_name": "questions",
-          "label": "LABEL_REPEATED",
           "name": "questions",
-          "number": "7",
+          "number": 7,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionItem"
         },
         {
           "json_name": "answerable",
           "name": "answerable",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "contentUnavailable",
           "name": "content_unavailable",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -2852,7 +3109,8 @@
         {
           "json_name": "cancellationRequested",
           "name": "cancellation_requested",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -2862,21 +3120,24 @@
         {
           "json_name": "question",
           "name": "question",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionLocalizedText"
         },
         {
           "json_name": "detail",
           "name": "detail",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionLocalizedText"
         },
         {
           "json_name": "approve",
           "name": "approve",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionLocalizedText"
         }
@@ -2887,50 +3148,54 @@
         {
           "json_name": "kind",
           "name": "kind",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "approve",
           "name": "approve",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "reject",
           "name": "reject",
-          "number": "3",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 3,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "always",
           "name": "always",
-          "number": "4",
-          "oneof_index": "1",
-          "proto3_optional": "true",
+          "number": 4,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "callId",
           "name": "call_id",
-          "number": "5",
-          "oneof_index": "2",
-          "proto3_optional": "true",
+          "number": 5,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "subject",
           "name": "subject",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionSubject"
         },
         {
           "json_name": "display",
           "name": "display",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionDisplay"
         }
@@ -2941,49 +3206,53 @@
         {
           "json_name": "id",
           "name": "id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "question",
           "name": "question",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "detail",
           "name": "detail",
-          "number": "3",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 3,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "header",
           "name": "header",
-          "number": "4",
-          "oneof_index": "1",
-          "proto3_optional": "true",
+          "number": 4,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "options",
-          "label": "LABEL_REPEATED",
           "name": "options",
-          "number": "5",
+          "number": 5,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionOption"
         },
         {
           "json_name": "multiSelect",
           "name": "multi_select",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "intent",
           "name": "intent",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionIntent"
         }
@@ -2993,9 +3262,9 @@
       "fields": [
         {
           "json_name": "translations",
-          "label": "LABEL_REPEATED",
           "name": "translations",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionLocalizedText.TranslationsEntry"
         }
@@ -3006,15 +3275,16 @@
         {
           "json_name": "label",
           "name": "label",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "description",
           "name": "description",
-          "number": "2",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 2,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3023,16 +3293,17 @@
       "fields": [
         {
           "json_name": "batches",
-          "label": "LABEL_REPEATED",
           "name": "batches",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionBatch"
         },
         {
           "json_name": "nextCursor",
           "name": "next_cursor",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3042,13 +3313,15 @@
         {
           "json_name": "batchId",
           "name": "batch_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "phase",
           "name": "phase",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QuestionPhase"
         }
@@ -3059,15 +3332,16 @@
         {
           "json_name": "name",
           "name": "name",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "icon",
           "name": "icon",
-          "number": "2",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 2,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3077,7 +3351,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3087,7 +3362,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3097,7 +3373,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3106,9 +3383,9 @@
       "fields": [
         {
           "json_name": "watchIds",
-          "label": "LABEL_REPEATED",
           "name": "watch_ids",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_STRING"
         }
       ]
@@ -3118,226 +3395,254 @@
         {
           "json_name": "listSessions",
           "name": "list_sessions",
-          "number": "1",
-          "oneof_index": "0",
+          "number": 1,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ListSessions"
         },
         {
-          "json_name": "listApprovals",
-          "name": "list_approvals",
-          "number": "10",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ListApprovals"
-        },
-        {
-          "json_name": "readHistory",
-          "name": "read_history",
-          "number": "11",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.HistoryRead"
-        },
-        {
-          "json_name": "watchSession",
-          "name": "watch_session",
-          "number": "12",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchSession"
-        },
-        {
-          "json_name": "refreshWatches",
-          "name": "refresh_watches",
-          "number": "13",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.RefreshWatches"
-        },
-        {
-          "json_name": "unwatchSession",
-          "name": "unwatch_session",
-          "number": "14",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.UnwatchSession"
-        },
-        {
-          "json_name": "getHostCapabilities",
-          "name": "get_host_capabilities",
-          "number": "190",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.GetHostCapabilities"
-        },
-        {
           "json_name": "getSession",
           "name": "get_session",
-          "number": "2",
-          "oneof_index": "0",
+          "number": 2,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.GetSession"
         },
         {
-          "json_name": "listModels",
-          "name": "list_models",
-          "number": "200",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ListModels"
-        },
-        {
-          "json_name": "readSessionModel",
-          "name": "read_session_model",
-          "number": "201",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ReadSessionModel"
-        },
-        {
-          "json_name": "selectSessionModel",
-          "name": "select_session_model",
-          "number": "202",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SelectSessionModel"
-        },
-        {
-          "json_name": "waitSession",
-          "name": "wait_session",
-          "number": "220",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WaitSession"
-        },
-        {
-          "json_name": "cancelSessionWait",
-          "name": "cancel_session_wait",
-          "number": "221",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.CancelSessionWait"
-        },
-        {
-          "json_name": "readWaitState",
-          "name": "read_wait_state",
-          "number": "222",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ReadWaitState"
-        },
-        {
-          "json_name": "createSession",
-          "name": "create_session",
-          "number": "240",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.CreateSession"
-        },
-        {
-          "json_name": "listQuestions",
-          "name": "list_questions",
-          "number": "260",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ListQuestions"
-        },
-        {
-          "json_name": "getQuestion",
-          "name": "get_question",
-          "number": "261",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.GetQuestion"
-        },
-        {
-          "json_name": "answerQuestion",
-          "name": "answer_question",
-          "number": "262",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.AnswerQuestion"
-        },
-        {
-          "json_name": "cancelQuestionAnswer",
-          "name": "cancel_question_answer",
-          "number": "263",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.CancelQuestionAnswer"
-        },
-        {
-          "json_name": "readPendingQueue",
-          "name": "read_pending_queue",
-          "number": "280",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ReadPendingQueue"
-        },
-        {
-          "json_name": "updatePendingQueue",
-          "name": "update_pending_queue",
-          "number": "281",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.UpdatePendingQueue"
-        },
-        {
-          "json_name": "forkSession",
-          "name": "fork_session",
-          "number": "300",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ForkSession"
-        },
-        {
           "json_name": "getApproval",
           "name": "get_approval",
-          "number": "4",
-          "oneof_index": "0",
+          "number": 4,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.GetApproval"
         },
         {
           "json_name": "getCommandResult",
           "name": "get_command_result",
-          "number": "5",
-          "oneof_index": "0",
+          "number": 5,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.GetCommandResult"
         },
         {
           "json_name": "sendMessage",
           "name": "send_message",
-          "number": "6",
-          "oneof_index": "0",
+          "number": 6,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SendMessage"
         },
         {
           "json_name": "interrupt",
           "name": "interrupt",
-          "number": "7",
-          "oneof_index": "0",
+          "number": 7,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Interrupt"
         },
         {
           "json_name": "resolveApproval",
           "name": "resolve_approval",
-          "number": "8",
-          "oneof_index": "0",
+          "number": 8,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ResolveApproval"
         },
         {
           "json_name": "ping",
           "name": "ping",
-          "number": "9",
-          "oneof_index": "0",
+          "number": 9,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Ping"
+        },
+        {
+          "json_name": "listApprovals",
+          "name": "list_approvals",
+          "number": 10,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ListApprovals"
+        },
+        {
+          "json_name": "readHistory",
+          "name": "read_history",
+          "number": 11,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryRead"
+        },
+        {
+          "json_name": "watchSession",
+          "name": "watch_session",
+          "number": 12,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchSession"
+        },
+        {
+          "json_name": "refreshWatches",
+          "name": "refresh_watches",
+          "number": 13,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.RefreshWatches"
+        },
+        {
+          "json_name": "unwatchSession",
+          "name": "unwatch_session",
+          "number": 14,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.UnwatchSession"
+        },
+        {
+          "json_name": "getHostCapabilities",
+          "name": "get_host_capabilities",
+          "number": 190,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.GetHostCapabilities"
+        },
+        {
+          "json_name": "listModels",
+          "name": "list_models",
+          "number": 200,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ListModels"
+        },
+        {
+          "json_name": "readSessionModel",
+          "name": "read_session_model",
+          "number": 201,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReadSessionModel"
+        },
+        {
+          "json_name": "selectSessionModel",
+          "name": "select_session_model",
+          "number": 202,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SelectSessionModel"
+        },
+        {
+          "json_name": "waitSession",
+          "name": "wait_session",
+          "number": 220,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WaitSession"
+        },
+        {
+          "json_name": "cancelSessionWait",
+          "name": "cancel_session_wait",
+          "number": 221,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CancelSessionWait"
+        },
+        {
+          "json_name": "readWaitState",
+          "name": "read_wait_state",
+          "number": 222,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReadWaitState"
+        },
+        {
+          "json_name": "createSession",
+          "name": "create_session",
+          "number": 240,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CreateSession"
+        },
+        {
+          "json_name": "listQuestions",
+          "name": "list_questions",
+          "number": 260,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ListQuestions"
+        },
+        {
+          "json_name": "getQuestion",
+          "name": "get_question",
+          "number": 261,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.GetQuestion"
+        },
+        {
+          "json_name": "answerQuestion",
+          "name": "answer_question",
+          "number": 262,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AnswerQuestion"
+        },
+        {
+          "json_name": "cancelQuestionAnswer",
+          "name": "cancel_question_answer",
+          "number": 263,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CancelQuestionAnswer"
+        },
+        {
+          "json_name": "readPendingQueue",
+          "name": "read_pending_queue",
+          "number": 280,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReadPendingQueue"
+        },
+        {
+          "json_name": "updatePendingQueue",
+          "name": "update_pending_queue",
+          "number": 281,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.UpdatePendingQueue"
+        },
+        {
+          "json_name": "forkSession",
+          "name": "fork_session",
+          "number": 300,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ForkSession"
         }
       ]
     },
@@ -3346,26 +3651,30 @@
         {
           "json_name": "requestId",
           "name": "request_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "status",
           "name": "status",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.OnlineStatus"
         },
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "expiresAtUnixMs",
           "name": "expires_at_unix_ms",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -3375,75 +3684,87 @@
         {
           "json_name": "requestId",
           "name": "request_id",
-          "number": "1",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "expiresAtUnixMs",
-          "name": "expires_at_unix_ms",
-          "number": "10",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "updatedAtUnixMs",
-          "name": "updated_at_unix_ms",
-          "number": "11",
-          "type": "TYPE_INT64"
-        },
-        {
-          "json_name": "channelId",
-          "name": "channel_id",
-          "number": "12",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceId",
           "name": "device_id",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "status",
           "name": "status",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.OnlineStatus"
         },
         {
           "json_name": "commandId",
           "name": "command_id",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "payloadDigest",
           "name": "payload_digest",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "resultBody",
           "name": "result_body",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "errorCode",
           "name": "error_code",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         },
         {
           "json_name": "errorMessage",
           "name": "error_message",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": 12,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3453,26 +3774,30 @@
         {
           "json_name": "approvalId",
           "name": "approval_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "decision",
           "name": "decision",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ApprovalDecision"
         },
         {
           "json_name": "expectedDigest",
           "name": "expected_digest",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "expectedVersion",
           "name": "expected_version",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_INT64"
         }
       ]
@@ -3482,191 +3807,215 @@
         {
           "json_name": "sessionList",
           "name": "session_list",
-          "number": "1",
-          "oneof_index": "0",
+          "number": 1,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionList"
         },
         {
-          "json_name": "approvalList",
-          "name": "approval_list",
-          "number": "10",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ApprovalList"
-        },
-        {
-          "json_name": "historyPage",
-          "name": "history_page",
-          "number": "11",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.HistoryPage"
-        },
-        {
-          "json_name": "watchReady",
-          "name": "watch_ready",
-          "number": "12",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchReady"
-        },
-        {
-          "json_name": "watchStates",
-          "name": "watch_states",
-          "number": "13",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchStates"
-        },
-        {
-          "json_name": "sessionInfo",
-          "name": "session_info",
-          "number": "14",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SessionSummary"
-        },
-        {
-          "json_name": "hostCapabilities",
-          "name": "host_capabilities",
-          "number": "190",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.HostCapabilities"
-        },
-        {
-          "json_name": "modelCatalog",
-          "name": "model_catalog",
-          "number": "200",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ModelCatalog"
-        },
-        {
-          "json_name": "sessionModel",
-          "name": "session_model",
-          "number": "201",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SessionModel"
-        },
-        {
-          "json_name": "modelSelectionReceipt",
-          "name": "model_selection_receipt",
-          "number": "202",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ModelSelectionReceipt"
-        },
-        {
-          "json_name": "sessionWaitResult",
-          "name": "session_wait_result",
-          "number": "220",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SessionWaitResult"
-        },
-        {
-          "json_name": "sessionWaitStateResult",
-          "name": "session_wait_state_result",
-          "number": "221",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SessionWaitStateResult"
-        },
-        {
-          "json_name": "lifecycleReceipt",
-          "name": "lifecycle_receipt",
-          "number": "240",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.LifecycleReceipt"
-        },
-        {
-          "json_name": "questionPage",
-          "name": "question_page",
-          "number": "260",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.QuestionPage"
-        },
-        {
-          "json_name": "questionBatch",
-          "name": "question_batch",
-          "number": "261",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.QuestionBatch"
-        },
-        {
-          "json_name": "questionReceipt",
-          "name": "question_receipt",
-          "number": "262",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.QuestionReceipt"
-        },
-        {
-          "json_name": "questionCancelReceipt",
-          "name": "question_cancel_receipt",
-          "number": "263",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.QuestionCancelReceipt"
-        },
-        {
-          "json_name": "pendingQueue",
-          "name": "pending_queue",
-          "number": "280",
-          "oneof_index": "0",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.PendingQueue"
-        },
-        {
           "json_name": "approval",
           "name": "approval",
-          "number": "4",
-          "oneof_index": "0",
+          "number": 4,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Approval"
         },
         {
           "json_name": "commandAccepted",
           "name": "command_accepted",
-          "number": "5",
-          "oneof_index": "0",
+          "number": 5,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CommandAccepted"
         },
         {
           "json_name": "commandResult",
           "name": "command_result",
-          "number": "6",
-          "oneof_index": "0",
+          "number": 6,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.CommandResult"
         },
         {
           "json_name": "pong",
           "name": "pong",
-          "number": "7",
-          "oneof_index": "0",
+          "number": 7,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Pong"
         },
         {
           "json_name": "errorCode",
           "name": "error_code",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ErrorCode"
         },
         {
           "json_name": "errorDetail",
           "name": "error_detail",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "approvalList",
+          "name": "approval_list",
+          "number": 10,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ApprovalList"
+        },
+        {
+          "json_name": "historyPage",
+          "name": "history_page",
+          "number": 11,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryPage"
+        },
+        {
+          "json_name": "watchReady",
+          "name": "watch_ready",
+          "number": 12,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchReady"
+        },
+        {
+          "json_name": "watchStates",
+          "name": "watch_states",
+          "number": 13,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchStates"
+        },
+        {
+          "json_name": "sessionInfo",
+          "name": "session_info",
+          "number": 14,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionSummary"
+        },
+        {
+          "json_name": "hostCapabilities",
+          "name": "host_capabilities",
+          "number": 190,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostCapabilities"
+        },
+        {
+          "json_name": "modelCatalog",
+          "name": "model_catalog",
+          "number": 200,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ModelCatalog"
+        },
+        {
+          "json_name": "sessionModel",
+          "name": "session_model",
+          "number": 201,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionModel"
+        },
+        {
+          "json_name": "modelSelectionReceipt",
+          "name": "model_selection_receipt",
+          "number": 202,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ModelSelectionReceipt"
+        },
+        {
+          "json_name": "sessionWaitResult",
+          "name": "session_wait_result",
+          "number": 220,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionWaitResult"
+        },
+        {
+          "json_name": "sessionWaitStateResult",
+          "name": "session_wait_state_result",
+          "number": 221,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionWaitStateResult"
+        },
+        {
+          "json_name": "lifecycleReceipt",
+          "name": "lifecycle_receipt",
+          "number": 240,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.LifecycleReceipt"
+        },
+        {
+          "json_name": "questionPage",
+          "name": "question_page",
+          "number": 260,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionPage"
+        },
+        {
+          "json_name": "questionBatch",
+          "name": "question_batch",
+          "number": 261,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionBatch"
+        },
+        {
+          "json_name": "questionReceipt",
+          "name": "question_receipt",
+          "number": 262,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionReceipt"
+        },
+        {
+          "json_name": "questionCancelReceipt",
+          "name": "question_cancel_receipt",
+          "number": 263,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionCancelReceipt"
+        },
+        {
+          "json_name": "pendingQueue",
+          "name": "pending_queue",
+          "number": 280,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PendingQueue"
         }
       ]
     },
@@ -3675,14 +4024,15 @@
         {
           "json_name": "replayId",
           "name": "replay_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceIds",
-          "label": "LABEL_REPEATED",
           "name": "device_ids",
-          "number": "2",
+          "number": 2,
+          "repeated": true,
           "type": "TYPE_STRING"
         }
       ]
@@ -3692,33 +4042,36 @@
         {
           "json_name": "replayId",
           "name": "replay_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deviceIds",
-          "label": "LABEL_REPEATED",
           "name": "device_ids",
-          "number": "2",
+          "number": 2,
+          "repeated": true,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "final",
           "name": "final",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "revokedAtUnixMs",
           "name": "revoked_at_unix_ms",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "grantGenerations",
-          "label": "LABEL_REPEATED",
           "name": "grant_generations",
-          "number": "5",
+          "number": 5,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.RevocationNotice.GrantGenerationsEntry"
         }
@@ -3729,27 +4082,30 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "provider",
           "name": "provider",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "model",
           "name": "model",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "effort",
           "name": "effort",
-          "number": "4",
-          "oneof_index": "0",
-          "proto3_optional": "true",
+          "number": 4,
+          "optional": true,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3759,19 +4115,22 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "text",
           "name": "text",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "deliveryMode",
           "name": "delivery_mode",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.DeliveryMode"
         }
@@ -3782,13 +4141,15 @@
         {
           "json_name": "hostId",
           "name": "host_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -3797,9 +4158,9 @@
       "fields": [
         {
           "json_name": "sessions",
-          "label": "LABEL_REPEATED",
           "name": "sessions",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionSummary"
         }
@@ -3810,41 +4171,47 @@
         {
           "json_name": "pending",
           "name": "pending",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "lastUsed",
           "name": "last_used",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "defaultSelection",
           "name": "default_selection",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "defaultIsFallback",
           "name": "default_is_fallback",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "next",
           "name": "next",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ModelChoice"
         },
         {
           "json_name": "pendingKnown",
           "name": "pending_known",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -3854,40 +4221,45 @@
         {
           "json_name": "session",
           "name": "session",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionKey"
         },
         {
           "json_name": "liveEpoch",
           "name": "live_epoch",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "revision",
           "name": "revision",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT64"
         },
         {
           "json_name": "historyHead",
           "name": "history_head",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "runPhase",
           "name": "run_phase",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.RunPhase"
         },
         {
           "json_name": "approvals",
-          "label": "LABEL_REPEATED",
           "name": "approvals",
-          "number": "6",
+          "number": 6,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Approval"
         }
@@ -3898,81 +4270,94 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "origin",
-          "name": "origin",
-          "number": "10",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "queuedPrompts",
-          "name": "queued_prompts",
-          "number": "12",
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "historyCursor",
-          "name": "history_cursor",
-          "number": "13",
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "sourceCapabilities",
-          "name": "source_capabilities",
-          "number": "14",
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.SourceCapabilities"
         },
         {
           "json_name": "title",
           "name": "title",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "cwd",
           "name": "cwd",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "createdAtUnixMs",
           "name": "created_at_unix_ms",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "updatedAtUnixMs",
           "name": "updated_at_unix_ms",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_INT64"
         },
         {
           "json_name": "running",
           "name": "running",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "agentAvailable",
           "name": "agent_available",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "blank",
           "name": "blank",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "parentSessionId",
           "name": "parent_session_id",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "origin",
+          "name": "origin",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "queuedPrompts",
+          "name": "queued_prompts",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "historyCursor",
+          "name": "history_cursor",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sourceCapabilities",
+          "name": "source_capabilities",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SourceCapabilities"
         }
       ]
     },
@@ -3981,45 +4366,51 @@
         {
           "json_name": "watchId",
           "name": "watch_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "session",
           "name": "session",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionKey"
         },
         {
           "json_name": "history",
           "name": "history",
-          "number": "3",
-          "oneof_index": "0",
+          "number": 3,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HistoryBatch"
         },
         {
           "json_name": "live",
           "name": "live",
-          "number": "4",
-          "oneof_index": "0",
+          "number": 4,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.LiveFrame"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "5",
-          "oneof_index": "0",
+          "number": 5,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionState"
         },
         {
           "json_name": "reset",
           "name": "reset",
-          "number": "6",
-          "oneof_index": "0",
+          "number": 6,
+          "oneof": "payload",
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HistoryReset"
         }
@@ -4030,26 +4421,30 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "waitId",
           "name": "wait_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "reason",
           "name": "reason",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.WaitReason"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionWaitState"
         }
@@ -4060,26 +4455,29 @@
         {
           "json_name": "active",
           "name": "active",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "running",
           "name": "running",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "queueAvailable",
           "name": "queue_available",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "pendingInput",
-          "label": "LABEL_REPEATED",
           "name": "pending_input",
-          "number": "4",
+          "number": 4,
+          "repeated": true,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.InputKind"
         }
@@ -4090,13 +4488,15 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionWaitState"
         }
@@ -4107,94 +4507,108 @@
         {
           "json_name": "history",
           "name": "history",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "resumableHistory",
           "name": "resumable_history",
-          "number": "2",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "modelSelection",
-          "name": "model_selection",
-          "number": "200",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "questionsRead",
-          "name": "questions_read",
-          "number": "260",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "questionsAnswerOpen",
-          "name": "questions_answer_open",
-          "number": "261",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "questionsAnswerContinued",
-          "name": "questions_answer_continued",
-          "number": "262",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "pendingQueueRead",
-          "name": "pending_queue_read",
-          "number": "280",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "pendingQueueEdit",
-          "name": "pending_queue_edit",
-          "number": "281",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "pendingQueueRemove",
-          "name": "pending_queue_remove",
-          "number": "282",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "pendingQueueSteer",
-          "name": "pending_queue_steer",
-          "number": "283",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "liveText",
           "name": "live_text",
-          "number": "3",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "sessionFork",
-          "name": "session_fork",
-          "number": "300",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "interrupt",
           "name": "interrupt",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "approvals",
           "name": "approvals",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_BOOL"
         },
         {
           "json_name": "deliveryModes",
-          "label": "LABEL_REPEATED",
           "name": "delivery_modes",
-          "number": "6",
+          "number": 6,
+          "repeated": true,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.DeliveryMode"
+        },
+        {
+          "json_name": "modelSelection",
+          "name": "model_selection",
+          "number": 200,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "questionsRead",
+          "name": "questions_read",
+          "number": 260,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "questionsAnswerOpen",
+          "name": "questions_answer_open",
+          "number": 261,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "questionsAnswerContinued",
+          "name": "questions_answer_continued",
+          "number": 262,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "pendingQueueRead",
+          "name": "pending_queue_read",
+          "number": 280,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "pendingQueueEdit",
+          "name": "pending_queue_edit",
+          "number": 281,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "pendingQueueRemove",
+          "name": "pending_queue_remove",
+          "number": 282,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "pendingQueueSteer",
+          "name": "pending_queue_steer",
+          "number": 283,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "sessionFork",
+          "name": "session_fork",
+          "number": 300,
+          "repeated": false,
+          "type": "TYPE_BOOL"
         }
       ]
     },
@@ -4203,7 +4617,8 @@
         {
           "json_name": "text",
           "name": "text",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -4213,19 +4628,22 @@
         {
           "json_name": "callId",
           "name": "call_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "name",
           "name": "name",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "summary",
           "name": "summary",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -4235,19 +4653,22 @@
         {
           "json_name": "callId",
           "name": "call_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "text",
           "name": "text",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "isError",
           "name": "is_error",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -4257,67 +4678,78 @@
         {
           "json_name": "version",
           "name": "version",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "rejected",
-          "name": "rejected",
-          "number": "10",
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "complete",
-          "name": "complete",
-          "number": "11",
-          "type": "TYPE_BOOL"
         },
         {
           "json_name": "transferId",
           "name": "transfer_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "topic",
           "name": "topic",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "index",
           "name": "index",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "count",
           "name": "count",
-          "number": "5",
+          "number": 5,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "totalBytes",
           "name": "total_bytes",
-          "number": "6",
+          "number": 6,
+          "repeated": false,
           "type": "TYPE_UINT32"
         },
         {
           "json_name": "digest",
           "name": "digest",
-          "number": "7",
+          "number": 7,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "payload",
           "name": "payload",
-          "number": "8",
+          "number": 8,
+          "repeated": false,
           "type": "TYPE_BYTES"
         },
         {
           "json_name": "ack",
           "name": "ack",
-          "number": "9",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "rejected",
+          "name": "rejected",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "complete",
+          "name": "complete",
+          "number": 11,
+          "repeated": false,
           "type": "TYPE_BOOL"
         }
       ]
@@ -4327,7 +4759,8 @@
         {
           "json_name": "watchId",
           "name": "watch_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -4337,26 +4770,30 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "itemId",
           "name": "item_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "action",
           "name": "action",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QueueAction"
         },
         {
           "json_name": "text",
           "name": "text",
-          "number": "4",
+          "number": 4,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -4366,19 +4803,22 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "waitId",
           "name": "wait_id",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "timeoutMs",
           "name": "timeout_ms",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -4388,20 +4828,23 @@
         {
           "json_name": "watchId",
           "name": "watch_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "state",
           "name": "state",
-          "number": "2",
+          "number": 2,
+          "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionState"
         },
         {
           "json_name": "leaseMs",
           "name": "lease_ms",
-          "number": "3",
+          "number": 3,
+          "repeated": false,
           "type": "TYPE_UINT32"
         }
       ]
@@ -4411,7 +4854,8 @@
         {
           "json_name": "sessionId",
           "name": "session_id",
-          "number": "1",
+          "number": 1,
+          "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
@@ -4420,14 +4864,14 @@
       "fields": [
         {
           "json_name": "watches",
-          "label": "LABEL_REPEATED",
           "name": "watches",
-          "number": "1",
+          "number": 1,
+          "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.WatchReady"
         }
       ]
     }
   },
-  "schema": "whalerein/proto-fields/v1"
+  "schema": "whalerein/proto-schema-baseline/v1"
 }

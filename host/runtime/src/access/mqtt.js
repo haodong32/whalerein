@@ -251,7 +251,7 @@ export class MqttAccess {
     }
     if (generation !== this.#generation || this.#stopped) return
     try {
-      await this.#publishReady(client)
+      await this.#publishReady()
     } catch (error) {
       this.logger?.warn('host_ready_failed', {
         code: 'unavailable',
@@ -266,7 +266,13 @@ export class MqttAccess {
     this.#handlers.onReady?.()
   }
 
-  async #publishReady(client) {
+  // Re-announce readiness when a reconnect raced Access's own resubscription.
+  async publishReady() {
+    if (!this.#connected) throw new PluginError('unavailable', 'mqtt not connected')
+    await this.#publishReady()
+  }
+
+  async #publishReady() {
     const ready = {
       host_id: this.hostId,
       connected_at_unix_ms: this.now(),

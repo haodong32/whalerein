@@ -56,16 +56,28 @@ export class FakeAccessSimulator {
     this.requestTopic = `whalerein/v1/h/${hostId}/request`
     this.resultTopic = `whalerein/v1/h/${hostId}/result`
     this.eventTopic = `whalerein/v1/h/${hostId}/event`
-    this.client = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
-    this.transport = new LogicalTransport({codec, publish:(topic,bytes)=>new Promise((resolve,reject)=>this.client.publish(topic,bytes,{qos:1},error=>error?reject(error):resolve()))})
+    this.#attach(broker.connectFn()('mqtts://access.test', { clientId: 'access' }))
+  }
+
+  #attach(client) {
+    this.client = client
+    this.transport = new LogicalTransport({codec:this.codec, publish:(topic,bytes)=>new Promise((resolve,reject)=>client.publish(topic,bytes,{qos:1},error=>error?reject(error):resolve()))})
     this.ready = new Promise((resolve) => {
-      this.client.on('connect', () => {
-        this.client.subscribe(this.resultTopic, { qos: 1 }, () => {
-          this.client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
+      client.on('connect', () => {
+        client.subscribe(this.resultTopic, { qos: 1 }, () => {
+          client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
         })
       })
     })
-    this.client.on('message', (topic, payload) => this.#onMessage(topic, payload))
+    client.on('message', (topic, payload) => this.#onMessage(topic, payload))
+  }
+
+  /** Reconnect the simulated Access after a broker-only outage. */
+  async reconnect() {
+    try { this.client.end?.(true) } catch { /* already offline */ }
+    this.hostReady = false
+    this.#attach(this.broker.connectFn()('mqtts://access.test', { clientId: 'access' }))
+    await this.ready
   }
 
   #onMessage(topic, payload) {

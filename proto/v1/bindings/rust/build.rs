@@ -14,6 +14,10 @@ fn main() {
 
     let descriptor = std::fs::read(&descriptor_path).expect("read descriptor");
     pbjson_build::Builder::new()
+        // The wire contract is additive: a reader ignores unknown proto3 JSON
+        // field names so a peer that adds a field stays compatible. Unknown
+        // enum values stay an error on purpose; see src/compat.rs.
+        .ignore_unknown_fields()
         .register_descriptors(&descriptor)
         .expect("register descriptors")
         .build(&[".whalerein.v1"])

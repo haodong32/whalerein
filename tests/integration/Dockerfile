@@ -39,6 +39,7 @@ ARG TARGETARCH
 COPY Cargo.toml Cargo.lock ./
 COPY core core
 COPY apps/cli apps/cli
+COPY apps/mobile-bindings apps/mobile-bindings
 COPY proto/v1/whalerein.proto proto/v1/whalerein.proto
 COPY proto/v1/bindings/rust proto/v1/bindings/rust
 COPY tools/noise-peer tools/noise-peer
@@ -112,7 +113,7 @@ RUN --mount=type=cache,id=whalerein-native-npm,target=/root/.npm,sharing=locked 
 FROM postgres AS runtime
 USER root
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich protobuf-compiler libprotobuf-dev libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest python3-rich chromium protobuf-compiler libprotobuf-dev libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY --from=mosquitto-build /usr/local/sbin/mosquitto /usr/local/sbin/mosquitto
 COPY --from=mosquitto-build /usr/local/lib/libmosquitto.so* /usr/local/lib/
 COPY --from=mosquitto-build /src/plugin/whalerein.so /usr/local/lib/mosquitto/whalerein.so
@@ -120,9 +121,11 @@ RUN ldconfig && test -x /usr/local/sbin/mosquitto && test -f /usr/local/lib/mosq
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=native-tools /opt/native /opt/native
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+ENV WHALEREIN_CHROMIUM_PATH=/usr/bin/chromium
 ENV PATH=/opt/native/node_modules/.bin:$PATH
 RUN node /opt/native/node_modules/playwright/cli.js install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+    || echo "WARNING: Playwright browser download unavailable; native-dsh browser cases will fail" ; \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=go-build /out/whalerein-access /out/broker-tests /out/server-tests /out/store-tests /out/store-support-tests /out/external-tests /usr/local/bin/
 COPY tools/repo/src/repo/__init__.py tools/repo/src/repo/test_timing.py /workspace/tools/repo/src/repo/
 ENV PYTHONPATH=/workspace/tools/repo/src
@@ -135,6 +138,8 @@ COPY --from=rust-build /out/mqtt_transport_driver target/debug/examples/mqtt_tra
 COPY --from=rust-build /out/delivery_budget_driver target/debug/examples/delivery_budget_driver
 COPY --from=rust-build /out/wait_concurrency_driver target/debug/examples/wait_concurrency_driver
 COPY proto/v1 proto/v1
+COPY access/internal/auth/testdata access/internal/auth/testdata
+COPY apps/mobile-bindings/swift apps/mobile-bindings/swift
 COPY tests/integration tests/integration
 COPY tests/fixtures tests/fixtures
 COPY --from=rust-build /out/whalerein-noise-peer tests/integration/drivers/noise/rust-peer/target/debug/whalerein-noise-peer

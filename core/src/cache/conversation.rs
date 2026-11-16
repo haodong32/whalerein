@@ -4,7 +4,7 @@ use super::*;
 use prost::Message;
 use whalerein_proto::{ConversationMessage, HistoryPage, MessageUpsert, SessionKey};
 
-fn aad(key: &SessionKey, id: &str) -> Vec<u8> {
+pub(super) fn aad(key: &SessionKey, id: &str) -> Vec<u8> {
     serde_json::to_vec(&[
         "conversation",
         key.host_id.as_str(),
@@ -86,6 +86,19 @@ impl Cache {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+    /// Committed message identities in ordinal order, without decrypting
+    /// payloads. A watch attach uses this to mark history that already exists
+    /// locally as seen, so a later gap recovery cannot replay it.
+    pub fn history_message_ids(&self, key: &SessionKey) -> Result<Vec<String>, CacheError> {
+        let conn = self.conn.lock().expect("cache mutex");
+        let mut statement = conn.prepare(
+            "SELECT message_id FROM conversation_messages WHERE host_id=?1 AND session_id=?2 ORDER BY ordinal",
+        )?;
+        let rows = statement.query_map(params![key.host_id, key.session_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn history_messages(
         &self,
@@ -603,5 +616,87 @@ mod retention_tests {
         cache.history_budget_bytes = 0;
         cache.trim_history_cache(None).unwrap();
         assert!(cache.history_cursor(&key).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    use whalerein_proto::{content_block, ContentBlock, HistoryBatch, MessageRole, TextContent};
+
+    fn text_message(id: &str) -> ConversationMessage {
+        ConversationMessage {
+            message_id: id.into(),
+            role: MessageRole::Assistant as i32,
+            blocks: vec![ContentBlock {
+                block_id: "text".into(),
+                content: Some(content_block::Content::Text(TextContent {
+                    text: format!("text {id}"),
+                })),
+            }],
+            ..Default::default()
+        }
+    }
+    fn batch(from: &str, to: &str, ids: &[&str]) -> HistoryBatch {
+        HistoryBatch {
+            from_cursor: from.into(),
+            to_cursor: to.into(),
+            batch_id: format!("{from}:{to}"),
+            changes: ids
+                .iter()
+                .map(|id| MessageUpsert {
+                    message: Some(text_message(id)),
+                    origin: None,
+                })
+                .collect(),
+        }
+    }
+    fn page(batch: HistoryBatch, snapshot: bool) -> HistoryPage {
+        let cut = batch.to_cursor.clone();
+        HistoryPage {
+            session: Some(SessionKey {
+                host_id: "host".into(),
+                session_id: "s".into(),
+            }),
+            batch: Some(batch),
+            cut_cursor: cut,
+            complete: true,
+            snapshot,
+        }
+    }
+
+    #[test]
+    fn gap_recovery_keeps_exactly_one_row_and_ordinal_per_message() {
+        let cache = Cache::open_in_memory([1u8; 32]).unwrap();
+        let key = SessionKey {
+            host_id: "host".into(),
+            session_id: "s".into(),
+        };
+        cache
+            .apply_history_page(&page(batch("start", "cut-1", &["a"]), true))
+            .unwrap();
+        cache
+            .apply_history_page(&page(batch("cut-1", "cut-2", &["b"]), false))
+            .unwrap();
+        // A reconnect/gap snapshot that overlaps live output must not create a
+        // second row or reorder what was already committed.
+        cache
+            .apply_history_page(&page(batch("start", "cut-3", &["a", "b", "c"]), true))
+            .unwrap();
+        assert_eq!(
+            cache.history_message_ids(&key).unwrap(),
+            ["a", "b", "c"],
+            "each committed identity appears once"
+        );
+        assert_eq!(cache.history_messages(&key).unwrap().len(), 3);
+        // A late batch that repeats a known identity is still idempotent.
+        cache
+            .apply_history_page(&page(batch("cut-3", "cut-4", &["b"]), false))
+            .unwrap();
+        assert_eq!(cache.history_message_ids(&key).unwrap(), ["a", "b", "c"]);
+        assert_eq!(
+            cache.history_cursor(&key).unwrap().as_deref(),
+            Some("cut-4")
+        );
     }
 }

@@ -10,6 +10,7 @@ export const encode = value => JSON.stringify(value, (_, v) => v instanceof Uint
 export const decode = value => JSON.parse(value, (_, v) => v?.$bytes ? Uint8Array.from(v.$bytes) : v)
 const RPC_ID = Symbol('fixture-rpc-id')
 export class FixtureAdapter extends DshAdapter {
+  approvalMode = 'claim'
   pending = new Map()
   events = new Set()
   approvals = new Set()
@@ -54,7 +55,14 @@ export class FixtureAdapter extends DshAdapter {
   }
   subscribeEvents(callback) { this.events.add(callback); return ()=>this.events.delete(callback) }
   subscribeApprovals(callback) { this.approvals.add(callback); return ()=>this.approvals.delete(callback) }
-  describe() { return {mode:'fake',available:true,capabilities:['model-catalog','model-read','model-select','wait','pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer','questions-read','questions-answer-continued','questions-answer-open']} }
+  describe() {
+    const capabilities=['model-catalog','model-read','model-select','wait','questions-read','questions-answer-continued','questions-answer-open']
+    // Delegate mode forwards native approvals to the local UI, so it must not
+    // advertise a remote approval surface it cannot serve.
+    if(this.approvalMode !== 'delegate') capabilities.push('approvals')
+    if(this.pendingQueueEnabled !== false) capabilities.push('pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer')
+    return {mode:'fake',available:true,capabilities}
+  }
   async readWaitState(sessionId, signal) {
     signal.throwIfAborted()
     const session = (await this.listSessions({signal})).find(value => value.sessionId === sessionId)
@@ -134,17 +142,31 @@ FixtureAdapter.prototype.callScoped = function(method, args, signal) {
 FixtureAdapter.prototype.listSessions = function(options = {}) { return this.callScoped('listSessions', [], options?.signal) }
 FixtureAdapter.prototype.listModels = function(options = {}) { return this.callScoped('listModels', [], options?.signal) }
 FixtureAdapter.prototype.readSessionModel = function(sessionId, options = {}) { return this.callScoped('readSessionModel', [sessionId], options?.signal) }
-FixtureAdapter.prototype.readPendingQueue = function(sessionId, options = {}) { return this.callScoped('readPendingQueue', [sessionId], options?.signal) }
+FixtureAdapter.prototype.readPendingQueue = function(sessionId, options = {}) {
+  if (this.pendingQueueEnabled === false) throw new AdapterError('unsupported_capability')
+  return this.callScoped('readPendingQueue', [sessionId], options?.signal)
+}
 FixtureAdapter.prototype.listQuestionPage = function(sessionId, query = {}) {
   const {signal, ...data} = query ?? {}
   return this.callScoped('listQuestionPage', [sessionId, data], signal)
 }
 FixtureAdapter.prototype.getQuestion = function(sessionId, batchId, options = {}) { return this.callScoped('getQuestion', [sessionId, batchId], options?.signal) }
-FixtureAdapter.prototype.updatePendingQueue = function(sessionId, command, context = {}) { return this.callScoped('updatePendingQueue', [sessionId, command, {expiresAt:context?.expiresAt ?? 0}], context?.signal) }
+FixtureAdapter.prototype.updatePendingQueue = function(sessionId, command, context = {}) {
+  if (this.pendingQueueEnabled === false) throw new DefinitiveExecutionError('unsupported_capability')
+  return this.callScoped('updatePendingQueue', [sessionId, command, {expiresAt:context?.expiresAt ?? 0}], context?.signal)
+}
 FixtureAdapter.prototype.answerContinuedQuestion = function(request, context = {}) { return this.callScoped('answerContinuedQuestion', [request, {expiresAt:context?.expiresAt ?? 0}], context?.signal) }
 FixtureAdapter.prototype.resolveApproval = function(id, decision, digest, version, context = {}) { return this.callScoped('resolveApproval', [id, decision, digest, version, {expiresAt:context?.expiresAt ?? 0}], context?.signal) }
 for(const method of ['nativeHead','getSessionSnapshot','listApprovals','sendUserMessage','interrupt','getApproval','selectSessionModel','forkSession']) {
   FixtureAdapter.prototype[method]=function(...args){return this.call(method,...args)}
+}
+FixtureAdapter.prototype.listApprovals = function(sessionId = '') {
+  if (this.approvalMode === 'delegate') return Promise.resolve([])
+  return this.call('listApprovals', sessionId)
+}
+FixtureAdapter.prototype.getApproval = function(approvalId) {
+  if (this.approvalMode === 'delegate') return Promise.resolve(null)
+  return this.call('getApproval', approvalId)
 }
 
 // AbortSignal is local to the Host process and is never serialized to FakeDSH.

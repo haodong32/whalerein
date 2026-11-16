@@ -14,6 +14,7 @@ export const EMPTY_SETTINGS_STATUS = Object.freeze({
   pairingCode: '',
   devices: Object.freeze([]),
   diagnostics: null,
+  configError: null,
 })
 
 // Keep this projection explicit: adapter summaries may gain private fields.
@@ -39,7 +40,15 @@ function settingsDiagnostics(host) {
 }
 
 export function settingsStatus(host) {
-  if (!host?.started) return { ...EMPTY_SETTINGS_STATUS, devices: [] }
+  const configError = host?.configError ?? null
+  if (!host?.started) {
+    return {
+      ...EMPTY_SETTINGS_STATUS,
+      hostId: typeof host?.config?.hostId === 'string' ? host.config.hostId : '',
+      devices: [],
+      configError,
+    }
+  }
   const security = host.security
   const channels = new Set((security?.listChannels() ?? []).map((channel) => channel.deviceId))
   let devices = []
@@ -62,6 +71,7 @@ export function settingsStatus(host) {
     pairingCode: security?.hostFingerprintDisplay ?? '',
     devices,
     diagnostics: settingsDiagnostics(host),
+    configError,
   }
 }
 

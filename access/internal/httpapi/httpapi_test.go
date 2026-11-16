@@ -70,8 +70,19 @@ func (f *fakeAuth) AuthorizeHost(_ context.Context, _ auth.Identity, hostID stri
 	return auth.ErrForbidden
 }
 
-func (f *fakeAuth) ListHosts(context.Context, auth.Identity) ([]auth.HostView, error) {
-	return f.list, f.hostsErr
+func (f *fakeAuth) ListHosts(_ context.Context, _ auth.Identity, limit, offset int) ([]auth.HostView, bool, error) {
+	if f.hostsErr != nil {
+		return nil, false, f.hostsErr
+	}
+	if offset >= len(f.list) {
+		return nil, false, nil
+	}
+	page := f.list[offset:]
+	truncated := len(page) > limit
+	if truncated {
+		page = page[:limit]
+	}
+	return page, truncated, nil
 }
 
 func (f *fakeAuth) AuthenticateHostRequest(_ context.Context, proof auth.HostProof) error {
@@ -196,6 +207,11 @@ func doRequest(t *testing.T, handler http.Handler, method, path string, body []b
 		reader = bytes.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, reader)
+	if body != nil {
+		// JSON bodies are the wire contract; a case that exercises a missing or
+		// wrong media type overrides this header explicitly.
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
@@ -460,7 +476,7 @@ func TestBodyLimitRejectsOversizedRequestsAndPreservesTraceID(t *testing.T) {
 	f := newAPIFixture(t)
 	f.server.deps.MaxBodyBytes = 10
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/pairing/claims", bytes.Repeat([]byte("x"), 100), nil)
-	assertError(t, recorder, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_invalid_argument)
+	assertError(t, recorder, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large)
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/healthz", nil, map[string]string{TraceHeader: "client-trace"})
 	if recorder.Header().Get(TraceHeader) != "client-trace" {
 		t.Fatalf("trace = %q", recorder.Header().Get(TraceHeader))
@@ -562,7 +578,7 @@ func TestClassifyErrorsMapsProtocolAndServiceFailures(t *testing.T) {
 		{"nil_maps_OK", nil, http.StatusOK, whalereinv1.ErrorCode_error_code_unspecified},
 		{"errRouteNotFound_maps_NotFound", errRouteNotFound, http.StatusNotFound, whalereinv1.ErrorCode_not_found},
 		{"errMethod_maps_MethodNotAllowed", errMethod, http.StatusMethodNotAllowed, whalereinv1.ErrorCode_invalid_argument},
-		{"errBodyTooLarge_maps_RequestEntityTooLarge", errBodyTooLarge, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_invalid_argument},
+		{"errBodyTooLarge_maps_RequestEntityTooLarge", errBodyTooLarge, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large},
 		{"errInvalidBody_maps_BadRequest", errInvalidBody, http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument},
 		{"errMissingAuth_maps_Unauthorized", errMissingAuth, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized},
 		{"auth_ErrUnauthorized_maps_Unauthorized", auth.ErrUnauthorized, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized},
@@ -806,7 +822,7 @@ func TestRoutesRejectInvalidAuthAndOversizedBodies(t *testing.T) {
 	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
 	f.server.deps.MaxBodyBytes = 5
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/pairing/claims", []byte(`{"claimId":"claim-1"}`), nil)
-	assertError(t, recorder, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_invalid_argument)
+	assertError(t, recorder, http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large)
 }
 
 func TestHostSignatureAuthorizesInvitationAndSingleGrantRevocation(t *testing.T) {

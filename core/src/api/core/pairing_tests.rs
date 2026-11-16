@@ -369,3 +369,277 @@ async fn old_async_cleanup_does_not_fence_recreated_identity() {
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn cancelling_at_the_fingerprint_prompt_then_retrying_creates_one_grant() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let uri = access.pairing_uri();
+    let error = core
+        .pair(&uri, |_| PairingDecision::reject())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CoreError::PairingCancelled));
+    {
+        let host = access.host.lock().unwrap();
+        assert_eq!(host.pair_hello_calls, 1);
+        assert_eq!(host.pair_finish_calls, 0, "refusal must not send FINISH");
+    }
+    assert!(!core.is_paired());
+    assert!(core
+        .load_pending_pairing(&core.device_identity().unwrap().device_id)
+        .unwrap()
+        .is_none());
+    // The same invitation is still unused, so the retry is the only attempt
+    // that reaches the Host FINISH stage.
+    let outcome = core
+        .pair(&uri, |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(core.is_paired());
+    assert_eq!(access.host.lock().unwrap().pair_finish_calls, 1);
+    assert_eq!(
+        access.host.lock().unwrap().device_id().as_deref(),
+        Some(outcome.device_id.as_str())
+    );
+    assert_eq!(core.sessions("host-1").await.unwrap().sessions.len(), 1);
+}
+
+#[tokio::test]
+async fn pending_finish_save_failure_blocks_finish_and_leaves_invitation_reusable() {
+    use crate::security::{MemorySecretStore, SecretError, SecretStore};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct FailingPending {
+        inner: MemorySecretStore,
+        fail: AtomicBool,
+    }
+    impl SecretStore for FailingPending {
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, SecretError> {
+            self.inner.load(key)
+        }
+        fn save(&self, key: &str, value: &[u8]) -> Result<(), SecretError> {
+            if key.starts_with("whalerein:v1:pending-pairing:") && self.fail.load(Ordering::SeqCst)
+            {
+                return Err(SecretError::Failed);
+            }
+            self.inner.save(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<(), SecretError> {
+            self.inner.delete(key)
+        }
+    }
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(FailingPending {
+        inner: MemorySecretStore::new(),
+        fail: AtomicBool::new(true),
+    });
+    let core = Core::new(CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: secrets.clone(),
+    })
+    .unwrap();
+    let uri = access.pairing_uri();
+    let error = core
+        .pair(&uri, |_| PairingDecision::approve())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, CoreError::Security(_)),
+        "pending save failure = {error:?}"
+    );
+    {
+        let host = access.host.lock().unwrap();
+        assert_eq!(host.pair_hello_calls, 1);
+        assert_eq!(
+            host.pair_finish_calls, 0,
+            "FINISH was sent without a saved pending intent"
+        );
+    }
+    // The invitation was not consumed: the same URI succeeds once the secret
+    // backend recovers, and exactly one FINISH reaches the Host.
+    secrets.fail.store(false, Ordering::SeqCst);
+    let outcome = core
+        .pair(&uri, |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(core.is_paired());
+    assert_eq!(access.host.lock().unwrap().pair_finish_calls, 1);
+    assert_eq!(
+        access.host.lock().unwrap().device_id().as_deref(),
+        Some(outcome.device_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn expired_finish_closes_pending_and_resume_explains_the_next_step() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let primary = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    {
+        let mut host = access.host.lock().unwrap();
+        host.host_id = "host-2".into();
+        host.identity = crate::security::StaticIdentity::generate();
+        host.drop_pair_finish_once = true;
+    }
+    assert!(core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .is_err());
+    let pending = core
+        .load_pending_pairing(&primary.device_id)
+        .unwrap()
+        .expect("lost FINISH must retain the pending intent");
+    let expired = CoreError::Api {
+        code: Some(whalerein_proto::ErrorCode::Expired),
+        message: "pairing token expired".into(),
+    };
+    core.settle_pairing_terminal(&pending, &expired).unwrap();
+    assert!(
+        core.load_pending_pairing(&primary.device_id)
+            .unwrap()
+            .is_none(),
+        "an expired invitation can never be resumed"
+    );
+    let error = core.resume_pairing().await.unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    assert!(error.to_string().contains("already paired"));
+}
+
+#[tokio::test]
+async fn resume_without_pending_guides_to_pair_and_already_paired_guides_to_revoke() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let error = core.resume_pairing().await.unwrap_err();
+    assert_eq!(error.code(), "not_found");
+    assert!(error.to_string().contains("whalerein pair"));
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    let error = core.resume_pairing().await.unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    assert!(error.to_string().contains("already paired"));
+    assert!(error.to_string().contains("revoke"));
+}
+
+#[tokio::test]
+async fn pairing_history_is_bounded_and_keeps_the_newest_records() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    let primary = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    for index in 0..40 {
+        records.push(crate::api::PairingHistoryRecord {
+            claim_id: format!("record-{index:02}"),
+            host_id: "host-1".into(),
+            fingerprint: "f".repeat(64),
+            status: "committed_unavailable".into(),
+        });
+    }
+    secrets
+        .save(
+            &keys::pairing_history(&primary.device_id),
+            &serde_json::to_vec(&records).unwrap(),
+        )
+        .unwrap();
+    let bounded = core.pairing_history().unwrap();
+    assert_eq!(bounded.len(), 32);
+    assert_eq!(bounded.first().unwrap().claim_id, "record-08");
+    assert_eq!(bounded.last().unwrap().claim_id, "record-39");
+}
+
+#[tokio::test]
+async fn new_pairing_drops_resolved_history_for_the_same_host_but_keeps_unresolved_evidence() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    let primary = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    let resolved = crate::api::PairingHistoryRecord {
+        claim_id: "resolved".into(),
+        host_id: "host-2".into(),
+        fingerprint: "a".repeat(64),
+        status: "confirmed".into(),
+    };
+    let unresolved = crate::api::PairingHistoryRecord {
+        claim_id: "unresolved".into(),
+        host_id: "host-2".into(),
+        fingerprint: "b".repeat(64),
+        status: "committed_unavailable".into(),
+    };
+    secrets
+        .save(
+            &keys::pairing_history(&primary.device_id),
+            &serde_json::to_vec(&vec![resolved, unresolved]).unwrap(),
+        )
+        .unwrap();
+    {
+        let mut host = access.host.lock().unwrap();
+        host.host_id = "host-2".into();
+        host.identity = crate::security::StaticIdentity::generate();
+        host.drop_pair_finish_once = true;
+    }
+    assert!(core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .is_err());
+    let history = core.pairing_history().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].claim_id, "unresolved");
+}
+
+#[tokio::test]
+async fn pairing_history_handles_empty_and_corrupt_state_without_leaking_credentials() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    assert!(core.pairing_history().unwrap().is_empty());
+    let primary = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(core.pairing_history().unwrap().is_empty());
+    {
+        let mut host = access.host.lock().unwrap();
+        host.host_id = "host-2".into();
+        host.identity = crate::security::StaticIdentity::generate();
+        host.unconfirmed_pair_finish_status = Some(409);
+    }
+    assert_eq!(
+        core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+            .await
+            .unwrap_err()
+            .code(),
+        "pairing_committed_unconfirmed"
+    );
+    let records = core.pairing_history().unwrap();
+    assert_eq!(records.len(), 1);
+    let pending = core
+        .load_pending_pairing(&primary.device_id)
+        .unwrap()
+        .unwrap();
+    let token = pending.finish.device_token.clone();
+    assert!(!serde_json::to_string(&records).unwrap().contains(&token));
+    let raw = secrets
+        .load(&keys::pairing_history(&primary.device_id))
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains(&token));
+    secrets
+        .save(&keys::pairing_history(&primary.device_id), b"not json")
+        .unwrap();
+    let error = core.pairing_history().unwrap_err();
+    assert_eq!(error.code(), "security_error");
+}

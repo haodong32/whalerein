@@ -153,7 +153,7 @@ Configuration summary:
 | `broker.url` | Access MQTT URL (`tcp://`, `tls://`, ...) |
 | `broker.public_url` | MQTT URL advertised in `whalerein://pair?...&mqtt=...` |
 | `broker.username` / `broker.password` | Access broker credential |
-| `broker.ca_file` / `server_name` | MQTT TLS verification |
+| `broker.ca_file` / `server_name` | MQTT TLS verification; a CA file must exist and contain a PEM certificate, and `insecure_skip_verify` is rejected for a remote broker and when a CA file is set |
 | `line.policy_ttl` | Broker policy validity sent with each update |
 | `line.reconcile_interval` / `heartbeat_interval` | Policy reconcile and validity refresh cadence |
 | `line.operation_timeout` | Bounded broker control operation |
@@ -165,7 +165,7 @@ Configuration summary:
 | `revocation.ack_timeout` | host acknowledgement wait |
 | `presence.cache_ttl` | broker presence cache |
 | `cleanup.*` | cleanup interval and token retention |
-| `protocol.version` | supported wire version (1) |
+| `protocol.version` | supported wire version; only 1-1 is accepted, and any other value fails startup with the supported range |
 | `log.level` | `debug`, `info`, `warn`, `error` |
 
 Tokens, passwords, API keys and database URLs are never logged. `Redacted()`
@@ -214,29 +214,79 @@ go run ./access/cmd/server -config access/config.yaml
 Endpoints:
 
 ```text
-GET  /healthz     process liveness, always 200 while serving
-GET  /readyz      DB ping and established MQTT session
-GET  /metrics     Prometheus text exposition
-POST /v1/pairing/invitations
-POST /v1/pairing/claims
-GET  /v1/hosts
-POST /v1/hosts/{host_id}/requests
-GET  /v1/requests/{request_id}
+GET    /healthz     process liveness, always 200 while serving
+GET    /readyz      database ping plus write probe and established MQTT session
+GET    /metrics     Prometheus text exposition
+POST   /v1/pairing/invitations
+POST   /v1/pairing/claims
+GET    /v1/hosts
+POST   /v1/hosts/{host_id}/requests
+GET    /v1/requests/{request_id}
+POST   /v1/requests/{request_id}/heartbeat
 DELETE /v1/devices/{device_id}
+POST   /v1/hosts/{host_id}/devices/{device_id}/revocation
+POST   /v1/enrollments/hosts
+GET    /v1/enrollments/hosts/{host_id}
+GET    /v1/operations/{operation_id}
 ```
+
+The external account endpoints are registered in every build. A Standalone
+deployment answers them with `501 unsupported_capability` instead of a `404`
+that would look like a mistyped path. Compare the [wire contract](../proto/v1/WIRE.md)
+for message details; the authoritative route table is
+[`server.go`](internal/httpapi/server.go).
+
+Method handling is explicit:
+
+- A known path with the wrong method is `405` with an `Allow` header.
+- `OPTIONS` on a known path is `204` with `Allow`; on an unknown path it is `404`.
+- `HEAD` is served by the `GET` route with status and headers but no body.
+- An unknown path is always `404 not_found`.
 
 Internal routes are bound only on `internal_listen` and require the fixed
 header `X-Whalerein-Internal-Token`:
 
 ```text
-POST /internal/broker/auth
-POST /internal/broker/acl
-POST /internal/broker/presence
+POST /internal/broker/connect
 ```
 
+`POST /internal/broker/connect` is the only internal route: it answers one
+deferred Mosquitto CONNECT with the versioned policy text. There is no
+per-operation ACL or presence callback.
+
+### Request bodies and version skew
+
+An endpoint that accepts a JSON body requires `Content-Type: application/json`
+(a `charset` parameter is accepted). A missing or different media type is
+`415 invalid_argument` before any parsing, so a form-encoded retry is not
+confused with malformed JSON.
+
+Decoding follows the cross-version wire policy:
+
+- a field added by a newer peer is ignored, so rolling upgrades do not fail;
+- an enum name or numeric value this Access version does not know is
+  `400 protocol_version_incompatible` (CLI exit 9), never a silent zero value;
+- malformed JSON or a wrong field type is `400 invalid_argument`;
+- a body over `http.max_body_bytes` is `413 payload_too_large` (CLI exit 5).
+
+`GET /v1/hosts` is bounded. It accepts `limit` (1-500, default 500) and
+`offset` (0-1000000) and reports the page in
+`X-Whalerein-Hosts-Limit`, `-Offset`, `-Returned` and `-Truncated` headers, so
+a device with more grants pages instead of receiving an unbounded response.
+
+Revocation is deterministic and idempotent where the caller can be
+re-authenticated: repeated admin revocation of an existing device answers
+`204`, and a fresh Host-signed revocation of an already-revoked grant answers
+`204`. A device that revoked itself can no longer authenticate with that
+credential, so its retry answers `401 unauthorized`; clients should treat that
+as the already-revoked terminal state. A valid device token for another device
+is `403 forbidden`, and an unknown target is `404 not_found`.
+
 HTTP errors are `ErrorResponse` JSON with a stable `ErrorCode` name. Public
-requests may carry `X-Whalerein-Trace-Id`; Access echoes it and includes it in
-logs and errors. Request and result bodies are never logged.
+requests may carry `X-Whalerein-Trace-Id`; Access echoes it only when it matches
+`[A-Za-z0-9._:-]{1,128}` and otherwise generates a fresh id, so client text
+cannot forge log records. Access logs include that trace id but never request
+or result bodies.
 
 Example:
 
@@ -249,7 +299,9 @@ curl -sS -X POST http://127.0.0.1:8080/v1/pairing/invitations \
 
 The invitation request returns 404 until the host has authenticated to the
 broker at least once (`hosts` row created on first auth). The pairing URI
-contains `v`, `access`, optional `mqtt`, `host`, and the one-time `token`.
+contains `v`, `access`, optional `mqtt`, `host`, the one-time `token`, and `exp`
+(the invitation expiry in whole Unix seconds, also returned as
+`expiresAtUnixMs`, so clients can reject an expired link locally).
 
 ## Mosquitto line
 

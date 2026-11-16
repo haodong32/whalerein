@@ -67,8 +67,43 @@ impl From<SecurityError> for PairingError {
     }
 }
 
+/// Maximum accepted invitation text. A real URI is a few hundred bytes; the
+/// bound keeps a pasted document from becoming an allocation or log problem.
+const MAX_PAIRING_URI_BYTES: usize = 8192;
+const MAX_PAIRING_HOST_ID_BYTES: usize = 128;
+const MAX_PAIRING_TOKEN_BYTES: usize = 512;
+
+/// Host ids are opaque labels but must stay one URL/topic token. Reject control
+/// characters, whitespace and the AAD separator instead of trimming them: a
+/// silently changed id would pair a different Host.
+fn valid_pairing_host_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PAIRING_HOST_ID_BYTES
+        && value.chars().all(|character| {
+            !character.is_control() && !character.is_whitespace() && character != '|'
+        })
+}
+
+/// Access issues a 32-byte base64url token. Bounding the alphabet here also
+/// prevents a pasted binary/large string from being hashed and sent.
+fn valid_pairing_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PAIRING_TOKEN_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// Parse `whalerein://pair?v=1&access=<url>&host=<id>&token=<token>`.
+///
+/// Surrounding whitespace and a UTF-8 BOM are tolerated because chat clients
+/// add them when a user copies a link. Field values are never trimmed.
 pub fn parse_pairing_uri(value: &str) -> Result<PairingUri, PairingError> {
+    let value =
+        value.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    if value.is_empty() || value.len() > MAX_PAIRING_URI_BYTES {
+        return Err(PairingError::InvalidUri);
+    }
     let url = url::Url::parse(value).map_err(|_| PairingError::InvalidUri)?;
     if url.scheme() != "whalerein" || url.host_str() != Some("pair") {
         return Err(PairingError::InvalidUri);
@@ -103,7 +138,7 @@ pub fn parse_pairing_uri(value: &str) -> Result<PairingUri, PairingError> {
     let access = access.ok_or(PairingError::InvalidUri)?;
     let host_id = host.ok_or(PairingError::InvalidUri)?;
     let token = token.ok_or(PairingError::InvalidUri)?;
-    if host_id.is_empty() || token.is_empty() {
+    if !valid_pairing_host_id(&host_id) || !valid_pairing_token(&token) {
         return Err(PairingError::InvalidUri);
     }
 
@@ -475,7 +510,10 @@ impl PairingInitiator {
         if !response.device_id.is_empty() && response.device_id != self.device_id {
             return Err(PairingError::ResponseMismatch);
         }
-        if response.protocol_version != 0 && response.protocol_version != PROTOCOL_VERSION {
+        // WIRE treats 0/absent as an old peer that must upgrade, not as a
+        // compatible version. Accepting it would silently pair across a
+        // contract the peer never proved.
+        if response.protocol_version != PROTOCOL_VERSION {
             return Err(PairingError::ProtocolIncompatible);
         }
         if !response.device_public_key.is_empty() && response.device_public_key != self.public_key {
@@ -667,6 +705,45 @@ mod tests {
         for case in cases {
             assert!(parse_pairing_uri(case).is_err(), "expected reject: {case}");
         }
+    }
+
+    #[test]
+    fn invitation_text_is_trimmed_bounded_and_never_echoed() {
+        let base = "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token=abc";
+        for wrapped in [
+            format!("  {base}\n"),
+            format!("\u{feff}{base}\u{feff}"),
+            format!("\n\t{base} \r\n"),
+        ] {
+            let parsed = parse_pairing_uri(&wrapped).expect("surrounding whitespace is tolerated");
+            assert_eq!(parsed.host_id, "h");
+            assert_eq!(parsed.token, "abc");
+        }
+
+        let host = "h".repeat(MAX_PAIRING_HOST_ID_BYTES + 1);
+        let token = "a".repeat(MAX_PAIRING_TOKEN_BYTES + 1);
+        let cases = [
+            format!("whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host={host}&token=abc"),
+            format!("whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token={token}"),
+            "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h%20x&token=abc".to_string(),
+            "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token=ab%20c".to_string(),
+            "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h%7Cx&token=abc".to_string(),
+            "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token=abc%00".to_string(),
+            format!(
+                "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token={}",
+                "a".repeat(MAX_PAIRING_URI_BYTES)
+            ),
+        ];
+        for case in cases {
+            assert!(parse_pairing_uri(&case).is_err(), "expected reject");
+        }
+
+        let secret = "TOP-SECRET-TOKEN";
+        let duplicated = format!(
+            "whalerein://pair?v=1&access=https%3A%2F%2Fa.test&host=h&token={secret}&token={secret}"
+        );
+        let error = parse_pairing_uri(&duplicated).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains(secret));
     }
 
     #[test]
@@ -882,6 +959,19 @@ mod tests {
             client.complete(&wrong_key),
             Err(PairingError::DeviceKeyMismatch)
         ));
+    }
+
+    #[test]
+    fn completion_rejects_an_absent_protocol_version() {
+        let uri = uri();
+        let (mut client, mut host, finish) = flow_until_finish(&uri);
+        let mut response = host.finish_response(&finish);
+        response.protocol_version = 0;
+        assert!(matches!(
+            client.complete(&response),
+            Err(PairingError::ProtocolIncompatible)
+        ));
+        assert_eq!(client.state(), PairingState::AwaitingFinish);
     }
 
     #[test]

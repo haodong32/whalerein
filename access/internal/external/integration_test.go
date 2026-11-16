@@ -430,8 +430,8 @@ func (acceptAdmin) AuthenticateDeviceToken(context.Context, string) (auth.Identi
 	return auth.Identity{}, auth.ErrUnauthorized
 }
 func (acceptAdmin) AuthorizeHost(context.Context, auth.Identity, string) error { return nil }
-func (acceptAdmin) ListHosts(context.Context, auth.Identity) ([]auth.HostView, error) {
-	return nil, nil
+func (acceptAdmin) ListHosts(context.Context, auth.Identity, int, int) ([]auth.HostView, bool, error) {
+	return nil, false, nil
 }
 func (acceptAdmin) RevokeDevice(context.Context, string) error                    { return nil }
 func (acceptAdmin) AuthenticateHostRequest(context.Context, auth.HostProof) error { return nil }

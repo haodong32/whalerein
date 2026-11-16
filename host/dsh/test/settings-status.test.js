@@ -232,3 +232,18 @@ test('when the host key is missing, settings reports the error without calling A
     await ctx.fiber.dispose()
   }
 })
+
+test('a host that failed to start reports the invalid configuration instead of a normal empty status', async () => {
+  const { settingsStatus } = await import('../src/settings.js')
+  const failure = settingsStatus({
+    started: false,
+    config: { hostId: 'host-configured' },
+    configError: { code: 'invalid_config', field: 'mqtt_url', reason: 'mqtt_url is required' },
+  })
+  assert.equal(failure.available, false)
+  assert.equal(failure.connected, false)
+  assert.equal(failure.hostId, 'host-configured')
+  assert.deepEqual(failure.devices, [])
+  assert.deepEqual(failure.configError, { code: 'invalid_config', field: 'mqtt_url', reason: 'mqtt_url is required' })
+  assert.equal(settingsStatus({ started: false }).configError, null)
+})

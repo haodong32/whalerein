@@ -107,7 +107,21 @@ test('model read keeps pending, last-used and source fallback distinct', async (
   assert.deepEqual(result.pending, { provider: 'pending-provider', model: 'pending-model', effort: 'high' })
   assert.deepEqual(result.last_used, { provider: 'used-provider', model: 'used-model' })
   assert.deepEqual(result.default_selection, { provider: 'default', model: 'm' })
-  assert.equal(result.default_is_fallback, true)
+  assert.equal(result.default_is_fallback, false)
+})
+
+test('default_is_fallback is true only while the session has no recorded selection', async () => {
+  const cold = adapter({ projections: async () => ({ kind: 'sequenced', values: { modelSelection: { next: null, lastUsed: null } } }) })
+  assert.equal((await cold.readSessionModel('s')).default_is_fallback, true)
+  const recorded = adapter({ projections: async () => ({ kind: 'sequenced', values: { modelSelection: {
+    next: { provider: 'p', model: 'm' }, lastUsed: null,
+  } } }) })
+  assert.equal((await recorded.readSessionModel('s')).default_is_fallback, false)
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const fake = new FakeDshAdapter({ sessions: [{ sessionId: 's' }], behavior: { modelOperations: true } })
+  assert.equal((await fake.readSessionModel('s')).default_is_fallback, true)
+  await fake.selectSessionModel('s', { provider: 'fixture-provider', model: 'fixture-model' })
+  assert.equal((await fake.readSessionModel('s')).default_is_fallback, false)
 })
 
 
@@ -159,4 +173,74 @@ test('channel lifecycle suppresses an already-started model catalog result', asy
   abort.abort('unavailable')
   release()
   await assert.rejects(pending,error=>error instanceof AdapterError && error.code==='unavailable')
+})
+
+test('fake model selection stays per-session and the next turn reports the observed model', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const source = new FakeDshAdapter({ sessions: [{ sessionId: 'a' }, { sessionId: 'b' }], behavior: { modelOperations: true } })
+  const beforeB = await source.readSessionModel('b')
+  await source.selectSessionModel('a', { provider: 'fixture-provider', model: 'fixture-model-2' })
+  const afterB = await source.readSessionModel('b')
+  // Selecting a model on one session never rewrites another session's model or
+  // the source default observed by it.
+  assert.equal(afterB.next, null)
+  assert.equal(afterB.last_used, null)
+  assert.equal(afterB.default_is_fallback, true)
+  assert.deepEqual(afterB.default_selection, beforeB.default_selection)
+  const afterA = await source.readSessionModel('a')
+  assert.equal(afterA.next.model, 'fixture-model-2')
+  assert.equal(afterA.last_used, null)
+  assert.equal(afterA.default_is_fallback, false)
+  // The following turn proves the source actually observed the new model, not
+  // merely that a receipt was echoed.
+  await source.execute('a', { send_message: { text: 'synthetic', delivery_mode: 'ENQUEUE_AFTER_RUN' } })
+  const observedA = await source.readSessionModel('a')
+  assert.equal(observedA.last_used.model, 'fixture-model-2')
+  assert.equal(observedA.pending, null)
+  assert.equal(observedA.next.model, 'fixture-model-2')
+  await source.execute('b', { send_message: { text: 'synthetic', delivery_mode: 'ENQUEUE_AFTER_RUN' } })
+  assert.equal((await source.readSessionModel('b')).last_used.model, beforeB.default_selection.model)
+})
+
+test('setting the same fake model twice is a no-op with an identical effective selection', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const source = new FakeDshAdapter({ sessions: [{ sessionId: 's' }], behavior: { modelOperations: true } })
+  const selection = { provider: 'fixture-provider', model: 'fixture-model-2', effort: 'high' }
+  const first = await source.selectSessionModel('s', selection)
+  const second = await source.selectSessionModel('s', selection)
+  assert.deepEqual(second.selected, first.selected)
+  const read = await source.readSessionModel('s')
+  assert.deepEqual(read.pending, first.selected)
+  assert.equal(read.default_is_fallback, false)
+})
+
+test('fake model selection rejects an expired command before changing the session', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const source = new FakeDshAdapter({ now: () => 200, sessions: [{ sessionId: 's' }], behavior: { modelOperations: true } })
+  await assert.rejects(source.selectSessionModel('s', { provider: 'fixture-provider', model: 'fixture-model' }, { expiresAt: 150 }),
+    error => error.code === 'expired' && error.name === 'DefinitiveExecutionError')
+  assert.equal((await source.readSessionModel('s')).next, null)
+})
+
+test('an incomplete catalog reports failed providers and refuses their selection definitively', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const source = new FakeDshAdapter({ sessions: [{ sessionId: 's' }],
+    behavior: { modelOperations: true, modelFailures: [{ id: 'fixture-bad-provider', name: 'Fixture failure' }] } })
+  const catalog = await source.listModels()
+  assert.equal(catalog.complete, false)
+  assert.deepEqual(catalog.failures, [{ id: 'fixture-bad-provider', name: 'Fixture failure', code: 'unavailable' }])
+  await assert.rejects(source.selectSessionModel('s', { provider: 'fixture-bad-provider', model: 'x' }), {
+    code: 'invalid_argument', name: 'DefinitiveExecutionError',
+  })
+  assert.equal((await source.readSessionModel('s')).next, null)
+})
+
+test('model read distinguishes an offline source from an unsupported read', async () => {
+  const offline = adapter({ projections: async () => { throw Object.assign(new Error('offline'), { code: 'unavailable' }) } })
+  await assert.rejects(offline.readSessionModel('s'), { code: 'unavailable' })
+  const unsupported = adapter({ modelCatalog: undefined })
+  await assert.rejects(unsupported.readSessionModel('s'), { code: 'unsupported_capability' })
+  await assert.rejects(unsupported.selectSessionModel('s', { provider: 'p', model: 'm' }), {
+    code: 'unsupported_capability', name: 'DefinitiveExecutionError',
+  })
 })

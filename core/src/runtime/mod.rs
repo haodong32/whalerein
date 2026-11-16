@@ -9,6 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use whalerein_proto::CapabilitySet;
+
 use crate::api::{CoreError, CoreResult};
 use crate::diagnostics::Metrics;
 use crate::security::SecureChannel;
@@ -94,6 +96,9 @@ pub enum HandshakePhase {
 struct HostRuntime {
     state: ConnectionState,
     channel: Option<SecureChannel>,
+    /// Capabilities advertised by this channel's `ChannelReady`. `None` means
+    /// no channel negotiation has completed for the Host.
+    capabilities: Option<CapabilitySet>,
     sync: SyncState,
     reconnect_count: u32,
     handshake_phase: HandshakePhase,
@@ -104,6 +109,7 @@ impl Default for HostRuntime {
         Self {
             state: ConnectionState::Disconnected,
             channel: None,
+            capabilities: None,
             sync: SyncState::Idle,
             reconnect_count: 0,
             handshake_phase: HandshakePhase::Idle,
@@ -185,6 +191,7 @@ impl Runtime {
         host.state = next;
         if next == ConnectionState::Revoked {
             host.channel = None;
+            host.capabilities = None;
         }
         let metrics = &inner.metrics;
         metrics.record_connection(next.as_str());
@@ -212,7 +219,31 @@ impl Runtime {
         let mut inner = self.inner.lock().expect("runtime mutex");
         if let Some(host) = inner.hosts.get_mut(host_id) {
             host.channel = None;
+            // Capabilities belong to the channel this handshake established.
+            host.capabilities = None;
         }
+    }
+
+    /// Capabilities advertised by the current channel's `ChannelReady`.
+    pub fn capabilities(&self, host_id: &str) -> Option<CapabilitySet> {
+        self.inner
+            .lock()
+            .expect("runtime mutex")
+            .hosts
+            .get(host_id)
+            .and_then(|host| host.capabilities.clone())
+    }
+
+    pub fn set_capabilities(&self, host_id: &str, capabilities: CapabilitySet) {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        if inner.revoked {
+            return;
+        }
+        inner
+            .hosts
+            .entry(host_id.to_owned())
+            .or_default()
+            .capabilities = Some(capabilities);
     }
 
     #[cfg(test)]
@@ -324,6 +355,7 @@ impl Runtime {
         inner.revoked = true;
         for host in inner.hosts.values_mut() {
             host.channel = None;
+            host.capabilities = None;
             host.state = ConnectionState::Revoked;
             host.handshake_phase = HandshakePhase::Failed;
         }
@@ -407,6 +439,24 @@ mod tests {
         // A handshake which finishes after revocation cannot reinstall a key.
         runtime.set_channel("h", channel());
         assert!(runtime.channel("h").is_none());
+    }
+
+    #[test]
+    fn capabilities_belong_to_the_current_channel() {
+        let runtime = Runtime::new();
+        assert!(runtime.capabilities("h").is_none());
+        let advertised = crate::pairing::default_capabilities();
+        runtime.set_capabilities("h", advertised.clone());
+        assert_eq!(runtime.capabilities("h"), Some(advertised.clone()));
+        runtime.clear_channel("h");
+        assert!(runtime.capabilities("h").is_none());
+
+        runtime.set_capabilities("h", advertised.clone());
+        runtime.revoke();
+        assert!(runtime.capabilities("h").is_none());
+        // A handshake finishing after revocation cannot advertise capabilities.
+        runtime.set_capabilities("h", advertised);
+        assert!(runtime.capabilities("h").is_none());
     }
 
     #[test]

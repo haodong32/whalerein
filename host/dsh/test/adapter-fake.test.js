@@ -91,6 +91,13 @@ test('when a fake approval expires or is resolved, expiry and one-shot consumpti
   now += 20
   const expired = await adapter.getApproval(second.approvalId)
   assert.equal(expired.state, 'expired')
+  // TTL expiry releases the turn: the session returns to idle and stays usable.
+  assert.equal((await adapter.getSessionSnapshot('s1')).summary.running, false)
+  assert.equal((await adapter.getSessionSnapshot('s1')).events.at(-1).type, 'turn/end')
+  adapter.setRunning('s1', true)
+  const next = adapter.requestApproval({ sessionId: 's1', ttlMs: 100 })
+  assert.ok(next.version > second.version)
+  assert.equal((await adapter.resolveApproval(next.approvalId, 'reject', next.digest, next.version)).state, 'rejected')
   await assert.rejects(adapter.resolveApproval(second.approvalId, 'approve', second.digest, second.version), (error) => error.code === 'approval_expired')
   assert.throws(() => adapter.requestApproval({ sessionId: 'missing' }), (error) => error.code === 'not_found')
 })
@@ -214,4 +221,29 @@ test('fork excludes native inbox splice and subsequent queued work', async () =>
   adapter.emit('source', {type:'system/message',data:{text:'synthetic'}})
   const child = (await adapter.forkSession('source')).lifecycle_receipt.session_id
   assert.deepEqual((await adapter.getSessionSnapshot(child)).events.map(event => event.type), ['turn/end'])
+})
+
+test('fake interrupt ends a running attempt once, releases approvals, and stays silent when idle', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  try {
+    const updates = []
+    const events = []
+    adapter.watch('s1', (update) => updates.push(update))
+    adapter.subscribeEvents((event) => events.push(event))
+    const approval = adapter.requestApproval({ sessionId: 's1', reason: 'fixture' })
+    await adapter.interrupt('s1')
+    assert.equal((await adapter.getSession('s1')).running, false)
+    assert.equal((await adapter.getApproval(approval.approvalId)).state, 'unavailable')
+    assert.deepEqual(await adapter.listApprovals('s1'), [])
+    assert.equal(updates.filter((update) => update.live?.ended?.outcome === 'INTERRUPTED').length, 1)
+    assert.equal(events.filter((event) => event.type === 'session/interrupted').length, 1)
+    const count = updates.length
+    await adapter.interrupt('s1')
+    assert.equal(updates.length, count)
+    assert.equal(events.filter((event) => event.type === 'session/interrupted').length, 1)
+    assert.equal((await adapter.getApproval(approval.approvalId)).state, 'unavailable')
+  } finally {
+    await adapter.close()
+  }
 })

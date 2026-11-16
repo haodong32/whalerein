@@ -1,0 +1,29 @@
+{
+  "configurations" : [
+    {
+      "id" : "C0A1B2C3-D4E5-4F60-8192-A3B4C5D6E7FA",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:WhaleRein.xcodeproj",
+      "identifier" : "A10000000000000000000030",
+      "name" : "WhaleRein"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:WhaleRein.xcodeproj",
+        "identifier" : "A10000000000000000000032",
+        "name" : "WhaleReinUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

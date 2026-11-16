@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strconv"
@@ -21,9 +22,20 @@ const (
 	HostAuthRevoke     = "revoke"
 
 	hostAuthPrefix = "whalerein/v1/host-auth"
+	// Host authorization accepts a signature two minutes in the past through
+	// one minute in the future. The Host runtime declares the identical window
+	// in host/runtime/src/contracts/time.js; the shared vector file pins both.
 	hostAuthPast   = 2 * time.Minute
 	hostAuthFuture = time.Minute
 )
+
+// HostSignatureReplayStore is the optional durable replay guard. A store that
+// implements it allows each verified Host signature exactly once across every
+// Access replica sharing the database. A store without it falls back to the
+// process-local guard, which is correct for one replica and covered by tests.
+type HostSignatureReplayStore interface {
+	ConsumeHostSignature(ctx context.Context, signatureHash []byte, hostID, purpose, deviceID string, signedAtUnixMs int64, at time.Time) (bool, error)
+}
 
 // HostProof is a host-signed request. HostID is the only host the signature
 // can authorize.
@@ -83,6 +95,27 @@ func (s *Service) AuthenticateHostRequest(ctx context.Context, proof HostProof) 
 	message := hostAuthMessage(proof.Purpose, proof.HostID, proof.DeviceID, proof.SignedAtUnixMs)
 	if !ed25519.Verify(ed25519.PublicKey(publicKey), message, proof.Signature) {
 		return ErrUnauthorized
+	}
+	if err := s.rememberSignatureOnce(ctx, proof); err != nil {
+		return err
+	}
+	return nil
+}
+
+// rememberSignatureOnce consumes a verified signature exactly once. The
+// durable guard is authoritative when the store supports it, so a captured
+// signature cannot be replayed against another replica.
+func (s *Service) rememberSignatureOnce(ctx context.Context, proof HostProof) error {
+	if guard, ok := s.store.(HostSignatureReplayStore); ok {
+		digest := sha256.Sum256(proof.Signature)
+		consumed, err := guard.ConsumeHostSignature(ctx, digest[:], proof.HostID, proof.Purpose, proof.DeviceID, proof.SignedAtUnixMs, s.now())
+		if err != nil {
+			return fmt.Errorf("record host signature: %w", err)
+		}
+		if !consumed {
+			return ErrUnauthorized
+		}
+		return nil
 	}
 	if !s.rememberSignature(proof) {
 		return ErrUnauthorized

@@ -133,6 +133,40 @@ func (s *Store) ListAuthorizedHosts(ctx context.Context, deviceID string) ([]Hos
 	return hosts, nil
 }
 
+// ListAuthorizedHostsPage returns one bounded page of the hosts a device may
+// access. Ordering by host_id makes limit/offset paging stable.
+func (s *Store) ListAuthorizedHostsPage(ctx context.Context, deviceID string, limit, offset int) ([]Host, error) {
+	if limit <= 0 {
+		return nil, errors.New("list authorized hosts: limit must be positive")
+	}
+	if offset < 0 {
+		return nil, errors.New("list authorized hosts: offset must not be negative")
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT h.host_id, h.fingerprint, h.protocol_version, h.created_at, h.updated_at
+		FROM hosts h
+		JOIN grants g ON g.host_id = h.host_id
+		WHERE g.device_id = $1 AND g.revoked_at IS NULL
+		ORDER BY h.host_id
+		LIMIT $2 OFFSET $3`, deviceID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list authorized hosts: %w", err)
+	}
+	defer rows.Close()
+	hosts := make([]Host, 0, limit)
+	for rows.Next() {
+		host, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list authorized hosts: %w", err)
+	}
+	return hosts, nil
+}
+
 // ListAuthorizedHostIDs returns the ids of every host with a live grant for the
 // device. Broker presence uses it to publish one event per authorized host.
 func (s *Store) ListAuthorizedHostIDs(ctx context.Context, deviceID string) ([]string, error) {

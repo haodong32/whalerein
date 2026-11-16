@@ -160,6 +160,28 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+/// Scripted lifecycle outcome returned by the fake Host for create and fork.
+#[derive(Clone, Debug)]
+pub enum LifecycleReply {
+    Ready {
+        session_id: String,
+    },
+    Warning {
+        session_id: String,
+        warning_code: String,
+        warning_detail: Option<String>,
+    },
+    Failed {
+        reason_code: String,
+        retryable: bool,
+    },
+    Unknown {
+        reason_code: String,
+        reconcile_mode: String,
+        reconcile_key: Option<String>,
+    },
+}
+
 pub struct FakeHost {
     pub identity: StaticIdentity,
     pub host_id: String,
@@ -170,6 +192,8 @@ pub struct FakeHost {
     pub extra_host_online: bool,
     pub extra_host_session: String,
     pub revoked: bool,
+    pub expire_request_id: Option<String>,
+    pub revoke_after_hosts: bool,
     pub fail_revoke_before: bool,
     pub drop_revoke_receipt: bool,
     pub drop_pair_finish_once: bool,
@@ -185,6 +209,10 @@ pub struct FakeHost {
     pub fail_hosts: bool,
     pub hosts_delay_ms: u64,
     pub fail_pending_queue: bool,
+    /// Test-only override for the session id a queue read reports.
+    pub pending_queue_session_override: Option<String>,
+    /// Test-only switch that answers a queue read with an unrelated payload.
+    pub pending_queue_wrong_payload: bool,
     pub query_error: Option<ErrorCode>,
     pub legacy_capabilities_error: Option<ErrorCode>,
     pub wait_timeouts: usize,
@@ -217,6 +245,9 @@ pub struct FakeHost {
     pending_wait_delay_ms: u64,
     pub drop_channel_after_command: bool,
     pub reject_channel_handshakes: bool,
+    /// Overrides the capabilities the fake Host advertises in `ChannelReady`.
+    /// `None` advertises the production default set.
+    pub channel_capabilities: Option<whalerein_proto::CapabilitySet>,
     pub revoke_after_command: bool,
     pub drop_command_receipts: bool,
     pub command_receipt_status_override: Option<OnlineStatus>,
@@ -225,8 +256,34 @@ pub struct FakeHost {
     pub model_selection_available: bool,
     pub model_observed: Option<String>,
     pub session_create_supported: bool,
+    pub session_fork_supported: bool,
+    pub fork_reply: LifecycleReply,
+    pub create_reply: LifecycleReply,
+    pub fork_calls: usize,
+    pub create_calls: usize,
+    pub last_fork_parent: Option<String>,
+    pub last_create_input: Option<whalerein_proto::CreateSession>,
+    pub forked_children: Vec<(String, String)>,
+    pub fail_get_session_for: Option<(String, ErrorCode)>,
+    pub sessions: Vec<SessionSummary>,
+    /// Approvals served by `ListApprovals`/`GetApproval` for host-1.
+    pub approvals: Vec<whalerein_proto::Approval>,
+    /// Approvals served for the optional host-2 identity.
+    pub extra_host_approvals: Vec<whalerein_proto::Approval>,
+    /// Forces `GetApproval` to fail with this code instead of answering.
+    pub approval_error: Option<ErrorCode>,
+    /// Host ids that actually served an approval query, in order.
+    pub approval_queries: Vec<String>,
+    /// Session filters received by `ListApprovals`, in order.
+    pub approval_filters: Vec<String>,
+    /// `(host id, approval id, decision)` recorded for each resolve command.
+    pub approval_resolutions: Vec<(String, String, i32)>,
+    pub history_messages: Vec<whalerein_proto::ConversationMessage>,
+    pub history_cut: String,
+    pub history_advance: Option<(Vec<whalerein_proto::ConversationMessage>, String)>,
     pub pending_result_polls: usize,
     pub settled_command_status: OnlineStatus,
+    pub settled_error_code: Option<ErrorCode>,
     pub request_traces: Vec<String>,
     pairing: Option<NoiseSession>,
     pending_noise: Option<NoiseSession>,
@@ -237,6 +294,10 @@ pub struct FakeHost {
 }
 
 impl FakeHost {
+    pub fn command_result_ids(&self) -> Vec<String> {
+        self.command_results.keys().cloned().collect()
+    }
+
     pub fn set_query_unavailable(&mut self, value: bool) {
         self.query_error = value.then_some(ErrorCode::Unavailable);
     }
@@ -252,6 +313,8 @@ impl FakeHost {
             extra_host_online: true,
             extra_host_session: "session-1".into(),
             revoked: false,
+            expire_request_id: None,
+            revoke_after_hosts: false,
             fail_revoke_before: false,
             drop_revoke_receipt: false,
             drop_pair_finish_once: false,
@@ -267,6 +330,8 @@ impl FakeHost {
             fail_hosts: false,
             hosts_delay_ms: 0,
             fail_pending_queue: false,
+            pending_queue_session_override: None,
+            pending_queue_wrong_payload: false,
             query_error: None,
             legacy_capabilities_error: None,
             wait_timeouts: 0,
@@ -299,6 +364,7 @@ impl FakeHost {
             pending_wait_delay_ms: 0,
             drop_channel_after_command: false,
             reject_channel_handshakes: false,
+            channel_capabilities: None,
             revoke_after_command: false,
             drop_command_receipts: false,
             command_receipt_status_override: None,
@@ -307,8 +373,32 @@ impl FakeHost {
             model_selection_available: true,
             model_observed: None,
             session_create_supported: false,
+            session_fork_supported: true,
+            fork_reply: LifecycleReply::Ready {
+                session_id: "forked-1".into(),
+            },
+            create_reply: LifecycleReply::Ready {
+                session_id: "created-1".into(),
+            },
+            fork_calls: 0,
+            create_calls: 0,
+            last_fork_parent: None,
+            last_create_input: None,
+            forked_children: Vec::new(),
+            fail_get_session_for: None,
+            sessions: vec![fake_session_summary("session-1")],
+            approvals: Vec::new(),
+            extra_host_approvals: Vec::new(),
+            approval_error: None,
+            approval_queries: Vec::new(),
+            approval_filters: Vec::new(),
+            approval_resolutions: Vec::new(),
+            history_messages: vec![history_message("message-1", "x")],
+            history_cut: "bookmark:committed".into(),
+            history_advance: None,
             pending_result_polls: 0,
             settled_command_status: OnlineStatus::Succeeded,
+            settled_error_code: None,
             request_traces: Vec::new(),
             pairing: None,
             pending_noise: None,
@@ -352,15 +442,26 @@ impl FakeHost {
                     },
                 );
                 response.delay_ms = self.hosts_delay_ms;
+                // Simulate a revocation that lands after discovery but before
+                // the per-Host session listing resolves.
+                if self.revoke_after_hosts {
+                    self.revoke_after_hosts = false;
+                    self.revoked = true;
+                }
                 response
             }
             ("POST", ["v1", "hosts", host_id, "requests"]) => {
                 self.host_request(host_id, &request.body)
             }
-            ("GET", ["v1", "requests", request_id]) => match self.requests.get(*request_id) {
-                Some(state) => MockResponse::json(200, state),
-                None => error_response(404, ErrorCode::NotFound, "request not found"),
-            },
+            ("GET", ["v1", "requests", request_id]) => {
+                if self.expire_request_id.as_deref() == Some(*request_id) {
+                    return error_response(410, ErrorCode::Expired, "request expired");
+                }
+                match self.requests.get(*request_id) {
+                    Some(state) => MockResponse::json(200, state),
+                    None => error_response(404, ErrorCode::NotFound, "request not found"),
+                }
+            }
             ("DELETE", ["v1", "devices", device_id]) => {
                 if self.revoked {
                     return error_response(401, ErrorCode::Unauthorized, "unauthorized");
@@ -377,6 +478,113 @@ impl FakeHost {
     pub fn drop_channel(&mut self) {
         self.channel = None;
         self.pending_noise = None;
+    }
+
+    fn lifecycle_receipt(
+        &self,
+        reply: &LifecycleReply,
+        operation: &str,
+        parent_session_id: Option<&str>,
+    ) -> whalerein_proto::LifecycleReceipt {
+        use whalerein_proto::{LifecycleDisposition, LifecycleReceipt};
+        let parent = if operation == "fork" {
+            parent_session_id.unwrap_or_default().to_owned()
+        } else {
+            String::new()
+        };
+        let mut receipt = LifecycleReceipt {
+            operation: operation.into(),
+            operation_id: format!("{operation}-operation-1"),
+            ..Default::default()
+        };
+        match reply {
+            LifecycleReply::Ready { session_id } => {
+                receipt.session_id = session_id.clone();
+                receipt.parent_session_id = parent;
+                receipt.disposition = LifecycleDisposition::Ready as i32;
+                receipt.phase = "COMPLETE".into();
+            }
+            LifecycleReply::Warning {
+                session_id,
+                warning_code,
+                warning_detail,
+            } => {
+                receipt.session_id = session_id.clone();
+                receipt.parent_session_id = parent;
+                receipt.disposition = LifecycleDisposition::ReadyWithWarning as i32;
+                receipt.warning_code = warning_code.clone();
+                receipt.warning_detail = warning_detail.clone();
+                receipt.phase = "ATTACH".into();
+            }
+            LifecycleReply::Failed {
+                reason_code,
+                retryable,
+            } => {
+                receipt.parent_session_id = parent;
+                receipt.disposition = LifecycleDisposition::Failed as i32;
+                receipt.reason_code = reason_code.clone();
+                receipt.retryable = *retryable;
+                receipt.phase = "PREFLIGHT".into();
+            }
+            LifecycleReply::Unknown {
+                reason_code,
+                reconcile_mode,
+                reconcile_key,
+            } => {
+                receipt.parent_session_id = parent;
+                receipt.disposition = LifecycleDisposition::Unknown as i32;
+                receipt.reason_code = reason_code.clone();
+                receipt.reconcile_mode = reconcile_mode.clone();
+                receipt.reconcile_key = reconcile_key.clone().unwrap_or_default();
+                receipt.phase = "NATIVE".into();
+            }
+        }
+        receipt
+    }
+
+    fn session_with_capabilities(&self, mut session: SessionSummary) -> SessionSummary {
+        if let Some(capabilities) = session.source_capabilities.as_mut() {
+            capabilities.model_selection = self.model_selection_available;
+        }
+        session
+    }
+
+    fn extra_host_summary(&self) -> SessionSummary {
+        SessionSummary {
+            session_id: self.extra_host_session.clone(),
+            title: "test session".into(),
+            cwd: "/work".into(),
+            running: true,
+            agent_available: true,
+            source_capabilities: Some(whalerein_proto::SourceCapabilities {
+                model_selection: self.model_selection_available,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn forked_child_summary(&self, session_id: &str) -> SessionSummary {
+        let parent = self
+            .forked_children
+            .iter()
+            .find(|(child, _)| child == session_id)
+            .map(|(_, parent)| parent.clone());
+        match parent {
+            Some(parent) => SessionSummary {
+                session_id: session_id.into(),
+                title: "forked session".into(),
+                cwd: "/work-child".into(),
+                parent_session_id: parent,
+                origin: "fork".into(),
+                source_capabilities: Some(whalerein_proto::SourceCapabilities {
+                    session_fork: self.session_fork_supported,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None => fake_session_summary(session_id),
+        }
     }
 
     pub fn channel_id(&self) -> Option<String> {
@@ -679,7 +887,11 @@ impl FakeHost {
             host_id: request.host_id.clone(),
             device_id: request.device_id.clone(),
             protocol_version: PROTOCOL_VERSION,
-            capabilities: Some(default_capabilities()),
+            capabilities: Some(
+                self.channel_capabilities
+                    .clone()
+                    .unwrap_or_else(default_capabilities),
+            ),
             host_nonce: "host-channel-nonce".into(),
         };
         let message = noise
@@ -728,48 +940,63 @@ impl FakeHost {
             Some(Payload::ListSessions(_)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::SessionList(
                     SessionList {
-                        sessions: vec![SessionSummary {
-                            session_id: if host_id == "host-2" {
-                                self.extra_host_session.clone()
-                            } else {
-                                "session-1".into()
-                            },
-                            title: "test session".into(),
-                            cwd: "/work".into(),
-                            running: true,
-                            agent_available: true,
-                            source_capabilities: Some(whalerein_proto::SourceCapabilities {
-                                model_selection: self.model_selection_available,
-                                ..Default::default()
-                            }),
-                            history_cursor: String::new(),
-                            ..Default::default()
-                        }],
+                        sessions: if host_id == "host-2" {
+                            vec![self.extra_host_summary()]
+                        } else {
+                            self.sessions
+                                .clone()
+                                .into_iter()
+                                .map(|session| self.session_with_capabilities(session))
+                                .collect()
+                        },
                     },
                 )),
                 ..Default::default()
             },
-            Some(Payload::GetSession(get)) => ResponsePayload {
-                payload: Some(whalerein_proto::response_payload::Payload::SessionInfo(
-                    SessionSummary {
-                        session_id: get.session_id,
-                        title: "test session".into(),
-                        source_capabilities: Some(whalerein_proto::SourceCapabilities {
-                            model_selection: self.model_selection_available,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            },
+            Some(Payload::GetSession(get)) => {
+                if let Some((id, code)) = &self.fail_get_session_for {
+                    if id == &get.session_id {
+                        return Err(*code);
+                    }
+                }
+                let summary = if host_id == "host-2" {
+                    self.extra_host_summary()
+                } else {
+                    let session = self
+                        .sessions
+                        .iter()
+                        .find(|session| session.session_id == get.session_id)
+                        .cloned()
+                        .unwrap_or_else(|| self.forked_child_summary(&get.session_id));
+                    self.session_with_capabilities(session)
+                };
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::SessionInfo(
+                        summary,
+                    )),
+                    ..Default::default()
+                }
+            }
             Some(Payload::ReadPendingQueue(_)) if self.fail_pending_queue => {
-                return Err(ErrorCode::Unavailable)
+                return Err(ErrorCode::Unavailable);
+            }
+            Some(Payload::ReadPendingQueue(_)) if self.pending_queue_wrong_payload => {
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::Pong(
+                        whalerein_proto::Pong {
+                            host_time_unix_ms: 1,
+                        },
+                    )),
+                    ..Default::default()
+                }
             }
             Some(Payload::ReadPendingQueue(read)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::PendingQueue(
                     whalerein_proto::PendingQueue {
-                        session_id: read.session_id,
+                        session_id: self
+                            .pending_queue_session_override
+                            .clone()
+                            .unwrap_or(read.session_id),
                         available: true,
                         running: true,
                         items: vec![whalerein_proto::PendingQueueItem {
@@ -823,23 +1050,30 @@ impl FakeHost {
             },
             Some(Payload::ReadHistory(read)) => {
                 use whalerein_proto::*;
-                let changes = if read.after_cursor == "bookmark:committed" {
-                    vec![]
+                let cut = self.history_cut.clone();
+                let advance = if !read.snapshot && read.after_cursor == cut {
+                    self.history_advance.take()
                 } else {
-                    vec![MessageUpsert {
-                        message: Some(ConversationMessage {
-                            message_id: "message-1".into(),
-                            role: MessageRole::Assistant as i32,
-                            blocks: vec![ContentBlock {
-                                block_id: "text".into(),
-                                content: Some(content_block::Content::Text(TextContent {
-                                    text: "x".into(),
-                                })),
-                            }],
-                            ..Default::default()
-                        }),
-                        origin: None,
-                    }]
+                    None
+                };
+                let (from_cursor, to_cursor, changes) = match advance {
+                    Some((messages, next)) => {
+                        self.history_cut = next.clone();
+                        (read.after_cursor.clone(), next, history_upserts(messages))
+                    }
+                    None if read.snapshot || read.after_cursor.is_empty() => (
+                        "bookmark:initial".into(),
+                        cut.clone(),
+                        history_upserts(self.history_messages.clone()),
+                    ),
+                    None if read.after_cursor == cut => {
+                        (read.after_cursor.clone(), cut.clone(), vec![])
+                    }
+                    None => (
+                        read.after_cursor.clone(),
+                        cut.clone(),
+                        history_upserts(self.history_messages.clone()),
+                    ),
                 };
                 ResponsePayload {
                     payload: Some(response_payload::Payload::HistoryPage(HistoryPage {
@@ -848,16 +1082,12 @@ impl FakeHost {
                             session_id: read.session_id,
                         }),
                         batch: Some(HistoryBatch {
-                            from_cursor: if read.after_cursor.is_empty() {
-                                "bookmark:initial".into()
-                            } else {
-                                read.after_cursor.clone()
-                            },
-                            to_cursor: "bookmark:committed".into(),
-                            batch_id: format!("batch:{}:bookmark:committed", read.after_cursor),
+                            from_cursor,
+                            to_cursor: to_cursor.clone(),
+                            batch_id: format!("batch:{}:{to_cursor}", read.after_cursor),
                             changes,
                         }),
-                        cut_cursor: "bookmark:committed".into(),
+                        cut_cursor: to_cursor,
                         complete: true,
                         snapshot: read.snapshot,
                     })),
@@ -866,14 +1096,14 @@ impl FakeHost {
             }
             Some(Payload::WatchSession(watch)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::WatchReady(
-                    fake_watch(&watch.session_id),
+                    fake_watch(&watch.session_id, &self.history_cut),
                 )),
                 ..Default::default()
             },
             Some(Payload::RefreshWatches(_)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::WatchStates(
                     whalerein_proto::WatchStates {
-                        watches: vec![fake_watch("session-1")],
+                        watches: vec![fake_watch("session-1", &self.history_cut)],
                     },
                 )),
                 ..Default::default()
@@ -1032,7 +1262,10 @@ impl FakeHost {
                                 found: self.command_results.contains_key(&get.command_id),
                                 status: self.settled_command_status as i32,
                                 result_payload: terminal.encode_to_vec(),
-                                error_code: 0,
+                                error_code: self
+                                    .settled_error_code
+                                    .unwrap_or(ErrorCode::Unspecified)
+                                    as i32,
                             },
                         )),
                         ..Default::default()
@@ -1049,7 +1282,7 @@ impl FakeHost {
                             model_catalog: self.model_selection_available,
                             model_read: self.model_selection_available,
                             session_create: self.session_create_supported,
-                            session_fork: true,
+                            session_fork: self.session_fork_supported,
                         },
                     ),
                 ),
@@ -1092,6 +1325,52 @@ impl FakeHost {
                 )),
                 ..Default::default()
             },
+            Some(Payload::ListApprovals(list)) => {
+                self.approval_queries.push(host_id.to_owned());
+                self.approval_filters.push(list.session_id.clone());
+                let rows = if host_id == "host-2" {
+                    self.extra_host_approvals.clone()
+                } else {
+                    self.approvals.clone()
+                };
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::ApprovalList(
+                        whalerein_proto::ApprovalList {
+                            approvals: rows
+                                .into_iter()
+                                .filter(|approval| {
+                                    list.session_id.is_empty()
+                                        || approval.session_id == list.session_id
+                                })
+                                .collect(),
+                        },
+                    )),
+                    ..Default::default()
+                }
+            }
+            Some(Payload::GetApproval(get)) => {
+                self.approval_queries.push(host_id.to_owned());
+                if let Some(code) = self.approval_error {
+                    return Err(code);
+                }
+                let rows = if host_id == "host-2" {
+                    &self.extra_host_approvals
+                } else {
+                    &self.approvals
+                };
+                match rows
+                    .iter()
+                    .find(|approval| approval.approval_id == get.approval_id)
+                {
+                    Some(approval) => ResponsePayload {
+                        payload: Some(whalerein_proto::response_payload::Payload::Approval(
+                            approval.clone(),
+                        )),
+                        ..Default::default()
+                    },
+                    None => return Err(ErrorCode::NotFound),
+                }
+            }
             Some(Payload::Ping(_)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::Pong(
                     whalerein_proto::Pong {
@@ -1132,23 +1411,26 @@ impl FakeHost {
         }
         let response = ResponsePayload {
             payload: Some(match payload.payload {
-                Some(whalerein_proto::request_payload::Payload::CreateSession(_)) => {
-                    whalerein_proto::response_payload::Payload::LifecycleReceipt(
-                        whalerein_proto::LifecycleReceipt {
-                            parent_session_id: String::new(),
-                            session_id: "created-1".into(),
-                            operation: "create".into(),
-                            disposition: whalerein_proto::LifecycleDisposition::Ready as i32,
-                            warning_code: String::new(),
-                            operation_id: String::new(),
-                            phase: String::new(),
-                            reason_code: String::new(),
-                            retryable: false,
-                            reconcile_mode: String::new(),
-                            reconcile_key: String::new(),
-                            warning_detail: None,
-                        },
-                    )
+                Some(whalerein_proto::request_payload::Payload::CreateSession(create)) => {
+                    self.create_calls += 1;
+                    self.last_create_input = Some(create);
+                    let receipt =
+                        self.lifecycle_receipt(&self.create_reply.clone(), "create", None);
+                    whalerein_proto::response_payload::Payload::LifecycleReceipt(receipt)
+                }
+                Some(whalerein_proto::request_payload::Payload::ForkSession(fork)) => {
+                    self.fork_calls += 1;
+                    self.last_fork_parent = Some(fork.session_id.clone());
+                    let receipt = self.lifecycle_receipt(
+                        &self.fork_reply.clone(),
+                        "fork",
+                        Some(&fork.session_id),
+                    );
+                    if !receipt.session_id.is_empty() {
+                        self.forked_children
+                            .push((receipt.session_id.clone(), fork.session_id));
+                    }
+                    whalerein_proto::response_payload::Payload::LifecycleReceipt(receipt)
                 }
                 Some(whalerein_proto::request_payload::Payload::SelectSessionModel(selection)) => {
                     whalerein_proto::response_payload::Payload::ModelSelectionReceipt(
@@ -1168,6 +1450,19 @@ impl FakeHost {
                         whalerein_proto::QuestionReceipt {
                             batch_id: answer.batch_id,
                             phase: whalerein_proto::QuestionPhase::QuestionReplyQueued as i32,
+                        },
+                    )
+                }
+                Some(whalerein_proto::request_payload::Payload::ResolveApproval(resolve)) => {
+                    self.approval_resolutions.push((
+                        request.host_id.clone(),
+                        resolve.approval_id,
+                        resolve.decision,
+                    ));
+                    whalerein_proto::response_payload::Payload::CommandAccepted(
+                        whalerein_proto::CommandAccepted {
+                            message_id: "message-1".into(),
+                            delivery_id: "delivery-1".into(),
                         },
                     )
                 }
@@ -1349,7 +1644,7 @@ impl FakeAccess {
     }
 }
 
-fn fake_watch(session: &str) -> whalerein_proto::WatchReady {
+fn fake_watch(session: &str, history_head: &str) -> whalerein_proto::WatchReady {
     whalerein_proto::WatchReady {
         watch_id: "watch-1".into(),
         lease_ms: 30000,
@@ -1360,11 +1655,52 @@ fn fake_watch(session: &str) -> whalerein_proto::WatchReady {
             }),
             live_epoch: "epoch".into(),
             revision: 1,
-            history_head: "bookmark:committed".into(),
+            history_head: history_head.into(),
             run_phase: whalerein_proto::RunPhase::Idle as i32,
             approvals: vec![],
         }),
     }
+}
+
+fn fake_session_summary(session_id: &str) -> SessionSummary {
+    SessionSummary {
+        session_id: session_id.into(),
+        title: "test session".into(),
+        cwd: "/work".into(),
+        running: true,
+        agent_available: true,
+        source_capabilities: Some(whalerein_proto::SourceCapabilities {
+            model_selection: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn history_message(message_id: &str, text: &str) -> whalerein_proto::ConversationMessage {
+    whalerein_proto::ConversationMessage {
+        message_id: message_id.into(),
+        role: whalerein_proto::MessageRole::Assistant as i32,
+        blocks: vec![whalerein_proto::ContentBlock {
+            block_id: "text".into(),
+            content: Some(whalerein_proto::content_block::Content::Text(
+                whalerein_proto::TextContent { text: text.into() },
+            )),
+        }],
+        ..Default::default()
+    }
+}
+
+fn history_upserts(
+    messages: Vec<whalerein_proto::ConversationMessage>,
+) -> Vec<whalerein_proto::MessageUpsert> {
+    messages
+        .into_iter()
+        .map(|message| whalerein_proto::MessageUpsert {
+            message: Some(message),
+            origin: None,
+        })
+        .collect()
 }
 
 // CLI assertions inspect the same redacted diagnostic record as Core.

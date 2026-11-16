@@ -9,27 +9,56 @@ Noise messages.
 ## Commands
 
 ```bash
-whalerein pair [--name <display-name>] <pairing-uri> [--yes] [--fingerprint <hex>]
+whalerein pair [--name <display-name>] [--fingerprint <hex>] [--yes] <pairing-uri>
+whalerein pair-resume
 whalerein pairing-history
 whalerein hosts
 whalerein sessions --host <host-id>
+whalerein models --host <host-id>
+whalerein model get --session <session-id>
+whalerein model set --session <session-id> --provider <provider> --model <model> [--effort <effort>]
 whalerein session-create --host <host-id> [--cwd <host-path> | --workspace <id>] [--preset <id>] [--session-id <preferred-id>]
+whalerein session-fork --session <session-id>
 whalerein commands-pending
 whalerein command-recover --request <request-id>
 whalerein tail --session <session-id> [--once] [--timeout <seconds>]
-whalerein send --session <session-id> [--delivery enqueue-after-run|steer|start-if-idle] <text>
+whalerein wait --session <session-id> [--timeout <seconds>] [--fail-on-timeout]
+whalerein sync --session <session-id>
+whalerein send --session <session-id> [--delivery enqueue-after-run|steer|start-if-idle] [--] <text>
+whalerein approvals --session <session-id>
+whalerein approvals --request <approval-id>
 whalerein approve --request <approval-id> --digest <hex> --version <n>
 whalerein reject --request <approval-id> --digest <hex> --version <n>
 whalerein interrupt --session <session-id>
 whalerein questions --session <session-id> [--cursor <cursor>]
 whalerein answer --session <session-id> --batch <batch-id> --epoch <epoch> --version <n> --digest <hex> --phase <phase> --input <file-or-dash> [--command-id <id>]
 whalerein question-cancel --session <session-id> --command <command-id>
-whalerein revoke
-whalerein doctor
-whalerein doctor --export <file>
+whalerein queue list --session <session-id>
+whalerein queue edit --session <session-id> --item <item-id> [--] <text>
+whalerein queue remove --session <session-id> --item <item-id>
+whalerein queue steer --session <session-id> --item <item-id>
+whalerein revoke --yes
+whalerein forget [--local-only] --yes
+whalerein doctor [--clear-diagnostics] [--export <file>] [--yes]
 ```
 
 Global flags: `--json`, `--yes`, `--data-dir <path>`.
+
+A message or queue replacement that starts with `-` is accepted as text. Put
+global flags before the text; a bare `--` ends option parsing, so
+`whalerein send --session S -- -hello` sends `-hello` (flags after `--` are
+text). `whalerein --help` always prints help; `whalerein send ... --help` is
+also help, so a message of exactly `--help` needs `--`.
+
+`revoke`, `forget` and `doctor --export` are destructive. In a terminal they ask
+for confirmation and default to no; in a non-interactive session they require
+`--yes` and otherwise exit 2 without changing anything. `pair` additionally
+accepts `--fingerprint` as explicit consent.
+
+`--host` must be placed before the command. `sessions`, `models` and
+`session-create` take their own required `--host`; when both are present they
+must name the same Host, and the command-level value is the one used. A
+disagreement is `conflict` (exit 8) instead of a silent override.
 
 To select a Host for a session operation, put `--host HOST_ID` before the
 command, for example `whalerein --host HOST_ID send --session SESSION_ID text`.
@@ -65,10 +94,14 @@ attachment failed after creation; do not retry or delete it. `UNKNOWN` never
 claims identity; it reports an operation id and a reconcile mode, and the CLI
 never retries automatically.
 
-`whalerein wait --session SESSION_ID --timeout MILLISECONDS [--fail-on-timeout]`
+`whalerein wait --session SESSION_ID --timeout SECONDS [--fail-on-timeout]`
 reports a typed idle/running/input-required/timeout observation without activating
-a cold Agent. The default timeout exit is 0; `--fail-on-timeout` exits 7 only for
-a timeout observation, while transport failures keep their own error codes.
+a cold Agent. `wait` and `tail` share one parser: seconds, non-zero, at most three
+decimal places (`0.25`, `30`). The default timeout exit is 0; `--fail-on-timeout`
+exits 7 only for a timeout observation and then includes
+`error.code = "timeout"` in the JSON envelope, while transport failures keep
+their own error codes. `tail --once` stops after the first visible text or
+committed message and defaults to a 15 second deadline.
 
 `pairing-history` shows redacted Host and claim identities for pending pairings
 removed by global revocation, and for pairings known to have committed whose original grants are no longer available or whose Host
@@ -120,16 +153,44 @@ Advertisement depends on native service support, not on the CLI version.
 
 ## Output
 
+`approvals --request <id>` reads one approval's live or terminal state
+(`PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `UNAVAILABLE`) without changing
+the pending-list output; a known id exits 0 and an unknown id exits 3
+(`not_found`).
+
 `--json` emits one stable object:
 
 ```json
 {"schema":"whalerein/v1","command":"hosts","data":{}}
-{"schema":"whalerein/v1","command":"hosts","error":{"code":"unauthorized","message":"..."}}
+{"schema":"whalerein/v1","command":"hosts","error":{"code":"unauthorized","action":"reauth","message":"..."}}
 ```
 
-Exit codes: `0` success, `1` internal, `2` usage/input, `3` not found,
-`4` unauthorized/revoked, `5` host offline/unavailable, `6` host rejected,
-`7` timeout/unknown, `8` conflict, `9` unsupported/incompatible.
+`error.action` is the shared client-action vocabulary from
+`proto/v1/error_codes.json` (`fix_input`, `reauth`, `refresh`, `retry`,
+`upgrade`, `resync`, `restart_pairing`, `review_pairing`, `none`). `upgrade` is
+terminal for the current attempt: the CLI names the side to upgrade and never
+presents the same request as retryable.
+
+The flag may appear anywhere in argv. When it does, usage errors also use the
+envelope (`"command":"cli"`, `error.code = "invalid_argument"`, exit 2, empty
+stderr) and `--help`/`--version` return exit 0 with `data.help`/`data.version`
+instead of plain text. Plain invocations keep clap's own help and error text.
+
+A closed output pipe (`whalerein tail --json | head -1`) ends the stream
+cleanly: no panic, no exit 101, exit 0. Human output never contains ANSI color;
+titles, reasons and tool names are escaped for tabs, newlines, ANSI and other
+control characters. Empty results print an actionable sentence, not `[]`.
+
+Exit codes: `0` success, `1` internal, `2` usage/input/configuration,
+`3` not found, `4` unauthorized/revoked, `5` host offline/unavailable,
+`6` host rejected, `7` timeout/unknown, `8` conflict,
+`9` unsupported/incompatible. An interrupted command uses exit 2 with
+`error.code = "cancelled"` before submission and exit 7 with
+`error.code = "unknown"` plus the retained request id after submission.
+
+Lifecycle `reason_code` values map through the same wire table: `PREFLIGHT_*`
+and `NATIVE_*` wrap an `ErrorCode` name, so `PREFLIGHT_CONFLICT` is exit 8 and
+`PREFLIGHT_UNSUPPORTED_CAPABILITY` is exit 9.
 
 ## Environment
 
@@ -140,6 +201,10 @@ Exit codes: `0` success, `1` internal, `2` usage/input, `3` not found,
 | `WHALEREIN_MQTT_URL` | Override the broker endpoint derived from the Access URL |
 | `WHALEREIN_CA_FILE` | Private CA PEM for HTTPS and MQTT |
 | `WHALEREIN_LOG` / `RUST_LOG` | Log filter written to stderr |
+
+Every value is validated before a command runs. A broker URL with an unsupported
+scheme, a missing or empty `WHALEREIN_CA_FILE`, or an unparseable log filter is
+`invalid_configuration` (exit 2) with the variable named; it is never ignored.
 
 The `file:<dir>` and `memory` secret backends provide no OS keyring protection;
 use them only for tests and the integration harness.
