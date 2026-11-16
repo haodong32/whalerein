@@ -68,13 +68,28 @@ jobs:
       - name: Build Rust XCFramework and Swift bindings
         run: bash apps/mobile-bindings/scripts/build-xcframework.sh
 
+      - name: Select an available iPhone simulator
+        id: simulator
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              for device in devices[runtime]:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      print(device["udid"])
+                      raise SystemExit
+          raise SystemExit("no available iPhone simulator")
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
       - name: Run Swift unit tests
         run: |
           xcodebuild test \
             -project apps/ios/WhaleRein.xcodeproj \
             -scheme WhaleRein \
             -testPlan Unit \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
             -resultBundlePath .local-docs/acceptance/add-ios-client/xcode/Unit.xcresult
 
       - name: Run UI tests
@@ -83,7 +98,7 @@ jobs:
             -project apps/ios/WhaleRein.xcodeproj \
             -scheme WhaleRein \
             -testPlan UI \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
             -resultBundlePath .local-docs/acceptance/add-ios-client/xcode/UI.xcresult
 
       - name: Upload iOS result bundles
