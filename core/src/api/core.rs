@@ -3159,8 +3159,10 @@ impl Core {
                     let _ = cache.clear();
                 } else {
                     database_bound = false;
-                    let _ = cache.release_for_revocation();
                 }
+                // Closing the connection is what releases the Windows file
+                // handle; clearing rows alone is not enough.
+                let _ = cache.release_for_revocation();
                 // Windows cannot delete an open SQLite file. Drop the last
                 // connection before removing the profile entry; otherwise the
                 // revocation reports incomplete cleanup and leaves the fence.

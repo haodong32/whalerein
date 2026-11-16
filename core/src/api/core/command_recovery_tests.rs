@@ -817,6 +817,7 @@ async fn pending_admission_rechecks_fence_after_lock_is_released() {
     assert_eq!(access.host.lock().unwrap().commands_seen, 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revocation_attempts_every_secret_delete_and_retries_after_reopen() {
     use crate::api::{MemorySecretStore, SecretError, SecretStore};
