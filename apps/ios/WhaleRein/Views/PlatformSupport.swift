@@ -55,17 +55,22 @@ extension View {
     /// versions that predate the glass APIs.
     @ViewBuilder
     func liquidGlass<S: Shape>(in shape: S) -> some View {
+#if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             self.glassEffect(.regular.interactive(), in: shape)
         } else {
             self.background(.regularMaterial, in: shape)
         }
+#else
+        self.background(.regularMaterial, in: shape)
+#endif
     }
 
     /// Native glass button styles on iOS 26; bordered styles keep the same
     /// hierarchy on older systems.
     @ViewBuilder
     func glassButtonStyle(prominent: Bool = false, controlSize: ControlSize = .regular) -> some View {
+#if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             if prominent {
                 self.buttonStyle(.glassProminent).controlSize(controlSize)
@@ -79,5 +84,12 @@ extension View {
                 self.buttonStyle(.bordered).controlSize(controlSize)
             }
         }
+#else
+        if prominent {
+            self.buttonStyle(.borderedProminent).controlSize(controlSize)
+        } else {
+            self.buttonStyle(.bordered).controlSize(controlSize)
+        }
+#endif
     }
 }

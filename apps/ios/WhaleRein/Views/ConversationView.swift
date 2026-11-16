@@ -224,11 +224,15 @@ struct ConversationView: View {
 /// deployment targets keep a plain transparent bar.
 private struct TopScrollEdgeEffect: ViewModifier {
     func body(content: Content) -> some View {
+#if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content.scrollEdgeEffectStyle(.soft, for: .top)
         } else {
             content
         }
+#else
+        content
+#endif
     }
 }
 
