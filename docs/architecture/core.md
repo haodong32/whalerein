@@ -22,11 +22,52 @@ drivers opt into `protocol-testing` and use the explicit `testing` exports.
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
 | `access` | HTTPS and device MQTT, including opaque fragmentation. |
 | `diagnostics` | Bounded redacted operation history and exports. |
+| `profiles` | Local profile registry, selection and cross-process activation. |
+| `account` | Validated account-service descriptors and opaque account binding. |
 
 `api/core.rs` owns the client facade. Its unit tests live in `api/core/`,
 while watch orchestration and its focused tests remain in `api/watch.rs` and
 `api/tail_tests.rs`. Facade tests are grouped by cache, command recovery, pairing,
 diagnostics and approval/revocation behavior, with shared setup in `test_support.rs`.
+
+### Profiles and activation
+
+A profile is one local state directory with one device identity and one service
+authority. Standalone profiles keep the historical flat layout in place. Managed
+profiles live under `profiles/<opaque-id>/`, so moving or renaming a profile
+directory is unsupported: the device identity secret is keyed by the canonical
+profile path, and cache provenance binds the database to that directory.
+
+`profiles.json` holds non-secret metadata: schema, revision, activation
+generation, the active profile, and each profile's name, mode, service
+description and optional opaque account binding. It is installed with an
+atomic temp-and-rename write after the previous write is durable. A corrupt,
+unknown-schema or future registry is a hard configuration error; Core never
+resets it. The legacy layout is recognized by the existing config, cache,
+revocation, pending and lock artifacts, and by the profile-scoped identity
+secret; it stays at the data-directory root and is never reinterpreted as
+account-managed.
+
+A managed profile whose state directory is missing, symlinked or not a plain
+directory is a hard configuration error. Core refuses to recreate it, because a
+replacement directory would silently mint a new device identity and lose the
+existing pins, cache provenance and pending recovery. Legacy state is likewise
+kept in place and never moved.
+
+A fresh directory has no profile. Its ordinary account entry selects official
+production, but invitation pairing remains available and Core constructs no
+account client. Account descriptors are metadata only until the feasibility
+gates pass; official presets cannot override endpoints, and a custom descriptor
+must provide distinct HTTPS (or loopback test) API, issuer and optional Access
+origins plus a public native client identifier.
+
+Every open `Core` holds a shared OS activation lock. A profile switch takes the
+exclusive form and fails with `conflict` while any client process is running,
+so a long watch or in-flight operation stops old traffic before the new selection
+is published. The lock is released on crash; there is no daemon or owner record.
+A switch preserves pending journals and never deletes local profile state. An
+older binary ignores the registry, so managed selections report a rollback
+warning and downgrade requires stopping those clients.
 
 A SessionKey is `(host_id, session_id)`. Resolve an unqualified session ID
 against the current authorized Host set. With multiple Hosts, every source

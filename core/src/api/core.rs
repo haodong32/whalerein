@@ -59,6 +59,8 @@ pub struct Core {
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
     watch_active: Arc<AtomicBool>,
+    profile: crate::profiles::ProfileContext,
+    _activation: Arc<crate::profiles::ActivationGuard>,
     #[cfg(all(test, unix))]
     fail_waiting_marker: Arc<AtomicBool>,
 }
@@ -78,9 +80,10 @@ impl Core {
     pub fn new_command_id() -> String {
         crate::util::random_id(16)
     }
-    pub fn new(options: CoreOptions) -> CoreResult<Self> {
-        let existed = options.data_dir.exists();
-        std::fs::create_dir_all(&options.data_dir)
+    pub fn new(mut options: CoreOptions) -> CoreResult<Self> {
+        let root = options.data_dir.clone();
+        let existed = root.exists();
+        std::fs::create_dir_all(&root)
             .map_err(|_| CoreError::Config("data directory could not be created".into()))?;
         #[cfg(unix)]
         if !existed {
@@ -88,7 +91,7 @@ impl Core {
             let mut open = std::fs::OpenOptions::new();
             open.read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-            let directory = open.open(&options.data_dir).map_err(|_| {
+            let directory = open.open(&root).map_err(|_| {
                 CoreError::Config("data directory could not be opened safely".into())
             })?;
             if !directory
@@ -108,6 +111,9 @@ impl Core {
         }
         #[cfg(not(unix))]
         let _ = existed;
+        let profile = crate::profiles::Profiles::new(&root).resolve_active(&options.secrets)?;
+        let activation = Arc::new(crate::profiles::ActivationGuard::shared(&root)?);
+        options.data_dir = profile.state_dir.clone();
         let store = ConfigStore::new(&options.data_dir);
         let startup_marker = revoked_commands::marker(&options.data_dir)?;
         let config = match store.load() {
@@ -143,6 +149,8 @@ impl Core {
             identity_init: Arc::new(Mutex::new(())),
             cache: Arc::new(Mutex::new(None)),
             watch_active: Arc::new(AtomicBool::new(false)),
+            profile,
+            _activation: activation,
             #[cfg(all(test, unix))]
             fail_waiting_marker: Arc::new(AtomicBool::new(false)),
         };
@@ -249,6 +257,13 @@ impl Core {
 
     pub fn data_dir(&self) -> &Path {
         &self.options.data_dir
+    }
+
+    /// Resolved local profile for this Core instance. Account data is metadata
+    /// only until the account transport gates pass; Standalone performs no
+    /// account-service activity.
+    pub fn profile(&self) -> &crate::profiles::ProfileContext {
+        &self.profile
     }
 
     #[cfg(test)]

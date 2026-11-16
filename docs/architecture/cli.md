@@ -18,6 +18,15 @@ the terminal renderer prints a suffix or a corrected complete message. It retain
 only line/active-Attempt formatting state. JSON exposes normalized block types and
 correlation metadata, never raw native event JSON or tool argument streams.
 
+`profile` commands manage local selections before a Core instance is opened. They
+read or mutate only the local registry and never contact an account or Access
+service. `profile add` never activates; `profile use` publishes the selection
+only after the acting process holds the exclusive activation lease. Staging is
+available only with an explicit testing flag, stays hidden from ordinary list
+output unless active or requested, and is labeled as staging in every human and
+JSON result. `profile remove` deletes only managed local state and never claims a
+remote grant or account-session revocation. See [usage](../../apps/cli/README.md#profiles).
+
 `tail --once` waits for visible text or a committed Message. Reset/state/start
 metadata does not satisfy it, and a marker-only deadline returns timeout. Commands
 and approvals retain stable IDs and digest/version guards. Pairing and diagnostic

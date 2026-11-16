@@ -249,6 +249,12 @@ pub enum Command {
         local_only: bool,
     },
 
+    /// Manage local service profiles and the active selection.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+
     /// Show the paired Access address and local unfinished command counts.
     Doctor {
         /// Remove the last failure's local diagnostic metadata.
@@ -258,6 +264,63 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         export: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ProfileAction {
+    /// List local profiles; testing-only staging stays hidden unless asked for.
+    List {
+        /// Include testing-only staging profiles.
+        #[arg(long)]
+        include_staging: bool,
+    },
+    /// Show the active profile and selected service.
+    Current,
+    /// Add a profile without activating it.
+    Add {
+        /// Local profile name.
+        name: String,
+        /// Add official staging; requires --enable-testing.
+        #[arg(long)]
+        staging: bool,
+        /// Explicitly accept the testing-only staging environment.
+        #[arg(long)]
+        enable_testing: bool,
+        /// Custom account API origin.
+        #[arg(long, value_name = "URL")]
+        api_origin: Option<String>,
+        /// Custom OIDC issuer.
+        #[arg(long, value_name = "URL")]
+        issuer: Option<String>,
+        /// Custom public native client registration.
+        #[arg(long, value_name = "ID")]
+        client_id: Option<String>,
+        /// Optional custom Access URL.
+        #[arg(long, value_name = "URL")]
+        access_url: Option<String>,
+    },
+    /// Publish a new active profile after old client activity has stopped.
+    Use {
+        /// Local profile name.
+        name: String,
+    },
+    /// Remove a managed profile's local state; never claims remote revocation.
+    Remove {
+        /// Local profile name.
+        name: String,
+    },
+}
+
+impl ProfileAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::List { .. } => "profile-list",
+            Self::Current => "profile-current",
+            Self::Add { .. } => "profile-add",
+            Self::Use { .. } => "profile-use",
+            Self::Remove { .. } => "profile-remove",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -368,6 +431,7 @@ impl Command {
             Self::Queue { .. } => "queue",
             Self::Revoke => "revoke",
             Self::Forget { .. } => "forget",
+            Self::Profile { action } => action.name(),
             Self::Doctor { .. } => "doctor",
         }
     }
@@ -380,6 +444,47 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[test]
+    fn profile_actions_have_stable_names_and_explicit_testing_flags() {
+        let cli = parse(&["whalerein", "profile", "list", "--include-staging"]);
+        assert_eq!(cli.command.name(), "profile-list");
+        assert!(matches!(
+            cli.command,
+            Command::Profile {
+                action: ProfileAction::List {
+                    include_staging: true
+                }
+            }
+        ));
+        let cli = parse(&["whalerein", "profile", "current"]);
+        assert_eq!(cli.command.name(), "profile-current");
+        let cli = parse(&[
+            "whalerein",
+            "profile",
+            "add",
+            "official-staging",
+            "--staging",
+            "--enable-testing",
+        ]);
+        assert_eq!(cli.command.name(), "profile-add");
+        assert!(matches!(
+            cli.command,
+            Command::Profile {
+                action: ProfileAction::Add {
+                    staging: true,
+                    enable_testing: true,
+                    ..
+                }
+            }
+        ));
+        let cli = parse(&["whalerein", "profile", "use", "official-staging"]);
+        assert_eq!(cli.command.name(), "profile-use");
+        let cli = parse(&["whalerein", "profile", "remove", "official-staging"]);
+        assert_eq!(cli.command.name(), "profile-remove");
+        assert!(Cli::try_parse_from(["whalerein", "profile"]).is_err());
+        assert!(Cli::try_parse_from(["whalerein", "profile", "use"]).is_err());
     }
 
     #[test]

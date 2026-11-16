@@ -19,6 +19,15 @@ ownership; these are not implemented security guarantees.
 | Access device/invitation credentials | Hashes in PostgreSQL. |
 | Deployment secrets | Configuration outside Git. |
 
+Profile state is isolated by local directory and device identity; account
+credentials, device keys, pins, cache and pending recovery do not cross
+profiles. Staging selection is a local testing choice, not server access
+control. Official staging is hidden from ordinary setup and must be explicitly
+added with the testing flag; it never auto-activates or acts as a fallback, and
+its active output stays labeled. A profile switch refuses while another client
+can still send traffic. Older binaries ignore the profile registry, so managed
+selections are not rollback-compatible without stopping those clients.
+
 Access/broker see routing IDs, timing and sizes, not session plaintext or channel
 keys. Endpoint/OS compromise is outside this protection. Cached client payloads
 are encrypted; memory/file secret backends are test tools. Compose plaintext
