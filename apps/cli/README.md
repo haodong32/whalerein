@@ -24,6 +24,11 @@ whalerein interrupt --session <session-id>
 whalerein questions --session <session-id> [--cursor <cursor>]
 whalerein answer --session <session-id> --batch <batch-id> --epoch <epoch> --version <n> --digest <hex> --phase <phase> --input <file-or-dash> [--command-id <id>]
 whalerein question-cancel --session <session-id> --command <command-id>
+whalerein profile list [--include-staging]
+whalerein profile current
+whalerein profile add NAME [--staging --enable-testing | --api-origin URL --issuer URL --client-id ID [--access-url URL]]
+whalerein profile use NAME
+whalerein profile remove NAME
 whalerein revoke
 whalerein doctor
 whalerein doctor --export <file>
@@ -130,6 +135,35 @@ Advertisement depends on native service support, not on the CLI version.
 Exit codes: `0` success, `1` internal, `2` usage/input, `3` not found,
 `4` unauthorized/revoked, `5` host offline/unavailable, `6` host rejected,
 `7` timeout/unknown, `8` conflict, `9` unsupported/incompatible.
+
+## Profiles
+
+Profiles isolate local device identity, Host pins, cache, pending operations and
+service authority. `profile current` shows the active selection and its
+environment; a fresh directory reports official production as the ordinary
+account default while invitation pairing remains available and no account
+service is contacted.
+
+`profile add` never switches the selection. Official staging is hidden from
+ordinary setup: adding it requires both `--staging` and `--enable-testing`, and
+it stays visibly labeled `Staging (testing only)` whenever active. This is a
+local testing choice, not server admission control. A custom profile requires an
+explicit account API origin, OIDC issuer and public native client ID; the client
+does not infer endpoints from hostnames.
+
+`profile use` fails with `conflict` while another client process is active, so
+old traffic stops before the new selection is published. Removing a managed
+profile deletes only its local state and never claims remote revocation. Older
+binaries ignore the profile registry; a managed selection therefore reports a
+rollback warning and those clients must be stopped before downgrading.
+
+| Command | Result shape |
+|---|---|
+| `profile list` | `{"profiles":[...]}` |
+| `profile current` | selection with `active`, `default_service`, `standalone_available` |
+| `profile add` | `{"profile":...,"current":false}` |
+| `profile use` | activation outcome with optional `rollback_warning` |
+| `profile remove` | removal outcome and `remote_revocation:"not_attempted"` |
 
 ## Environment
 
