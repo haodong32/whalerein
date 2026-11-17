@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { createLogger, createLogSalt } from 'whalerein-host/log.js'
 import { createSettingsService } from './src/settings.js'
 import { resolveEnvironment, resolveTrust } from 'whalerein-host/configuration'
-import { profileSnapshot, migrateServiceConfig } from './src/service-config.js'
+import { profileSnapshot, validateProfileKeys } from './src/service-config.js'
 
 export const name = 'whalerein-dsh'
 // Cordis applies the plugin only once the real DSH services exist, so `auto`
@@ -30,8 +30,8 @@ export const inject = ['sessions', 'sessionController', 'credentials']
  * only input. Empty strings are missing and fall back to the schema default.
  * Secret tokens have no default, so an absent token stays unset. */
 export const Config = z.object({
-  service: z.string().default('').volatile(),
-  cloud_environment: z.string().default('').hidden().volatile(),
+  service: z.string().default('whalerein_cloud').volatile(),
+  cloud_environment: z.string().default('production').hidden().volatile(),
   custom: z.object({
     label: z.string().default(''),
     api_origin: z.string().default(''),
@@ -39,14 +39,9 @@ export const Config = z.object({
     native_client_id: z.string().default(''),
     tls: z.object({ ca_provider: z.string().default('system'), ca_file: z.string().default('') }),
   }).volatile(),
-  environment: z.string().default('').hidden().volatile(),
-  config_file: z.string().default('').hidden().volatile(),
-  connection_mode: z.string().default('auto').hidden().volatile(),
   state_root: z.string().default('').volatile(),
   enrollment_issuer_public_key: z.string().default('').volatile(),
   enrollment_issuer: z.string().default('').volatile(),
-  profile_id: z.string().default('').hidden().volatile(),
-  developer_tools_enabled: z.boolean().default(false).hidden().volatile(),
   server: z.string().default('').volatile(),
   admin_token: z.string().role('secret').volatile(),
   access_port: z.string().default('').volatile(),
@@ -80,16 +75,12 @@ function configValue(raw, key) {
 }
 
 export function materializeConfig(raw) {
+  validateProfileKeys(raw)
   const keys = [
     'service', 'cloud_environment', 'custom',
-    'environment',
-    'config_file',
-    'connection_mode',
     'state_root',
     'enrollment_issuer_public_key',
     'enrollment_issuer',
-    'profile_id',
-    'developer_tools_enabled',
     'server',
     'admin_token',
     'access_port',
@@ -228,8 +219,7 @@ export function configFailure(error) {
   const reason = error instanceof ConfigError
     ? error.message.replace(`${error.code}: `, '')
     : undefined
-  const names = ['service', 'cloud_environment', 'custom', 'environment', 'config_file', 'connection_mode', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
-    'profile_id', 'developer_tools_enabled',
+  const names = ['service', 'cloud_environment', 'custom', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
     'server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
     'host_token', 'adapter', 'approval_mode', 'approval_ttl_ms', 'event_batch_ms',
     'outbox_per_device_limit', 'outbox_total_limit', 'snapshot_max_events',
@@ -264,7 +254,7 @@ function registerSettings(ctx, host) {
  * plaintext or hands them to the browser.
  */
 export async function createManagedHost(rawConfig = {}, options = {}) {
-  const config = resolveManagerConfig(migrateServiceConfig(materializeConfig(rawConfig), options.ctx), options)
+  const config = resolveManagerConfig(materializeConfig(rawConfig))
   const managerFactory = options.managerFactory ?? await loadManagerFactory()
   const configurationSnapshot = profileSnapshot(config)
   try {
@@ -276,7 +266,6 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
   }
   const credentials = options.credentials ?? new DshHostCredentials({
     ctx: options.ctx,
-    profileId: config.profileId,
   })
   // The manager needs the native source adapter for the real DSH connection.
   // Custom factories in tests may supply their own source; do not build a real
@@ -316,8 +305,6 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
       verifyAuthorization,
       expectedIssuer: config.expectedIssuer,
       runtimeConfig: config.runtimeConfig,
-      selectedProfile: '',
-      developerToolsEnabled: config.developerToolsEnabled,
     })
   } catch {
     // Runtime diagnostic text may contain private state or paths.
@@ -344,10 +331,8 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
     mode: 'managed',
     config,
     service: config.service,
-    profileConfigured: true,
     manager,
     credentials,
-    developerToolsEnabled: config.developerToolsEnabled,
     get started() { return !stopped },
     start() { return this },
     async stop() {
@@ -369,10 +354,7 @@ async function applyManaged(ctx, rawConfig, options) {
       managed: true,
       manager: null,
       config,
-      configPath: configValue(rawConfig, 'config_file') || null,
-      environmentOverride: configValue(rawConfig, 'environment') || null,
       configError: failure,
-      developerToolsEnabled: false,
     })
     return undefined
   }
@@ -387,9 +369,6 @@ async function applyManaged(ctx, rawConfig, options) {
       managed: true,
       manager: null,
       config,
-      configPath: config.configFile ?? null,
-      environmentOverride: config.environment || null,
-      developerToolsEnabled: config.developerToolsEnabled,
       configError: error?.configError ?? (error instanceof ConfigError ? configFailure(error) : { code: typeof error?.code === 'string' ? error.code : 'manager_unavailable', field: '', reason: 'the connection manager is unavailable in this runtime' }),
     })
     return undefined
@@ -406,10 +385,10 @@ async function applyManaged(ctx, rawConfig, options) {
 }
 
 export function apply(ctx, rawConfig = {}, options = {}) {
-  let materialized = materializeConfig(rawConfig)
+  let materialized
   let mode
   try {
-    materialized = migrateServiceConfig(materialized, ctx)
+    materialized = materializeConfig(rawConfig)
     mode = resolveConnectionMode(materialized)
   } catch (error) {
     const failure = configFailure(error)

@@ -28,7 +28,7 @@ test('a default comment-only empty profile patch becomes one valid entry, not an
   assert.match(text, /^# a top-level YAML array of entries\.$/m)
   assert.match(text, /^- id: whalerein-dsh$/m)
   assert.equal(text.match(/^- id:/gm).length, 1)
-  assert.match(text, /state_dir: "\/tmp\/whalerein-state"/)
+  assert.match(text, /state_root: "\/tmp\/whalerein-state"/)
 })
 
 test('an existing profile list gains exactly one WhaleRein entry and stays idempotent', (t) => {
@@ -42,7 +42,7 @@ test('an existing profile list gains exactly one WhaleRein entry and stays idemp
   assert.equal(second.status, 0, second.stderr)
   const text = readFileSync(first.file, 'utf8')
   assert.equal(text.match(/^- id: whalerein-dsh$/gm).length, 1)
-  assert.match(text, /state_dir: "\/tmp\/whalerein-state"/)
+  assert.match(text, /state_root: "\/tmp\/whalerein-state"/)
 })
 
 test('a missing patch file is created with the entry', (t) => {

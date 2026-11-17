@@ -1507,7 +1507,7 @@ def test_native_browser_settings_persist(scenario):
     scenario.browser(
         "settings", hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"]
     )
-    expected = {"service": "standalone", "legacySelectors": []}
+    expected = {"service": "standalone"}
     assert scenario.request("connection-settings") == expected
     scenario.native.close()
     scenario.start_native()

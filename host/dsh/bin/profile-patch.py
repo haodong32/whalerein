@@ -27,7 +27,7 @@ def update(text: str, state: str, service: str | None, cloud: str | None) -> str
                  f'    service: {service or "whalerein_cloud"}',
                  f'    cloud_environment: {cloud or "production"}', '    adapter: real']
         if state:
-            block.append(f'    state_dir: {json.dumps(state)}')
+            block.append(f'    state_root: {json.dumps(state)}')
         return (prefix + '\n' if prefix else '') + '\n'.join(block) + '\n'
     if service is None and cloud is None:
         return text
@@ -38,8 +38,6 @@ def update(text: str, state: str, service: str | None, cloud: str | None) -> str
     config_end = next((i for i in range(config + 1, end)
                        if lines[i].strip() and not lines[i].lstrip().startswith('#')
                        and len(lines[i]) - len(lines[i].lstrip()) <= 2), end)
-    if any(re.match(r'^    (environment|config_file|connection_mode|profile_id):', line) for line in lines[config + 1:config_end]):
-        raise ValueError('start the plugin once to migrate legacy selectors before an explicit override')
     changes = {}
     if service:
         changes['service'] = service
@@ -61,14 +59,14 @@ def update(text: str, state: str, service: str | None, cloud: str | None) -> str
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('path', type=Path)
-    parser.add_argument('state_dir', nargs='?', default='')
+    parser.add_argument('state_root', nargs='?', default='')
     parser.add_argument('--service', choices=('whalerein_cloud', 'custom', 'standalone'))
     parser.add_argument('--cloud-environment', choices=('production', 'staging', 'local'))
     parser.add_argument('--print', dest='preview', action='store_true')
     args = parser.parse_args(argv)
     text = args.path.read_text(encoding='utf-8') if args.path.exists() else ''
     try:
-        rendered = update(text, args.state_dir, args.service, args.cloud_environment)
+        rendered = update(text, args.state_root, args.service, args.cloud_environment)
     except ValueError as error:
         parser.error(str(error))
     if args.preview:

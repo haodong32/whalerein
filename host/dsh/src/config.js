@@ -6,7 +6,7 @@ export { ConfigError, validateTopicId, topics, PROTOCOL_VERSION } from 'whalerei
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { serviceConfiguration } from './service-config.js'
+import { serviceConfiguration, validateProfileKeys } from './service-config.js'
 
 function pick(raw, names, fallback) {
   for (const name of names) {
@@ -50,50 +50,21 @@ function optionalPort(raw, name) {
   return integer(value, undefined, { min: 1, max: 65535, name })
 }
 
-const CONNECTION_MODES = ['auto', 'managed', 'standalone']
-
-function connectionMode(raw) {
-  const value = String(pick(raw, ['connection_mode'], 'auto') ?? 'auto').trim()
-  if (!CONNECTION_MODES.includes(value)) {
-    throw new ConfigError('invalid_config', 'connection_mode must be auto, managed, or standalone')
-  }
-  return value
-}
-
-/** A profile that already has manual connection material stays Standalone. */
-export function hasStandaloneConfig(raw = {}) {
-  return ['server', 'mqtt_url', 'host_token'].some((name) => String(pick(raw, [name], '') ?? '').trim() !== '')
-}
-
-/**
- * Decide how this profile connects. Auto preserves every existing manual
- * installation and treats a fresh profile without connection material as the
- * managed WhaleRein Cloud flow.
- */
+/** Connection mode is derived only from the profile's service selection. */
 export function resolveConnectionMode(raw = {}) {
-  if (raw.service) return serviceConfiguration(raw).service === 'standalone' ? 'standalone' : 'managed'
-  const mode = connectionMode(raw)
-  if (mode !== 'auto') return mode
-  return hasStandaloneConfig(raw) ? 'standalone' : 'managed'
+  return serviceConfiguration(raw).service === 'standalone' ? 'standalone' : 'managed'
 }
 
-/**
- * Validate manager-owned profile options. These keys are additive: an existing
- * Standalone profile keeps resolving through resolveConfig unchanged.
- */
-export function resolveManagerConfig(raw = {}, options = {}) {
+/** Validate the profile-owned managed connection parameters. */
+export function resolveManagerConfig(raw = {}) {
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
   }
   const selection = serviceConfiguration(raw)
-  const stateRoot = pick(raw, ['state_root', 'state_dir'], join(homedir(), '.whalerein', 'dsh'))
+  const stateRoot = pick(raw, ['state_root'], join(homedir(), '.whalerein', 'dsh'))
   if (typeof stateRoot !== 'string' || stateRoot.trim() === '' || stateRoot.includes('\0') || stateRoot.length > 4096) {
     throw new ConfigError('invalid_config', 'state_root must be a non-empty path')
-  }
-  const profileId = pick(raw, ['profile_id'], '')
-  if (typeof profileId !== 'string' || (profileId !== '' && (!/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(profileId)))) {
-    throw new ConfigError('invalid_config', 'profile_id must be an opaque profile identifier')
   }
   const issuerPublicKey = pick(raw, ['enrollment_issuer_public_key'], '')
   if (issuerPublicKey !== '' && (typeof issuerPublicKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(issuerPublicKey))) {
@@ -112,9 +83,6 @@ export function resolveManagerConfig(raw = {}, options = {}) {
     connectionMode: 'managed',
     adapter,
     stateRoot: stateRoot.trim(),
-    stateDir: stateRoot.trim(),
-    profileId,
-    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
     issuerPublicKey,
     expectedIssuer,
     pendingQueueEnabled: boolean(pick(raw, ['pending_queue_enabled'], true), true),
@@ -163,6 +131,7 @@ function derivedEndpoints(server, insecure, accessPort, mqttPort) {
  * @returns {object} resolved config.
  */
 export function resolveConfig(raw = {}) {
+  validateProfileKeys(raw)
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
@@ -222,13 +191,10 @@ export function resolveConfig(raw = {}) {
     throw new ConfigError('invalid_config', 'approval_mode must be claim or delegate')
   }
 
-  const mode = connectionMode(raw)
   const stateRoot = pick(raw, ['state_root', 'state_dir'], stateDir)
   return {
-    connectionMode: mode === 'auto' ? 'standalone' : mode,
+    connectionMode: 'standalone',
     stateRoot,
-    profileId: String(pick(raw, ['profile_id'], '') ?? ''),
-    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
     accessUrl: accessUrl || '',
     server,
     adminToken,

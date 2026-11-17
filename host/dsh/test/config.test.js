@@ -1,10 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
-  resolveConfig, resolveConnectionMode, resolveManagerConfig, hasStandaloneConfig,
+  resolveConfig, resolveConnectionMode, resolveManagerConfig,
   validateTopicId, topics, ConfigError,
 } from '../src/config.js'
 
@@ -205,60 +202,36 @@ test('every documented profile key materializes through the shipped Config schem
 })
 
 
-test('auto mode preserves existing manual profiles and selects managed only for a fresh profile', () => {
+test('service alone selects the connection mode; manual fields never change the default', () => {
   assert.equal(resolveConnectionMode({}), 'managed')
-  assert.equal(resolveConnectionMode({ host_id: 'host-1' }), 'managed')
-  assert.equal(hasStandaloneConfig({}), false)
-  assert.equal(resolveConnectionMode({ server: 'access.example' }), 'standalone')
-  assert.equal(resolveConnectionMode({ mqtt_url: 'mqtts://broker.example:8883' }), 'standalone')
-  assert.equal(resolveConnectionMode({ host_token: 'token' }), 'standalone')
-  assert.equal(resolveConnectionMode({ connection_mode: 'managed', server: 'access.example' }), 'managed')
-  assert.equal(resolveConnectionMode({ connection_mode: 'standalone' }), 'standalone')
-  assert.throws(() => resolveConnectionMode({ connection_mode: 'cloud' }), (error) => error.code === 'invalid_config')
+  for (const raw of [{ server: 'access.example' }, { mqtt_url: 'mqtts://broker.example' }, { host_token: 'token' }]) {
+    assert.equal(resolveConnectionMode(raw), 'managed')
+  }
+  assert.equal(resolveConnectionMode({ service: 'standalone' }), 'standalone')
+  assert.throws(() => resolveConnectionMode({ connection_mode: 'standalone' }), ConfigError)
 })
 
-test('managed options validate a state root, opaque selected profile and developer tools without connection secrets', () => {
+test('managed options validate only the profile-owned connection and runtime parameters', () => {
   const defaults = resolveManagerConfig({})
-  assert.equal(defaults.connectionMode, 'managed')
-  assert.equal(defaults.profileId, '')
-  assert.equal(defaults.developerToolsEnabled, false)
+  assert.equal(defaults.service, 'whalerein_cloud')
+  assert.equal(defaults.cloudEnvironment, 'production')
   assert.ok(defaults.stateRoot.endsWith('/.whalerein/dsh'))
-  const configured = resolveManagerConfig({
-    state_root: '/var/lib/whalerein',
-    profile_id: 'profile-1',
-    developer_tools_enabled: true,
-    adapter: 'fake',
-    log_level: 'debug',
-  })
+  const configured = resolveManagerConfig({ state_root: '/var/lib/whalerein', adapter: 'fake', log_level: 'debug' })
   assert.equal(configured.stateRoot, '/var/lib/whalerein')
-  assert.equal(configured.stateDir, '/var/lib/whalerein')
-  assert.equal(configured.profileId, 'profile-1')
-  assert.equal(configured.developerToolsEnabled, true)
   assert.equal(configured.adapter, 'fake')
   assert.equal(configured.logLevel, 'debug')
   assert.throws(() => resolveManagerConfig({ state_root: 'bad\0path' }), ConfigError)
-  assert.equal(resolveManagerConfig({ state_root: '' }).stateRoot, resolveManagerConfig({}).stateRoot)
-  assert.throws(() => resolveManagerConfig({ profile_id: 'bad id' }), ConfigError)
-  assert.throws(() => resolveManagerConfig({ profile_id: 'a'.repeat(129) }), ConfigError)
   assert.throws(() => resolveManagerConfig({ adapter: 'cloud' }), ConfigError)
-  assert.throws(() => resolveManagerConfig({ developer_tools_enabled: 'maybe' }), ConfigError)
+  assert.equal(resolveManagerConfig({ state_root: '' }).stateRoot, defaults.stateRoot)
   assert.equal(resolveManagerConfig({ state_root: '  /tmp/state  ' }).stateRoot, '/tmp/state')
-  assert.equal(resolveManagerConfig({ state_dir: '/tmp/legacy-state' }).stateRoot, '/tmp/legacy-state')
 })
 
-test('standalone configuration carries the additive manager options without changing existing values', () => {
-  const config = resolveConfig({
-    ...base,
-    state_root: '/tmp/root',
-    profile_id: 'profile-1',
-    developer_tools_enabled: true,
-  })
+test('Standalone resolves its parameters without a separate profile selector', () => {
+  const config = resolveConfig({ ...base, service: 'standalone', state_root: '/tmp/root' })
   assert.equal(config.connectionMode, 'standalone')
   assert.equal(config.stateRoot, '/tmp/root')
-  assert.equal(config.profileId, 'profile-1')
-  assert.equal(config.developerToolsEnabled, true)
-  assert.equal(resolveConfig(base).connectionMode, 'standalone')
-  assert.equal(resolveConfig(base).developerToolsEnabled, false)
+  assert.equal('profileId' in config, false)
+  assert.equal('developerToolsEnabled' in config, false)
 })
 
 test('the managed config accepts one pinned issuer key and issuer origin', () => {

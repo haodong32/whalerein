@@ -149,10 +149,10 @@ its manual connection fields. See the [configuration contract](../../host/dsh/RE
 
 `src/service-config.js` validates these values and constructs an immutable
 in-memory snapshot for the shared Host resolver and packaged official catalog.
-It does not load a TOML file during normal operation. A one-time legacy import
-can read an explicit old file, then commits the canonical selection into the DSH
-profile. Mixed old/new selectors fail closed. Core/CLI file configuration and the
-shared environment catalog contract are unchanged.
+It never reads a TOML file, infers configuration from the identity registry or
+rewrites old settings. Removed selectors are rejected; the plugin accepts only
+the new connection selection contract. Core/CLI file configuration and the shared
+environment catalog contract are unchanged.
 
 The Host manager accepts read-only profile-owned snapshots. It never refreshes
 these from disk or accepts configuration/profile switching mutations in this

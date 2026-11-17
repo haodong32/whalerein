@@ -4,9 +4,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { startHarness } from './support/harness.js'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { EMPTY_SETTINGS_STATUS, settingsStatus, WhaleReinSettingsService } from '../src/settings.js'
 
 test('when settings status is requested, it returns the host pairing code and paired device summaries', async () => {
@@ -292,9 +289,9 @@ test('a managed manager snapshot is allowlisted and never exposes secrets, host 
   assert.equal(snapshot.connected, true)
   assert.equal(snapshot.error.code, 'temporarily_unavailable')
   assert.equal(snapshot.approvalUrl, 'https://app.example/approve/request-1')
-  assert.deepEqual(snapshot.profiles, [{
-    id: 'profile-opaque', label: 'Staging', environment: 'staging', active: true, managed: true, capabilities: ['switching'],
-  }])
+  assert.equal('profiles' in snapshot, false)
+  assert.equal('stagingEnabled' in snapshot, false)
+  assert.equal('developerToolsEnabled' in snapshot, false)
   assert.deepEqual(snapshot.capabilities, ['pairing', 'removal'])
   const serialized = JSON.stringify(snapshot)
   for (const secret of ['host-private', 'private.example', 'poll-secret', 'auth-secret', 'key-secret', 'private detail', 'bad id']) {
@@ -319,7 +316,7 @@ test('invalid or hostile manager values fail closed without leaking them', () =>
   assert.equal(snapshot.environment, 'custom')
   assert.equal(snapshot.approvalUrl, '')
   assert.deepEqual(snapshot.error, { code: 'internal' })
-  assert.deepEqual(snapshot.profiles, [])
+  assert.equal('profiles' in snapshot, false)
   assert.deepEqual(snapshot.capabilities, [])
   const details = sanitizeManagerDetails({
     state: 'connected', environment: 'production', accessOrigin: 'https://access.example',
@@ -404,4 +401,27 @@ test('an unsafe removal URL never crosses the settings RPC boundary', async () =
   assert.equal(result.action, null)
   assert.equal(JSON.stringify(result).includes('javascript:'), false)
   await ctx.fiber.dispose()
+})
+
+test('retained lifecycle RPCs forward exactly once and return only sanitized results', async () => {
+  const ctx = new Context()
+  const calls = []
+  const manager = { snapshot: () => ({ state: 'connected', environment: 'production', connected: true }) }
+  for (const method of ['startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'remove']) {
+    manager[method] = (...args) => {
+      calls.push([method, ...args])
+      return { url: 'https://app.example/manage', privateKey: 'must-not-be-returned' }
+    }
+  }
+  const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
+  try {
+    for (const method of ['startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'removeComputer']) {
+      const result = await service[method]()
+      assert.equal(result.managed, true)
+      assert.equal(result.connected, true)
+      assert.equal(result.action.url, 'https://app.example/manage')
+      assert.equal('privateKey' in result.action, false)
+    }
+    assert.deepEqual(calls, [['startConnect'], ['cancel'], ['retry'], ['disconnect'], ['reconnect'], ['remove']])
+  } finally { await ctx.fiber.dispose() }
 })

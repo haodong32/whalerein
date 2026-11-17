@@ -138,9 +138,7 @@ let channelQueueBarrier = null
           if (method === 'connection-settings') {
             const row = ctx.settings.describe({redactSecrets: true}).find((value) => value.ns === 'whalerein-dsh')
             const service = row?.user?.service
-            const legacy = ['environment', 'config_file', 'connection_mode', 'profile_id', 'developer_tools_enabled']
-            return {service: ['whalerein_cloud', 'custom', 'standalone'].includes(service) ? service : null,
-              legacySelectors: legacy.filter((key) => row?.user?.[key] && row.user[key] !== 'auto')}
+            return {service: ['whalerein_cloud', 'custom', 'standalone'].includes(service) ? service : null}
           }
           if (method === 'ready') {
             const status = ctx.get('whalereinSettings')?.snapshot()

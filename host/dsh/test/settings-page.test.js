@@ -1894,16 +1894,27 @@ test('service form adopts the asynchronously loaded profile revision before the 
   } finally { await runtime.dispose() }
 })
 
-test('service editor repairs legacy selectors in the same atomic profile write', async () => {
+
+test('disconnect stays a local pause and removal remains gated throughout its lifecycle', async () => {
   const runtime = await createManagedRuntime()
   try {
-    runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), value: { service: '', environment: 'staging', config_file: '/old.toml', connection_mode: 'managed', profile_id: 'old', developer_tools_enabled: true }, base: { connection_mode: 'managed' } })
-    await managedButton(runtime, '保存连接配置').props.onClick()
-    const ops = runtime.mutations.at(-1).ops
-    assert.ok(ops.some((op) => op.path[0] === 'cloud_environment' && op.value === 'staging'))
-    assert.ok(ops.some((op) => op.path[0] === 'config_file' && op.op === 'unset'))
-    assert.ok(ops.some((op) => op.path[0] === 'connection_mode' && op.op === 'set' && op.value === ''))
-    assert.ok(ops.some((op) => op.path[0] === 'profile_id' && op.op === 'unset'))
-    assert.ok(ops.some((op) => op.path[0] === 'developer_tools_enabled' && op.op === 'unset'))
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.match(text(tree), /断开连接只会在本地暂停这台电脑/)
+    assert.match(text(tree), /移除这台电脑需要新的浏览器授权/)
+    await findAll(tree, (node) => node.type === UI.Button && text(node) === '断开连接')[0].props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.map(([method]) => method), ['disconnect'])
+    runtime.setCloudState('disconnected', { connected: false })
+    await runtime.refresh()
+    assert.ok(managedButton(runtime, '连接到 WhaleRein Cloud') || managedButton(runtime, '重试'))
+    for (const state of ['removing', 'removed']) {
+      runtime.setCloudState(state, { connected: false })
+      await runtime.refresh()
+      assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    }
+    assert.match(text(runtime.render()), /重新添加这台电脑需要新的浏览器授权/)
+    assert.equal(runtime.calls.some(([method]) => method === 'removeComputer'), false)
   } finally { await runtime.dispose() }
 })

@@ -1,12 +1,11 @@
 import { HostRuntime } from 'whalerein-host'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin, { name, inject, Config, apply, configFailure, createHost, createManagedHost } from '../index.js'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { createConnectionManager } from 'whalerein-host/manager.js'
 import { ConfigError } from '../src/config.js'
 
 test('when a profile has a host ID, apply preserves it; otherwise it generates one', async () => {
@@ -79,6 +78,7 @@ test('when plugin configuration is invalid, apply logs a safe configuration erro
   process.stderr.write = (chunk) => { written += String(chunk); return true }
   try {
     const result = apply({}, {
+      service: 'standalone',
       mqtt_url: 'not-a-url-with-private-input',
       host_id: 'host-apply',
       host_token: 'test-token',
@@ -96,8 +96,6 @@ test('when plugin configuration is invalid, apply logs a safe configuration erro
 
 test('when apply runs, it starts the host in a Cordis effect and disposes it on unload', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-apply-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   try {
     const disposers = []
     const ctx = {
@@ -109,6 +107,7 @@ test('when apply runs, it starts the host in a Cordis effect and disposes it on 
     }
     const host = apply(ctx, {
       adapter: 'fake',
+      service: 'standalone',
       mqtt_url: 'mqtts://127.0.0.1:1',
       host_id: 'host-apply',
       host_token: 'token',
@@ -128,11 +127,10 @@ test('when apply runs, it starts the host in a Cordis effect and disposes it on 
 
 test('when createHost receives valid configuration, it resolves it; invalid input is rejected', () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-create-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   try {
     const host = createHost({
       adapter: 'fake',
+      service: 'standalone',
       mqtt_url: 'mqtts://broker.test',
       host_id: 'host-1',
       host_token: 'token',
@@ -167,13 +165,13 @@ test('configuration helpers tolerate schemastery getters, plain errors and faili
   const original = process.stderr.write.bind(process.stderr)
   process.stderr.write = () => { throw new Error('closed stderr') }
   try {
-    assert.equal(apply({}, { mqtt_url: 'bad', host_id: 'host-apply', host_token: 't' }), undefined)
+    assert.equal(apply({}, { service: 'standalone', mqtt_url: 'bad', host_id: 'host-apply', host_token: 't' }), undefined)
   } finally {
     process.stderr.write = original
   }
   const directory = mkdtempSync(join(tmpdir(), 'whalerein-no-fiber-'))
   try {
-    const generated = apply({ emit() {} }, { adapter: 'fake', mqtt_url: 'mqtts://127.0.0.1:1', host_token: 'token', state_dir: directory, host_id: '' })
+    const generated = apply({ emit() {} }, { service: 'standalone', adapter: 'fake', mqtt_url: 'mqtts://127.0.0.1:1', host_token: 'token', state_dir: directory, host_id: '' })
     assert.match(generated.config.hostId, /^[a-z0-9_.:-]+-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
   } finally {
     rmSync(directory, { recursive: true, force: true })
@@ -193,8 +191,6 @@ test('documented values wrapped by schemastery are materialized through the same
 
 test('managed hosting constructs the connection manager with profile-scoped credentials and manager options', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   try {
     const calls = []
     const manager = {
@@ -203,8 +199,7 @@ test('managed hosting constructs the connection manager with profile-scoped cred
     }
     const credentials = { name: 'credential-adapter' }
     const host = await createManagedHost({
-      state_root: dir, config_file: configFile,
-      developer_tools_enabled: true,
+      state_root: dir,
     }, {
       ctx: { credentials: {} },
       credentials,
@@ -221,8 +216,6 @@ test('managed hosting constructs the connection manager with profile-scoped cred
     assert.equal(calls[0][0], 'create')
     assert.equal(calls[0][1].stateRoot, dir)
     assert.equal(calls[0][1].credentials, credentials)
-    assert.equal(calls[0][1].selectedProfile, '')
-    assert.equal(calls[0][1].developerToolsEnabled, false)
     assert.equal(calls[0][1].ctx.credentials.name, undefined)
     assert.equal(host.started, true)
     await host.stop()
@@ -237,18 +230,16 @@ test('managed hosting constructs the connection manager with profile-scoped cred
 
 test('a managed manager contract failure is closed and reported without exposing internals', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-bad-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   try {
-    await assert.rejects(createManagedHost({ state_root: dir, config_file: configFile }, {
+    await assert.rejects(createManagedHost({ state_root: dir }, {
       ctx: {},
       managerFactory: async () => ({ snapshot: 'not-a-function' }),
     }), (error) => error.code === 'manager_unavailable')
-    await assert.rejects(createManagedHost({ state_root: dir, config_file: configFile }, {
+    await assert.rejects(createManagedHost({ state_root: dir }, {
       ctx: {},
       managerFactory: async () => { throw Object.assign(new Error('private manager detail'), { code: 'manager_unavailable' }) },
     }), (error) => error.code === 'manager_unavailable' && !error.message.includes('private'))
-    await assert.rejects(createManagedHost({ state_root: dir, config_file: configFile }, {
+    await assert.rejects(createManagedHost({ state_root: dir }, {
       ctx: {},
       managerFactory: async () => ({
         snapshot: () => ({ state: 'idle' }),
@@ -262,8 +253,6 @@ test('a managed manager contract failure is closed and reported without exposing
 
 test('apply on a fresh managed profile registers settings and disposes the manager with the plugin effect', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-apply-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   const root = new Context()
   let disposed = 0
   class TypertGateway extends Service {
@@ -279,7 +268,7 @@ test('apply on a fresh managed profile registers settings and disposes the manag
       async dispose() { disposed += 1 },
     }
     const host = await apply(root, {
-      state_root: dir, config_file: configFile,
+      state_root: dir,
     }, { managerFactory: async () => manager })
     assert.equal(host.managed, true)
     assert.equal(existsSync(join(dir, 'host-id')), false, 'a managed install does not generate a visible Host ID')
@@ -295,8 +284,6 @@ test('apply on a fresh managed profile registers settings and disposes the manag
 
 test('apply keeps the settings surface available when the runtime manager cannot be constructed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-missing-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   const root = new Context()
   const original = process.stderr.write.bind(process.stderr)
   let written = ''
@@ -306,7 +293,7 @@ test('apply keeps the settings surface available when the runtime manager cannot
   }
   try {
     await root.plugin({ name: 'fixtures', apply(ctx) { new TypertGateway(ctx) } })
-    const result = await apply(root, { state_root: dir, config_file: configFile }, {
+    const result = await apply(root, { state_root: dir }, {
       managerFactory: async () => { throw Object.assign(new Error('private module path'), { code: 'manager_unavailable' }) },
     })
     assert.equal(result, undefined)
@@ -327,8 +314,6 @@ test('apply keeps the settings surface available when the runtime manager cannot
 
 test('a pinned issuer key becomes the manager authorization verifier', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-verifier-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
   try {
     const { generateKeyPairSync, sign } = await import('node:crypto')
     const pair = generateKeyPairSync('ed25519')
@@ -337,7 +322,7 @@ test('a pinned issuer key becomes the manager authorization verifier', async () 
     const signature = sign(null, Buffer.from(canonical), pair.privateKey).toString('base64url')
     let captured
     const host = await createManagedHost({
-      state_root: dir, config_file: configFile,
+      state_root: dir,
       enrollment_issuer_public_key: publicKey,
       enrollment_issuer: 'https://issuer.example',
     }, {

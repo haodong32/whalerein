@@ -31,9 +31,9 @@ if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || ((10#$PORT < 1 || 10#$PORT > 65535)); then
 fi
 PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/$PROFILE"
 PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
-STATE_DIR="${WHALEREIN_STATE_DIR:-${WHALEREIN_DATA_DIR:-$ROOT/.data}/dsh/$PROFILE}"
+STATE_ROOT="${WHALEREIN_STATE_ROOT:-${WHALEREIN_DATA_DIR:-$ROOT/.data}/dsh/$PROFILE}"
 # Validate and render before installation or profile mutations.
-PREVIEW="$(python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PATCH_FILE" "$STATE_DIR" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --print)"
+PREVIEW="$(python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PATCH_FILE" "$STATE_ROOT" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --print)"
 if [[ "$DRY_RUN" == 1 ]]; then
   printf '%s\n' "$PREVIEW"
   echo "# dsh --profile $PROFILE --port $PORT --no-open"
@@ -63,7 +63,7 @@ if 'whalerein-dsh' not in bundles:
     bundles.append('whalerein-dsh')
     path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 PY
-python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PATCH_FILE" "$STATE_DIR" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"}
+python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PATCH_FILE" "$STATE_ROOT" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"}
 echo "DSH profile: $PROFILE"
 echo "Connection configuration: $PATCH_FILE"
 echo 'Press Ctrl-C to stop.'

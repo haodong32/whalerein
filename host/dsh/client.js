@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
       configurationInvalidReason: ' ({reason})',
       externalChange: 'Settings changed in another window. Your unsaved draft is kept.',
       loadSaved: 'Load saved values',
-      errorServerRequired: 'Enter a server address. Removing it requires a saved legacy MQTT URL.',
+      errorServerRequired: 'Enter a server address. Removing it requires a saved explicit MQTT URL.',
       errorServerInvalid: 'Use a host name or IPv4 address without a scheme or port.',
       errorPortInvalid: 'Use a whole number between 1 and 65535.',
       errorHostIdInvalid: 'Use 1-128 letters, digits, dots, colons, underscores or hyphens.',
@@ -823,13 +823,13 @@ window.__ModuleLoader__.load({
           copyFeedback ? h('p', { style: copyFeedback === 'uriCopied' ? styles.success : styles.error, role: 'status' }, t(copyFeedback)) : null) : null)
     }
 
-    function draftErrors(draft, { storedServer, legacyMqttUrl }) {
+    function draftErrors(draft, { storedServer, explicitMqttUrl }) {
       const errors = {}
       const server = String(draft.server ?? '').trim()
       if (server) {
         if (!/^[A-Za-z0-9.-]{1,253}$/.test(server) || server.startsWith('.') || server.startsWith('-') ||
             server.endsWith('.') || server.endsWith('-') || server.includes('..')) errors.server = 'errorServerInvalid'
-      } else if (storedServer && !legacyMqttUrl) {
+      } else if (storedServer && !explicitMqttUrl) {
         errors.server = 'errorServerRequired'
       }
       for (const key of ['access_port', 'mqtt_port']) {
@@ -852,7 +852,7 @@ window.__ModuleLoader__.load({
       return true
     }
 
-    function LegacySettingsPage({ t, form, status, developerTools, locale, invite, revoke, secrets, testConnection }) {
+    function StandaloneSettingsPage({ t, form, status, developerTools, locale, invite, revoke, secrets, testConnection }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => form.getSnapshot())
       const [draft, setDraft] = React.useState(() => initialDraft(snapshot.value))
@@ -1045,8 +1045,8 @@ window.__ModuleLoader__.load({
       const save = async () => {
         if (!snapshot.writable || testing || saving) return
         const storedServer = String(snapshot.user?.server ?? snapshot.base?.server ?? snapshot.value?.server ?? '').trim()
-        const legacyMqttUrl = String(snapshot.user?.mqtt_url ?? snapshot.base?.mqtt_url ?? '').trim()
-        const validation = draftErrors(draft, { storedServer, legacyMqttUrl })
+        const explicitMqttUrl = String(snapshot.user?.mqtt_url ?? snapshot.base?.mqtt_url ?? '').trim()
+        const validation = draftErrors(draft, { storedServer, explicitMqttUrl })
         if (Object.keys(validation).length) {
           setFieldErrors(validation)
           setError('')
@@ -1074,7 +1074,7 @@ window.__ModuleLoader__.load({
             ops.push(draft[key] === '' ? { op: 'unset', path: [key] } : { op: 'set', path: [key], value: draft[key] })
           }
           if (String(draft.server ?? '').trim() !== '') {
-            // Saved server settings always clear legacy explicit endpoints.
+            // Saved server settings always clear explicit endpoint fields.
             ops.push({ op: 'unset', path: ['mqtt_url'] }, { op: 'unset', path: ['access_url'] })
           }
           let okay
@@ -1353,8 +1353,7 @@ window.__ModuleLoader__.load({
       const stateHint = errorHintKey(snapshot.error?.code) || `stateHint_${state}`
       const transitional = TRANSITIONAL_STATES.has(state)
       const pending = snapshot.pendingOperation === true
-      const activeProfile = (snapshot.profiles ?? []).find((profile) => profile.active === true)
-      const isStaging = snapshot.environment === 'staging' || activeProfile?.environment === 'staging'
+      const isStaging = snapshot.environment === 'staging'
       const activeLocale = localeService?.getSnapshot?.().active
       const approvalUrl = localeApprovalUrl(approvalLink || snapshot.approvalUrl, activeLocale)
       const showConnect = ['idle', 'disconnected'].includes(state)
@@ -1608,16 +1607,6 @@ window.__ModuleLoader__.load({
             if (custom.tls.ca_provider === 'file') custom.tls.ca_file = draft.custom.tls.ca_file
             ops.push({ op: 'set', path: ['custom'], value: custom })
           }
-          for (const key of ['environment', 'config_file', 'connection_mode', 'profile_id', 'developer_tools_enabled']) {
-            const value = snapshot.value?.[key]
-            if (!value || value === 'auto') continue
-            if (key === 'environment' && !snapshot.value?.cloud_environment && ['production', 'staging', 'local'].includes(value)) {
-              ops.push({ op: 'set', path: ['cloud_environment'], value })
-            }
-            ops.push(snapshot.base?.[key] && snapshot.base[key] !== 'auto'
-              ? { op: 'set', path: [key], value: key === 'developer_tools_enabled' ? false : '' }
-              : { op: 'unset', path: [key] })
-          }
           const okay = await form.mutate(ops, baseRevision.current)
           if (okay) {
             dirty.current = false
@@ -1687,7 +1676,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'whalerein-settings', style: styles.page },
         h('h2', { style: styles.title }, (props.t ?? ((key) => key))('title')),
         h(ServiceSettings, props),
-        managed ? h(ManagedSettingsPage, props) : h(LegacySettingsPage, props))
+        managed ? h(ManagedSettingsPage, props) : h(StandaloneSettingsPage, props))
     }
 
     function createSecretPresence(remote) {
@@ -1735,22 +1724,10 @@ window.__ModuleLoader__.load({
         profileId: text(value.profileId, 128),
         label: text(value.label, 64),
         hostName: text(value.hostName, 64),
-        stagingEnabled: value.stagingEnabled === true,
-        developerToolsEnabled: value.developerToolsEnabled === true,
         approvalUrl: safeApprovalUrl(value.approvalUrl),
         error: value.error && typeof value.error === 'object' ? { code: text(value.error.code, 64) } : null,
         pendingOperation: value.pendingOperation === true,
-        profiles: Array.isArray(value.profiles) ? value.profiles.slice(0, 32) : [],
         capabilities: Array.isArray(value.capabilities) ? value.capabilities.slice(0, 8) : [],
-        configuration: value.configuration && typeof value.configuration === 'object'
-          ? {
-              sourceKind: text(value.configuration.sourceKind, 16),
-              selectedEnvironment: text(value.configuration.selectedEnvironment, 64),
-              desiredDefault: text(value.configuration.desiredDefault, 64),
-              definitionSource: text(value.configuration.definitionSource, 16),
-              selectionSource: text(value.configuration.selectionSource, 16),
-            }
-          : null,
       }
     }
 

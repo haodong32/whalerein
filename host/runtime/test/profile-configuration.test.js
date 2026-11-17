@@ -53,7 +53,7 @@ test('invalid profile resolution cannot initialize or reconnect the old authorit
   assert.equal(calls, 0)
 })
 
-test('profile authority matching preserves imported custom identities and scopes their trust to the profile snapshot', async (t) => {
+test('profile authority matching reuses identical definitions and isolates changed authority', async (t) => {
   const options = fixture(t)
   function configuration(name, api = 'https://app.example') {
     const document = emptyConfiguration()
@@ -64,13 +64,13 @@ test('profile authority matching preserves imported custom identities and scopes
     }
     return { ...options.configSnapshot, document }
   }
-  const first = await manager(t, { ...options, environment: 'old-company', configSnapshot: configuration('old-company') })
+  const first = await manager(t, { ...options, environment: 'company', configSnapshot: configuration('company') })
   const identity = first.snapshot().profileId
   await first.dispose()
-  const imported = await manager(t, { ...options, environment: 'profile-company', configSnapshot: configuration('profile-company') })
-  assert.equal(imported.snapshot().profileId, identity)
-  assert.equal(imported.environmentTrust().environment, 'profile-company')
-  await imported.dispose()
+  const reopened = await manager(t, { ...options, environment: 'company', configSnapshot: configuration('company') })
+  assert.equal(reopened.snapshot().profileId, identity)
+  assert.equal(reopened.environmentTrust().environment, 'company')
+  await reopened.dispose()
   const other = await manager(t, { ...options, environment: 'other-company', configSnapshot: configuration('other-company', 'https://other.example') })
   assert.notEqual(other.snapshot().profileId, identity)
 })

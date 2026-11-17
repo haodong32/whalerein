@@ -70,7 +70,8 @@ saved values. Ordinary starts preserve the entry.
 | `service` | `whalerein_cloud` | `whalerein_cloud`, `custom`, or `standalone` |
 | `cloud_environment` | `production` | Internal-only `production`, `staging`, or `local`; hidden from the normal settings form |
 | `custom` | absent | Custom account-service definition, described below |
-| `state_root` | `~/.whalerein/dsh` | Existing Host registry and per-identity state root; `state_dir` is a legacy alias |
+| `state_root` | `~/.whalerein/dsh` | Existing Host registry and per-identity state root; `state_dir` independently selects the Standalone SQLite directory |
+| `state_dir` | `state_root` | Standalone SQLite directory |
 | `adapter` | `auto` | Real DSH inside the plugin; `real` and `fake` are also supported |
 | `log_level` | `info` | Runtime logging level |
 | `pending_queue_enabled` | `true` | Advertise supported native pending-queue operations |
@@ -111,22 +112,18 @@ not entered in the custom block. Changing authority selects an isolated identity
 changing a label reuses the identity.
 
 `service: standalone` uses the existing manual fields: `server`, `access_port`,
-`mqtt_port`, `host_id`, `host_token`, `admin_token`, `ca_file`, and, for legacy
-profiles without `server`, `access_url`/`mqtt_url`. Host IDs are generated once
+`mqtt_port`, `host_id`, `host_token`, `admin_token`, `ca_file`, and, for explicit
+connections without `server`, `access_url`/`mqtt_url`. Host IDs are generated once
 when missing. Tokens remain write-only in the UI. Profile `!!js process.env`
 expressions require the operator to export those variables; the launcher injects
 no development token defaults. `allow_insecure_mqtt` is only for explicit local
 plaintext development. Existing runtime tuning keys remain supported.
 
-Legacy entries are migrated once through DSH's profile commit mechanism before
-startup. An explicit old `config_file` is imported read-only into the profile;
-subsequent file edits have no effect. Existing identity selection and state paths
-are preserved. Incomplete custom authority cannot be inferred: migration fails
-closed so the settings can be corrected. New `service` settings combined with
-non-default legacy selectors (`environment`, `config_file`, `connection_mode`,
-`profile_id`, `developer_tools_enabled`) are rejected rather than prioritized.
-Back up the profile before upgrading; older plugin versions do not understand the
-new selection contract. Shared CLI/Core TOML behavior is unchanged.
+The configuration contract is a hard cut. Removed selectors (`environment`,
+`config_file`, `connection_mode`, `profile_id`, `developer_tools_enabled`) are
+unsupported and rejected. There is no TOML import, registry-based configuration
+inference, startup rewrite or editor repair of old settings. Configure the new
+fields explicitly. Shared CLI/Core TOML behavior is unchanged.
 
 ## Run real DSH
 
@@ -148,8 +145,7 @@ Fresh profiles use Cloud production and a profile-specific state directory under
 `--cloud-environment` updates only that scalar; it never rewrites custom fields,
 secrets or sibling entries, and does not change a selected custom/Standalone
 service. Dry-run validates and prints only non-secret connection scalars, with no
-filesystem writes. Legacy selectors must be migrated by an ordinary startup
-before an explicit launcher override. The normal `web` profile is untouched. The launcher does not
+filesystem writes. The normal `web` profile is untouched. The launcher does not
 start Access, PostgreSQL or Mosquitto.
 
 ## Settings page

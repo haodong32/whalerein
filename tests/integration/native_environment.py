@@ -256,6 +256,7 @@ class NativeScenario(Scenario):
             self.native.close()
             self._boot()
             config = {
+                "service": "standalone",
                 "server": "127.0.0.1",
                 "access_port": "18080",
                 "mqtt_port": "1883",

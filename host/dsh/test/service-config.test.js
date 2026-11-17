@@ -1,12 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { serviceConfiguration, customConfiguration, migrateServiceConfig } from '../src/service-config.js'
+import { serviceConfiguration, customConfiguration } from '../src/service-config.js'
 import { resolveManagerConfig, resolveConnectionMode } from '../src/config.js'
 import { createManagedHost, apply } from '../index.js'
-import { HostProfileRegistry } from 'whalerein-host/registry.js'
 import { settingsStatus, WhaleReinSettingsService } from '../src/settings.js'
 import { Context } from '@deepseek-ai/cordis'
 
@@ -73,7 +72,7 @@ test('profile config ignores WHALEREIN_CONFIG and never creates a shared file', 
   assert.equal(calls[0].profileConfiguration, true)
   assert.equal(readFileSync(shared, 'utf8'), 'invalid TOML')
   assert.deepEqual(readdirSync(state), ['shared.toml'])
-  assert.equal(settingsStatus(host).configuration, null)
+  assert.equal('configuration' in settingsStatus(host), false)
   await host.stop()
 })
 
@@ -113,55 +112,15 @@ test('custom profile selection isolates changed authority and reuses it on retur
   assert.equal(await open({ ...custom, label: 'Renamed' }), first)
 })
 
-test('legacy migration writes the full selection once and stops if the profile write fails', (t) => {
-  const state = directory(t)
-  const commits = []
-  const ctx = { fiber: {}, emit: (...args) => commits.push(args) }
-  const next = migrateServiceConfig({ state_root: state, environment: 'staging', connection_mode: 'managed' }, ctx)
-  assert.equal(next.service, 'whalerein_cloud')
-  assert.equal(next.cloud_environment, 'staging')
-  assert.equal('environment' in next, false)
-  assert.equal('connection_mode' in next, false)
-  assert.equal(commits.length, 1)
-  assert.equal(migrateServiceConfig(next, ctx), next)
-  assert.equal(commits.length, 1)
-  assert.throws(() => migrateServiceConfig({ state_root: state }, { fiber: {}, emit() { throw new Error('write failed') } }), /write failed/)
-  assert.equal(migrateServiceConfig({ state_root: state, host_token: 'not-logged' }).service, 'standalone')
-})
-
-test('legacy migration imports an explicit TOML once and preserves its custom authority', (t) => {
-  const state = directory(t)
-  const file = join(state, 'legacy.toml')
-  const content = 'version = 1\nenvironment = "company"\n[environments.company]\nmode = "account"\napi_origin = "https://app.example"\nissuer = "https://auth.example/oidc"\nnative_client_id = "whalerein-cli"\n'
-  writeFileSync(file, content)
-  const next = migrateServiceConfig({ state_root: state, config_file: file })
-  assert.equal(next.service, 'custom')
-  assert.equal(next.custom.api_origin, custom.api_origin)
-  assert.equal('config_file' in next, false)
-  assert.equal(readFileSync(file, 'utf8'), content)
-  writeFileSync(file, 'invalid')
-  assert.equal(resolveManagerConfig(next).service, 'custom')
-  invalid(() => migrateServiceConfig({ state_root: state, config_file: file }))
-})
-
-test('legacy registry selection is imported without changing identity and bad selected IDs fail closed', (t) => {
-  const state = directory(t)
-  const registry = new HostProfileRegistry({ stateRoot: state })
-  registry.ensure()
-  const next = migrateServiceConfig({ state_root: state })
-  assert.equal(next.cloud_environment, 'production')
-  invalid(() => migrateServiceConfig({ state_root: state, profile_id: 'missing' }))
-})
-
 test('DSH snapshot exposes no internal environment list or second configuration writer', async () => {
   const ctx = new Context()
-  const host = { managed: true, profileConfigured: true, manager: { snapshot: () => ({ state: 'idle', environment: 'staging', profiles: [{ id: 'internal', environment: 'local' }], stagingEnabled: true, developerToolsEnabled: true, capabilities: ['switching', 'custom-service', 'staging', 'removal'] }) } }
+  const host = { managed: true, manager: { snapshot: () => ({ state: 'idle', environment: 'staging', profiles: [{ id: 'internal', environment: 'local' }], stagingEnabled: true, developerToolsEnabled: true, capabilities: ['switching', 'custom-service', 'staging', 'removal'] }) } }
   const service = new WhaleReinSettingsService(ctx, host)
   const snapshot = service.snapshot()
-  assert.deepEqual(snapshot.profiles, [])
-  assert.equal(snapshot.stagingEnabled, false)
-  assert.equal(snapshot.developerToolsEnabled, false)
-  assert.equal(snapshot.configuration, null)
+  assert.equal('profiles' in snapshot, false)
+  assert.equal('stagingEnabled' in snapshot, false)
+  assert.equal('developerToolsEnabled' in snapshot, false)
+  assert.equal('configuration' in snapshot, false)
   assert.deepEqual(snapshot.capabilities, ['removal'])
   for (const method of ['switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile', 'saveDefaultEnvironment', 'applyEnvironment']) assert.equal(service[method], undefined)
   await ctx.fiber.dispose()
@@ -208,31 +167,6 @@ test('browser connection provenance cannot replace the native source adapter', a
   await ctx.fiber.dispose()
 })
 
-test('legacy custom migration imports its explicit definition even when the registry has an older descriptor', (t) => {
-  const state = directory(t)
-  const registry = new HostProfileRegistry({ stateRoot: state })
-  registry.ensure()
-  const record = registry.addProfile({ label: 'Old custom', environment: 'company', service: { id: 'old-company', environment: 'custom', label: 'Old custom', apiOrigin: 'https://app.example' } })
-  registry.prepareActivation(record.id, registry.read().revision)
-  registry.commitActivation(record.id, registry.read().revision)
-  const file = join(state, 'legacy.toml')
-  writeFileSync(file, 'version = 1\nenvironment = "company"\n[environments.company]\nmode = "account"\napi_origin = "https://app.example"\nissuer = "https://auth.example/oidc"\nnative_client_id = "whalerein-cli"\n')
-  const next = migrateServiceConfig({ state_root: state, config_file: file })
-  assert.equal(next.service, 'custom')
-  assert.equal(next.cloud_environment, 'production')
-  assert.equal(next.custom.issuer, custom.issuer)
-  invalid(() => migrateServiceConfig({ state_root: state }))
-  assert.equal(migrateServiceConfig({ state_root: state, connection_mode: 'standalone', config_file: '/missing/unused.toml' }).service, 'standalone')
-})
-
-test('legacy file trust is imported relative to the resolved configuration file', (t) => {
-  const state = directory(t)
-  const file = join(state, 'legacy.toml')
-  writeFileSync(file, 'version = 1\nenvironment = "company"\n[environments.company]\nmode = "account"\napi_origin = "https://app.example"\nissuer = "https://auth.example/oidc"\nnative_client_id = "client"\n[environments.company.tls]\nca_provider = "file"\nca_file = "root-ca.pem"\n')
-  const next = migrateServiceConfig({ state_root: state, config_file: file })
-  assert.equal(next.custom.tls.ca_file, join(realpathSync(state), 'root-ca.pem'))
-})
-
 test('Standalone generated identity follows state_root when the legacy state_dir is empty', async (t) => {
   const { withHostId } = await import('../index.js')
   const first = directory(t)
@@ -242,4 +176,15 @@ test('Standalone generated identity follows state_root when the legacy state_dir
   assert.equal(readFileSync(join(first, 'host-id'), 'utf8').trim(), one)
   assert.equal(readFileSync(join(second, 'host-id'), 'utf8').trim(), two)
   assert.equal(withHostId(null, { state_root: first }).host_id, one)
+})
+
+test('removed selectors are rejected before materialization, with no implicit mode inference', async () => {
+  const { Config, materializeConfig } = await import('../index.js')
+  for (const key of ['environment', 'config_file', 'connection_mode', 'profile_id', 'developer_tools_enabled']) {
+    assert.equal(Object.hasOwn(Config.dict, key), false)
+    invalid(() => materializeConfig({ [key]: '' }))
+    invalid(() => serviceConfiguration({ [key]: '' }))
+  }
+  assert.equal(serviceConfiguration({ server: 'access.example', host_token: 'unused' }).service, 'whalerein_cloud')
+  assert.equal(serviceConfiguration({}).cloudEnvironment, 'production')
 })

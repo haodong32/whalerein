@@ -906,11 +906,7 @@ export class ConnectionManager {
     const environment = resolution.environment
     const authority = authorityOf(resolution)
     const profiles = this.#registry.list().filter((profile) => profile.mode === 'managed')
-    const match = profiles.find((profile) => profile.bindings?.serviceAuthority === authority
-      || (this.#options.profileConfiguration
-        && profile.service?.apiOrigin === definition.api_origin
-        && profile.service?.issuer === definition.issuer
-        && profile.service?.nativeClientId === definition.native_client_id))
+    const match = profiles.find((profile) => profile.bindings?.serviceAuthority === authority)
     if (match) return match
     const sameEnvironment = profiles.find((profile) => profile.environment === environment)
     if (sameEnvironment) {
