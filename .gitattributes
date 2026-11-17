@@ -36,3 +36,8 @@
 *.zst filter=lfs diff=lfs merge=lfs -text
 
 # Do not broadly track *.bin: small protocol fixtures belong in regular Git.
+
+# Client-environment contract fixtures and generated copies are byte-level
+# contract input: keep LF on every OS so Rust and Node normalize identically.
+contracts/client-environment/** text eol=lf
+host/runtime/src/configuration/*.json text eol=lf
