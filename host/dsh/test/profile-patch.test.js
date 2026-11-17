@@ -68,3 +68,66 @@ test('the launcher never injects a Cloud-generated environment descriptor', (t) 
   assert.match(text, /adapter: real/)
   assert.doesNotMatch(text, /local_environment_file|WHALEREIN_LOCAL_ENVIRONMENT|environment: local|host_token|server:|ca_file:/)
 })
+
+function invoke(args) {
+  return spawnSync('python3', [helper, ...args], { encoding: 'utf8' })
+}
+
+test('managed mode seeds the cloud entry without standalone secrets', (t) => {
+  if (!hasPython) return t.skip('python3 is unavailable on this platform')
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-profile-patch-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'cordis.patch.yml')
+  writeFileSync(file, '# header\n[]\n')
+  const result = invoke([file, '--mode', 'managed', '--state-root', '/tmp/root',
+    '--developer-tools', '--log-level', 'info'])
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /connection_mode: managed/)
+  assert.match(text, /state_root: "\/tmp\/root"/)
+  assert.match(text, /developer_tools_enabled: true/)
+  assert.doesNotMatch(text, /host_token|server:|state_dir:/)
+})
+
+test('an existing entry is preserved unless --force rewrites only that item', (t) => {
+  if (!hasPython) return t.skip('python3 is unavailable on this platform')
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-profile-patch-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'cordis.patch.yml')
+  writeFileSync(file, [
+    '- id: whalerein-dsh',
+    '  name: whalerein-dsh',
+    '  config:',
+    '    server: 127.0.0.1',
+    '    host_id: "host-keep"',
+    '    host_token: !!js process.env.WHALEREIN_HOST_TOKEN',
+    '- id: locale',
+    '  name: locale',
+    '  config: {}',
+    '',
+  ].join('\n'))
+  const preserved = invoke([file])
+  assert.equal(preserved.status, 0, preserved.stderr)
+  assert.match(readFileSync(file, 'utf8'), /host_token/)
+
+  const rewritten = invoke([file, '--mode', 'managed', '--force', '--no-developer-tools'])
+  assert.equal(rewritten.status, 0, rewritten.stderr)
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /connection_mode: managed/)
+  assert.match(text, /developer_tools_enabled: false/)
+  assert.match(text, /- id: locale/)
+  assert.equal(text.match(/^- id: whalerein-dsh$/gm).length, 1)
+})
+
+test('--print leaves the file untouched and shows the replacement', (t) => {
+  if (!hasPython) return t.skip('python3 is unavailable on this platform')
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-profile-patch-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'cordis.patch.yml')
+  const initial = '- id: whalerein-dsh\n  name: whalerein-dsh\n  config:\n    server: 127.0.0.1\n'
+  writeFileSync(file, initial)
+  const result = invoke([file, '--mode', 'managed', '--force', '--print'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /connection_mode: managed/)
+  assert.equal(readFileSync(file, 'utf8'), initial)
+})

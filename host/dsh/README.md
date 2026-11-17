@@ -113,14 +113,34 @@ pnpm start
 
 `pnpm start` invokes `bin/start-real-dsh.sh`, which creates the
 `whalerein-debug` DSH profile if needed, installs this package with
-`dsh plugin` (pnpm), and registers `whalerein-dsh` as a profile bundle before running real DSH in
-the foreground on port 3099. The first launch writes local Compose defaults into
-that profile's `cordis.patch.yml`. Later launches leave the file unchanged.
-DSH prints its tokenized UI URL. Press Ctrl-C to stop. It only ensures the plugin
-is loaded by DSH; it does **not** start or check Access/PostgreSQL/EMQX.
-`WHALEREIN_DSH_PORT` selects the port. `WHALEREIN_CONFIG` selects the
-per-device TOML file; no Cloud descriptor or host/admin token is injected.
-The normal `web` profile on 3080 is untouched.
+`dsh plugin` (pnpm), registers `whalerein-dsh` as a profile bundle and runs
+real DSH in the foreground on port 3099. DSH prints its tokenized UI URL;
+press Ctrl-C to stop. It only ensures the plugin is loaded by DSH; it does
+**not** start or check Access/PostgreSQL/Mosquitto. The normal `web` profile
+on 3080 is untouched.
+
+A fresh profile gets a **managed** WhaleRein Cloud entry, so the first page
+offers **Connect to WhaleRein Cloud** and Developer tools instead of a manual
+server form. An existing entry is preserved verbatim. Flags change the seed:
+
+```bash
+pnpm start --managed                # seed or rewrite a managed cloud entry
+pnpm start --standalone             # seed or rewrite a manual Access entry
+pnpm start --profile other --port 3100
+pnpm start --reinstall              # force `dsh plugin add` of this checkout
+pnpm start --no-developer-tools     # hide the Developer tools section
+pnpm start --log-level debug
+pnpm start --dry-run                # print the planned entry and command
+```
+
+`--managed` writes `connection_mode: managed`, `state_root` and
+`developer_tools_enabled`; `--standalone` keeps the legacy `server`/`host_token`
+entry and `state_dir`. An explicit mode is the only way to replace an existing
+entry; the standalone block still references exported `WHALEREIN_HOST_TOKEN`
+and `WHALEREIN_ADMIN_TOKEN`. Managed mode uses the per-device TOML file selected
+by `WHALEREIN_CONFIG` (default `~/.whalerein/config.toml`) and injects no host
+or admin token. The launcher fails early when the port is already
+in use and prints the selected profile, mode, state path and URL.
 
 Loading the Host plugin as a bundle (rather than a `--patch` launch overlay)
 is what lets the settings page save into the profile user layer.

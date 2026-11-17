@@ -1679,6 +1679,21 @@ test('every managed lifecycle state has actionable localized text and no false c
   }
 })
 
+test('action-required explains a known service error and falls back for unknown codes', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('action_required', { error: { code: 'unavailable' } })
+    await runtime.refresh()
+    assert.match(text(runtime.render()), new RegExp(runtime.locales.dictionaries.zh.errorHint_unavailable))
+    runtime.setCloudState('action_required', { error: { code: 'something_new' } })
+    await runtime.refresh()
+    assert.match(text(runtime.render()), new RegExp(runtime.locales.dictionaries.zh.stateHint_action_required))
+    assert.doesNotMatch(text(runtime.render()), new RegExp(runtime.locales.dictionaries.zh.errorHint_unavailable))
+  } finally {
+    await runtime.dispose()
+  }
+})
+
 test('active staging stays labeled and switchable when details and Developer tools are collapsed', async () => {
   const runtime = await createManagedRuntime()
   try {
