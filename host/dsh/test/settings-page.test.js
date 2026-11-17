@@ -331,7 +331,7 @@ async function createSettingsRuntime({
       retry: managerAction('retry'),
       disconnect: managerAction('disconnect'),
       reconnect: managerAction('reconnect'),
-      remove: managerAction('remove'),
+      removeComputer: managerAction('removeComputer'),
       switchProfile: managerAction('switchProfile'),
       enableStaging: managerAction('enableStaging'),
       addCustomService: managerAction('addCustomService'),
@@ -451,6 +451,39 @@ async function createSettingsRuntime({
     },
   }
 }
+
+test('remote descriptors keep the gateway contract: unique endpoints, no reserved member names', async () => {
+  const runtime = await createSettingsRuntime()
+  try {
+    const contribution = runtime.registered.find((item) => item.contribution)?.contribution
+    assert.equal(contribution.package, 'whalerein-dsh')
+    // DSH's RemoteNamespaceService fields and prototype members. A descriptor
+    // method colliding with one of them fails the whole mount with
+    // "client api: method ... conflicts with its namespace service", and the
+    // entry then surfaces as "failed" during web boot. A mount stub cannot
+    // enforce this, so the names are pinned against the gateway contract
+    // (verified with @deepseek-ai/dsh-api-gateway 0.2.2-rc.1).
+    const reserved = new Set([
+      'ctx', 'empty', 'invokeRemote', 'methods', 'name', 'namespace',
+      'assertMethodAvailable', 'has', 'install', 'installDirect', 'installScoped', 'remove',
+    ])
+    assert.deepEqual(contribution.descriptors.map((descriptor) => descriptor.method), [
+      'snapshot', 'invite', 'revoke', 'testConnection',
+      'details', 'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect',
+      'removeComputer', 'switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile',
+    ])
+    const endpoints = contribution.descriptors.map((descriptor) => `${descriptor.namespace}/${descriptor.method}`)
+    assert.equal(new Set(endpoints).size, endpoints.length, 'remote endpoints must be unique')
+    for (const descriptor of contribution.descriptors) {
+      assert.ok(!reserved.has(descriptor.method), `${descriptor.id} uses reserved method ${descriptor.method}`)
+      assert.equal(descriptor.id, `whalerein-dsh#${descriptor.namespace}/${descriptor.method}`)
+      assert.equal(descriptor.namespace, 'whalerein')
+      assert.equal(descriptor.service, 'whalereinSettings')
+    }
+  } finally {
+    await runtime.dispose()
+  }
+})
 
 test('when connected, the settings page shows the host pairing code and paired devices', async () => {
   const runtime = await createSettingsRuntime()
@@ -1737,7 +1770,7 @@ test('disconnect, remote removal and local profile deletion use distinct wording
     assert.match(removed, /这台电脑已被移除/)
     assert.match(removed, /重新添加这台电脑需要新的浏览器授权/)
     assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
-    assert.equal(runtime.calls.some(([name]) => name === 'remove'), false)
+    assert.equal(runtime.calls.some(([name]) => name === 'removeComputer'), false)
   } finally {
     await runtime.dispose()
   }
@@ -1909,7 +1942,7 @@ test('Remove this computer opens the browser-authorized management URL and stays
     globalThis.window = { ...originalWindow, open: () => null }
     runtime.setCloudState('connected', { connected: true })
     await runtime.refresh()
-    runtime.setActionResult('remove', {
+    runtime.setActionResult('removeComputer', {
       ok: true,
       value: {
         ...runtime.getStatus(), state: 'removing',
@@ -1918,7 +1951,7 @@ test('Remove this computer opens the browser-authorized management URL and stays
     })
     await managedButton(runtime, '移除这台电脑').props.onClick()
     await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'remove'), [['remove']])
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'removeComputer'), [['removeComputer']])
     runtime.setCloudState('removing', { connected: true })
     await runtime.refresh()
     const tree = runtime.render()

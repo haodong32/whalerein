@@ -79,7 +79,7 @@ test('when settings reads remote status, it returns a read-only snapshot compati
     { method: 'retry', invocation: { kind: 'direct' } },
     { method: 'disconnect', invocation: { kind: 'direct' } },
     { method: 'reconnect', invocation: { kind: 'direct' } },
-    { method: 'remove', invocation: { kind: 'direct' } },
+    { method: 'removeComputer', invocation: { kind: 'direct' } },
     { method: 'switchProfile', invocation: { kind: 'direct' } },
     { method: 'enableStaging', invocation: { kind: 'direct' } },
     { method: 'addCustomService', invocation: { kind: 'direct' } },
@@ -379,7 +379,7 @@ test('every frozen manager method forwards once with validated arguments and ret
   const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
   for (const [method, args] of [
     ['startConnect', [{ source: 'browser' }]],
-    ['cancel', []], ['retry', []], ['disconnect', []], ['reconnect', []], ['remove', []],
+    ['cancel', []], ['retry', []], ['disconnect', []], ['reconnect', []], ['removeComputer', []],
     ['switchProfile', ['profile-1']], ['enableStaging', []],
     ['addCustomService', [{ label: 'Service', apiOrigin: 'https://service.example/path' }]],
     ['deleteProfile', ['profile-2']],
@@ -443,7 +443,7 @@ test('manager action results expose only opaque profile metadata and a validated
       addCustomService: async () => ({ id: 'custom-id', label: 'Custom', environment: 'custom', active: false }),
     },
   })
-  const removal = await service.remove()
+  const removal = await service.removeComputer()
   assert.deepEqual(removal.action, {
     id: '', label: '', environment: '', active: false, deleted: '', remoteRegistration: '', url: 'https://app.example/hosts/host-1',
   })
@@ -465,7 +465,7 @@ test('an unsafe removal URL never crosses the settings RPC boundary', async () =
       remove: async () => ({ state: 'removing', url: 'javascript:alert(1)' }),
     },
   })
-  const result = await service.remove()
+  const result = await service.removeComputer()
   assert.equal(result.action, null)
   assert.equal(JSON.stringify(result).includes('javascript:'), false)
   await ctx.fiber.dispose()

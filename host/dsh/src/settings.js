@@ -231,7 +231,7 @@ export function settingsStatus(host) {
 }
 
 const MANAGER_METHODS = Object.freeze([
-  'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'remove',
+  'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'removeComputer',
   'switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile',
 ])
 
@@ -326,7 +326,7 @@ export class WhaleReinSettingsService extends TypertRemoteService {
   retry() { return this._forward('retry') }
   disconnect() { return this._forward('disconnect') }
   reconnect() { return this._forward('reconnect') }
-  remove() { return this._forward('remove') }
+  removeComputer() { return this._forward('remove') }
   async switchProfile(id) { return this._forward('switchProfile', profileId(id)) }
   enableStaging() { return this._forward('enableStaging') }
   async addCustomService(value) { return this._forward('addCustomService', customService(value)) }

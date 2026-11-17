@@ -1213,7 +1213,7 @@ window.__ModuleLoader__.load({
         retry: () => invoke('retry'),
         disconnect: () => invoke('disconnect'),
         reconnect: () => invoke('reconnect'),
-        remove: () => invoke('remove'),
+        removeComputer: () => invoke('removeComputer'),
         switchProfile: (id) => invoke('switchProfile', id),
         enableStaging: () => invoke('enableStaging'),
         addCustomService: (value) => invoke('addCustomService', value),
@@ -1381,7 +1381,7 @@ window.__ModuleLoader__.load({
         setBusy('remove')
         setActionError('')
         const tab = reserveBrowserTab()
-        const result = await connection.invoke('remove')
+        const result = await connection.invoke('removeComputer')
         await status.refresh?.()
         if (!result.ok) {
           try { tab?.close?.() } catch { /* already closed */ }
@@ -1783,6 +1783,10 @@ window.__ModuleLoader__.load({
     const jsonCodec = (typeSymbol) => ({
       mode: 'strict', typeSymbol: `whalerein-dsh#${typeSymbol}`, create: () => ({ parse: (value) => value }),
     })
+    // Method names must avoid DSH's RemoteNamespaceService fields and prototype
+    // members (ctx, empty, name, methods, namespace, has, install, installDirect,
+    // installScoped, remove): the gateway rejects the whole mount on a collision.
+    // `remove` is reserved, so the computer-removal action is `removeComputer`.
     const MANAGER_REMOTE_DESCRIPTORS = [
       ['details', [], 'WhaleReinConnectionDetails'],
       ['startConnect', [{ name: 'request', wire: 'request', source: 'json', codec: jsonCodec('ConnectionStartRequest') }], 'WhaleReinConnectionSnapshot'],
@@ -1790,7 +1794,7 @@ window.__ModuleLoader__.load({
       ['retry', [], 'WhaleReinConnectionSnapshot'],
       ['disconnect', [], 'WhaleReinConnectionSnapshot'],
       ['reconnect', [], 'WhaleReinConnectionSnapshot'],
-      ['remove', [], 'WhaleReinConnectionSnapshot'],
+      ['removeComputer', [], 'WhaleReinConnectionSnapshot'],
       ['switchProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
       ['enableStaging', [], 'WhaleReinConnectionSnapshot'],
       ['addCustomService', [{ name: 'value', wire: 'value', source: 'json', codec: jsonCodec('CustomService') }], 'WhaleReinConnectionSnapshot'],
