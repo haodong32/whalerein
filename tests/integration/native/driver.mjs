@@ -135,6 +135,11 @@ let channelQueueBarrier = null
             await ctx.settings.update('whalerein-dsh', config)
             return { seeded: true }
           }
+          if (method === 'connection-settings') {
+            const row = ctx.settings.describe({redactSecrets: true}).find((value) => value.ns === 'whalerein-dsh')
+            const service = row?.user?.service
+            return {service: ['whalerein_cloud', 'custom', 'standalone'].includes(service) ? service : null}
+          }
           if (method === 'ready') {
             const status = ctx.get('whalereinSettings')?.snapshot()
             return { available: status?.available === true, connected: status?.connected === true,

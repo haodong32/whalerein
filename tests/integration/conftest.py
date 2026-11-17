@@ -302,7 +302,7 @@ def broker(broker_control, shared_broker):
 
 
 @pytest.fixture
-def scenario(tmp_path, postgres, broker_control, shared_broker, request):
+def scenario(tmp_path, postgres, broker_control, shared_broker, request, monkeypatch):
     schema = "case_" + uuid.uuid4().hex
     command = [
         "psql",
@@ -328,6 +328,11 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     if native:
         from native_environment import NativeScenario
 
+        # The CLI owns its configuration. DSH must not initialize its shared
+        # file as a side effect of installing or starting the Host plugin.
+        cli_config = tmp_path / "cli-config.toml"
+        cli_config.write_text('version = 1\nenvironment = "production"\n')
+        monkeypatch.setenv("WHALEREIN_CONFIG", str(cli_config))
         value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
     else:
         value = Scenario(tmp_path, schema)

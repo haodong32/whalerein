@@ -225,15 +225,10 @@ async function createSettingsRuntime({
     profileId: 'profile-production',
     label: 'WhaleRein Cloud',
     hostName: 'Studio Mac',
-    stagingEnabled: false,
-    developerToolsEnabled: false,
     approvalUrl: '',
     error: null,
     connected: false,
     pendingOperation: false,
-    profiles: [
-      { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-    ],
     capabilities: [],
     configError: null,
   } : {
@@ -332,10 +327,6 @@ async function createSettingsRuntime({
       disconnect: managerAction('disconnect'),
       reconnect: managerAction('reconnect'),
       removeComputer: managerAction('removeComputer'),
-      switchProfile: managerAction('switchProfile'),
-      enableStaging: managerAction('enableStaging'),
-      addCustomService: managerAction('addCustomService'),
-      deleteProfile: managerAction('deleteProfile'),
     },
     settings: {
       describe: async () => describe(),
@@ -470,7 +461,7 @@ test('remote descriptors keep the gateway contract: unique endpoints, no reserve
     assert.deepEqual(contribution.descriptors.map((descriptor) => descriptor.method), [
       'snapshot', 'invite', 'revoke', 'testConnection',
       'details', 'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect',
-      'removeComputer', 'switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile',
+      'removeComputer',
     ])
     const endpoints = contribution.descriptors.map((descriptor) => `${descriptor.namespace}/${descriptor.method}`)
     assert.equal(new Set(endpoints).size, endpoints.length, 'remote endpoints must be unique')
@@ -664,7 +655,7 @@ test('official disclosures toggle independently and the log menu updates the sav
     assert.equal(disclosure('连接配置').props.open, true)
     assert.equal(disclosure('高级配置').props.open, true)
 
-    const menu = () => find(runtime.render(), (node) => node.type === UI.Menu)
+    const menu = () => find(runtime.render(), (node) => node.type === UI.Menu && ['debug', 'warn', 'info'].includes(node.props.selectedId))
     assert.equal(menu().props.open, false)
     assert.equal(menu().props.anchor.props.size, 'md')
     assert.equal(menu().props.anchor.props.variant, 'ghost')
@@ -1108,7 +1099,7 @@ const saveButton = (runtime) => find(runtime.render(), (node) => node.type === U
 const field = (runtime, label) => find(runtime.render(), (node) => node.type === UI.Input && node.props['aria-label'] === label)
 const deviceRow = (runtime, id) => find(runtime.render(), (node) => node.type === 'li' && text(node).includes(id))
 
-test('clearing the server without a legacy MQTT URL is blocked per field instead of saving an unstartable profile', async () => {
+test('clearing the server without an explicit MQTT URL is blocked per field instead of saving an unstartable profile', async () => {
   const runtime = await createSettingsRuntime()
   try {
     runtime.setFormSnapshot({
@@ -1589,7 +1580,7 @@ test('a fresh managed install shows one cloud action and no technical fields or 
     assert.match(rendered, /连接到 WhaleRein Cloud/)
     assert.match(rendered, /账号登录始终留在浏览器中/)
     assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.variant, 'primary')
-    assert.equal(find(tree, (node) => node.type === UI.Menu), undefined)
+    assert.equal(findAll(tree, (node) => node.type === UI.Menu).length, 1)
     for (const label of ['服务器', '主机 ID', '主机 Token', '主机凭据', '服务端口', '传输端口']) {
       assert.equal(find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === label), undefined)
     }
@@ -1694,103 +1685,6 @@ test('action-required explains a known service error and falls back for unknown 
   }
 })
 
-test('active staging stays labeled and switchable when details and Developer tools are collapsed', async () => {
-  const runtime = await createManagedRuntime()
-  try {
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      state: 'connected',
-      connected: true,
-      environment: 'staging',
-      stagingEnabled: true,
-      profileId: 'profile-staging',
-      label: 'WhaleRein Cloud Staging',
-      profiles: [
-        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: false, managed: true },
-        { id: 'profile-staging', label: 'WhaleRein Cloud Staging', environment: 'staging', active: true, managed: true },
-      ],
-    })
-    await runtime.refresh()
-    const tree = runtime.render()
-    assert.ok(find(tree, (node) => node.props?.['data-whalerein-staging'] === 'true'), 'staging label is visible')
-    assert.match(text(tree), /Staging/)
-    assert.equal(managedDisclosure(runtime, '连接详情').props.open, false)
-    assert.equal(managedDisclosure(runtime, '开发者工具'), undefined)
-    const switchBack = managedButton(runtime, '切换回生产环境')
-    assert.ok(switchBack, 'production switch is reachable without Developer tools')
-    await switchBack.props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'profile-production']])
-  } finally {
-    await runtime.dispose()
-  }
-})
-
-test('enabling staging never activates it and explicit profile selection does', async () => {
-  const runtime = await createManagedRuntime({ development: true })
-  try {
-    assert.match(text(runtime.render()), /开发者工具/)
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      profiles: [
-        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-      ],
-    })
-    await runtime.refresh()
-    runtime.render()
-    await managedButton(runtime, '启用 Staging').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.map(([name]) => name), ['enableStaging'])
-    assert.equal(runtime.getStatus().environment, 'production', 'enabling staging does not switch')
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      stagingEnabled: true,
-      profiles: [
-        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-        { id: 'profile-staging', label: 'WhaleRein Cloud Staging', environment: 'staging', active: false, managed: true },
-      ],
-    })
-    await runtime.refresh()
-    runtime.render()
-    await managedButton(runtime, '使用 Staging').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'profile-staging']])
-  } finally {
-    await runtime.dispose()
-  }
-})
-
-test('disconnect, remote removal and local profile deletion use distinct wording and calls', async () => {
-  const runtime = await createManagedRuntime()
-  try {
-    runtime.setCloudState('connected', { connected: true })
-    await runtime.refresh()
-    const tree = runtime.render()
-    const rendered = text(tree)
-    assert.match(rendered, /断开连接只会在本地暂停这台电脑/)
-    assert.match(rendered, /移除这台电脑需要新的浏览器授权/)
-    const remove = managedButton(runtime, '移除这台电脑')
-    assert.ok(remove)
-    await findAll(tree, (node) => node.type === UI.Button && text(node) === '断开连接')[0].props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.map(([name]) => name), ['disconnect'])
-    runtime.setCloudState('removing', { connected: true })
-    await runtime.refresh()
-    const removing = text(runtime.render())
-    assert.match(removing, /正在移除这台电脑/)
-    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
-    runtime.setCloudState('removed', { connected: false })
-    await runtime.refresh()
-    const removed = text(runtime.render())
-    assert.match(removed, /这台电脑已被移除/)
-    assert.match(removed, /重新添加这台电脑需要新的浏览器授权/)
-    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
-    assert.equal(runtime.calls.some(([name]) => name === 'removeComputer'), false)
-  } finally {
-    await runtime.dispose()
-  }
-})
-
 test('managed state changes announce through role=status and move focus to the status region', async () => {
   const originalDocument = globalThis.document
   const focused = []
@@ -1848,39 +1742,6 @@ test('connection details are collapsed by default and show only redacted diagnos
   }
 })
 
-test('advanced custom services and inactive local profile deletion are explicit manager calls', async () => {
-  const runtime = await createManagedRuntime()
-  try {
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      profileId: 'profile-production',
-      profiles: [
-        { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-        { id: 'profile-old', label: 'Old staging', environment: 'staging', active: false, managed: true },
-      ],
-    })
-    await runtime.refresh()
-    const tree = runtime.render()
-    const label = find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === '服务名称')
-    const origin = find(tree, (node) => node.type === UI.Input && node.props['aria-label'] === 'API 来源')
-    label.props.onChange({ target: { value: 'Reviewed service' } })
-    origin.props.onChange({ target: { value: 'https://service.example' } })
-    await managedButton(runtime, '添加自定义服务').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'addCustomService'),
-      [['addCustomService', { label: 'Reviewed service', apiOrigin: 'https://service.example' }]])
-    const deletes = findAll(runtime.render(), (node) => node.type === UI.Button && /删除本地配置/.test(node.props?.['aria-label'] ?? ''))
-    assert.equal(deletes.length, 2)
-    assert.equal(deletes[0].props.disabled, true, 'active profile cannot be deleted')
-    assert.equal(deletes[1].props.disabled, false)
-    await deletes[1].props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'deleteProfile'), [['deleteProfile', 'profile-old']])
-  } finally {
-    await runtime.dispose()
-  }
-})
-
 test('a failed managed action is announced without exposing the private failure text', async () => {
   const runtime = await createManagedRuntime()
   try {
@@ -1906,45 +1767,6 @@ test('an unsafe approval URL is never rendered as an open-browser action', async
     const tree = runtime.render()
     assert.equal(find(tree, (node) => node.type === 'a' && /打开浏览器/.test(text(node))), undefined)
     assert.doesNotMatch(text(tree), /javascript:/)
-  } finally {
-    await runtime.dispose()
-  }
-})
-
-test('staging switching falls back to manager-returned opaque ids when the snapshot has no profile list', async () => {
-  const runtime = await createManagedRuntime({ development: true })
-  try {
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      profileId: 'production-id-1',
-      environment: 'production',
-      profiles: [],
-      stagingEnabled: false,
-    })
-    await runtime.refresh()
-    runtime.setActionResult('enableStaging', {
-      ok: true,
-      value: {
-        ...runtime.getStatus(), stagingEnabled: true,
-        action: { id: 'staging-id-1', label: 'WhaleRein Cloud Staging', environment: 'staging', active: false },
-      },
-    })
-    runtime.render()
-    await managedButton(runtime, '启用 Staging').props.onClick()
-    await runtime.settle()
-    runtime.setStatus({ ...runtime.getStatus(), stagingEnabled: true })
-    await runtime.refresh()
-    runtime.render()
-    await managedButton(runtime, '使用 Staging').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'staging-id-1']])
-    runtime.setStatus({ ...runtime.getStatus(), environment: 'staging', profileId: 'staging-id-1' })
-    await runtime.refresh()
-    runtime.render()
-    await managedButton(runtime, '切换回生产环境').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'),
-      [['switchProfile', 'staging-id-1'], ['switchProfile', 'production-id-1']])
   } finally {
     await runtime.dispose()
   }
@@ -1981,43 +1803,341 @@ test('Remove this computer opens the browser-authorized management URL and stays
   }
 })
 
-test('official local environment stays labeled and can be selected beside staging', async () => {
-  const runtime = await createManagedRuntime({ development: true })
+
+test('service selector exposes only Cloud, custom and Standalone and saves to the DSH profile', async () => {
+  const runtime = await createManagedRuntime()
   try {
-    runtime.setStatus({ ...runtime.getStatus(), profiles: [
-      { id: 'production-one', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-      { id: 'local-one', label: 'WhaleRein Cloud Local', environment: 'local', active: false, managed: true },
-    ] })
-    await runtime.refresh()
-    runtime.render()
-    await managedButton(runtime, '使用本地开发').props.onClick()
-    await runtime.settle()
-    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'local-one']])
-    runtime.setStatus({ ...runtime.getStatus(), environment: 'local', profileId: 'local-one' })
-    await runtime.refresh()
-    assert.match(text(runtime.render()), /本地开发/)
+    const menu = () => find(runtime.render(), (node) => node.type === UI.Menu && node.props.items?.some((item) => item.id === 'whalerein_cloud'))
+    assert.deepEqual(menu().props.items.map((item) => item.id), ['whalerein_cloud', 'custom', 'standalone'])
+    assert.doesNotMatch(text(runtime.render()), /启用 Staging|使用 Staging|使用本地开发|目标环境|配置来源/)
+    menu().props.onSelect('standalone')
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.deepEqual(runtime.mutations.at(-1), { ops: [{ op: 'set', path: ['service'], value: 'standalone' }], revision: 3 })
+    assert.match(text(runtime.render()), /已保存，请重新加载插件/)
+    assert.deepEqual(runtime.calls, [])
   } finally { await runtime.dispose() }
 })
 
-test('managed settings show desired-vs-current and configuration provenance', async () => {
-  const runtime = await createManagedRuntime({ development: false })
+test('custom service editor validates fields and atomically saves the complete profile block', async () => {
+  const runtime = await createManagedRuntime()
   try {
-    runtime.setStatus({
-      ...runtime.getStatus(),
-      environment: 'production',
-      configuration: {
-        sourceKind: 'explicit',
-        selectedEnvironment: 'staging',
-        desiredDefault: 'staging',
-        definitionSource: 'builtin',
-        selectionSource: 'file',
-      },
-    })
+    const menu = find(runtime.render(), (node) => node.type === UI.Menu)
+    menu.props.onSelect('custom')
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.match(text(runtime.render()), /请补全自定义服务参数/)
+    assert.deepEqual(runtime.mutations, [])
+    const fields = { custom_label: 'Example', api_origin: 'https://app.example', issuer: 'https://auth.example/oidc', native_client_id: 'my-client' }
+    // Display labels are localized; stable input IDs identify the draft fields.
+    for (const [key, value] of Object.entries(fields)) {
+      const id = key === 'custom_label' ? 'label' : key
+      find(runtime.render(), (node) => node.type === UI.Input && node.props.id === `whalerein-custom-${id}`).props.onChange({ target: { value } })
+    }
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.deepEqual(runtime.mutations.at(-1).ops, [
+      { op: 'set', path: ['service'], value: 'custom' },
+      { op: 'set', path: ['custom'], value: { label: 'Example', api_origin: 'https://app.example', issuer: 'https://auth.example/oidc', native_client_id: 'my-client', tls: { ca_provider: 'system' } } },
+    ])
+    const provider = find(runtime.render(), (node) => node.type === UI.Menu && node.props.selectedId === 'system')
+    provider.props.onSelect('file')
+    find(runtime.render(), (node) => node.type === UI.Input && node.props.id === 'whalerein-custom-ca_file').props.onChange({ target: { value: '/tmp/local-ca.pem' } })
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.deepEqual(runtime.mutations.at(-1).ops[1].value.tls, { ca_provider: 'file', ca_file: '/tmp/local-ca.pem' })
+  } finally { await runtime.dispose() }
+})
+
+test('service save preserves a conflicting draft and can reload the current profile', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    find(runtime.render(), (node) => node.type === UI.Menu).props.onSelect('standalone')
+    runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), revision: 4 })
+    runtime.setMutateResult(false)
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.match(text(runtime.render()), /设置已在另一个窗口修改/)
+    assert.equal(find(runtime.render(), (node) => node.type === UI.Menu).props.selectedId, 'standalone')
+    await managedButton(runtime, '载入已保存的值').props.onClick()
+    runtime.setMutateResult(true)
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.equal(runtime.mutations.at(-1).revision, 4)
+  } finally { await runtime.dispose() }
+})
+
+test('internal Cloud configuration has a fixed badge and no environment switch action', async () => {
+  const runtime = await createManagedRuntime({ development: true })
+  try {
+    for (const environment of ['staging', 'local']) {
+      runtime.setCloudState('idle', { environment })
+      await runtime.refresh()
+      assert.match(text(runtime.render()), new RegExp(`内部测试 · ${environment}`))
+      assert.doesNotMatch(text(runtime.render()), /启用 Staging|使用 Staging|使用本地开发|切换回生产环境/)
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('service form adopts the asynchronously loaded profile revision before the first edit', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setFormSnapshot({ value: {}, writable: false, revision: null })
+    runtime.render()
+    runtime.setFormSnapshot({ value: { service: 'standalone' }, writable: true, revision: 9 })
+    assert.equal(find(runtime.render(), (node) => node.type === UI.Menu).props.selectedId, 'standalone')
+    await managedButton(runtime, '保存连接配置').props.onClick()
+    assert.equal(runtime.mutations.at(-1).revision, 9)
+  } finally { await runtime.dispose() }
+})
+
+
+test('disconnect stays a local pause and removal remains gated throughout its lifecycle', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('connected', { connected: true })
     await runtime.refresh()
-    const rendered = text(runtime.render())
-    assert.match(rendered, /目标环境/)
-    assert.match(rendered, /官方目录/)
-    assert.match(rendered, /Staging/)
-    assert.equal(runtime.getStatus().environment, 'production')
+    const tree = runtime.render()
+    assert.match(text(tree), /断开连接只会在本地暂停这台电脑/)
+    assert.match(text(tree), /移除这台电脑需要新的浏览器授权/)
+    await findAll(tree, (node) => node.type === UI.Button && text(node) === '断开连接')[0].props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.map(([method]) => method), ['disconnect'])
+    runtime.setCloudState('disconnected', { connected: false })
+    await runtime.refresh()
+    assert.ok(managedButton(runtime, '连接到 WhaleRein Cloud') || managedButton(runtime, '重试'))
+    for (const state of ['removing', 'removed']) {
+      runtime.setCloudState(state, { connected: false })
+      await runtime.refresh()
+      assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    }
+    assert.match(text(runtime.render()), /重新添加这台电脑需要新的浏览器授权/)
+    assert.equal(runtime.calls.some(([method]) => method === 'removeComputer'), false)
+  } finally { await runtime.dispose() }
+})
+
+test('managed connect labeling follows the running service until the plugin reloads', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), value: { service: 'custom' } })
+    assert.ok(managedButton(runtime, '连接到 WhaleRein Cloud'))
+    assert.equal(managedButton(runtime, '连接自定义服务'), undefined)
+    runtime.setCloudState('idle', { service: 'custom' })
+    await runtime.refresh()
+    assert.ok(managedButton(runtime, '连接自定义服务'))
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud'), undefined)
+    assert.match(text(runtime.render()), /所选服务/)
+    assert.match(text(runtime.render()), /当前运行连接: 自定义服务/)
+  } finally { await runtime.dispose() }
+})
+
+test('invalid custom account and trust drafts cannot be persisted from the editor', async () => {
+  const { customConfiguration } = await import('../src/service-config.js')
+  const runtime = await createManagedRuntime()
+  const valid = { label: 'Example', api_origin: 'https://app.example', issuer: 'https://auth.example/oidc', native_client_id: 'client' }
+  try {
+    for (const change of [
+      { api_origin: ' https://app.example' }, { issuer: 'https://auth.example/oidc ' },
+      { native_client_id: 'bad id' }, { native_client_id: 'x'.repeat(257) },
+      { label: ' bad label' }, { label: 'x'.repeat(65) }, { label: 'bad\nlabel' },
+      { tls: { ca_provider: 'file', ca_file: 'relative.pem' } },
+      { tls: { ca_provider: 'file', ca_file: '/tmp/invalid\0.pem' } },
+    ]) {
+      const custom = { ...valid, ...change }
+      assert.throws(() => customConfiguration(custom), { code: 'invalid_config' })
+      runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), value: { service: 'custom', custom } })
+      await managedButton(runtime, '保存连接配置').props.onClick()
+      assert.match(text(runtime.render()), /请补全自定义服务参数/)
+      assert.deepEqual(runtime.mutations, [])
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('managed lifecycle actions share one synchronous gate across rapid clicks', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    for (const [state, label, method] of [['action_required', '重试', 'retry'], ['awaiting_approval', '取消', 'cancel'], ['connected', '断开连接', 'disconnect']]) {
+      runtime.setCloudState(state, { pendingOperation: method === 'cancel', available: true })
+      await runtime.refresh()
+      let finish
+      let calls = 0
+      runtime.remote.whalerein[method] = () => { calls += 1; return new Promise((resolve) => { finish = resolve }) }
+      const button = managedButton(runtime, label)
+      const first = button.props.onClick()
+      const second = button.props.onClick()
+      assert.equal(calls, 1)
+      finish({ ok: true, value: {} })
+      await Promise.all([first, second])
+      await runtime.settle()
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('rapid removal reserves one browser tab and blocks competing lifecycle actions', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  let opened = 0
+  let finish
+  let calls = 0
+  try {
+    globalThis.window = { ...originalWindow, open: () => { opened += 1; return { location: {}, close() {} } } }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.remote.whalerein.removeComputer = () => { calls += 1; return new Promise((resolve) => { finish = resolve }) }
+    const remove = managedButton(runtime, '移除这台电脑')
+    const disconnect = managedButton(runtime, '断开连接')
+    const first = remove.props.onClick()
+    const duplicate = remove.props.onClick()
+    await disconnect.props.onClick()
+    assert.equal(calls, 1)
+    assert.equal(opened, 1)
+    assert.deepEqual(runtime.calls, [])
+    finish({ ok: true, value: { action: { url: 'https://app.example/manage' } } })
+    await Promise.all([first, duplicate])
+  } finally { globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('an unavailable managed connection disables mutations and blocks stale callbacks', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const staleConnect = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { available: false })
+    await runtime.refresh()
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.disabled, true)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    await staleConnect.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+  } finally { await runtime.dispose() }
+})
+
+test('a failed status refresh releases the action gate and closes its reserved tab', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const refresh = runtime.statusStore.refresh
+  let closed = 0
+  try {
+    globalThis.window = { ...originalWindow, open: () => ({ location: {}, close() { closed += 1 } }) }
+    runtime.statusStore.refresh = async () => { throw new Error('private-refresh-detail') }
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    assert.equal(closed, 1)
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.disabled, false)
+    assert.doesNotMatch(text(runtime.render()), /private-refresh-detail/)
+    runtime.statusStore.refresh = refresh
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    assert.equal(runtime.calls.filter(([method]) => method === 'startConnect').length, 2)
+  } finally { runtime.statusStore.refresh = refresh; globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('prototype property names in unknown error codes use the generic state hint', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    for (const code of ['constructor', '__proto__', 'toString']) {
+      runtime.setCloudState('action_required', { error: { code } })
+      await runtime.refresh()
+      assert.match(text(runtime.render()), new RegExp(runtime.locales.dictionaries.zh.stateHint_action_required))
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('late details from the previous service cannot overwrite the current service details', async () => {
+  const runtime = await createManagedRuntime()
+  let finish
+  try {
+    runtime.setCloudState('connected', { service: 'whalerein_cloud', connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('details', { ok: true, value: { state: 'connected', region: 'previous-service' } })
+    managedDisclosure(runtime, '连接详情').props.onToggle()
+    runtime.render()
+    await runtime.settle()
+    runtime.setActionResult('details', new Promise((resolve) => { finish = resolve }))
+    const stale = managedButton(runtime, '刷新详情').props.onClick()
+    runtime.setActionResult('details', { ok: true, value: { state: 'connected', environment: 'custom', region: 'current-service' } })
+    runtime.setCloudState('connected', { service: 'custom', profileId: 'current-profile', connected: true })
+    await runtime.refresh()
+    assert.doesNotMatch(text(runtime.render()), /previous-service/)
+    await runtime.settle()
+    assert.match(text(runtime.render()), /current-service/)
+    finish({ ok: true, value: { state: 'connected', environment: 'production', region: 'previous-service' } })
+    await stale
+    await runtime.settle()
+    assert.match(text(runtime.render()), /current-service/)
+    assert.doesNotMatch(text(runtime.render()), /previous-service/)
+  } finally { finish?.({ ok: false }); await runtime.dispose() }
+})
+
+test('a retired service cannot open its late authorization reply in the browser', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  let finish
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.remote.whalerein.startConnect = () => new Promise((resolve) => { finish = resolve })
+    const pending = managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    runtime.setCloudState('idle', { service: 'custom', profileId: 'custom-profile' })
+    await runtime.refresh()
+    finish({ ok: true, value: { approvalUrl: 'https://app.example/old-approval' } })
+    await pending
+    assert.equal(tab.closed, true)
+    assert.equal(tab.location.href, undefined)
+  } finally { finish?.({ ok: false }); globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('stale callbacks cannot dispatch actions to a newly selected runtime', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const stale = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { service: 'custom', profileId: 'custom-profile' })
+    await runtime.refresh()
+    await stale.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+  } finally { await runtime.dispose() }
+})
+
+test('canonical approval URLs replace cached links and cached removal URLs stay scoped to their service', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setActionResult('startConnect', { ok: true, value: { approvalUrl: 'https://app.example/old-approval' } })
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    for (const change of [{}, { service: 'custom', profileId: 'custom-profile' }]) {
+      runtime.setCloudState('awaiting_approval', { ...change, approvalUrl: 'https://app.example/current-approval' })
+      await runtime.refresh()
+      const links = findAll(runtime.render(), (node) => node.type === 'a').map((node) => node.props.href)
+      assert.ok(links.some((url) => url.includes('/current-approval')))
+      assert.equal(links.some((url) => url.includes('/old-approval')), false)
+    }
+    runtime.setCloudState('connected', { service: 'whalerein_cloud', profileId: 'profile-production', approvalUrl: '', connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('removeComputer', { ok: true, value: { action: { url: 'https://app.example/old-management' } } })
+    await managedButton(runtime, '移除这台电脑').props.onClick()
+    runtime.setCloudState('removing', { service: 'custom', profileId: 'custom-profile', connected: false })
+    await runtime.refresh()
+    const links = findAll(runtime.render(), (node) => node.type === 'a').map((node) => node.props.href)
+    assert.equal(links.some((url) => url.includes('/old-management')), false)
+  } finally { await runtime.dispose() }
+})
+
+test('an unmounted settings page cannot navigate a late authorization reply', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  let finish
+  let disposed = false
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.remote.whalerein.startConnect = () => new Promise((resolve) => { finish = resolve })
+    const pending = managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    await runtime.dispose()
+    disposed = true
+    finish({ ok: true, value: { approvalUrl: 'https://app.example/retired-page-approval' } })
+    await pending
+    assert.equal(tab.closed, true)
+    assert.equal(tab.location.href, undefined)
+  } finally { finish?.({ ok: false }); globalThis.window = originalWindow; if (!disposed) await runtime.dispose() }
+})
+
+test('a Cloud deployment change invalidates old callbacks even when the service name is unchanged', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const stale = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { service: 'whalerein_cloud', profileId: 'staging-profile', environment: 'staging' })
+    await runtime.refresh()
+    await stale.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+    assert.match(text(runtime.render()), /内部测试 · staging/)
   } finally { await runtime.dispose() }
 })

@@ -6,7 +6,7 @@ export { ConfigError, validateTopicId, topics, PROTOCOL_VERSION } from 'whalerei
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { open, resolveEnvironment, IDENTIFIER_PATTERN } from 'whalerein-host/configuration'
+import { serviceConfiguration, validateProfileKeys } from './service-config.js'
 
 function pick(raw, names, fallback) {
   for (const name of names) {
@@ -50,81 +50,21 @@ function optionalPort(raw, name) {
   return integer(value, undefined, { min: 1, max: 65535, name })
 }
 
-const CONNECTION_MODES = ['auto', 'managed', 'standalone']
-
-function connectionMode(raw) {
-  const value = String(pick(raw, ['connection_mode'], 'auto') ?? 'auto').trim()
-  if (!CONNECTION_MODES.includes(value)) {
-    throw new ConfigError('invalid_config', 'connection_mode must be auto, managed, or standalone')
-  }
-  return value
-}
-
-/** A profile that already has manual connection material stays Standalone. */
-export function hasStandaloneConfig(raw = {}) {
-  return ['server', 'mqtt_url', 'host_token'].some((name) => String(pick(raw, [name], '') ?? '').trim() !== '')
-}
-
-/**
- * Decide how this profile connects. Auto preserves every existing manual
- * installation and treats a fresh profile without connection material as the
- * managed WhaleRein Cloud flow.
- */
+/** Connection mode is derived only from the profile's service selection. */
 export function resolveConnectionMode(raw = {}) {
-  const mode = connectionMode(raw)
-  if (mode !== 'auto') return mode
-  return hasStandaloneConfig(raw) ? 'standalone' : 'managed'
+  return serviceConfiguration(raw).service === 'standalone' ? 'standalone' : 'managed'
 }
 
-/**
- * Validate manager-owned profile options. These keys are additive: an existing
- * Standalone profile keeps resolving through resolveConfig unchanged.
- */
-export function resolveManagerConfig(raw = {}, options = {}) {
+/** Validate the profile-owned managed connection parameters. */
+export function resolveManagerConfig(raw = {}) {
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
   }
-  const configFile = pick(raw, ['config_file'], '')
-  if (configFile !== '' && (typeof configFile !== 'string' || configFile.includes('\0'))) {
-    throw new ConfigError('invalid_config', 'config_file must be a usable file path')
-  }
-  const environment = pick(raw, ['environment'], '')
-  if (environment !== '' && (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment))) {
-    throw new ConfigError('invalid_config', `environment must match ${IDENTIFIER_PATTERN}`)
-  }
-  if (environment !== '') {
-    // The Host configuration module owns resolution; the plugin never keeps a
-    // second environment catalog or fallback.
-    let snapshot = null
-    try {
-      snapshot = open({
-        configFile: configFile || undefined,
-        envVars: options.envVars,
-        homeDir: options.homeDir,
-        inspectionOnly: true,
-      })
-    } catch (error) {
-      if (configFile !== '' || (options.envVars ?? process.env).WHALEREIN_CONFIG) {
-        throw new ConfigError('invalid_config', `config_file: ${error.code ?? 'unreadable_config'}`)
-      }
-      // A fresh default file may be initialized by ordinary startup.
-    }
-    if (snapshot) {
-      try {
-        resolveEnvironment(snapshot, environment)
-      } catch (error) {
-        throw new ConfigError('invalid_config', `environment: ${error.code ?? 'unknown_environment'}`)
-      }
-    }
-  }
-  const stateRoot = pick(raw, ['state_root', 'state_dir'], join(homedir(), '.whalerein', 'dsh'))
+  const selection = serviceConfiguration(raw)
+  const stateRoot = pick(raw, ['state_root'], join(homedir(), '.whalerein', 'dsh'))
   if (typeof stateRoot !== 'string' || stateRoot.trim() === '' || stateRoot.includes('\0') || stateRoot.length > 4096) {
     throw new ConfigError('invalid_config', 'state_root must be a non-empty path')
-  }
-  const profileId = pick(raw, ['profile_id'], '')
-  if (typeof profileId !== 'string' || (profileId !== '' && (!/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(profileId)))) {
-    throw new ConfigError('invalid_config', 'profile_id must be an opaque profile identifier')
   }
   const issuerPublicKey = pick(raw, ['enrollment_issuer_public_key'], '')
   if (issuerPublicKey !== '' && (typeof issuerPublicKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(issuerPublicKey))) {
@@ -139,14 +79,10 @@ export function resolveManagerConfig(raw = {}, options = {}) {
     }
   }
   return {
-    environment,
-    configFile: configFile || undefined,
+    ...selection,
     connectionMode: 'managed',
     adapter,
     stateRoot: stateRoot.trim(),
-    stateDir: stateRoot.trim(),
-    profileId,
-    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
     issuerPublicKey,
     expectedIssuer,
     pendingQueueEnabled: boolean(pick(raw, ['pending_queue_enabled'], true), true),
@@ -189,12 +125,16 @@ function derivedEndpoints(server, insecure, accessPort, mqttPort) {
 /**
  * Resolve one plugin configuration object. A `server` host derives the Access
  * origin and the MQTT URL. Explicit `mqtt_url` / `access_url` apply only when
- * `server` is empty, so existing deployments keep working.
+ * `server` is empty. Both forms are explicit Standalone parameters.
  *
  * @param {object} raw plugin config supplied by Cordis.
  * @returns {object} resolved config.
  */
 export function resolveConfig(raw = {}) {
+  validateProfileKeys(raw)
+  if (raw.service !== undefined && raw.service !== 'standalone') {
+    throw new ConfigError('invalid_config', 'service must be standalone for this runtime')
+  }
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
@@ -247,20 +187,17 @@ export function resolveConfig(raw = {}) {
     throw new ConfigError('invalid_config', 'mqtt_url must use the mqtt or mqtts scheme')
   }
 
-  const stateDir = pick(raw, ['state_dir'], join(homedir(), '.whalerein', 'dsh'))
+  const stateDir = pick(raw, ['state_dir', 'state_root'], join(homedir(), '.whalerein', 'dsh'))
   const protoPath = pick(raw, ['proto_path'], '')
   const approvalMode = pick(raw, ['approval_mode'], 'claim')
   if (!['claim', 'delegate'].includes(approvalMode)) {
     throw new ConfigError('invalid_config', 'approval_mode must be claim or delegate')
   }
 
-  const mode = connectionMode(raw)
   const stateRoot = pick(raw, ['state_root', 'state_dir'], stateDir)
   return {
-    connectionMode: mode === 'auto' ? 'standalone' : mode,
+    connectionMode: 'standalone',
     stateRoot,
-    profileId: String(pick(raw, ['profile_id'], '') ?? ''),
-    developerToolsEnabled: boolean(pick(raw, ['developer_tools_enabled'], false), false),
     accessUrl: accessUrl || '',
     server,
     adminToken,

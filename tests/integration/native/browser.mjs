@@ -73,6 +73,28 @@ try {
     stage = 'secret-render'
     assert(!(await panel.innerText()).includes(input.hostToken))
     if (input.action === 'settings') {
+      stage = 'service-selector'
+      const selector = panel.getByRole('button', { name: /^Connection type$|^连接方式$/ })
+      stage = 'service-selector-open'
+      await selector.click()
+      stage = 'service-selector-choice'
+      await page.getByText('Standalone', { exact: true }).last().click()
+      stage = 'service-selector-save'
+      await panel.getByRole('button', { name: /^Save connection$|^保存连接配置$/ }).click()
+      stage = 'service-selector-saved'
+      const savedConnection = panel.getByText(/Saved. Reload the plugin|已保存，请重新加载插件/)
+      const conflict = panel.getByText(/Settings changed in another window|设置已在另一个窗口修改/)
+      await expect.poll(async () => (await savedConnection.count()) + (await conflict.count())).toBeGreaterThan(0)
+      if (await conflict.count()) {
+        // Exercise explicit user recovery when the native namespace changes
+        // after the first describe; the product never retries silently.
+        stage = 'service-reload-values'
+        await panel.getByRole('button', { name: /^Load saved values$|^载入已保存的值$/ }).click()
+        await panel.getByRole('button', { name: /^Save connection$|^保存连接配置$/ }).click()
+      }
+      stage = 'service-selector-confirmed'
+      await savedConnection.waitFor()
+      assert(!/Enable staging|启用 Staging|Use local development|使用本地开发/.test(await panel.innerText()))
       stage = 'connection-test'
       await panel.getByRole('button', { name: /Test connection|测试连接/ }).click()
       await panel.getByText(/Connection test passed|连接测试通过/).waitFor()

@@ -1,10 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
-  resolveConfig, resolveConnectionMode, resolveManagerConfig, hasStandaloneConfig,
+  resolveConfig, resolveConnectionMode, resolveManagerConfig,
   validateTopicId, topics, ConfigError,
 } from '../src/config.js'
 
@@ -15,7 +12,7 @@ const base = {
 }
 
 test('when configuration values are supplied or omitted, explicit values and safe defaults are resolved', () => {
-  const config = resolveConfig({ ...base, state_dir: '/tmp/state', access_url: 'https://access.example' }, {})
+  const config = resolveConfig({ ...base, state_dir: '/tmp/state', access_url: 'https://access.example' })
   assert.equal(config.hostId, 'host-1')
   assert.equal(config.mqttUrl, base.mqtt_url)
   assert.equal(config.hostToken, 'secret-token')
@@ -63,31 +60,31 @@ test('when mqtt:// is configured, it is accepted only if the plaintext flag is e
 })
 
 test('when configuration lacks required fields or has invalid adapter, topic ID, URL, approval mode or plaintext flag, it rejects invalid_config', () => {
-  assert.throws(() => resolveConfig({}, {}), (error) => error instanceof ConfigError && error.code === 'invalid_config')
-  assert.throws(() => resolveConfig({ ...base, adapter: 'cloud' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, host_id: 'bad/id' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, host_id: 'bad id' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'https://broker' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'mqtt://broker' }, {}), (error) => error.code === 'invalid_config')
-  assert.equal(resolveConfig({ ...base, mqtt_url: 'mqtt://broker', allow_insecure_mqtt: true }, {}).allowInsecureMqtt, true)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'not a url' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, access_url: 'not a url' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, approval_mode: 'auto' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, allow_insecure_mqtt: 'maybe' }, {}), ConfigError)
+  assert.throws(() => resolveConfig({}), (error) => error instanceof ConfigError && error.code === 'invalid_config')
+  assert.throws(() => resolveConfig({ ...base, adapter: 'cloud' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, host_id: 'bad/id' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, host_id: 'bad id' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'https://broker' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'mqtt://broker' }), (error) => error.code === 'invalid_config')
+  assert.equal(resolveConfig({ ...base, mqtt_url: 'mqtt://broker', allow_insecure_mqtt: true }).allowInsecureMqtt, true)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'not a url' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, access_url: 'not a url' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, approval_mode: 'auto' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, allow_insecure_mqtt: 'maybe' }), ConfigError)
   assert.throws(() => validateTopicId('', 'host_id'), ConfigError)
   assert.throws(() => validateTopicId('a'.repeat(129), 'host_id'), ConfigError)
   assert.equal(validateTopicId('a.b:c_d-1', 'id'), 'a.b:c_d-1')
 })
 
-test('when a server host is set, derived endpoints override legacy URLs', () => {
+test('when a server host is set, derived endpoints override explicit URLs', () => {
   const secure = resolveConfig({
     server: 'access.example',
     host_id: 'host-1',
     host_token: 'secret-token',
     admin_token: 'admin',
-    mqtt_url: 'mqtts://legacy.example:8883',
-    access_url: 'https://legacy.example',
-  }, {})
+    mqtt_url: 'mqtts://explicit.example:8883',
+    access_url: 'https://explicit.example',
+  })
   assert.equal(secure.server, 'access.example')
   assert.equal(secure.adminToken, 'admin')
   assert.equal(secure.accessUrl, 'https://access.example')
@@ -100,7 +97,7 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
     host_id: 'host-1',
     host_token: 'secret-token',
     allow_insecure_mqtt: true,
-  }, {})
+  })
   assert.equal(insecure.server, '10.0.0.8')
   assert.equal(insecure.accessUrl, 'http://10.0.0.8:8080')
   assert.equal(insecure.mqttUrl, 'mqtt://10.0.0.8:1883')
@@ -113,7 +110,7 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
     access_port: '80',
     mqtt_port: '8884',
     allow_insecure_mqtt: true,
-  }, {})
+  })
   assert.equal(ports.accessUrl, 'http://access.example')
   assert.equal(ports.mqttUrl, 'mqtt://access.example:8884')
 
@@ -128,15 +125,15 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
 })
 
 test('when server values contain a scheme, port, or incomplete host, configuration rejects them', () => {
-  assert.throws(() => resolveConfig({ server: 'https://access.example', host_id: 'host-1', host_token: 'secret-token' }, {}), /server must be a host name or IPv4 address/)
-  assert.throws(() => resolveConfig({ server: 'access.example:443', host_id: 'host-1', host_token: 'secret-token' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ server: 'access.example', host_id: 'host-1', host_token: 'secret-token', access_port: '0' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ server: '::1', host_id: 'host-1', host_token: 'secret-token' }, {}), ConfigError)
-  const legacy = resolveConfig(base, {})
-  assert.equal(legacy.server, '')
-  assert.equal(legacy.accessPort, null)
-  assert.equal(legacy.mqttPort, null)
-  assert.equal(legacy.adminToken, '')
+  assert.throws(() => resolveConfig({ server: 'https://access.example', host_id: 'host-1', host_token: 'secret-token' }), /server must be a host name or IPv4 address/)
+  assert.throws(() => resolveConfig({ server: 'access.example:443', host_id: 'host-1', host_token: 'secret-token' }), ConfigError)
+  assert.throws(() => resolveConfig({ server: 'access.example', host_id: 'host-1', host_token: 'secret-token', access_port: '0' }), ConfigError)
+  assert.throws(() => resolveConfig({ server: '::1', host_id: 'host-1', host_token: 'secret-token' }), ConfigError)
+  const explicit = resolveConfig(base)
+  assert.equal(explicit.server, '')
+  assert.equal(explicit.accessPort, null)
+  assert.equal(explicit.mqttPort, null)
+  assert.equal(explicit.adminToken, '')
 })
 
 test('when resolving topic templates, only the four wire topics are produced', () => {
@@ -205,60 +202,36 @@ test('every documented profile key materializes through the shipped Config schem
 })
 
 
-test('auto mode preserves existing manual profiles and selects managed only for a fresh profile', () => {
+test('service alone selects the connection mode; manual fields never change the default', () => {
   assert.equal(resolveConnectionMode({}), 'managed')
-  assert.equal(resolveConnectionMode({ host_id: 'host-1' }), 'managed')
-  assert.equal(hasStandaloneConfig({}), false)
-  assert.equal(resolveConnectionMode({ server: 'access.example' }), 'standalone')
-  assert.equal(resolveConnectionMode({ mqtt_url: 'mqtts://broker.example:8883' }), 'standalone')
-  assert.equal(resolveConnectionMode({ host_token: 'token' }), 'standalone')
-  assert.equal(resolveConnectionMode({ connection_mode: 'managed', server: 'access.example' }), 'managed')
-  assert.equal(resolveConnectionMode({ connection_mode: 'standalone' }), 'standalone')
-  assert.throws(() => resolveConnectionMode({ connection_mode: 'cloud' }), (error) => error.code === 'invalid_config')
+  for (const raw of [{ server: 'access.example' }, { mqtt_url: 'mqtts://broker.example' }, { host_token: 'token' }]) {
+    assert.equal(resolveConnectionMode(raw), 'managed')
+  }
+  assert.equal(resolveConnectionMode({ service: 'standalone' }), 'standalone')
+  assert.throws(() => resolveConnectionMode({ connection_mode: 'standalone' }), ConfigError)
 })
 
-test('managed options validate a state root, opaque selected profile and developer tools without connection secrets', () => {
+test('managed options validate only the profile-owned connection and runtime parameters', () => {
   const defaults = resolveManagerConfig({})
-  assert.equal(defaults.connectionMode, 'managed')
-  assert.equal(defaults.profileId, '')
-  assert.equal(defaults.developerToolsEnabled, false)
+  assert.equal(defaults.service, 'whalerein_cloud')
+  assert.equal(defaults.cloudEnvironment, 'production')
   assert.ok(defaults.stateRoot.endsWith('/.whalerein/dsh'))
-  const configured = resolveManagerConfig({
-    state_root: '/var/lib/whalerein',
-    profile_id: 'profile-1',
-    developer_tools_enabled: true,
-    adapter: 'fake',
-    log_level: 'debug',
-  })
+  const configured = resolveManagerConfig({ state_root: '/var/lib/whalerein', adapter: 'fake', log_level: 'debug' })
   assert.equal(configured.stateRoot, '/var/lib/whalerein')
-  assert.equal(configured.stateDir, '/var/lib/whalerein')
-  assert.equal(configured.profileId, 'profile-1')
-  assert.equal(configured.developerToolsEnabled, true)
   assert.equal(configured.adapter, 'fake')
   assert.equal(configured.logLevel, 'debug')
   assert.throws(() => resolveManagerConfig({ state_root: 'bad\0path' }), ConfigError)
-  assert.equal(resolveManagerConfig({ state_root: '' }).stateRoot, resolveManagerConfig({}).stateRoot)
-  assert.throws(() => resolveManagerConfig({ profile_id: 'bad id' }), ConfigError)
-  assert.throws(() => resolveManagerConfig({ profile_id: 'a'.repeat(129) }), ConfigError)
   assert.throws(() => resolveManagerConfig({ adapter: 'cloud' }), ConfigError)
-  assert.throws(() => resolveManagerConfig({ developer_tools_enabled: 'maybe' }), ConfigError)
+  assert.equal(resolveManagerConfig({ state_root: '' }).stateRoot, defaults.stateRoot)
   assert.equal(resolveManagerConfig({ state_root: '  /tmp/state  ' }).stateRoot, '/tmp/state')
-  assert.equal(resolveManagerConfig({ state_dir: '/tmp/legacy-state' }).stateRoot, '/tmp/legacy-state')
 })
 
-test('standalone configuration carries the additive manager options without changing existing values', () => {
-  const config = resolveConfig({
-    ...base,
-    state_root: '/tmp/root',
-    profile_id: 'profile-1',
-    developer_tools_enabled: true,
-  })
+test('Standalone resolves its parameters without a separate profile selector', () => {
+  const config = resolveConfig({ ...base, service: 'standalone', state_root: '/tmp/root' })
   assert.equal(config.connectionMode, 'standalone')
   assert.equal(config.stateRoot, '/tmp/root')
-  assert.equal(config.profileId, 'profile-1')
-  assert.equal(config.developerToolsEnabled, true)
-  assert.equal(resolveConfig(base).connectionMode, 'standalone')
-  assert.equal(resolveConfig(base).developerToolsEnabled, false)
+  assert.equal('profileId' in config, false)
+  assert.equal('developerToolsEnabled' in config, false)
 })
 
 test('the managed config accepts one pinned issuer key and issuer origin', () => {
@@ -268,27 +241,6 @@ test('the managed config accepts one pinned issuer key and issuer origin', () =>
   assert.equal(resolved.expectedIssuer, 'https://issuer.example')
   assert.throws(() => resolveManagerConfig({ enrollment_issuer_public_key: 'not-a-key' }), (error) => error.code === 'invalid_config')
   assert.throws(() => resolveManagerConfig({ enrollment_issuer: 'issuer' }), (error) => error.code === 'invalid_config')
-})
-
-test('the managed configuration accepts a config file and a resolved per-instance override', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'whalerein-dsh-config-'))
-  try {
-    const configFile = join(directory, 'config.toml')
-    writeFileSync(configFile, 'version = 1\nenvironment = "company"\n\n[environments.company]\nlabel = "Company"\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nclient_id = "whalerein-cli"\n'.replace('client_id', 'native_client_id'))
-    const resolved = resolveManagerConfig({ config_file: configFile, environment: 'company', state_root: '/tmp/state' }, {})
-    assert.equal(resolved.configFile, configFile)
-    assert.equal(resolved.environment, 'company')
-    assert.equal(resolved.stateRoot, '/tmp/state')
-    assert.equal(resolved.runtimeConfig.caFile, undefined)
-    assert.throws(() => resolveManagerConfig({ environment: 'Invalid Name' }), (error) => error.code === 'invalid_config')
-    assert.throws(() => resolveManagerConfig({ config_file: configFile, environment: 'unknown' }, {}), (error) => error.code === 'invalid_config')
-    assert.throws(() => resolveManagerConfig({ config_file: '/missing/config.toml', environment: 'production' }, {}), (error) => error.code === 'invalid_config')
-    assert.throws(() => resolveManagerConfig({ config_file: 'bad\0path' }, {}), (error) => error.code === 'invalid_config')
-    assert.equal(resolveManagerConfig({ environment: '' }).environment, '')
-    assert.equal(resolveManagerConfig({ config_file: '' }).configFile, undefined)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
 })
 
 test('the DSH adapter keeps no catalog, descriptor loader or TOML writer', async () => {
@@ -303,8 +255,15 @@ test('the DSH adapter keeps no catalog, descriptor loader or TOML writer', async
   }
   const settings = readFileSync(new URL('src/settings.js', root), 'utf8')
   assert.equal(settings.includes("writeFileSync"), false)
-  assert.equal(settings.includes('configurationView'), true, 'settings only projects the Host configuration view')
+  assert.equal(settings.includes('configurationView'), false, 'DSH does not expose a second configuration view')
   const config = readFileSync(new URL('src/config.js', root), 'utf8')
   assert.equal(config.includes('app.whalerein'), false)
   assert.equal(config.includes('staging.whalerein'), false)
+})
+
+test('the Standalone runtime resolver refuses another explicitly selected service', () => {
+  for (const service of ['whalerein_cloud', 'custom', 'invalid']) {
+    assert.throws(() => resolveConfig({ ...base, service }), { code: 'invalid_config' })
+  }
+  assert.equal(resolveConfig({ ...base, service: 'standalone' }).connectionMode, 'standalone')
 })

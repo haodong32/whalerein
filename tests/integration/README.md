@@ -97,6 +97,8 @@ Chromium for settings and browser ownership checks. Backend and browser cases ar
 one group; `--only` selects individual journeys. `--list` discovers them without
 starting DSH, Chromium, PostgreSQL or the broker.
 
+Each native case gives the CLI its own explicit default TOML configuration;
+the DSH connector reads only its profile and never initializes the CLI file.
 Each case owns a fresh DSH home, working directory, native process and loopback
 Messages provider. The provider returns deterministic text or a test-only native
 tool that asks the real Approval service before incrementing a private counter.
