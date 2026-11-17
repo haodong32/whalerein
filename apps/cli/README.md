@@ -37,9 +37,16 @@ whalerein queue list --session <session-id>
 whalerein queue edit --session <session-id> --item <item-id> <text>
 whalerein queue remove --session <session-id> --item <item-id>
 whalerein queue steer --session <session-id> --item <item-id>
+whalerein config show [--environment NAME]
+whalerein config check [--environment NAME]
+whalerein config set default NAME | --clear
+whalerein config set environment NAME --mode account|standalone [--api-origin URL --issuer URL --native-client-id ID] [--label LABEL] [--ca-provider system|file --ca-file PATH]
+whalerein config set builtin NAME [--label LABEL] [--clear-label] [--ca-provider system|mkcert|file --ca-file PATH] [--clear-tls]
+whalerein config remove environment NAME
+whalerein config import [--source KIND] [--confirm PREVIEW_ID --yes]
 whalerein profile list [--include-staging]
 whalerein profile current
-whalerein profile add NAME [--staging --enable-testing | --api-origin URL --issuer URL --client-id ID [--access-url URL]]
+whalerein profile add NAME
 whalerein profile use NAME
 whalerein profile remove NAME
 whalerein revoke
@@ -48,7 +55,12 @@ whalerein doctor
 whalerein doctor --export <file>
 ```
 
-Global flags: `--json`, `--yes`, `--data-dir <path>`. Destructive commands
+Global flags: `--json`, `--yes`, `--data-dir <path>`, `--config <path>`,
+`--environment <name>`. `--config` beats `WHALEREIN_CONFIG`, which beats
+`~/.whalerein/config.toml`. `--environment` applies to one invocation only and
+is never persisted; an unknown name fails instead of falling back to
+production. `--data-dir` remains the identity/state root and is never derived
+from an environment. Destructive commands
 require `--yes` when standard input is not a terminal.
 
 To select a Host for a session operation, put `--host HOST_ID` before the
@@ -159,12 +171,14 @@ environment; a fresh directory reports official production as the ordinary
 account default while invitation pairing remains available and no account
 service is contacted.
 
-`profile add` never switches the selection. Official staging is hidden from
-ordinary setup: adding it requires both `--staging` and `--enable-testing`, and
-it stays visibly labeled `Staging (testing only)` whenever active. This is a
-local testing choice, not server admission control. A custom profile requires an
-explicit account API origin, OIDC issuer and public native client ID; the client
-does not infer endpoints from hostnames.
+Profiles are scoped to the resolved environment. `profile list` shows only
+identities in that environment (testing-only staging/local identities stay
+hidden unless active or `--include-staging` is passed), `profile add` adds an
+identity inside it, and `profile use` refuses an identity from another
+environment. Environment definitions come from the built-in catalog or the
+client-environment file; legacy service flags on `profile add` are rejected with
+guidance to `config set environment`. A configuration change never re-binds an
+existing identity or rotates its state.
 
 `profile use` fails with `conflict` while another client process is active, so
 old traffic stops before the new selection is published. Removing a managed
@@ -174,9 +188,9 @@ rollback warning and those clients must be stopped before downgrading.
 
 | Command | Result shape |
 |---|---|
-| `profile list` | `{"profiles":[...]}` |
-| `profile current` | selection with `active`, `default_service`, `standalone_available` |
-| `profile add` | `{"profile":...,"current":false}` |
+| `profile list` | `{"environment":...,"selection_source":...,"profiles":[...]}` |
+| `profile current` | selection with `active`, `default_service`, `standalone_available`, `environment`, `selection_source`, `definition_source` |
+| `profile add` | `{"environment":...,"profile":...,"current":false}` |
 | `profile use` | activation outcome with optional `rollback_warning` |
 | `profile remove` | removal outcome and `remote_revocation:"not_attempted"` |
 
@@ -185,6 +199,7 @@ rollback warning and those clients must be stopped before downgrading.
 | Variable | Meaning |
 |---|---|
 | `WHALEREIN_DATA_DIR` | Local config/cache directory |
+| `WHALEREIN_CONFIG` | Client-environment TOML path when `--config` is absent; defaults to `~/.whalerein/config.toml` |
 | `WHALEREIN_SECRET_BACKEND` | `keyring` (default), `memory` (tests), `file:<dir>` (test harness only) |
 | `WHALEREIN_MQTT_URL` | Override the broker endpoint derived from the Access URL |
 | `WHALEREIN_CA_FILE` | Private CA PEM for HTTPS and MQTT |
@@ -226,3 +241,24 @@ outcome follows the same four dispositions: a missing source or a source with
 no completed turn fails at preflight, a verified child attach failure keeps the
 parent and child identities with a warning, and an unresolved native phase is
 `UNKNOWN` with a parent-id or manual reconcile hint.
+
+### Environment selection
+
+`--environment NAME` selects any valid environment for one invocation. It is
+never persisted: the next command follows the file default (`config set default`)
+or built-in production when no default is declared. An unknown name fails instead
+of falling back. `config show` explains the selected file, selection/definition
+provenance, desired default versus invocation override, field provenance and
+offline validation; `config check` returns a non-zero exit for invalid or
+unresolvable configuration and never claims live connectivity.
+
+`config set environment` defines a custom account or standalone environment,
+`config set builtin` specializes only a built-in label/TLS pair, and
+`config remove environment` refuses built-in names. All writes go through Core's
+revisioned patch path and preserve unrelated comments and keys. `config import`
+previews legacy sources read-only; confirmation requires the preview id plus
+`--yes`.
+
+Account login/discovery transport is still unavailable in this CLI release.
+Environment/profile selection is implemented; it does not make `login` or
+automatic account pairing available.

@@ -39,6 +39,31 @@ keys. Endpoint/OS compromise is outside this protection. Cached client payloads
 are encrypted; memory/file secret backends are test tools. Compose plaintext
 loopback listeners require separate production TLS configuration.
 
+## Configuration and trust
+
+The client-environment file is non-secret. It contains environment names,
+public origins, native registration ids and CA references. Managed route fields
+(`access_url`, `mqtt_url`, broker/region keys) and credential-shaped fields are
+rejected as `unknown_field` rather than stored. Secrets stay in Core
+`SecretStore` and in Host native credential records under their existing names;
+configuration never reads, copies, moves or rekeys them.
+
+TLS trust is scoped to the selected environment: the platform store, the fixed
+per-user mkcert root for built-in `local`, or an explicit public CA file. The
+configuration path never installs a CA, copies a CA private key, runs a shell
+helper, or changes a process-global TLS store. A missing or wrong CA fails with
+`invalid_tls` and does not change the selected environment. Existing Standalone
+`WHALEREIN_CA_FILE` and `WHALEREIN_MQTT_URL` transport overrides are separate
+and outside this contract.
+
+Legacy import is read-only until confirmation. Preview reports literal secrets
+only as a conflict or secure-handoff requirement and never prints their values;
+it retains identity and state by path, profile id and credential namespace, and
+never moves, copies or rekeys a profile or credential. The import journal and
+the `<config>.lock.sqlite` sidecar are non-secret coordination state: they
+record revisions, paths, names and step timestamps, never tokens or private
+keys, and a normal configuration open never reads them.
+
 ## Pairing and revocation
 
 Core confirms the Noise host fingerprint before FINISH. Invitations are

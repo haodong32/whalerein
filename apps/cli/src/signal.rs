@@ -14,27 +14,51 @@ use whalerein_core::api::PendingCommand;
 use crate::cli::Command;
 use crate::output::CliOutcome;
 
-/// Resolve when SIGINT or SIGTERM arrives.
-pub async fn interrupt() {
+/// Register the OS signal handlers immediately and return a future that
+/// resolves when either signal arrives.
+///
+/// Startup can take longer than the interval before a user's first Ctrl-C
+/// (configuration parsing, profile resolution and cache opening). Registering
+/// synchronously avoids the default process-killing disposition during that
+/// window; the lazy `ctrl_c()` registration used by [`interrupt`] only happens
+/// when the future is first polled.
+pub fn registered_interrupt() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {},
-                    _ = terminate.recv() => {},
+        let interrupt = signal(SignalKind::interrupt()).ok();
+        let terminate = signal(SignalKind::terminate()).ok();
+        async move {
+            match (interrupt, terminate) {
+                (Some(mut interrupt), Some(mut terminate)) => {
+                    tokio::select! {
+                        _ = interrupt.recv() => {},
+                        _ = terminate.recv() => {},
+                    }
                 }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
+                (Some(mut interrupt), None) => {
+                    let _ = interrupt.recv().await;
+                }
+                (None, Some(mut terminate)) => {
+                    let _ = terminate.recv().await;
+                }
+                (None, None) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
             }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
+}
+
+/// Resolve when SIGINT or SIGTERM arrives.
+pub async fn interrupt() {
+    registered_interrupt().await
 }
 
 /// Request identities that were still unfinished when a snapshot was taken.

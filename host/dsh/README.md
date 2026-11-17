@@ -24,8 +24,8 @@ Host networking, encryption, commands, watched publication and state now live in
 [`host/runtime`](../../host/runtime/README.md). The package depends on that local
 Host package through `workspace:*` and shares the root `pnpm-lock.yaml`. Run
 `pnpm install --frozen-lockfile` from the repository root to install both packages.
-The generated descriptor is packaged with Host rather than resolved
-through a checkout-only path.
+The canonical client-environment catalog is packaged with Host; no generated
+Cloud descriptor or checkout-only path is used.
 
 ```text
 host/dsh/
@@ -49,16 +49,18 @@ host/runtime/
 
 ## Configuration
 
-The running DSH profile is the only connection config. Settings → WhaleRein writes `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (entry id `whalerein-dsh`). The plugin reads that document after Cordis has evaluated any `!!js` expression stored in it. It does not consult `WHALEREIN_*` environment variables on its own.
+The running DSH profile is the only connection-settings source. Settings → WhaleRein writes `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (entry id `whalerein-dsh`). The plugin reads that document after Cordis has evaluated any `!!js` expression stored in it. Managed profiles reference the per-device TOML file through `config_file` (Host default `~/.whalerein/config.toml`, or `WHALEREIN_CONFIG`); the plugin keeps no environment catalog, endpoint table or TOML writer of its own.
 
 Every documented key below is part of the shipped `Config` schema and is read from the profile. Saving applies all changed fields in one atomic namespace mutation at the revision the draft was read from; a rejected save keeps the draft, and clearing a field restores inheritance. If the stored configuration cannot resolve at startup, the plugin keeps the settings page available and names the invalid field instead of looking like an unpaired host. Clearing `server` is blocked while it is the only source of `mqtt_url`; save a legacy `mqtt_url` first or keep the server address.
 
-A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` so the value stays out of the file. The process still has to export that variable. `pnpm start` does this for the host token and the administrator token.
+A legacy Standalone secret may be stored in that file as an `!!js process.env` expression so the value stays out of the file. Managed profiles carry no endpoints, trust material or tokens; `pnpm start` seeds only `connection_mode: managed`, `adapter: real` and its state directory.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `connection_mode` | `auto` | `auto`, `managed`, or `standalone`. Auto keeps every profile with existing `server`/`mqtt_url`/`host_token` material standalone and treats a profile without connection material as the managed WhaleRein Cloud flow |
-| `state_root` | `~/.whalerein/dsh` | Managed state root passed to the Host connection manager. `state_dir` remains the legacy alias for Standalone profiles |
+| `config_file` | empty | Explicit per-device TOML path passed to the Host configuration module. Empty uses `WHALEREIN_CONFIG`, then `~/.whalerein/config.toml` |
+| `environment` | empty | Optional per-instance environment override. It is validated by Host resolution, never persisted into the file and never creates a second default |
+| `state_root` | `~/.whalerein/dsh` | Managed state root passed to the Host connection manager. It is exactly the caller value; it is never derived from a configuration descriptor. `state_dir` remains the legacy alias for Standalone profiles |
 | `profile_id` | none | Selected managed profile. Opaque identifier only; it is never a display name or host ID |
 | `developer_tools_enabled` | `false` | Enables the staging/Developer tools affordance in the managed settings page. Enabling staging still requires an explicit profile selection |
 | `enrollment_issuer_public_key` | none | One base64url Ed25519 public key. When set, the managed flow verifies the account service's portable authorization signature before sending anything. Access verifies the same document independently |
@@ -70,7 +72,7 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 | `mqtt_url` | required when `server` is empty | legacy `mqtts://...`; `mqtt://` only when `allow_insecure_mqtt` is true |
 | `host_id` | generated once from the computer name when the profile has none | topic-safe host id. A saved value stays. Clearing the settings field keeps the saved value. Changing it requires confirmation and creates a new host identity: paired devices must pair again. The Host credential record key stays stable so a rename does not brick the next start |
 | `host_token` | required | broker provisioning token (never logged) |
-| `ca_file` | none | TLS CA bundle. Empty uses the system trust store |
+| `ca_file` | none | Legacy Standalone TLS CA bundle. Managed trust comes only from the selected environment's scoped `tls` resolution |
 | `state_dir` | `~/.whalerein/dsh` | Not shown in settings. SQLite directory |
 | `adapter` | `auto` | Not shown in settings. Inside DSH, `auto` uses the real adapter. `fake` and `real` stay for tests and standalone runs |
 | `pending_queue_enabled` | `true` | Not shown in settings. When false, pending-queue read/edit/remove/steer are not advertised |
@@ -116,8 +118,8 @@ the foreground on port 3099. The first launch writes local Compose defaults into
 that profile's `cordis.patch.yml`. Later launches leave the file unchanged.
 DSH prints its tokenized UI URL. Press Ctrl-C to stop. It only ensures the plugin
 is loaded by DSH; it does **not** start or check Access/PostgreSQL/EMQX.
-`WHALEREIN_DSH_PORT` selects the port. `WHALEREIN_HOST_TOKEN` and
-`WHALEREIN_ADMIN_TOKEN` are exported for profile values that reference them.
+`WHALEREIN_DSH_PORT` selects the port. `WHALEREIN_CONFIG` selects the
+per-device TOML file; no Cloud descriptor or host/admin token is injected.
 The normal `web` profile on 3080 is untouched.
 
 Loading the Host plugin as a bundle (rather than a `--patch` launch overlay)
@@ -437,8 +439,8 @@ pnpm test          # node:test with coverage thresholds
 # Repository gate: ./repo test --project dsh --coverage
 ```
 
-Latest run (Node 25.9.0): **291 tests pass**, line **96.5%**, branch **85.5%**,
-function **91.8%**. Thresholds in `package.json` are 90% line, 85% branch, 90%
+Latest run (Node 25.9.0): **304 tests pass**, line **96.0%**, branch **85.3%**,
+function **91.7%**. Thresholds in `package.json` are 90% line, 85% branch, 90%
 function.
 
 Test suites cover: Noise XX roundtrip/MAC/prologue/AAD/channel keys; protobuf
@@ -587,3 +589,21 @@ DSH versions, operating systems, CPU architectures, and Node versions are open
 but unverified; advertisement there is feature detection, not a claim that the
 operation works. Windows native behavior and a repeatable macOS runner remain
 unverified.
+
+### Official local account service
+
+The official `local` environment uses the managed enrollment flow, alongside
+staging and production, and is selected only by the per-device TOML file
+(`environment = "local"` or an explicit settings/instance selection). Its
+service identity, API/issuer origins, native registration and mkcert trust
+defaults come from the public catalog and Host configuration module. No
+Cloud-generated environment document is required.
+
+The DSH profile keeps only `connection_mode: managed`, `adapter: real`, its
+explicit `state_dir` and an optional `config_file`/`environment` reference; no
+broker token, server, CA path or state root is copied from the environment
+definition. Editing the TOML file changes desired settings for a subsequent
+open only. A running authority stays pinned until an explicit switch; a changed
+authority under the same name requires a new Host profile. Missing configuration
+fails closed, and the development CA is scoped to the selected local service
+without disabling validation or touching global Node trust.

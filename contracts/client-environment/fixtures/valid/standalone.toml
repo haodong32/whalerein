@@ -1,0 +1,6 @@
+version = 1
+environment = "lab"
+
+[environments.lab]
+label = "Lab invitation pairing"
+mode = "standalone"

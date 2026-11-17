@@ -1,0 +1,14 @@
+# Quoted keys and multiline strings are maintained-parser syntax.
+version = 1
+environment = "company"
+
+[environments."company"]
+"label" = """Company
+Cloud"""
+mode = "account"
+api_origin = "https://cloud.example.com"
+issuer = "https://auth.example.com/oidc"
+native_client_id = "whalerein-cli"
+
+[environments.company.tls]
+ca_provider = "system"

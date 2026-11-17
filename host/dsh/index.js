@@ -17,6 +17,8 @@ import { createAdapter, FakeDshAdapter } from './src/adapter/index.js'
 import { join } from 'node:path'
 import { createLogger, createLogSalt } from 'whalerein-host/log.js'
 import { createSettingsService } from './src/settings.js'
+import { open, resolveEnvironment } from 'whalerein-host/configuration'
+import { hasLegacyMarkers } from 'whalerein-host/registry.js'
 
 export const name = 'whalerein-dsh'
 // Cordis applies the plugin only once the real DSH services exist, so `auto`
@@ -27,6 +29,8 @@ export const inject = ['sessions', 'sessionController', 'credentials']
  * only input. Empty strings are missing and fall back to the schema default.
  * Secret tokens have no default, so an absent token stays unset. */
 export const Config = z.object({
+  environment: z.string().default('').volatile(),
+  config_file: z.string().default('').volatile(),
   connection_mode: z.string().default('auto').volatile(),
   state_root: z.string().default('').volatile(),
   enrollment_issuer_public_key: z.string().default('').volatile(),
@@ -67,6 +71,8 @@ function configValue(raw, key) {
 
 export function materializeConfig(raw) {
   const keys = [
+    'environment',
+    'config_file',
     'connection_mode',
     'state_root',
     'enrollment_issuer_public_key',
@@ -211,7 +217,7 @@ export function configFailure(error) {
   const reason = error instanceof ConfigError
     ? error.message.replace(`${error.code}: `, '')
     : undefined
-  const names = ['connection_mode', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
+  const names = ['environment', 'config_file', 'connection_mode', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
     'profile_id', 'developer_tools_enabled',
     'server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
     'host_token', 'adapter', 'approval_mode', 'approval_ttl_ms', 'event_batch_ms',
@@ -247,8 +253,32 @@ function registerSettings(ctx, host) {
  * plaintext or hands them to the browser.
  */
 export async function createManagedHost(rawConfig = {}, options = {}) {
-  const config = resolveManagerConfig(materializeConfig(rawConfig))
+  const config = resolveManagerConfig(materializeConfig(rawConfig), options)
   const managerFactory = options.managerFactory ?? await loadManagerFactory()
+  // Resolve the selected file once at startup. The manager receives this
+  // snapshot plus the reference; later edits only change desired state.
+  let configurationSnapshot = null
+  try {
+    configurationSnapshot = open({
+      configFile: config.configFile,
+      envVars: options.envVars,
+      homeDir: options.homeDir,
+      allowDefaultInit: true,
+      legacyState: () => hasLegacyMarkers(config.stateRoot),
+    })
+    resolveEnvironment(configurationSnapshot, config.environment || null)
+  } catch (error) {
+    throw Object.assign(new Error('configuration unavailable'), {
+      code: typeof error?.code === 'string' ? error.code : 'invalid_config',
+      configError: {
+        code: typeof error?.code === 'string' ? error.code : 'invalid_config',
+        message: 'configuration could not be resolved',
+        environment: typeof error?.environment === 'string' ? error.environment : null,
+      },
+      configPath: config.configFile ?? null,
+      environmentOverride: config.environment || null,
+    })
+  }
   const credentials = options.credentials ?? new DshHostCredentials({
     ctx: options.ctx,
     profileId: config.profileId,
@@ -279,6 +309,9 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
     manager = await managerFactory({
       ctx: options.ctx,
       credentials,
+      environment: config.environment || null,
+      configFile: config.configFile,
+      configSnapshot: configurationSnapshot,
       stateRoot: config.stateRoot,
       now: options.now,
       fetch: options.fetch,
@@ -326,7 +359,7 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
 async function applyManaged(ctx, rawConfig, options) {
   let config
   try {
-    config = resolveManagerConfig(materializeConfig(rawConfig))
+    config = resolveManagerConfig(materializeConfig(rawConfig), options)
   } catch (error) {
     const failure = configFailure(error)
     fallbackLog(failure.code, failure.reason)
@@ -334,6 +367,8 @@ async function applyManaged(ctx, rawConfig, options) {
       managed: true,
       manager: null,
       config,
+      configPath: configValue(rawConfig, 'config_file') || null,
+      environmentOverride: configValue(rawConfig, 'environment') || null,
       configError: failure,
       developerToolsEnabled: false,
     })
@@ -350,8 +385,10 @@ async function applyManaged(ctx, rawConfig, options) {
       managed: true,
       manager: null,
       config,
+      configPath: config.configFile ?? null,
+      environmentOverride: config.environment || null,
       developerToolsEnabled: config.developerToolsEnabled,
-      configError: { code: 'manager_unavailable', field: '', reason: 'the connection manager is unavailable in this runtime' },
+      configError: error?.configError ?? { code: typeof error?.code === 'string' ? error.code : 'manager_unavailable', field: '', reason: 'the connection manager is unavailable in this runtime' },
     })
     return undefined
   }

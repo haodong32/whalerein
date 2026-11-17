@@ -1,0 +1,7 @@
+version = 1
+
+[environments.company]
+mode = "account"
+api_origin = "http://cloud.example.com"
+issuer = "https://auth.example.com/oidc"
+native_client_id = "whalerein-cli"

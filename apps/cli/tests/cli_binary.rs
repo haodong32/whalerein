@@ -1,10 +1,45 @@
 //! Binary-level checks for stable output, exit codes and non-interactive modes.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+
+/// Every binary test gets an isolated default config unless it passes
+/// `--config` or explicitly exercises default initialization.
+fn default_test_config() -> &'static Path {
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("whalerein-cli-binary-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        if !path.exists() {
+            std::fs::write(&path, "version = 1\nenvironment = \"production\"\n").unwrap();
+        }
+        path
+    })
+}
 
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_whalerein"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_whalerein"));
+    command.env("WHALEREIN_CONFIG", default_test_config());
+    command
+}
+
+fn write_config(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+fn run_config(args: &[&str], config: &Path) -> std::process::Output {
+    binary()
+        .args(args)
+        .env("WHALEREIN_CONFIG", config)
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -1061,9 +1096,15 @@ async fn approvals_request_prints_the_wire_state_and_unknown_is_not_found() {
 fn profile_commands_are_stable_across_processes_and_gated() {
     let dir = tempfile::tempdir().unwrap();
     let dir_text = dir.path().to_str().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "version = 1\nenvironment = \"staging\"\n",
+    );
     let json = |args: &[&str]| {
         let output = binary()
-            .args(["--json", "--data-dir", dir_text])
+            .args(["--json", "--data-dir", dir_text, "--config"])
+            .arg(&config)
             .args(args)
             .env("WHALEREIN_SECRET_BACKEND", "memory")
             .output()
@@ -1076,24 +1117,10 @@ fn profile_commands_are_stable_across_processes_and_gated() {
     let value: serde_json::Value = serde_json::from_slice(&fresh.stdout).unwrap();
     assert_eq!(value["command"], "profile-current");
     assert!(value["data"]["active"].is_null());
-    assert_eq!(
-        value["data"]["default_service"]["kind"],
-        "official-production"
-    );
+    assert_eq!(value["data"]["environment"], "staging");
     assert!(!dir.path().join("profiles.json").exists());
 
-    let (denied,) = json(&["profile", "add", "official-staging", "--staging"]);
-    assert_eq!(denied.status.code(), Some(9), "{denied:?}");
-    let value: serde_json::Value = serde_json::from_slice(&denied.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "unsupported_capability");
-
-    let (added,) = json(&[
-        "profile",
-        "add",
-        "official-staging",
-        "--staging",
-        "--enable-testing",
-    ]);
+    let (added,) = json(&["profile", "add", "official-staging"]);
     assert!(added.status.success(), "{added:?}");
     let (used,) = json(&["profile", "use", "official-staging"]);
     assert!(used.status.success(), "{used:?}");
@@ -1107,6 +1134,7 @@ fn profile_commands_are_stable_across_processes_and_gated() {
 
     let (listed,) = json(&["profile", "list"]);
     let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["data"]["environment"], "staging");
     assert!(value["data"]["profiles"]
         .as_array()
         .unwrap()
@@ -1117,10 +1145,6 @@ fn profile_commands_are_stable_across_processes_and_gated() {
     assert!(removed.status.success(), "{removed:?}");
     let value: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
     assert_eq!(value["data"]["remote_revocation"], "not_attempted");
-    assert_eq!(
-        value["data"]["active"]["active"]["name"],
-        "official-production"
-    );
 }
 
 #[cfg(unix)]
@@ -1131,16 +1155,21 @@ fn profile_switch_conflicts_with_an_external_activation_holder() {
 
     let dir = tempfile::tempdir().unwrap();
     let dir_text = dir.path().to_str().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "version = 1\nenvironment = \"staging\"\n",
+    );
     let added = binary()
         .args([
             "profile",
             "add",
             "official-staging",
-            "--staging",
-            "--enable-testing",
             "--data-dir",
             dir_text,
+            "--config",
         ])
+        .arg(&config)
         .env("WHALEREIN_SECRET_BACKEND", "memory")
         .output()
         .unwrap();
@@ -1162,14 +1191,9 @@ fn profile_switch_conflicts_with_an_external_activation_holder() {
     assert_eq!(lines.next().unwrap().unwrap(), "ready");
 
     let switched = binary()
-        .args([
-            "--json",
-            "--data-dir",
-            dir_text,
-            "profile",
-            "use",
-            "official-staging",
-        ])
+        .args(["--json", "--data-dir", dir_text, "--config"])
+        .arg(&config)
+        .args(["profile", "use", "official-staging"])
         .env("WHALEREIN_SECRET_BACKEND", "memory")
         .output()
         .unwrap();
@@ -1179,4 +1203,543 @@ fn profile_switch_conflicts_with_an_external_activation_holder() {
 
     let _ = holder.kill();
     let _ = holder.wait();
+}
+
+const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDADCCAeigAwIBAgIUbb+LQ3RCDYx+wPWPRkbqGiCM6c4wDQYJKoZIhvcNAQEL\nBQAwIDEeMBwGA1UEAwwVd2hhbGVyZWluLWNsaS10ZXN0LWNhMB4XDTI2MTExNzEx\nMzAwMFoXDTM2MTExNDExMzAwMFowIDEeMBwGA1UEAwwVd2hhbGVyZWluLWNsaS10\nZXN0LWNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv+nspxQJzY7X\nnWsyH69PZXrWqb7RVDvNTZl3eu2qWpUkl9r87x82veYCvEJygfOX9dIzTQ2JV9FX\n2S09+JFU/27rj8EvGA9fBpdvDiQlqDr1Q5aAiqaT3Jl32kdEK7F4+a0fyMlYxXeg\niLManaiW3SD0kVME/Qsvfc68wa7hD8FNv8rgH96cYwSqOfsdaBkiGUcNg+jC9gGg\nKXrVCdWgVrlDh4XDmCX3O2NH5a7o93fYg7pp//GwuSvtmm1JuKfEyFFAn92tkoz+\neqYCRh0N10gnN65X3bvWpx9rQS+2v7/hWggURvTZGa1SOK8fkkQBeZKVachokfuL\nGCJWqkNrvQIDAQABozIwMDAdBgNVHQ4EFgQUxh31qeQ4KZJJmQgoW4LTsDwpH5Yw\nDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAbezVGedF0UeF4axs\ng3NSwXgdoTTO2YUR1FvDtge8HvXu+HhOmEcOmbBMV0oPMLYz76B7lbseDWZaEQw8\nFw8O8pk7zzseIlNw0WmpY4+pZDJIc+A+hZ2pu08u0t5jlNufWmYt+GjXTlfQuEhT\nFWtXpAo8eskfOnbRm5jHziMuqYkeSyjxo7PvUaQNGAVpiM8uvvy5UsH6L93VI11J\nlGPip/Uf+deAS5JGKJwN8om7rB1H0GlD6NKO9+gOltGNh9PT6ILy++NYeRpPPw/s\n5MwZBn76RWJxwdQTqqan+51ZKj2CeZr04fe0Od6oEiLBsPZLCVm52amQLfKU0q4A\ntsnj7Q==\n-----END CERTIFICATE-----\n";
+
+const ACCOUNT_ENV: &str = "version = 1\nenvironment = \"company\"\n\n[environments.company]\nlabel = \"Company Cloud\"\nmode = \"account\"\napi_origin = \"https://cloud.example.com\"\nissuer = \"https://auth.example.com/oidc\"\nnative_client_id = \"whalerein-cli\"\n";
+
+#[test]
+fn config_env_ac_03_explicit_path_beats_whalerein_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_config = write_config(
+        dir.path(),
+        "from-env.toml",
+        "version = 1\nenvironment = \"staging\"\n",
+    );
+    let explicit = write_config(dir.path(), "explicit.toml", ACCOUNT_ENV);
+    let output = binary()
+        .args(["--json", "--config"])
+        .arg(&explicit)
+        .arg("config")
+        .arg("show")
+        .env("WHALEREIN_CONFIG", &env_config)
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["data"]["selected_environment"], "company");
+    assert_eq!(value["data"]["source_kind"], "explicit");
+    assert_eq!(
+        value["data"]["path"].as_str().unwrap(),
+        std::fs::canonicalize(&explicit).unwrap().to_str().unwrap()
+    );
+
+    let output = run_config(&["--json", "config", "show"], &env_config);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(envelope(&output)["data"]["selected_environment"], "staging");
+}
+
+#[test]
+fn config_env_ac_03_missing_explicit_file_fails_without_initializing() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.toml");
+    let output = binary()
+        .args(["--json", "--config"])
+        .arg(&missing)
+        .arg("config")
+        .arg("show")
+        .env("WHALEREIN_CONFIG", default_test_config())
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(envelope(&output)["error"]["code"], "missing_config");
+    assert!(!missing.exists());
+}
+
+#[test]
+fn config_env_ac_03_fresh_default_initializes_then_commands_follow_the_saved_default() {
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let invoke = |args: &[&str]| {
+        binary()
+            .args(["--data-dir", data.path().to_str().unwrap()])
+            .args(args)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env_remove("WHALEREIN_CONFIG")
+            .env_remove("WHALEREIN_DATA_DIR")
+            .env("WHALEREIN_SECRET_BACKEND", "memory")
+            .output()
+            .unwrap()
+    };
+    let initial = invoke(&["--json", "doctor"]);
+    assert!(initial.status.success(), "{initial:?}");
+    let path = home.path().join(".whalerein/config.toml");
+    assert!(path.exists());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("version = 1"));
+    assert!(text.contains("environment = \"production\""));
+
+    let created = invoke(&[
+        "--json",
+        "config",
+        "set",
+        "environment",
+        "company",
+        "--mode",
+        "account",
+        "--api-origin",
+        "https://cloud.example.com",
+        "--issuer",
+        "https://auth.example.com/oidc",
+        "--native-client-id",
+        "whalerein-cli",
+    ]);
+    assert!(created.status.success(), "{created:?}");
+    let default = invoke(&["--json", "config", "set", "default", "company"]);
+    assert!(default.status.success(), "{default:?}");
+    let shown = invoke(&["--json", "config", "show"]);
+    assert!(shown.status.success(), "{shown:?}");
+    let value = envelope(&shown);
+    assert_eq!(value["data"]["selected_environment"], "company");
+    assert_eq!(value["data"]["selection_source"], "file");
+    let before = std::fs::read(&path).unwrap();
+    let checked = invoke(&["--json", "config", "check"]);
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "check must not write"
+    );
+}
+
+#[test]
+fn config_env_ac_06_environment_override_is_ephemeral_and_unknown_names_never_fall_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "config.toml", ACCOUNT_ENV);
+    let before = std::fs::read(&config).unwrap();
+    let output = run_config(
+        &["--json", "--environment", "company", "config", "show"],
+        &config,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["data"]["selected_environment"], "company");
+    assert_eq!(value["data"]["selection_source"], "invocation");
+    assert_eq!(
+        std::fs::read(&config).unwrap(),
+        before,
+        "override must not persist"
+    );
+
+    let output = run_config(&["--json", "config", "show"], &config);
+    assert_eq!(envelope(&output)["data"]["selected_environment"], "company");
+
+    let output = run_config(
+        &["--json", "--environment", "production", "config", "show"],
+        &config,
+    );
+    assert_eq!(
+        envelope(&output)["data"]["selected_environment"],
+        "production"
+    );
+
+    let output = run_config(&["--json", "--environment", "missing", "hosts"], &config);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(envelope(&output)["error"]["code"], "unknown_environment");
+}
+
+#[test]
+fn config_env_ac_16_show_and_check_report_offline_facts_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "config.toml", ACCOUNT_ENV);
+    let before = std::fs::read(&config).unwrap();
+
+    let human = run_config(&["config", "show"], &config);
+    assert!(human.status.success(), "{human:?}");
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("Configuration file:"));
+    assert!(text.contains("Selected environment: company"));
+    assert!(text.contains("Selection source: configuration file"));
+    assert!(text.contains("Validation: offline only"));
+    assert!(text.contains("Live readiness: not checked"));
+    assert!(text.contains("Field provenance:"));
+
+    let json = run_config(&["--json", "config", "show"], &config);
+    assert!(json.status.success(), "{json:?}");
+    let value = envelope(&json);
+    assert_eq!(value["command"], "config.show");
+    assert_eq!(value["data"]["validation"]["scope"], "offline");
+    assert_eq!(value["data"]["validation"]["live_readiness"], "not_checked");
+    assert_eq!(value["data"]["field_provenance"]["mode"], "file");
+    assert!(!String::from_utf8(json.stdout).unwrap().contains("token"));
+
+    let check = run_config(&["--json", "config", "check"], &config);
+    assert!(check.status.success(), "{check:?}");
+    assert_eq!(envelope(&check)["command"], "config.check");
+    assert_eq!(
+        std::fs::read(&config).unwrap(),
+        before,
+        "show/check must not write"
+    );
+}
+
+#[test]
+fn config_env_ac_19_set_default_persists_only_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let initial = "# keep me\nversion = 1\nenvironment = \"production\"\n\n[environments.company]\nmode = \"standalone\"\n";
+    let config = write_config(dir.path(), "config.toml", initial);
+    let output = run_config(&["--json", "config", "set", "default", "company"], &config);
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("# keep me"));
+    assert!(text.contains("environment = \"company\""));
+    assert!(text.contains("[environments.company]"));
+    assert_eq!(envelope(&output)["data"]["selected_environment"], "company");
+
+    let cleared = run_config(&["--json", "config", "set", "default", "--clear"], &config);
+    assert!(cleared.status.success(), "{cleared:?}");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(!text.contains("environment = \""));
+    assert_eq!(
+        envelope(&cleared)["data"]["selected_environment"],
+        "production"
+    );
+}
+
+#[test]
+fn config_env_ac_04_set_environment_writes_valid_toml_and_preserves_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "# deployment settings\nversion = 1\nenvironment = \"production\"\n",
+    );
+    let output = run_config(
+        &[
+            "--json",
+            "config",
+            "set",
+            "environment",
+            "company",
+            "--mode",
+            "account",
+            "--api-origin",
+            "https://cloud.example.com",
+            "--issuer",
+            "https://auth.example.com/oidc",
+            "--native-client-id",
+            "whalerein-cli",
+            "--label",
+            "Company Cloud",
+        ],
+        &config,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("# deployment settings"));
+    assert!(text.contains("[environments.company]"));
+    assert!(text.contains("mode = \"account\""));
+    assert!(text.contains("api_origin = \"https://cloud.example.com\""));
+    assert!(text.contains("label = \"Company Cloud\""));
+    let check = run_config(&["--json", "config", "check"], &config);
+    assert!(check.status.success(), "{check:?}");
+}
+
+#[test]
+fn config_env_ac_02_builtin_label_and_tls_specialization_are_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "config.toml", "version = 1\n");
+    let output = run_config(
+        &[
+            "--json",
+            "config",
+            "set",
+            "builtin",
+            "production",
+            "--label",
+            "Corp production",
+            "--ca-provider",
+            "system",
+        ],
+        &config,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["data"]["definition"]["label"], "Corp production");
+    assert_eq!(value["data"]["field_provenance"]["label"], "file");
+    assert_eq!(value["data"]["definition"]["tls"]["ca_provider"], "system");
+
+    let cleared = run_config(
+        &[
+            "--json",
+            "config",
+            "set",
+            "builtin",
+            "production",
+            "--clear-tls",
+        ],
+        &config,
+    );
+    assert!(cleared.status.success(), "{cleared:?}");
+    assert_eq!(
+        envelope(&cleared)["data"]["definition"]["tls"]["ca_provider"],
+        "system"
+    );
+}
+
+#[test]
+fn config_env_ac_02_builtin_authority_override_is_actionable() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "config.toml", "version = 1\n");
+    let output = run_config(
+        &[
+            "--json",
+            "config",
+            "set",
+            "environment",
+            "production",
+            "--mode",
+            "account",
+            "--api-origin",
+            "https://evil.example.com",
+            "--issuer",
+            "https://evil.example.com/oidc",
+            "--native-client-id",
+            "whalerein-cli",
+        ],
+        &config,
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["error"]["code"], "authority_override");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("new custom name"), "{message}");
+    assert!(message.contains("config set environment"), "{message}");
+}
+
+#[test]
+fn config_env_ac_02_remove_environment_refuses_builtins() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "config.toml", "version = 1\n");
+    let output = run_config(
+        &["--json", "config", "remove", "environment", "production"],
+        &config,
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["error"]["code"], "authority_override");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cannot be removed"));
+}
+
+#[test]
+fn config_env_ac_03_check_exits_nonzero_for_invalid_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "version = 1\nduplicate = 1\nduplicate = 2\n",
+    );
+    let output = run_config(&["--json", "config", "check"], &config);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["error"]["code"], "duplicate_key");
+
+    let config = write_config(
+        dir.path(),
+        "unknown.toml",
+        "version = 1\nenvironment = \"missing\"\n",
+    );
+    let output = run_config(&["--json", "config", "check"], &config);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value = envelope(&output);
+    assert_eq!(value["error"]["code"], "unknown_environment");
+    assert_eq!(value["data"]["errors"][0]["code"], "unknown_environment");
+}
+
+#[test]
+fn config_env_ac_10_relative_and_tilde_ca_paths_resolve_against_config_and_home() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("ca.pem"), TEST_CA_PEM).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "version = 1\nenvironment = \"company\"\n\n[environments.company]\nmode = \"account\"\napi_origin = \"https://cloud.example.com\"\nissuer = \"https://auth.example.com/oidc\"\nnative_client_id = \"whalerein-cli\"\n\n[environments.company.tls]\nca_provider = \"file\"\nca_file = \"~/ca.pem\"\n",
+    );
+    let output = binary()
+        .args(["--json", "--config"])
+        .arg(&config)
+        .args(["config", "check"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let dir2 = tempfile::tempdir().unwrap();
+    std::fs::write(dir2.path().join("ca.pem"), TEST_CA_PEM).unwrap();
+    let relative = write_config(
+        dir2.path(),
+        "config.toml",
+        "version = 1\nenvironment = \"company\"\n\n[environments.company]\nmode = \"account\"\napi_origin = \"https://cloud.example.com\"\nissuer = \"https://auth.example.com/oidc\"\nnative_client_id = \"whalerein-cli\"\n\n[environments.company.tls]\nca_provider = \"file\"\nca_file = \"ca.pem\"\n",
+    );
+    let output = run_config(&["--json", "config", "check"], &relative);
+    assert!(output.status.success(), "{output:?}");
+
+    let missing = write_config(
+        dir2.path(),
+        "missing-ca.toml",
+        "version = 1\nenvironment = \"company\"\n\n[environments.company]\nmode = \"account\"\napi_origin = \"https://cloud.example.com\"\nissuer = \"https://auth.example.com/oidc\"\nnative_client_id = \"whalerein-cli\"\n\n[environments.company.tls]\nca_provider = \"file\"\nca_file = \"missing.pem\"\n",
+    );
+    let output = run_config(&["--json", "config", "check"], &missing);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(envelope(&output)["error"]["code"], "invalid_tls");
+}
+
+#[test]
+fn config_env_ac_07_profile_use_refuses_a_profile_from_another_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "config.toml",
+        "version = 1\nenvironment = \"production\"\n\n[environments.company]\nmode = \"standalone\"\n",
+    );
+    let added = binary()
+        .args(["--data-dir", data.path().to_str().unwrap(), "--config"])
+        .arg(&config)
+        .args(["--json", "profile", "add", "work"])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let set = run_config(&["--json", "config", "set", "default", "company"], &config);
+    assert!(set.status.success(), "{set:?}");
+    let used = binary()
+        .args(["--data-dir", data.path().to_str().unwrap(), "--config"])
+        .arg(&config)
+        .args(["--json", "profile", "use", "work"])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert_eq!(used.status.code(), Some(8), "{used:?}");
+    let value = envelope(&used);
+    assert_eq!(value["error"]["code"], "conflict");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("belongs to environment production"));
+
+    let listed = binary()
+        .args(["--data-dir", data.path().to_str().unwrap(), "--config"])
+        .arg(&config)
+        .args(["--json", "profile", "list"])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{listed:?}");
+    assert_eq!(envelope(&listed)["data"]["environment"], "company");
+    assert!(envelope(&listed)["data"]["profiles"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn config_env_ac_21_import_preview_is_read_only_and_confirm_requires_yes() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("legacy");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("config.json"),
+        b"{\"schema\":\"whalerein/v1/config\"}\n",
+    )
+    .unwrap();
+    let target = write_config(
+        dir.path(),
+        "target.toml",
+        "version = 1\nenvironment = \"production\"\n",
+    );
+    let target_before = std::fs::read(&target).unwrap();
+    let data_before = std::fs::read(data.join("config.json")).unwrap();
+
+    let preview = binary()
+        .args(["--json", "--data-dir", data.to_str().unwrap(), "--config"])
+        .arg(&target)
+        .args(["config", "import", "--source", "core-flat"])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(preview.status.success(), "{preview:?}");
+    let value = envelope(&preview);
+    assert_eq!(value["command"], "config.import");
+    assert_eq!(value["data"]["source"]["kind"], "core-flat");
+    assert_eq!(value["data"]["status"], "retain_only");
+    assert!(value["data"]["preview_id"].is_string());
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        target_before,
+        "preview must not write"
+    );
+    assert_eq!(
+        std::fs::read(data.join("config.json")).unwrap(),
+        data_before
+    );
+    let preview_id = value["data"]["preview_id"].as_str().unwrap().to_owned();
+
+    let refused = binary()
+        .args(["--json", "--data-dir", data.to_str().unwrap(), "--config"])
+        .arg(&target)
+        .args([
+            "config",
+            "import",
+            "--source",
+            "core-flat",
+            "--confirm",
+            &preview_id,
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert_eq!(envelope(&refused)["error"]["code"], "invalid_argument");
+    assert!(envelope(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("requires --yes"));
+
+    let confirmed = binary()
+        .args([
+            "--json",
+            "--yes",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--config",
+        ])
+        .arg(&target)
+        .args([
+            "config",
+            "import",
+            "--source",
+            "core-flat",
+            "--confirm",
+            &preview_id,
+        ])
+        .env("WHALEREIN_SECRET_BACKEND", "memory")
+        .output()
+        .unwrap();
+    assert!(confirmed.status.success(), "{confirmed:?}");
+    let value = envelope(&confirmed);
+    assert_eq!(value["data"]["status"], "imported");
+    assert_eq!(value["data"]["journal_state"], "complete");
+    assert_eq!(value["data"]["preview_id"], preview_id);
 }

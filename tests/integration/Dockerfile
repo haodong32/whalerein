@@ -42,6 +42,7 @@ ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=4
 ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY core core
+COPY contracts contracts
 COPY apps/cli apps/cli
 COPY apps/mobile-bindings apps/mobile-bindings
 COPY proto/v1/whalerein.proto proto/v1/whalerein.proto

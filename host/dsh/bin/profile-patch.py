@@ -8,6 +8,7 @@ invalid YAML, so an empty document is rewritten as comments plus the entry.
 
 from __future__ import annotations
 
+import os
 import json
 import sys
 from pathlib import Path
@@ -19,7 +20,13 @@ def is_empty_document(text: str) -> bool:
     return content in ([], ["[]"])
 
 
-def render(text: str, host_id: str, state_dir: str) -> str:
+def render(text: str, state_dir: str) -> str:
+    """Seed one managed entry with no endpoint or trust material.
+
+    The per-device TOML path stays a Host/DSH setting, not a generated Cloud
+    descriptor: an empty config_file means the Host default
+    (~/.whalerein/config.toml) or WHALEREIN_CONFIG when the operator sets it.
+    """
     lines = text.splitlines()
     if is_empty_document(text):
         lines = [line for line in lines if line.strip() != "[]"]
@@ -27,28 +34,25 @@ def render(text: str, host_id: str, state_dir: str) -> str:
         "- id: whalerein-dsh\n"
         "  name: whalerein-dsh\n"
         "  config:\n"
-        "    server: 127.0.0.1\n"
-        f"    host_id: {json.dumps(host_id)}\n"
-        "    host_token: !!js process.env.WHALEREIN_HOST_TOKEN\n"
-        "    admin_token: !!js process.env.WHALEREIN_ADMIN_TOKEN ?? ''\n"
-        f"    state_dir: {json.dumps(state_dir)}\n"
+        "    connection_mode: managed\n"
         "    adapter: real\n"
-        "    allow_insecure_mqtt: true\n"
         "    log_level: debug\n"
     )
+    if state_dir:
+        block += f"    state_dir: {json.dumps(state_dir)}\n"
     prefix = "\n".join(lines).rstrip()
     return (prefix + "\n" if prefix.strip() else "") + block
 
-
 def main(argv: list[str]) -> int:
-    if len(argv) != 4:
-        print("usage: profile-patch.py <cordis.patch.yml> <host-id> <state-dir>", file=sys.stderr)
+    if len(argv) not in (2, 3):
+        print("usage: profile-patch.py <cordis.patch.yml> [state-dir]", file=sys.stderr)
         return 2
-    path, host_id, state_dir = (Path(argv[1]), argv[2], argv[3])
+    path = Path(argv[1])
+    state_dir = argv[2] if len(argv) == 3 else ""
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if "id: whalerein-dsh" in text:
         return 0
-    path.write_text(render(text, host_id, state_dir), encoding="utf-8")
+    path.write_text(render(text, state_dir), encoding="utf-8")
     return 0
 
 

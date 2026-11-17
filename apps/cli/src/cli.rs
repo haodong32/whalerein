@@ -22,6 +22,19 @@ impl From<Delivery> for whalerein_core::api::DeliveryMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConfigEnvironmentMode {
+    Account,
+    Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConfigCaProvider {
+    System,
+    Mkcert,
+    File,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "whalerein",
@@ -41,6 +54,15 @@ pub struct Cli {
     /// Override the local data directory (also WHALEREIN_DATA_DIR).
     #[arg(long, global = true, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
+
+    /// Explicit configuration file. Takes precedence over WHALEREIN_CONFIG.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Select an environment for this invocation only. Never persisted and
+    /// never falls back to production when the name is unknown.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub environment: Option<String>,
 
     /// Scope session operations to one authorized Host. It must be placed
     /// before the command; commands with their own required `--host`
@@ -260,6 +282,12 @@ pub enum Command {
         local_only: bool,
     },
 
+    /// Inspect or change this device's client configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Manage local service profiles and the active selection.
     Profile {
         #[command(subcommand)]
@@ -275,6 +303,113 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         export: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigAction {
+    /// Show the selected file, effective environment and field provenance.
+    Show,
+    /// Validate offline configuration and selection facts.
+    Check,
+    /// Change persistent non-secret settings.
+    Set {
+        #[command(subcommand)]
+        action: ConfigSetAction,
+    },
+    /// Remove a user-defined environment.
+    Remove {
+        #[command(subcommand)]
+        action: ConfigRemoveAction,
+    },
+    /// Preview or confirm explicit legacy adoption.
+    Import {
+        /// Legacy source kind to require, for example `core-flat`.
+        #[arg(long, value_name = "KIND")]
+        source: Option<String>,
+        /// Preview id the user reviewed. Requires `--yes`.
+        #[arg(long, value_name = "PREVIEW_ID")]
+        confirm: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigSetAction {
+    /// Set or clear the persistent default environment.
+    Default {
+        /// Environment name to persist as the default.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        name: Option<String>,
+        /// Remove the persisted default so built-in production applies.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Create or replace a complete custom environment.
+    Environment {
+        /// Custom environment identifier.
+        name: String,
+        #[arg(long, value_enum)]
+        mode: ConfigEnvironmentMode,
+        #[arg(long, value_name = "URL")]
+        api_origin: Option<String>,
+        #[arg(long, value_name = "URL")]
+        issuer: Option<String>,
+        #[arg(long, value_name = "ID")]
+        native_client_id: Option<String>,
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
+        #[arg(long, value_enum, value_name = "PROVIDER")]
+        ca_provider: Option<ConfigCaProvider>,
+        #[arg(long, value_name = "PATH")]
+        ca_file: Option<String>,
+    },
+    /// Specialize only a built-in environment's label and TLS trust.
+    Builtin {
+        /// Built-in environment name.
+        name: String,
+        #[arg(long, value_name = "LABEL", conflicts_with = "clear_label")]
+        label: Option<String>,
+        #[arg(long)]
+        clear_label: bool,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "PROVIDER",
+            conflicts_with = "clear_tls"
+        )]
+        ca_provider: Option<ConfigCaProvider>,
+        #[arg(long, value_name = "PATH", conflicts_with = "clear_tls")]
+        ca_file: Option<String>,
+        #[arg(long)]
+        clear_tls: bool,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigRemoveAction {
+    /// Remove a custom environment. Built-in names are rejected.
+    Environment { name: String },
+}
+
+impl ConfigAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Show => "config.show",
+            Self::Check => "config.check",
+            Self::Set { action } => action.name(),
+            Self::Remove { .. } => "config.remove-environment",
+            Self::Import { .. } => "config.import",
+        }
+    }
+}
+
+impl ConfigSetAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Default { .. } => "config.set-default",
+            Self::Environment { .. } => "config.set-environment",
+            Self::Builtin { .. } => "config.set-builtin",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -447,6 +582,7 @@ impl Command {
             Self::Queue { .. } => "queue",
             Self::Revoke => "revoke",
             Self::Forget { .. } => "forget",
+            Self::Config { action } => action.name(),
             Self::Profile { action } => action.name(),
             Self::Doctor { .. } => "doctor",
         }
@@ -481,6 +617,8 @@ impl Command {
             "interrupt",
             "revoke",
             "forget",
+            "config",
+            "profile",
             "doctor",
         ]
     }
@@ -518,6 +656,18 @@ impl Command {
             "interrupt",
             "revoke",
             "forget",
+            "config show",
+            "config check",
+            "config set default",
+            "config set environment",
+            "config set builtin",
+            "config remove environment",
+            "config import",
+            "profile list",
+            "profile current",
+            "profile add",
+            "profile use",
+            "profile remove",
             "doctor",
         ]
     }

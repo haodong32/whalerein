@@ -1,0 +1,5 @@
+version = 1
+
+[environments.lab]
+mode = "standalone"
+issuer = "https://auth.example.com/oidc"

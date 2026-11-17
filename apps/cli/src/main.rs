@@ -6,6 +6,7 @@
 //! Plain (non-JSON) invocations keep clap's own help and error text.
 
 mod cli;
+mod config;
 mod env;
 mod output;
 mod run;

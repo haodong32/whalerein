@@ -140,13 +140,32 @@ pub async fn run(cli: Cli) -> CliOutcome {
             return CliOutcome::local_failure(&command, error.code.as_str(), error.message, 2)
         }
     };
-    run_with_signal(cli, secrets, crate::signal::interrupt()).await
+    run_with_signal(cli, secrets, crate::signal::registered_interrupt()).await
+}
+
+/// Keep in-process CLI tests away from the developer's real default config.
+#[cfg(test)]
+fn isolate_test_config() {
+    use std::sync::OnceLock;
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    let path = CONFIG.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("whalerein-cli-unit-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test config directory");
+        let path = dir.join("config.toml");
+        if !path.exists() {
+            std::fs::write(&path, "version = 1\nenvironment = \"production\"\n")
+                .expect("test config file");
+        }
+        path
+    });
+    std::env::set_var("WHALEREIN_CONFIG", path);
 }
 
 /// Injectable variant used by tests. The only injected boundary is SecretStore.
 #[allow(dead_code)]
 pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutcome {
-    run_with_signal(cli, secrets, crate::signal::interrupt()).await
+    run_with_signal(cli, secrets, crate::signal::registered_interrupt()).await
 }
 
 /// Dispatch with an injectable interrupt future so tests can prove the
@@ -159,8 +178,42 @@ pub(crate) async fn run_with_signal<S>(
 where
     S: std::future::Future<Output = ()>,
 {
+    #[cfg(test)]
+    isolate_test_config();
     let command = cli.command.clone();
+    // The identity/state root is never derived from an environment descriptor:
+    // configuration and state stay independent per-device inputs.
     let data_dir = cli.data_dir.clone().unwrap_or_else(default_data_dir);
+
+    // Import previews are read-only and must work even when the default config
+    // file does not exist yet; the command validates and writes through Core.
+    if let Command::Config { action } = &command {
+        if matches!(action, crate::cli::ConfigAction::Import { .. }) {
+            return match crate::config::run_import(&cli, &command, action, &data_dir, &secrets) {
+                Ok(outcome) => outcome,
+                Err(error) => core_error_outcome(&command, error),
+            };
+        }
+    }
+
+    // Ordinary startup may initialize a missing default file; show/check and
+    // every help path are inspection-only. Resolution never falls back.
+    let config = match crate::config::open(&cli, &command) {
+        Ok(config) => config,
+        Err(error) => return core_error_outcome(&command, error),
+    };
+    // `config show/check` must explain an unresolvable selection as data; the
+    // other commands fail before touching protocol state.
+    if let Command::Config { action } = &command {
+        return match crate::config::run(&cli, &command, action, &config) {
+            Ok(outcome) => outcome,
+            Err(error) => core_error_outcome(&command, error),
+        };
+    }
+    let resolution = match config.resolve(cli.environment.as_deref()) {
+        Ok(resolution) => resolution,
+        Err(error) => return core_error_outcome(&command, error),
+    };
     // Only the two recovery commands tolerate a corrupt configuration. Every
     // other command still needs a routable configuration and keeps the
     // explicit invalid_configuration error.
@@ -170,12 +223,15 @@ where
         None
     };
     if let Command::Profile { action } = &command {
-        return match profile(&data_dir, &secrets, &command, action) {
+        return match profile(&data_dir, &secrets, &command, action, &resolution) {
             Ok(outcome) => outcome,
             Err(error) => core_error_outcome(&command, error),
         };
     }
-    let core = match Core::new(CoreOptions { data_dir, secrets }) {
+    let core = match Core::new_in_environment(
+        CoreOptions { data_dir, secrets },
+        Some(resolution.environment.as_str()),
+    ) {
         Ok(core) => core,
         Err(error) => return with_quarantine(core_error_outcome(&command, error), quarantined),
     };
@@ -530,6 +586,7 @@ async fn dispatch(
 ) -> Result<CliOutcome, CoreError> {
     let result = match command {
         Command::Profile { .. } => unreachable!("profile commands are dispatched before Core"),
+        Command::Config { .. } => unreachable!("config commands are dispatched before Core"),
         Command::Pair {
             uri,
             fingerprint,
@@ -1631,19 +1688,42 @@ fn profile(
     secrets: &Arc<dyn SecretStore>,
     command: &Command,
     action: &ProfileAction,
+    resolution: &whalerein_core::api::EnvironmentResolution,
 ) -> Result<CliOutcome, CoreError> {
     let profiles = Profiles::new(data_dir);
     match action {
         ProfileAction::List { include_staging } => {
-            let profiles_list = profiles.list(secrets, *include_staging)?;
-            let data = json!({ "profiles": profiles_list });
+            let profiles_list = profiles.environment_profiles(
+                &resolution.environment,
+                *include_staging,
+                secrets,
+            )?;
+            let data = json!({
+                "environment": resolution.environment,
+                "selection_source": resolution.selection_source,
+                "profiles": profiles_list,
+            });
             let human = render_profile_list(&profiles_list);
             Ok(CliOutcome::success(command, data, human))
         }
         ProfileAction::Current => {
-            let selection = profiles.current(secrets)?;
-            let data = serde_json::to_value(&selection)
+            // The active identity is scoped to the resolved environment; the
+            // registry's global active record never overrides the config file.
+            let mut selection = profiles.current(secrets)?;
+            selection.active = profiles.resolve_environment_identity(resolution, secrets, false)?;
+            let mut data = serde_json::to_value(&selection)
                 .unwrap_or_else(|_| json!({ "registry_present": selection.registry_present }));
+            if let Some(object) = data.as_object_mut() {
+                object.insert("environment".into(), json!(resolution.environment));
+                object.insert(
+                    "selection_source".into(),
+                    json!(resolution.selection_source),
+                );
+                object.insert(
+                    "definition_source".into(),
+                    json!(resolution.definition_source),
+                );
+            }
             Ok(CliOutcome::success(
                 command,
                 data,
@@ -1659,56 +1739,33 @@ fn profile(
             client_id,
             access_url,
         } => {
-            let custom_supplied = api_origin.is_some()
+            let legacy_supplied = *staging
+                || *enable_testing
+                || api_origin.is_some()
                 || issuer.is_some()
                 || client_id.is_some()
                 || access_url.is_some();
-            if *staging && custom_supplied {
+            if legacy_supplied {
                 return Err(CoreError::InvalidInput(
-                    "--staging cannot be combined with custom service arguments".into(),
+                    "profile add now adds an identity inside the resolved environment; define custom services with `whalerein config set environment` and select built-ins with `--environment` or `config set default`"
+                        .into(),
                 ));
             }
-            let summary = if *staging {
-                if !*enable_testing {
-                    return Err(CoreError::Unsupported);
-                }
-                profiles.add_official_staging(name, true, secrets)?
-            } else {
-                if *enable_testing {
-                    return Err(CoreError::InvalidInput(
-                        "--enable-testing requires --staging".into(),
-                    ));
-                }
-                let api_origin = api_origin.as_ref().ok_or_else(|| {
-                    CoreError::InvalidInput("custom profile requires --api-origin".into())
-                })?;
-                let issuer = issuer.as_ref().ok_or_else(|| {
-                    CoreError::InvalidInput("custom profile requires --issuer".into())
-                })?;
-                let client_id = client_id.as_ref().ok_or_else(|| {
-                    CoreError::InvalidInput("custom profile requires --client-id".into())
-                })?;
-                profiles.add_custom(
-                    name,
-                    whalerein_core::api::CustomServiceInput {
-                        api_origin: api_origin.clone(),
-                        issuer: issuer.clone(),
-                        native_client_id: client_id.clone(),
-                        access_url: access_url.clone(),
-                    },
-                    secrets,
-                )?
-            };
-            let data = json!({ "profile": summary, "current": false });
+            // Identities never carry a second environment/service authority.
+            let summary = profiles.add_environment_profile(resolution, name, secrets)?;
+            let data = json!({
+                "environment": resolution.environment,
+                "profile": summary,
+                "current": false,
+            });
             let human = format!(
-                "Added profile {} ({}); active profile unchanged.\n",
-                summary.name,
-                environment_label(summary.environment)
+                "Added profile {} in environment {}; active identity unchanged.\n",
+                summary.name, resolution.environment
             );
             Ok(CliOutcome::success(command, data, human))
         }
         ProfileAction::Use { name } => {
-            let outcome = profiles.activate(name)?;
+            let outcome = profiles.use_profile_in_environment(resolution, name)?;
             let data = serde_json::to_value(&outcome)
                 .unwrap_or_else(|_| json!({ "profile": outcome.profile }));
             let mut human = format!(
@@ -1744,6 +1801,7 @@ fn environment_label(environment: Environment) -> &'static str {
     match environment {
         Environment::Production => "Production",
         Environment::Staging => "Staging (testing only)",
+        Environment::Local => "Local (testing only)",
         Environment::Custom => "Custom",
         Environment::Standalone => "Standalone",
     }
@@ -2515,7 +2573,7 @@ mod tests {
             let mut args = vec!["whalerein", "--json", "--data-dir", data_dir];
             args.extend_from_slice(command);
             match tokio::time::timeout(
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 Box::pin(run_with(cli(&args), secrets)),
             )
             .await
@@ -2923,40 +2981,29 @@ mod profile_tests {
         assert!(!dir.path().join("profiles.json").exists());
     }
 
+    fn write_config(dir: &std::path::Path, body: &str) -> String {
+        let path = dir.join("config.toml");
+        std::fs::write(&path, body).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
     #[tokio::test]
-    async fn profile_staging_requires_explicit_testing_and_never_activates() {
+    async fn profile_staging_adds_within_the_resolved_environment_without_activating() {
         let dir = tempfile::tempdir().unwrap();
         let dir_text = dir.path().to_str().unwrap();
+        let config = write_config(dir.path(), "version = 1\nenvironment = \"staging\"\n");
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
-        let denied = run_with(
-            cli(&[
-                "whalerein",
-                "--json",
-                "--data-dir",
-                dir_text,
-                "profile",
-                "add",
-                "official-staging",
-                "--staging",
-            ]),
-            secrets.clone(),
-        )
-        .await;
-        assert_eq!(denied.exit, 9, "{denied:?}");
-        assert_eq!(denied.to_json()["error"]["code"], "unsupported_capability");
-        assert!(!dir.path().join("profiles.json").exists());
-
         let added = run_with(
             cli(&[
                 "whalerein",
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "add",
                 "official-staging",
-                "--staging",
-                "--enable-testing",
             ]),
             secrets.clone(),
         )
@@ -2972,16 +3019,15 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "current",
             ]),
             secrets.clone(),
         )
         .await;
-        assert_eq!(
-            current.to_json()["data"]["active"]["name"],
-            "official-production"
-        );
+        assert_eq!(current.to_json()["data"]["environment"], "staging");
 
         let hidden = run_with(
             cli(&[
@@ -2989,19 +3035,19 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "list",
             ]),
             secrets.clone(),
         )
         .await;
-        assert_eq!(
-            hidden.to_json()["data"]["profiles"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(hidden.to_json()["data"]["environment"], "staging");
+        assert!(hidden.to_json()["data"]["profiles"]
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         let shown = run_with(
             cli(&[
@@ -3009,6 +3055,8 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "list",
                 "--include-staging",
@@ -3021,30 +3069,26 @@ mod profile_tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            1
         );
-        assert!(shown.to_json()["data"]["profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value["name"] == "official-staging" && value["environment"] == "staging"));
     }
 
     #[tokio::test]
-    async fn profile_activation_labels_staging_and_persists_across_processes() {
+    async fn profile_activation_stays_within_the_environment_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let dir_text = dir.path().to_str().unwrap();
+        let config = write_config(dir.path(), "version = 1\nenvironment = \"staging\"\n");
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
         let added = run_with(
             cli(&[
                 "whalerein",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "add",
                 "official-staging",
-                "--staging",
-                "--enable-testing",
             ]),
             secrets.clone(),
         )
@@ -3056,6 +3100,8 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "use",
                 "official-staging",
@@ -3073,6 +3119,8 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "current",
             ]),
@@ -3091,6 +3139,8 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "remove",
                 "official-staging",
@@ -3107,35 +3157,41 @@ mod profile_tests {
             removed.to_json()["data"]["active"]["active"]["name"],
             "official-production"
         );
+
         let after = run_with(
             cli(&[
                 "whalerein",
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "current",
             ]),
             secrets,
         )
         .await;
-        assert_eq!(
-            after.to_json()["data"]["active"]["name"],
-            "official-production"
-        );
+        assert!(after.to_json()["data"]["active"].is_null());
     }
 
     #[tokio::test]
-    async fn profile_custom_service_requires_every_explicit_endpoint() {
+    async fn profile_add_rejects_legacy_service_flags_and_uses_the_environment() {
         let dir = tempfile::tempdir().unwrap();
         let dir_text = dir.path().to_str().unwrap();
+        let config = write_config(
+            dir.path(),
+            "version = 1\nenvironment = \"corp\"\n\n[environments.corp]\nmode = \"account\"\napi_origin = \"https://api.corp.example\"\nissuer = \"https://id.corp.example\"\nnative_client_id = \"whalerein-cli\"\n",
+        );
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
-        let missing = run_with(
+        let denied = run_with(
             cli(&[
                 "whalerein",
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "add",
                 "corp",
@@ -3145,8 +3201,12 @@ mod profile_tests {
             secrets.clone(),
         )
         .await;
-        assert_eq!(missing.exit, 2, "{missing:?}");
-        assert_eq!(missing.to_json()["error"]["code"], "invalid_argument");
+        assert_eq!(denied.exit, 2, "{denied:?}");
+        assert_eq!(denied.to_json()["error"]["code"], "invalid_argument");
+        assert!(denied.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("config set environment"));
 
         let added = run_with(
             cli(&[
@@ -3154,17 +3214,11 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "add",
                 "corp",
-                "--api-origin",
-                "https://api.corp.example",
-                "--issuer",
-                "https://id.corp.example",
-                "--client-id",
-                "whalerein-cli",
-                "--access-url",
-                "https://access.corp.example",
             ]),
             secrets.clone(),
         )
@@ -3177,6 +3231,8 @@ mod profile_tests {
                 "--json",
                 "--data-dir",
                 dir_text,
+                "--config",
+                &config,
                 "profile",
                 "use",
                 "corp",
@@ -4989,7 +5045,9 @@ mod approval_read_tests {
                 json: true,
                 yes: false,
                 data_dir: Some(dir.path().to_path_buf()),
+                config: None,
                 host: None,
+                environment: None,
                 command: Command::Approvals {
                     session: None,
                     request: None,

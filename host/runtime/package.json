@@ -6,7 +6,8 @@
   "main": "src/host.js",
   "exports": {
     ".": "./src/host.js",
-    "./*": "./src/*"
+    "./*": "./src/*",
+    "./configuration": "./src/configuration/index.js"
   },
   "files": [
     "src"
@@ -23,7 +24,10 @@
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "mqtt": "^5.16.1",
-    "protobufjs": "^8.8.1"
+    "protobufjs": "^8.8.1",
+    "smol-toml": "1.9.1",
+    "toml-eslint-parser": "1.0.3",
+    "undici": "^7.30.2"
   },
   "devDependencies": {
     "c8": "^10.1.3"

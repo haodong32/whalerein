@@ -1,0 +1,10 @@
+version = 1
+environment = "company"
+
+# Company account service; authority is explicit, never inferred.
+[environments.company]
+label = "Company Cloud"
+mode = "account"
+api_origin = "https://cloud.example.com"
+issuer = "https://auth.example.com/oidc"
+native_client_id = "whalerein-cli"

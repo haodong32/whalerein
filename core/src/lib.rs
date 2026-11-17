@@ -9,6 +9,7 @@ mod account;
 pub mod api;
 mod cache;
 mod commands;
+mod configuration;
 mod diagnostics;
 mod drafts;
 mod pairing;
