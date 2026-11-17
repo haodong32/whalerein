@@ -156,14 +156,27 @@ def measure(project, runner):
     if not probe.ok:
         result.error = "cargo llvm-cov is unavailable: " + (probe.tail(300) or "unknown error")
         return result
+    # Drop execution counts between packages/runs, but retain instrumented
+    # compilation outputs. --no-clean prevents llvm-cov from discarding them again.
     cleaned = runner.run(
-        ["cargo", "llvm-cov", "clean", "--workspace"], project.root, timeout=60, quiet=True
+        ["cargo", "llvm-cov", "clean", "--workspace", "--profraw-only"],
+        project.root,
+        timeout=60,
+        quiet=True,
     )
     if not cleaned.ok:
         result.error = "Could not reset stale Rust coverage artifacts: " + cleaned.tail(500)
         return result
     run = runner.run(
-        ["cargo", "llvm-cov", "--package", project.name, "--json", "--summary-only"],
+        [
+            "cargo",
+            "llvm-cov",
+            "--no-clean",
+            "--package",
+            project.name,
+            "--json",
+            "--summary-only",
+        ],
         project.root,
         timeout=1800,
     )
@@ -204,11 +217,10 @@ def steps(project, action):
     package = ("--manifest-path", str(project.manifest), "--package", project.name)
     if action == "fmt":
         commands = [(*base, "fmt", *package)]
-    elif action == "check":
-        commands = [
-            (*base, "fmt", *package, "--", "--check"),
-            (*base, "clippy", *package, "--all-targets", "--", "-D", "warnings"),
-        ]
+    elif action in ("check", "quick"):
+        commands = [(*base, "fmt", *package, "--", "--check")]
+        if action == "check":
+            commands.append((*base, "clippy", *package, "--all-targets", "--", "-D", "warnings"))
     else:
         commands = [(*base, "build", *package)]
     return [Step(f"{project.id}: {command[1]}", command, project.path) for command in commands]

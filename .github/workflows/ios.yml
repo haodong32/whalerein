@@ -1,18 +1,14 @@
 name: iOS
 
-# Cost tiers:
-# - pull request: build once, then the Unit plan plus a small UI smoke selection.
-# - merge queue, main push, nightly, and a manual "full" dispatch: the complete
-#   UI plan. A merge queue would run it once per queued entry instead of once
-#   per push, so a long UI job cannot be cancelled by the next commit. This
-#   personal repository cannot enable that ruleset yet, but the merge_group
-#   tier is already wired for when it can.
+# Ordinary PR pushes only report the lightweight iOS gate. Heavy verification
+# runs on the run-full-ci label event, main, merge queue, nightly or dispatch.
 
 on:
   # No path filter: the `iOS gate` check is required on main, so every PR
   # revision must receive a conclusion. The changes job below decides whether
   # the heavy jobs run.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   merge_group:
   push:
     branches:
@@ -38,13 +34,16 @@ on:
         options: [full, smoke, unit]
         default: full
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 permissions:
   contents: read
 
 concurrency:
-  # A pull request cancels its own superseded run; queued, main and scheduled
-  # tiers never cancel so a completed entry can report its own result.
-  group: ios-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  # Separate quick and requested runs so an ordinary push cannot cancel a full
+  # verification. A repeated request cancels the superseded requested run.
+  group: ios-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'run-full-ci') && 'full' || 'automatic' }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -57,6 +56,7 @@ jobs:
       ios: ${{ steps.diff.outputs.ios }}
     steps:
       - name: Check out the merge revision
+        if: github.event_name != 'pull_request' || (github.event.action == 'labeled' && github.event.label.name == 'run-full-ci')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -64,10 +64,18 @@ jobs:
         id: diff
         env:
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
+          if [ "$EVENT" = pull_request ] && { [ "$ACTION" != labeled ] || [ "$LABEL" != run-full-ci ]; }; then
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo 'ios=false' >> "$GITHUB_OUTPUT"
+            echo 'iOS verification not requested: add run-full-ci to test this revision.'
+            exit 0
+          fi
           case "$EVENT" in
             pull_request|merge_group)
               changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --) ;;
@@ -187,8 +195,7 @@ jobs:
     needs: [changes, build]
     if: >-
       needs.build.result == 'success' &&
-      ((github.event_name == 'pull_request' && needs.changes.outputs.ios == 'true') ||
-       (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke'))
+      github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -234,7 +241,8 @@ jobs:
     needs: [changes, build]
     if: >-
       needs.build.result == 'success' &&
-      ((github.event_name == 'merge_group' && needs.changes.outputs.build == 'true') ||
+      ((github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'run-full-ci') ||
+       (github.event_name == 'merge_group' && needs.changes.outputs.build == 'true') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        github.event_name == 'schedule' ||
        (github.event_name == 'workflow_dispatch' && inputs.suite == 'full'))
@@ -277,13 +285,13 @@ jobs:
     if: always() && !cancelled()
     needs: [changes, build, unit, smoke, full]
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check required results
         env:
           EVENT: ${{ github.event_name }}
           SUITE: ${{ github.event.inputs.suite || 'full' }}
-          IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
           BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
           BUILD_RESULT: ${{ needs.build.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
@@ -291,6 +299,7 @@ jobs:
           FULL_RESULT: ${{ needs.full.result }}
         run: |
           set -euo pipefail
+          test "$CHANGES_RESULT" = success
           # A revision with no iOS-facing build input skips every heavy job and
           # still passes the required gate.
           if [ "$BUILD_REQUIRED" != 'true' ]; then
@@ -304,12 +313,8 @@ jobs:
           test "$UNIT_RESULT" = success
           case "$EVENT" in
             pull_request)
-              if [ "$IOS_CHANGED" = 'true' ]; then
-                test "$SMOKE_RESULT" = success
-              else
-                test "$SMOKE_RESULT" = skipped
-              fi
-              test "$FULL_RESULT" = skipped
+              test "$SMOKE_RESULT" = skipped
+              test "$FULL_RESULT" = success
               ;;
             workflow_dispatch)
               case "$SUITE" in

@@ -92,7 +92,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          LABEL: ${{ github.event.label.name }}
           CACHE_HIT: ${{ steps.baseline.outputs.cache-hit }}
           REVISION: ${{ steps.inputs.outputs.revision }}
         run: |
@@ -101,7 +101,7 @@ jobs:
             pull_request)
               # Only the label event itself requests the suite. Later pushes
               # keep the check reporting without spending the heavy run.
-              if [ "$ACTION" = labeled ] && printf '%s' "$LABELS" | grep -q '"run-integration"'; then
+              if [ "$ACTION" = labeled ] && [ "$LABEL" = run-integration ]; then
                 echo "verified_revision=$REVISION" >> "$GITHUB_OUTPUT"
                 echo 'run=true' >> "$GITHUB_OUTPUT"
               else
