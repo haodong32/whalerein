@@ -8,6 +8,7 @@
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { createInvitation, revokeDevice } from './pairing.js'
 import { testConnection } from './connection-test.js'
+import { SERVICES } from './service-config.js'
 
 export const CONNECTION_STATES = Object.freeze([
   'idle', 'requesting', 'awaiting_approval', 'enrolling', 'recovering',
@@ -153,22 +154,25 @@ export function settingsStatus(host) {
   const configError = host?.configError ?? null
   if (isManagedHost(host)) {
     const manager = managedManager(host)
+    const selectedService = host.service ?? host.config?.service
+    const service = SERVICES.includes(selectedService) ? selectedService : 'whalerein_cloud'
+    const unavailable = () => ({ ...EMPTY_MANAGED_SNAPSHOT, state: 'action_required', service, error: { code: 'unavailable' }, configError })
     if (!manager || typeof manager.snapshot !== 'function') {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return unavailable()
     }
     let raw
     try {
       raw = manager.snapshot()
     } catch {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return unavailable()
     }
     if (!raw || typeof raw !== 'object') {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return unavailable()
     }
     const snapshot = sanitizeManagerSnapshot(raw, {
       configError,
     })
-    return { ...snapshot, service: host.service || host.config?.service || 'whalerein_cloud' }
+    return { ...snapshot, service }
   }
   if (!host?.started) {
     return {

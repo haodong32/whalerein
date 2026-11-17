@@ -1218,7 +1218,7 @@ window.__ModuleLoader__.load({
     }
 
     function errorHintKey(code) {
-      return typeof code === 'string' ? (ERROR_HINT_KEYS[code] ?? '') : ''
+      return typeof code === 'string' && Object.hasOwn(ERROR_HINT_KEYS, code) ? ERROR_HINT_KEYS[code] : ''
     }
 
     function ManagedSettingsPage({ t, status, connection, locale: localeService }) {
@@ -1233,7 +1233,27 @@ window.__ModuleLoader__.load({
       const [details, setDetails] = React.useState(null)
       const [detailsLoading, setDetailsLoading] = React.useState(false)
       const fieldId = React.useId()
-      const startingRef = React.useRef(false)
+      const actionInFlight = React.useRef(false)
+      const mounted = React.useRef(true)
+      React.useEffect(() => {
+        mounted.current = true
+        return () => { mounted.current = false }
+      }, [])
+      const detailsRequest = React.useRef(0)
+      const loadDetails = async () => {
+        if (typeof connection?.invoke !== 'function') return
+        const request = ++detailsRequest.current
+        setDetailsLoading(true)
+        try {
+          const result = await connection.invoke('details')
+          const value = result.ok && result.value && typeof result.value === 'object' ? result.value : null
+          if (request === detailsRequest.current) setDetails(value ? { value, service: snapshot.service, profileId: snapshot.profileId } : null)
+        } catch {
+          if (request === detailsRequest.current) setDetails(null)
+        } finally {
+          if (request === detailsRequest.current) setDetailsLoading(false)
+        }
+      }
       const lastState = React.useRef(snapshot.state)
       React.useEffect(() => status.subscribe(() => {
         const next = status.getSnapshot()
@@ -1249,17 +1269,11 @@ window.__ModuleLoader__.load({
         }
       }, [snapshot.state, fieldId])
       React.useEffect(() => {
-        if (!detailsOpen || typeof connection?.invoke !== 'function') return undefined
-        let cancelled = false
-        setDetailsLoading(true)
-        void connection.invoke('details').then((result) => {
-          if (cancelled) return
-          setDetails(result.ok && result.value && typeof result.value === 'object' ? result.value : null)
-        }).finally(() => {
-          if (!cancelled) setDetailsLoading(false)
-        })
-        return () => { cancelled = true }
-      }, [detailsOpen, connection, snapshot.state])
+        if (!detailsOpen) return undefined
+        setDetails(null)
+        void loadDetails()
+        return () => { detailsRequest.current += 1 }
+      }, [detailsOpen, connection, snapshot.state, snapshot.service, snapshot.profileId])
 
       if (snapshot.ready !== true) {
         return h('div', { style: styles.page, className: 'whalerein-body' },
@@ -1273,25 +1287,36 @@ window.__ModuleLoader__.load({
       const pending = snapshot.pendingOperation === true
       const isStaging = snapshot.environment === 'staging'
       const activeLocale = localeService?.getSnapshot?.().active
-      const approvalUrl = localeApprovalUrl(approvalLink || snapshot.approvalUrl, activeLocale)
+      const matchesTarget = (link) => link?.service === snapshot.service && link?.profileId === snapshot.profileId
+      const approvalUrl = localeApprovalUrl(snapshot.approvalUrl || (matchesTarget(approvalLink) ? approvalLink.url : ''), activeLocale)
+      const removalUrl = matchesTarget(removalLink) ? removalLink.url : ''
+      const currentDetails = matchesTarget(details) ? details.value : null
       const showConnect = ['idle', 'disconnected'].includes(state)
       const showCancel = ['requesting', 'awaiting_approval', 'enrolling', 'recovering'].includes(state)
       const showRetry = ['denied', 'expired', 'action_required'].includes(state)
       const showDisconnect = state === 'connected' || state === 'reconnecting'
 
+      const isCurrentTarget = () => {
+        const current = status.getSnapshot()
+        return mounted.current && current.service === snapshot.service && current.profileId === snapshot.profileId
+      }
       const run = async (method, label, ...args) => {
-        if (busy || typeof connection?.invoke !== 'function') return
+        if (actionInFlight.current || !isCurrentTarget() || status.getSnapshot().available !== true || typeof connection?.invoke !== 'function') return
+        actionInFlight.current = true
         setBusy(label)
         setActionError('')
-        const result = await connection.invoke(method, ...args)
-        if (!result.ok) setActionError('cloudActionFailed')
-        await status.refresh?.()
-        setBusy('')
+        setApprovalLink('')
+        try {
+          const result = await connection.invoke(method, ...args)
+          await status.refresh?.()
+          if (!result.ok && isCurrentTarget()) setActionError('cloudActionFailed')
+        } catch { if (isCurrentTarget()) setActionError('cloudActionFailed') }
+        finally { actionInFlight.current = false; setBusy('') }
       }
 
       const start = async () => {
-        if (startingRef.current || busy || typeof connection?.invoke !== 'function') return
-        startingRef.current = true
+        if (actionInFlight.current || !isCurrentTarget() || status.getSnapshot().available !== true || status.getSnapshot().pendingOperation || typeof connection?.invoke !== 'function') return
+        actionInFlight.current = true
         setBusy('start')
         setActionError('')
         setBrowserBlocked(false)
@@ -1301,6 +1326,10 @@ window.__ModuleLoader__.load({
         try {
           const result = await connection.invoke('startConnect', { source: 'settings' })
           await status.refresh?.()
+          if (!isCurrentTarget()) {
+            try { tab?.close?.() } catch { /* already closed */ }
+            return
+          }
           if (!result.ok) {
             try { tab?.close?.() } catch { /* already closed */ }
             setActionError('cloudActionFailed')
@@ -1312,40 +1341,55 @@ window.__ModuleLoader__.load({
             || localeApprovalUrl(status.getSnapshot().approvalUrl, active)
           if (url) {
             const opened = commitBrowserTab(tab, url)
-            setApprovalLink(url)
+            setApprovalLink({ url, service: snapshot.service, profileId: snapshot.profileId })
             setBrowserBlocked(!opened)
           } else {
             try { tab?.close?.() } catch { /* already closed */ }
           }
+        } catch {
+          try { tab?.close?.() } catch { /* already closed */ }
+          if (isCurrentTarget()) setActionError('cloudActionFailed')
         } finally {
-          startingRef.current = false
+          actionInFlight.current = false
           setBusy('')
         }
       }
 
       const remove = async () => {
-        if (busy || pending || typeof connection?.invoke !== 'function') return
+        const current = status.getSnapshot()
+        if (actionInFlight.current || !isCurrentTarget() || current.available !== true || current.pendingOperation
+          || ['removing', 'removed'].includes(current.state) || typeof connection?.invoke !== 'function') return
+        actionInFlight.current = true
         setBusy('remove')
         setActionError('')
+        setRemovalLink('')
+        setBrowserBlocked(false)
         const tab = reserveBrowserTab()
-        const result = await connection.invoke('removeComputer')
-        await status.refresh?.()
-        if (!result.ok) {
+        try {
+          const result = await connection.invoke('removeComputer')
+          await status.refresh?.()
+          if (!isCurrentTarget()) {
+            try { tab?.close?.() } catch { /* already closed */ }
+            return
+          }
+          if (!result.ok) {
+            try { tab?.close?.() } catch { /* already closed */ }
+            setActionError('cloudActionFailed')
+            return
+          }
+          const active = localeService?.getSnapshot?.().active
+          const url = localeApprovalUrl(result.value?.action?.url, active)
+          if (url) {
+            const opened = commitBrowserTab(tab, url)
+            setRemovalLink({ url, service: snapshot.service, profileId: snapshot.profileId })
+            setBrowserBlocked(!opened)
+          } else {
+            try { tab?.close?.() } catch { /* already closed */ }
+          }
+        } catch {
           try { tab?.close?.() } catch { /* already closed */ }
-          setActionError('cloudActionFailed')
-          setBusy('')
-          return
-        }
-        const active = localeService?.getSnapshot?.().active
-        const url = localeApprovalUrl(result.value?.action?.url, active)
-        if (url) {
-          const opened = commitBrowserTab(tab, url)
-          setRemovalLink(url)
-          setBrowserBlocked(!opened)
-        } else {
-          try { tab?.close?.() } catch { /* already closed */ }
-        }
-        setBusy('')
+          if (isCurrentTarget()) setActionError('cloudActionFailed')
+        } finally { actionInFlight.current = false; setBusy('') }
       }
       const entries = [
         [tr('cloudDetailsState'), tr(`state_${state}`)],
@@ -1353,13 +1397,13 @@ window.__ModuleLoader__.load({
         [tr('cloudDetailsHostName'), snapshot.hostName || '—'],
         [tr('cloudDetailsProfile'), snapshot.label || '—'],
       ]
-      const detailRows = details ? [
-        [tr('cloudDetailsState'), details.state ? tr(`state_${details.state}`) : '—'],
-        [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, details.environment || snapshot.environment)],
-        [tr('cloudDetailsRegion'), details.region || '—'],
-        [tr('cloudDetailsOrigin'), details.accessOrigin || '—'],
-        [tr('cloudDetailsRevision'), details.revision == null ? '—' : String(details.revision)],
-        [tr('cloudDetailsLastError'), details.lastErrorCode || '—'],
+      const detailRows = currentDetails ? [
+        [tr('cloudDetailsState'), currentDetails.state ? tr(`state_${currentDetails.state}`) : '—'],
+        [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, currentDetails.environment || snapshot.environment)],
+        [tr('cloudDetailsRegion'), currentDetails.region || '—'],
+        [tr('cloudDetailsOrigin'), currentDetails.accessOrigin || '—'],
+        [tr('cloudDetailsRevision'), currentDetails.revision == null ? '—' : String(currentDetails.revision)],
+        [tr('cloudDetailsLastError'), currentDetails.lastErrorCode || '—'],
       ] : entries
 
       return h('div', { style: styles.page, className: 'whalerein-body' },
@@ -1385,19 +1429,19 @@ window.__ModuleLoader__.load({
                 h('p', { id: `${fieldId}-state-hint`, style: { ...styles.statusHint, margin: 0 } }, tr(stateHint)))),
             h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
               showConnect ? h(Button, {
-                variant: 'primary', size: 'md', disabled: !!busy || pending,
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy || pending,
                 'aria-describedby': `${fieldId}-state-hint`, onClick: start,
               }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
               showRetry ? h(Button, {
-                variant: 'primary', size: 'md', disabled: !!busy || pending,
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy || pending,
                 onClick: () => run('retry', 'retry'),
               }, busy === 'retry' ? tr('state_requesting') : tr('cloudTryAgain')) : null,
               showCancel ? h(Button, {
-                variant: 'outline', size: 'md', disabled: !!busy,
+                variant: 'outline', size: 'md', disabled: snapshot.available !== true || !!busy,
                 onClick: () => run('cancel', 'cancel'),
               }, busy === 'cancel' ? tr('cloudCancelling') : tr('cloudCancel')) : null,
               showDisconnect ? h(Button, {
-                variant: 'outline', size: 'md', disabled: !!busy,
+                variant: 'outline', size: 'md', disabled: snapshot.available !== true || !!busy,
                 onClick: () => run('disconnect', 'disconnect'),
               }, busy === 'disconnect' ? tr('cloudDisconnecting') : tr('cloudDisconnect')) : null,
               )),
@@ -1414,8 +1458,8 @@ window.__ModuleLoader__.load({
           state === 'removing'
             ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
               h('p', { style: styles.hint, role: 'status' }, tr('cloudConfirmationRequired')),
-              removalLink ? h('a', {
-                href: removalLink, target: '_blank', rel: 'noopener noreferrer',
+              removalUrl ? h('a', {
+                href: removalUrl, target: '_blank', rel: 'noopener noreferrer',
                 style: styles.approvalLink, className: 'whalerein-approval-link',
               }, tr('cloudOpenBrowser')) : null,
               browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
@@ -1436,23 +1480,18 @@ window.__ModuleLoader__.load({
             detailsOpen ? h('div', { style: styles.managedActions },
               h(Button, {
                 variant: 'ghost', size: 'sm', disabled: detailsLoading,
-                onClick: () => {
-                  setDetailsLoading(true)
-                  void connection.invoke('details').then((result) => {
-                    setDetails(result.ok && result.value && typeof result.value === 'object' ? result.value : null)
-                  }).finally(() => setDetailsLoading(false))
-                },
+                onClick: loadDetails,
               }, detailsLoading ? tr('loading') : tr('cloudDetailsRefresh'))) : null,
             h('p', { style: styles.hint }, tr('cloudDisconnectHint')),
             h('p', { style: styles.hint }, tr('cloudRemoveHint')),
             h('div', { style: styles.managedActions },
               showDisconnect ? h(Button, {
-                variant: 'outline', size: 'sm', disabled: !!busy,
+                variant: 'outline', size: 'sm', disabled: snapshot.available !== true || !!busy,
                 onClick: () => run('disconnect', 'disconnect'),
               }, tr('cloudDisconnect')) : null,
               h(Button, {
                 variant: 'ghost', size: 'sm', style: styles.dangerAction,
-                disabled: !!busy || pending || state === 'removing' || state === 'removed',
+                disabled: snapshot.available !== true || !!busy || pending || state === 'removing' || state === 'removed',
                 onClick: remove,
               }, busy === 'remove' ? tr('cloudRemoving') : tr('cloudRemove'))),
             h('p', { style: styles.hint }, tr('cloudPairingManaged'))))),

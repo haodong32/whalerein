@@ -425,3 +425,16 @@ test('retained lifecycle RPCs forward exactly once and return only sanitized res
     assert.deepEqual(calls, [['startConnect'], ['cancel'], ['retry'], ['disconnect'], ['reconnect'], ['remove']])
   } finally { await ctx.fiber.dispose() }
 })
+
+test('unavailable managers retain a valid configured service without exposing invalid input', () => {
+  for (const manager of [null, { snapshot() { throw new Error('private') } }, { snapshot: () => null }]) {
+    const snapshot = settingsStatus({ managed: true, config: { service: 'custom' }, manager })
+    assert.equal(snapshot.service, 'custom')
+    assert.equal(snapshot.state, 'action_required')
+    assert.equal(snapshot.available, false)
+    assert.equal(snapshot.connected, false)
+  }
+  const snapshot = settingsStatus({ managed: true, config: { service: { private: 'must-not-be-exposed' } } })
+  assert.equal(snapshot.service, 'whalerein_cloud')
+  assert.equal(JSON.stringify(snapshot).includes('must-not-be-exposed'), false)
+})

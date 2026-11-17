@@ -1946,3 +1946,198 @@ test('invalid custom account and trust drafts cannot be persisted from the edito
     }
   } finally { await runtime.dispose() }
 })
+
+test('managed lifecycle actions share one synchronous gate across rapid clicks', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    for (const [state, label, method] of [['action_required', '重试', 'retry'], ['awaiting_approval', '取消', 'cancel'], ['connected', '断开连接', 'disconnect']]) {
+      runtime.setCloudState(state, { pendingOperation: method === 'cancel', available: true })
+      await runtime.refresh()
+      let finish
+      let calls = 0
+      runtime.remote.whalerein[method] = () => { calls += 1; return new Promise((resolve) => { finish = resolve }) }
+      const button = managedButton(runtime, label)
+      const first = button.props.onClick()
+      const second = button.props.onClick()
+      assert.equal(calls, 1)
+      finish({ ok: true, value: {} })
+      await Promise.all([first, second])
+      await runtime.settle()
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('rapid removal reserves one browser tab and blocks competing lifecycle actions', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  let opened = 0
+  let finish
+  let calls = 0
+  try {
+    globalThis.window = { ...originalWindow, open: () => { opened += 1; return { location: {}, close() {} } } }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.remote.whalerein.removeComputer = () => { calls += 1; return new Promise((resolve) => { finish = resolve }) }
+    const remove = managedButton(runtime, '移除这台电脑')
+    const disconnect = managedButton(runtime, '断开连接')
+    const first = remove.props.onClick()
+    const duplicate = remove.props.onClick()
+    await disconnect.props.onClick()
+    assert.equal(calls, 1)
+    assert.equal(opened, 1)
+    assert.deepEqual(runtime.calls, [])
+    finish({ ok: true, value: { action: { url: 'https://app.example/manage' } } })
+    await Promise.all([first, duplicate])
+  } finally { globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('an unavailable managed connection disables mutations and blocks stale callbacks', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const staleConnect = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { available: false })
+    await runtime.refresh()
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.disabled, true)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    await staleConnect.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+  } finally { await runtime.dispose() }
+})
+
+test('a failed status refresh releases the action gate and closes its reserved tab', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const refresh = runtime.statusStore.refresh
+  let closed = 0
+  try {
+    globalThis.window = { ...originalWindow, open: () => ({ location: {}, close() { closed += 1 } }) }
+    runtime.statusStore.refresh = async () => { throw new Error('private-refresh-detail') }
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    assert.equal(closed, 1)
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud').props.disabled, false)
+    assert.doesNotMatch(text(runtime.render()), /private-refresh-detail/)
+    runtime.statusStore.refresh = refresh
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    assert.equal(runtime.calls.filter(([method]) => method === 'startConnect').length, 2)
+  } finally { runtime.statusStore.refresh = refresh; globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('prototype property names in unknown error codes use the generic state hint', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    for (const code of ['constructor', '__proto__', 'toString']) {
+      runtime.setCloudState('action_required', { error: { code } })
+      await runtime.refresh()
+      assert.match(text(runtime.render()), new RegExp(runtime.locales.dictionaries.zh.stateHint_action_required))
+    }
+  } finally { await runtime.dispose() }
+})
+
+test('late details from the previous service cannot overwrite the current service details', async () => {
+  const runtime = await createManagedRuntime()
+  let finish
+  try {
+    runtime.setCloudState('connected', { service: 'whalerein_cloud', connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('details', { ok: true, value: { state: 'connected', region: 'previous-service' } })
+    managedDisclosure(runtime, '连接详情').props.onToggle()
+    runtime.render()
+    await runtime.settle()
+    runtime.setActionResult('details', new Promise((resolve) => { finish = resolve }))
+    const stale = managedButton(runtime, '刷新详情').props.onClick()
+    runtime.setActionResult('details', { ok: true, value: { state: 'connected', environment: 'custom', region: 'current-service' } })
+    runtime.setCloudState('connected', { service: 'custom', profileId: 'current-profile', connected: true })
+    await runtime.refresh()
+    assert.doesNotMatch(text(runtime.render()), /previous-service/)
+    await runtime.settle()
+    assert.match(text(runtime.render()), /current-service/)
+    finish({ ok: true, value: { state: 'connected', environment: 'production', region: 'previous-service' } })
+    await stale
+    await runtime.settle()
+    assert.match(text(runtime.render()), /current-service/)
+    assert.doesNotMatch(text(runtime.render()), /previous-service/)
+  } finally { finish?.({ ok: false }); await runtime.dispose() }
+})
+
+test('a retired service cannot open its late authorization reply in the browser', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  let finish
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.remote.whalerein.startConnect = () => new Promise((resolve) => { finish = resolve })
+    const pending = managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    runtime.setCloudState('idle', { service: 'custom', profileId: 'custom-profile' })
+    await runtime.refresh()
+    finish({ ok: true, value: { approvalUrl: 'https://app.example/old-approval' } })
+    await pending
+    assert.equal(tab.closed, true)
+    assert.equal(tab.location.href, undefined)
+  } finally { finish?.({ ok: false }); globalThis.window = originalWindow; await runtime.dispose() }
+})
+
+test('stale callbacks cannot dispatch actions to a newly selected runtime', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const stale = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { service: 'custom', profileId: 'custom-profile' })
+    await runtime.refresh()
+    await stale.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+  } finally { await runtime.dispose() }
+})
+
+test('canonical approval URLs replace cached links and cached removal URLs stay scoped to their service', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setActionResult('startConnect', { ok: true, value: { approvalUrl: 'https://app.example/old-approval' } })
+    await managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    for (const change of [{}, { service: 'custom', profileId: 'custom-profile' }]) {
+      runtime.setCloudState('awaiting_approval', { ...change, approvalUrl: 'https://app.example/current-approval' })
+      await runtime.refresh()
+      const links = findAll(runtime.render(), (node) => node.type === 'a').map((node) => node.props.href)
+      assert.ok(links.some((url) => url.includes('/current-approval')))
+      assert.equal(links.some((url) => url.includes('/old-approval')), false)
+    }
+    runtime.setCloudState('connected', { service: 'whalerein_cloud', profileId: 'profile-production', approvalUrl: '', connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('removeComputer', { ok: true, value: { action: { url: 'https://app.example/old-management' } } })
+    await managedButton(runtime, '移除这台电脑').props.onClick()
+    runtime.setCloudState('removing', { service: 'custom', profileId: 'custom-profile', connected: false })
+    await runtime.refresh()
+    const links = findAll(runtime.render(), (node) => node.type === 'a').map((node) => node.props.href)
+    assert.equal(links.some((url) => url.includes('/old-management')), false)
+  } finally { await runtime.dispose() }
+})
+
+test('an unmounted settings page cannot navigate a late authorization reply', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  let finish
+  let disposed = false
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.remote.whalerein.startConnect = () => new Promise((resolve) => { finish = resolve })
+    const pending = managedButton(runtime, '连接到 WhaleRein Cloud').props.onClick()
+    await runtime.dispose()
+    disposed = true
+    finish({ ok: true, value: { approvalUrl: 'https://app.example/retired-page-approval' } })
+    await pending
+    assert.equal(tab.closed, true)
+    assert.equal(tab.location.href, undefined)
+  } finally { finish?.({ ok: false }); globalThis.window = originalWindow; if (!disposed) await runtime.dispose() }
+})
+
+test('a Cloud deployment change invalidates old callbacks even when the service name is unchanged', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const stale = managedButton(runtime, '连接到 WhaleRein Cloud')
+    runtime.setCloudState('idle', { service: 'whalerein_cloud', profileId: 'staging-profile', environment: 'staging' })
+    await runtime.refresh()
+    await stale.props.onClick()
+    assert.deepEqual(runtime.calls, [])
+    assert.match(text(runtime.render()), /内部测试 · staging/)
+  } finally { await runtime.dispose() }
+})
