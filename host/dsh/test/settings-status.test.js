@@ -7,7 +7,7 @@ import { startHarness } from './support/harness.js'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EMPTY_SETTINGS_STATUS, sanitizeConfigurationView, settingsStatus, WhaleReinSettingsService } from '../src/settings.js'
+import { EMPTY_SETTINGS_STATUS, settingsStatus, WhaleReinSettingsService } from '../src/settings.js'
 
 test('when settings status is requested, it returns the host pairing code and paired device summaries', async () => {
   const harness = await startHarness()
@@ -83,19 +83,9 @@ test('when settings reads remote status, it returns a read-only snapshot compati
     { method: 'disconnect', invocation: { kind: 'direct' } },
     { method: 'reconnect', invocation: { kind: 'direct' } },
     { method: 'removeComputer', invocation: { kind: 'direct' } },
-    { method: 'switchProfile', invocation: { kind: 'direct' } },
-    { method: 'enableStaging', invocation: { kind: 'direct' } },
-    { method: 'addCustomService', invocation: { kind: 'direct' } },
-    { method: 'deleteProfile', invocation: { kind: 'direct' } },
     { method: 'invite', invocation: { kind: 'direct' } },
     { method: 'revoke', invocation: { kind: 'direct' } },
     { method: 'testConnection', invocation: { kind: 'direct' } },
-    { method: 'configuration', invocation: { kind: 'direct' } },
-    { method: 'saveDefaultEnvironment', invocation: { kind: 'direct' } },
-    { method: 'specializeBuiltin', invocation: { kind: 'direct' } },
-    { method: 'saveCustomEnvironment', invocation: { kind: 'direct' } },
-    { method: 'removeCustomEnvironment', invocation: { kind: 'direct' } },
-    { method: 'applyEnvironment', invocation: { kind: 'direct' } },
   ])
   assert.deepEqual(service.snapshot(), { ...EMPTY_SETTINGS_STATUS, devices: [] })
   assert.equal(ctx.whalereinSettings.name, 'whalereinSettings')
@@ -326,7 +316,7 @@ test('invalid or hostile manager values fail closed without leaking them', () =>
     capabilities: ['unknown'],
   })
   assert.equal(snapshot.state, 'action_required')
-  assert.equal(snapshot.environment, 'production')
+  assert.equal(snapshot.environment, 'custom')
   assert.equal(snapshot.approvalUrl, '')
   assert.deepEqual(snapshot.error, { code: 'internal' })
   assert.deepEqual(snapshot.profiles, [])
@@ -369,46 +359,6 @@ test('managed settings exposes sanitized manager details and refuses missing or 
   await missingCtx.fiber.dispose()
 })
 
-test('every frozen manager method forwards once with validated arguments and returns a sanitized snapshot', async () => {
-  const ctx = new Context()
-  const calls = []
-  const manager = {
-    snapshot: () => ({ state: 'connected', environment: 'production', profileId: 'p1', connected: true }),
-    startConnect: (request) => calls.push(['startConnect', request]),
-    cancel: () => calls.push(['cancel']),
-    retry: () => calls.push(['retry']),
-    disconnect: () => calls.push(['disconnect']),
-    reconnect: () => calls.push(['reconnect']),
-    remove: () => calls.push(['remove']),
-    switchProfile: (id) => calls.push(['switchProfile', id]),
-    enableStaging: () => calls.push(['enableStaging']),
-    addCustomService: (value) => calls.push(['addCustomService', value]),
-    deleteProfile: (id) => calls.push(['deleteProfile', id]),
-  }
-  const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
-  for (const [method, args] of [
-    ['startConnect', [{ source: 'browser' }]],
-    ['cancel', []], ['retry', []], ['disconnect', []], ['reconnect', []], ['removeComputer', []],
-    ['switchProfile', ['profile-1']], ['enableStaging', []],
-    ['addCustomService', [{ label: 'Service', apiOrigin: 'https://service.example/path' }]],
-    ['deleteProfile', ['profile-2']],
-  ]) {
-    const result = await service[method](...args)
-    assert.equal(result.managed, true, method)
-  }
-  assert.deepEqual(calls, [
-    ['startConnect', { source: 'browser' }], ['cancel'], ['retry'], ['disconnect'], ['reconnect'], ['remove'],
-    ['switchProfile', 'profile-1'], ['enableStaging'],
-    ['addCustomService', { label: 'Service', apiOrigin: 'https://service.example/path' }],
-    ['deleteProfile', 'profile-2'],
-  ])
-  await assert.rejects(service.switchProfile('bad id'), (error) => error instanceof RemoteError && error.code === 'whalerein/invalid-input')
-  await assert.rejects(service.deleteProfile(''), (error) => error instanceof RemoteError && error.code === 'whalerein/invalid-input')
-  await assert.rejects(service.addCustomService(null), (error) => error instanceof RemoteError && error.code === 'whalerein/invalid-input')
-  await assert.rejects(service.addCustomService({ label: 'x', apiOrigin: 'file:///private' }), (error) => error instanceof RemoteError && error.code === 'whalerein/invalid-input')
-  await ctx.fiber.dispose()
-})
-
 test('manager failures become stable action errors without exposing private diagnostics', async () => {
   const ctx = new Context()
   const service = new WhaleReinSettingsService(ctx, {
@@ -441,30 +391,6 @@ test('managed pairing calls are refused with a clear capability error while stan
   await ctx.fiber.dispose()
 })
 
-test('manager action results expose only opaque profile metadata and a validated browser URL', async () => {
-  const ctx = new Context()
-  const service = new WhaleReinSettingsService(ctx, {
-    managed: true,
-    manager: {
-      snapshot: () => ({ state: 'connected', environment: 'production' }),
-      remove: async () => ({ state: 'removing', url: 'https://app.example/hosts/host-1', hostId: 'host-1', token: 'secret' }),
-      enableStaging: async () => ({ id: 'staging-id', label: 'Staging', environment: 'staging', developerToolsEnabled: true }),
-      addCustomService: async () => ({ id: 'custom-id', label: 'Custom', environment: 'custom', active: false }),
-    },
-  })
-  const removal = await service.removeComputer()
-  assert.deepEqual(removal.action, {
-    id: '', label: '', environment: '', active: false, deleted: '', remoteRegistration: '', url: 'https://app.example/hosts/host-1',
-  })
-  const staging = await service.enableStaging()
-  assert.equal(staging.action.id, 'staging-id')
-  assert.equal(staging.action.environment, 'staging')
-  assert.equal(staging.action.active, false)
-  assert.equal(JSON.stringify(removal).includes('secret-token'), false)
-  assert.equal(JSON.stringify(removal).includes('"hostId"'), false)
-  await ctx.fiber.dispose()
-})
-
 test('an unsafe removal URL never crosses the settings RPC boundary', async () => {
   const ctx = new Context()
   const service = new WhaleReinSettingsService(ctx, {
@@ -478,118 +404,4 @@ test('an unsafe removal URL never crosses the settings RPC boundary', async () =
   assert.equal(result.action, null)
   assert.equal(JSON.stringify(result).includes('javascript:'), false)
   await ctx.fiber.dispose()
-})
-
-test('settings projects configuration provenance and delegates saves to the Host module', async () => {
-  const patches = []
-  const configView = {
-    path: '/tmp/whalerein/config.toml',
-    source_kind: 'explicit',
-    revision: `sha256:${'a'.repeat(64)}`,
-    selected_environment: 'staging',
-    selection_source: 'file',
-    definition_source: 'builtin',
-    desired_default: 'staging',
-    effective_override: null,
-    definition: { id: 'official-staging', mode: 'account', label: 'WhaleRein Cloud Staging (testing only)', api_origin: 'https://app.staging.whalerein.com' },
-    field_provenance: { id: 'catalog', mode: 'catalog', label: 'catalog', tls: 'catalog', issuer: 'catalog' },
-    validation: { scope: 'offline', live_readiness: 'not_checked' },
-    errors: [],
-  }
-  const manager = {
-    snapshot: () => ({
-      state: 'connected', environment: 'production', desiredEnvironment: 'staging',
-      profileId: 'abc', label: 'WhaleRein Cloud', hostName: 'host', stagingEnabled: true,
-      developerToolsEnabled: true, approvalUrl: null, error: null, connected: true,
-      pendingOperation: false, profiles: [], capabilities: [],
-    }),
-    configurationView: () => configView,
-    updateConfiguration: async (patch) => { patches.push(patch); return configView },
-    applyEnvironment: async (environment) => ({ ...manager.snapshot(), environment, profileId: 'def' }),
-  }
-  const ctx = new Context()
-  try {
-    const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
-    const status = service.snapshot()
-    assert.equal(status.configuration.path, '/tmp/whalerein/config.toml')
-    assert.equal(status.configuration.selectedEnvironment, 'staging')
-    assert.equal(status.configuration.sourceKind, 'explicit')
-    assert.equal(status.configuration.definitionSource, 'builtin')
-    assert.equal(status.configuration.desiredDefault, 'staging')
-    assert.equal(status.configuration.definition.label, 'WhaleRein Cloud Staging (testing only)')
-    assert.equal(status.configuration.definition.api_origin, undefined)
-    assert.equal(status.configuration.provenance.id, 'catalog')
-    assert.equal(status.environment, 'production')
-    assert.equal(status.desiredEnvironment, undefined)
-    assert.equal(JSON.stringify(status).includes('token'), false)
-
-    const saved = await service.saveDefaultEnvironment({ environment: 'staging' })
-    assert.deepEqual(patches.at(-1), { type: 'SetDefaultEnvironment', environment: 'staging' })
-    assert.equal(saved.configuration.desiredDefault, 'staging')
-    await service.specializeBuiltin({ environment: 'local', label: 'Lab', tls: { ca_provider: 'file', ca_file: '/opt/ca.pem' } })
-    assert.deepEqual(patches.at(-1), { type: 'SpecializeBuiltin', environment: 'local', label: 'Lab', tls: { ca_provider: 'file', ca_file: '/opt/ca.pem' } })
-    await service.saveCustomEnvironment({ name: 'company', definition: { mode: 'account', label: 'Company', api_origin: 'https://cloud.example.com', issuer: 'https://auth.example.com/oidc', native_client_id: 'whalerein-cli' } })
-    assert.equal(patches.at(-1).type, 'UpsertCustomEnvironment')
-    assert.equal(patches.at(-1).name, 'company')
-    await service.removeCustomEnvironment({ name: 'company' })
-    assert.deepEqual(patches.at(-1), { type: 'RemoveCustomEnvironment', environment: 'company' })
-    const applied = await service.applyEnvironment({ environment: 'staging' })
-    assert.equal(applied.action.environment, 'staging')
-
-    await assert.rejects(service.saveDefaultEnvironment({ environment: 'Bad Name' }), (error) => error.code === 'whalerein/invalid-input')
-    await assert.rejects(service.specializeBuiltin({ environment: 'company' }), (error) => error.code === 'whalerein/invalid-input')
-    await assert.rejects(service.saveCustomEnvironment({ name: 'lab', definition: { mode: 'account' } }), (error) => error.code === 'whalerein/invalid-input')
-    await assert.rejects(service.applyEnvironment({ environment: '../x' }), (error) => error.code === 'whalerein/invalid-input')
-    await assert.rejects(service.saveCustomEnvironment({ name: 'lab', definition: { mode: 'standalone', tls: { ca_provider: 'file' } } }), (error) => error.code === 'whalerein/invalid-input')
-  } finally {
-    await ctx.fiber.dispose()
-  }
-})
-
-test('settings configuration projection falls back to the plugin reference and stays redacted', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'whalerein-settings-config-'))
-  try {
-    const configFile = join(directory, 'config.toml')
-    writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
-    const host = { managed: true, manager: null, configPath: configFile, environmentOverride: null }
-    const status = settingsStatus(host)
-    assert.equal(status.configuration.selectedEnvironment, 'production')
-    assert.equal(status.configuration.definitionSource, 'builtin')
-    const missing = settingsStatus({ managed: true, manager: null, configPath: join(directory, 'missing.toml') })
-    assert.equal(missing.configuration.selectedEnvironment, null)
-    assert.equal(missing.configuration.errors[0].code, 'missing_config')
-    assert.equal(settingsStatus({ managed: true, manager: null }).configuration, null)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('configuration view projection drops unknown provenance and malformed values', () => {
-  const view = sanitizeConfigurationView({
-    path: 7,
-    source_kind: 'remote',
-    revision: 'not-a-revision',
-    selected_environment: 'Bad Name',
-    selection_source: 'invocation',
-    definition_source: 'file',
-    desired_default: 'Bad Name',
-    effective_override: 'Bad Name',
-    definition: { id: 7, mode: 'unknown', label: null },
-    field_provenance: { id: 'file', tls: 'default', issuer: 'secret-source' },
-    validation: { scope: 'live', live_readiness: 'ready' },
-    errors: [{ code: 'BAD CODE', message: 'raw private detail' }, { code: 'unknown_field', message: 'x' }],
-  })
-  assert.equal(view.path, '')
-  assert.equal(view.sourceKind, 'explicit')
-  assert.equal(view.revision, null)
-  assert.equal(view.selectedEnvironment, null)
-  assert.equal(view.desiredDefault, null)
-  assert.equal(view.effectiveOverride, null)
-  assert.equal(view.selectionSource, 'invocation')
-  assert.equal(view.definitionSource, 'file')
-  assert.equal(view.definition.mode, null)
-  assert.deepEqual(view.provenance, { id: 'file', tls: 'default' })
-  assert.equal(view.validation.scope, 'live')
-  assert.deepEqual(view.errors.map((error) => error.code), ['unreadable_config', 'unknown_field'])
-  assert.equal(sanitizeConfigurationView(null), null)
 })

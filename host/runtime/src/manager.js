@@ -150,6 +150,9 @@ export class ConnectionManager {
     if (environmentOverride !== null && typeof environmentOverride !== 'string') {
       throw new PluginError('invalid_argument', 'environment override must be a string')
     }
+    if (options.profileConfiguration === true && !options.configSnapshot) {
+      throw new PluginError('invalid_argument', 'profile configuration snapshot is required')
+    }
     this.#options = {
       configFile: typeof configFile === 'string' ? configFile : undefined,
       environment: environmentOverride,
@@ -157,6 +160,7 @@ export class ConnectionManager {
       homeDir: options.homeDir,
       platform: options.platform,
       configSnapshot: options.configSnapshot ?? null,
+      profileConfiguration: options.profileConfiguration === true,
       allowDefaultInit: options.allowDefaultInit !== false,
       stateRoot: options.stateRoot,
       credentials: options.credentials,
@@ -472,6 +476,7 @@ export class ConnectionManager {
   }
 
   async switchProfile(id) {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       if (typeof id !== 'string' || id === '') throw new PluginError('invalid_argument', 'profile id is required')
@@ -534,6 +539,7 @@ export class ConnectionManager {
   }
 
   async enableStaging() {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       const record = this.#registry.enableStaging()
@@ -542,6 +548,7 @@ export class ConnectionManager {
   }
 
   async addCustomService({ label, apiOrigin } = {}) {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       const descriptor = customService({ label, apiOrigin }, { allowLoopback: this.#options.allowLoopback })
@@ -570,6 +577,7 @@ export class ConnectionManager {
   }
 
   async deleteProfile(id) {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       const record = this.#registry.get(id)
@@ -601,6 +609,7 @@ export class ConnectionManager {
 
   /** Read-only projection of the selected file, latest desired default and the pinned runtime. */
   configurationView() {
+    if (this.#options.profileConfiguration) return this.#resolution ? viewConfiguration(this.#resolution) : null
     const requested = this.#options.configFile
     let snapshot = null
     let error = this.#configError
@@ -646,6 +655,7 @@ export class ConnectionManager {
 
   /** Persist a typed settings patch through the Host configuration module only. */
   async updateConfiguration(patch) {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       const snapshot = open({
@@ -678,6 +688,7 @@ export class ConnectionManager {
    * authority gets its own profile, and pending work refuses the switch.
    */
   async applyEnvironment(environment) {
+    if (this.#options.profileConfiguration) throw new PluginError('unsupported_capability', 'edit the owning profile configuration')
     return this.#run(async () => {
       this.#assertUsable()
       if (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment)) {
@@ -797,7 +808,7 @@ export class ConnectionManager {
     this.#configSnapshot = null
     this.#resolution = null
     const active = this.#registry.active()
-    if (active?.mode === 'standalone') return
+    if (active?.mode === 'standalone' && !this.#options.profileConfiguration) return
     if (this.#options.configSnapshot) {
       try {
         this.#configSnapshot = this.#options.configSnapshot
@@ -836,6 +847,7 @@ export class ConnectionManager {
 
   /** Re-read only the desired selection; the pinned runtime never follows it. */
   #refreshDesired() {
+    if (this.#options.profileConfiguration) return
     if (this.#registry.active()?.mode === 'standalone') return
     try {
       const snapshot = open({
@@ -894,7 +906,11 @@ export class ConnectionManager {
     const environment = resolution.environment
     const authority = authorityOf(resolution)
     const profiles = this.#registry.list().filter((profile) => profile.mode === 'managed')
-    const match = profiles.find((profile) => profile.bindings?.serviceAuthority === authority)
+    const match = profiles.find((profile) => profile.bindings?.serviceAuthority === authority
+      || (this.#options.profileConfiguration
+        && profile.service?.apiOrigin === definition.api_origin
+        && profile.service?.issuer === definition.issuer
+        && profile.service?.nativeClientId === definition.native_client_id))
     if (match) return match
     const sameEnvironment = profiles.find((profile) => profile.environment === environment)
     if (sameEnvironment) {
@@ -939,7 +955,7 @@ export class ConnectionManager {
   #resolutionFor(record) {
     if (!record || record.environment === 'standalone' || !this.#configSnapshot) return null
     try {
-      return resolveEnvironment(this.#configSnapshot, record.environment)
+      return resolveEnvironment(this.#configSnapshot, this.#options.profileConfiguration ? this.#options.environment : record.environment)
     } catch {
       return null
     }
@@ -979,6 +995,10 @@ export class ConnectionManager {
   // --- initialization -----------------------------------------------------
 
   async #initialize() {
+    if (this.#options.profileConfiguration && this.#configError) {
+      this.#setState('action_required', 'invalid_argument')
+      return
+    }
     let record
     try {
       record = this.#activeRecord()
@@ -1620,6 +1640,7 @@ export class ConnectionManager {
   }
 
   #assertUsable() {
+    if (this.#options.profileConfiguration && this.#configError) throw new PluginError('invalid_argument', 'profile configuration is invalid')
     if (this.#disposed) {
       const error = new PluginError('conflict', 'connection manager was disposed')
       error.code = 'disposed'

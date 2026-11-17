@@ -49,136 +49,129 @@ host/runtime/
 
 ## Configuration
 
-The running DSH profile is the only connection-settings source. Settings → WhaleRein writes `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (entry id `whalerein-dsh`). The plugin reads that document after Cordis has evaluated any `!!js` expression stored in it. Managed profiles reference the per-device TOML file through `config_file` (Host default `~/.whalerein/config.toml`, or `WHALEREIN_CONFIG`); the plugin keeps no environment catalog, endpoint table or TOML writer of its own.
+The current DSH profile's `whalerein-dsh` entry in `cordis.patch.yml` is the
+only plugin configuration source. The settings page writes that same namespace
+atomically at the revision it read. After saving, reload the plugin to apply a
+connection change. A stale save preserves the draft and offers to load the latest
+saved values. Ordinary starts preserve the entry.
 
-Every documented key below is part of the shipped `Config` schema and is read from the profile. Saving applies all changed fields in one atomic namespace mutation at the revision the draft was read from; a rejected save keeps the draft, and clearing a field restores inheritance. If the stored configuration cannot resolve at startup, the plugin keeps the settings page available and names the invalid field instead of looking like an unpaired host. Clearing `server` is blocked while it is the only source of `mqtt_url`; save a legacy `mqtt_url` first or keep the server address.
-
-A legacy Standalone secret may be stored in that file as an `!!js process.env` expression so the value stays out of the file. Managed profiles carry no endpoints, trust material or tokens; `pnpm start` seeds only `connection_mode: managed`, `adapter: real` and its state directory.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `connection_mode` | `auto` | `auto`, `managed`, or `standalone`. Auto keeps every profile with existing `server`/`mqtt_url`/`host_token` material standalone and treats a profile without connection material as the managed WhaleRein Cloud flow |
-| `config_file` | empty | Explicit per-device TOML path passed to the Host configuration module. Empty uses `WHALEREIN_CONFIG`, then `~/.whalerein/config.toml` |
-| `environment` | empty | Optional per-instance environment override. It is validated by Host resolution, never persisted into the file and never creates a second default |
-| `state_root` | `~/.whalerein/dsh` | Managed state root passed to the Host connection manager. It is exactly the caller value; it is never derived from a configuration descriptor. `state_dir` remains the legacy alias for Standalone profiles |
-| `profile_id` | none | Selected managed profile. Opaque identifier only; it is never a display name or host ID |
-| `developer_tools_enabled` | `false` | Enables the staging/Developer tools affordance in the managed settings page. Enabling staging still requires an explicit profile selection |
-| `enrollment_issuer_public_key` | none | One base64url Ed25519 public key. When set, the managed flow verifies the account service's portable authorization signature before sending anything. Access verifies the same document independently |
-| `enrollment_issuer` | none | Absolute origin the signed authorization must name. Checked together with the pinned key |
-| `server` | none | host name or IPv4 address. When set, the plugin derives the Access origin and the MQTT URL and ignores `mqtt_url` / `access_url` |
-| `admin_token` | none | Not shown in settings. The plugin does not use it. A saved value stays in the profile. Host-signed requests mint this host’s pairing link and revoke this host’s grant. The Access admin token remains the operator credential for invitations for any host and for `DELETE /v1/devices/{id}` |
-| `access_port` | `443`, or `8080` when plaintext is allowed | Access port. `443` and plaintext `80` are omitted from the URL |
-| `mqtt_port` | `8883`, or `1883` when plaintext is allowed | MQTT port |
-| `mqtt_url` | required when `server` is empty | legacy `mqtts://...`; `mqtt://` only when `allow_insecure_mqtt` is true |
-| `host_id` | generated once from the computer name when the profile has none | topic-safe host id. A saved value stays. Clearing the settings field keeps the saved value. Changing it requires confirmation and creates a new host identity: paired devices must pair again. The Host credential record key stays stable so a rename does not brick the next start |
-| `host_token` | required | broker provisioning token (never logged) |
-| `ca_file` | none | Legacy Standalone TLS CA bundle. Managed trust comes only from the selected environment's scoped `tls` resolution |
-| `state_dir` | `~/.whalerein/dsh` | Not shown in settings. SQLite directory |
-| `adapter` | `auto` | Not shown in settings. Inside DSH, `auto` uses the real adapter. `fake` and `real` stay for tests and standalone runs |
-| `pending_queue_enabled` | `true` | Not shown in settings. When false, pending-queue read/edit/remove/steer are not advertised |
-| `enable_open_question_broker` | `true` | Not shown in settings. When false, the open-question broker is not installed and open-question answer is not advertised |
-| `access_url` | none | legacy Access origin, used when `server` is empty |
-| `proto_path` | repo descriptor | protobuf JSON descriptor |
-| `approval_mode` | `claim` | `claim` answers `approval/request`; `delegate` calls `next()` |
-| `approval_ttl_ms` | `300000` | pending approval lifetime |
-| `event_batch_ms` | `20` | ordinary-output batch window |
-| `outbox_per_device_limit` | `100` | pending ciphertext rows per device |
-| `outbox_total_limit` | `1000` | pending ciphertext rows overall |
-| `snapshot_max_events` | `5000` | DSH snapshot read bound |
-| `reconnect_min_ms` / `reconnect_max_ms` | `500` / `30000` | MQTT backoff |
-| `shutdown_timeout_ms` | `5000` | wait for in-flight requests on stop |
-| `log_level` | `info` | `debug`, `info`, `warn`, `error`, or `silent` |
-
-`allow_insecure_mqtt` defaults to false and is not shown in settings. Turn it on in the profile only for a trusted plaintext broker.
-
-`pending_queue_enabled` and `enable_open_question_broker` default to true and are not shown in settings. Setting either false in the profile withdraws that capability group from advertisement; native service support still determines the remaining groups.
-
-MQTT identity is fixed by WIRE.md:
-
-```text
-client id  whalerein-host-{host_id}
-username   host:{host_id}
+```yaml
+- id: whalerein-dsh
+  name: whalerein-dsh
+  config:
+    service: whalerein_cloud
+    cloud_environment: production
+    adapter: real
+    state_root: /absolute/path/to/instance-state
 ```
 
-The plugin subscribes only `whalerein/v1/h/{host_id}/request` and publishes only
-its own `result` and `event` topics. After subscribing it publishes a
-`HostResult{status=succeeded, result_body=HostReady}` readiness signal.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `service` | `whalerein_cloud` | `whalerein_cloud`, `custom`, or `standalone` |
+| `cloud_environment` | `production` | Internal-only `production`, `staging`, or `local`; hidden from the normal settings form |
+| `custom` | absent | Custom account-service definition, described below |
+| `state_root` | `~/.whalerein/dsh` | Existing Host registry and per-identity state root; `state_dir` is a legacy alias |
+| `adapter` | `auto` | Real DSH inside the plugin; `real` and `fake` are also supported |
+| `log_level` | `info` | Runtime logging level |
+| `pending_queue_enabled` | `true` | Advertise supported native pending-queue operations |
+| `enable_open_question_broker` | `true` | Enable the native open-question broker |
+| `enrollment_issuer_public_key` | empty | Optional pinned base64url Ed25519 issuer public key |
+| `enrollment_issuer` | empty | Optional expected authorization issuer |
 
-## One-command real-DSH debug
+Cloud definitions come from the shared, packaged official catalog. DSH does not
+read `WHALEREIN_CONFIG` or `~/.whalerein/config.toml` during ordinary startup,
+status polling or settings saves. The registry retains credentials, registration,
+pairing, recovery and pause state; its active pointer cannot override the profile.
+Cloud environments have separate identities, and returning to an environment
+reuses its identity. An invalid target fails closed without connecting to a
+previous environment. Starting another owner of the same state root fails the
+existing activation lock; give independent DSH instances independent state roots.
+
+Custom services use the same browser-authorization flow as Cloud:
+
+```yaml
+service: custom
+custom:
+  label: My service
+  api_origin: https://app.example.com
+  issuer: https://auth.example.com/oidc
+  native_client_id: whalerein-cli
+  tls:
+    ca_provider: system
+```
+
+Only `label`, `api_origin`, `issuer`, `native_client_id`, and `tls` are accepted
+inside `custom`. The label is optional. API origin, issuer and the service's
+registered native client ID are required. API origin must be an HTTPS origin
+without a path, credentials, query or fragment; issuer must be HTTPS on a distinct
+origin. `tls` accepts only `ca_provider` (`system` or `file`, default `system`) and
+`ca_file` (an absolute path, required only for `file`). Unknown fields are errors.
+Access/MQTT routes and enrollment credentials are supplied by the approved service,
+not entered in the custom block. Changing authority selects an isolated identity;
+changing a label reuses the identity.
+
+`service: standalone` uses the existing manual fields: `server`, `access_port`,
+`mqtt_port`, `host_id`, `host_token`, `admin_token`, `ca_file`, and, for legacy
+profiles without `server`, `access_url`/`mqtt_url`. Host IDs are generated once
+when missing. Tokens remain write-only in the UI. Profile `!!js process.env`
+expressions require the operator to export those variables; the launcher injects
+no development token defaults. `allow_insecure_mqtt` is only for explicit local
+plaintext development. Existing runtime tuning keys remain supported.
+
+Legacy entries are migrated once through DSH's profile commit mechanism before
+startup. An explicit old `config_file` is imported read-only into the profile;
+subsequent file edits have no effect. Existing identity selection and state paths
+are preserved. Incomplete custom authority cannot be inferred: migration fails
+closed so the settings can be corrected. New `service` settings combined with
+non-default legacy selectors (`environment`, `config_file`, `connection_mode`,
+`profile_id`, `developer_tools_enabled`) are rejected rather than prioritized.
+Back up the profile before upgrading; older plugin versions do not understand the
+new selection contract. Shared CLI/Core TOML behavior is unchanged.
+
+## Run real DSH
 
 ```bash
 cd host/dsh
 pnpm start
-```
-
-`pnpm start` invokes `bin/start-real-dsh.sh`, which creates the
-`whalerein-debug` DSH profile if needed, installs this package with
-`dsh plugin` (pnpm), registers `whalerein-dsh` as a profile bundle and runs
-real DSH in the foreground on port 3099. DSH prints its tokenized UI URL;
-press Ctrl-C to stop. It only ensures the plugin is loaded by DSH; it does
-**not** start or check Access/PostgreSQL/Mosquitto. The normal `web` profile
-on 3080 is untouched.
-
-A fresh profile gets a **managed** WhaleRein Cloud entry, so the first page
-offers **Connect to WhaleRein Cloud** and Developer tools instead of a manual
-server form. An existing entry is preserved verbatim. Flags change the seed:
-
-```bash
-pnpm start --managed                # seed or rewrite a managed cloud entry
-pnpm start --standalone             # seed or rewrite a manual Access entry
 pnpm start --profile other --port 3100
-pnpm start --reinstall              # force `dsh plugin add` of this checkout
-pnpm start --no-developer-tools     # hide the Developer tools section
-pnpm start --log-level debug
-pnpm start --dry-run                # print the planned entry and command
+pnpm start --reinstall
+pnpm start --dry-run
+# Internal development only: saves the Cloud deployment in this DSH profile.
+pnpm start --cloud-environment staging
+pnpm start --cloud-environment local
 ```
 
-`--managed` writes `connection_mode: managed`, `state_root` and
-`developer_tools_enabled`; `--standalone` keeps the legacy `server`/`host_token`
-entry and `state_dir`. An explicit mode is the only way to replace an existing
-entry; the standalone block still references exported `WHALEREIN_HOST_TOKEN`
-and `WHALEREIN_ADMIN_TOKEN`. Managed mode uses the per-device TOML file selected
-by `WHALEREIN_CONFIG` (default `~/.whalerein/config.toml`) and injects no host
-or admin token. The launcher fails early when the port is already
-in use and prints the selected profile, mode, state path and URL.
-
-Loading the Host plugin as a bundle (rather than a `--patch` launch overlay)
-is what lets the settings page save into the profile user layer.
+The launcher creates the dedicated `whalerein-debug` profile when missing,
+installs this checkout, registers the bundle and starts DSH with `--no-open`.
+Fresh profiles use Cloud production and a profile-specific state directory under
+`.data/dsh/<profile>`. Existing entries and paths are preserved. An explicit
+`--cloud-environment` updates only that scalar; it never rewrites custom fields,
+secrets or sibling entries, and does not change a selected custom/Standalone
+service. Dry-run validates and prints only non-secret connection scalars, with no
+filesystem writes. Legacy selectors must be migrated by an ordinary startup
+before an explicit launcher override. The normal `web` profile is untouched. The launcher does not
+start Access, PostgreSQL or Mosquitto.
 
 ## Settings page
 
-A fresh profile without manual connection material loads the managed WhaleRein
-Cloud flow: a title, a short explanation, and one primary **Connect to WhaleRein
-Cloud** action. No server, port, Host ID, token, region or fingerprint input is
-required, and loading the page never starts enrollment or opens a browser. The
-server-side settings service projects the frozen `ConnectionManager` API
-(`snapshot`, `details`, `startConnect`, `cancel`, `retry`, `disconnect`,
-`reconnect`, `remove`, `switchProfile`, `enableStaging`, `addCustomService`,
-`deleteProfile`) through allowlisted snapshots. Poll credentials, authorization
-documents, keys, host ids, routes and raw approval locators never cross the
-browser RPC boundary or enter logs; the approval destination is a validated
-credential-free http(s) URL used only for the explicit browser handoff.
+The connection selector exposes exactly **WhaleRein Cloud**, **Custom service**
+and **Standalone**. All connection fields are saved in the DSH namespace; there
+is no profile picker, Staging enable action or shared-default editor. Internal
+Cloud instances show a fixed deployment badge without an environment switch.
+The custom service form shows name and API origin first, with required account
+and optional trust parameters under Advanced.
 
-Managed states are `idle`, `requesting`, `awaiting_approval`, `enrolling`,
-`recovering`, `connecting`, `connected`, `reconnecting`, `disconnected`,
-`denied`, `expired`, `action_required`, `removing`, and `removed`. Connected is
-shown only from runtime readiness. The status region announces changes through
-`role=status`/`aria-live`, focus moves to it on state changes, and the layout
-wraps from 320 CSS px upward.
-
-Browser handoff reserves a tab during the explicit Connect click and falls back
-to a visible **Open browser** link when the browser blocks it. The approval URL
-carries the active `en`/`zh-CN` locale. Connection details are collapsed by
-default and expose only non-secret identity and redacted diagnostics. Custom
-services live under Advanced, while Developer tools enables staging and then
-requires an explicit staging profile selection; enabling staging does not
-switch the computer. An active Staging label stays visible when details and
-Developer tools are hidden, and switching back to production remains reachable.
+Loading settings never begins enrollment or opens a browser. The primary Connect
+action reserves a tab during the click and navigates it only to the validated
+approval URL. The page handles browser blocking with a manual link. Account login
+stays in the browser. Status and details are allowlisted projections without
+credentials, routes, host IDs or inactive identity lists. The DSH remote surface
+exposes lifecycle actions, read-only details, connection probes and device pairing;
+configuration edits use the existing revisioned DSH settings writer only.
 
 Disconnect is a local pause that retains the cloud registration. **Remove this
 computer** is browser-authorized and stays `removing` until the service enforces
-removal. Deleting an inactive local profile is separate and explains that the
-remote registration remains. Managed profiles hide device invitation/revocation
+removal. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
 unless the selected service advertises pairing support; Standalone profiles keep
 the existing pairing, invitation, revocation, and connection-test behavior.
 
@@ -223,7 +216,7 @@ fixed. Completing a test refreshes live status; a failed readiness or draft chec
 does not itself mark an established host connection offline.
 
 The same `whalerein-dsh` package adds **Settings → WhaleRein** to the DSH Web
-UI through its Client half. The connection form asks for a server host, a host
+UI through its Client half. In Standalone mode the connection form asks for a server host, a host
 ID, and a host token. Ports, the CA bundle path, and the log level live under
 Advanced. Empty ports use 443 and 8883, or 8080 and 1883 when plaintext
 is allowed. Saving a server clears any saved `mqtt_url` and `access_url` so
@@ -242,8 +235,8 @@ does not log that URI or the invitation token, and it does not return the token
 as its own field. Pairing and revocation use host-signed Access requests.
 
 The page edits this plugin's `Config` section through DSH `configForms`: saved
-fields override the profile/environment values, and clearing a field inherits
-the environment/default again. The host token is write-only: its row shows
+fields are saved to the profile user layer, and clearing a field restores its
+profile base or schema default. The host token is write-only: its row shows
 whether it is configured and accepts a replacement; leaving it empty
 preserves the saved token. The administrator token is not exposed by the page.
 The plugin must be loaded as a profile
@@ -459,9 +452,8 @@ pnpm test          # node:test with coverage thresholds
 # Repository gate: ./repo test --project dsh --coverage
 ```
 
-Latest run (Node 25.9.0): **304 tests pass**, line **96.0%**, branch **85.3%**,
-function **91.7%**. Thresholds in `package.json` are 90% line, 85% branch, 90%
-function.
+Coverage thresholds in `package.json` are 90% line, 85% branch and 90%
+function. Repository reports retain the measured values for each run.
 
 Test suites cover: Noise XX roundtrip/MAC/prologue/AAD/channel keys; protobuf
 binary fixture (`proto/v1/fixtures/host_request.bin`); pairing cancel/mismatch/
@@ -610,20 +602,10 @@ but unverified; advertisement there is feature detection, not a claim that the
 operation works. Windows native behavior and a repeatable macOS runner remain
 unverified.
 
-### Official local account service
+### Internal Cloud deployments
 
-The official `local` environment uses the managed enrollment flow, alongside
-staging and production, and is selected only by the per-device TOML file
-(`environment = "local"` or an explicit settings/instance selection). Its
-service identity, API/issuer origins, native registration and mkcert trust
-defaults come from the public catalog and Host configuration module. No
-Cloud-generated environment document is required.
-
-The DSH profile keeps only `connection_mode: managed`, `adapter: real`, its
-explicit `state_dir` and an optional `config_file`/`environment` reference; no
-broker token, server, CA path or state root is copied from the environment
-definition. Editing the TOML file changes desired settings for a subsequent
-open only. A running authority stays pinned until an explicit switch; a changed
-authority under the same name requires a new Host profile. Missing configuration
-fails closed, and the development CA is scoped to the selected local service
-without disabling validation or touching global Node trust.
+Only `cloud_environment` in the DSH profile selects official staging or local
+services. Local uses the packaged catalog's account authority and scoped mkcert
+trust. The setting is hidden from ordinary forms; there is no development toggle
+that changes selection. A missing local CA or unavailable service reports an error
+without changing the saved deployment or disabling TLS validation.

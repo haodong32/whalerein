@@ -6,7 +6,7 @@ export { ConfigError, validateTopicId, topics, PROTOCOL_VERSION } from 'whalerei
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { open, resolveEnvironment, IDENTIFIER_PATTERN } from 'whalerein-host/configuration'
+import { serviceConfiguration } from './service-config.js'
 
 function pick(raw, names, fallback) {
   for (const name of names) {
@@ -71,6 +71,7 @@ export function hasStandaloneConfig(raw = {}) {
  * managed WhaleRein Cloud flow.
  */
 export function resolveConnectionMode(raw = {}) {
+  if (raw.service) return serviceConfiguration(raw).service === 'standalone' ? 'standalone' : 'managed'
   const mode = connectionMode(raw)
   if (mode !== 'auto') return mode
   return hasStandaloneConfig(raw) ? 'standalone' : 'managed'
@@ -85,39 +86,7 @@ export function resolveManagerConfig(raw = {}, options = {}) {
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
   }
-  const configFile = pick(raw, ['config_file'], '')
-  if (configFile !== '' && (typeof configFile !== 'string' || configFile.includes('\0'))) {
-    throw new ConfigError('invalid_config', 'config_file must be a usable file path')
-  }
-  const environment = pick(raw, ['environment'], '')
-  if (environment !== '' && (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment))) {
-    throw new ConfigError('invalid_config', `environment must match ${IDENTIFIER_PATTERN}`)
-  }
-  if (environment !== '') {
-    // The Host configuration module owns resolution; the plugin never keeps a
-    // second environment catalog or fallback.
-    let snapshot = null
-    try {
-      snapshot = open({
-        configFile: configFile || undefined,
-        envVars: options.envVars,
-        homeDir: options.homeDir,
-        inspectionOnly: true,
-      })
-    } catch (error) {
-      if (configFile !== '' || (options.envVars ?? process.env).WHALEREIN_CONFIG) {
-        throw new ConfigError('invalid_config', `config_file: ${error.code ?? 'unreadable_config'}`)
-      }
-      // A fresh default file may be initialized by ordinary startup.
-    }
-    if (snapshot) {
-      try {
-        resolveEnvironment(snapshot, environment)
-      } catch (error) {
-        throw new ConfigError('invalid_config', `environment: ${error.code ?? 'unknown_environment'}`)
-      }
-    }
-  }
+  const selection = serviceConfiguration(raw)
   const stateRoot = pick(raw, ['state_root', 'state_dir'], join(homedir(), '.whalerein', 'dsh'))
   if (typeof stateRoot !== 'string' || stateRoot.trim() === '' || stateRoot.includes('\0') || stateRoot.length > 4096) {
     throw new ConfigError('invalid_config', 'state_root must be a non-empty path')
@@ -139,8 +108,7 @@ export function resolveManagerConfig(raw = {}, options = {}) {
     }
   }
   return {
-    environment,
-    configFile: configFile || undefined,
+    ...selection,
     connectionMode: 'managed',
     adapter,
     stateRoot: stateRoot.trim(),
@@ -247,7 +215,7 @@ export function resolveConfig(raw = {}) {
     throw new ConfigError('invalid_config', 'mqtt_url must use the mqtt or mqtts scheme')
   }
 
-  const stateDir = pick(raw, ['state_dir'], join(homedir(), '.whalerein', 'dsh'))
+  const stateDir = pick(raw, ['state_dir', 'state_root'], join(homedir(), '.whalerein', 'dsh'))
   const protoPath = pick(raw, ['proto_path'], '')
   const approvalMode = pick(raw, ['approval_mode'], 'claim')
   if (!['claim', 'delegate'].includes(approvalMode)) {

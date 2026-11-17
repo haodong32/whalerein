@@ -1,128 +1,88 @@
 #!/usr/bin/env python3
-"""Write the WhaleRein entry into a DSH profile patch document.
+"""Seed the DSH profile or update explicitly requested connection scalars.
 
-The DSH profile patch is a YAML list. A fresh profile starts as comments plus
-an empty top-level array (`[]`), so appending a block after that sentinel would
-produce invalid YAML. This script handles three cases:
-
-* an empty document: drop the `[]` sentinel and append the entry;
-* an existing `whalerein-dsh` entry: leave it alone unless ``--force`` is given,
-  in which case only that list item is replaced;
-* ``--print``: render to stdout without touching the file (dry run).
+Existing custom settings, secrets, comments and sibling entries are preserved.
+The helper never evaluates YAML tags or reads a shared TOML configuration.
 """
-
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import tempfile
 from pathlib import Path
 
-ID_LINE = "- id: whalerein-dsh"
+ENTRY = re.compile(r"^- id: ['\"]?whalerein-dsh['\"]?\s*$")
 
 
-def is_empty_document(text: str) -> bool:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    content = [line for line in lines if not line.startswith("#")]
-    return content in ([], ["[]"])
-
-
-def render(mode: str, *, host_id: str, state_dir: str, state_root: str,
-           developer_tools: bool, log_level: str) -> str:
-    if mode == "managed":
-        lines = [
-            ID_LINE,
-            "  name: whalerein-dsh",
-            "  config:",
-            "    connection_mode: managed",
-            f"    developer_tools_enabled: {'true' if developer_tools else 'false'}",
-            "    adapter: real",
-            f"    log_level: {log_level}",
-        ]
-        if state_root:
-            lines.append(f"    state_root: {json.dumps(state_root)}")
-        elif state_dir:
-            lines.append(f"    state_dir: {json.dumps(state_dir)}")
-    else:
-        lines = [
-            ID_LINE,
-            "  name: whalerein-dsh",
-            "  config:",
-            "    server: 127.0.0.1",
-            f"    host_id: {json.dumps(host_id)}",
-            "    host_token: !!js process.env.WHALEREIN_HOST_TOKEN",
-            "    admin_token: !!js process.env.WHALEREIN_ADMIN_TOKEN ?? ''",
-            f"    state_dir: {json.dumps(state_dir)}",
-            "    adapter: real",
-            "    allow_insecure_mqtt: true",
-            f"    log_level: {log_level}",
-        ]
-    return "\n".join(lines) + "\n"
-
-
-def replace_entry(text: str, block: str) -> str:
-    """Replace the existing whalerein-dsh list item, keeping every other line."""
+def update(text: str, state: str, service: str | None, cloud: str | None) -> str:
     lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if line.strip() == ID_LINE), None)
+    start = next((i for i, line in enumerate(lines) if ENTRY.fullmatch(line)), None)
     if start is None:
-        return append_entry(text, block)
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        # A new top-level list item starts every sibling entry.
-        if lines[i].startswith("- "):
-            end = i
-            break
-    prefix = lines[:start]
-    suffix = lines[end:]
-    rendered = prefix + block.splitlines() + suffix
-    return "\n".join(rendered).rstrip() + "\n"
-
-
-def append_entry(text: str, block: str) -> str:
-    lines = text.splitlines()
-    if is_empty_document(text):
-        lines = [line for line in lines if line.strip() != "[]"]
-    prefix = "\n".join(lines).rstrip()
-    return (prefix + "\n" if prefix.strip() else "") + block
+        if all(not line.strip() or line.lstrip().startswith('#') or line.strip() == '[]' for line in lines):
+            lines = [line for line in lines if line.strip() != '[]']
+        prefix = '\n'.join(lines).rstrip()
+        block = ['- id: whalerein-dsh', '  name: whalerein-dsh', '  config:',
+                 f'    service: {service or "whalerein_cloud"}',
+                 f'    cloud_environment: {cloud or "production"}', '    adapter: real']
+        if state:
+            block.append(f'    state_dir: {json.dumps(state)}')
+        return (prefix + '\n' if prefix else '') + '\n'.join(block) + '\n'
+    if service is None and cloud is None:
+        return text
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('- ')), len(lines))
+    config = next((i for i in range(start + 1, end) if lines[i].strip() == 'config:'), None)
+    if config is None:
+        raise ValueError('the existing entry needs a block-style config before it can be edited')
+    config_end = next((i for i in range(config + 1, end)
+                       if lines[i].strip() and not lines[i].lstrip().startswith('#')
+                       and len(lines[i]) - len(lines[i].lstrip()) <= 2), end)
+    if any(re.match(r'^    (environment|config_file|connection_mode|profile_id):', line) for line in lines[config + 1:config_end]):
+        raise ValueError('start the plugin once to migrate legacy selectors before an explicit override')
+    changes = {}
+    if service:
+        changes['service'] = service
+    if cloud:
+        changes['cloud_environment'] = cloud
+    block = lines[config + 1:config_end]
+    for key, value in changes.items():
+        pattern = re.compile(rf'^    {key}:')
+        matches = [i for i, line in enumerate(block) if pattern.match(line)]
+        if len(matches) > 1:
+            raise ValueError('duplicate connection keys must be repaired before editing')
+        if matches:
+            block[matches[0]] = f'    {key}: {value}'
+        else:
+            block.append(f'    {key}: {value}')
+    return '\n'.join(lines[:config + 1] + block + lines[config_end:]) + '\n'
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument("path", type=Path)
-    # Preserve the managed <path> [state-dir] interface.
-    parser.add_argument("legacy_state_dir", nargs="?", default="")
-    parser.add_argument("--mode", choices=("managed", "standalone"), default="managed")
-    parser.add_argument("--host-id", default=None)
-    parser.add_argument("--state-dir", default="")
-    parser.add_argument("--state-root", default="")
-    parser.add_argument("--developer-tools", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--log-level", default="info")
-    parser.add_argument("--force", action="store_true", help="replace an existing entry")
-    parser.add_argument("--print", dest="print_only", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('path', type=Path)
+    parser.add_argument('state_dir', nargs='?', default='')
+    parser.add_argument('--service', choices=('whalerein_cloud', 'custom', 'standalone'))
+    parser.add_argument('--cloud-environment', choices=('production', 'staging', 'local'))
+    parser.add_argument('--print', dest='preview', action='store_true')
     args = parser.parse_args(argv)
-
-    mode = args.mode
-    host_id = args.host_id or "host-1"
-    state_dir = args.state_dir or args.legacy_state_dir or ""
-    text = args.path.read_text(encoding="utf-8") if args.path.exists() else ""
-    block = render(mode, host_id=host_id, state_dir=state_dir,
-                   state_root=args.state_root, developer_tools=args.developer_tools,
-                   log_level=args.log_level)
-    if args.print_only:
-        if ID_LINE in text:
-            sys.stdout.write(replace_entry(text, block) if args.force else text)
-        else:
-            sys.stdout.write(append_entry(text, block))
-        return 0
-    if ID_LINE in text:
-        if not args.force:
-            return 0
-        updated = replace_entry(text, block)
-    else:
-        updated = append_entry(text, block)
-    args.path.write_text(updated, encoding="utf-8")
+    text = args.path.read_text(encoding='utf-8') if args.path.exists() else ''
+    try:
+        rendered = update(text, args.state_dir, args.service, args.cloud_environment)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.preview:
+        sys.stdout.write('\n'.join(line for line in rendered.splitlines() if re.match(r'^    (service|cloud_environment|adapter|state_dir|state_root):', line)) + '\n')
+    elif rendered != text:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=args.path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(rendered)
+        try:
+            temporary.replace(args.path)
+        finally:
+            temporary.unlink(missing_ok=True)
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main(sys.argv[1:]))

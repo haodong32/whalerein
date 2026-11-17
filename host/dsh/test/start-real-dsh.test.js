@@ -27,29 +27,18 @@ function fixture(t) {
 
 test('launcher previews a fresh managed profile without filesystem changes', { skip }, (t) => {
   const { directory, preview } = fixture(t)
-  assert.match(preview(), /connection_mode: managed/)
+  assert.match(preview(), /service: whalerein_cloud/)
   assert.deepEqual(readdirSync(directory), [])
 })
 
-test('launcher generates distinct standalone host IDs and honors an explicit ID', { skip }, (t) => {
-  const { directory, env, preview } = fixture(t)
-  const hostId = () => preview('--standalone').match(/host_id: "([^"]+)"/)[1]
-  const first = hostId()
-  const second = hostId()
-  assert.match(first, /-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
-  assert.notEqual(first, second)
-  env.WHALEREIN_HOST_ID = 'host-explicit'
-  assert.equal(hostId(), 'host-explicit')
-  assert.deepEqual(readdirSync(directory), [])
-})
 
-test('launcher preserves an existing entry and reuses its host ID on an explicit rewrite', { skip }, (t) => {
-  const { env, preview } = fixture(t)
-  const patch = join(env.DSH_HOME, 'profiles', 'whalerein-debug', 'cordis.patch.yml')
-  mkdirSync(dirname(patch), { recursive: true })
-  const initial = '- id: whalerein-dsh\n  name: whalerein-dsh\n  config:\n    server: 127.0.0.1\n    host_id: "host-existing"\n'
-  writeFileSync(patch, initial)
-  assert.match(preview(), /existing entry .* is preserved \(mode: standalone\)/)
-  assert.match(preview('--standalone'), /host_id: "host-existing"/)
-  assert.equal(readFileSync(patch, 'utf8'), initial)
+test('launcher persists internal selection through the profile helper and rejects invalid arguments before writes', { skip }, (t) => {
+  const { directory, preview } = fixture(t)
+  assert.match(preview('--cloud-environment', 'staging'), /cloud_environment: staging/)
+  for (const args of [['--cloud-environment', 'invalid'], ['--port', '0'], ['--port', '65536'], ['--port', 'not-a-port'], ['--profile', '../other'], ['--managed']]) {
+    const { env } = fixture(t)
+    const result = spawnSync('bash', [launcher, '--dry-run', ...args], { env, encoding: 'utf8' })
+    assert.notEqual(result.status, 0)
+  }
+  assert.deepEqual(readdirSync(directory), [])
 })

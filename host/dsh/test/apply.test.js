@@ -14,6 +14,7 @@ test('when a profile has a host ID, apply preserves it; otherwise it generates o
   const disposers = []
   const committed = []
   const base = {
+    service: 'standalone',
     adapter: 'fake',
     mqtt_url: 'mqtts://127.0.0.1:1',
     host_token: 'token',
@@ -203,7 +204,6 @@ test('managed hosting constructs the connection manager with profile-scoped cred
     const credentials = { name: 'credential-adapter' }
     const host = await createManagedHost({
       state_root: dir, config_file: configFile,
-      profile_id: 'profile-1',
       developer_tools_enabled: true,
     }, {
       ctx: { credentials: {} },
@@ -221,8 +221,8 @@ test('managed hosting constructs the connection manager with profile-scoped cred
     assert.equal(calls[0][0], 'create')
     assert.equal(calls[0][1].stateRoot, dir)
     assert.equal(calls[0][1].credentials, credentials)
-    assert.equal(calls[0][1].selectedProfile, 'profile-1')
-    assert.equal(calls[0][1].developerToolsEnabled, true)
+    assert.equal(calls[0][1].selectedProfile, '')
+    assert.equal(calls[0][1].developerToolsEnabled, false)
     assert.equal(calls[0][1].ctx.credentials.name, undefined)
     assert.equal(host.started, true)
     await host.stop()
@@ -280,7 +280,6 @@ test('apply on a fresh managed profile registers settings and disposes the manag
     }
     const host = await apply(root, {
       state_root: dir, config_file: configFile,
-      profile_id: 'profile-1',
     }, { managerFactory: async () => manager })
     assert.equal(host.managed, true)
     assert.equal(existsSync(join(dir, 'host-id')), false, 'a managed install does not generate a visible Host ID')
@@ -325,51 +324,6 @@ test('apply keeps the settings surface available when the runtime manager cannot
   }
 })
 
-
-test('the real runtime manager composes with managed settings and staging never activates implicitly', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'whalerein-real-manager-'))
-  const configFile = join(dir, 'config.toml')
-  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
-  const root = new Context()
-  class TypertGateway extends Service {
-    constructor(ctx) { super(ctx, 'typertGateway') }
-  }
-  try {
-    await root.plugin({ name: 'fixtures', apply(ctx) { new TypertGateway(ctx) } })
-    const host = await apply(root, { state_root: dir, config_file: configFile,}, {
-      managerFactory: createConnectionManager,
-      fetch: async () => { throw new Error('no network in this test') },
-      mqtt: () => ({}),
-      now: () => 1700000000000,
-      log: null,
-    })
-    assert.equal(host.managed, true)
-    const initial = root.whalereinSettings.snapshot()
-    assert.equal(initial.managed, true)
-    assert.equal(initial.state, 'idle')
-    assert.equal(initial.environment, 'production')
-    assert.equal(initial.profiles.length, 1)
-    assert.equal(initial.profiles[0].active, true)
-    const productionId = initial.profileId
-    const enabled = await root.whalereinSettings.enableStaging()
-    assert.equal(enabled.action.environment, 'staging')
-    assert.equal(enabled.action.active, false)
-    assert.equal(enabled.environment, 'production', 'adding staging does not switch')
-    assert.equal(enabled.profiles.length, 2)
-    const stagingId = enabled.action.id
-    assert.equal(enabled.profiles.find((profile) => profile.id === stagingId).active, false)
-    const switched = await root.whalereinSettings.switchProfile(stagingId)
-    assert.equal(switched.environment, 'staging')
-    assert.equal(switched.profileId, stagingId)
-    const back = await root.whalereinSettings.switchProfile(productionId)
-    assert.equal(back.environment, 'production')
-    assert.equal(back.profileId, productionId)
-    await root.fiber.dispose()
-  } finally {
-    await root.fiber.dispose()
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
 
 test('a pinned issuer key becomes the manager authorization verifier', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-verifier-'))

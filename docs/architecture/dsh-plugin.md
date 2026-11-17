@@ -15,7 +15,7 @@ re-exported by the connector. Repository test support is not published.
 | Location | Responsibility |
 | --- | --- |
 | `index.js`, `cordis.patch.yml` | Cordis registration, entry configuration and runtime construction. |
-| `src/config.js` | DSH profile shape, configuration-file reference and per-instance environment override. |
+| `src/config.js` | DSH profile validation and manual connection settings. |
 | `src/credentials.js` | DSH credential-store binding, separate from conversation APIs. |
 | `src/adapter/base.js` | Source contract and native operation adaptation. |
 | `src/adapter/real.js`, `fake.js` | Native source interaction and the isolated test authority. |
@@ -138,29 +138,34 @@ matching request scope; the adapter `finally` releases the native question
 claim. MQTT will/keepalive remains for long-lived event connections only. TTL
 is still the fallback.
 
-## Client environment configuration
+## Profile-owned connection configuration
 
-The reusable configuration module is `host/runtime/src/configuration/`. It owns
-the same contract as Core: one-file path resolution, strict version-1 TOML
-parsing and catalog resolution, the revisioned typed writer with the
-`<config>.lock.sqlite` sidecar, the Core-shaped settings view, and scoped
-`system`/`mkcert`/`file` trust through a per-environment undici agent. It never
-invokes Core or a CLI, and the packaged generated catalog copy ships with Host
-instead of being read from a checkout path.
+The DSH profile user layer is the only source of connection selection and
+parameters. `service` selects `whalerein_cloud`, `custom`, or `standalone`.
+`cloud_environment` is an internal deployment selector defaulting to production;
+ordinary settings expose no staging/local picker. `custom` contains a strict
+account-service definition and scoped system/file TLS settings. Standalone keeps
+its manual connection fields. See the [configuration contract](../../host/dsh/README.md#configuration).
 
-The DSH native profile holds only a configuration-file reference (`config_file`)
-and an optional per-instance `environment` override. Empty `config_file` follows
-`WHALEREIN_CONFIG`, then `~/.whalerein/config.toml`. The override is validated by
-Host resolution, is never persisted into the file, and never creates a second
-default. `state_root` stays exactly the caller value; the configuration file
-never relocates or rekeys state.
+`src/service-config.js` validates these values and constructs an immutable
+in-memory snapshot for the shared Host resolver and packaged official catalog.
+It does not load a TOML file during normal operation. A one-time legacy import
+can read an explicit old file, then commits the canonical selection into the DSH
+profile. Mixed old/new selectors fail closed. Core/CLI file configuration and the
+shared environment catalog contract are unchanged.
 
-Settings project the Host configuration view (path, source, revision, desired
-default versus current selection, field provenance, offline errors) and send
-saved default, custom, built-in and remove actions to the Host
-`updateConfiguration`. The plugin keeps no environment catalog, endpoint table
-or TOML writer. Startup no longer requires a Cloud-generated environment
-descriptor or `WHALEREIN_LOCAL_ENVIRONMENT`; built-in `local` authority, native
-registration and mkcert defaults come from the packaged catalog. A changed
-authority under the same name fails closed until a new Host profile is created,
-and a live authority stays pinned until an explicit `applyEnvironment`.
+The Host manager accepts read-only profile-owned snapshots. It never refreshes
+these from disk or accepts configuration/profile switching mutations in this
+mode. On startup, the profile selects an existing matching authority or a new
+isolated identity; the registry stores identity and recovery facts rather than
+another configuration choice. A failed resolution cannot resume an old authority.
+Stopping/reloading releases the existing activation ownership before another
+runtime can use the same state root. Credentials and state paths are preserved.
+
+The client edits the profile with DSH's atomic revisioned namespace writer and
+reports that a plugin reload is needed. The remote service no longer exposes
+profile switching, test-environment enabling, custom-profile creation/deletion or
+TOML writers. It projects no inactive profile list. Custom definitions share the
+same TLS resolution as Host, with no process-global trust mutation. Real DSH
+persistence, reload ordering and browser behavior require native integration
+verification in addition to isolated settings tests.

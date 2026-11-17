@@ -141,6 +141,19 @@ window.__ModuleLoader__.load({
       diagnosticSynced: 'Synced',
       debugOnly: 'Debug',
       // Managed WhaleRein Cloud connection
+      internalCloud: 'Internal testing · {environment}',
+      connectCustom: 'Connect to service',
+      serviceReloadHint: 'Connection edits apply after reloading the plugin.',
+      serviceCurrent: 'Running connection',
+      serviceLabel: 'Connection type',
+      serviceCustom: 'Custom service',
+      serviceSave: 'Save connection',
+      serviceSaved: 'Saved. Reload the plugin to apply this connection.',
+      serviceInvalid: 'Complete the custom service fields and check the URLs and TLS settings.',
+      customIssuer: 'Authorization issuer',
+      customClient: 'Native client ID',
+      customCaProvider: 'CA provider',
+      customCaFile: 'CA file (absolute path)',
       cloudIntro: 'Connect this computer to WhaleRein Cloud and approve it in your browser. Account sign-in stays in the browser.',
       cloudConnect: 'Connect to WhaleRein Cloud',
       cloudCancel: 'Cancel',
@@ -366,6 +379,19 @@ window.__ModuleLoader__.load({
       diagnosticSynced: '已同步',
       debugOnly: '调试',
       // Managed WhaleRein Cloud connection
+      internalCloud: '内部测试 · {environment}',
+      connectCustom: '连接自定义服务',
+      serviceReloadHint: '连接配置修改后，重新加载插件生效。',
+      serviceCurrent: '当前运行连接',
+      serviceLabel: '连接方式',
+      serviceCustom: '自定义服务',
+      serviceSave: '保存连接配置',
+      serviceSaved: '已保存，请重新加载插件以应用连接配置。',
+      serviceInvalid: '请补全自定义服务参数，并检查地址和 TLS 配置。',
+      customIssuer: '授权签发者地址',
+      customClient: '客户端 ID',
+      customCaProvider: 'CA 来源',
+      customCaFile: 'CA 文件绝对路径',
       cloudIntro: '将这台电脑连接到 WhaleRein Cloud，并在浏览器中授权。账号登录始终留在浏览器中。',
       cloudConnect: '连接到 WhaleRein Cloud',
       cloudCancel: '取消',
@@ -920,10 +946,10 @@ window.__ModuleLoader__.load({
       }, [revokeFocus, fieldId])
 
       if (snapshot.status === 'loading') {
-        return h('div', { style: styles.page, className: 'whalerein-settings' }, h('style', null, css), h('h2', { style: styles.title }, tr('title')), h('p', { style: styles.intro }, tr('loading')))
+        return h('div', { style: styles.page, className: 'whalerein-body' }, h('style', null, css), h('h2', { style: styles.title }, tr('title')), h('p', { style: styles.intro }, tr('loading')))
       }
       if (snapshot.status !== 'ready') {
-        return h('div', { style: styles.page, className: 'whalerein-settings' }, h('style', null, css), h('h2', { style: styles.title }, tr('title')), h('p', { style: styles.intro }, tr('unavailable')))
+        return h('div', { style: styles.page, className: 'whalerein-body' }, h('style', null, css), h('h2', { style: styles.title }, tr('title')), h('p', { style: styles.intro }, tr('unavailable')))
       }
 
       const setField = (key, value) => {
@@ -1082,10 +1108,8 @@ window.__ModuleLoader__.load({
       const advancedFields = FIELDS.filter((field) => field.advanced)
       const configError = statusSnapshot.configError ?? null
 
-      return h('div', { style: styles.page, className: 'whalerein-settings' },
+      return h('div', { style: styles.page, className: 'whalerein-body' },
         h('style', null, css),
-        h('header', { style: styles.header },
-          h('h2', { style: styles.title }, tr('title'))),
         h(ConfigurationError, { t: tr, error: configError }),
         h(ConnectionCard, {
           t: tr, snapshot: statusSnapshot, inviting, inviteError, pairingUri, pairingExpiresAt,
@@ -1261,28 +1285,6 @@ window.__ModuleLoader__.load({
       return t('cloudProduction')
     }
 
-    function ProfileRows({ t, profiles, activeId, pending, busy, onDelete }) {
-      if (!Array.isArray(profiles) || profiles.length === 0) {
-        return h('p', { style: styles.hint }, t('cloudNoProfiles'))
-      }
-      return h('ul', { style: styles.deviceList, 'aria-label': t('cloudProfiles') },
-        profiles.map((profile) => {
-          const active = profile.active === true || profile.id === activeId
-          const disabled = busy || pending || active || profile.managed === false
-          return h('li', { key: profile.id, style: styles.profileRow, className: 'whalerein-profile-row' },
-            h('div', { style: styles.profileCopy },
-              h('div', { style: styles.profileName }, profile.label || profile.id),
-              h('div', { style: styles.deviceMeta },
-                managedEnvironmentLabel(t, profile.environment),
-                active ? ` · ${t('cloudDeleteActive')}` : '')),
-            h(Button, {
-              variant: 'ghost', size: 'sm', style: styles.dangerAction,
-              disabled, 'aria-label': `${t('cloudDeleteProfile')}: ${profile.label || profile.id}`,
-              onClick: () => onDelete(profile.id),
-            }, t('cloudDeleteProfile')))
-        }))
-    }
-
     const ERROR_HINT_KEYS = {
       unavailable: 'errorHint_unavailable',
       forbidden: 'errorHint_forbidden',
@@ -1300,7 +1302,7 @@ window.__ModuleLoader__.load({
       return typeof code === 'string' ? (ERROR_HINT_KEYS[code] ?? '') : ''
     }
 
-    function ManagedSettingsPage({ t, status, connection, developerTools, locale: localeService }) {
+    function ManagedSettingsPage({ t, form, status, connection, developerTools, locale: localeService }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => status.getSnapshot())
       const [busy, setBusy] = React.useState('')
@@ -1309,17 +1311,8 @@ window.__ModuleLoader__.load({
       const [removalLink, setRemovalLink] = React.useState('')
       const [browserBlocked, setBrowserBlocked] = React.useState(false)
       const [detailsOpen, setDetailsOpen] = React.useState(false)
-      const [advancedOpen, setAdvancedOpen] = React.useState(false)
-      const [developerOpen, setDeveloperOpen] = React.useState(false)
       const [details, setDetails] = React.useState(null)
       const [detailsLoading, setDetailsLoading] = React.useState(false)
-      const [customLabel, setCustomLabel] = React.useState('')
-      const [customOrigin, setCustomOrigin] = React.useState('')
-      const [customNotice, setCustomNotice] = React.useState('')
-      const [profileNotice, setProfileNotice] = React.useState('')
-      const [development, setDevelopment] = React.useState(() => developerTools?.getSnapshot?.() === true)
-      const [stagingFallbackId, setStagingFallbackId] = React.useState('')
-      const [productionFallbackId, setProductionFallbackId] = React.useState('')
       const fieldId = React.useId()
       const startingRef = React.useRef(false)
       const lastState = React.useRef(snapshot.state)
@@ -1327,11 +1320,6 @@ window.__ModuleLoader__.load({
         const next = status.getSnapshot()
         setSnapshot(next)
       }), [status])
-      React.useEffect(() => developerTools?.subscribe?.(() => setDevelopment(developerTools.getSnapshot() === true)), [developerTools])
-      React.useEffect(() => {
-        if (snapshot.environment === 'production' && snapshot.profileId) setProductionFallbackId(snapshot.profileId)
-        if (snapshot.environment === 'staging' && snapshot.profileId) setStagingFallbackId(snapshot.profileId)
-      }, [snapshot.environment, snapshot.profileId])
       React.useEffect(() => {
         if (lastState.current === snapshot.state) return
         lastState.current = snapshot.state
@@ -1355,7 +1343,7 @@ window.__ModuleLoader__.load({
       }, [detailsOpen, connection, snapshot.state])
 
       if (snapshot.ready !== true) {
-        return h('div', { style: styles.page, className: 'whalerein-settings' },
+        return h('div', { style: styles.page, className: 'whalerein-body' },
           h('style', null, css),
           h('h2', { style: styles.title }, tr('title')),
           h('p', { style: styles.intro }, tr('loading')))
@@ -1367,26 +1355,17 @@ window.__ModuleLoader__.load({
       const pending = snapshot.pendingOperation === true
       const activeProfile = (snapshot.profiles ?? []).find((profile) => profile.active === true)
       const isStaging = snapshot.environment === 'staging' || activeProfile?.environment === 'staging'
-      const stagingProfile = (snapshot.profiles ?? []).find((profile) => profile.environment === 'staging')
-      const productionProfile = (snapshot.profiles ?? []).find((profile) => profile.environment === 'production')
-      // The frozen runtime snapshot may not list profiles yet. Fall back to the
-      // opaque ids the manager returns for the active profile and for a newly
-      // added staging profile, so switching stays usable either way.
-      const stagingProfileId = stagingProfile?.id ?? stagingFallbackId
-      const productionProfileId = productionProfile?.id ?? productionFallbackId
       const activeLocale = localeService?.getSnapshot?.().active
       const approvalUrl = localeApprovalUrl(approvalLink || snapshot.approvalUrl, activeLocale)
       const showConnect = ['idle', 'disconnected'].includes(state)
       const showCancel = ['requesting', 'awaiting_approval', 'enrolling', 'recovering'].includes(state)
       const showRetry = ['denied', 'expired', 'action_required'].includes(state)
       const showDisconnect = state === 'connected' || state === 'reconnecting'
-      const showDeveloperTools = development || snapshot.developerToolsEnabled === true
 
       const run = async (method, label, ...args) => {
         if (busy || typeof connection?.invoke !== 'function') return
         setBusy(label)
         setActionError('')
-        setProfileNotice('')
         const result = await connection.invoke(method, ...args)
         if (!result.ok) setActionError('cloudActionFailed')
         await status.refresh?.()
@@ -1451,31 +1430,9 @@ window.__ModuleLoader__.load({
         }
         setBusy('')
       }
-      const enableStaging = async () => {
-        if (busy || typeof connection?.invoke !== 'function') return
-        setBusy('staging')
-        setActionError('')
-        const result = await connection.invoke('enableStaging')
-        if (!result.ok) {
-          setActionError('cloudActionFailed')
-        } else if (result.value?.action?.id) {
-          setStagingFallbackId(result.value.action.id)
-        }
-        await status.refresh?.()
-        setBusy('')
-      }
-      const configuration = snapshot.configuration ?? null
-      const configurationRows = configuration ? [
-        [tr('cloudDetailsDesired'), configuration.desiredDefault
-          ? managedEnvironmentLabel(tr, configuration.desiredDefault) : '—'],
-        [tr('cloudDetailsSource'), configuration.definitionSource === 'builtin'
-          ? tr('cloudSourceBuiltin')
-          : configuration.definitionSource === 'file' ? tr('cloudSourceFile') : '—'],
-      ] : []
       const entries = [
         [tr('cloudDetailsState'), tr(`state_${state}`)],
         [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, snapshot.environment)],
-        ...configurationRows,
         [tr('cloudDetailsHostName'), snapshot.hostName || '—'],
         [tr('cloudDetailsProfile'), snapshot.label || '—'],
       ]
@@ -1488,22 +1445,14 @@ window.__ModuleLoader__.load({
         [tr('cloudDetailsLastError'), details.lastErrorCode || '—'],
       ] : entries
 
-      return h('div', { style: styles.page, className: 'whalerein-settings' },
+      return h('div', { style: styles.page, className: 'whalerein-body' },
         h('style', null, css),
+        h(ConfigurationError, { t: tr, error: snapshot.configError }),
         h('header', { style: styles.header },
           h('div', { style: styles.stagingLabel },
-            h('h2', { style: styles.title }, tr('title')),
-            isStaging ? h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive'))
-              : snapshot.environment === 'local' ? h(Tag, { tone: 'neutral', 'data-whalerein-local': 'true' }, tr('cloudLocal')) : null),
+            isStaging ? h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('internalCloud', { environment: snapshot.environment }))
+              : snapshot.environment === 'local' ? h(Tag, { tone: 'neutral', 'data-whalerein-local': 'true' }, tr('internalCloud', { environment: 'local' })) : null),
           h('p', { style: styles.intro }, tr('cloudIntro'))),
-        isStaging && !development
-          ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
-            h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive')),
-            h(Button, {
-              variant: 'outline', size: 'sm', disabled: !!busy,
-              onClick: () => run('switchProfile', 'switch', productionProfileId ?? 'production'),
-            }, busy === 'switch' ? tr('cloudSwitching') : tr('cloudSwitchProduction')))
-          : null,
         h('section', { style: styles.statusCard, 'aria-labelledby': `${fieldId}-state-title` },
           h('div', { style: styles.connectionHeader },
             h('div', { style: styles.statusHeader },
@@ -1521,7 +1470,7 @@ window.__ModuleLoader__.load({
               showConnect ? h(Button, {
                 variant: 'primary', size: 'md', disabled: !!busy || pending,
                 'aria-describedby': `${fieldId}-state-hint`, onClick: start,
-              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr('cloudConnect') : tr('cloudTryAgain')) : null,
+              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr(form.getSnapshot().value?.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
               showRetry ? h(Button, {
                 variant: 'primary', size: 'md', disabled: !!busy || pending,
                 onClick: () => run('retry', 'retry'),
@@ -1558,7 +1507,7 @@ window.__ModuleLoader__.load({
         h('section', { style: styles.details },
           h(DisclosureRow, {
             title: tr('cloudDetails'), icon: h(IconSettingsOutlineRegular, { size: 16 }),
-            headerAccessory: isStaging ? h(Tag, { tone: 'neutral' }, tr('cloudStagingActive')) : null,
+            headerAccessory: isStaging ? h(Tag, { tone: 'neutral' }, tr('internalCloud', { environment: snapshot.environment })) : null,
             open: detailsOpen, expandable: true, expandOnRowClick: true,
             onToggle: () => setDetailsOpen((open) => !open),
           }, h('div', { style: styles.form },
@@ -1590,108 +1539,135 @@ window.__ModuleLoader__.load({
                 onClick: remove,
               }, busy === 'remove' ? tr('cloudRemoving') : tr('cloudRemove'))),
             h('p', { style: styles.hint }, tr('cloudPairingManaged'))))),
-        h('section', { style: styles.details },
-          h(DisclosureRow, {
-            title: tr('cloudAdvanced'), icon: h(IconSlidersTwoOutlineRegular, { size: 16 }),
-            open: advancedOpen, expandable: true, expandOnRowClick: true,
-            onToggle: () => setAdvancedOpen((open) => !open),
-          }, h('div', { style: styles.form },
-            h('h4', { style: styles.codeLabel }, tr('cloudCustomService')),
-            h('p', { style: styles.hint }, tr('cloudCustomServiceHint')),
-            h('div', null,
-              h(Field, {
-                field: { key: 'custom_label', label: 'cloudCustomLabel', subtitle: 'cloudCustomServiceHint', kind: 'text' },
-                draft: { custom_label: customLabel }, t: tr,
-                onChange: (_key, value) => setCustomLabel(value),
-                id: `${fieldId}-custom-label`, disabled: !!busy, error: '',
-              }),
-              h(Field, {
-                field: { key: 'custom_origin', label: 'cloudCustomOrigin', subtitle: 'cloudCustomServiceHint', placeholder: 'cloudCustomOriginPlaceholder', kind: 'text' },
-                draft: { custom_origin: customOrigin }, t: tr,
-                onChange: (_key, value) => setCustomOrigin(value),
-                id: `${fieldId}-custom-origin`, disabled: !!busy, error: '',
-              })),
-            h('div', { style: styles.managedActions },
-              h(Button, {
-                variant: 'outline', size: 'sm', disabled: !!busy || customLabel.trim() === '' || customOrigin.trim() === '',
-                onClick: async () => {
-                  if (busy) return
-                  setBusy('custom')
-                  setActionError('')
-                  setCustomNotice('')
-                  const result = await connection.invoke('addCustomService', { label: customLabel.trim(), apiOrigin: customOrigin.trim() })
-                  if (result.ok) {
-                    setCustomNotice('cloudCustomServiceAdded')
-                    setCustomLabel('')
-                    setCustomOrigin('')
-                  } else {
-                    setActionError('cloudActionFailed')
-                  }
-                  await status.refresh?.()
-                  setBusy('')
-                },
-              }, busy === 'custom' ? tr('saving') : tr('cloudAddCustomService'))),
-            customNotice ? h('p', { style: styles.success, role: 'status' }, tr(customNotice)) : null,
-            h('h4', { style: styles.codeLabel }, tr('cloudProfiles')),
-            h('p', { style: styles.hint }, tr('cloudProfilesHint')),
-            h(ProfileRows, {
-              t: tr, profiles: snapshot.profiles, activeId: snapshot.profileId, pending,
-              busy: !!busy,
-              onDelete: async (id) => {
-                if (busy) return
-                setBusy('delete')
-                setActionError('')
-                setProfileNotice('')
-                const result = await connection.invoke('deleteProfile', id)
-                if (result.ok) setProfileNotice('cloudRemovedLocal')
-                else setActionError('cloudActionFailed')
-                await status.refresh?.()
-                setBusy('')
-              },
-            }),
-            h('p', { style: styles.hint }, tr('cloudDeleteHint')),
-            profileNotice ? h('p', { style: styles.success, role: 'status' }, tr(profileNotice)) : null))),
-        showDeveloperTools
-          ? h(DeveloperToolsSection, {
-            t: tr, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen,
-            setDeveloperOpen, onEnableStaging: enableStaging,
-            onSwitch: (id) => run('switchProfile', 'switch', id),
-          })
-          : null)
+      )
     }
 
-    function DeveloperToolsSection({ t, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen, setDeveloperOpen, onEnableStaging, onSwitch }) {
-      return h('section', { style: styles.details },
-        h(DisclosureRow, {
-          title: t('cloudDeveloperTools'), icon: h(IconCodeOutlineRegular, { size: 16 }),
-          headerAccessory: h(Tag, { tone: 'quiet' }, t('debugOnly')),
-          open: developerOpen, expandable: true, expandOnRowClick: true,
-          onToggle: () => setDeveloperOpen((open) => !open),
-        }, h('div', { style: styles.form },
-          h('p', { style: styles.hint }, t('cloudDeveloperToolsHint')),
-          ...(snapshot.profiles ?? []).filter((p) => p.environment === 'local').map((p) =>
-            h(Button, { key: p.id, variant: 'outline', size: 'sm', disabled: !!busy || p.active,
-              onClick: () => onSwitch(p.id) }, t('cloudUseLocal'))),
-          !snapshot.stagingEnabled
-            ? h(Button, {
-              variant: 'outline', size: 'sm', disabled: !!busy,
-              onClick: onEnableStaging,
-            }, busy === 'staging' ? t('cloudEnablingStaging') : t('cloudEnableStaging'))
-            : h('div', null,
-              h('p', { style: styles.hint }, t('cloudStagingNote')),
-              h('div', { style: styles.profileRow, className: 'whalerein-profile-row' },
-                h('div', { style: styles.profileCopy },
-                  h('div', { style: styles.profileName }, t('cloudStagingProfile')),
-                  h('div', { style: styles.deviceMeta }, isStaging ? t('cloudStagingActive') : t('cloudProduction'))),
-                isStaging
-                  ? h(Button, {
-                    variant: 'outline', size: 'sm', disabled: !!busy,
-                    onClick: () => onSwitch(productionProfileId ?? 'production'),
-                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudSwitchProduction'))
-                  : h(Button, {
-                    variant: 'primary', size: 'sm', disabled: !!busy || !stagingProfileId,
-                    onClick: () => onSwitch(stagingProfileId),
-                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudUseStaging')))))))
+    // All connection edits use the existing revisioned DSH namespace writer.
+    // No manager action or shared TOML writer can change this selection.
+    function ServiceSettings({ form, status, t }) {
+      const tr = typeof t === 'function' ? t : (key) => key
+      const [snapshot, setSnapshot] = React.useState(() => form.getSnapshot())
+      const [draft, setDraft] = React.useState(() => ({
+        service: form.getSnapshot().value?.service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone'),
+        custom: form.getSnapshot().value?.custom ?? {},
+      }))
+      const [open, setOpen] = React.useState(false)
+      const [advanced, setAdvanced] = React.useState(false)
+      const [saving, setSaving] = React.useState(false)
+      const [notice, setNotice] = React.useState('')
+      const savingRef = React.useRef(false)
+      const baseRevision = React.useRef(snapshot.revision)
+      const dirty = React.useRef(false)
+      React.useEffect(() => {
+        const refresh = () => {
+          const next = form.getSnapshot()
+          setSnapshot(next)
+          if (!dirty.current) {
+            baseRevision.current = next.revision
+            setDraft({ service: next.value?.service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone'), custom: next.value?.custom ?? {} })
+          }
+        }
+        const unsubscribe = form.subscribe(refresh)
+        refresh()
+        return unsubscribe
+      }, [form, status])
+      const labels = { whalerein_cloud: 'WhaleRein Cloud', custom: tr('serviceCustom'), standalone: 'Standalone' }
+      const fields = [
+        ['label', 'cloudCustomLabel'], ['api_origin', 'cloudCustomOrigin'],
+        ['issuer', 'customIssuer'], ['native_client_id', 'customClient'],
+        ['ca_provider', 'customCaProvider'], ['ca_file', 'customCaFile'],
+      ]
+      const change = (key, value) => {
+        dirty.current = true
+        setNotice('')
+        setDraft((current) => ({ ...current, custom: key.startsWith('ca_')
+          ? { ...current.custom, tls: { ...current.custom.tls, [key]: value } }
+          : { ...current.custom, [key]: value } }))
+      }
+      const save = async () => {
+        if (savingRef.current || !snapshot.writable || typeof form.mutate !== 'function') return
+        if (draft.service === 'custom') {
+          try {
+            const api = new URL(draft.custom.api_origin)
+            const issuer = new URL(draft.custom.issuer)
+            const provider = draft.custom.tls?.ca_provider || 'system'
+            if (api.protocol !== 'https:' || api.pathname !== '/' || api.search || api.hash || api.username || api.password
+              || issuer.protocol !== 'https:' || issuer.search || issuer.hash || issuer.username || issuer.password
+              || api.origin === issuer.origin || !draft.custom.native_client_id?.trim()
+              || !['system', 'file'].includes(provider)
+              || (provider === 'file' && !draft.custom.tls?.ca_file?.trim())) throw new Error('invalid')
+          } catch { setAdvanced(true); setNotice('serviceInvalid'); return }
+        }
+        savingRef.current = true
+        setSaving(true)
+        setNotice('')
+        try {
+          const ops = [{ op: 'set', path: ['service'], value: draft.service }]
+          if (draft.service === 'custom') {
+            const custom = { label: draft.custom.label || '', api_origin: draft.custom.api_origin, issuer: draft.custom.issuer, native_client_id: draft.custom.native_client_id, tls: { ca_provider: draft.custom.tls?.ca_provider || 'system' } }
+            if (custom.tls.ca_provider === 'file') custom.tls.ca_file = draft.custom.tls.ca_file
+            ops.push({ op: 'set', path: ['custom'], value: custom })
+          }
+          for (const key of ['environment', 'config_file', 'connection_mode', 'profile_id', 'developer_tools_enabled']) {
+            const value = snapshot.value?.[key]
+            if (!value || value === 'auto') continue
+            if (key === 'environment' && !snapshot.value?.cloud_environment && ['production', 'staging', 'local'].includes(value)) {
+              ops.push({ op: 'set', path: ['cloud_environment'], value })
+            }
+            ops.push(snapshot.base?.[key] && snapshot.base[key] !== 'auto'
+              ? { op: 'set', path: [key], value: key === 'developer_tools_enabled' ? false : '' }
+              : { op: 'unset', path: [key] })
+          }
+          const okay = await form.mutate(ops, baseRevision.current)
+          if (okay) {
+            dirty.current = false
+            baseRevision.current = form.getSnapshot().revision
+            setNotice('serviceSaved')
+          } else setNotice(form.getSnapshot().revision !== baseRevision.current ? 'errorSaveConflict' : 'saveFailed')
+        } catch { setNotice('saveFailed') }
+        finally { savingRef.current = false; setSaving(false) }
+      }
+      const renderField = ([key, label]) => h(Field, {
+        key, id: `whalerein-custom-${key}`, t: tr, disabled: saving || !snapshot.writable,
+        field: { key, label, subtitle: 'cloudCustomServiceHint', kind: key === 'ca_provider' ? 'select' : 'text', options: ['system', 'file'] },
+        draft: { [key]: key.startsWith('ca_') ? draft.custom.tls?.[key] ?? (key === 'ca_provider' ? 'system' : '') : draft.custom[key] ?? '' },
+        onChange: change, menuOpen: open === key,
+        setMenuOpen: (value) => setOpen((typeof value === 'function' ? value(open === key) : value) ? key : false),
+      })
+      return h('section', { style: styles.form },
+        h('style', null, css),
+        h('p', { style: styles.hint }, tr('serviceReloadHint')),
+        h('p', { style: styles.hint }, `${tr('serviceCurrent')}: ${labels[status.getSnapshot().service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone')]}`),
+        h('div', { style: styles.fieldRow, className: 'whalerein-field-row' },
+          h('span', null, tr('serviceLabel')),
+          h(Menu, {
+            open: open === true, anchor: h(Button, { variant: 'ghost', size: 'md', className: 'whalerein-select',
+              disabled: saving || !snapshot.writable, 'aria-label': tr('serviceLabel'),
+              'aria-haspopup': 'menu', 'aria-expanded': open === true,
+              onClick: () => setOpen((value) => !value) }, labels[draft.service], h(IconChevronDownOutlineRegular)),
+            items: Object.entries(labels).map(([id, label]) => ({ id, label })), selectedId: draft.service,
+            onClose: () => setOpen(false), onSelect: (value) => {
+              dirty.current = true
+              setDraft((current) => ({ ...current, service: value })); setOpen(false); setNotice('')
+            }, align: 'end', autoFocus: true, portal: true,
+          })),
+        ...(draft.service === 'custom' ? [
+          ...fields.slice(0, 2).map(renderField),
+          h(DisclosureRow, { title: tr('cloudAdvanced'), icon: h(IconSlidersTwoOutlineRegular, { size: 16 }),
+            open: advanced, expandable: true, expandOnRowClick: true,
+            onToggle: () => setAdvanced((value) => !value),
+          }, h('div', { style: styles.form }, ...fields.slice(2).map(renderField))),
+        ] : []),
+        h(Button, { variant: 'outline', size: 'sm', disabled: saving || !snapshot.writable,
+          onClick: save }, saving ? tr('saving') : tr('serviceSave')),
+        notice === 'errorSaveConflict' ? h(Button, { variant: 'ghost', size: 'sm', onClick: () => {
+          const current = form.getSnapshot()
+          dirty.current = false
+          baseRevision.current = current.revision
+          setDraft({ service: current.value?.service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone'), custom: current.value?.custom ?? {} })
+          setNotice('')
+        } }, tr('loadSaved')) : null,
+        notice ? h('p', { role: notice === 'serviceSaved' ? 'status' : 'alert', style: notice === 'serviceSaved' ? styles.success : styles.error }, tr(notice)) : null)
     }
 
     function SettingsPage(props) {
@@ -1703,12 +1679,15 @@ window.__ModuleLoader__.load({
         setManaged(snapshot.managed === true)
       }), [props.status])
       if (!ready) {
-        return h('div', { style: styles.page, className: 'whalerein-settings' },
+        return h('div', { style: styles.page, className: 'whalerein-body' },
           h('style', null, css),
           h('h2', { style: styles.title }, (props.t ?? ((key) => key))('title')),
           h('p', { style: styles.intro }, (props.t ?? ((key) => key))('loading')))
       }
-      return managed ? h(ManagedSettingsPage, props) : h(LegacySettingsPage, props)
+      return h('div', { className: 'whalerein-settings', style: styles.page },
+        h('h2', { style: styles.title }, (props.t ?? ((key) => key))('title')),
+        h(ServiceSettings, props),
+        managed ? h(ManagedSettingsPage, props) : h(LegacySettingsPage, props))
     }
 
     function createSecretPresence(remote) {
@@ -1749,6 +1728,7 @@ window.__ModuleLoader__.load({
       return {
         available: value.available === true,
         managed: value.managed === true,
+        service: ['whalerein_cloud', 'custom', 'standalone'].includes(value.service) ? value.service : value.managed ? 'whalerein_cloud' : 'standalone',
         state: typeof value.state === 'string' ? value.state : 'action_required',
         environment: ['production', 'staging', 'local', 'custom', 'standalone'].includes(value.environment)
           ? value.environment : 'production',
@@ -1868,10 +1848,6 @@ window.__ModuleLoader__.load({
       ['disconnect', [], 'WhaleReinConnectionSnapshot'],
       ['reconnect', [], 'WhaleReinConnectionSnapshot'],
       ['removeComputer', [], 'WhaleReinConnectionSnapshot'],
-      ['switchProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
-      ['enableStaging', [], 'WhaleReinConnectionSnapshot'],
-      ['addCustomService', [{ name: 'value', wire: 'value', source: 'json', codec: jsonCodec('CustomService') }], 'WhaleReinConnectionSnapshot'],
-      ['deleteProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
     ].map(([method, parameters, typeSymbol]) => ({
       id: `whalerein-dsh#whalerein/${method}`,
       service: 'whalereinSettings',
