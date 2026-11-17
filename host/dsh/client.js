@@ -184,6 +184,16 @@ window.__ModuleLoader__.load({
       stateHint_denied: 'The request was denied in the browser. Try again to create a new approval request.',
       stateHint_expired: 'The request expired before it was approved. Try again to create a new approval request.',
       stateHint_action_required: 'One action is needed before this computer can connect.',
+      errorHint_unavailable: 'The connection is unavailable. Check your network and retry. If the problem persists, ask the operator to check service readiness and enrollment configuration.',
+      errorHint_forbidden: 'The service refused this request. Sign in again and check that the account may connect this computer.',
+      errorHint_unauthorized: 'The service did not accept this computer\'s authorization. Sign in again and retry.',
+      errorHint_conflict: 'This attempt conflicts with an earlier request. Retry to start a fresh one.',
+      errorHint_recovery_required: 'An earlier attempt may have completed. Retry to reconcile it before starting again.',
+      errorHint_expired: 'The authorization expired before it was used. Retry to start a new request.',
+      errorHint_rate_limited: 'Too many requests. Wait a moment, then retry.',
+      errorHint_protocol_version_incompatible: 'This service uses an unsupported protocol version. Update the plugin or select a compatible service.',
+      errorHint_unsupported_capability: 'This service does not support Host enrollment. Select a compatible service.',
+      errorHint_internal: 'The service reported an internal error. Retry; if it persists, check the service logs.',
       stateHint_removing: 'Waiting for the service to enforce removal. This can take a moment.',
       stateHint_removed: 'Removal was enforced. Adding this computer again requires fresh browser approval.',
       cloudDetails: 'Connection details',
@@ -399,6 +409,16 @@ window.__ModuleLoader__.load({
       stateHint_denied: '请求已在浏览器中被拒绝。重试会创建新的授权请求。',
       stateHint_expired: '请求在授权前已过期。重试会创建新的授权请求。',
       stateHint_action_required: '需要完成一个操作才能建立连接。',
+      errorHint_unavailable: '连接暂时不可用。请检查网络后重试；若持续出现，请联系运维检查服务状态和主机注册配置。',
+      errorHint_forbidden: '服务拒绝了这次请求。请重新登录，并确认该账号可以连接这台电脑。',
+      errorHint_unauthorized: '服务未接受这台电脑的授权。请重新登录后重试。',
+      errorHint_conflict: '这次尝试与先前的请求冲突。请重试以创建新的请求。',
+      errorHint_recovery_required: '先前的尝试可能已经完成。请重试以先完成对账，再重新发起。',
+      errorHint_expired: '授权在使用前已过期。请重试以创建新的请求。',
+      errorHint_rate_limited: '请求过于频繁。请稍等片刻后重试。',
+      errorHint_protocol_version_incompatible: '该服务使用的协议版本不受支持。请更新插件或选择兼容的服务。',
+      errorHint_unsupported_capability: '该服务不支持主机注册。请选择兼容的服务。',
+      errorHint_internal: '服务报告了内部错误。请重试；若持续出现，请检查服务日志。',
       stateHint_removing: '正在等待服务执行移除，请稍候。',
       stateHint_removed: '移除已生效。重新添加这台电脑需要新的浏览器授权。',
       cloudDetails: '连接详情',
@@ -1263,6 +1283,23 @@ window.__ModuleLoader__.load({
         }))
     }
 
+    const ERROR_HINT_KEYS = {
+      unavailable: 'errorHint_unavailable',
+      forbidden: 'errorHint_forbidden',
+      unauthorized: 'errorHint_unauthorized',
+      conflict: 'errorHint_conflict',
+      recovery_required: 'errorHint_recovery_required',
+      expired: 'errorHint_expired',
+      rate_limited: 'errorHint_rate_limited',
+      protocol_version_incompatible: 'errorHint_protocol_version_incompatible',
+      unsupported_capability: 'errorHint_unsupported_capability',
+      internal: 'errorHint_internal',
+    }
+
+    function errorHintKey(code) {
+      return typeof code === 'string' ? (ERROR_HINT_KEYS[code] ?? '') : ''
+    }
+
     function ManagedSettingsPage({ t, status, connection, developerTools, locale: localeService }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => status.getSnapshot())
@@ -1325,6 +1362,7 @@ window.__ModuleLoader__.load({
       }
 
       const state = MANAGED_STATES.has(snapshot.state) ? snapshot.state : 'action_required'
+      const stateHint = errorHintKey(snapshot.error?.code) || `stateHint_${state}`
       const transitional = TRANSITIONAL_STATES.has(state)
       const pending = snapshot.pendingOperation === true
       const activeProfile = (snapshot.profiles ?? []).find((profile) => profile.active === true)
@@ -1478,7 +1516,7 @@ window.__ModuleLoader__.load({
                 'aria-atomic': 'true', tabIndex: -1,
               },
                 h('h3', { id: `${fieldId}-state-title`, style: { ...styles.statusTitle, margin: 0 } }, tr(`state_${state}`)),
-                h('p', { id: `${fieldId}-state-hint`, style: { ...styles.statusHint, margin: 0 } }, tr(`stateHint_${state}`)))),
+                h('p', { id: `${fieldId}-state-hint`, style: { ...styles.statusHint, margin: 0 } }, tr(stateHint)))),
             h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
               showConnect ? h(Button, {
                 variant: 'primary', size: 'md', disabled: !!busy || pending,
