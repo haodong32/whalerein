@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 
 	"fmt"
 	"io"
@@ -17,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
+	"github.com/whalerein/whalerein/access/internal/store"
 )
 
 func freePort(t *testing.T) int {
@@ -271,4 +275,29 @@ func TestEntrypointPrintsVersionWithoutStartingServer(t *testing.T) {
 	if !strings.Contains(string(output), version) {
 		t.Fatalf("output = %q", output)
 	}
+}
+
+func TestDefaultStartupStoreOpsFailClosedWithoutAPool(t *testing.T) {
+	ops := defaultStartupStoreOps()
+	if ops.open == nil || ops.migrate == nil || ops.close == nil || ops.cleanup == nil {
+		t.Fatal("every startup store operation must be configured")
+	}
+	if err := ops.migrate(context.Background(), &store.Store{}); err == nil {
+		t.Fatal("migrating a store without a pool must fail closed")
+	}
+	ops.close(&store.Store{})
+}
+
+func TestDrainCleanupTaskStopsOnAFailedStatement(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	task := cleanupTask{
+		operation: "probe",
+		success:   "probe cleaned",
+		failure:   "probe cleanup failed",
+		cutoff:    func(now time.Time) time.Time { return now },
+		run: func(context.Context, time.Time) (int64, error) {
+			return 0, errors.New("synthetic failure")
+		},
+	}
+	drainCleanupTask(context.Background(), task, time.Now().UTC(), logger, diagnostics.NewMetrics())
 }

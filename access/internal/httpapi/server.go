@@ -20,6 +20,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -83,7 +84,10 @@ type Dependencies struct {
 type ExternalService interface {
 	EnrollHost(ctx context.Context, request *whalereinv1.HostEnrollmentRequest) (*whalereinv1.HostEnrollmentResponse, error)
 	EnrollmentStatus(ctx context.Context, hostID string) (*whalereinv1.HostEnrollmentStatus, error)
+	EnrollmentStatusForHost(ctx context.Context, hostID string, proof external.HostOwnershipProof) (*whalereinv1.HostEnrollmentStatus, error)
 	OperationStatus(ctx context.Context, operationID string) (*whalereinv1.OperationStatus, error)
+	DisableHost(ctx context.Context, hostID string) (time.Time, error)
+	RecoverCredential(ctx context.Context, hostID string, authorization *whalereinv1.ExternalAuthorization, proof external.HostOwnershipProof) (*external.CredentialReplacement, error)
 }
 
 // Server owns the public and internal HTTP handlers.
@@ -148,6 +152,9 @@ func (s *Server) publicRoutes() []routeSpec {
 	return append(routes,
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
+		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/disable", handler: s.handleDisableHostEnrollment},
+		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/credential", handler: s.handleCredentialReplacement},
+		routeSpec{method: http.MethodGet, pattern: "/v1/hosts/{host_id}/enrollment", handler: s.handleHostEnrollmentProofStatus},
 		routeSpec{method: http.MethodGet, pattern: "/v1/operations/{operation_id}", handler: s.handleOperationStatus},
 	)
 }

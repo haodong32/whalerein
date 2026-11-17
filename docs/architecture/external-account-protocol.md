@@ -1,7 +1,7 @@
 # External account protocol v1
 
-Status: **contract ratified; partial Host-enrollment surface shipped; device
-account mode not implemented.** The operator approved decisions R1–R10 on
+Status: **contract ratified; Host enrollment operational in external mode;
+device account mode not implemented.** The operator approved decisions R1–R10 on
 2026-11-14, so this document fixes the v1 public contract that Access, Core and
 an independent account service implement. Host enrollment and its status reads
 exist and verify signatures and Host proof, but external Host enrollment is not
@@ -42,14 +42,19 @@ acceptance claim.
   are wired and verify issuer, audience, purpose, region, key window, signature,
   expiry and Host proof of possession. See `access/internal/external/` and
   `access/internal/httpapi/external_handlers.go`.
-- **Enrollment is not operational**: the issued broker credential is not
-  accepted by the broker, readiness is unreachable, an external Host does not
-  become a `hosts` row, operation state is always reported committed, retries
-  after authorization expiry are refused, revisions are count-derived without
-  locking, and a second enrollment for the same Host conflicts with the
-  enrollment primary key. These are implementation gaps, not contract choices.
-- **Status reads are admin-only** in this build; the original-device/Host proof
-  described by this contract is not implemented.
+- **Enrollment is operational** in `mode: external`: the broker accepts the
+  per-enrollment credential hash, `HostReady` advances the enrollment to ready
+  and records the operation outcome, and monitored readiness is what the console
+  projects. Managed authorizations now carry a monotonic `enrollmentRevision`
+  allocated by the account service before the decision commits.
+- **Status reads have a Host-proof path**: `GET /v1/hosts/{host_id}/enrollment`
+  accepts the frozen `whalerein/v1/host-proof-v1` proof and returns no
+  credential. Admin status reads remain for operators.
+- **Removal and credential replacement exist**: `POST
+  /v1/enrollments/hosts/{host_id}/disable` (admin bearer, Cloud only) durably
+  disables, revokes grants and closes the live Host session; `POST
+  /v1/enrollments/hosts/{host_id}/credential` replaces a lost credential once
+  with a fresh `host_credential_recovery` authorization plus Host proof.
 - **Device account pairing, directory, device registration, management apply and
   regional enforcement are absent.** Only purpose constants and fixture
   issuance exist for `device_pairing`/`device_recovery`.
@@ -63,6 +68,43 @@ acceptance claim.
   officially supports DPoP, re-run the native feasibility gate before
   implementing login, refresh, directory, device registration or pairing
   authorization. Do not add a Bearer fallback in the meantime.
+
+### Host ownership proof (v1)
+
+Host-scoped reads and credential replacement use a signed JSON proof instead of
+extending the canonical protobuf schema, so Standalone wire messages are
+unchanged. The Host signs this newline-joined text with the signing key bound to
+its current enrollment:
+
+```text
+whalerein/v1/host-proof-v1
+|<purpose>
+|<hostId>
+|<subjectId>
+|<issuedAtUnixMs>
+|<nonce base64url>
+```
+
+`purpose` is `enrollment_status` (subject: operation id) or
+`credential_replacement` (subject: authorization id). The proof travels in
+`X-Whalerein-Host-Proof` as base64url JSON
+`{"hostId","issuedAt","nonce","signature"}`. Issued-at is limited to ±5 minutes
+and each nonce is single-use for 15 minutes. Neither endpoint ever returns a
+credential except the one-time replacement response.
+
+A regional service therefore exposes:
+
+| Operation | Endpoint | Authentication |
+| --- | --- | --- |
+| Enrollment | `POST /v1/enrollments/hosts` | portable authorization + enrollment proof |
+| Host status | `GET /v1/hosts/{host_id}/enrollment` | Host ownership proof |
+| Credential replacement | `POST /v1/enrollments/hosts/{host_id}/credential` | Host ownership proof + `host_credential_recovery` authorization |
+| Disable | `POST /v1/enrollments/hosts/{host_id}/disable` | regional management identity (Cloud only) |
+
+The account service separately publishes its own versioned metadata document
+(service identity, environment, protocol capabilities, approval origin, create
+path and bounded display/locale limits). The Host validates that document,
+the signed authorization and the assigned route before it sends any secret.
 
 Treat the operations table below as the target contract, not current behavior.
 

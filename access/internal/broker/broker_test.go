@@ -746,3 +746,53 @@ func TestPahoSessionPublishesPresenceJsonAsRawMqtt(t *testing.T) {
 		t.Fatalf("publish topic=%q qos=%d payload=%q", client.publishTopic, client.publishQoS, client.publishPayload)
 	}
 }
+
+func TestReadyHandlerRunsOnlyForAnEmptyRequestIDHostReady(t *testing.T) {
+	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
+	service.Presence().ApplySnapshot(nil, 0)
+	ready := make(chan string, 2)
+	service.SetReadyHandler(func(_ context.Context, hostID string) error {
+		ready <- hostID
+		return nil
+	})
+	service.SetResultHandler(func(context.Context, string, *whalereinv1.HostResult) error { return nil })
+	// A normal request result carries a request id and is never readiness,
+	// even when its body happens to be a HostReady message.
+	body, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h1"})
+	normal, _ := proto.Marshal(&whalereinv1.HostResult{
+		RequestId: "request-1", HostId: "h1",
+		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body,
+	})
+	service.HandleMessage(ResultTopic("h1"), normal)
+	select {
+	case host := <-ready:
+		t.Fatalf("a request result advanced readiness for %q", host)
+	default:
+	}
+	// The empty-request-id HostReady path still advances readiness.
+	service.HandleMessage(ResultTopic("h1"), mustHostReadyResult(t, "h1"))
+	select {
+	case host := <-ready:
+		if host != "h1" {
+			t.Fatalf("ready host = %q", host)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HostReady did not advance readiness")
+	}
+}
+
+func mustHostReadyResult(t *testing.T, hostID string) []byte {
+	t.Helper()
+	body, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := proto.Marshal(&whalereinv1.HostResult{
+		RequestId: "", HostId: hostID,
+		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}

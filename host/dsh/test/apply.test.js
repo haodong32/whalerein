@@ -1,10 +1,12 @@
 import { HostRuntime } from 'whalerein-host'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import plugin, { name, inject, Config, apply, configFailure, createHost } from '../index.js'
+import plugin, { name, inject, Config, apply, configFailure, createHost, createManagedHost } from '../index.js'
+import { Context, Service } from '@deepseek-ai/cordis'
+import { createConnectionManager } from 'whalerein-host/manager.js'
 import { ConfigError } from '../src/config.js'
 
 test('when a profile has a host ID, apply preserves it; otherwise it generates one', async () => {
@@ -181,4 +183,206 @@ test('documented values wrapped by schemastery are materialized through the same
   assert.deepEqual(materializeConfig(wrapped), {
     approval_mode: 'delegate', event_batch_ms: '3', shutdown_timeout_ms: '153',
   })
+})
+
+
+test('managed hosting constructs the connection manager with profile-scoped credentials and manager options', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-'))
+  try {
+    const calls = []
+    const manager = {
+      snapshot: () => ({ state: 'idle', environment: 'production' }),
+      async dispose() { calls.push(['dispose']) },
+    }
+    const credentials = { name: 'credential-adapter' }
+    const host = await createManagedHost({
+      state_root: dir,
+      profile_id: 'profile-1',
+      developer_tools_enabled: true,
+    }, {
+      ctx: { credentials: {} },
+      credentials,
+      managerFactory: async (options) => {
+        calls.push(['create', options])
+        return manager
+      },
+    })
+    assert.equal(host.managed, true)
+    assert.equal(host.config.connectionMode, 'managed')
+    assert.equal(host.config.stateRoot, dir)
+    assert.equal(host.manager, manager)
+    assert.equal(host.credentials, credentials)
+    assert.equal(calls[0][0], 'create')
+    assert.equal(calls[0][1].stateRoot, dir)
+    assert.equal(calls[0][1].credentials, credentials)
+    assert.equal(calls[0][1].selectedProfile, 'profile-1')
+    assert.equal(calls[0][1].developerToolsEnabled, true)
+    assert.equal(calls[0][1].ctx.credentials.name, undefined)
+    assert.equal(host.started, true)
+    await host.stop()
+    assert.deepEqual(calls.at(-1), ['dispose'])
+    assert.equal(host.started, false)
+    await host.stop()
+    assert.equal(calls.filter(([name]) => name === 'dispose').length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a managed manager contract failure is closed and reported without exposing internals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-bad-'))
+  try {
+    await assert.rejects(createManagedHost({ state_root: dir }, {
+      ctx: {},
+      managerFactory: async () => ({ snapshot: 'not-a-function' }),
+    }), (error) => error.code === 'manager_unavailable')
+    await assert.rejects(createManagedHost({ state_root: dir }, {
+      ctx: {},
+      managerFactory: async () => { throw Object.assign(new Error('private manager detail'), { code: 'manager_unavailable' }) },
+    }), (error) => error.code === 'manager_unavailable' && !error.message.includes('private'))
+    await assert.rejects(createManagedHost({ state_root: dir }, {
+      ctx: {},
+      managerFactory: async () => ({
+        snapshot: () => ({ state: 'idle' }),
+        ready: Promise.reject(new Error('private initialization detail')),
+      }),
+    }), (error) => error.code === 'manager_unavailable' && !error.message.includes('private'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('apply on a fresh managed profile registers settings and disposes the manager with the plugin effect', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-apply-'))
+  const root = new Context()
+  let disposed = 0
+  class TypertGateway extends Service {
+    constructor(ctx) { super(ctx, 'typertGateway') }
+  }
+  try {
+    await root.plugin({
+      name: 'fixtures',
+      apply(ctx) { new TypertGateway(ctx) },
+    })
+    const manager = {
+      snapshot: () => ({ state: 'idle', environment: 'production', profileId: 'profile-1', connected: false }),
+      async dispose() { disposed += 1 },
+    }
+    const host = await apply(root, {
+      state_root: dir,
+      profile_id: 'profile-1',
+    }, { managerFactory: async () => manager })
+    assert.equal(host.managed, true)
+    assert.equal(existsSync(join(dir, 'host-id')), false, 'a managed install does not generate a visible Host ID')
+    assert.equal(root.whalereinSettings.snapshot().managed, true)
+    assert.equal(root.whalereinSettings.snapshot().state, 'idle')
+    await root.fiber.dispose()
+    assert.equal(disposed, 1)
+  } finally {
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('apply keeps the settings surface available when the runtime manager cannot be constructed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-missing-'))
+  const root = new Context()
+  const original = process.stderr.write.bind(process.stderr)
+  let written = ''
+  process.stderr.write = (chunk) => { written += String(chunk); return true }
+  class TypertGateway extends Service {
+    constructor(ctx) { super(ctx, 'typertGateway') }
+  }
+  try {
+    await root.plugin({ name: 'fixtures', apply(ctx) { new TypertGateway(ctx) } })
+    const result = await apply(root, { state_root: dir }, {
+      managerFactory: async () => { throw Object.assign(new Error('private module path'), { code: 'manager_unavailable' }) },
+    })
+    assert.equal(result, undefined)
+    assert.match(written, /manager_unavailable/)
+    assert.equal(written.includes('private module path'), false)
+    const snapshot = root.whalereinSettings.snapshot()
+    assert.equal(snapshot.managed, true)
+    assert.equal(snapshot.available, false)
+    assert.deepEqual(snapshot.error, { code: 'unavailable' })
+    assert.equal(snapshot.configError.code, 'manager_unavailable')
+  } finally {
+    process.stderr.write = original
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('the real runtime manager composes with managed settings and staging never activates implicitly', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-real-manager-'))
+  const root = new Context()
+  class TypertGateway extends Service {
+    constructor(ctx) { super(ctx, 'typertGateway') }
+  }
+  try {
+    await root.plugin({ name: 'fixtures', apply(ctx) { new TypertGateway(ctx) } })
+    const host = await apply(root, { state_root: dir }, {
+      managerFactory: createConnectionManager,
+      fetch: async () => { throw new Error('no network in this test') },
+      mqtt: () => ({}),
+      now: () => 1700000000000,
+      log: null,
+    })
+    assert.equal(host.managed, true)
+    const initial = root.whalereinSettings.snapshot()
+    assert.equal(initial.managed, true)
+    assert.equal(initial.state, 'idle')
+    assert.equal(initial.environment, 'production')
+    assert.equal(initial.profiles.length, 1)
+    assert.equal(initial.profiles[0].active, true)
+    const productionId = initial.profileId
+    const enabled = await root.whalereinSettings.enableStaging()
+    assert.equal(enabled.action.environment, 'staging')
+    assert.equal(enabled.action.active, false)
+    assert.equal(enabled.environment, 'production', 'adding staging does not switch')
+    assert.equal(enabled.profiles.length, 2)
+    const stagingId = enabled.action.id
+    assert.equal(enabled.profiles.find((profile) => profile.id === stagingId).active, false)
+    const switched = await root.whalereinSettings.switchProfile(stagingId)
+    assert.equal(switched.environment, 'staging')
+    assert.equal(switched.profileId, stagingId)
+    const back = await root.whalereinSettings.switchProfile(productionId)
+    assert.equal(back.environment, 'production')
+    assert.equal(back.profileId, productionId)
+    await root.fiber.dispose()
+  } finally {
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a pinned issuer key becomes the manager authorization verifier', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-verifier-'))
+  try {
+    const { generateKeyPairSync, sign } = await import('node:crypto')
+    const pair = generateKeyPairSync('ed25519')
+    const publicKey = Buffer.from(pair.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('base64url')
+    const canonical = 'whalerein/v1/ext-auth-v1\n|auth-1'
+    const signature = sign(null, Buffer.from(canonical), pair.privateKey).toString('base64url')
+    let captured
+    const host = await createManagedHost({
+      state_root: dir,
+      enrollment_issuer_public_key: publicKey,
+      enrollment_issuer: 'https://issuer.example',
+    }, {
+      ctx: {},
+      managerFactory: async (options) => {
+        captured = options
+        return { snapshot: () => ({ state: 'idle' }), async dispose() {} }
+      },
+    })
+    assert.equal(typeof captured.verifyAuthorization, 'function')
+    assert.equal(captured.expectedIssuer, 'https://issuer.example')
+    assert.equal(captured.verifyAuthorization({ issuer: 'https://issuer.example', signature }, canonical), true)
+    assert.equal(captured.verifyAuthorization({ issuer: 'https://issuer.example', signature }, `${canonical}x`), false)
+    await host.stop()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

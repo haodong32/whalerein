@@ -1,11 +1,22 @@
 // Settings projection. Snapshot is read-only public state. invite asks Access
 // for a one-time pairing URI and returns that URI plus the host fingerprint.
-// revoke asks Access to revoke one device. Private keys, peer keys, the admin
-// token, and the raw invitation token stay off this API and out of logs.
+// revoke asks Access to revoke one device. The managed cloud connection is
+// projected through a separate allowlisted snapshot; private keys, peer keys,
+// the admin token, poll credentials, authorization documents, host ids, routes
+// and raw approval locators stay off this API and out of logs.
 
-import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { createInvitation, revokeDevice } from './pairing.js'
 import { testConnection } from './connection-test.js'
+
+export const CONNECTION_STATES = Object.freeze([
+  'idle', 'requesting', 'awaiting_approval', 'enrolling', 'recovering',
+  'connecting', 'connected', 'reconnecting', 'disconnected', 'denied',
+  'expired', 'action_required', 'removing', 'removed',
+])
+const ENVIRONMENTS = new Set(['production', 'staging', 'custom', 'standalone'])
+const CAPABILITIES = new Set(['pairing', 'removal', 'switching', 'custom-service', 'staging'])
+const ERROR_CODE = /^[a-z][a-z0-9_./-]{0,63}$/
 
 export const EMPTY_SETTINGS_STATUS = Object.freeze({
   available: false,
@@ -16,6 +27,122 @@ export const EMPTY_SETTINGS_STATUS = Object.freeze({
   diagnostics: null,
   configError: null,
 })
+
+export const EMPTY_MANAGED_SNAPSHOT = Object.freeze({
+  available: false,
+  managed: true,
+  state: 'idle',
+  environment: 'production',
+  profileId: '',
+  label: '',
+  hostName: '',
+  stagingEnabled: false,
+  developerToolsEnabled: false,
+  approvalUrl: '',
+  error: null,
+  connected: false,
+  pendingOperation: false,
+  profiles: Object.freeze([]),
+  capabilities: Object.freeze([]),
+  configError: null,
+})
+
+/** Bound non-secret display text and remove control characters/newlines. */
+function text(value, max = 200) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function safeCode(value, fallback = 'internal') {
+  return typeof value === 'string' && ERROR_CODE.test(value) ? value : fallback
+}
+
+function safeBoolean(value) {
+  return value === true
+}
+
+function safeApprovalUrl(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return ''
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return ''
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) return ''
+  return url.toString()
+}
+
+function safeProfiles(value) {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, 32).flatMap((profile) => {
+    if (!profile || typeof profile !== 'object') return []
+    const id = text(profile.id, 128)
+    if (!id || !/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(id)) return []
+    const environment = ENVIRONMENTS.has(profile.environment) ? profile.environment : 'custom'
+    return [{
+      id,
+      label: text(profile.label, 64),
+      environment,
+      active: safeBoolean(profile.active),
+      managed: safeBoolean(profile.managed ?? true),
+      capabilities: Array.isArray(profile.capabilities)
+        ? [...new Set(profile.capabilities.filter((name) => CAPABILITIES.has(name)))].slice(0, 8)
+        : [],
+    }]
+  })
+}
+
+function safeCapabilities(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.filter((name) => CAPABILITIES.has(name)))].slice(0, 8)
+}
+
+/**
+ * Project the frozen ConnectionManager snapshot. Every field is selected
+ * explicitly so a future runtime field cannot leak through this boundary.
+ */
+export function sanitizeManagerSnapshot(raw = {}, extra = {}) {
+  const state = CONNECTION_STATES.includes(raw?.state) ? raw.state : 'action_required'
+  return {
+    available: raw?.available !== false,
+    managed: true,
+    state,
+    environment: ENVIRONMENTS.has(raw?.environment) ? raw.environment : 'production',
+    profileId: text(raw?.profileId, 128),
+    label: text(raw?.label, 64),
+    hostName: text(raw?.hostName, 64),
+    stagingEnabled: safeBoolean(raw?.stagingEnabled),
+    developerToolsEnabled: safeBoolean(raw?.developerToolsEnabled) || extra.developerTools === true,
+    // The browser handoff needs the approval destination. It is validated to a
+    // credential-free http(s) origin and is never written to logs.
+    approvalUrl: safeApprovalUrl(raw?.approvalUrl),
+    error: raw?.error && typeof raw.error === 'object'
+      ? { code: safeCode(raw.error.code) }
+      : null,
+    connected: safeBoolean(raw?.connected),
+    pendingOperation: safeBoolean(raw?.pendingOperation),
+    profiles: safeProfiles(raw?.profiles),
+    capabilities: safeCapabilities(raw?.capabilities),
+    configError: extra.configError ?? null,
+  }
+}
+
+/** Project manager details without routes, credentials or host identifiers. */
+export function sanitizeManagerDetails(raw = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    state: CONNECTION_STATES.includes(raw.state) ? raw.state : null,
+    environment: ENVIRONMENTS.has(raw.environment) ? raw.environment : null,
+    label: text(raw.label, 64) || null,
+    hostName: text(raw.hostName, 64) || null,
+    accessOrigin: safeApprovalUrl(raw.accessOrigin) || null,
+    region: text(raw.region, 64) || null,
+    revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : null,
+    lastErrorCode: raw.lastErrorCode ? safeCode(raw.lastErrorCode) : null,
+    protocolVersion: Number.isSafeInteger(raw.protocolVersion) && raw.protocolVersion > 0 ? raw.protocolVersion : null,
+  }
+}
 
 // Keep this projection explicit: adapter summaries may gain private fields.
 function settingsDiagnostics(host) {
@@ -39,8 +166,35 @@ function settingsDiagnostics(host) {
   }
 }
 
+export function isManagedHost(host) {
+  return host?.managed === true || host?.mode === 'managed' || !!host?.manager || !!host?.connectionManager
+}
+
+function managedManager(host) {
+  return host?.manager ?? host?.connectionManager ?? null
+}
+
 export function settingsStatus(host) {
   const configError = host?.configError ?? null
+  if (isManagedHost(host)) {
+    const manager = managedManager(host)
+    if (!manager || typeof manager.snapshot !== 'function') {
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+    }
+    let raw
+    try {
+      raw = manager.snapshot()
+    } catch {
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+    }
+    if (!raw || typeof raw !== 'object') {
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+    }
+    return sanitizeManagerSnapshot(raw, {
+      configError,
+      developerTools: host.developerToolsEnabled === true,
+    })
+  }
   if (!host?.started) {
     return {
       ...EMPTY_SETTINGS_STATUS,
@@ -66,6 +220,7 @@ export function settingsStatus(host) {
   }
   return {
     available: true,
+    managed: false,
     connected: host.access?.connected === true,
     hostId: host.config.hostId,
     pairingCode: security?.hostFingerprintDisplay ?? '',
@@ -75,14 +230,114 @@ export function settingsStatus(host) {
   }
 }
 
+const MANAGER_METHODS = Object.freeze([
+  'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'remove',
+  'switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile',
+])
+
+function profileId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(value)) {
+    throw new RemoteError('whalerein/invalid-input', 'invalid profile identifier')
+  }
+  return value
+}
+
+/** Non-secret profile identity returned by profile-adding manager methods. */
+function sanitizeAction(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const id = text(raw.id ?? raw.deleted, 128)
+  const action = {
+    id: /^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(id) ? id : '',
+    label: text(raw.label, 64),
+    environment: ENVIRONMENTS.has(raw.environment) ? raw.environment : '',
+    active: raw.active === true,
+    deleted: text(raw.deleted, 128),
+    remoteRegistration: raw.remoteRegistration === 'not_revoked' ? 'not_revoked' : '',
+    // Browser-authorized lifecycle destination (for example Remove this
+    // computer). Validated as a credential-free http(s) URL; never logged.
+    url: safeApprovalUrl(raw.url),
+  }
+  return Object.values(action).some((value) => value !== '' && value !== false) ? action : null
+}
+
+function customService(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RemoteError('whalerein/invalid-input', 'invalid custom service')
+  }
+  const label = text(value.label, 64)
+  const apiOrigin = text(value.apiOrigin, 2048)
+  let parsed
+  try {
+    parsed = new URL(apiOrigin)
+  } catch {
+    throw new RemoteError('whalerein/invalid-input', 'invalid service origin')
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new RemoteError('whalerein/invalid-input', 'invalid service origin')
+  }
+  return { label, apiOrigin: parsed.toString() }
+}
+
 export class WhaleReinSettingsService extends TypertRemoteService {
   constructor(ctx, host) {
     super(ctx, 'whalereinSettings', { namespace: 'whalerein' })
     this.host = host
+    this.manager = managedManager(host)
+    this.managed = isManagedHost(host)
   }
 
   snapshot() {
     return settingsStatus(this.host)
+  }
+
+  details() {
+    if (!this.manager || typeof this.manager.details !== 'function') return null
+    try {
+      return sanitizeManagerDetails(this.manager.details())
+    } catch {
+      throw new RemoteError('whalerein/unavailable', 'connection details unavailable')
+    }
+  }
+
+  async _forward(method, ...args) {
+    if (!this.manager || typeof this.manager[method] !== 'function') {
+      throw new RemoteError(
+        this.managed ? 'whalerein/unavailable' : 'whalerein/unsupported_capability',
+        'connection manager method unavailable',
+      )
+    }
+    let result
+    try {
+      result = await this.manager[method](...args)
+    } catch {
+      // Manager diagnostics may contain private state. Only a stable code
+      // crosses the browser boundary.
+      throw new RemoteError('whalerein/action-failed', 'connection action failed')
+    }
+    return { ...this.snapshot(), action: sanitizeAction(result) }
+  }
+
+  startConnect(request) {
+    const source = text(request?.source, 32) || 'settings'
+    return this._forward('startConnect', { source: source === 'browser' ? 'browser' : 'settings' })
+  }
+
+  cancel() { return this._forward('cancel') }
+  retry() { return this._forward('retry') }
+  disconnect() { return this._forward('disconnect') }
+  reconnect() { return this._forward('reconnect') }
+  remove() { return this._forward('remove') }
+  async switchProfile(id) { return this._forward('switchProfile', profileId(id)) }
+  enableStaging() { return this._forward('enableStaging') }
+  async addCustomService(value) { return this._forward('addCustomService', customService(value)) }
+  async deleteProfile(id) { return this._forward('deleteProfile', profileId(id)) }
+
+  _requirePairing() {
+    if (!this.managed) return
+    const capabilities = this.snapshot()?.capabilities ?? []
+    if (!capabilities.includes('pairing')) {
+      throw new RemoteError('whalerein/unsupported_capability', 'device pairing is not available for this cloud connection')
+    }
   }
 
   async testConnection(draft) {
@@ -101,6 +356,7 @@ export class WhaleReinSettingsService extends TypertRemoteService {
   }
 
   async invite() {
+    this._requirePairing()
     const config = this.host?.config ?? {}
     const invitation = await createInvitation({
       accessUrl: config.accessUrl,
@@ -116,6 +372,7 @@ export class WhaleReinSettingsService extends TypertRemoteService {
   }
 
   async revoke(deviceId) {
+    this._requirePairing()
     const generation = this.host?.security?.grantGeneration?.(deviceId) ?? 0
     const config = this.host?.config ?? {}
     const result = await revokeDevice({
@@ -143,6 +400,10 @@ function markRemote(method, name) {
   })
 }
 markRemote(WhaleReinSettingsService.prototype.snapshot, 'snapshot')
+markRemote(WhaleReinSettingsService.prototype.details, 'details')
+for (const method of MANAGER_METHODS) {
+  markRemote(WhaleReinSettingsService.prototype[method], method)
+}
 markRemote(WhaleReinSettingsService.prototype.invite, 'invite')
 markRemote(WhaleReinSettingsService.prototype.revoke, 'revoke')
 markRemote(WhaleReinSettingsService.prototype.testConnection, 'testConnection')

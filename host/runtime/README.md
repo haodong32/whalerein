@@ -25,6 +25,29 @@ their wire error code. The Host journals admission before invocation and stores 
 terminal result only after encoding and persistence succeed. Lost replies and
 completion-write failures never authorize another invocation of the same command.
 
+## Managed cloud connection
+
+`createConnectionManager` adds Host-specific service profiles and browser
+approval around the same runtime. It owns a versioned registry of opaque
+profiles, independent signing/Noise keys and credentials per profile,
+cross-process activation ownership, the Cloud create/poll client, Host-owned
+route validation and the enrollment/recovery journals.
+
+```javascript
+import { createConnectionManager } from 'whalerein-host/manager.js'
+const manager = createConnectionManager({ stateRoot, credentials, source })
+await manager.ready
+manager.snapshot() // sanitized state, profiles and capabilities; never secrets
+await manager.startConnect() // returns awaiting_approval with an approval URL
+```
+
+Production selects an official descriptor with no account connection; staging
+is added only through `enableStaging()` and never activates by itself; custom
+managed services are added with an explicit validated `apiOrigin`. Switching
+stops the old profile's traffic and publishes the new selection atomically.
+`disconnect()` persists a local pause across restarts and `remove()` hands off
+to the service's authenticated management page without claiming revocation.
+
 | Module | Responsibility |
 | --- | --- |
 | `contracts/source.js` | Source interface and normalized update validation. |

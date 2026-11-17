@@ -57,6 +57,12 @@ A secret may be stored in that file as `!!js process.env.WHALEREIN_HOST_TOKEN` s
 
 | Key | Default | Meaning |
 |---|---|---|
+| `connection_mode` | `auto` | `auto`, `managed`, or `standalone`. Auto keeps every profile with existing `server`/`mqtt_url`/`host_token` material standalone and treats a profile without connection material as the managed WhaleRein Cloud flow |
+| `state_root` | `~/.whalerein/dsh` | Managed state root passed to the Host connection manager. `state_dir` remains the legacy alias for Standalone profiles |
+| `profile_id` | none | Selected managed profile. Opaque identifier only; it is never a display name or host ID |
+| `developer_tools_enabled` | `false` | Enables the staging/Developer tools affordance in the managed settings page. Enabling staging still requires an explicit profile selection |
+| `enrollment_issuer_public_key` | none | One base64url Ed25519 public key. When set, the managed flow verifies the account service's portable authorization signature before sending anything. Access verifies the same document independently |
+| `enrollment_issuer` | none | Absolute origin the signed authorization must name. Checked together with the pinned key |
 | `server` | none | host name or IPv4 address. When set, the plugin derives the Access origin and the MQTT URL and ignores `mqtt_url` / `access_url` |
 | `admin_token` | none | Not shown in settings. The plugin does not use it. A saved value stays in the profile. Host-signed requests mint this host’s pairing link and revoke this host’s grant. The Access admin token remains the operator credential for invitations for any host and for `DELETE /v1/devices/{id}` |
 | `access_port` | `443`, or `8080` when plaintext is allowed | Access port. `443` and plaintext `80` are omitted from the URL |
@@ -118,6 +124,41 @@ Loading the Host plugin as a bundle (rather than a `--patch` launch overlay)
 is what lets the settings page save into the profile user layer.
 
 ## Settings page
+
+A fresh profile without manual connection material loads the managed WhaleRein
+Cloud flow: a title, a short explanation, and one primary **Connect to WhaleRein
+Cloud** action. No server, port, Host ID, token, region or fingerprint input is
+required, and loading the page never starts enrollment or opens a browser. The
+server-side settings service projects the frozen `ConnectionManager` API
+(`snapshot`, `details`, `startConnect`, `cancel`, `retry`, `disconnect`,
+`reconnect`, `remove`, `switchProfile`, `enableStaging`, `addCustomService`,
+`deleteProfile`) through allowlisted snapshots. Poll credentials, authorization
+documents, keys, host ids, routes and raw approval locators never cross the
+browser RPC boundary or enter logs; the approval destination is a validated
+credential-free http(s) URL used only for the explicit browser handoff.
+
+Managed states are `idle`, `requesting`, `awaiting_approval`, `enrolling`,
+`recovering`, `connecting`, `connected`, `reconnecting`, `disconnected`,
+`denied`, `expired`, `action_required`, `removing`, and `removed`. Connected is
+shown only from runtime readiness. The status region announces changes through
+`role=status`/`aria-live`, focus moves to it on state changes, and the layout
+wraps from 320 CSS px upward.
+
+Browser handoff reserves a tab during the explicit Connect click and falls back
+to a visible **Open browser** link when the browser blocks it. The approval URL
+carries the active `en`/`zh-CN` locale. Connection details are collapsed by
+default and expose only non-secret identity and redacted diagnostics. Custom
+services live under Advanced, while Developer tools enables staging and then
+requires an explicit staging profile selection; enabling staging does not
+switch the computer. An active Staging label stays visible when details and
+Developer tools are hidden, and switching back to production remains reachable.
+
+Disconnect is a local pause that retains the cloud registration. **Remove this
+computer** is browser-authorized and stays `removing` until the service enforces
+removal. Deleting an inactive local profile is separate and explains that the
+remote registration remains. Managed profiles hide device invitation/revocation
+unless the selected service advertises pairing support; Standalone profiles keep
+the existing pairing, invitation, revocation, and connection-test behavior.
 
 The page reuses the host's `@deepseek-ai/dsh-client-ui-primitives` module for
 buttons, inputs, disclosure rows, the log-level menu,
@@ -396,8 +437,8 @@ pnpm test          # node:test with coverage thresholds
 # Repository gate: ./repo test --project dsh --coverage
 ```
 
-Latest run (Node 25.9.0): **117 tests pass**, line **96.1%**, branch **85.9%**,
-function **93.2%**. Thresholds in `package.json` are 90% line, 85% branch, 90%
+Latest run (Node 25.9.0): **291 tests pass**, line **96.5%**, branch **85.5%**,
+function **91.8%**. Thresholds in `package.json` are 90% line, 85% branch, 90%
 function.
 
 Test suites cover: Noise XX roundtrip/MAC/prologue/AAD/channel keys; protobuf

@@ -260,6 +260,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			AccessPassword:        cfg.Broker.Password,
 			ProtocolVersion:       cfg.Protocol.Version,
 			RevocationAckTimeout:  cfg.Revocation.AckTimeout.D(),
+			RequireHostEnrollment: cfg.Mode == "external",
 		},
 	})
 	if err != nil {
@@ -318,7 +319,6 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	service.SetResultHandler(requestService.HandleHostResult)
 	service.SetEventHandler(eventService.Handle)
-	service.SetReadyHandler(authService.ReplayPendingRevocations)
 	service.SetHostKeyHandler(authService.RememberHostAuthorizationKey)
 
 	readiness := diagnostics.NewReadiness()
@@ -335,15 +335,27 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return nil
 	})
 
-	var externalService httpapi.ExternalService
+	var externalService *external.Service
 	if cfg.Mode == "external" {
 		trust, err := externalTrust(cfg)
 		if err != nil {
 			return err
 		}
-		externalService = external.New(trust, db, cfg.External.MQTTURL)
+		externalService = external.New(trust, db, cfg.External.MQTTURL,
+			external.WithHostEnforcer(authService))
 		logger.Info("external account mode enabled", "issuer", trust.Issuer, "region", trust.Region)
 	}
+
+	// HostReady is the only readiness source that advances an external
+	// enrollment. A probe principal cannot publish a Result, so it never
+	// reaches this handler, and the auth replay keeps its existing behavior.
+	service.SetReadyHandler(func(ctx context.Context, hostID string) error {
+		revocationErr := authService.ReplayPendingRevocations(ctx, hostID)
+		if externalService == nil {
+			return revocationErr
+		}
+		return errors.Join(revocationErr, externalService.HandleHostReady(ctx, hostID))
+	})
 
 	api, err := httpapi.New(httpapi.Dependencies{
 		Auth:          authService,

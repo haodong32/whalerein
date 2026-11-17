@@ -140,6 +140,99 @@ window.__ModuleLoader__.load({
       diagnosticPending: 'Pending',
       diagnosticSynced: 'Synced',
       debugOnly: 'Debug',
+      // Managed WhaleRein Cloud connection
+      cloudIntro: 'Connect this computer to WhaleRein Cloud and approve it in your browser. Account sign-in stays in the browser.',
+      cloudConnect: 'Connect to WhaleRein Cloud',
+      cloudCancel: 'Cancel',
+      cloudCancelling: 'Cancelling…',
+      cloudTryAgain: 'Try again',
+      cloudReconnect: 'Reconnect',
+      cloudDisconnect: 'Disconnect',
+      cloudDisconnecting: 'Disconnecting…',
+      cloudRemove: 'Remove this computer',
+      cloudRemoving: 'Removing…',
+      cloudOpenBrowser: 'Open browser',
+      cloudBrowserBlocked: 'Your browser blocked the new tab. Use Open browser to finish connecting.',
+      cloudApprovalLink: 'Approval link',
+      cloudActionFailed: 'The connection action could not be completed. Try again.',
+      cloudStatusUnavailable: 'Connection status is temporarily unavailable. Try again in a moment.',
+      cloudPending: 'A connection operation is already in progress.',
+      cloudDismiss: 'Dismiss',
+      state_idle: 'Not connected',
+      state_requesting: 'Preparing connection…',
+      state_awaiting_approval: 'Finish connecting in your browser',
+      state_enrolling: 'Connecting…',
+      state_recovering: 'Recovering connection…',
+      state_connecting: 'Connecting…',
+      state_connected: 'Connected to WhaleRein Cloud',
+      state_reconnecting: 'Reconnecting…',
+      state_disconnected: 'Disconnected',
+      state_denied: 'Connection request denied',
+      state_expired: 'Connection request expired',
+      state_action_required: 'Action required',
+      state_removing: 'Removing this computer…',
+      state_removed: 'This computer was removed',
+      stateHint_idle: 'Connect this computer to WhaleRein Cloud. Browser approval starts only after you choose Connect.',
+      stateHint_requesting: 'Preparing a secure connection request. Do not close this page.',
+      stateHint_awaiting_approval: 'Approve this computer in the browser tab we opened. Keep this page open.',
+      stateHint_enrolling: 'Approval received. Establishing this computer’s connection.',
+      stateHint_recovering: 'Recovering a pending connection. This can take a moment.',
+      stateHint_connecting: 'Establishing the connection. Connected appears only after the service confirms readiness.',
+      stateHint_connected: 'This computer is connected and ready for remote control.',
+      stateHint_reconnecting: 'The connection was interrupted. Automatic reconnects continue within the current authorization.',
+      stateHint_disconnected: 'This computer is disconnected locally. Its cloud registration is retained; Connect resumes the same identity.',
+      stateHint_denied: 'The request was denied in the browser. Try again to create a new approval request.',
+      stateHint_expired: 'The request expired before it was approved. Try again to create a new approval request.',
+      stateHint_action_required: 'One action is needed before this computer can connect.',
+      stateHint_removing: 'Waiting for the service to enforce removal. This can take a moment.',
+      stateHint_removed: 'Removal was enforced. Adding this computer again requires fresh browser approval.',
+      cloudDetails: 'Connection details',
+      cloudDetailsHint: 'Non-secret identity and status only. Credentials, keys, routes and host identifiers are never shown.',
+      cloudDetailsEnvironment: 'Environment',
+      cloudDetailsProfile: 'Profile',
+      cloudDetailsHostName: 'This computer',
+      cloudDetailsState: 'Status',
+      cloudDetailsRegion: 'Region',
+      cloudDetailsOrigin: 'Service origin',
+      cloudDetailsRevision: 'Registration revision',
+      cloudDetailsLastError: 'Last error code',
+      cloudDetailsRefresh: 'Refresh details',
+      cloudDetailsUnavailable: 'Details are unavailable right now.',
+      cloudAdvanced: 'Advanced',
+      cloudCustomService: 'Custom service',
+      cloudCustomServiceHint: 'Use this only for a reviewed self-hosted WhaleRein service. Adding it does not activate it.',
+      cloudCustomLabel: 'Service label',
+      cloudCustomOrigin: 'API origin',
+      cloudCustomOriginPlaceholder: 'https://service.example',
+      cloudAddCustomService: 'Add custom service',
+      cloudCustomServiceAdded: 'Custom service added. Select it from the profile list to use it.',
+      cloudDeveloperTools: 'Developer tools',
+      cloudDeveloperToolsHint: 'Test environments are hidden until you enable them here.',
+      cloudEnableStaging: 'Enable staging',
+      cloudEnablingStaging: 'Enabling…',
+      cloudStagingNote: 'Enabling staging does not switch this computer. A staging profile must be selected explicitly.',
+      cloudStagingProfile: 'WhaleRein Cloud Staging',
+      cloudUseStaging: 'Use staging',
+      cloudSwitchProduction: 'Switch to production',
+      cloudSwitching: 'Switching…',
+      cloudStagingActive: 'Staging',
+      cloudProduction: 'Production',
+      cloudCustom: 'Custom',
+      cloudProfiles: 'Local profiles',
+      cloudProfilesHint: 'Only an inactive local profile can be deleted. Deleting it does not remove the cloud registration.',
+      cloudNoProfiles: 'No local profiles are available.',
+      cloudDeleteProfile: 'Delete local profile',
+      cloudDeleteActive: 'Switch away from this profile before deleting it.',
+      cloudDeleteHint: 'Deleting local files does not revoke this computer in the cloud. Use Remove this computer for that.',
+      cloudRemovedLocal: 'Local profile deleted. Its remote registration remains.',
+      cloudPairingManaged: 'Device pairing is managed by WhaleRein Cloud for this connection.',
+      cloudDisconnectHint: 'Disconnect only pauses this computer locally. It keeps its registration and can reconnect without new approval.',
+      cloudRemoveHint: 'Remove this computer requires fresh browser authorization. The status stays Removing until the service enforces it.',
+      cloudLocalOnly: 'Local action',
+      cloudBrowserAuthorized: 'Browser-authorized action',
+      cloudUnsupported: 'This action is not available for the selected connection.',
+      cloudRetryHint: 'This creates a new browser approval request.',
+      cloudConfirmationRequired: 'Confirm removal in your browser. Keep this page open.',
     }
     const zh = {
       nav: 'WhaleRein',
@@ -256,6 +349,99 @@ window.__ModuleLoader__.load({
       diagnosticPending: '等待同步',
       diagnosticSynced: '已同步',
       debugOnly: '调试',
+      // Managed WhaleRein Cloud connection
+      cloudIntro: '将这台电脑连接到 WhaleRein Cloud，并在浏览器中授权。账号登录始终留在浏览器中。',
+      cloudConnect: '连接到 WhaleRein Cloud',
+      cloudCancel: '取消',
+      cloudCancelling: '正在取消…',
+      cloudTryAgain: '重试',
+      cloudReconnect: '重新连接',
+      cloudDisconnect: '断开连接',
+      cloudDisconnecting: '正在断开…',
+      cloudRemove: '移除这台电脑',
+      cloudRemoving: '正在移除…',
+      cloudOpenBrowser: '打开浏览器',
+      cloudBrowserBlocked: '浏览器阻止了新标签页。请使用“打开浏览器”完成连接。',
+      cloudApprovalLink: '授权链接',
+      cloudActionFailed: '无法完成连接操作，请重试。',
+      cloudStatusUnavailable: '暂时无法获取连接状态，请稍后重试。',
+      cloudPending: '已有连接操作正在进行。',
+      cloudDismiss: '关闭',
+      state_idle: '未连接',
+      state_requesting: '正在准备连接…',
+      state_awaiting_approval: '请在浏览器中完成连接',
+      state_enrolling: '正在连接…',
+      state_recovering: '正在恢复连接…',
+      state_connecting: '正在连接…',
+      state_connected: '已连接到 WhaleRein Cloud',
+      state_reconnecting: '正在重新连接…',
+      state_disconnected: '已断开连接',
+      state_denied: '连接请求被拒绝',
+      state_expired: '连接请求已过期',
+      state_action_required: '需要处理',
+      state_removing: '正在移除这台电脑…',
+      state_removed: '这台电脑已被移除',
+      stateHint_idle: '连接这台电脑到 WhaleRein Cloud。只有选择“连接”后才会开始浏览器授权。',
+      stateHint_requesting: '正在准备安全的连接请求，请不要关闭此页面。',
+      stateHint_awaiting_approval: '请在我们打开的浏览器标签页中授权这台电脑，并保持此页面打开。',
+      stateHint_enrolling: '已收到授权，正在建立这台电脑的连接。',
+      stateHint_recovering: '正在恢复待处理的连接，请稍候。',
+      stateHint_connecting: '正在建立连接。只有服务确认就绪后才会显示已连接。',
+      stateHint_connected: '这台电脑已连接，可以进行远程控制。',
+      stateHint_reconnecting: '连接中断，将在当前授权范围内自动重连。',
+      stateHint_disconnected: '这台电脑已在本地断开，云端注册仍保留；点击连接会恢复同一身份。',
+      stateHint_denied: '请求已在浏览器中被拒绝。重试会创建新的授权请求。',
+      stateHint_expired: '请求在授权前已过期。重试会创建新的授权请求。',
+      stateHint_action_required: '需要完成一个操作才能建立连接。',
+      stateHint_removing: '正在等待服务执行移除，请稍候。',
+      stateHint_removed: '移除已生效。重新添加这台电脑需要新的浏览器授权。',
+      cloudDetails: '连接详情',
+      cloudDetailsHint: '仅显示非敏感的身份与状态。凭据、密钥、路由和主机标识永远不会显示。',
+      cloudDetailsEnvironment: '环境',
+      cloudDetailsProfile: '配置',
+      cloudDetailsHostName: '这台电脑',
+      cloudDetailsState: '状态',
+      cloudDetailsRegion: '区域',
+      cloudDetailsOrigin: '服务来源',
+      cloudDetailsRevision: '注册版本',
+      cloudDetailsLastError: '最近错误代码',
+      cloudDetailsRefresh: '刷新详情',
+      cloudDetailsUnavailable: '暂时无法获取详情。',
+      cloudAdvanced: '高级配置',
+      cloudCustomService: '自定义服务',
+      cloudCustomServiceHint: '仅用于经过审核的自托管 WhaleRein 服务。添加后不会自动启用。',
+      cloudCustomLabel: '服务名称',
+      cloudCustomOrigin: 'API 来源',
+      cloudCustomOriginPlaceholder: 'https://service.example',
+      cloudAddCustomService: '添加自定义服务',
+      cloudCustomServiceAdded: '已添加自定义服务。请在配置列表中选择后才会使用。',
+      cloudDeveloperTools: '开发者工具',
+      cloudDeveloperToolsHint: '测试环境默认隐藏，需要在这里显式启用。',
+      cloudEnableStaging: '启用 Staging',
+      cloudEnablingStaging: '正在启用…',
+      cloudStagingNote: '启用 Staging 不会切换这台电脑，必须显式选择 Staging 配置。',
+      cloudStagingProfile: 'WhaleRein Cloud Staging',
+      cloudUseStaging: '使用 Staging',
+      cloudSwitchProduction: '切换回生产环境',
+      cloudSwitching: '正在切换…',
+      cloudStagingActive: 'Staging',
+      cloudProduction: '生产环境',
+      cloudCustom: '自定义',
+      cloudProfiles: '本地配置',
+      cloudProfilesHint: '只能删除未启用的本地配置。删除本地配置不会移除云端注册。',
+      cloudNoProfiles: '暂无本地配置。',
+      cloudDeleteProfile: '删除本地配置',
+      cloudDeleteActive: '请先切换到其他配置再删除。',
+      cloudDeleteHint: '删除本地文件不会在云端撤销这台电脑。如需撤销，请使用“移除这台电脑”。',
+      cloudRemovedLocal: '本地配置已删除，云端注册仍然保留。',
+      cloudPairingManaged: '此连接的设备配对由 WhaleRein Cloud 管理。',
+      cloudDisconnectHint: '断开连接只会在本地暂停这台电脑，云端注册仍保留，无需重新授权即可连接。',
+      cloudRemoveHint: '移除这台电脑需要新的浏览器授权。在服务执行完成前，状态会一直显示“正在移除”。',
+      cloudLocalOnly: '本地操作',
+      cloudBrowserAuthorized: '浏览器授权操作',
+      cloudUnsupported: '所选连接不支持此操作。',
+      cloudRetryHint: '这会创建新的浏览器授权请求。',
+      cloudConfirmationRequired: '请在浏览器中确认移除，并保持此页面打开。',
     }
 
     const styles = {
@@ -304,6 +490,15 @@ window.__ModuleLoader__.load({
       details: { borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: '16px' },
       form: { display: 'flex', flexDirection: 'column', gap: '16px', paddingTop: '12px' },
       diagnosticRow: { display: 'grid', gap: '16px', padding: '8px 0', fontSize: '13px' },
+      managedActions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', minWidth: 0 },
+      managedStateRegion: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, outlineOffset: '2px' },
+      stagingLabel: { display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' },
+      approvalLink: { display: 'inline-flex', alignItems: 'center', minHeight: '32px', maxWidth: '100%', padding: '0 12px', borderRadius: 'var(--dsw-radius-md)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)', textDecoration: 'underline', overflowWrap: 'anywhere' },
+      profileRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px 12px', padding: '12px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
+      profileCopy: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: '1 1 180px' },
+      profileName: { fontSize: '13px', fontWeight: 500, lineHeight: '20px', overflowWrap: 'anywhere' },
+      detailValue: { margin: 0, overflowWrap: 'anywhere' },
+      dangerAction: { color: 'var(--dsw-alias-state-error-primary)' },
     }
 
     const css = `
@@ -321,6 +516,15 @@ window.__ModuleLoader__.load({
         .whalerein-settings .whalerein-field-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
         .whalerein-settings .whalerein-field-control { justify-content: flex-start; }
         .whalerein-settings .whalerein-diagnostic-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+      }
+      /* 320 CSS px and 200% zoom: actions wrap and text never forces width. */
+      .whalerein-settings .whalerein-managed-actions { flex-wrap: wrap; }
+      .whalerein-settings .whalerein-approval-link { max-width: 100%; overflow-wrap: anywhere; }
+      .whalerein-settings .whalerein-profile-row { flex-wrap: wrap; }
+      @media (max-width: 400px) {
+        .whalerein-settings { gap: 16px; }
+        .whalerein-settings .whalerein-managed-actions { align-items: stretch; }
+        .whalerein-settings .whalerein-managed-actions > * { max-width: 100%; }
       }
     `
 
@@ -590,7 +794,7 @@ window.__ModuleLoader__.load({
       return true
     }
 
-    function SettingsPage({ t, form, status, developerTools, locale, invite, revoke, secrets, testConnection }) {
+    function LegacySettingsPage({ t, form, status, developerTools, locale, invite, revoke, secrets, testConnection }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => form.getSnapshot())
       const [draft, setDraft] = React.useState(() => initialDraft(snapshot.value))
@@ -927,6 +1131,522 @@ window.__ModuleLoader__.load({
           h(RuntimeDiagnostics, { t: tr, snapshot: statusSnapshot }))) : null)
     }
 
+    const MANAGED_STATES = new Set([
+      'idle', 'requesting', 'awaiting_approval', 'enrolling', 'recovering',
+      'connecting', 'connected', 'reconnecting', 'disconnected', 'denied',
+      'expired', 'action_required', 'removing', 'removed',
+    ])
+    const TRANSITIONAL_STATES = new Set(['requesting', 'enrolling', 'recovering', 'connecting', 'removing'])
+
+    function safeApprovalUrl(value) {
+      if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return ''
+      try {
+        const url = new URL(value)
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return ''
+        return url.toString()
+      } catch {
+        return ''
+      }
+    }
+
+    function localeApprovalUrl(value, active) {
+      const url = safeApprovalUrl(value)
+      if (!url) return ''
+      try {
+        const parsed = new URL(url)
+        if (!parsed.searchParams.has('locale')) parsed.searchParams.set('locale', active === 'zh' ? 'zh-CN' : 'en')
+        return parsed.toString()
+      } catch {
+        return ''
+      }
+    }
+
+    function reserveBrowserTab() {
+      if (typeof window === 'undefined' || typeof window.open !== 'function') return null
+      try {
+        // Reserve synchronously during the click so a popup blocker evaluates
+        // against the explicit user action, before the RPC resolves.
+        return window.open('', '_blank') ?? null
+      } catch {
+        return null
+      }
+    }
+
+    function commitBrowserTab(tab, url) {
+      if (!tab) return false
+      try {
+        tab.opener = null
+        if (tab.location) {
+          tab.location.href = url
+        } else if (typeof tab.location?.assign === 'function') {
+          tab.location.assign(url)
+        } else {
+          return false
+        }
+        return true
+      } catch {
+        try {
+          tab.location.assign?.(url)
+          return true
+        } catch {
+          return false
+        }
+      }
+    }
+
+    function createConnectionActions(remote) {
+      const invoke = async (method, ...args) => {
+        const fn = remote?.whalerein?.[method]
+        if (typeof fn !== 'function') return { ok: false, code: 'gateway/method-unavailable' }
+        try {
+          const result = await fn(...args)
+          if (result?.ok === false) return { ok: false, code: result.error?.code ?? 'gateway/internal' }
+          return { ok: true, value: result?.value ?? null }
+        } catch (error) {
+          return { ok: false, code: typeof error?.code === 'string' ? error.code : 'gateway/internal' }
+        }
+      }
+      return {
+        invoke,
+        startConnect: (request) => invoke('startConnect', request),
+        cancel: () => invoke('cancel'),
+        retry: () => invoke('retry'),
+        disconnect: () => invoke('disconnect'),
+        reconnect: () => invoke('reconnect'),
+        remove: () => invoke('remove'),
+        switchProfile: (id) => invoke('switchProfile', id),
+        enableStaging: () => invoke('enableStaging'),
+        addCustomService: (value) => invoke('addCustomService', value),
+        deleteProfile: (id) => invoke('deleteProfile', id),
+      }
+    }
+
+    function managedEnvironmentLabel(t, environment) {
+      if (environment === 'staging') return t('cloudStagingActive')
+      if (environment === 'custom') return t('cloudCustom')
+      if (environment === 'standalone') return t('cloudLocalOnly')
+      return t('cloudProduction')
+    }
+
+    function ProfileRows({ t, profiles, activeId, pending, busy, onDelete }) {
+      if (!Array.isArray(profiles) || profiles.length === 0) {
+        return h('p', { style: styles.hint }, t('cloudNoProfiles'))
+      }
+      return h('ul', { style: styles.deviceList, 'aria-label': t('cloudProfiles') },
+        profiles.map((profile) => {
+          const active = profile.active === true || profile.id === activeId
+          const disabled = busy || pending || active || profile.managed === false
+          return h('li', { key: profile.id, style: styles.profileRow, className: 'whalerein-profile-row' },
+            h('div', { style: styles.profileCopy },
+              h('div', { style: styles.profileName }, profile.label || profile.id),
+              h('div', { style: styles.deviceMeta },
+                managedEnvironmentLabel(t, profile.environment),
+                active ? ` · ${t('cloudDeleteActive')}` : '')),
+            h(Button, {
+              variant: 'ghost', size: 'sm', style: styles.dangerAction,
+              disabled, 'aria-label': `${t('cloudDeleteProfile')}: ${profile.label || profile.id}`,
+              onClick: () => onDelete(profile.id),
+            }, t('cloudDeleteProfile')))
+        }))
+    }
+
+    function ManagedSettingsPage({ t, status, connection, developerTools, locale: localeService }) {
+      const tr = typeof t === 'function' ? t : (key) => key
+      const [snapshot, setSnapshot] = React.useState(() => status.getSnapshot())
+      const [busy, setBusy] = React.useState('')
+      const [actionError, setActionError] = React.useState('')
+      const [approvalLink, setApprovalLink] = React.useState('')
+      const [removalLink, setRemovalLink] = React.useState('')
+      const [browserBlocked, setBrowserBlocked] = React.useState(false)
+      const [detailsOpen, setDetailsOpen] = React.useState(false)
+      const [advancedOpen, setAdvancedOpen] = React.useState(false)
+      const [developerOpen, setDeveloperOpen] = React.useState(false)
+      const [details, setDetails] = React.useState(null)
+      const [detailsLoading, setDetailsLoading] = React.useState(false)
+      const [customLabel, setCustomLabel] = React.useState('')
+      const [customOrigin, setCustomOrigin] = React.useState('')
+      const [customNotice, setCustomNotice] = React.useState('')
+      const [profileNotice, setProfileNotice] = React.useState('')
+      const [development, setDevelopment] = React.useState(() => developerTools?.getSnapshot?.() === true)
+      const [stagingFallbackId, setStagingFallbackId] = React.useState('')
+      const [productionFallbackId, setProductionFallbackId] = React.useState('')
+      const fieldId = React.useId()
+      const startingRef = React.useRef(false)
+      const lastState = React.useRef(snapshot.state)
+      React.useEffect(() => status.subscribe(() => {
+        const next = status.getSnapshot()
+        setSnapshot(next)
+      }), [status])
+      React.useEffect(() => developerTools?.subscribe?.(() => setDevelopment(developerTools.getSnapshot() === true)), [developerTools])
+      React.useEffect(() => {
+        if (snapshot.environment === 'production' && snapshot.profileId) setProductionFallbackId(snapshot.profileId)
+        if (snapshot.environment === 'staging' && snapshot.profileId) setStagingFallbackId(snapshot.profileId)
+      }, [snapshot.environment, snapshot.profileId])
+      React.useEffect(() => {
+        if (lastState.current === snapshot.state) return
+        lastState.current = snapshot.state
+        // Move focus to the announced status so keyboard and screen-reader
+        // users learn about the state change without losing their place.
+        if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+          document.getElementById(`${fieldId}-state`)?.focus?.()
+        }
+      }, [snapshot.state, fieldId])
+      React.useEffect(() => {
+        if (!detailsOpen || typeof connection?.invoke !== 'function') return undefined
+        let cancelled = false
+        setDetailsLoading(true)
+        void connection.invoke('details').then((result) => {
+          if (cancelled) return
+          setDetails(result.ok && result.value && typeof result.value === 'object' ? result.value : null)
+        }).finally(() => {
+          if (!cancelled) setDetailsLoading(false)
+        })
+        return () => { cancelled = true }
+      }, [detailsOpen, connection, snapshot.state])
+
+      if (snapshot.ready !== true) {
+        return h('div', { style: styles.page, className: 'whalerein-settings' },
+          h('style', null, css),
+          h('h2', { style: styles.title }, tr('title')),
+          h('p', { style: styles.intro }, tr('loading')))
+      }
+
+      const state = MANAGED_STATES.has(snapshot.state) ? snapshot.state : 'action_required'
+      const transitional = TRANSITIONAL_STATES.has(state)
+      const pending = snapshot.pendingOperation === true
+      const activeProfile = (snapshot.profiles ?? []).find((profile) => profile.active === true)
+      const isStaging = snapshot.environment === 'staging' || activeProfile?.environment === 'staging'
+      const stagingProfile = (snapshot.profiles ?? []).find((profile) => profile.environment === 'staging')
+      const productionProfile = (snapshot.profiles ?? []).find((profile) => profile.environment === 'production')
+      // The frozen runtime snapshot may not list profiles yet. Fall back to the
+      // opaque ids the manager returns for the active profile and for a newly
+      // added staging profile, so switching stays usable either way.
+      const stagingProfileId = stagingProfile?.id ?? stagingFallbackId
+      const productionProfileId = productionProfile?.id ?? productionFallbackId
+      const activeLocale = localeService?.getSnapshot?.().active
+      const approvalUrl = localeApprovalUrl(approvalLink || snapshot.approvalUrl, activeLocale)
+      const showConnect = ['idle', 'disconnected'].includes(state)
+      const showCancel = ['requesting', 'awaiting_approval', 'enrolling', 'recovering'].includes(state)
+      const showRetry = ['denied', 'expired', 'action_required'].includes(state)
+      const showDisconnect = state === 'connected' || state === 'reconnecting'
+      const showDeveloperTools = development || snapshot.developerToolsEnabled === true
+
+      const run = async (method, label, ...args) => {
+        if (busy || typeof connection?.invoke !== 'function') return
+        setBusy(label)
+        setActionError('')
+        setProfileNotice('')
+        const result = await connection.invoke(method, ...args)
+        if (!result.ok) setActionError('cloudActionFailed')
+        await status.refresh?.()
+        setBusy('')
+      }
+
+      const start = async () => {
+        if (startingRef.current || busy || typeof connection?.invoke !== 'function') return
+        startingRef.current = true
+        setBusy('start')
+        setActionError('')
+        setBrowserBlocked(false)
+        setApprovalLink('')
+        // Reserve the tab during the explicit click, before awaiting the RPC.
+        const tab = reserveBrowserTab()
+        try {
+          const result = await connection.invoke('startConnect', { source: 'settings' })
+          await status.refresh?.()
+          if (!result.ok) {
+            try { tab?.close?.() } catch { /* already closed */ }
+            setActionError('cloudActionFailed')
+            return
+          }
+          const active = localeService?.getSnapshot?.().active
+          const url = localeApprovalUrl(result.value?.approvalUrl, active)
+            || localeApprovalUrl(result.value?.snapshot?.approvalUrl, active)
+            || localeApprovalUrl(status.getSnapshot().approvalUrl, active)
+          if (url) {
+            const opened = commitBrowserTab(tab, url)
+            setApprovalLink(url)
+            setBrowserBlocked(!opened)
+          } else {
+            try { tab?.close?.() } catch { /* already closed */ }
+          }
+        } finally {
+          startingRef.current = false
+          setBusy('')
+        }
+      }
+
+      const remove = async () => {
+        if (busy || pending || typeof connection?.invoke !== 'function') return
+        setBusy('remove')
+        setActionError('')
+        const tab = reserveBrowserTab()
+        const result = await connection.invoke('remove')
+        await status.refresh?.()
+        if (!result.ok) {
+          try { tab?.close?.() } catch { /* already closed */ }
+          setActionError('cloudActionFailed')
+          setBusy('')
+          return
+        }
+        const active = localeService?.getSnapshot?.().active
+        const url = localeApprovalUrl(result.value?.action?.url, active)
+        if (url) {
+          const opened = commitBrowserTab(tab, url)
+          setRemovalLink(url)
+          setBrowserBlocked(!opened)
+        } else {
+          try { tab?.close?.() } catch { /* already closed */ }
+        }
+        setBusy('')
+      }
+      const enableStaging = async () => {
+        if (busy || typeof connection?.invoke !== 'function') return
+        setBusy('staging')
+        setActionError('')
+        const result = await connection.invoke('enableStaging')
+        if (!result.ok) {
+          setActionError('cloudActionFailed')
+        } else if (result.value?.action?.id) {
+          setStagingFallbackId(result.value.action.id)
+        }
+        await status.refresh?.()
+        setBusy('')
+      }
+      const entries = [
+        [tr('cloudDetailsState'), tr(`state_${state}`)],
+        [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, snapshot.environment)],
+        [tr('cloudDetailsHostName'), snapshot.hostName || '—'],
+        [tr('cloudDetailsProfile'), snapshot.label || '—'],
+      ]
+      const detailRows = details ? [
+        [tr('cloudDetailsState'), details.state ? tr(`state_${details.state}`) : '—'],
+        [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, details.environment || snapshot.environment)],
+        [tr('cloudDetailsRegion'), details.region || '—'],
+        [tr('cloudDetailsOrigin'), details.accessOrigin || '—'],
+        [tr('cloudDetailsRevision'), details.revision == null ? '—' : String(details.revision)],
+        [tr('cloudDetailsLastError'), details.lastErrorCode || '—'],
+      ] : entries
+
+      return h('div', { style: styles.page, className: 'whalerein-settings' },
+        h('style', null, css),
+        h('header', { style: styles.header },
+          h('div', { style: styles.stagingLabel },
+            h('h2', { style: styles.title }, tr('title')),
+            isStaging ? h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive')) : null),
+          h('p', { style: styles.intro }, tr('cloudIntro'))),
+        isStaging && !development
+          ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+            h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive')),
+            h(Button, {
+              variant: 'outline', size: 'sm', disabled: !!busy,
+              onClick: () => run('switchProfile', 'switch', productionProfileId ?? 'production'),
+            }, busy === 'switch' ? tr('cloudSwitching') : tr('cloudSwitchProduction')))
+          : null,
+        h('section', { style: styles.statusCard, 'aria-labelledby': `${fieldId}-state-title` },
+          h('div', { style: styles.connectionHeader },
+            h('div', { style: styles.statusHeader },
+              h('span', { style: { ...styles.statusIcon, color: state === 'connected' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' }, 'aria-hidden': true },
+                h(state === 'connected' ? IconCheckCircleOutlineRegular : IconWarningOutlineRegular, { size: 20 })),
+              h('div', {
+                style: styles.managedStateRegion,
+                id: `${fieldId}-state`,
+                role: 'status', 'aria-live': state === 'connected' ? 'polite' : 'assertive',
+                'aria-atomic': 'true', tabIndex: -1,
+              },
+                h('h3', { id: `${fieldId}-state-title`, style: { ...styles.statusTitle, margin: 0 } }, tr(`state_${state}`)),
+                h('p', { id: `${fieldId}-state-hint`, style: { ...styles.statusHint, margin: 0 } }, tr(`stateHint_${state}`)))),
+            h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+              showConnect ? h(Button, {
+                variant: 'primary', size: 'md', disabled: !!busy || pending,
+                'aria-describedby': `${fieldId}-state-hint`, onClick: start,
+              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr('cloudConnect') : tr('cloudTryAgain')) : null,
+              showRetry ? h(Button, {
+                variant: 'primary', size: 'md', disabled: !!busy || pending,
+                onClick: () => run('retry', 'retry'),
+              }, busy === 'retry' ? tr('state_requesting') : tr('cloudTryAgain')) : null,
+              showCancel ? h(Button, {
+                variant: 'outline', size: 'md', disabled: !!busy,
+                onClick: () => run('cancel', 'cancel'),
+              }, busy === 'cancel' ? tr('cloudCancelling') : tr('cloudCancel')) : null,
+              showDisconnect ? h(Button, {
+                variant: 'outline', size: 'md', disabled: !!busy,
+                onClick: () => run('disconnect', 'disconnect'),
+              }, busy === 'disconnect' ? tr('cloudDisconnecting') : tr('cloudDisconnect')) : null,
+              )),
+          !snapshot.available ? h('p', { style: styles.hint, role: 'status' }, tr('cloudStatusUnavailable')) : null,
+          pending ? h('p', { style: styles.hint, role: 'status' }, tr('cloudPending')) : null,
+          ['requesting', 'awaiting_approval'].includes(state) && approvalUrl
+            ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+              h('a', {
+                href: approvalUrl, target: '_blank', rel: 'noopener noreferrer',
+                style: styles.approvalLink, className: 'whalerein-approval-link',
+              }, tr('cloudOpenBrowser')),
+              browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
+            : null,
+          state === 'removing'
+            ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+              h('p', { style: styles.hint, role: 'status' }, tr('cloudConfirmationRequired')),
+              removalLink ? h('a', {
+                href: removalLink, target: '_blank', rel: 'noopener noreferrer',
+                style: styles.approvalLink, className: 'whalerein-approval-link',
+              }, tr('cloudOpenBrowser')) : null,
+              browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
+            : null,
+          actionError ? h('p', { style: styles.error, role: 'alert' }, tr(actionError)) : null),
+        h('section', { style: styles.details },
+          h(DisclosureRow, {
+            title: tr('cloudDetails'), icon: h(IconSettingsOutlineRegular, { size: 16 }),
+            headerAccessory: isStaging ? h(Tag, { tone: 'neutral' }, tr('cloudStagingActive')) : null,
+            open: detailsOpen, expandable: true, expandOnRowClick: true,
+            onToggle: () => setDetailsOpen((open) => !open),
+          }, h('div', { style: styles.form },
+            h('p', { style: styles.hint }, tr('cloudDetailsHint')),
+            h('dl', { style: { margin: 0 } }, detailRows.map(([label, value], index) =>
+              h('div', { key: `${label}-${index}`, style: styles.diagnosticRow, className: 'whalerein-diagnostic-row' },
+                h('dt', { style: { color: 'var(--dsw-alias-label-secondary)' } }, label),
+                h('dd', { style: styles.detailValue }, value)))),
+            detailsOpen ? h('div', { style: styles.managedActions },
+              h(Button, {
+                variant: 'ghost', size: 'sm', disabled: detailsLoading,
+                onClick: () => {
+                  setDetailsLoading(true)
+                  void connection.invoke('details').then((result) => {
+                    setDetails(result.ok && result.value && typeof result.value === 'object' ? result.value : null)
+                  }).finally(() => setDetailsLoading(false))
+                },
+              }, detailsLoading ? tr('loading') : tr('cloudDetailsRefresh'))) : null,
+            h('p', { style: styles.hint }, tr('cloudDisconnectHint')),
+            h('p', { style: styles.hint }, tr('cloudRemoveHint')),
+            h('div', { style: styles.managedActions },
+              showDisconnect ? h(Button, {
+                variant: 'outline', size: 'sm', disabled: !!busy,
+                onClick: () => run('disconnect', 'disconnect'),
+              }, tr('cloudDisconnect')) : null,
+              h(Button, {
+                variant: 'ghost', size: 'sm', style: styles.dangerAction,
+                disabled: !!busy || pending || state === 'removing' || state === 'removed',
+                onClick: remove,
+              }, busy === 'remove' ? tr('cloudRemoving') : tr('cloudRemove'))),
+            h('p', { style: styles.hint }, tr('cloudPairingManaged'))))),
+        h('section', { style: styles.details },
+          h(DisclosureRow, {
+            title: tr('cloudAdvanced'), icon: h(IconSlidersTwoOutlineRegular, { size: 16 }),
+            open: advancedOpen, expandable: true, expandOnRowClick: true,
+            onToggle: () => setAdvancedOpen((open) => !open),
+          }, h('div', { style: styles.form },
+            h('h4', { style: styles.codeLabel }, tr('cloudCustomService')),
+            h('p', { style: styles.hint }, tr('cloudCustomServiceHint')),
+            h('div', null,
+              h(Field, {
+                field: { key: 'custom_label', label: 'cloudCustomLabel', subtitle: 'cloudCustomServiceHint', kind: 'text' },
+                draft: { custom_label: customLabel }, t: tr,
+                onChange: (_key, value) => setCustomLabel(value),
+                id: `${fieldId}-custom-label`, disabled: !!busy, error: '',
+              }),
+              h(Field, {
+                field: { key: 'custom_origin', label: 'cloudCustomOrigin', subtitle: 'cloudCustomServiceHint', placeholder: 'cloudCustomOriginPlaceholder', kind: 'text' },
+                draft: { custom_origin: customOrigin }, t: tr,
+                onChange: (_key, value) => setCustomOrigin(value),
+                id: `${fieldId}-custom-origin`, disabled: !!busy, error: '',
+              })),
+            h('div', { style: styles.managedActions },
+              h(Button, {
+                variant: 'outline', size: 'sm', disabled: !!busy || customLabel.trim() === '' || customOrigin.trim() === '',
+                onClick: async () => {
+                  if (busy) return
+                  setBusy('custom')
+                  setActionError('')
+                  setCustomNotice('')
+                  const result = await connection.invoke('addCustomService', { label: customLabel.trim(), apiOrigin: customOrigin.trim() })
+                  if (result.ok) {
+                    setCustomNotice('cloudCustomServiceAdded')
+                    setCustomLabel('')
+                    setCustomOrigin('')
+                  } else {
+                    setActionError('cloudActionFailed')
+                  }
+                  await status.refresh?.()
+                  setBusy('')
+                },
+              }, busy === 'custom' ? tr('saving') : tr('cloudAddCustomService'))),
+            customNotice ? h('p', { style: styles.success, role: 'status' }, tr(customNotice)) : null,
+            h('h4', { style: styles.codeLabel }, tr('cloudProfiles')),
+            h('p', { style: styles.hint }, tr('cloudProfilesHint')),
+            h(ProfileRows, {
+              t: tr, profiles: snapshot.profiles, activeId: snapshot.profileId, pending,
+              busy: !!busy,
+              onDelete: async (id) => {
+                if (busy) return
+                setBusy('delete')
+                setActionError('')
+                setProfileNotice('')
+                const result = await connection.invoke('deleteProfile', id)
+                if (result.ok) setProfileNotice('cloudRemovedLocal')
+                else setActionError('cloudActionFailed')
+                await status.refresh?.()
+                setBusy('')
+              },
+            }),
+            h('p', { style: styles.hint }, tr('cloudDeleteHint')),
+            profileNotice ? h('p', { style: styles.success, role: 'status' }, tr(profileNotice)) : null))),
+        showDeveloperTools
+          ? h(DeveloperToolsSection, {
+            t: tr, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen,
+            setDeveloperOpen, onEnableStaging: enableStaging,
+            onSwitch: (id) => run('switchProfile', 'switch', id),
+          })
+          : null)
+    }
+
+    function DeveloperToolsSection({ t, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen, setDeveloperOpen, onEnableStaging, onSwitch }) {
+      return h('section', { style: styles.details },
+        h(DisclosureRow, {
+          title: t('cloudDeveloperTools'), icon: h(IconCodeOutlineRegular, { size: 16 }),
+          headerAccessory: h(Tag, { tone: 'quiet' }, t('debugOnly')),
+          open: developerOpen, expandable: true, expandOnRowClick: true,
+          onToggle: () => setDeveloperOpen((open) => !open),
+        }, h('div', { style: styles.form },
+          h('p', { style: styles.hint }, t('cloudDeveloperToolsHint')),
+          !snapshot.stagingEnabled
+            ? h(Button, {
+              variant: 'outline', size: 'sm', disabled: !!busy,
+              onClick: onEnableStaging,
+            }, busy === 'staging' ? t('cloudEnablingStaging') : t('cloudEnableStaging'))
+            : h('div', null,
+              h('p', { style: styles.hint }, t('cloudStagingNote')),
+              h('div', { style: styles.profileRow, className: 'whalerein-profile-row' },
+                h('div', { style: styles.profileCopy },
+                  h('div', { style: styles.profileName }, t('cloudStagingProfile')),
+                  h('div', { style: styles.deviceMeta }, isStaging ? t('cloudStagingActive') : t('cloudProduction'))),
+                isStaging
+                  ? h(Button, {
+                    variant: 'outline', size: 'sm', disabled: !!busy,
+                    onClick: () => onSwitch(productionProfileId ?? 'production'),
+                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudSwitchProduction'))
+                  : h(Button, {
+                    variant: 'primary', size: 'sm', disabled: !!busy || !stagingProfileId,
+                    onClick: () => onSwitch(stagingProfileId),
+                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudUseStaging')))))))
+    }
+
+    function SettingsPage(props) {
+      const [ready, setReady] = React.useState(() => props.status.getSnapshot().ready === true)
+      const [managed, setManaged] = React.useState(() => props.status.getSnapshot().managed === true)
+      React.useEffect(() => props.status.subscribe(() => {
+        const snapshot = props.status.getSnapshot()
+        setReady(snapshot.ready === true)
+        setManaged(snapshot.managed === true)
+      }), [props.status])
+      if (!ready) {
+        return h('div', { style: styles.page, className: 'whalerein-settings' },
+          h('style', null, css),
+          h('h2', { style: styles.title }, (props.t ?? ((key) => key))('title')),
+          h('p', { style: styles.intro }, (props.t ?? ((key) => key))('loading')))
+      }
+      return managed ? h(ManagedSettingsPage, props) : h(LegacySettingsPage, props)
+    }
+
     function createSecretPresence(remote) {
       let keys = new Set()
       const listeners = new Set()
@@ -959,8 +1679,30 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function cloudSnapshot(value) {
+      const text = (item, max = 200) => typeof item === 'string'
+        ? item.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max) : ''
+      return {
+        available: value.available === true,
+        managed: value.managed === true,
+        state: typeof value.state === 'string' ? value.state : 'action_required',
+        environment: ['production', 'staging', 'custom', 'standalone'].includes(value.environment)
+          ? value.environment : 'production',
+        profileId: text(value.profileId, 128),
+        label: text(value.label, 64),
+        hostName: text(value.hostName, 64),
+        stagingEnabled: value.stagingEnabled === true,
+        developerToolsEnabled: value.developerToolsEnabled === true,
+        approvalUrl: safeApprovalUrl(value.approvalUrl),
+        error: value.error && typeof value.error === 'object' ? { code: text(value.error.code, 64) } : null,
+        pendingOperation: value.pendingOperation === true,
+        profiles: Array.isArray(value.profiles) ? value.profiles.slice(0, 32) : [],
+        capabilities: Array.isArray(value.capabilities) ? value.capabilities.slice(0, 8) : [],
+      }
+    }
+
     function createStatusStore(remote) {
-      let snapshot = { available: false, connected: false, hostId: '', pairingCode: '', devices: [] }
+      let snapshot = { available: false, ready: false, managed: false, connected: false, hostId: '', pairingCode: '', devices: [] }
       let timer = null
       let disposed = false
       let running = false
@@ -984,6 +1726,7 @@ window.__ModuleLoader__.load({
             if (disposed) return
             if (result?.ok && result.value && typeof result.value === 'object') {
               publish({
+                ready: true,
                 available: result.value.available === true,
                 connected: result.value.connected === true,
                 hostId: typeof result.value.hostId === 'string' ? result.value.hostId : '',
@@ -991,14 +1734,15 @@ window.__ModuleLoader__.load({
                 devices: Array.isArray(result.value.devices) ? result.value.devices : [],
                 diagnostics: result.value.diagnostics ?? null,
                 configError: result.value.configError ?? null,
+                ...cloudSnapshot(result.value),
               })
             } else {
               // A transient read failure must not look like every device was
               // unpaired; keep the last known list and mark status unavailable.
-              publish({ ...snapshot, available: false })
+              publish({ ...snapshot, ready: true, available: false })
             }
           } catch {
-            if (!disposed) publish({ ...snapshot, available: false })
+            if (!disposed) publish({ ...snapshot, ready: true, available: false })
           } finally {
             running = false
             if (queued && !disposed) {
@@ -1035,6 +1779,31 @@ window.__ModuleLoader__.load({
         },
       }
     }
+
+    const jsonCodec = (typeSymbol) => ({
+      mode: 'strict', typeSymbol: `whalerein-dsh#${typeSymbol}`, create: () => ({ parse: (value) => value }),
+    })
+    const MANAGER_REMOTE_DESCRIPTORS = [
+      ['details', [], 'WhaleReinConnectionDetails'],
+      ['startConnect', [{ name: 'request', wire: 'request', source: 'json', codec: jsonCodec('ConnectionStartRequest') }], 'WhaleReinConnectionSnapshot'],
+      ['cancel', [], 'WhaleReinConnectionSnapshot'],
+      ['retry', [], 'WhaleReinConnectionSnapshot'],
+      ['disconnect', [], 'WhaleReinConnectionSnapshot'],
+      ['reconnect', [], 'WhaleReinConnectionSnapshot'],
+      ['remove', [], 'WhaleReinConnectionSnapshot'],
+      ['switchProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
+      ['enableStaging', [], 'WhaleReinConnectionSnapshot'],
+      ['addCustomService', [{ name: 'value', wire: 'value', source: 'json', codec: jsonCodec('CustomService') }], 'WhaleReinConnectionSnapshot'],
+      ['deleteProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
+    ].map(([method, parameters, typeSymbol]) => ({
+      id: `whalerein-dsh#whalerein/${method}`,
+      service: 'whalereinSettings',
+      namespace: 'whalerein',
+      method,
+      invocation: { kind: 'direct' },
+      parameters,
+      result: { mode: 'strict', typeSymbol: `whalerein-dsh#${typeSymbol}`, create: () => ({ parse: (value) => value }) },
+    }))
 
     const REMOTE_CONTRIBUTION = {
       package: 'whalerein-dsh',
@@ -1090,7 +1859,7 @@ window.__ModuleLoader__.load({
           mode: 'strict', typeSymbol: 'whalerein-dsh#ConnectionTestDraft', create: () => ({ parse: (value) => value }),
         } }],
         result: { mode: 'strict', typeSymbol: 'whalerein-dsh#ConnectionTestResult', create: () => ({ parse: (value) => value }) },
-      }],
+      }, ...MANAGER_REMOTE_DESCRIPTORS],
     }
 
     return {
@@ -1118,7 +1887,10 @@ window.__ModuleLoader__.load({
                 order: 35,
                 label: () => t('nav'),
                 locale: NS,
-                inject: () => ({ form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection }),
+                inject: () => ({
+                  form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection,
+                  connection: createConnectionActions(injected.remote),
+                }),
               },
               SettingsPage,
             ),
@@ -1128,7 +1900,10 @@ window.__ModuleLoader__.load({
               { name: 'plugins.row.config', key: 'whalerein-dsh#whalerein-dsh', locale: NS },
               ({ view }) => view === 'summary'
                 ? h('span', null, t('intro'))
-                : h(SettingsPage, { t, form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection }),
+                : h(SettingsPage, {
+                  t, form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection,
+                  connection: createConnectionActions(injected.remote),
+                }),
             ),
           )
         })

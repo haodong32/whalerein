@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveConfig, validateTopicId, topics, ConfigError } from '../src/config.js'
+import {
+  resolveConfig, resolveConnectionMode, resolveManagerConfig, hasStandaloneConfig,
+  validateTopicId, topics, ConfigError,
+} from '../src/config.js'
 
 const base = {
   mqtt_url: 'mqtts://broker.example:8883',
@@ -196,4 +199,70 @@ test('every documented profile key materializes through the shipped Config schem
   assert.equal(config.protoPath, '/tmp/descriptor.json')
   assert.equal(resolveConfig(base).eventBatchMs, 20)
   assert.throws(() => resolveConfig({ ...base, event_batch_ms: 0 }), ConfigError)
+})
+
+
+test('auto mode preserves existing manual profiles and selects managed only for a fresh profile', () => {
+  assert.equal(resolveConnectionMode({}), 'managed')
+  assert.equal(resolveConnectionMode({ host_id: 'host-1' }), 'managed')
+  assert.equal(hasStandaloneConfig({}), false)
+  assert.equal(resolveConnectionMode({ server: 'access.example' }), 'standalone')
+  assert.equal(resolveConnectionMode({ mqtt_url: 'mqtts://broker.example:8883' }), 'standalone')
+  assert.equal(resolveConnectionMode({ host_token: 'token' }), 'standalone')
+  assert.equal(resolveConnectionMode({ connection_mode: 'managed', server: 'access.example' }), 'managed')
+  assert.equal(resolveConnectionMode({ connection_mode: 'standalone' }), 'standalone')
+  assert.throws(() => resolveConnectionMode({ connection_mode: 'cloud' }), (error) => error.code === 'invalid_config')
+})
+
+test('managed options validate a state root, opaque selected profile and developer tools without connection secrets', () => {
+  const defaults = resolveManagerConfig({})
+  assert.equal(defaults.connectionMode, 'managed')
+  assert.equal(defaults.profileId, '')
+  assert.equal(defaults.developerToolsEnabled, false)
+  assert.ok(defaults.stateRoot.endsWith('/.whalerein/dsh'))
+  const configured = resolveManagerConfig({
+    state_root: '/var/lib/whalerein',
+    profile_id: 'profile-1',
+    developer_tools_enabled: true,
+    adapter: 'fake',
+    log_level: 'debug',
+  })
+  assert.equal(configured.stateRoot, '/var/lib/whalerein')
+  assert.equal(configured.stateDir, '/var/lib/whalerein')
+  assert.equal(configured.profileId, 'profile-1')
+  assert.equal(configured.developerToolsEnabled, true)
+  assert.equal(configured.adapter, 'fake')
+  assert.equal(configured.logLevel, 'debug')
+  assert.throws(() => resolveManagerConfig({ state_root: 'bad\0path' }), ConfigError)
+  assert.equal(resolveManagerConfig({ state_root: '' }).stateRoot, resolveManagerConfig({}).stateRoot)
+  assert.throws(() => resolveManagerConfig({ profile_id: 'bad id' }), ConfigError)
+  assert.throws(() => resolveManagerConfig({ profile_id: 'a'.repeat(129) }), ConfigError)
+  assert.throws(() => resolveManagerConfig({ adapter: 'cloud' }), ConfigError)
+  assert.throws(() => resolveManagerConfig({ developer_tools_enabled: 'maybe' }), ConfigError)
+  assert.equal(resolveManagerConfig({ state_root: '  /tmp/state  ' }).stateRoot, '/tmp/state')
+  assert.equal(resolveManagerConfig({ state_dir: '/tmp/legacy-state' }).stateRoot, '/tmp/legacy-state')
+})
+
+test('standalone configuration carries the additive manager options without changing existing values', () => {
+  const config = resolveConfig({
+    ...base,
+    state_root: '/tmp/root',
+    profile_id: 'profile-1',
+    developer_tools_enabled: true,
+  })
+  assert.equal(config.connectionMode, 'standalone')
+  assert.equal(config.stateRoot, '/tmp/root')
+  assert.equal(config.profileId, 'profile-1')
+  assert.equal(config.developerToolsEnabled, true)
+  assert.equal(resolveConfig(base).connectionMode, 'standalone')
+  assert.equal(resolveConfig(base).developerToolsEnabled, false)
+})
+
+test('the managed config accepts one pinned issuer key and issuer origin', () => {
+  const publicKey = Buffer.alloc(32, 7).toString('base64url')
+  const resolved = resolveManagerConfig({ enrollment_issuer_public_key: publicKey, enrollment_issuer: 'https://issuer.example' })
+  assert.equal(resolved.issuerPublicKey, publicKey)
+  assert.equal(resolved.expectedIssuer, 'https://issuer.example')
+  assert.throws(() => resolveManagerConfig({ enrollment_issuer_public_key: 'not-a-key' }), (error) => error.code === 'invalid_config')
+  assert.throws(() => resolveManagerConfig({ enrollment_issuer: 'issuer' }), (error) => error.code === 'invalid_config')
 })

@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/external"
@@ -17,13 +20,21 @@ import (
 
 // fakeExternal scripts the external account service boundary.
 type fakeExternal struct {
-	enrollResponse *whalereinv1.HostEnrollmentResponse
-	enrollErr      error
-	statusResponse *whalereinv1.HostEnrollmentStatus
-	statusErr      error
-	operation      *whalereinv1.OperationStatus
-	operationErr   error
-	lastHost       string
+	enrollResponse    *whalereinv1.HostEnrollmentResponse
+	enrollErr         error
+	statusResponse    *whalereinv1.HostEnrollmentStatus
+	statusErr         error
+	hostStatus        *whalereinv1.HostEnrollmentStatus
+	hostStatusErr     error
+	operation         *whalereinv1.OperationStatus
+	operationErr      error
+	disabledAt        time.Time
+	disableErr        error
+	replacement       *external.CredentialReplacement
+	recoveryErr       error
+	lastHost          string
+	lastProof         external.HostOwnershipProof
+	lastAuthorization *whalereinv1.ExternalAuthorization
 }
 
 func (f *fakeExternal) EnrollHost(context.Context, *whalereinv1.HostEnrollmentRequest) (*whalereinv1.HostEnrollmentResponse, error) {
@@ -35,8 +46,26 @@ func (f *fakeExternal) EnrollmentStatus(_ context.Context, hostID string) (*whal
 	return f.statusResponse, f.statusErr
 }
 
+func (f *fakeExternal) EnrollmentStatusForHost(_ context.Context, hostID string, proof external.HostOwnershipProof) (*whalereinv1.HostEnrollmentStatus, error) {
+	f.lastHost = hostID
+	f.lastProof = proof
+	return f.hostStatus, f.hostStatusErr
+}
+
 func (f *fakeExternal) OperationStatus(context.Context, string) (*whalereinv1.OperationStatus, error) {
 	return f.operation, f.operationErr
+}
+
+func (f *fakeExternal) DisableHost(_ context.Context, hostID string) (time.Time, error) {
+	f.lastHost = hostID
+	return f.disabledAt, f.disableErr
+}
+
+func (f *fakeExternal) RecoverCredential(_ context.Context, hostID string, authorization *whalereinv1.ExternalAuthorization, proof external.HostOwnershipProof) (*external.CredentialReplacement, error) {
+	f.lastHost = hostID
+	f.lastAuthorization = authorization
+	f.lastProof = proof
+	return f.replacement, f.recoveryErr
 }
 
 // newExternalFixture builds a server with external mode enabled.
@@ -167,4 +196,160 @@ func TestExternalRoutesReportAnExplicitCapabilityErrorWithoutTheMode(t *testing.
 	// A mistyped path stays a plain 404 so the two conditions differ.
 	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/enrollment", nil, nil)
 	assertError(t, recorder, http.StatusNotFound, whalereinv1.ErrorCode_not_found)
+}
+
+func hostProofHeader(t *testing.T, hostID string) string {
+	t.Helper()
+	document := map[string]any{
+		"hostId":    hostID,
+		"issuedAt":  time.Now().UTC().UnixMilli(),
+		"nonce":     "bm9uY2U",
+		"signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func TestHostEnrollmentProofStatusRequiresAHostProof(t *testing.T) {
+	fake := &fakeExternal{hostStatus: &whalereinv1.HostEnrollmentStatus{
+		HostId: "host-1", EnrollmentRevision: "2", OperationId: "op-1",
+		State: whalereinv1.EnrollmentState_enrollment_ready,
+	}}
+	server := newExternalFixture(t, fake)
+	headers := map[string]string{HostProofHeader: hostProofHeader(t, "host-1")}
+
+	recorder := doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/hosts/host-1/enrollment", nil, nil)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("a bare host id must be unauthorized, got %d", recorder.Code)
+	}
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{adminHeaderName: "Bearer admin-token"})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("the admin bearer must not replace the Host proof, got %d", recorder.Code)
+	}
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{HostProofHeader: "%%%"})
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("a malformed proof must be forbidden, got %d", recorder.Code)
+	}
+	recorder = doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/hosts/host-1/enrollment", nil, headers)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("a valid proof must read the status, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if fake.lastProof.HostID != "host-1" {
+		t.Fatalf("the proof was not passed through: %+v", fake.lastProof)
+	}
+	decoded := &whalereinv1.HostEnrollmentStatus{}
+	if err := protojson.Unmarshal(recorder.Body.Bytes(), decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GetState() != whalereinv1.EnrollmentState_enrollment_ready || decoded.GetEnrollmentRevision() != "2" {
+		t.Fatalf("unexpected status %+v", decoded)
+	}
+}
+
+func TestHostDisableRequiresTheAdminBearerAndIsIdempotent(t *testing.T) {
+	disabledAt := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	fake := &fakeExternal{disabledAt: disabledAt}
+	server := newExternalFixture(t, fake)
+	path := "/v1/enrollments/hosts/host-1/disable"
+
+	recorder := doRequest(t, server.PublicHandler(), http.MethodPost, path, nil, nil)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without the admin bearer, got %d", recorder.Code)
+	}
+	recorder = doRequest(t, server.PublicHandler(), http.MethodPost, path, nil,
+		map[string]string{adminHeaderName: "Bearer wrong"})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a wrong admin bearer, got %d", recorder.Code)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		recorder = doRequest(t, server.PublicHandler(), http.MethodPost, path, nil,
+			map[string]string{adminHeaderName: "Bearer admin-token"})
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("attempt %d: expected 200, got %d: %s", attempt, recorder.Code, recorder.Body.String())
+		}
+		var body struct {
+			State      string `json:"state"`
+			DisabledAt string `json:"disabledAt"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.State != "disabled" || body.DisabledAt != disabledAt.Format(time.RFC3339) {
+			t.Fatalf("attempt %d: unexpected body %+v", attempt, body)
+		}
+	}
+}
+
+func TestCredentialReplacementReturnsTheCredentialOnlyOnce(t *testing.T) {
+	fake := &fakeExternal{replacement: &external.CredentialReplacement{
+		Credential: external.IssuedCredential{
+			HostID: "host-1", MQTTURL: "mqtts://broker.test:8883",
+			Username: "host:host-1", Password: "new-secret",
+		},
+		State: "enrollment_ready", Revision: "2",
+	}}
+	server := newExternalFixture(t, fake)
+	authorization := &whalereinv1.ExternalAuthorization{
+		AuthorizationId: "auth-recover-1", Purpose: external.PurposeHostCredentialRecovery,
+		HostId: "host-1", WorkspaceId: "ws-1", EnrollmentRevision: "2",
+	}
+	body, err := json.Marshal(map[string]any{"authorization": authorization})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/enrollments/hosts/host-1/credential"
+	headers := map[string]string{
+		HostProofHeader: hostProofHeader(t, "host-1"),
+		"Content-Type":  "application/json",
+	}
+	// A bare id without the proof is refused before any authorization work.
+	recorder := doRequest(t, server.PublicHandler(), http.MethodPost, path, body,
+		map[string]string{"Content-Type": "application/json"})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("a bare id must be unauthorized, got %d", recorder.Code)
+	}
+	recorder = doRequest(t, server.PublicHandler(), http.MethodPost, path, body, headers)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Credential struct {
+			HostID   string `json:"hostId"`
+			MQTTURL  string `json:"mqttUrl"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"credential"`
+		State    string `json:"state"`
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Credential.Password != "new-secret" || response.Credential.Username != "host:host-1" {
+		t.Fatalf("unexpected credential %+v", response.Credential)
+	}
+	if response.State != "enrollment_ready" || response.Revision != "2" {
+		t.Fatalf("unexpected replacement metadata %+v", response)
+	}
+	if fake.lastAuthorization.GetAuthorizationId() != "auth-recover-1" {
+		t.Fatalf("the authorization was not passed through: %+v", fake.lastAuthorization)
+	}
+}
+
+func TestNewExternalRoutesReportAnExplicitCapabilityErrorWithoutTheMode(t *testing.T) {
+	server := newAPIFixture(t).server
+	recorder := doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
+		map[string]string{HostProofHeader: hostProofHeader(t, "host-1")})
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
+	recorder = doRequest(t, server.PublicHandler(), http.MethodPost, "/v1/enrollments/hosts/host-1/disable", nil,
+		map[string]string{adminHeaderName: "Bearer admin-token"})
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
+	recorder = doRequest(t, server.PublicHandler(), http.MethodPost, "/v1/enrollments/hosts/host-1/credential", nil,
+		map[string]string{HostProofHeader: hostProofHeader(t, "host-1")})
+	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
 }
