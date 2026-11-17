@@ -140,7 +140,7 @@ pub async fn run(cli: Cli) -> CliOutcome {
             return CliOutcome::local_failure(&command, error.code.as_str(), error.message, 2)
         }
     };
-    run_with_signal(cli, secrets, crate::signal::interrupt()).await
+    run_with_signal(cli, secrets, crate::signal::registered_interrupt()).await
 }
 
 /// Keep in-process CLI tests away from the developer's real default config.
@@ -165,7 +165,7 @@ fn isolate_test_config() {
 /// Injectable variant used by tests. The only injected boundary is SecretStore.
 #[allow(dead_code)]
 pub(crate) async fn run_with(cli: Cli, secrets: Arc<dyn SecretStore>) -> CliOutcome {
-    run_with_signal(cli, secrets, crate::signal::interrupt()).await
+    run_with_signal(cli, secrets, crate::signal::registered_interrupt()).await
 }
 
 /// Dispatch with an injectable interrupt future so tests can prove the
