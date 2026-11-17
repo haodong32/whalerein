@@ -143,7 +143,9 @@ installs this checkout, registers the bundle and starts DSH with `--no-open`.
 Fresh profiles use Cloud production and a profile-specific state directory under
 `.data/dsh/<profile>`. Existing entries and paths are preserved. An explicit
 `--cloud-environment` updates only that scalar; it never rewrites custom fields,
-secrets or sibling entries, and does not change a selected custom/Standalone
+secrets or sibling entries. Unrecognized entry layouts are preserved on ordinary
+starts and refused for scalar overrides; duplicate target entries are rejected.
+The Cloud override does not change a selected custom/Standalone
 service. Dry-run validates and prints only non-secret connection scalars, with no
 filesystem writes. The normal `web` profile is untouched. The launcher does not
 start Access, PostgreSQL or Mosquitto.

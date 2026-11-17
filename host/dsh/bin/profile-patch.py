@@ -18,7 +18,15 @@ ENTRY = re.compile(r"^- id: ['\"]?whalerein-dsh['\"]?\s*$")
 
 def update(text: str, state: str, service: str | None, cloud: str | None) -> str:
     lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if ENTRY.fullmatch(line)), None)
+    entries = [i for i, line in enumerate(lines) if ENTRY.fullmatch(line)]
+    targets = re.findall(r'''^\s*(?:-\s*)?id:\s*['"]?whalerein-dsh['"]?\s*(?:#.*)?$''', text, re.MULTILINE)
+    if len(targets) > 1:
+        raise ValueError('duplicate WhaleRein entries must be repaired before editing')
+    start = entries[0] if entries else None
+    if start is None and targets:
+        if service is None and cloud is None:
+            return text
+        raise ValueError('unsupported WhaleRein entry layout; refusing to append a duplicate')
     if start is None:
         if all(not line.strip() or line.lstrip().startswith('#') or line.strip() == '[]' for line in lines):
             lines = [line for line in lines if line.strip() != '[]']

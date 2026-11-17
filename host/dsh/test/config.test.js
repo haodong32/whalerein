@@ -260,3 +260,10 @@ test('the DSH adapter keeps no catalog, descriptor loader or TOML writer', async
   assert.equal(config.includes('app.whalerein'), false)
   assert.equal(config.includes('staging.whalerein'), false)
 })
+
+test('the Standalone runtime resolver refuses another explicitly selected service', () => {
+  for (const service of ['whalerein_cloud', 'custom', 'invalid']) {
+    assert.throws(() => resolveConfig({ ...base, service }), { code: 'invalid_config' })
+  }
+  assert.equal(resolveConfig({ ...base, service: 'standalone' }).connectionMode, 'standalone')
+})

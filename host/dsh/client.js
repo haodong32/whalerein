@@ -154,7 +154,7 @@ window.__ModuleLoader__.load({
       customClient: 'Native client ID',
       customCaProvider: 'CA provider',
       customCaFile: 'CA file (absolute path)',
-      cloudIntro: 'Connect this computer to WhaleRein Cloud and approve it in your browser. Account sign-in stays in the browser.',
+      cloudIntro: 'Connect this computer to the selected service and approve it in your browser. Account sign-in stays in the browser.',
       cloudConnect: 'Connect to WhaleRein Cloud',
       cloudCancel: 'Cancel',
       cloudCancelling: 'Cancelling…',
@@ -182,7 +182,7 @@ window.__ModuleLoader__.load({
       state_action_required: 'Action required',
       state_removing: 'Removing this computer…',
       state_removed: 'This computer was removed',
-      stateHint_idle: 'Connect this computer to WhaleRein Cloud. Browser approval starts only after you choose Connect.',
+      stateHint_idle: 'Connect this computer to the selected service. Browser approval starts only after you choose Connect.',
       stateHint_requesting: 'Preparing a secure connection request. Do not close this page.',
       stateHint_awaiting_approval: 'Approve this computer in the browser tab we opened. Keep this page open.',
       stateHint_enrolling: 'Approval received. Establishing this computer’s connection.',
@@ -360,7 +360,7 @@ window.__ModuleLoader__.load({
       customClient: '客户端 ID',
       customCaProvider: 'CA 来源',
       customCaFile: 'CA 文件绝对路径',
-      cloudIntro: '将这台电脑连接到 WhaleRein Cloud，并在浏览器中授权。账号登录始终留在浏览器中。',
+      cloudIntro: '将这台电脑连接到所选服务，并在浏览器中授权。账号登录始终留在浏览器中。',
       cloudConnect: '连接到 WhaleRein Cloud',
       cloudCancel: '取消',
       cloudCancelling: '正在取消…',
@@ -388,7 +388,7 @@ window.__ModuleLoader__.load({
       state_action_required: '需要处理',
       state_removing: '正在移除这台电脑…',
       state_removed: '这台电脑已被移除',
-      stateHint_idle: '连接这台电脑到 WhaleRein Cloud。只有选择“连接”后才会开始浏览器授权。',
+      stateHint_idle: '连接这台电脑到所选服务。只有选择“连接”后才会开始浏览器授权。',
       stateHint_requesting: '正在准备安全的连接请求，请不要关闭此页面。',
       stateHint_awaiting_approval: '请在我们打开的浏览器标签页中授权这台电脑，并保持此页面打开。',
       stateHint_enrolling: '已收到授权，正在建立这台电脑的连接。',
@@ -431,7 +431,7 @@ window.__ModuleLoader__.load({
       cloudStagingActive: 'Staging',
       cloudProduction: '生产环境',
       cloudCustom: '自定义',
-      cloudPairingManaged: '此连接的设备配对由 WhaleRein Cloud 管理。',
+      cloudPairingManaged: '此连接的设备配对由所选服务管理。',
       cloudDisconnectHint: '断开连接只会在本地暂停这台电脑，云端注册仍保留，无需重新授权即可连接。',
       cloudRemoveHint: '移除这台电脑需要新的浏览器授权。在服务执行完成前，状态会一直显示“正在移除”。',
       cloudLocalOnly: '本地操作',
@@ -1221,7 +1221,7 @@ window.__ModuleLoader__.load({
       return typeof code === 'string' ? (ERROR_HINT_KEYS[code] ?? '') : ''
     }
 
-    function ManagedSettingsPage({ t, form, status, connection, locale: localeService }) {
+    function ManagedSettingsPage({ t, status, connection, locale: localeService }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => status.getSnapshot())
       const [busy, setBusy] = React.useState('')
@@ -1387,7 +1387,7 @@ window.__ModuleLoader__.load({
               showConnect ? h(Button, {
                 variant: 'primary', size: 'md', disabled: !!busy || pending,
                 'aria-describedby': `${fieldId}-state-hint`, onClick: start,
-              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr(form.getSnapshot().value?.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
+              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
               showRetry ? h(Button, {
                 variant: 'primary', size: 'md', disabled: !!busy || pending,
                 onClick: () => run('retry', 'retry'),
@@ -1464,6 +1464,8 @@ window.__ModuleLoader__.load({
     function ServiceSettings({ form, status, t }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => form.getSnapshot())
+      const [runningService, setRunningService] = React.useState(() => status.getSnapshot().service)
+      React.useEffect(() => status.subscribe(() => setRunningService(status.getSnapshot().service)), [status])
       const [draft, setDraft] = React.useState(() => ({
         service: form.getSnapshot().value?.service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone'),
         custom: form.getSnapshot().value?.custom ?? {},
@@ -1508,11 +1510,17 @@ window.__ModuleLoader__.load({
             const api = new URL(draft.custom.api_origin)
             const issuer = new URL(draft.custom.issuer)
             const provider = draft.custom.tls?.ca_provider || 'system'
-            if (api.protocol !== 'https:' || api.pathname !== '/' || api.search || api.hash || api.username || api.password
+            const label = draft.custom.label ?? ''
+            const clientId = draft.custom.native_client_id
+            const caFile = draft.custom.tls?.ca_file ?? ''
+            if (draft.custom.api_origin !== draft.custom.api_origin.trim() || draft.custom.issuer !== draft.custom.issuer.trim()
+              || typeof label !== 'string' || label !== label.trim() || label.length > 64 || /[\x00-\x1f\x7f]/.test(label)
+              || typeof clientId !== 'string' || !clientId || clientId.length > 256 || /[\s\x00-\x1f\x7f]/.test(clientId)
+              || api.protocol !== 'https:' || api.pathname !== '/' || api.search || api.hash || api.username || api.password
               || issuer.protocol !== 'https:' || issuer.search || issuer.hash || issuer.username || issuer.password
-              || api.origin === issuer.origin || !draft.custom.native_client_id?.trim()
+              || api.origin === issuer.origin
               || !['system', 'file'].includes(provider)
-              || (provider === 'file' && !draft.custom.tls?.ca_file?.trim())) throw new Error('invalid')
+              || (provider === 'file' && (typeof caFile !== 'string' || !/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(caFile) || caFile.includes('\0')))) throw new Error('invalid')
           } catch { setAdvanced(true); setNotice('serviceInvalid'); return }
         }
         savingRef.current = true
@@ -1544,7 +1552,7 @@ window.__ModuleLoader__.load({
       return h('section', { style: styles.form },
         h('style', null, css),
         h('p', { style: styles.hint }, tr('serviceReloadHint')),
-        h('p', { style: styles.hint }, `${tr('serviceCurrent')}: ${labels[status.getSnapshot().service || (status.getSnapshot().managed ? 'whalerein_cloud' : 'standalone')]}`),
+        h('p', { style: styles.hint }, `${tr('serviceCurrent')}: ${labels[runningService]}`),
         h('div', { style: styles.fieldRow, className: 'whalerein-field-row' },
           h('span', null, tr('serviceLabel')),
           h(Menu, {

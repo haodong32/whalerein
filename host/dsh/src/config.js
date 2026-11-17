@@ -132,6 +132,9 @@ function derivedEndpoints(server, insecure, accessPort, mqttPort) {
  */
 export function resolveConfig(raw = {}) {
   validateProfileKeys(raw)
+  if (raw.service !== undefined && raw.service !== 'standalone') {
+    throw new ConfigError('invalid_config', 'service must be standalone for this runtime')
+  }
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')

@@ -104,3 +104,23 @@ test('profile updates reject ambiguous config blocks and duplicate connection fi
     assert.equal(readFileSync(file, 'utf8'), initial)
   }
 })
+
+test('profile helper never appends another identity for reordered or duplicate target entries', (t) => {
+  if (!hasPython) return t.skip('python3 is unavailable on this platform')
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-profile-shape-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'cordis.patch.yml')
+  for (const [initial, expectedStatus] of [
+    ['- name: whalerein-dsh\n  id: whalerein-dsh\n  config:\n    service: custom\n', 0],
+    ['- id: whalerein-dsh # keep\n  config:\n    service: custom\n', 0],
+    ['- id: whalerein-dsh\n  config: {}\n- id: whalerein-dsh\n  config: {}\n', 2],
+  ]) {
+    writeFileSync(file, initial)
+    const result = spawnSync('python3', [helper, file], { encoding: 'utf8' })
+    assert.equal(result.status, expectedStatus)
+    assert.equal(readFileSync(file, 'utf8'), initial)
+    const override = spawnSync('python3', [helper, file, '--cloud-environment', 'staging'], { encoding: 'utf8' })
+    assert.notEqual(override.status, 0)
+    assert.equal(readFileSync(file, 'utf8'), initial)
+  }
+})

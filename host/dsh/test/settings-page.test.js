@@ -1909,3 +1909,40 @@ test('disconnect stays a local pause and removal remains gated throughout its li
     assert.equal(runtime.calls.some(([method]) => method === 'removeComputer'), false)
   } finally { await runtime.dispose() }
 })
+
+test('managed connect labeling follows the running service until the plugin reloads', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), value: { service: 'custom' } })
+    assert.ok(managedButton(runtime, '连接到 WhaleRein Cloud'))
+    assert.equal(managedButton(runtime, '连接自定义服务'), undefined)
+    runtime.setCloudState('idle', { service: 'custom' })
+    await runtime.refresh()
+    assert.ok(managedButton(runtime, '连接自定义服务'))
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud'), undefined)
+    assert.match(text(runtime.render()), /所选服务/)
+    assert.match(text(runtime.render()), /当前运行连接: 自定义服务/)
+  } finally { await runtime.dispose() }
+})
+
+test('invalid custom account and trust drafts cannot be persisted from the editor', async () => {
+  const { customConfiguration } = await import('../src/service-config.js')
+  const runtime = await createManagedRuntime()
+  const valid = { label: 'Example', api_origin: 'https://app.example', issuer: 'https://auth.example/oidc', native_client_id: 'client' }
+  try {
+    for (const change of [
+      { api_origin: ' https://app.example' }, { issuer: 'https://auth.example/oidc ' },
+      { native_client_id: 'bad id' }, { native_client_id: 'x'.repeat(257) },
+      { label: ' bad label' }, { label: 'x'.repeat(65) }, { label: 'bad\nlabel' },
+      { tls: { ca_provider: 'file', ca_file: 'relative.pem' } },
+      { tls: { ca_provider: 'file', ca_file: '/tmp/invalid\0.pem' } },
+    ]) {
+      const custom = { ...valid, ...change }
+      assert.throws(() => customConfiguration(custom), { code: 'invalid_config' })
+      runtime.setFormSnapshot({ ...runtime.form.getSnapshot(), value: { service: 'custom', custom } })
+      await managedButton(runtime, '保存连接配置').props.onClick()
+      assert.match(text(runtime.render()), /请补全自定义服务参数/)
+      assert.deepEqual(runtime.mutations, [])
+    }
+  } finally { await runtime.dispose() }
+})
