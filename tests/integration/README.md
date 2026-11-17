@@ -9,7 +9,9 @@ compilers or development services. See the [testing policy](../../docs/testing.m
 ## Run
 
 The full container suite is slow and runs only when explicitly selected.
-Routine iteration should use focused unit tests.
+Use focused unit tests during iteration, then select the integration group that
+exercises the changed behavior. Follow the [staged validation policy](../../docs/testing.md#choose-checks-for-a-change)
+when expanding scope or repeating a run; directory count is not a test selector.
 
 ```bash
 ./repo test --suite integration

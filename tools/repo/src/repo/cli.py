@@ -55,7 +55,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   ./repo check --project core
-  ./repo test --project repo --coverage
+  ./repo test --project core --only reconnect
   ./repo test --suite integration --group protocol
   ./repo doctor --for test
 
@@ -86,8 +86,8 @@ Full reference: tools/repo/README.md""",
         "check": "  ./repo check\n  ./repo check --project repo",
         "build": "  ./repo build\n  ./repo build --project access",
         "test": (
-            "  ./repo test --project core\n"
             "  ./repo test --project core --only reconnect\n"
+            "  ./repo test --project core --coverage\n"
             "  ./repo test --project core --list\n"
             "  ./repo test --project repo --coverage\n"
             "  ./repo test --suite integration --group protocol\n"
@@ -111,6 +111,10 @@ Full reference: tools/repo/README.md""",
         notes = ""
         if name == "test":
             notes = (
+                "Iteration: select a project and matching --only cases; defer coverage.\n"
+                "Final validation: run affected-project coverage once after the final edit.\n"
+                "Bare test selects all unit projects. Integration scope follows changed behavior.\n"
+                "Startup reports scope and advisory historical wall time; it never skips tests.\n\n"
                 "Selection rules:\n"
                 "  --project is unit-only; --group is integration-only.\n"
                 "  Unit --only requires exactly one project; --only cannot use suite all.\n"

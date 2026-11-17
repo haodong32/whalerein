@@ -481,9 +481,9 @@ revocations and reconciling uncertain commands; it is not DNS failover alone.
 | 4. Later: multi-instance hosting | API/relay deployment roles, readiness/draining, relay fencing, credential rotation and controlled rollout/rollback. | Multi-API admission, paused-old-relay takeover, broker reconnect and rolling replacement preserve revocation gates and outcome recovery. |
 | 5. Later: regional automation | Independent stacks, infrastructure automation, directory routing, usage ingestion and recovery procedures. | Regions operate independently within policy validity; lost/duplicate/out-of-order updates reconcile without cross-region access. |
 
-For each slice run affected unit tests and package coverage gates. Protocol
-changes require binding checks and protocol integration; cross-component and
-recovery changes require full integration under the repository testing policy.
+For each slice use staged affected-project validation and final package coverage
+gates. Select integration groups by the changed protocol, persistence, transport
+or recovery behavior under the [testing policy](../testing.md#choose-checks-for-a-change).
 Production TLS, service certificate rotation, real broker administration and
 infrastructure replacement require deployment acceptance. These are future gates,
 not verification claims for this design document.
