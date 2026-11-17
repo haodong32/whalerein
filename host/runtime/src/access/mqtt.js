@@ -161,7 +161,21 @@ export class MqttAccess {
       options.ca = this.ca
       options.rejectUnauthorized = true
     }
+    // A deployment that shares 443 between HTTPS and MQTT routes the TLS
+    // connection by ALPN. Only offer the MQTT protocol on that explicit port;
+    // a normal mqtts://host:8883 deployment keeps a plain TLS handshake.
+    if (this.#alpnProtocols()) options.ALPNProtocols = this.#alpnProtocols()
     return options
+  }
+
+  #alpnProtocols() {
+    try {
+      const url = new URL(this.url)
+      if (url.protocol === 'mqtts:' && url.port === '443') return ['mqtt']
+    } catch {
+      // The URL was validated when the credential was accepted.
+    }
+    return null
   }
 
   #connect() {
