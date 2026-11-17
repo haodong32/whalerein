@@ -55,16 +55,31 @@ include DSH. Rust/Node root manifests and lockfiles select their ecosystem;
 protocol, fixtures, shared tooling, workflow, deployment and integration changes
 select all projects. Selection changes do not change local `./repo test` defaults.
 
-CI runs selected Rust, Go, Node and Python groups in parallel. Projects within
-each group run sequentially; Rust coverage cleanup must not race another Rust
-project in the same checkout. Each group installs only its required toolchains,
-checks supported operations and saves its own coverage reports as an artifact.
-The `CI gate` job requires all selected groups to pass, including on retries.
+The push workflow runs independent Rust, Go, Node and Python quick jobs in
+parallel, without a preceding selection job. Each job selects affected projects
+before installing toolchains. Rust only checks formatting; Go, Node and Python
+run checks and unit tests without coverage or a separate build. These are partial
+iteration checks, not evidence of Rust compilation, platform behavior or coverage.
+Three minutes is the quick-job performance target, including setup and report
+upload but excluding runner queueing. A final timing step emits a warning after
+completion if a job exceeds the target; elapsed time alone does not change test
+success. Quick jobs, the final gate and lightweight iOS decision/gate jobs have
+ten-minute safety timeouts to stop stuck runs. Test failures and safety timeouts
+still fail the checks. Superseded push runs are cancelled.
+
+The separate `full-ci.yml` runs on the `run-full-ci` label event, manual dispatch,
+main pushes, merge queue and nightly schedule. Leaving the label attached does
+not rerun heavy jobs on later pushes. Full verification runs checks, supported
+builds and unit coverage, plus deployment acceptance when `access` is selected
+and protocol contracts when `proto` is selected. Protocol generation is checked
+once in the contract job rather than again in the Node job. `Full CI gate` requires every selected job; it is distinct
+from the required quick `CI gate`.
 
 Affected Rust projects additionally run on `macos-15` and `windows-2025` native
-runners, with their own checks, builds and per-crate coverage gates. The native
-matrix uses the same project inventory and consumer expansion as Linux; a
-non-Rust change does not schedule it. Native job failures block `CI gate`.
+runners, with checks, builds and per-crate coverage gates. The native matrix uses
+the same project inventory and consumer expansion as Linux. Native failures
+block `Full CI gate`. Client-environment contract files select Core and Host and
+their consumers, without scheduling unrelated Access or repository tooling.
 The macOS Core job explicitly runs the otherwise ignored Keychain round-trip
 in a temporary keychain and verifies execution and cleanup. Windows also runs
 focused repository-runner tests for its native pipes and process-tree deadlines.
@@ -88,10 +103,20 @@ python3 tools/repo/src/repo/ci.py plan --base BASE_SHA --head HEAD_SHA
 uv run --project tools/repo python -m repo.ci run --projects '["core", "cli"]'
 ```
 
-The second command executes selected projects through `./repo check`, applicable
+For the lightweight push path:
+
+```bash
+python3 tools/repo/src/repo/ci.py quick-plan --base BASE_SHA --head HEAD_SHA --kind rust
+uv run --project tools/repo python -m repo.ci quick --projects '["core", "cli"]'
+```
+
+The `run` command executes selected projects through `./repo check`, applicable
 `./repo build` operations and `./repo test --coverage`. Rust registry/build caches
-and the pinned coverage tool are cached separately. Reports remain downloadable
-Artifacts with seven-day retention; no Summary or Pages publishing is configured.
+and the pinned coverage tool are cached separately. Full CI disables Rust
+incremental compilation and uses line-table-only debug information to reduce
+cache/build size. Profile-only cleanup preserves cached instrumented builds,
+while removing old execution counts before each package measurement. Reports
+remain downloadable Artifacts with seven-day retention; no Summary or Pages publishing is configured.
 The Go artifact also includes the native coverage profile when available, even
 when the run fails its coverage gate.
 
@@ -376,7 +401,8 @@ For Go projects, use `go tool cover -func=<profile>` or `go tool cover
 -html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
 to inspect the measured code blocks.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
-cargo-llvm-cov execution after resetting stale workspace coverage artifacts,
+cargo-llvm-cov execution after clearing stale workspace profile counts while
+retaining instrumented compilation outputs,
 explicitly labeled `separate_measurement`; it does not
 add cases to execution totals.
 

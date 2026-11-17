@@ -1,0 +1,420 @@
+name: Full CI
+
+on:
+  pull_request:
+    types: [labeled]
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 18 * * *' # 02:17 Asia/Shanghai
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-ci-${{ github.event_name }}-${{ github.event.label.name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Select affected projects
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-full-ci'
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.changes.outputs.matrix }}
+      native_matrix: ${{ steps.changes.outputs.native_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Go for workflow lint
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+      - name: Lint workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Select projects
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          matrix=$(python3 tools/repo/src/repo/ci.py plan --base "$BASE_SHA" --head "$HEAD_SHA")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          native_matrix=$(python3 tools/repo/src/repo/ci.py native-plan --base "$BASE_SHA" --head "$HEAD_SHA")
+          echo "native_matrix=$native_matrix" >> "$GITHUB_OUTPUT"
+
+  fast:
+    name: Checks and coverage (${{ matrix.kind }})
+    needs: changes
+    if: >-
+      needs.changes.outputs.matrix != '{"include": []}'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        if: matrix.kind == 'go' || matrix.kind == 'node'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        if: matrix.kind == 'node'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.13.1'
+
+      - name: Set up pnpm
+        if: matrix.kind == 'node'
+        run: npm install --global pnpm@12.18.0
+
+      - name: Restore pnpm cache
+        if: matrix.kind == 'node'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.13.1'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.8'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Cache Rust dependencies and builds
+        if: matrix.kind == 'rust'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v2-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v2-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-v2-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml', 'tools/repo/linux-rust-packages.txt', 'tools/repo/protoc-linux.sh') }}-
+
+      - name: Cache Rust coverage tool
+        if: matrix.kind == 'rust'
+        id: coverage-tool
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          key: llvm-cov-ubuntu-26.04-${{ hashFiles('rust-toolchain.toml') }}-0.9.1
+
+      - name: Set up Rust
+        if: matrix.kind == 'rust'
+        run: rustc --version
+
+      - name: Install Rust coverage tool
+        if: matrix.kind == 'rust' && steps.coverage-tool.outputs.cache-hit != 'true'
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+
+      - name: Install Linux Rust build dependencies
+        if: matrix.kind == 'rust'
+        run: |
+          sudo apt-get update
+          xargs -r sudo apt-get install --yes < tools/repo/linux-rust-packages.txt
+          bash tools/repo/protoc-linux.sh "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+
+      - name: Install JavaScript workspace
+        if: matrix.kind == 'node'
+        run: pnpm install --frozen-lockfile
+
+      - name: Check, build and test selected projects
+        env:
+          PROJECTS: ${{ toJSON(matrix.projects) }}
+        run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
+
+      - name: Upload reports and local build outputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-${{ matrix.kind }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            .data/runs/**/coverage-*.coverprofile
+            .data/bin/whalerein-access
+            target/debug/whalerein
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  contract:
+    name: Contract checks
+    needs: changes
+    if: >-
+      contains(needs.changes.outputs.matrix, '"proto"')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.13.1'
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@12.18.0
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.8'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Set up protocol tools
+        run: |
+          bash tools/repo/protoc-linux.sh "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install JavaScript workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Check generated protocol bindings
+        run: ./repo proto --check
+
+      - name: Check Swift surface drift
+        run: |
+          python3 proto/v1/bindings/swift/check_swift_surface.py || {
+            echo "::error::Swift surface drift. Update proto/v1/bindings/swift/ios-surface.json and the hand-written MobileError mapping together; see proto/v1/bindings/swift/check_swift_surface.py."
+            exit 1
+          }
+
+      - name: Check protobuf compatibility vectors
+        run: |
+          python3 tests/integration/drivers/protobuf/proto_compat.py --check || {
+            echo "::error::Protobuf compatibility failed. A breaking change needs a version bump and an explicit baseline update with --update-baseline --rationale; see tests/integration/drivers/protobuf/proto_compat.py."
+            exit 1
+          }
+
+  native:
+    name: Native Rust checks and coverage (${{ matrix.os }})
+    needs: changes
+    if: >-
+      needs.changes.outputs.native_matrix != '{"include": []}'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.native_matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.8'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Cache Rust dependencies and builds
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
+          key: rust-v2-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v2-${{ matrix.os }}-${{ runner.arch }}-llvm-cov-0.9.1-${{ hashFiles('rust-toolchain.toml', 'tools/repo/src/repo/native_ci.py') }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Install native protoc and Rust coverage tool
+        run: |
+          uv run --project tools/repo python -m repo.native_ci protoc .data/native-protoc
+          echo "$GITHUB_WORKSPACE/.data/native-protoc" >> "$GITHUB_PATH"
+          rustc --version
+          if ! cargo llvm-cov --version; then
+            cargo install cargo-llvm-cov --version 0.9.1 --locked
+          fi
+
+      - name: Verify Windows repository process handling
+        if: runner.os == 'Windows'
+        run: uv run --project tools/repo python -m repo test --project repo --only windows
+
+      - name: Check, build and test selected native projects
+        env:
+          PROJECTS: ${{ toJSON(matrix.projects) }}
+        run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
+
+      - name: Verify the macOS Keychain explicitly
+        if: runner.os == 'macOS' && contains(matrix.projects, 'core')
+        run: uv run --project tools/repo python -m repo.native_ci keychain .data/runs/keychain/result.json
+
+      - name: Upload native test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-native-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            .data/runs/keychain/result.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Retain native build cache after verification
+        if: >-
+          !cancelled() && steps.native-cache.outcome == 'success' &&
+          steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo-llvm-cov.exe
+            target
+
+  deployment:
+    name: Deployment acceptance
+    needs: changes
+    if: >-
+      contains(needs.changes.outputs.matrix, '"access"')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      WHALEREIN_ACCEPTANCE: '1'
+      WHALEREIN_ACCEPTANCE_RESTART_ACCESS: 'docker compose -f deploy/compose/stack.yaml restart access'
+      WHALEREIN_ACCEPTANCE_RESTART_BROKER: 'docker compose -f deploy/compose/stack.yaml restart mosquitto'
+      WHALEREIN_ACCEPTANCE_RESTART_POSTGRES: 'docker compose -f deploy/compose/stack.yaml restart postgres'
+      WHALEREIN_ACCEPTANCE_STOP_ACCESS: 'docker stop --time 20 whalerein-access'
+      WHALEREIN_ACCEPTANCE_START_ACCESS: 'docker start whalerein-access'
+      WHALEREIN_ACCEPTANCE_ACCESS_CONTAINER: whalerein-access
+      WHALEREIN_ACCEPTANCE_POSTGRES_CONTAINER: whalerein-postgres
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: go.sum
+
+      - name: Build and start the Compose stack
+        run: docker compose -f deploy/compose/stack.yaml up -d --build
+
+      - name: Wait for Access readiness
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f deploy/compose/stack.yaml ps
+          exit 1
+
+      - name: Run deployment acceptance
+        run: >-
+          go test -tags acceptance ./tests/acceptance
+          -run 'TestMosquittoLineAcceptance|TestPostgresRestartAndReadOnlyFence|TestGracefulShutdownAndLogRotation|TestBackupRestoreCannotResurrectGrantOrDuplicateCommand|TestRequestMetadataRetentionPolicy'
+          -count=1 -v -timeout 30m
+
+      - name: Capture stack state and logs
+        if: always()
+        run: |
+          set +e
+          mkdir -p .data/runs/deployment || true
+          docker compose -f deploy/compose/stack.yaml ps > .data/runs/deployment/ps.txt 2>&1 || true
+          docker compose -f deploy/compose/stack.yaml logs --no-color > .data/runs/deployment/stack.log 2>&1 || true
+          exit 0
+
+      - name: Upload deployment acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-acceptance-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/deployment/stack.log
+            .data/runs/deployment/ps.txt
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Tear down the Compose stack
+        if: always()
+        run: docker compose -f deploy/compose/stack.yaml down -v
+
+  gate:
+    name: Full CI gate
+    if: always() && !cancelled() && needs.changes.result != 'skipped'
+    needs: [changes, fast, native, contract, deployment]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check required results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.fast.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          NATIVE_MATRIX: ${{ needs.changes.outputs.native_matrix }}
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$MATRIX" = '{"include": []}' ]; then
+            test "$TEST_RESULT" = skipped
+            test "$NATIVE_RESULT" = skipped
+            test "$CONTRACT_RESULT" = skipped
+            test "$DEPLOYMENT_RESULT" = skipped
+          else
+            test "$TEST_RESULT" = success
+            if printf '%s' "$MATRIX" | grep -q '"proto"'; then
+              test "$CONTRACT_RESULT" = success
+            else
+              test "$CONTRACT_RESULT" = skipped
+            fi
+            if printf '%s' "$MATRIX" | grep -q '"access"'; then
+              test "$DEPLOYMENT_RESULT" = success
+            else
+              test "$DEPLOYMENT_RESULT" = skipped
+            fi
+            if [ "$NATIVE_MATRIX" = '{"include": []}' ]; then
+              test "$NATIVE_RESULT" = skipped
+            else
+              test "$NATIVE_RESULT" = success
+            fi
+          fi

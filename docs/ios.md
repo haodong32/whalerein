@@ -173,10 +173,16 @@ support tooling through an explicit support channel instead.
 
 ## CI
 
-`.github/workflows/ios.yml` runs on changes to `apps/ios/`, the binding crate,
-Core, protocol definitions or the Rust manifests. It builds the XCFramework,
-runs the `Unit` and `UI` plans on a macOS runner, and uploads result bundles.
-Changes to shared Rust inputs therefore invalidate the iOS job.
+`.github/workflows/ios.yml` reports a lightweight `iOS gate` on every ordinary
+PR revision. Add `run-full-ci` to build and test affected iOS inputs for that
+revision; only the label event requests this work, so remove and re-add it after
+a new push. The build inputs include `apps/ios/`, the binding crate, Core,
+protocol definitions and Rust manifests. Requested verification builds the
+XCFramework and test products once, then runs the `Unit` and complete `UI` plans
+on macOS and uploads result bundles. A lightweight gate success is not iOS test
+evidence. Main pushes, merge queue and nightly runs also run full verification;
+manual dispatch accepts `unit`, `smoke` or `full`.
+See [CI test tiers](testing.md#ci-test-tiers) for timing and revision rules.
 
 ## Security and accessibility
 
