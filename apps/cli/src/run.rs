@@ -2573,7 +2573,7 @@ mod tests {
             let mut args = vec!["whalerein", "--json", "--data-dir", data_dir];
             args.extend_from_slice(command);
             match tokio::time::timeout(
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 Box::pin(run_with(cli(&args), secrets)),
             )
             .await

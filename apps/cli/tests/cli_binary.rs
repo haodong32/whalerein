@@ -1268,6 +1268,7 @@ fn config_env_ac_03_fresh_default_initializes_then_commands_follow_the_saved_def
             .args(["--data-dir", data.path().to_str().unwrap()])
             .args(args)
             .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
             .env_remove("WHALEREIN_CONFIG")
             .env_remove("WHALEREIN_DATA_DIR")
             .env("WHALEREIN_SECRET_BACKEND", "memory")
@@ -1577,6 +1578,7 @@ fn config_env_ac_10_relative_and_tilde_ca_paths_resolve_against_config_and_home(
         .arg(&config)
         .args(["config", "check"])
         .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .env("WHALEREIN_SECRET_BACKEND", "memory")
         .output()
         .unwrap();
