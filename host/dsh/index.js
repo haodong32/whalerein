@@ -346,7 +346,7 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
 async function applyManaged(ctx, rawConfig, options) {
   let config
   try {
-    config = resolveManagerConfig(materializeConfig(rawConfig), options)
+    config = resolveManagerConfig(materializeConfig(rawConfig))
   } catch (error) {
     const failure = configFailure(error)
     fallbackLog(failure.code, failure.reason)

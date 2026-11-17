@@ -159,18 +159,15 @@ window.__ModuleLoader__.load({
       cloudCancel: 'Cancel',
       cloudCancelling: 'Cancelling…',
       cloudTryAgain: 'Try again',
-      cloudReconnect: 'Reconnect',
       cloudDisconnect: 'Disconnect',
       cloudDisconnecting: 'Disconnecting…',
       cloudRemove: 'Remove this computer',
       cloudRemoving: 'Removing…',
       cloudOpenBrowser: 'Open browser',
       cloudBrowserBlocked: 'Your browser blocked the new tab. Use Open browser to finish connecting.',
-      cloudApprovalLink: 'Approval link',
       cloudActionFailed: 'The connection action could not be completed. Try again.',
       cloudStatusUnavailable: 'Connection status is temporarily unavailable. Try again in a moment.',
       cloudPending: 'A connection operation is already in progress.',
-      cloudDismiss: 'Dismiss',
       state_idle: 'Not connected',
       state_requesting: 'Preparing connection…',
       state_awaiting_approval: 'Finish connecting in your browser',
@@ -220,47 +217,18 @@ window.__ModuleLoader__.load({
       cloudDetailsRevision: 'Registration revision',
       cloudDetailsLastError: 'Last error code',
       cloudDetailsRefresh: 'Refresh details',
-      cloudDetailsUnavailable: 'Details are unavailable right now.',
       cloudAdvanced: 'Advanced',
-      cloudCustomService: 'Custom service',
       cloudCustomServiceHint: 'Use this only for a reviewed self-hosted WhaleRein service. Adding it does not activate it.',
       cloudCustomLabel: 'Service label',
       cloudCustomOrigin: 'API origin',
-      cloudCustomOriginPlaceholder: 'https://service.example',
-      cloudAddCustomService: 'Add custom service',
-      cloudCustomServiceAdded: 'Custom service added. Select it from the profile list to use it.',
-      cloudDetailsDesired: 'Desired environment',
-      cloudDetailsSource: 'Configuration source',
-      cloudSourceBuiltin: 'Official catalog',
-      cloudSourceFile: 'Per-device file',
-      cloudDeveloperTools: 'Developer tools',
-      cloudDeveloperToolsHint: 'Test environments are hidden until you enable them here.',
       cloudLocal: 'Local development',
-      cloudUseLocal: 'Use local development',
-      cloudEnableStaging: 'Enable staging',
-      cloudEnablingStaging: 'Enabling…',
-      cloudStagingNote: 'Enabling staging does not switch this computer. A staging profile must be selected explicitly.',
-      cloudStagingProfile: 'WhaleRein Cloud Staging',
-      cloudUseStaging: 'Use staging',
-      cloudSwitchProduction: 'Switch to production',
-      cloudSwitching: 'Switching…',
       cloudStagingActive: 'Staging',
       cloudProduction: 'Production',
       cloudCustom: 'Custom',
-      cloudProfiles: 'Local profiles',
-      cloudProfilesHint: 'Only an inactive local profile can be deleted. Deleting it does not remove the cloud registration.',
-      cloudNoProfiles: 'No local profiles are available.',
-      cloudDeleteProfile: 'Delete local profile',
-      cloudDeleteActive: 'Switch away from this profile before deleting it.',
-      cloudDeleteHint: 'Deleting local files does not revoke this computer in the cloud. Use Remove this computer for that.',
-      cloudRemovedLocal: 'Local profile deleted. Its remote registration remains.',
       cloudPairingManaged: 'Device pairing is managed by WhaleRein Cloud for this connection.',
       cloudDisconnectHint: 'Disconnect only pauses this computer locally. It keeps its registration and can reconnect without new approval.',
       cloudRemoveHint: 'Remove this computer requires fresh browser authorization. The status stays Removing until the service enforces it.',
       cloudLocalOnly: 'Local action',
-      cloudBrowserAuthorized: 'Browser-authorized action',
-      cloudUnsupported: 'This action is not available for the selected connection.',
-      cloudRetryHint: 'This creates a new browser approval request.',
       cloudConfirmationRequired: 'Confirm removal in your browser. Keep this page open.',
     }
     const zh = {
@@ -397,18 +365,15 @@ window.__ModuleLoader__.load({
       cloudCancel: '取消',
       cloudCancelling: '正在取消…',
       cloudTryAgain: '重试',
-      cloudReconnect: '重新连接',
       cloudDisconnect: '断开连接',
       cloudDisconnecting: '正在断开…',
       cloudRemove: '移除这台电脑',
       cloudRemoving: '正在移除…',
       cloudOpenBrowser: '打开浏览器',
       cloudBrowserBlocked: '浏览器阻止了新标签页。请使用“打开浏览器”完成连接。',
-      cloudApprovalLink: '授权链接',
       cloudActionFailed: '无法完成连接操作，请重试。',
       cloudStatusUnavailable: '暂时无法获取连接状态，请稍后重试。',
       cloudPending: '已有连接操作正在进行。',
-      cloudDismiss: '关闭',
       state_idle: '未连接',
       state_requesting: '正在准备连接…',
       state_awaiting_approval: '请在浏览器中完成连接',
@@ -458,47 +423,18 @@ window.__ModuleLoader__.load({
       cloudDetailsRevision: '注册版本',
       cloudDetailsLastError: '最近错误代码',
       cloudDetailsRefresh: '刷新详情',
-      cloudDetailsUnavailable: '暂时无法获取详情。',
       cloudAdvanced: '高级配置',
-      cloudCustomService: '自定义服务',
       cloudCustomServiceHint: '仅用于经过审核的自托管 WhaleRein 服务。添加后不会自动启用。',
       cloudCustomLabel: '服务名称',
       cloudCustomOrigin: 'API 来源',
-      cloudCustomOriginPlaceholder: 'https://service.example',
-      cloudAddCustomService: '添加自定义服务',
-      cloudCustomServiceAdded: '已添加自定义服务。请在配置列表中选择后才会使用。',
-      cloudDetailsDesired: '目标环境',
-      cloudDetailsSource: '配置来源',
-      cloudSourceBuiltin: '官方目录',
-      cloudSourceFile: '本机文件',
-      cloudDeveloperTools: '开发者工具',
-      cloudDeveloperToolsHint: '测试环境默认隐藏，需要在这里显式启用。',
       cloudLocal: '本地开发',
-      cloudUseLocal: '使用本地开发',
-      cloudEnableStaging: '启用 Staging',
-      cloudEnablingStaging: '正在启用…',
-      cloudStagingNote: '启用 Staging 不会切换这台电脑，必须显式选择 Staging 配置。',
-      cloudStagingProfile: 'WhaleRein Cloud Staging',
-      cloudUseStaging: '使用 Staging',
-      cloudSwitchProduction: '切换回生产环境',
-      cloudSwitching: '正在切换…',
       cloudStagingActive: 'Staging',
       cloudProduction: '生产环境',
       cloudCustom: '自定义',
-      cloudProfiles: '本地配置',
-      cloudProfilesHint: '只能删除未启用的本地配置。删除本地配置不会移除云端注册。',
-      cloudNoProfiles: '暂无本地配置。',
-      cloudDeleteProfile: '删除本地配置',
-      cloudDeleteActive: '请先切换到其他配置再删除。',
-      cloudDeleteHint: '删除本地文件不会在云端撤销这台电脑。如需撤销，请使用“移除这台电脑”。',
-      cloudRemovedLocal: '本地配置已删除，云端注册仍然保留。',
       cloudPairingManaged: '此连接的设备配对由 WhaleRein Cloud 管理。',
       cloudDisconnectHint: '断开连接只会在本地暂停这台电脑，云端注册仍保留，无需重新授权即可连接。',
       cloudRemoveHint: '移除这台电脑需要新的浏览器授权。在服务执行完成前，状态会一直显示“正在移除”。',
       cloudLocalOnly: '本地操作',
-      cloudBrowserAuthorized: '浏览器授权操作',
-      cloudUnsupported: '所选连接不支持此操作。',
-      cloudRetryHint: '这会创建新的浏览器授权请求。',
       cloudConfirmationRequired: '请在浏览器中确认移除，并保持此页面打开。',
     }
 
@@ -552,9 +488,6 @@ window.__ModuleLoader__.load({
       managedStateRegion: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, outlineOffset: '2px' },
       stagingLabel: { display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' },
       approvalLink: { display: 'inline-flex', alignItems: 'center', minHeight: '32px', maxWidth: '100%', padding: '0 12px', borderRadius: 'var(--dsw-radius-md)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)', textDecoration: 'underline', overflowWrap: 'anywhere' },
-      profileRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px 12px', padding: '12px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
-      profileCopy: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: '1 1 180px' },
-      profileName: { fontSize: '13px', fontWeight: 500, lineHeight: '20px', overflowWrap: 'anywhere' },
       detailValue: { margin: 0, overflowWrap: 'anywhere' },
       dangerAction: { color: 'var(--dsw-alias-state-error-primary)' },
     }
@@ -578,7 +511,6 @@ window.__ModuleLoader__.load({
       /* 320 CSS px and 200% zoom: actions wrap and text never forces width. */
       .whalerein-settings .whalerein-managed-actions { flex-wrap: wrap; }
       .whalerein-settings .whalerein-approval-link { max-width: 100%; overflow-wrap: anywhere; }
-      .whalerein-settings .whalerein-profile-row { flex-wrap: wrap; }
       @media (max-width: 400px) {
         .whalerein-settings { gap: 16px; }
         .whalerein-settings .whalerein-managed-actions { align-items: stretch; }
@@ -1192,7 +1124,6 @@ window.__ModuleLoader__.load({
       'connecting', 'connected', 'reconnecting', 'disconnected', 'denied',
       'expired', 'action_required', 'removing', 'removed',
     ])
-    const TRANSITIONAL_STATES = new Set(['requesting', 'enrolling', 'recovering', 'connecting', 'removing'])
 
     function safeApprovalUrl(value) {
       if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return ''
@@ -1262,19 +1193,7 @@ window.__ModuleLoader__.load({
           return { ok: false, code: typeof error?.code === 'string' ? error.code : 'gateway/internal' }
         }
       }
-      return {
-        invoke,
-        startConnect: (request) => invoke('startConnect', request),
-        cancel: () => invoke('cancel'),
-        retry: () => invoke('retry'),
-        disconnect: () => invoke('disconnect'),
-        reconnect: () => invoke('reconnect'),
-        removeComputer: () => invoke('removeComputer'),
-        switchProfile: (id) => invoke('switchProfile', id),
-        enableStaging: () => invoke('enableStaging'),
-        addCustomService: (value) => invoke('addCustomService', value),
-        deleteProfile: (id) => invoke('deleteProfile', id),
-      }
+      return { invoke }
     }
 
     function managedEnvironmentLabel(t, environment) {
@@ -1302,7 +1221,7 @@ window.__ModuleLoader__.load({
       return typeof code === 'string' ? (ERROR_HINT_KEYS[code] ?? '') : ''
     }
 
-    function ManagedSettingsPage({ t, form, status, connection, developerTools, locale: localeService }) {
+    function ManagedSettingsPage({ t, form, status, connection, locale: localeService }) {
       const tr = typeof t === 'function' ? t : (key) => key
       const [snapshot, setSnapshot] = React.useState(() => status.getSnapshot())
       const [busy, setBusy] = React.useState('')
@@ -1351,7 +1270,6 @@ window.__ModuleLoader__.load({
 
       const state = MANAGED_STATES.has(snapshot.state) ? snapshot.state : 'action_required'
       const stateHint = errorHintKey(snapshot.error?.code) || `stateHint_${state}`
-      const transitional = TRANSITIONAL_STATES.has(state)
       const pending = snapshot.pendingOperation === true
       const isStaging = snapshot.environment === 'staging'
       const activeLocale = localeService?.getSnapshot?.().active

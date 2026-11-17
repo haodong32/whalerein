@@ -225,15 +225,10 @@ async function createSettingsRuntime({
     profileId: 'profile-production',
     label: 'WhaleRein Cloud',
     hostName: 'Studio Mac',
-    stagingEnabled: false,
-    developerToolsEnabled: false,
     approvalUrl: '',
     error: null,
     connected: false,
     pendingOperation: false,
-    profiles: [
-      { id: 'profile-production', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
-    ],
     capabilities: [],
     configError: null,
   } : {
@@ -332,10 +327,6 @@ async function createSettingsRuntime({
       disconnect: managerAction('disconnect'),
       reconnect: managerAction('reconnect'),
       removeComputer: managerAction('removeComputer'),
-      switchProfile: managerAction('switchProfile'),
-      enableStaging: managerAction('enableStaging'),
-      addCustomService: managerAction('addCustomService'),
-      deleteProfile: managerAction('deleteProfile'),
     },
     settings: {
       describe: async () => describe(),
@@ -1108,7 +1099,7 @@ const saveButton = (runtime) => find(runtime.render(), (node) => node.type === U
 const field = (runtime, label) => find(runtime.render(), (node) => node.type === UI.Input && node.props['aria-label'] === label)
 const deviceRow = (runtime, id) => find(runtime.render(), (node) => node.type === 'li' && text(node).includes(id))
 
-test('clearing the server without a legacy MQTT URL is blocked per field instead of saving an unstartable profile', async () => {
+test('clearing the server without an explicit MQTT URL is blocked per field instead of saving an unstartable profile', async () => {
   const runtime = await createSettingsRuntime()
   try {
     runtime.setFormSnapshot({

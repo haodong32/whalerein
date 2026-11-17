@@ -176,7 +176,7 @@ export function settingsStatus(host) {
       hostId: typeof host?.config?.hostId === 'string' ? host.config.hostId : '',
       devices: [],
       configError,
-        }
+    }
   }
   const security = host.security
   const channels = new Set((security?.listChannels() ?? []).map((channel) => channel.deviceId))
@@ -203,7 +203,7 @@ export function settingsStatus(host) {
     devices,
     diagnostics: settingsDiagnostics(host),
     configError,
-    }
+  }
 }
 
 const MANAGER_METHODS = Object.freeze([

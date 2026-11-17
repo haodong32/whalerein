@@ -12,7 +12,7 @@ const base = {
 }
 
 test('when configuration values are supplied or omitted, explicit values and safe defaults are resolved', () => {
-  const config = resolveConfig({ ...base, state_dir: '/tmp/state', access_url: 'https://access.example' }, {})
+  const config = resolveConfig({ ...base, state_dir: '/tmp/state', access_url: 'https://access.example' })
   assert.equal(config.hostId, 'host-1')
   assert.equal(config.mqttUrl, base.mqtt_url)
   assert.equal(config.hostToken, 'secret-token')
@@ -60,31 +60,31 @@ test('when mqtt:// is configured, it is accepted only if the plaintext flag is e
 })
 
 test('when configuration lacks required fields or has invalid adapter, topic ID, URL, approval mode or plaintext flag, it rejects invalid_config', () => {
-  assert.throws(() => resolveConfig({}, {}), (error) => error instanceof ConfigError && error.code === 'invalid_config')
-  assert.throws(() => resolveConfig({ ...base, adapter: 'cloud' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, host_id: 'bad/id' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, host_id: 'bad id' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'https://broker' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'mqtt://broker' }, {}), (error) => error.code === 'invalid_config')
-  assert.equal(resolveConfig({ ...base, mqtt_url: 'mqtt://broker', allow_insecure_mqtt: true }, {}).allowInsecureMqtt, true)
-  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'not a url' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, access_url: 'not a url' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, approval_mode: 'auto' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ ...base, allow_insecure_mqtt: 'maybe' }, {}), ConfigError)
+  assert.throws(() => resolveConfig({}), (error) => error instanceof ConfigError && error.code === 'invalid_config')
+  assert.throws(() => resolveConfig({ ...base, adapter: 'cloud' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, host_id: 'bad/id' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, host_id: 'bad id' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'https://broker' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'mqtt://broker' }), (error) => error.code === 'invalid_config')
+  assert.equal(resolveConfig({ ...base, mqtt_url: 'mqtt://broker', allow_insecure_mqtt: true }).allowInsecureMqtt, true)
+  assert.throws(() => resolveConfig({ ...base, mqtt_url: 'not a url' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, access_url: 'not a url' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, approval_mode: 'auto' }), ConfigError)
+  assert.throws(() => resolveConfig({ ...base, allow_insecure_mqtt: 'maybe' }), ConfigError)
   assert.throws(() => validateTopicId('', 'host_id'), ConfigError)
   assert.throws(() => validateTopicId('a'.repeat(129), 'host_id'), ConfigError)
   assert.equal(validateTopicId('a.b:c_d-1', 'id'), 'a.b:c_d-1')
 })
 
-test('when a server host is set, derived endpoints override legacy URLs', () => {
+test('when a server host is set, derived endpoints override explicit URLs', () => {
   const secure = resolveConfig({
     server: 'access.example',
     host_id: 'host-1',
     host_token: 'secret-token',
     admin_token: 'admin',
-    mqtt_url: 'mqtts://legacy.example:8883',
-    access_url: 'https://legacy.example',
-  }, {})
+    mqtt_url: 'mqtts://explicit.example:8883',
+    access_url: 'https://explicit.example',
+  })
   assert.equal(secure.server, 'access.example')
   assert.equal(secure.adminToken, 'admin')
   assert.equal(secure.accessUrl, 'https://access.example')
@@ -97,7 +97,7 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
     host_id: 'host-1',
     host_token: 'secret-token',
     allow_insecure_mqtt: true,
-  }, {})
+  })
   assert.equal(insecure.server, '10.0.0.8')
   assert.equal(insecure.accessUrl, 'http://10.0.0.8:8080')
   assert.equal(insecure.mqttUrl, 'mqtt://10.0.0.8:1883')
@@ -110,7 +110,7 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
     access_port: '80',
     mqtt_port: '8884',
     allow_insecure_mqtt: true,
-  }, {})
+  })
   assert.equal(ports.accessUrl, 'http://access.example')
   assert.equal(ports.mqttUrl, 'mqtt://access.example:8884')
 
@@ -125,15 +125,15 @@ test('when a server host is set, derived endpoints override legacy URLs', () => 
 })
 
 test('when server values contain a scheme, port, or incomplete host, configuration rejects them', () => {
-  assert.throws(() => resolveConfig({ server: 'https://access.example', host_id: 'host-1', host_token: 'secret-token' }, {}), /server must be a host name or IPv4 address/)
-  assert.throws(() => resolveConfig({ server: 'access.example:443', host_id: 'host-1', host_token: 'secret-token' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ server: 'access.example', host_id: 'host-1', host_token: 'secret-token', access_port: '0' }, {}), ConfigError)
-  assert.throws(() => resolveConfig({ server: '::1', host_id: 'host-1', host_token: 'secret-token' }, {}), ConfigError)
-  const legacy = resolveConfig(base, {})
-  assert.equal(legacy.server, '')
-  assert.equal(legacy.accessPort, null)
-  assert.equal(legacy.mqttPort, null)
-  assert.equal(legacy.adminToken, '')
+  assert.throws(() => resolveConfig({ server: 'https://access.example', host_id: 'host-1', host_token: 'secret-token' }), /server must be a host name or IPv4 address/)
+  assert.throws(() => resolveConfig({ server: 'access.example:443', host_id: 'host-1', host_token: 'secret-token' }), ConfigError)
+  assert.throws(() => resolveConfig({ server: 'access.example', host_id: 'host-1', host_token: 'secret-token', access_port: '0' }), ConfigError)
+  assert.throws(() => resolveConfig({ server: '::1', host_id: 'host-1', host_token: 'secret-token' }), ConfigError)
+  const explicit = resolveConfig(base)
+  assert.equal(explicit.server, '')
+  assert.equal(explicit.accessPort, null)
+  assert.equal(explicit.mqttPort, null)
+  assert.equal(explicit.adminToken, '')
 })
 
 test('when resolving topic templates, only the four wire topics are produced', () => {

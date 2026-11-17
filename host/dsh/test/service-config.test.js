@@ -167,7 +167,7 @@ test('browser connection provenance cannot replace the native source adapter', a
   await ctx.fiber.dispose()
 })
 
-test('Standalone generated identity follows state_root when the legacy state_dir is empty', async (t) => {
+test('Standalone generated identity follows state_root when state_dir is empty', async (t) => {
   const { withHostId } = await import('../index.js')
   const first = directory(t)
   const second = directory(t)

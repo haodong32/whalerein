@@ -125,7 +125,7 @@ function derivedEndpoints(server, insecure, accessPort, mqttPort) {
 /**
  * Resolve one plugin configuration object. A `server` host derives the Access
  * origin and the MQTT URL. Explicit `mqtt_url` / `access_url` apply only when
- * `server` is empty, so existing deployments keep working.
+ * `server` is empty. Both forms are explicit Standalone parameters.
  *
  * @param {object} raw plugin config supplied by Cordis.
  * @returns {object} resolved config.
