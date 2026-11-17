@@ -13,14 +13,29 @@ These rules also apply to merge requests (MRs).
 
 ## Title and description
 
-Write in English. The title follows [commit rules](commits.md).
-Keep the description proportional to the change and explain:
+Write the title and description in English for human reviewers. Keep the title
+in Conventional Commits format, following [commit rules](commits.md), with a
+short, plain-language subject that describes the resulting change.
 
-- **Behavior:** the problem and resulting behavior; link the related issue.
-- **Validation:** actual commands or CI runs and outcomes. Mark checks not run
-  with the reason; identify affected consumers when relevant.
-- **Compatibility and rollout:** API, protocol, configuration or state changes,
-  consumer updates, migration and rollback limits, or `None`.
+Use the four headings in the [PR template](../.github/pull_request_template.md),
+in order, including when creating a PR/MR through a CLI or API:
+
+- **Background:** explain the problem or reason for the change; link a related
+  issue when available.
+- **Changes:** summarize the main changes and resulting behavior. Include
+  implementation details only when they help the reviewer assess the change.
+- **Key test changes:** describe important cases added, updated or removed and
+  the behavior they verify. Briefly state actual validation results and relevant
+  checks not run, with reasons. If no cases changed, say so and describe how the
+  change was checked. Test counts alone do not explain test changes.
+- **Compatibility and breaking changes:** explain the impact on existing users
+  and consumers, including API, protocol, configuration or state changes. Include
+  migration, upgrade order and rollback limits when relevant; write `None` when
+  there is no compatibility impact.
+
+Keep each section to a few sentences or short bullets, scaled to the change.
+Keep compatibility impact separate from the change summary so reviewers can
+quickly find upgrade requirements.
 
 Update the description when scope changes. Keep secrets, pairing links and
 private message/tool contents out of the PR and attachments.
