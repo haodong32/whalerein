@@ -10,8 +10,9 @@
 
 ## Key test changes
 
-<!-- Describe important test case changes and what they verify, or say no tests
-     changed. Briefly state validation results and relevant checks not run. -->
+<!-- List only key cases added, updated or removed: what they checked before
+     and what they check now. For new cases, state the previous coverage gap.
+     Write "None" if no cases changed. -->
 
 ## Compatibility and breaking changes
 

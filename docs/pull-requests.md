@@ -24,10 +24,12 @@ in order, including when creating a PR/MR through a CLI or API:
   issue when available.
 - **Changes:** summarize the main changes and resulting behavior. Include
   implementation details only when they help the reviewer assess the change.
-- **Key test changes:** describe important cases added, updated or removed and
-  the behavior they verify. Briefly state actual validation results and relevant
-  checks not run, with reasons. If no cases changed, say so and describe how the
-  change was checked. Test counts alone do not explain test changes.
+- **Key test changes:** list only important test cases added, updated or removed,
+  with a brief before-and-after comparison of their assertions or coverage.
+  For a new case, state the previous coverage gap and what it now verifies;
+  for a removed case, explain what replaces it or why it is obsolete. If no
+  cases changed, write `None`. Keep commands, pass counts, coverage percentages,
+  execution results and environment limits in CI or test reports, not this section.
 - **Compatibility and breaking changes:** explain the impact on existing users
   and consumers, including API, protocol, configuration or state changes. Include
   migration, upgrade order and rollback limits when relevant; write `None` when
@@ -44,8 +46,8 @@ private message/tool contents out of the PR and attachments.
 
 Use `./repo` and follow [testing policy](testing.md). Report only verified
 results for the relevant revision; partial, skipped or cancelled checks are not
-full passes. Link CI reports and summarize local results without committing
-acceptance histories. Do not rely on workflows that are not implemented.
+full passes. Retain execution evidence in CI or saved test reports without
+committing acceptance histories. Do not rely on workflows that are not implemented.
 
 Use a draft while the change is incomplete. Before merge, resolve blocking
 feedback, satisfy applicable checks, and ensure consumers, generated files and
