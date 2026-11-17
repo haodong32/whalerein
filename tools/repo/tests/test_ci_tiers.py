@@ -1,0 +1,186 @@
+"""Execute workflow decision scripts to guard timing tiers and failure gates."""
+
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[3]
+pytestmark = pytest.mark.skipif(
+    os.name == "nt" or not shutil.which("bash"),
+    reason="requires the POSIX Bash used by the Linux GitHub Actions decision jobs",
+)
+
+
+def script(workflow, step):
+    text = (ROOT / ".github/workflows" / workflow).read_text()
+    block = text.split("      - name: " + step + "\n", 1)[1]
+    match = re.search(r"        run: \|\n((?:          .*\n|\n)+)", block)
+    if match is None:
+        inline = re.search(r"        run: (.+)", block)
+        assert inline, step
+        return inline[1]
+    return "\n".join(line[10:] for line in match[1].splitlines())
+
+
+def execute(tmp_path, workflow, step, **env):
+    output = tmp_path / "output"
+    output.write_text("")
+    result = subprocess.run(
+        ["bash", "-e", "-c", script(workflow, step)],
+        env={**os.environ, "GITHUB_OUTPUT": str(output), **env},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return result.returncode, dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+
+@pytest.mark.parametrize("action,label", [("synchronize", "run-full-ci"), ("labeled", "other")])
+def test_ordinary_pr_never_checks_out_or_builds_ios(tmp_path, action, label):
+    code, outputs = execute(
+        tmp_path,
+        "ios.yml",
+        "Compare the tested revision",
+        EVENT="pull_request",
+        ACTION=action,
+        LABEL=label,
+    )
+    assert code == 0
+    assert outputs == {"build": "false", "ios": "false"}
+
+
+def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nprintf 'core/src/lib.rs\\n'\n")
+    git.chmod(0o755)
+    code, outputs = execute(
+        tmp_path,
+        "ios.yml",
+        "Compare the tested revision",
+        EVENT="pull_request",
+        ACTION="labeled",
+        LABEL="run-full-ci",
+        BASE_SHA="base",
+        HEAD_SHA="head",
+        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+    )
+    assert code == 0
+    assert outputs["build"] == "true"
+
+
+@pytest.mark.parametrize("label,expected", [("run-integration", "true"), ("run-full-ci", "false")])
+def test_integration_only_responds_to_its_own_label(tmp_path, label, expected):
+    code, outputs = execute(
+        tmp_path,
+        "integration.yml",
+        "Decide whether to run",
+        EVENT="pull_request",
+        ACTION="labeled",
+        LABEL=label,
+        REVISION="current",
+    )
+    assert code == 0
+    assert outputs["run"] == expected
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "success"])
+def test_quick_gate_cannot_hide_unsuccessful_jobs(tmp_path, result):
+    code, _ = execute(tmp_path, "ci.yml", "Require every quick check", RESULT=result)
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize("changes", ["failure", "cancelled", "success"])
+def test_ios_gate_requires_successful_selection_even_when_build_is_skipped(tmp_path, changes):
+    code, _ = execute(
+        tmp_path,
+        "ios.yml",
+        "Check required results",
+        CHANGES_RESULT=changes,
+        EVENT="pull_request",
+        SUITE="full",
+        BUILD_REQUIRED="false",
+        BUILD_RESULT="skipped",
+        UNIT_RESULT="skipped",
+        SMOKE_RESULT="skipped",
+        FULL_RESULT="skipped",
+    )
+    assert (code == 0) == (changes == "success")
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "success"])
+def test_requested_ios_full_ui_failure_blocks_gate(tmp_path, result):
+    code, _ = execute(
+        tmp_path,
+        "ios.yml",
+        "Check required results",
+        CHANGES_RESULT="success",
+        EVENT="pull_request",
+        SUITE="full",
+        BUILD_REQUIRED="true",
+        BUILD_RESULT="success",
+        UNIT_RESULT="success",
+        SMOKE_RESULT="skipped",
+        FULL_RESULT=result,
+    )
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize("proto", [True, False])
+@pytest.mark.parametrize("contract", ["success", "skipped", "failure"])
+def test_full_gate_only_accepts_expected_contract_result(tmp_path, proto, contract):
+    code, _ = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Check required results",
+        CHANGES_RESULT="success",
+        TEST_RESULT="success",
+        NATIVE_RESULT="skipped",
+        NATIVE_MATRIX='{"include": []}',
+        CONTRACT_RESULT=contract,
+        DEPLOYMENT_RESULT="skipped",
+        MATRIX='{"include": [{"projects": ["%s"]}]}' % ("proto" if proto else "dsh"),
+    )
+    assert (code == 0) == (contract == ("success" if proto else "skipped"))
+
+
+@pytest.mark.parametrize("access", [True, False])
+@pytest.mark.parametrize("deployment", ["success", "skipped", "failure", "cancelled"])
+def test_full_gate_requires_deployment_only_for_access_consumers(tmp_path, access, deployment):
+    code, _ = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Check required results",
+        CHANGES_RESULT="success",
+        TEST_RESULT="success",
+        NATIVE_RESULT="skipped",
+        NATIVE_MATRIX='{"include": []}',
+        CONTRACT_RESULT="skipped",
+        DEPLOYMENT_RESULT=deployment,
+        MATRIX='{"include": [{"projects": ["%s"]}]}' % ("access" if access else "dsh"),
+    )
+    assert (code == 0) == (deployment == ("success" if access else "skipped"))
+
+
+@pytest.mark.parametrize("elapsed,warning", [(179, False), (180, False), (181, True), (500, True)])
+def test_slow_quick_checks_warn_without_failing(tmp_path, elapsed, warning):
+    date = tmp_path / "date"
+    date.write_text("#!/bin/sh\nprintf '1000\\n'\n")
+    date.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-e", "-c", script("ci.yml", "Report quick-check duration")],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "QUICK_CI_STARTED_AT": str(1000 - elapsed),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert ("::warning::" in result.stdout) == warning
+    assert f"{elapsed}s" in result.stdout

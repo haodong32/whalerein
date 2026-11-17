@@ -18,14 +18,21 @@ Select exact IDs with `--project`; directory paths are not selectors.
 
 | Intent | Entry point |
 |---|---|
-| Write formatting / check format and static issues | `./repo fmt` / `./repo check` |
-| Compile registered projects | `./repo build` |
-| Native tests / coverage | `./repo test` / `./repo test --coverage` |
+| Check the affected project | `./repo check --project ID` |
+| Format or build the affected project | `./repo fmt --project ID` / `./repo build --project ID` |
+| Final affected-project unit tests / coverage | `./repo test --project ID` / `./repo test --project ID --coverage` |
 | Find cases without executing their bodies | `./repo test --project ID --list` |
 | Run a matching unit case | `./repo test --project ID --only TEXT` |
 | Check or regenerate protocol bindings | `./repo proto --check` / `./repo proto` |
 | Render saved facts without executing tests | `./repo report FILE --output FILE` |
 | Diagnose missing tools | `./repo doctor --for TASK` |
+
+Iteration: choose explicit projects and matching `--only` cases without coverage.
+Final validation: run affected-project unit coverage once after the final relevant
+edit. Before widening or repeating a run, identify the new edit, failure or
+uncovered risk. Read the startup scope and historical wall-time notice; unknown
+history is not a cheap estimate. The three-minute quick-feedback target is
+advisory. Pure document edits need document checks.
 
 Pass the relevant project ID for focused format/check/build/unit operations.
 An explicitly selected unsupported operation fails; do not silently substitute
@@ -70,7 +77,8 @@ Cover the changed behavior at its actual execution seam. For scheduling changes,
 check cancellation and observation retention; for selector changes, check that
 unmatched test bodies do not execute.
 
-For implementation changes, run `./repo check --project repo` and
-`./repo test --project repo --coverage`, plus the product/integration checks
-required by the changed behavior. Keep the command reference synchronized with
-changes to CLI or report contracts.
+For repo-tool implementation changes, iterate with
+`./repo test --project repo --only TEXT`. At completion, run
+`./repo check --project repo` and `./repo test --project repo --coverage` once,
+plus the product/integration checks required by the changed behavior. Keep the
+command reference synchronized with changes to CLI or report contracts.

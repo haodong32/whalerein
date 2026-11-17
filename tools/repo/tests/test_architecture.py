@@ -503,6 +503,9 @@ def test_rust_coverage_requires_native_success(tmp_path, probe, output, code):
         runner.responses[0] = missing()
     measured = rust.measure(project, runner)
     assert measured.ok == (probe == 0 and code == 0 and output != "invalid")
+    if probe == 0:
+        assert "--profraw-only" in runner.calls[1][0]
+        assert "--no-clean" in runner.calls[2][0]
 
 
 def test_coverage_exception_retains_successful_cases(registry, monkeypatch, out):

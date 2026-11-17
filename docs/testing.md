@@ -32,7 +32,7 @@ macOS or Windows validation.
 - The CI workflow runs affected Rust projects' checks, builds, unit tests and
   per-crate coverage on Linux, macOS 15 and Windows Server 2025. Linux also owns
   the Go, Node.js and Python groups and the separate container integration suite.
-  All selected native matrix jobs must pass the `CI gate`.
+  All selected native matrix jobs must pass the `Full CI gate`.
 - Windows runs the Core file-lock/sharing and reparse-point cases natively,
   plus focused repository-runner tests for Windows pipes and process-tree
   termination. macOS additionally invokes the ignored SecretStore Keychain
@@ -46,22 +46,18 @@ macOS or Windows validation.
 
 ## CI operating-system matrix
 
-`.github/workflows/ci.yml` keeps the affected-project selection in the `changes`
-job and adds two consumers:
+The ordinary `.github/workflows/ci.yml` only runs quick iteration checks on Linux.
+The opt-in `.github/workflows/full-ci.yml` owns the full platform matrix:
 
 | Job | Runner | What it proves |
 |---|---|---|
-| Checks and coverage (`fast`) | `ubuntu-24.04` | Static checks, Linux unit coverage, CLI diagnostics acceptance. |
-| Native unit tests (macOS/Windows) | `macos-15`, `windows-2025` | The same selected Rust, Go and Node projects run their native unit tests on the matching OS. |
-| Deployment acceptance | `ubuntu-24.04` | Compose stack, restart/in-flight recovery, graceful shutdown, log rotation, backup/restore and retention. |
+| Checks and coverage | `ubuntu-26.04` | Static checks, builds and affected-project unit coverage. |
+| Native Rust checks and coverage | `macos-15`, `windows-2025` | Native checks, builds, unit tests and per-crate coverage. |
+| Deployment acceptance | `ubuntu-24.04` | Compose restart/recovery, shutdown, backup/restore and retention. |
 
-The native jobs reuse `tools/repo/src/repo/ci.py plan`; they do not select a
-different project set and they never run the Linux container integration suite.
-They invoke native unit commands instead of `./repo test` because the streaming
-process runner depends on POSIX process groups. Rust coverage, Go statement
-coverage and Node line coverage remain the Linux gate; the OS jobs prove that
-platform-gated tests actually execute. A skipped platform test in another OS job
-is not evidence for the skipped platform.
+The full native jobs reuse the affected-project selection and invoke the repo
+module through Python. Platform-gated tests execute on their matching OS; a skip
+on another OS is not evidence. Every selected job is required by `Full CI gate`.
 
 Named platform-gated tests include
 `windows_sharing_violation_is_retryable_admission_contention`,
@@ -173,23 +169,54 @@ with another agent's Compose run.
 
 ## Choose checks for a change
 
-Run commands from the repository root:
+Use the smallest scope that exercises the changed behavior, then finish with
+complete affected-project validation. Run from the repository root:
 
-```bash
-./repo check --project core
-./repo test --project core
-./repo test --project core --only reconnect
-./repo test --project core --coverage
-```
+| Stage | Selection | Completion |
+|---|---|---|
+| Iteration | `./repo check --project ID` and `./repo test --project ID --only TEXT` | The changed behavior and regression cases pass; coverage is deferred. |
+| Final code validation | `./repo test --project ID --coverage` for affected projects, plus relevant checks/builds | Run once after the final relevant edit; each affected first-party scope meets the coverage gate. |
+| Documentation only | Review links, command accuracy and `git diff --check` | Product tests are needed only if executable behavior also changed. |
 
-- During iteration, run focused unit tests and the affected project's checks.
-- Protocol changes require `./repo proto --check` and
-  `./repo test --suite integration --group protocol`. Regenerate intentional
-  binding changes with `./repo proto` and review the generated diff.
-- Cross-component, recovery and release changes require the full integration
-  suite: `./repo test --suite integration`.
-- `./repo test` runs all registered unit projects. Integration is slow and opt-in.
-  Use `./repo test --suite all` for one report containing both suites.
+Select project IDs explicitly for agent-driven format/check/build/unit commands.
+Use known case names, source searches or saved reports to choose `--only`;
+`--list` can compile Rust or build an integration image and is not a free probe.
+A focused pass verifies only its selected behavior. It does not replace final
+unit coverage, native platform validation, or a required integration run.
+
+Before expanding or repeating tests, state the new relevant source/test/config
+edit, observed failure, or specific uncovered risk that requires the run. Once
+checks pass, document wording, PR descriptions and progress updates alone do not
+justify repeating product tests. A base merge or dependency/toolchain change may
+invalidate results and must be assessed. This is a selection rule, not automatic
+result caching: the tool always executes the requested tests.
+
+Choose integration scope by behavior, not the number of changed directories:
+
+- Protocol schema, serialization or cross-language binding changes: run
+  `./repo proto --check` and `./repo test --suite integration --group protocol`.
+- Storage transactions, persistence or migrations: select `--group storage`.
+- MQTT/TLS connections, transport framing or reconnect handling: select
+  `--group transport`; add chain cases if end-to-end recovery is affected.
+- CLI/Access/Host request flow, approval, deduplication or recovery: select
+  relevant `--group chain` cases using `--only TEXT` during iteration, then the
+  affected group at completion.
+- Real DSH adapter, session or browser interactions: select `--group native-dsh`.
+- Run the complete integration suite for release validation or shared changes
+  with identified risks across multiple groups that narrower checks cannot
+  establish. Name those risks before starting; crossing directories alone is
+  insufficient. A full suite deferred to CI is reported as pending, not passed.
+
+Local command defaults stay compatible: bare `./repo test` selects all registered
+unit projects, and `--suite all` selects all unit and integration tests. Use these
+intentionally for repository-wide validation, with the scope reason stated.
+
+Every test invocation displays its selected projects/group, whether a case filter
+and coverage are enabled, and comparable historical wall time before compilation
+or execution. History is a local observation, not a cold-build prediction or a
+pass receipt. Three minutes is the quick-feedback target; a historical estimate
+above it or a completed run exceeding it produces a warning, without cancelling
+tests, changing results, asking for approval, or automatically changing scope.
 
 For the Mosquitto line, two opt-in fixtures back the replacement acceptance
 record. The native broker fixture needs the pinned Mosquitto 2.1.2 headers and
@@ -255,13 +282,32 @@ queue, main and nightly tiers prove the exact trees that land.
 
 ### Pull request
 
-`.github/workflows/ci.yml` runs the affected-project fast checks, contract
-checks and deployment acceptance. The iOS workflow builds the XCFramework and
-test products once, then runs the Unit plan and a small UI smoke selection; the
-full 43-case UI plan does not run on every push. The workflow has no path filter
-so every revision reports `iOS gate`, but the heavy jobs skip when no
-iOS-facing build input changed. `CI gate` and `iOS gate` are the required checks
-on main.
+`.github/workflows/ci.yml` runs parallel affected-project quick checks. Rust
+checks formatting without compiling; Go, Node and Python run static checks and
+unit tests without coverage or a separate build. Full Rust tests, coverage,
+platform matrices, iOS builds and deployment acceptance do not run on ordinary
+PR pushes. Three minutes is a performance target for each quick job, including
+setup and report upload but excluding runner queueing. A final timing step warns
+if a job exceeds that target without changing its test result. Quick jobs and
+lightweight gate/decision jobs have ten-minute safety timeouts to stop stuck
+runs. Test failures and safety timeouts still fail; slow successful jobs pass.
+
+Add `run-full-ci` to request full checks/builds/coverage, native Rust matrices,
+contract checks when `proto` is affected, deployment acceptance when Access is
+affected, and iOS Unit/full
+UI plans for that revision. Only that label event requests heavy work. After a
+new push, remove and re-add the label to verify the new tree. An unrelated label
+must not trigger integration, even when `run-integration` is still attached.
+The workflows keep `CI gate` and `iOS gate` names required by the main ruleset;
+on ordinary pushes, `iOS gate` only confirms heavy work was not requested.
+It is not evidence of a successful iOS build. Full native results use the
+separate `Full CI gate` check.
+
+Full verification is opt-in before merge under the current required-check rules.
+Before merging a change that needs full validation, verify the final tested
+merge revision matches the current PR head and base; an old successful run does
+not validate a later push or base update. Main/nightly runs are additional
+regression checks and do not replace pre-merge validation.
 
 `Full integration` reports a result on every PR revision but only runs the
 suite when the `run-integration` label is attached to that exact event. Opening
@@ -276,18 +322,20 @@ repository.
 
 ### Merge queue (not available here)
 
-The workflows accept `merge_group` and run `CI gate`, the complete integration
-suite and the full iOS UI plan against the exact merge-group tree. The merge
+The workflows accept `merge_group` and run quick checks, full native verification,
+the complete integration suite and the full iOS UI plan against the exact merge-group tree. The merge
 queue itself is a repository ruleset feature that GitHub currently rejects for
 this personal public repository (`Invalid rule 'merge_queue'`), so the tier is
 inactive here. No workflow change is needed if the queue becomes available
 later, for example after moving the repository into an organization with the
 feature. Enabling the ruleset with required `CI gate` and `iOS gate` checks is
-already done; the merge-queue rule can be added to it unchanged.
+already done. If the queue is enabled, also require `Full CI gate` and
+`Full integration` so merging waits for full verification.
 
 ### Main and nightly
 
-A main push reruns the full iOS UI plan for the landed tree. Full integration
+A main push runs full native verification and the full iOS UI plan for the landed
+tree. Full native CI also runs nightly at 02:17 Asia/Shanghai. Full integration
 remains scheduled by `.github/workflows/integration.yml` at 03:17 Asia/Shanghai
 and the iOS full plan at 02:47 Asia/Shanghai (18:47 UTC); GitHub scheduling is
 best-effort, and manual dispatch can validate a repair or high-risk change
@@ -295,7 +343,7 @@ without waiting.
 iOS dispatch accepts `unit`, `smoke` or `full`; choose the PR branch and `full`
 to run the complete UI plan before merging.
 
-The scheduled workflow freezes one main commit and fingerprints all tracked inputs except
+The scheduled Integration workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips
 heavy execution only when an exact successful input receipt exists. The initial
 run, changed inputs, unknown/missing evidence or evicted cache cause a full run.

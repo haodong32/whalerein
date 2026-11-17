@@ -9,11 +9,12 @@
 - Keep Core self-contained in Rust; `SecretStore` is its only injection boundary.
 - Use PostgreSQL for server state and internal tasks; review additional infrastructure before introducing it.
 - Never commit secrets or expose message contents, tool parameters, private keys, or pairing tokens in logs or tests.
-- Run relevant build/lint/tests; require ≥90% unit-test line coverage per Rust crate, Go package, and Node.js package.
-- `./repo test` runs unit tests only. Full integration is slow and opt-in via `./repo test --suite integration` or `./repo test --suite all`; use it for cross-component, protocol, recovery, or release changes.
+- Use staged validation: iterate with explicit `--project ID` checks and `--only TEXT` unit cases; finish with affected-project unit tests and coverage once after the final relevant edit. Require ≥90% coverage per Rust crate, Go package, and Node.js package. Documentation-only changes need document checks.
+- Before expanding or repeating tests, state the new relevant edit, failure, or uncovered risk. Choose integration groups by changed behavior; directory count alone does not justify full integration. Follow [test selection and timing policy](docs/testing.md#choose-checks-for-a-change); local command defaults remain available for intentional full validation.
 - If a test cannot execute on the current operating system, skip it with an explicit platform reason; do not emulate, cross-run, or force it. Gate OS-specific tests (`cfg`, build tags, `t.Skip`, `pytest.mark.skipif`) so the matching GitHub Actions OS job runs them. A skip on another OS is not evidence.
 - Claim only verified API, integration, and deployment behavior.
 - Before committing, read [commit rules](docs/commits.md).
+- Before creating or updating a PR/MR, read [pull request rules](docs/pull-requests.md).
 
 ## Architecture
 

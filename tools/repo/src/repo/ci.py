@@ -29,7 +29,9 @@ def plan(root: Path, paths: list[str]) -> dict:
                 if s != "."
             )
         }
-        if path.startswith(("proto/", "tests/fixtures/")):
+        if path.startswith("contracts/client-environment/"):
+            owners |= {"core", "host"}
+        elif path.startswith(("proto/", "tests/fixtures/")):
             owners |= ids
         elif path in ("Cargo.toml", "Cargo.lock"):
             owners |= {p["id"] for p in entries if p["kind"] == "rust"}
@@ -71,8 +73,8 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
 
 
 def native_plan(root: Path, paths: list[str]) -> dict:
-    # Mobile bindings are a pure Rust surface exercised by the Linux coverage
-    # gate; the OS-gated jobs target Core/CLI/proto/noise-peer instead.
+    # Mobile bindings are exercised on Linux and by the iOS build; the native
+    # jobs target Core/CLI/proto/noise-peer instead.
     bindings = {"mobile-bindings"}
     rust = [
         identity
@@ -106,6 +108,28 @@ def run_projects(root: Path, projects: list[str]) -> None:
             if operation == "test":
                 command += ["--coverage"]
             subprocess.run(command, cwd=root, check=True)
+
+
+def run_quick(root: Path, projects: list[str]) -> None:
+    """Run bounded iteration checks without Rust compilation or coverage passes."""
+    from .projects import load_projects, select_projects
+    from .runners import rust
+
+    if not projects:
+        raise ValueError("CI requires explicit projects")
+    selected = select_projects(load_projects(root), projects)
+    for project in selected:
+        if project.kind == "rust":
+            for step in rust.steps(project, "quick"):
+                subprocess.run(list(step.argv), cwd=step.cwd, check=True)
+        else:
+            for operation in ("check", "test"):
+                if operation in project.capabilities:
+                    subprocess.run(
+                        [sys.executable, "-m", "repo", operation, "--project", project.id],
+                        cwd=root,
+                        check=True,
+                    )
 
 
 def native_commands(root: Path, matrix: dict) -> list[list[str]]:
@@ -149,18 +173,30 @@ def run_native(root: Path, matrix: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("plan", "native-plan", "run", "native"))
+    parser.add_argument(
+        "operation", choices=("plan", "quick-plan", "native-plan", "run", "quick", "native")
+    )
+    parser.add_argument("--kind", choices=("rust", "go", "node", "python"))
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--projects", default="[]")
     parser.add_argument("--matrix", default='{"include": []}')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[4]
-    if args.operation in ("plan", "native-plan"):
+    if args.operation == "quick-plan":
+        if not args.kind:
+            parser.error("quick-plan requires --kind")
+        groups = plan(root, changed_paths(root, args.base, args.head))["include"]
+        projects = next((g["projects"] for g in groups if g["kind"] == args.kind), [])
+        print("selected=" + str(bool(projects)).lower())
+        print("projects=" + json.dumps(projects))
+    elif args.operation in ("plan", "native-plan"):
         planner = plan if args.operation == "plan" else native_plan
         print(json.dumps(planner(root, changed_paths(root, args.base, args.head))))
     elif args.operation == "run":
         run_projects(root, json.loads(args.projects))
+    elif args.operation == "quick":
+        run_quick(root, json.loads(args.projects))
     else:
         run_native(root, json.loads(args.matrix))
 
