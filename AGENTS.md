@@ -14,6 +14,7 @@
 - If a test cannot execute on the current operating system, skip it with an explicit platform reason; do not emulate, cross-run, or force it. Gate OS-specific tests (`cfg`, build tags, `t.Skip`, `pytest.mark.skipif`) so the matching GitHub Actions OS job runs them. A skip on another OS is not evidence.
 - Claim only verified API, integration, and deployment behavior.
 - Before committing, read [commit rules](docs/commits.md).
+- Before creating or updating a PR/MR, read [pull request rules](docs/pull-requests.md).
 
 ## Architecture
 

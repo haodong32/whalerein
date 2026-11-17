@@ -1,14 +1,19 @@
-## Behavior
+<!-- Follow docs/pull-requests.md. Keep each section brief. -->
 
-<!-- Explain the problem and resulting behavior. Link a related issue if available. -->
+## Background
 
-## Validation
+<!-- What problem or need does this PR address? -->
 
-<!-- List actual commands or CI runs and outcomes. Note affected consumers,
-     checks not run and why, and relevant environment limits. -->
+## Changes
 
-## Compatibility and rollout
+<!-- Summarize the main changes and resulting behavior. -->
 
-<!-- Describe API/protocol/configuration/state changes, migration, upgrade order
-     and rollback limits, or write "None". For release PRs, list selected
-     components, versions and test/stable channel. -->
+## Key test changes
+
+<!-- Describe important test case changes and what they verify, or say no tests
+     changed. Briefly state validation results and relevant checks not run. -->
+
+## Compatibility and breaking changes
+
+<!-- Explain compatibility impact, breaking changes and any required migration,
+     or write "None". -->
