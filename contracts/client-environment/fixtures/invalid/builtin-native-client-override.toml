@@ -1,0 +1,4 @@
+version = 1
+
+[environments.staging]
+native_client_id = "custom-cli"

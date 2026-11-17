@@ -1,0 +1,9 @@
+version = 1
+environment = "local"
+
+[environments.local]
+label = "Development machine"
+
+[environments.local.tls]
+ca_provider = "file"
+ca_file = "/opt/whalerein/development-rootCA.pem"

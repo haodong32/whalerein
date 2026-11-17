@@ -6,6 +6,7 @@ export { ConfigError, validateTopicId, topics, PROTOCOL_VERSION } from 'whalerei
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { open, resolveEnvironment, IDENTIFIER_PATTERN } from 'whalerein-host/configuration'
 
 function pick(raw, names, fallback) {
   for (const name of names) {
@@ -79,10 +80,43 @@ export function resolveConnectionMode(raw = {}) {
  * Validate manager-owned profile options. These keys are additive: an existing
  * Standalone profile keeps resolving through resolveConfig unchanged.
  */
-export function resolveManagerConfig(raw = {}) {
+export function resolveManagerConfig(raw = {}, options = {}) {
   const adapter = pick(raw, ['adapter'], 'auto')
   if (!['auto', 'fake', 'real'].includes(adapter)) {
     throw new ConfigError('invalid_config', 'adapter must be auto, fake, or real')
+  }
+  const configFile = pick(raw, ['config_file'], '')
+  if (configFile !== '' && (typeof configFile !== 'string' || configFile.includes('\0'))) {
+    throw new ConfigError('invalid_config', 'config_file must be a usable file path')
+  }
+  const environment = pick(raw, ['environment'], '')
+  if (environment !== '' && (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment))) {
+    throw new ConfigError('invalid_config', `environment must match ${IDENTIFIER_PATTERN}`)
+  }
+  if (environment !== '') {
+    // The Host configuration module owns resolution; the plugin never keeps a
+    // second environment catalog or fallback.
+    let snapshot = null
+    try {
+      snapshot = open({
+        configFile: configFile || undefined,
+        envVars: options.envVars,
+        homeDir: options.homeDir,
+        inspectionOnly: true,
+      })
+    } catch (error) {
+      if (configFile !== '' || (options.envVars ?? process.env).WHALEREIN_CONFIG) {
+        throw new ConfigError('invalid_config', `config_file: ${error.code ?? 'unreadable_config'}`)
+      }
+      // A fresh default file may be initialized by ordinary startup.
+    }
+    if (snapshot) {
+      try {
+        resolveEnvironment(snapshot, environment)
+      } catch (error) {
+        throw new ConfigError('invalid_config', `environment: ${error.code ?? 'unknown_environment'}`)
+      }
+    }
   }
   const stateRoot = pick(raw, ['state_root', 'state_dir'], join(homedir(), '.whalerein', 'dsh'))
   if (typeof stateRoot !== 'string' || stateRoot.trim() === '' || stateRoot.includes('\0') || stateRoot.length > 4096) {
@@ -105,6 +139,8 @@ export function resolveManagerConfig(raw = {}) {
     }
   }
   return {
+    environment,
+    configFile: configFile || undefined,
     connectionMode: 'managed',
     adapter,
     stateRoot: stateRoot.trim(),
@@ -117,7 +153,6 @@ export function resolveManagerConfig(raw = {}) {
     enableOpenQuestionBroker: boolean(pick(raw, ['enable_open_question_broker'], true), true),
     logLevel: pick(raw, ['log_level'], 'info'),
     runtimeConfig: {
-      caFile: pick(raw, ['ca_file'], '') || '',
       outboxPerDeviceLimit: integer(raw.outbox_per_device_limit, 100, { min: 1, max: 100_000, name: 'outbox_per_device_limit' }),
       outboxTotalLimit: integer(raw.outbox_total_limit, 1000, { min: 1, max: 1_000_000, name: 'outbox_total_limit' }),
       reconnectMinMs: integer(raw.reconnect_min_ms, 500, { min: 50, max: 60_000, name: 'reconnect_min_ms' }),

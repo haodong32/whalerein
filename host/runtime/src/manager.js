@@ -6,13 +6,13 @@
 // CLI/Core state and never exposes secrets in snapshots.
 
 import { hostname as osHostname } from 'node:os'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { HostRuntime } from './host.js'
 import { MqttAccess } from './access/mqtt.js'
 import { PluginError } from './errors.js'
 import { generateHostId } from './host-id.js'
 import { ActivationOwner } from './activation.js'
-import { HostProfileRegistry, RegistryError } from './registry.js'
+import { HostProfileRegistry, RegistryError, hasLegacyMarkers } from './registry.js'
 import {
   CREDENTIAL_PURPOSES,
   ProfileCredentialStore,
@@ -26,7 +26,15 @@ import {
   ManagedEnrollmentClient,
   fetchServiceMetadata,
 } from './enrollment.js'
+import { open } from './configuration/open.js'
+import { resolveEnvironment } from './configuration/resolve.js'
+import { view as viewConfiguration } from './configuration/view.js'
+import { update as updateConfigurationDocument } from './configuration/update.js'
+import { createScopedClient } from './configuration/tls.js'
+import { redactError } from './configuration/errors.js'
 import { customService, validateServiceOrigin } from './services.js'
+import { isBuiltinEnvironment } from './configuration/catalog.js'
+import { IDENTIFIER_PATTERN } from './configuration/document.js'
 
 const STATES = new Set([
   'idle',
@@ -76,6 +84,22 @@ function codeOf(error) {
   return LOCAL_ERROR_CODES.has(code) ? code : 'internal'
 }
 
+function canonicalJson(value) {
+  return JSON.stringify([value.environment, value.id, value.api_origin, value.issuer, value.native_client_id, value.mode])
+}
+
+/** Stable non-secret authority fingerprint for the resolved definition. */
+export function authorityOf(resolution) {
+  return createHash('sha256').update(canonicalJson(resolution.definition)).digest('hex')
+}
+
+function sameService(service, definition) {
+  if (!service || !definition) return false
+  return service.id === definition.id
+    && service.environment === (definition.environment ?? '')
+    && service.apiOrigin === (definition.api_origin ?? null)
+}
+
 function sanitizeName(value, fallback = 'WhaleRein Host') {
   if (typeof value !== 'string') return fallback
   const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
@@ -84,6 +108,13 @@ function sanitizeName(value, fallback = 'WhaleRein Host') {
 
 export class ConnectionManager {
   #options
+  #configSnapshot = null
+  #resolution = null
+  #configError = null
+  #desiredSnapshot = null
+  #desiredResolution = null
+  #desiredError = null
+  #scopedClients = new Map()
   #registry
   #activation
   #now
@@ -109,11 +140,28 @@ export class ConnectionManager {
       throw new PluginError('invalid_argument', 'manager stateRoot is required')
     }
     if (!options.credentials) throw new PluginError('invalid_argument', 'credential adapter is required')
+    const configFile = options.configFile ?? options.configPath
+    if (configFile !== undefined && (typeof configFile !== 'string' || configFile === '')) {
+      throw new PluginError('invalid_argument', 'configFile must be a non-empty path')
+    }
+    const environmentOverride = options.environment === undefined || options.environment === null || options.environment === ''
+      ? null
+      : options.environment
+    if (environmentOverride !== null && typeof environmentOverride !== 'string') {
+      throw new PluginError('invalid_argument', 'environment override must be a string')
+    }
     this.#options = {
+      configFile: typeof configFile === 'string' ? configFile : undefined,
+      environment: environmentOverride,
+      envVars: options.envVars,
+      homeDir: options.homeDir,
+      platform: options.platform,
+      configSnapshot: options.configSnapshot ?? null,
+      allowDefaultInit: options.allowDefaultInit !== false,
       stateRoot: options.stateRoot,
       credentials: options.credentials,
       now: options.now ?? Date.now,
-      fetch: options.fetch ?? globalThis.fetch,
+      fetch: options.fetch ?? null,
       mqtt: options.mqtt ?? ((mqttOptions) => new MqttAccess(mqttOptions)),
       runtimeFactory: options.runtimeFactory ?? ((runtimeOptions) => new HostRuntime(runtimeOptions)),
       log: options.log ?? null,
@@ -145,10 +193,19 @@ export class ConnectionManager {
     })
     this.#activation = new ActivationOwner({ stateRoot: this.#options.stateRoot, lock: this.#options.lock })
     this.#registry.ensure()
+    if (options.developerToolsEnabled) this.#registry.markDeveloperTools(true)
     try {
       this.#registry.recoverPrepared()
     } catch {
       // A prepared marker never selects; a later switch retries safely.
+    }
+    this.#resolveConfiguration()
+    try {
+      this.#reconcileDesiredProfile()
+    } catch (error) {
+      // Keep the settings surface and current profile available; a changed
+      // authority must never be silently rebound.
+      this.#configError = this.#redactConfigurationError(error)
     }
     this.#refreshDerivedState()
     this.ready = this.#initialize()
@@ -157,6 +214,7 @@ export class ConnectionManager {
   // --- frozen API ---------------------------------------------------------
 
   snapshot() {
+    this.#refreshDesired()
     const record = this.#activeRecord()
     const intent = this.#readIntent(record)
     const staging = this.#stagingProfile()
@@ -168,9 +226,15 @@ export class ConnectionManager {
       managed: profile.mode === 'managed',
       capabilities: this.#capabilitiesFor(profile),
     }))
+    const desired = this.#desiredResolution
     return {
       state: this.#state,
-      environment: record?.environment ?? 'standalone',
+      environment: record?.environment ?? desired?.environment ?? 'standalone',
+      desiredEnvironment: desired?.environment ?? null,
+      selectionSource: desired?.selection_source ?? null,
+      definitionSource: desired?.definition_source ?? null,
+      configPath: this.#desiredSnapshot?.path ?? this.#configSnapshot?.path ?? this.#options.configFile ?? null,
+      configError: this.#desiredError ?? this.#configError,
       profileId: record?.id ?? null,
       label: record?.label ?? '',
       hostName: this.#hostName,
@@ -413,7 +477,7 @@ export class ConnectionManager {
       if (typeof id !== 'string' || id === '') throw new PluginError('invalid_argument', 'profile id is required')
       const current = this.#activeRecord()
       if (!current) throw new PluginError('internal', 'no active profile')
-      const target = this.#registry.get(id)
+      const target = this.#resolveRecord(this.#registry.get(id))
       if (!target) throw new PluginError('not_found', 'profile does not exist')
       if (current.id === target.id) return this.snapshot()
       // Validate the target locally before changing ownership or selection.
@@ -535,6 +599,174 @@ export class ConnectionManager {
     })
   }
 
+  /** Read-only projection of the selected file, latest desired default and the pinned runtime. */
+  configurationView() {
+    const requested = this.#options.configFile
+    let snapshot = null
+    let error = this.#configError
+    if (this.#activeRecord()?.mode !== 'standalone') {
+      try {
+        snapshot = open({
+          configFile: requested,
+          envVars: this.#options.envVars,
+          homeDir: this.#options.homeDir,
+          inspectionOnly: true,
+          allowDefaultInit: false,
+        })
+        error = null
+        return viewConfiguration(snapshot, { override: this.#options.environment })
+      } catch (failure) {
+        error = this.#redactConfigurationError(failure)
+      }
+    }
+    return {
+      path: requested ?? this.#configSnapshot?.path ?? null,
+      source_kind: 'explicit',
+      revision: snapshot?.revision ?? this.#configSnapshot?.revision ?? null,
+      selected_environment: this.#resolution?.environment ?? null,
+      selection_source: this.#resolution?.selection_source ?? null,
+      definition_source: this.#resolution?.definition_source ?? null,
+      desired_default: snapshot?.document?.environment ?? this.#configSnapshot?.document?.environment ?? null,
+      effective_override: this.#options.environment,
+      definition: this.#resolution?.definition ?? null,
+      field_provenance: {},
+      validation: { scope: 'offline', live_readiness: 'not_checked' },
+      errors: error ? [error] : [],
+    }
+  }
+
+  /** Scoped trust metadata for the pinned environment (never a global TLS change). */
+  environmentTrust() {
+    const record = this.#activeRecord()
+    if (!record || record.mode === 'standalone') return null
+    const trust = this.#trustFor(record)
+    if (!trust) return null
+    return { environment: trust.environment, provider: trust.provider, caFile: trust.caFile, scope: trust.scope }
+  }
+
+  /** Persist a typed settings patch through the Host configuration module only. */
+  async updateConfiguration(patch) {
+    return this.#run(async () => {
+      this.#assertUsable()
+      const snapshot = open({
+        configFile: this.#options.configFile,
+        envVars: this.#options.envVars,
+        homeDir: this.#options.homeDir,
+        allowDefaultInit: this.#options.allowDefaultInit,
+        legacyState: () => hasLegacyMarkers(this.#options.stateRoot),
+      })
+      const next = updateConfigurationDocument(snapshot, patch, snapshot.revision)
+      this.#configSnapshot = next
+      this.#desiredSnapshot = next
+      try {
+        this.#resolution = resolveEnvironment(next, this.#options.environment)
+        this.#desiredResolution = this.#resolution
+        this.#configError = null
+        this.#desiredError = null
+      } catch (error) {
+        this.#resolution = null
+        this.#desiredResolution = null
+        this.#configError = this.#redactConfigurationError(error)
+        this.#desiredError = this.#configError
+      }
+      return this.configurationView()
+    })
+  }
+
+  /**
+   * Explicitly switch the running authority. The file is reread, the target
+   * authority gets its own profile, and pending work refuses the switch.
+   */
+  async applyEnvironment(environment) {
+    return this.#run(async () => {
+      this.#assertUsable()
+      if (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment)) {
+        throw new PluginError('invalid_argument', 'environment name is invalid')
+      }
+      const record = this.#activeRecord()
+      if (this.#pendingOperation(record, this.#readIntent(record))) {
+        throw new PluginError('conflict', 'unfinished work must settle before switching environments')
+      }
+      const snapshot = open({
+        configFile: this.#options.configFile,
+        envVars: this.#options.envVars,
+        homeDir: this.#options.homeDir,
+        allowDefaultInit: this.#options.allowDefaultInit,
+        legacyState: () => hasLegacyMarkers(this.#options.stateRoot),
+      })
+      const resolution = resolveEnvironment(snapshot, environment)
+      if (resolution.definition.mode === 'standalone') {
+        throw new PluginError('unsupported_capability', 'standalone profile state is not configured through the environment file')
+      }
+      const target = this.#resolveProfileTarget(resolution)
+      const current = this.#activeRecord()
+      if (current?.id === target.id) {
+        this.#configSnapshot = snapshot
+        this.#resolution = resolution
+        this.#desiredSnapshot = snapshot
+        this.#desiredResolution = resolution
+        this.#configError = null
+        this.#desiredError = null
+        return this.snapshot()
+      }
+      this.#validateTarget(target)
+      const acquiredHere = !this.#activation.owned
+      this.#activation.acquire()
+      try {
+        this.#generation += 1
+        this.#abortPolling()
+        this.#operation = null
+        try {
+          await this.#stopRuntime()
+        } catch {
+          throw new PluginError('conflict', 'the active runtime did not stop; selection is unchanged')
+        }
+        this.#persistUncertainForCurrent(current)
+        const before = this.#registry.read()
+        if (!before) throw new PluginError('internal', 'profile registry is missing')
+        const expectedRevision = before.revision
+        this.#registry.prepareActivation(target.id, expectedRevision)
+        const preparedRevision = this.#registry.read().revision
+        try {
+          this.#registry.commitActivation(target.id, preparedRevision)
+        } catch (error) {
+          try {
+            this.#registry.abortActivation(this.#registry.read().revision)
+          } catch {
+            // the prepared marker never selects
+          }
+          throw error
+        }
+        this.#metadataCache.delete(current?.id)
+        this.#metadataCache.delete(target.id)
+        this.#closeScopedClients()
+        this.#configSnapshot = snapshot
+        this.#resolution = resolution
+        this.#desiredSnapshot = snapshot
+        this.#desiredResolution = resolution
+        this.#configError = null
+        this.#desiredError = null
+        this.#refreshDerivedState()
+        this.#setState(this.#establishedState(target), null)
+        const selection = this.#activeRecord()
+        if (selection && selection.mode === 'managed' && this.#hasBinding(selection) && this.#source) {
+          try {
+            await this.#resumeManaged(selection)
+          } catch (error) {
+            this.#handleOperationFailure(error)
+          }
+        }
+        if (this.#runtime === null) this.#activation.release()
+        return this.snapshot()
+      } catch (error) {
+        if (acquiredHere && this.#runtime === null) this.#activation.release()
+        this.#errorCode = codeOf(error)
+        this.#lastErrorCode = codeOf(error)
+        throw error
+      }
+    })
+  }
+
   async dispose() {
     if (this.#disposed) return
     this.#disposed = true
@@ -547,6 +779,7 @@ export class ConnectionManager {
     } catch {
       // contained; ownership is released below
     }
+    this.#closeScopedClients()
     try {
       await operation
     } catch {
@@ -555,6 +788,192 @@ export class ConnectionManager {
     this.#activation.release()
     this.#connected = false
     this.#clearError()
+  }
+
+  // --- configuration reconciliation ---------------------------------------
+
+  #resolveConfiguration() {
+    this.#configError = null
+    this.#configSnapshot = null
+    this.#resolution = null
+    const active = this.#registry.active()
+    if (active?.mode === 'standalone') return
+    if (this.#options.configSnapshot) {
+      try {
+        this.#configSnapshot = this.#options.configSnapshot
+        this.#resolution = resolveEnvironment(this.#configSnapshot, this.#options.environment)
+        this.#desiredSnapshot = this.#configSnapshot
+        this.#desiredResolution = this.#resolution
+        this.#desiredError = null
+      } catch (error) {
+        this.#configSnapshot = null
+        this.#configError = this.#redactConfigurationError(error)
+        this.#desiredError = this.#configError
+      }
+      return
+    }
+    try {
+      this.#configSnapshot = open({
+        configFile: this.#options.configFile,
+        envVars: this.#options.envVars,
+        homeDir: this.#options.homeDir,
+        allowDefaultInit: this.#options.allowDefaultInit,
+        legacyState: () => hasLegacyMarkers(this.#options.stateRoot),
+      })
+      this.#resolution = resolveEnvironment(this.#configSnapshot, this.#options.environment)
+      this.#desiredSnapshot = this.#configSnapshot
+      this.#desiredResolution = this.#resolution
+      this.#desiredError = null
+    } catch (error) {
+      this.#configSnapshot = null
+      this.#resolution = null
+      this.#configError = this.#redactConfigurationError(error)
+      this.#desiredSnapshot = null
+      this.#desiredResolution = null
+      this.#desiredError = this.#configError
+    }
+  }
+
+  /** Re-read only the desired selection; the pinned runtime never follows it. */
+  #refreshDesired() {
+    if (this.#registry.active()?.mode === 'standalone') return
+    try {
+      const snapshot = open({
+        configFile: this.#options.configFile,
+        envVars: this.#options.envVars,
+        homeDir: this.#options.homeDir,
+        inspectionOnly: true,
+        allowDefaultInit: false,
+      })
+      this.#desiredSnapshot = snapshot
+      this.#desiredResolution = resolveEnvironment(snapshot, this.#options.environment)
+      this.#desiredError = null
+    } catch (error) {
+      this.#desiredSnapshot = null
+      this.#desiredResolution = null
+      this.#desiredError = this.#redactConfigurationError(error)
+    }
+  }
+
+  #redactConfigurationError(error) {
+    const code = typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(error.code)
+      ? error.code
+      : 'unreadable_config'
+    const redacted = error?.name === 'ConfigurationError' ? redactError(error) : null
+    return {
+      code: redacted?.code ?? code,
+      message: redacted?.message ?? 'configuration could not be resolved',
+      environment: typeof error?.environment === 'string' ? error.environment : null,
+    }
+  }
+
+  #reconcileDesiredProfile() {
+    if (!this.#resolution) return
+    const definition = this.#resolution.definition
+    if (definition.mode === 'standalone') return
+    const target = this.#resolveProfileTarget(this.#resolution)
+    if (target && target.id !== this.#registry.active()?.id) this.#activateAtStartup(target.id)
+  }
+
+  #activateAtStartup(id) {
+    this.#activation.acquire()
+    try {
+      const registry = this.#registry.read()
+      if (!registry) throw new PluginError('internal', 'profile registry is missing')
+      this.#registry.prepareActivation(id, registry.revision)
+      this.#registry.commitActivation(id, this.#registry.read().revision)
+    } finally {
+      this.#activation.release()
+    }
+  }
+
+  /** Find or create the managed profile for one resolved environment. */
+  #resolveProfileTarget(resolution) {
+    const definition = resolution.definition
+    if (definition.mode !== 'account') return null
+    const environment = resolution.environment
+    const authority = authorityOf(resolution)
+    const profiles = this.#registry.list().filter((profile) => profile.mode === 'managed')
+    const match = profiles.find((profile) => profile.bindings?.serviceAuthority === authority)
+    if (match) return match
+    const sameEnvironment = profiles.find((profile) => profile.environment === environment)
+    if (sameEnvironment) {
+      if (sameEnvironment.bindings?.serviceAuthority) {
+        throw new PluginError('invalid_argument', 'environment authority changed; use a new Host profile')
+      }
+      if (!sameService(sameEnvironment.service, definition)) {
+        throw new PluginError('invalid_argument', 'environment authority changed; use a new Host profile')
+      }
+      this.#registry.setBindings(sameEnvironment.id, { serviceAuthority: authority })
+      return this.#registry.get(sameEnvironment.id)
+    }
+    const label = this.#uniqueProfileLabel(definition.label ?? `WhaleRein ${environment}`, environment)
+    const service = {
+      id: definition.id,
+      environment: definition.environment ?? 'custom',
+      label,
+      apiOrigin: definition.api_origin,
+      issuer: definition.issuer,
+      nativeClientId: definition.native_client_id,
+    }
+    return this.#registry.addProfile({
+      label,
+      environment,
+      service,
+      bindings: { serviceAuthority: authority },
+    })
+  }
+
+  #uniqueProfileLabel(preferred, environment) {
+    const base = sanitizeName(preferred, `WhaleRein ${environment}`).slice(0, 64)
+    const labels = new Set(this.#registry.list().map((profile) => profile.label.toLowerCase()))
+    if (!labels.has(base.toLowerCase())) return base
+    for (let index = 2; index < 100; index += 1) {
+      const suffix = ` (${index})`
+      const candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`
+      if (!labels.has(candidate.toLowerCase())) return candidate
+    }
+    return `${environment.slice(0, 50)}-${createHash('sha256').update(base).digest('hex').slice(0, 8)}`.slice(0, 64)
+  }
+
+  #resolutionFor(record) {
+    if (!record || record.environment === 'standalone' || !this.#configSnapshot) return null
+    try {
+      return resolveEnvironment(this.#configSnapshot, record.environment)
+    } catch {
+      return null
+    }
+  }
+
+  #scopedClientFor(record) {
+    const resolution = this.#resolutionFor(record)
+    if (!resolution) return null
+    const key = `${resolution.environment}:${authorityOf(resolution)}`
+    let client = this.#scopedClients.get(key)
+    if (!client) {
+      client = createScopedClient(resolution, {
+        homeDir: this.#options.homeDir,
+        envVars: this.#options.envVars,
+        platform: this.#options.platform,
+      })
+      this.#scopedClients.set(key, client)
+    }
+    return client
+  }
+
+  #fetchFor(record) {
+    if (typeof this.#options.fetch === 'function') return this.#options.fetch
+    return this.#scopedClientFor(record)?.fetch ?? globalThis.fetch
+  }
+
+  #trustFor(record) {
+    return this.#scopedClientFor(record)?.trust ?? null
+  }
+
+  #closeScopedClients() {
+    const clients = [...this.#scopedClients.values()]
+    this.#scopedClients.clear()
+    for (const client of clients) client.close().catch(() => {})
   }
 
   // --- initialization -----------------------------------------------------
@@ -729,7 +1148,7 @@ export class ConnectionManager {
       hostId: prepared.hostId,
       token: credential.password,
       authorizationPublicKey: prepared.identity.signingPublicKey,
-      caFile: this.#options.runtimeConfig.caFile ?? '',
+      caFile: this.#trustFor(record)?.caFile ?? '',
       reconnectMinMs: config.reconnectMinMs,
       reconnectMaxMs: config.reconnectMaxMs,
       logger: this.#options.log,
@@ -886,14 +1305,14 @@ export class ConnectionManager {
   }
 
   #managedConfig(record, prepared, credential) {
-    const base = this.#options.runtimeConfig
+    const base = { ...this.#options.runtimeConfig }
     return {
       ...base,
       hostId: prepared.hostId,
       hostToken: credential.password,
       mqttUrl: credential.mqttUrl,
       stateDir: this.#registry.stateDirFor(record.id),
-      caFile: base.caFile ?? '',
+      caFile: this.#trustFor(record)?.caFile ?? base.caFile ?? '',
       outboxPerDeviceLimit: base.outboxPerDeviceLimit ?? 100,
       outboxTotalLimit: base.outboxTotalLimit ?? 1000,
       shutdownTimeoutMs: base.shutdownTimeoutMs ?? 5000,
@@ -947,12 +1366,13 @@ export class ConnectionManager {
   async #metadataFor(record) {
     const cached = this.#metadataCache.get(record.id)
     if (cached) return cached
+    const builtin = isBuiltinEnvironment(record.environment)
     const metadata = await fetchServiceMetadata({
       apiOrigin: record.service?.apiOrigin,
-      fetch: this.#options.fetch,
+      fetch: this.#fetchFor(record),
       allowLoopback: this.#options.allowLoopback,
-      expectedService: '',
-      expectedEnvironment: record.environment === 'custom' ? '' : record.environment,
+      expectedService: builtin ? record.service.id : '',
+      expectedEnvironment: builtin ? (record.service.environment ?? record.environment) : '',
     })
     this.#metadataCache.set(record.id, metadata)
     return metadata
@@ -969,7 +1389,7 @@ export class ConnectionManager {
       noisePublicKey: prepared.identity.noisePublicKey,
       credentialStore: prepared.store,
       journal: this.#intentJournal(record),
-      fetch: this.#options.fetch,
+      fetch: this.#fetchFor(record),
       now: this.#now,
       log: this.#options.log,
       allowLoopback: this.#options.allowLoopback,
@@ -1026,7 +1446,15 @@ export class ConnectionManager {
   // --- state helpers ------------------------------------------------------
 
   #activeRecord() {
-    return this.#registry.active()
+    const record = this.#registry.active()
+    return this.#resolveRecord(record)
+  }
+
+  #resolveRecord(record) {
+    // The pinned profile is the running authority. A changed desired
+    // configuration is reported separately and only an explicit switch
+    // resolves or refuses it; startup never silently rebinds here.
+    return record
   }
 
   #stagingProfile() {

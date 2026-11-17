@@ -9,6 +9,13 @@ import { ProfileCredentialStore, CREDENTIAL_PURPOSES } from '../src/credentials.
 import { HostProfileRegistry } from '../src/registry.js'
 import { OFFICIAL_SERVICES } from '../src/services.js'
 
+
+function ensureConfig(stateRoot, text = 'version = 1\nenvironment = "production"\n') {
+  const path = join(stateRoot, 'config.toml')
+  writeFileSync(path, text)
+  return path
+}
+
 const NOW = 1_800_000_000_000
 const HOST_NAME = 'test-mac'
 const b64 = (value) => Buffer.from(value).toString('base64url')
@@ -26,7 +33,7 @@ function json(status, body, headers = {}) {
 
 function metadataDocument(overrides = {}) {
   return {
-    service: 'whalerein-cloud',
+    service: 'official-production',
     environment: 'production',
     protocol: { version: 1, capabilities: ['host-enrollment-v1'] },
     approval: { origin: 'https://app.whalerein.com', path: '/approve/{id}' },
@@ -204,6 +211,7 @@ function fixture(options = {}) {
   const network = options.network ?? createFetch(options.fetchOptions)
   const manager = createConnectionManager({
     stateRoot,
+    configFile: ensureConfig(stateRoot),
     credentials,
     source: options.source === false ? null : {},
     legacy: options.legacy,
@@ -232,6 +240,7 @@ test('fresh default is official production, starts no network, and never reads C
   try {
     const manager = createConnectionManager({
       stateRoot,
+      configFile: ensureConfig(stateRoot),
       credentials: new MemoryHostCredentials(),
       source: {},
       now: () => NOW,
@@ -316,6 +325,7 @@ test('disconnect persists paused intent; restart does not auto-reconnect and rec
     })
     const second = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: {},
       now: () => NOW,
@@ -354,6 +364,7 @@ test('staging enablement does not activate or autostart, persists, and failure d
     assert.equal(f.runtimes.length, 0)
     const second = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: null,
       now: () => NOW,
@@ -369,7 +380,7 @@ test('staging enablement does not activate or autostart, persists, and failure d
     const switched = await f.manager.switchProfile(staging.id)
     assert.equal(switched.environment, 'staging')
     assert.equal(switched.state, 'idle')
-    assert.equal(switched.label, 'WhaleRein Cloud Staging')
+    assert.equal(switched.label, 'WhaleRein Cloud Staging (testing only)')
     assert.equal(f.runtimes.length, 0)
     // A staging service failure remains selected and labeled; no fallback.
     await assert.rejects(
@@ -408,6 +419,7 @@ test('switch stops the old runtime before publishing and a stop failure preserve
       const runtimes = createRuntimes({ failStop: true })
       const manager = createConnectionManager({
         stateRoot: failingStateRoot,
+        configFile: ensureConfig(failingStateRoot),
         credentials: f.credentials,
         source: {},
         now: () => NOW,
@@ -440,6 +452,7 @@ test('a second process cannot own the active installation', async () => {
     await waitFor(() => f.manager.snapshot().state === 'connected')
     const second = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: new MemoryHostCredentials(),
       source: {},
       now: () => NOW,
@@ -600,6 +613,7 @@ test('legacy standalone configuration remains a separate manual mode', async () 
   try {
     const manager = createConnectionManager({
       stateRoot,
+      configFile: ensureConfig(stateRoot),
       credentials: new MemoryHostCredentials(),
       source: null,
       now: () => NOW,
@@ -634,6 +648,7 @@ test('corrupt registry, moved state and missing committed keys stay actionable',
     writeFileSync(join(corruptRoot, 'host-profiles.json'), '{bad')
     assert.throws(() => createConnectionManager({
       stateRoot: corruptRoot,
+      configFile: ensureConfig(corruptRoot),
       credentials: new MemoryHostCredentials(),
       installationId: 'test-install',
     }), (error) => error.code === 'registry_corrupt')
@@ -652,6 +667,7 @@ test('corrupt registry, moved state and missing committed keys stay actionable',
     // A fresh credential store has no committed key while the registry does.
     const missing = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: new MemoryHostCredentials(),
       source: {},
       now: () => NOW,
@@ -669,6 +685,7 @@ test('corrupt registry, moved state and missing committed keys stay actionable',
     rmSync(join(f.stateRoot, 'profiles', profileId), { recursive: true, force: true })
     assert.throws(() => createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       installationId: 'test-install',
     }), (error) => error.code === 'registry_unsafe_state')
@@ -813,6 +830,7 @@ test('retry reconciles a persisted uncertain operation only when the credential 
 
     const reopened = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: {},
       now: () => NOW,
@@ -838,6 +856,7 @@ test('retry reconciles a persisted uncertain operation only when the credential 
     await store.remove(CREDENTIAL_PURPOSES.transportCredential)
     const unresolved = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: {},
       now: () => NOW,
@@ -924,6 +943,7 @@ test('restart resumes a persisted approval through an injected source provider',
     await f.manager.dispose()
     const resumed = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: null,
       getSource: () => ({}),
@@ -959,6 +979,7 @@ test('a source provider failure leaves persisted approval dormant without invent
     await f.manager.dispose()
     const dormant = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: null,
       getSource: () => { throw new Error('source unavailable') },
@@ -991,6 +1012,7 @@ test('persisted approved intent resumes through polling and uncertain intent is 
     writeFileSync(path, JSON.stringify({ ...intent, state: 'approved' }))
     const noAuth = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: {},
       now: () => NOW,
@@ -1011,6 +1033,7 @@ test('persisted approved intent resumes through polling and uncertain intent is 
     registry.setPending(profileId, { uncertain: true, phase: 'enrollment' })
     const uncertain = createConnectionManager({
       stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
       credentials: f.credentials,
       source: {},
       now: () => NOW,
@@ -1053,7 +1076,7 @@ test('runtime failures and missing readiness produce action-required without fal
 test('a switched target failure stays selected and never falls back', async () => {
   const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
   const stagingDoc = metadataDocument({
-    service: 'whalerein-cloud-staging',
+    service: 'official-staging',
     environment: 'staging',
     approval: { origin: 'https://app.staging.whalerein.com', path: '/approve/{id}' },
   })
@@ -1063,6 +1086,7 @@ test('a switched target failure stays selected and never falls back', async () =
   try {
     const first = createConnectionManager({
       stateRoot,
+      configFile: ensureConfig(stateRoot),
       credentials,
       source: {},
       now: () => NOW,
@@ -1078,8 +1102,10 @@ test('a switched target failure stays selected and never falls back', async () =
     await first.switchProfile(staging.id)
     await first.dispose()
 
+    ensureConfig(stateRoot, 'version = 1\nenvironment = "staging"\n')
     const second = createConnectionManager({
       stateRoot,
+      configFile: join(stateRoot, 'config.toml'),
       credentials,
       source: {},
       now: () => NOW,
@@ -1098,8 +1124,10 @@ test('a switched target failure stays selected and never falls back', async () =
     await waitFor(() => second.snapshot().state === 'connected' && second.snapshot().environment === 'production')
     await second.dispose()
 
+    ensureConfig(stateRoot)
     const failing = createConnectionManager({
       stateRoot,
+      configFile: join(stateRoot, 'config.toml'),
       credentials,
       source: {},
       now: () => NOW,
@@ -1203,6 +1231,7 @@ test('live transport disconnects and readiness are reflected in manager state', 
   try {
     const manager = createConnectionManager({
       stateRoot,
+      configFile: ensureConfig(stateRoot),
       credentials: new MemoryHostCredentials(),
       source: {},
       now: () => NOW,
@@ -1223,5 +1252,442 @@ test('live transport disconnects and readiness are reflected in manager state', 
     await manager.dispose()
   } finally {
     rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('two runtime profiles with separate configuration references resolve independently', async () => {
+  const rootA = mkdtempSync(join(tmpdir(), 'whalerein-config-a-'))
+  const rootB = mkdtempSync(join(tmpdir(), 'whalerein-config-b-'))
+  const configA = join(rootA, 'device-a.toml')
+  const configB = join(rootB, 'device-b.toml')
+  writeFileSync(configA, 'version = 1\nenvironment = "production"\n')
+  writeFileSync(configB, 'version = 1\nenvironment = "staging"\n')
+  const managers = []
+  try {
+    for (const [stateRoot, configFile] of [[rootA, configA], [rootB, configB]]) {
+      managers.push(createConnectionManager({
+        stateRoot: join(stateRoot, 'host'),
+        configFile,
+        credentials: new MemoryHostCredentials(),
+        source: {},
+        now: () => NOW,
+        hostName: HOST_NAME,
+        fetch: async () => { throw new Error('no network expected') },
+        mqtt: createMqtt([]),
+        runtimeFactory: createRuntimes().factory,
+        installationId: 'test-install',
+      }))
+    }
+    for (const manager of managers) await manager.ready
+    assert.equal(managers[0].snapshot().environment, 'production')
+    assert.equal(managers[0].snapshot().desiredEnvironment, 'production')
+    assert.equal(managers[1].snapshot().environment, 'staging')
+    assert.equal(managers[1].snapshot().desiredEnvironment, 'staging')
+    assert.equal(managers[1].snapshot().label, 'WhaleRein Cloud Staging (testing only)')
+    for (const manager of managers) await manager.dispose()
+  } finally {
+    rmSync(rootA, { recursive: true, force: true })
+    rmSync(rootB, { recursive: true, force: true })
+  }
+})
+
+test('a configuration edit changes desired state but never switches the live authority', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-config-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-edit-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "production"\n')
+  const f = fixture({ stateRoot, managerOptions: { configFile } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    writeFileSync(configFile, 'version = 1\nenvironment = "staging"\n')
+    const snapshot = f.manager.snapshot()
+    assert.equal(snapshot.environment, 'production')
+    assert.equal(snapshot.desiredEnvironment, 'staging')
+    assert.equal(snapshot.connected, true)
+    const view = f.manager.configurationView()
+    assert.equal(view.desired_default, 'staging')
+    assert.equal(view.selected_environment, 'staging')
+    // The runtime registry stays beneath the caller-provided state root.
+    assert.equal(existsSync(join(f.stateRoot, 'host-profiles.json')), true)
+    assert.equal(existsSync(join(configDir, 'host-profiles.json')), false)
+    // An explicit switch is required and the running authority moves only then.
+    const switched = await f.manager.applyEnvironment('staging')
+    assert.equal(switched.environment, 'staging')
+    assert.equal(switched.connected, false)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('a service authority change under one name refuses reuse until a new profile exists', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-authority-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-authority-'))
+  const configFile = join(configDir, 'config.toml')
+  const base = 'version = 1\nenvironment = "company"\n\n[environments.company]\nlabel = "Company"\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nnative_client_id = "whalerein-cli"\n'
+  writeFileSync(configFile, base)
+  const options = {
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  }
+  try {
+    const first = createConnectionManager(options)
+    await first.ready
+    assert.equal(first.snapshot().environment, 'company')
+    assert.equal(first.snapshot().definitionSource, 'file')
+    const profilesBefore = first.snapshot().profiles.length
+    await first.dispose()
+    writeFileSync(configFile, base.replace('https://cloud.example.com', 'https://other.example.com'))
+    const second = createConnectionManager(options)
+    await second.ready
+    assert.equal(second.snapshot().environment, 'company')
+    assert.equal(second.snapshot().desiredEnvironment, 'company')
+    assert.equal(second.snapshot().configError.code, 'invalid_argument')
+    assert.equal(second.snapshot().profiles.length, profilesBefore)
+    await assert.rejects(second.applyEnvironment('company'), (error) => error.code === 'invalid_argument')
+    await second.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('custom and local definitions expose scoped trust and the expected service identity', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-trust-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-trust-'))
+  const mkcertHome = mkdtempSync(join(tmpdir(), 'whalerein-mkcert-'))
+  const caFile = join(configDir, 'company-rootCA.pem')
+  writeFileSync(caFile, '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n')
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "company"\n\n[environments.company]\nlabel = "Company"\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nnative_client_id = "whalerein-cli"\n\n[environments.company.tls]\nca_provider = "file"\nca_file = "company-rootCA.pem"\n')
+  const seen = []
+  const metadata = metadataDocument({
+    service: 'company-service',
+    environment: 'production',
+    approval: { origin: 'https://cloud.example.com', path: '/approve/{id}' },
+  })
+  const network = createFetch({ metadata })
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async (url, init) => {
+      seen.push(String(url))
+      return network.fetch(url, init)
+    },
+    mqtt: () => { throw new Error('must not connect') },
+    runtimeFactory: () => { throw new Error('must not start') },
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    const trust = manager.environmentTrust()
+    assert.equal(trust.provider, 'file')
+    assert.equal(trust.scope, 'company')
+    assert.equal(trust.caFile.endsWith('company-rootCA.pem'), true)
+    await manager.startConnect()
+    assert.equal(seen[0], 'https://cloud.example.com/api/host-service')
+    const snapshot = manager.snapshot()
+    assert.equal(snapshot.environment, 'company')
+    const profile = snapshot.profiles.find((item) => item.active)
+    assert.equal(profile.label, 'Company')
+  } finally {
+    await manager.dispose()
+  }
+  // Built-in local resolves its expected official identity and mkcert trust.
+  const localSeen = []
+  const localConfig = join(configDir, 'local.toml')
+  writeFileSync(localConfig, 'version = 1\nenvironment = "local"\n')
+  const xdg = join(mkcertHome, 'share')
+  mkdirSync(join(xdg, 'mkcert'), { recursive: true })
+  writeFileSync(join(xdg, 'mkcert', 'rootCA.pem'), '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n')
+  const localManager = createConnectionManager({
+    stateRoot: join(stateRoot, 'local'),
+    configFile: localConfig,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    envVars: { XDG_DATA_HOME: xdg },
+    platform: 'linux',
+    fetch: async (url, init) => {
+      localSeen.push(String(url))
+      const localNetwork = createFetch({ metadata: metadataDocument({ service: 'official-local', environment: 'local', approval: { origin: 'https://app.whalerein.test', path: '/approve/{id}' } }) })
+      return localNetwork.fetch(url, init)
+    },
+    mqtt: () => { throw new Error('must not connect') },
+    runtimeFactory: () => { throw new Error('must not start') },
+    installationId: 'test-install',
+  })
+  try {
+    await localManager.ready
+    const trust = localManager.environmentTrust()
+    assert.equal(trust.provider, 'mkcert')
+    assert.equal(trust.scope, 'local')
+    await localManager.startConnect()
+    assert.equal(localSeen[0], 'https://app.whalerein.test/api/host-service')
+    assert.equal(localManager.snapshot().environment, 'local')
+  } finally {
+    await localManager.dispose()
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
+    rmSync(mkcertHome, { recursive: true, force: true })
+  }
+})
+
+test('settings updates delegate to the configuration module and never write TOML from the manager', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-save-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-save-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, '# keep me\nversion = 1\nenvironment = "production"\n')
+  const f = fixture({ stateRoot, managerOptions: { configFile } })
+  try {
+    await f.manager.ready
+    const view = await f.manager.updateConfiguration({ type: 'SetDefaultEnvironment', environment: 'staging' })
+    assert.equal(view.desired_default, 'staging')
+    assert.equal(readFileSync(configFile, 'utf8').includes('# keep me'), true)
+    const snapshot = f.manager.snapshot()
+    assert.equal(snapshot.environment, 'production')
+    assert.equal(snapshot.desiredEnvironment, 'staging')
+    // Switching to the already-pinned environment is a no-op.
+    const same = await f.manager.applyEnvironment('production')
+    assert.equal(same.environment, 'production')
+    await assert.rejects(f.manager.applyEnvironment('Invalid Name'), (error) => error.code === 'invalid_argument')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('an explicit switch refuses while an approval is pending', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-pending-'))
+  const f = fixture({ stateRoot })
+  try {
+    await f.manager.startConnect()
+    assert.equal(f.manager.snapshot().state, 'awaiting_approval')
+    await assert.rejects(f.manager.applyEnvironment('staging'), (error) => error.code === 'conflict')
+    await f.manager.cancel()
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a missing explicit configuration is reported without a fallback environment', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-missing-'))
+  const missing = join(stateRoot, 'missing', 'config.toml')
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile: missing,
+    allowDefaultInit: false,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    const snapshot = manager.snapshot()
+    assert.equal(snapshot.environment, 'production')
+    assert.equal(snapshot.desiredEnvironment, null)
+    assert.equal(snapshot.configError.code, 'missing_config')
+    const view = manager.configurationView()
+    assert.equal(view.errors[0].code, 'missing_config')
+    assert.equal(view.selected_environment, null)
+    assert.equal(manager.environmentTrust(), null)
+    assert.throws(() => createConnectionManager({ stateRoot, configFile: '', credentials: new MemoryHostCredentials() }), (error) => error.code === 'invalid_argument')
+    assert.throws(() => createConnectionManager({ stateRoot, environment: 7, credentials: new MemoryHostCredentials() }), (error) => error.code === 'invalid_argument')
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('a standalone custom definition cannot be activated through the managed switch', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-standalone-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-standalone-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "lab"\n\n[environments.lab]\nmode = "standalone"\n')
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    assert.equal(manager.snapshot().desiredEnvironment, 'lab')
+    assert.equal(manager.snapshot().definitionSource, 'file')
+    await assert.rejects(manager.applyEnvironment('lab'), (error) => error.code === 'unsupported_capability')
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('a settings patch that removes the selected environment reports a redacted resolution error', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-remove-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-remove-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "company"\n\n[environments.company]\nlabel = "Company"\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nnative_client_id = "whalerein-cli"\n')
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    assert.equal(manager.snapshot().environment, 'company')
+    const view = await manager.updateConfiguration({ type: 'RemoveCustomEnvironment', environment: 'company' })
+    assert.equal(view.selected_environment, null)
+    assert.equal(view.errors[0].code, 'unknown_environment')
+    assert.equal(manager.snapshot().desiredEnvironment, null)
+    assert.equal(manager.snapshot().configError.code, 'unknown_environment')
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('two custom environments with the same label get distinct stable profile labels', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-labels-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-labels-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "one"\n\n[environments.one]\nlabel = "Same"\nmode = "account"\napi_origin = "https://one.example.com"\nissuer = "https://auth.one.example.com/oidc"\nnative_client_id = "whalerein-cli"\n\n[environments.two]\nlabel = "Same"\nmode = "account"\napi_origin = "https://two.example.com"\nissuer = "https://auth.two.example.com/oidc"\nnative_client_id = "whalerein-cli"\n')
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    const switched = await manager.applyEnvironment('two')
+    assert.equal(switched.environment, 'two')
+    const labels = switched.profiles.map((profile) => profile.label).sort()
+    assert.deepEqual(labels, ['Same', 'Same (2)', 'WhaleRein Cloud'])
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+test('an explicit environment switch preserves selection when the runtime cannot stop', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-apply-stop-'))
+  const runtimes = createRuntimes({ failStop: true })
+  const f = fixture({ stateRoot, managerOptions: { runtimeFactory: runtimes.factory } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const before = f.manager.snapshot().profileId
+    await assert.rejects(f.manager.applyEnvironment('staging'), (error) => error.code === 'conflict')
+    assert.equal(f.manager.snapshot().profileId, before)
+    assert.equal(f.manager.snapshot().environment, 'production')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('legacy standalone profiles expose no configuration trust or managed switch', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-standalone-trust-'))
+  writeFileSync(join(stateRoot, 'state.sqlite'), 'legacy')
+  const manager = createConnectionManager({
+    stateRoot,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+    standalone: { config: { hostId: 'legacy-host', hostToken: 'legacy-token', mqttUrl: 'mqtts://legacy.example', stateDir: stateRoot } },
+  })
+  try {
+    await manager.ready
+    assert.equal(manager.snapshot().environment, 'standalone')
+    assert.equal(manager.environmentTrust(), null)
+    assert.equal(manager.snapshot().desiredEnvironment, null)
+    const view = manager.configurationView()
+    assert.equal(view.selected_environment, null)
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('an unbound profile whose stored service differs from the file needs a new profile', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-unbound-'))
+  const configDir = mkdtempSync(join(tmpdir(), 'whalerein-config-unbound-'))
+  const configFile = join(configDir, 'config.toml')
+  writeFileSync(configFile, 'version = 1\nenvironment = "legacyx"\n\n[environments.legacyx]\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nnative_client_id = "whalerein-cli"\n')
+  const registry = new HostProfileRegistry({ stateRoot })
+  registry.ensure()
+  registry.addProfile({
+    label: 'Legacy X',
+    environment: 'legacyx',
+    service: { id: 'legacy-service', environment: 'custom', label: 'Legacy X', apiOrigin: 'https://legacy.example.com' },
+  })
+  const manager = createConnectionManager({
+    stateRoot,
+    configFile,
+    credentials: new MemoryHostCredentials(),
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  })
+  try {
+    await manager.ready
+    assert.equal(manager.snapshot().environment, 'production')
+    assert.equal(manager.snapshot().configError.code, 'invalid_argument')
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+    rmSync(configDir, { recursive: true, force: true })
   }
 })

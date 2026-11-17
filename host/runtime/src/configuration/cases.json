@@ -1,0 +1,531 @@
+{
+  "schema": "whalerein/v1/client-environment-corpus",
+  "version": 1,
+  "cases": [
+    {
+      "id": "valid/minimal",
+      "kind": "valid",
+      "file": "fixtures/valid/minimal.toml",
+      "document": {
+        "version": 1,
+        "environment": null,
+        "environments": {}
+      }
+    },
+    {
+      "id": "valid/production-selection",
+      "kind": "valid",
+      "file": "fixtures/valid/production-selection.toml",
+      "document": {
+        "version": 1,
+        "environment": "production",
+        "environments": {
+          "production": {
+            "id": "production",
+            "mode": null,
+            "label": "WhaleRein Cloud (work laptop)",
+            "api_origin": null,
+            "issuer": null,
+            "native_client_id": null,
+            "environment": null,
+            "tls": null
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/custom-account",
+      "kind": "valid",
+      "file": "fixtures/valid/custom-account.toml",
+      "document": {
+        "version": 1,
+        "environment": "company",
+        "environments": {
+          "company": {
+            "id": "company",
+            "mode": "account",
+            "label": "Company Cloud",
+            "api_origin": "https://cloud.example.com",
+            "issuer": "https://auth.example.com/oidc",
+            "native_client_id": "whalerein-cli",
+            "environment": null,
+            "tls": null
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/standalone",
+      "kind": "valid",
+      "file": "fixtures/valid/standalone.toml",
+      "document": {
+        "version": 1,
+        "environment": "lab",
+        "environments": {
+          "lab": {
+            "id": "lab",
+            "mode": "standalone",
+            "label": "Lab invitation pairing",
+            "api_origin": null,
+            "issuer": null,
+            "native_client_id": null,
+            "environment": null,
+            "tls": null
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/local-trust-file",
+      "kind": "valid",
+      "file": "fixtures/valid/local-trust-file.toml",
+      "document": {
+        "version": 1,
+        "environment": "local",
+        "environments": {
+          "local": {
+            "id": "local",
+            "mode": null,
+            "label": "Development machine",
+            "api_origin": null,
+            "issuer": null,
+            "native_client_id": null,
+            "environment": null,
+            "tls": {
+              "ca_provider": "file",
+              "ca_file": "/opt/whalerein/development-rootCA.pem"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/standalone-trust-file",
+      "kind": "valid",
+      "file": "fixtures/valid/standalone-trust-file.toml",
+      "document": {
+        "version": 1,
+        "environment": "lab",
+        "environments": {
+          "lab": {
+            "id": "lab",
+            "mode": "standalone",
+            "label": null,
+            "api_origin": null,
+            "issuer": null,
+            "native_client_id": null,
+            "environment": null,
+            "tls": {
+              "ca_provider": "file",
+              "ca_file": "/opt/lab/rootCA.pem"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/quoted-multiline",
+      "kind": "valid",
+      "file": "fixtures/valid/quoted-multiline.toml",
+      "document": {
+        "version": 1,
+        "environment": "company",
+        "environments": {
+          "company": {
+            "id": "company",
+            "mode": "account",
+            "label": "Company\nCloud",
+            "api_origin": "https://cloud.example.com",
+            "issuer": "https://auth.example.com/oidc",
+            "native_client_id": "whalerein-cli",
+            "environment": null,
+            "tls": {
+              "ca_provider": "system",
+              "ca_file": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "valid/literal-strings",
+      "kind": "valid",
+      "file": "fixtures/valid/literal-strings.toml",
+      "document": {
+        "version": 1,
+        "environment": "company",
+        "environments": {
+          "company": {
+            "id": "company",
+            "mode": "account",
+            "label": "$(touch /tmp/whalerein-should-not-run) ${HOME} `id`",
+            "api_origin": "https://cloud.example.com",
+            "issuer": "https://auth.example.com/oidc",
+            "native_client_id": "whalerein-cli",
+            "environment": null,
+            "tls": null
+          }
+        }
+      }
+    },
+    {
+      "id": "invalid/duplicate-key",
+      "kind": "invalid",
+      "file": "fixtures/invalid/duplicate-key.toml",
+      "error": "duplicate_key"
+    },
+    {
+      "id": "invalid/unknown-top-level",
+      "kind": "invalid",
+      "file": "fixtures/invalid/unknown-top-level.toml",
+      "error": "unknown_field"
+    },
+    {
+      "id": "invalid/unknown-env-field",
+      "kind": "invalid",
+      "file": "fixtures/invalid/unknown-env-field.toml",
+      "error": "unknown_field"
+    },
+    {
+      "id": "invalid/managed-route",
+      "kind": "invalid",
+      "file": "fixtures/invalid/managed-route.toml",
+      "error": "unknown_field"
+    },
+    {
+      "id": "invalid/future-version",
+      "kind": "invalid",
+      "file": "fixtures/invalid/future-version.toml",
+      "error": "unsupported_version"
+    },
+    {
+      "id": "invalid/missing-version",
+      "kind": "invalid",
+      "file": "fixtures/invalid/missing-version.toml",
+      "error": "unsupported_version"
+    },
+    {
+      "id": "invalid/string-version",
+      "kind": "invalid",
+      "file": "fixtures/invalid/string-version.toml",
+      "error": "unsupported_version"
+    },
+    {
+      "id": "invalid/bad-identifier",
+      "kind": "invalid",
+      "file": "fixtures/invalid/bad-identifier.toml",
+      "error": "invalid_identifier"
+    },
+    {
+      "id": "invalid/bad-url",
+      "kind": "invalid",
+      "file": "fixtures/invalid/bad-url.toml",
+      "error": "invalid_url"
+    },
+    {
+      "id": "invalid/issuer-equals-api",
+      "kind": "invalid",
+      "file": "fixtures/invalid/issuer-equals-api.toml",
+      "error": "invalid_url"
+    },
+    {
+      "id": "invalid/standalone-with-account-fields",
+      "kind": "invalid",
+      "file": "fixtures/invalid/standalone-with-account-fields.toml",
+      "error": "invalid_mode_fields"
+    },
+    {
+      "id": "invalid/account-missing-issuer",
+      "kind": "invalid",
+      "file": "fixtures/invalid/account-missing-issuer.toml",
+      "error": "invalid_mode_fields"
+    },
+    {
+      "id": "invalid/account-missing-api",
+      "kind": "invalid",
+      "file": "fixtures/invalid/account-missing-api.toml",
+      "error": "invalid_mode_fields"
+    },
+    {
+      "id": "invalid/unknown-mode",
+      "kind": "invalid",
+      "file": "fixtures/invalid/unknown-mode.toml",
+      "error": "invalid_mode"
+    },
+    {
+      "id": "invalid/missing-mode",
+      "kind": "invalid",
+      "file": "fixtures/invalid/missing-mode.toml",
+      "error": "invalid_mode"
+    },
+    {
+      "id": "invalid/builtin-authority-override",
+      "kind": "invalid",
+      "file": "fixtures/invalid/builtin-authority-override.toml",
+      "error": "authority_override"
+    },
+    {
+      "id": "invalid/builtin-mode-override",
+      "kind": "invalid",
+      "file": "fixtures/invalid/builtin-mode-override.toml",
+      "error": "authority_override"
+    },
+    {
+      "id": "invalid/builtin-native-client-override",
+      "kind": "invalid",
+      "file": "fixtures/invalid/builtin-native-client-override.toml",
+      "error": "authority_override"
+    },
+    {
+      "id": "invalid/bad-selection-identifier",
+      "kind": "invalid",
+      "file": "fixtures/invalid/bad-selection-identifier.toml",
+      "error": "invalid_identifier"
+    },
+    {
+      "id": "invalid/tls-file-without-path",
+      "kind": "invalid",
+      "file": "fixtures/invalid/tls-file-without-path.toml",
+      "error": "invalid_tls"
+    },
+    {
+      "id": "invalid/tls-mkcert-custom",
+      "kind": "invalid",
+      "file": "fixtures/invalid/tls-mkcert-custom.toml",
+      "error": "invalid_tls"
+    },
+    {
+      "id": "invalid/tls-unknown-provider",
+      "kind": "invalid",
+      "file": "fixtures/invalid/tls-unknown-provider.toml",
+      "error": "invalid_tls"
+    },
+    {
+      "id": "invalid/unknown-environment-selection",
+      "kind": "resolve",
+      "file": "fixtures/invalid/unknown-environment-selection.toml",
+      "error": "unknown_environment"
+    }
+  ],
+  "resolution": [
+    {
+      "id": "resolution/default-production",
+      "file": "fixtures/valid/minimal.toml",
+      "override": null,
+      "expect": {
+        "environment": "production",
+        "selection_source": "default",
+        "definition_source": "builtin",
+        "definition": {
+          "id": "official-production",
+          "mode": "account",
+          "label": "WhaleRein Cloud",
+          "api_origin": "https://app.whalerein.com",
+          "issuer": "https://login.whalerein.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": "production",
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/saved-production",
+      "file": "fixtures/valid/production-selection.toml",
+      "override": null,
+      "expect": {
+        "environment": "production",
+        "selection_source": "file",
+        "definition_source": "builtin",
+        "definition": {
+          "id": "official-production",
+          "mode": "account",
+          "label": "WhaleRein Cloud (work laptop)",
+          "api_origin": "https://app.whalerein.com",
+          "issuer": "https://login.whalerein.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": "production",
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/custom-account",
+      "file": "fixtures/valid/custom-account.toml",
+      "override": null,
+      "expect": {
+        "environment": "company",
+        "selection_source": "file",
+        "definition_source": "file",
+        "definition": {
+          "id": "company",
+          "mode": "account",
+          "label": "Company Cloud",
+          "api_origin": "https://cloud.example.com",
+          "issuer": "https://auth.example.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": null,
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/override-beats-file",
+      "file": "fixtures/valid/custom-account.toml",
+      "override": "local",
+      "expect": {
+        "environment": "local",
+        "selection_source": "invocation",
+        "definition_source": "builtin",
+        "definition": {
+          "id": "official-local",
+          "mode": "account",
+          "label": "WhaleRein Cloud Local (testing only)",
+          "api_origin": "https://app.whalerein.test",
+          "issuer": "https://auth.whalerein.test/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": "local",
+          "tls": {
+            "ca_provider": "mkcert",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/override-staging",
+      "file": "fixtures/valid/minimal.toml",
+      "override": "staging",
+      "expect": {
+        "environment": "staging",
+        "selection_source": "invocation",
+        "definition_source": "builtin",
+        "definition": {
+          "id": "official-staging",
+          "mode": "account",
+          "label": "WhaleRein Cloud Staging (testing only)",
+          "api_origin": "https://app.staging.whalerein.com",
+          "issuer": "https://auth.staging.whalerein.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": "staging",
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/local-label-and-trust",
+      "file": "fixtures/valid/local-trust-file.toml",
+      "override": null,
+      "expect": {
+        "environment": "local",
+        "selection_source": "file",
+        "definition_source": "builtin",
+        "definition": {
+          "id": "official-local",
+          "mode": "account",
+          "label": "Development machine",
+          "api_origin": "https://app.whalerein.test",
+          "issuer": "https://auth.whalerein.test/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": "local",
+          "tls": {
+            "ca_provider": "file",
+            "ca_file": "/opt/whalerein/development-rootCA.pem"
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/standalone-trust-file",
+      "file": "fixtures/valid/standalone-trust-file.toml",
+      "override": null,
+      "expect": {
+        "environment": "lab",
+        "selection_source": "file",
+        "definition_source": "file",
+        "definition": {
+          "id": "lab",
+          "mode": "standalone",
+          "label": null,
+          "api_origin": null,
+          "issuer": null,
+          "native_client_id": null,
+          "environment": null,
+          "tls": {
+            "ca_provider": "file",
+            "ca_file": "/opt/lab/rootCA.pem"
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/quoted-multiline",
+      "file": "fixtures/valid/quoted-multiline.toml",
+      "override": null,
+      "expect": {
+        "environment": "company",
+        "selection_source": "file",
+        "definition_source": "file",
+        "definition": {
+          "id": "company",
+          "mode": "account",
+          "label": "Company\nCloud",
+          "api_origin": "https://cloud.example.com",
+          "issuer": "https://auth.example.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": null,
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/literal-strings",
+      "file": "fixtures/valid/literal-strings.toml",
+      "override": null,
+      "expect": {
+        "environment": "company",
+        "selection_source": "file",
+        "definition_source": "file",
+        "definition": {
+          "id": "company",
+          "mode": "account",
+          "label": "$(touch /tmp/whalerein-should-not-run) ${HOME} `id`",
+          "api_origin": "https://cloud.example.com",
+          "issuer": "https://auth.example.com/oidc",
+          "native_client_id": "whalerein-cli",
+          "environment": null,
+          "tls": {
+            "ca_provider": "system",
+            "ca_file": null
+          }
+        }
+      }
+    },
+    {
+      "id": "resolution/unknown-environment",
+      "file": "fixtures/invalid/unknown-environment-selection.toml",
+      "override": null,
+      "error": "unknown_environment"
+    },
+    {
+      "id": "resolution/unknown-override",
+      "file": "fixtures/valid/production-selection.toml",
+      "override": "ghost",
+      "error": "unknown_environment"
+    }
+  ]
+}

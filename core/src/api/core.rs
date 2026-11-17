@@ -180,7 +180,20 @@ impl Core {
     pub fn new_command_id() -> String {
         crate::util::random_id(16)
     }
-    pub fn new(mut options: CoreOptions) -> CoreResult<Self> {
+    pub fn new(options: CoreOptions) -> CoreResult<Self> {
+        Self::new_in_environment(options, None)
+    }
+
+    /// Open Core with an explicit effective environment.
+    ///
+    /// `None` keeps the historical global-active resolution used by callers
+    /// that do not select an environment (tests and embeds). CLI and future
+    /// bindings pass the resolved environment so an identity from another
+    /// environment cannot be used silently.
+    pub fn new_in_environment(
+        mut options: CoreOptions,
+        environment: Option<&str>,
+    ) -> CoreResult<Self> {
         let root = options.data_dir.clone();
         let existed = root.exists();
         std::fs::create_dir_all(&root)
@@ -215,7 +228,13 @@ impl Core {
         // resolved: a switch that completes while this process waits cannot
         // leave Core on a selection the lease no longer covers.
         let activation = Arc::new(crate::profiles::ActivationGuard::shared(&root)?);
-        let profile = crate::profiles::Profiles::new(&root).resolve_active(&options.secrets)?;
+        let profiles = crate::profiles::Profiles::new(&root);
+        let profile = match environment {
+            Some(environment) => {
+                profiles.resolve_active_in_environment(environment, &options.secrets)?
+            }
+            None => profiles.resolve_active(&options.secrets)?,
+        };
         options.data_dir = profile.state_dir.clone();
         let store = ConfigStore::new(&options.data_dir);
         let startup_marker = revoked_commands::marker(&options.data_dir)?;

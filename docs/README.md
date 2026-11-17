@@ -2,7 +2,7 @@
 
 | Task | Read |
 |---|---|
-| Architecture | [Overview](architecture.md), [Core](architecture/core.md), [CLI](architecture/cli.md), [Access](architecture/access.md), [Mosquitto line](architecture/mosquitto.md), [DSH plugin](architecture/dsh-plugin.md), [Harness contract](architecture/harness-contract.md) |
+| Architecture | [Overview](architecture.md), [Core](architecture/core.md), [CLI](architecture/cli.md), [Access](architecture/access.md), [Mosquitto line](architecture/mosquitto.md), [DSH plugin](architecture/dsh-plugin.md), [Harness contract](architecture/harness-contract.md), [Client environment contract](../contracts/client-environment/README.md) |
 | Domain language | [Conversation glossary](glossary.md) |
 | Repository tasks | [Commands and architecture](../tools/repo/README.md), [Agent skill](../.agents/skills/whalerein-repo/SKILL.md), [commit rules](commits.md), [pull request rules](pull-requests.md) |
 | Validation | [Testing policy](testing.md), [integration environment](../tests/integration/README.md) |

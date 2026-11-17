@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   resolveConfig, resolveConnectionMode, resolveManagerConfig, hasStandaloneConfig,
   validateTopicId, topics, ConfigError,
@@ -265,4 +268,43 @@ test('the managed config accepts one pinned issuer key and issuer origin', () =>
   assert.equal(resolved.expectedIssuer, 'https://issuer.example')
   assert.throws(() => resolveManagerConfig({ enrollment_issuer_public_key: 'not-a-key' }), (error) => error.code === 'invalid_config')
   assert.throws(() => resolveManagerConfig({ enrollment_issuer: 'issuer' }), (error) => error.code === 'invalid_config')
+})
+
+test('the managed configuration accepts a config file and a resolved per-instance override', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-dsh-config-'))
+  try {
+    const configFile = join(directory, 'config.toml')
+    writeFileSync(configFile, 'version = 1\nenvironment = "company"\n\n[environments.company]\nlabel = "Company"\nmode = "account"\napi_origin = "https://cloud.example.com"\nissuer = "https://auth.example.com/oidc"\nclient_id = "whalerein-cli"\n'.replace('client_id', 'native_client_id'))
+    const resolved = resolveManagerConfig({ config_file: configFile, environment: 'company', state_root: '/tmp/state' }, {})
+    assert.equal(resolved.configFile, configFile)
+    assert.equal(resolved.environment, 'company')
+    assert.equal(resolved.stateRoot, '/tmp/state')
+    assert.equal(resolved.runtimeConfig.caFile, undefined)
+    assert.throws(() => resolveManagerConfig({ environment: 'Invalid Name' }), (error) => error.code === 'invalid_config')
+    assert.throws(() => resolveManagerConfig({ config_file: configFile, environment: 'unknown' }, {}), (error) => error.code === 'invalid_config')
+    assert.throws(() => resolveManagerConfig({ config_file: '/missing/config.toml', environment: 'production' }, {}), (error) => error.code === 'invalid_config')
+    assert.throws(() => resolveManagerConfig({ config_file: 'bad\0path' }, {}), (error) => error.code === 'invalid_config')
+    assert.equal(resolveManagerConfig({ environment: '' }).environment, '')
+    assert.equal(resolveManagerConfig({ config_file: '' }).configFile, undefined)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('the DSH adapter keeps no catalog, descriptor loader or TOML writer', async () => {
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('../', import.meta.url)
+  const files = ['src/config.js', 'src/settings.js', 'index.js', 'bin/profile-patch.py']
+  for (const file of files) {
+    const text = readFileSync(new URL(file, root), 'utf8')
+    assert.equal(text.includes('WHALEREIN_LOCAL_ENVIRONMENT'), false, `${file} must not read the Cloud descriptor variable`)
+    assert.equal(text.includes('local_environment_file'), false, `${file} must not carry the Cloud descriptor reference`)
+    assert.equal(text.includes('official-services.json'), false, `${file} must not own an endpoint catalog`)
+  }
+  const settings = readFileSync(new URL('src/settings.js', root), 'utf8')
+  assert.equal(settings.includes("writeFileSync"), false)
+  assert.equal(settings.includes('configurationView'), true, 'settings only projects the Host configuration view')
+  const config = readFileSync(new URL('src/config.js', root), 'utf8')
+  assert.equal(config.includes('app.whalerein'), false)
+  assert.equal(config.includes('staging.whalerein'), false)
 })

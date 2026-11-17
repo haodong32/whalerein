@@ -1,45 +1,44 @@
 // Official non-secret service descriptors and custom-service validation.
 //
-// The descriptors are the frozen public bootstrap presets. They deliberately
-// contain no credentials, ports, Access origins, MQTT URLs or regions: those
-// arrive only in an approved, signed enrollment route. Staging is a testing
-// preset; the manager never activates it merely by adding it.
+// The descriptors are derived from the packaged canonical client-environment
+// catalog. They deliberately contain no credentials, ports, Access origins,
+// MQTT URLs or regions: those arrive only in an approved, signed enrollment
+// route. There is no second hard-coded endpoint table.
 
+import { BUILTIN_ENVIRONMENTS, builtinDefinition } from './configuration/catalog.js'
 import { PluginError } from './errors.js'
 
 export const SERVICE_PROTOCOL_VERSION = 1
-export const ENVIRONMENTS = Object.freeze(['production', 'staging', 'custom', 'standalone'])
+export const ENVIRONMENTS = Object.freeze(['production', 'staging', 'local', 'custom', 'standalone'])
 export const PROFILE_MODES = Object.freeze(['managed', 'standalone'])
 
 function freezeService(service) {
   return Object.freeze({ ...service })
 }
 
-/** Exactly the reviewed public bootstrap descriptors. */
-export const OFFICIAL_SERVICES = Object.freeze({
-  production: freezeService({
-    id: 'official-production',
-    environment: 'production',
-    label: 'WhaleRein Cloud',
-    apiOrigin: 'https://app.whalerein.com',
-  }),
-  staging: freezeService({
-    id: 'official-staging',
-    environment: 'staging',
-    label: 'WhaleRein Cloud Staging',
-    apiOrigin: 'https://app.staging.whalerein.com',
-  }),
-})
+/** Built-in authority descriptors derived from the canonical catalog. */
+function descriptor(environment) {
+  const definition = builtinDefinition(environment)
+  return freezeService({
+    id: definition.id,
+    environment: definition.environment,
+    label: definition.label,
+    apiOrigin: definition.api_origin,
+    issuer: definition.issuer,
+    nativeClientId: definition.native_client_id,
+  })
+}
 
-export const OFFICIAL_SERVICE_LIST = Object.freeze([
-  OFFICIAL_SERVICES.production,
-  OFFICIAL_SERVICES.staging,
-])
+export const OFFICIAL_SERVICES = Object.freeze(Object.fromEntries(
+  BUILTIN_ENVIRONMENTS.map((environment) => [environment, descriptor(environment)]),
+))
+
+export const OFFICIAL_SERVICE_LIST = Object.freeze(BUILTIN_ENVIRONMENTS.map((environment) => OFFICIAL_SERVICES[environment]))
 
 export function officialService(environment) {
-  if (environment === 'production') return OFFICIAL_SERVICES.production
-  if (environment === 'staging') return OFFICIAL_SERVICES.staging
-  throw new PluginError('invalid_argument', 'unknown official environment')
+  const service = OFFICIAL_SERVICES[environment]
+  if (!service) throw new PluginError('invalid_argument', 'unknown official environment')
+  return service
 }
 
 function isLoopbackHostname(hostname) {

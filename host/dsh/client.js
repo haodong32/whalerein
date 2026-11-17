@@ -206,8 +206,14 @@ window.__ModuleLoader__.load({
       cloudCustomOriginPlaceholder: 'https://service.example',
       cloudAddCustomService: 'Add custom service',
       cloudCustomServiceAdded: 'Custom service added. Select it from the profile list to use it.',
+      cloudDetailsDesired: 'Desired environment',
+      cloudDetailsSource: 'Configuration source',
+      cloudSourceBuiltin: 'Official catalog',
+      cloudSourceFile: 'Per-device file',
       cloudDeveloperTools: 'Developer tools',
       cloudDeveloperToolsHint: 'Test environments are hidden until you enable them here.',
+      cloudLocal: 'Local development',
+      cloudUseLocal: 'Use local development',
       cloudEnableStaging: 'Enable staging',
       cloudEnablingStaging: 'Enabling…',
       cloudStagingNote: 'Enabling staging does not switch this computer. A staging profile must be selected explicitly.',
@@ -415,8 +421,14 @@ window.__ModuleLoader__.load({
       cloudCustomOriginPlaceholder: 'https://service.example',
       cloudAddCustomService: '添加自定义服务',
       cloudCustomServiceAdded: '已添加自定义服务。请在配置列表中选择后才会使用。',
+      cloudDetailsDesired: '目标环境',
+      cloudDetailsSource: '配置来源',
+      cloudSourceBuiltin: '官方目录',
+      cloudSourceFile: '本机文件',
       cloudDeveloperTools: '开发者工具',
       cloudDeveloperToolsHint: '测试环境默认隐藏，需要在这里显式启用。',
+      cloudLocal: '本地开发',
+      cloudUseLocal: '使用本地开发',
       cloudEnableStaging: '启用 Staging',
       cloudEnablingStaging: '正在启用…',
       cloudStagingNote: '启用 Staging 不会切换这台电脑，必须显式选择 Staging 配置。',
@@ -1222,6 +1234,7 @@ window.__ModuleLoader__.load({
     }
 
     function managedEnvironmentLabel(t, environment) {
+      if (environment === 'local') return t('cloudLocal')
       if (environment === 'staging') return t('cloudStagingActive')
       if (environment === 'custom') return t('cloudCustom')
       if (environment === 'standalone') return t('cloudLocalOnly')
@@ -1413,9 +1426,18 @@ window.__ModuleLoader__.load({
         await status.refresh?.()
         setBusy('')
       }
+      const configuration = snapshot.configuration ?? null
+      const configurationRows = configuration ? [
+        [tr('cloudDetailsDesired'), configuration.desiredDefault
+          ? managedEnvironmentLabel(tr, configuration.desiredDefault) : '—'],
+        [tr('cloudDetailsSource'), configuration.definitionSource === 'builtin'
+          ? tr('cloudSourceBuiltin')
+          : configuration.definitionSource === 'file' ? tr('cloudSourceFile') : '—'],
+      ] : []
       const entries = [
         [tr('cloudDetailsState'), tr(`state_${state}`)],
         [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, snapshot.environment)],
+        ...configurationRows,
         [tr('cloudDetailsHostName'), snapshot.hostName || '—'],
         [tr('cloudDetailsProfile'), snapshot.label || '—'],
       ]
@@ -1433,7 +1455,8 @@ window.__ModuleLoader__.load({
         h('header', { style: styles.header },
           h('div', { style: styles.stagingLabel },
             h('h2', { style: styles.title }, tr('title')),
-            isStaging ? h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive')) : null),
+            isStaging ? h(Tag, { tone: 'neutral', 'data-whalerein-staging': 'true' }, tr('cloudStagingActive'))
+              : snapshot.environment === 'local' ? h(Tag, { tone: 'neutral', 'data-whalerein-local': 'true' }, tr('cloudLocal')) : null),
           h('p', { style: styles.intro }, tr('cloudIntro'))),
         isStaging && !development
           ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
@@ -1608,6 +1631,9 @@ window.__ModuleLoader__.load({
           onToggle: () => setDeveloperOpen((open) => !open),
         }, h('div', { style: styles.form },
           h('p', { style: styles.hint }, t('cloudDeveloperToolsHint')),
+          ...(snapshot.profiles ?? []).filter((p) => p.environment === 'local').map((p) =>
+            h(Button, { key: p.id, variant: 'outline', size: 'sm', disabled: !!busy || p.active,
+              onClick: () => onSwitch(p.id) }, t('cloudUseLocal'))),
           !snapshot.stagingEnabled
             ? h(Button, {
               variant: 'outline', size: 'sm', disabled: !!busy,
@@ -1686,7 +1712,7 @@ window.__ModuleLoader__.load({
         available: value.available === true,
         managed: value.managed === true,
         state: typeof value.state === 'string' ? value.state : 'action_required',
-        environment: ['production', 'staging', 'custom', 'standalone'].includes(value.environment)
+        environment: ['production', 'staging', 'local', 'custom', 'standalone'].includes(value.environment)
           ? value.environment : 'production',
         profileId: text(value.profileId, 128),
         label: text(value.label, 64),
@@ -1698,6 +1724,15 @@ window.__ModuleLoader__.load({
         pendingOperation: value.pendingOperation === true,
         profiles: Array.isArray(value.profiles) ? value.profiles.slice(0, 32) : [],
         capabilities: Array.isArray(value.capabilities) ? value.capabilities.slice(0, 8) : [],
+        configuration: value.configuration && typeof value.configuration === 'object'
+          ? {
+              sourceKind: text(value.configuration.sourceKind, 16),
+              selectedEnvironment: text(value.configuration.selectedEnvironment, 64),
+              desiredDefault: text(value.configuration.desiredDefault, 64),
+              definitionSource: text(value.configuration.definitionSource, 16),
+              selectionSource: text(value.configuration.selectionSource, 16),
+            }
+          : null,
       }
     }
 

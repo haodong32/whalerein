@@ -1,0 +1,4 @@
+version = 1
+
+[environments.production]
+api_origin = "https://cloud.example.com"

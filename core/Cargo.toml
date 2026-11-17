@@ -33,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 snow = { workspace = true }
+toml_edit = "0.25"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -59,6 +60,7 @@ keyring = { version = "3.6", features = ["windows-native"], optional = true }
 keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"], optional = true }
 
 [dev-dependencies]
+rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true }
 

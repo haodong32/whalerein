@@ -4,6 +4,7 @@ use whalerein_proto::ErrorCode;
 
 use crate::access::{AccessError, AccessErrorKind};
 use crate::cache::CacheError;
+use crate::configuration::ConfigurationError;
 use crate::pairing::PairingError;
 use crate::security::SecurityError;
 
@@ -81,6 +82,14 @@ pub enum CoreError {
     Internal(String),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("client environment: {0}")]
+    Configuration(Box<ConfigurationError>),
+}
+
+impl From<ConfigurationError> for CoreError {
+    fn from(error: ConfigurationError) -> Self {
+        Self::Configuration(Box::new(error))
+    }
 }
 
 impl CoreError {
@@ -122,6 +131,7 @@ impl CoreError {
             Self::Security(_) => "security_error",
             Self::Internal(_) => "internal",
             Self::Config(_) => "invalid_configuration",
+            Self::Configuration(error) => error.code(),
         }
     }
 
@@ -154,7 +164,7 @@ impl CoreError {
             | Self::Api {
                 code: Some(code), ..
             } => error_code_exit_code(*code),
-            Self::InvalidInput(_) | Self::Config(_) => 2,
+            Self::InvalidInput(_) | Self::Config(_) | Self::Configuration(_) => 2,
             Self::NotFound(_) => 3,
             Self::Unauthorized
             | Self::Revoked
@@ -196,6 +206,8 @@ impl CoreError {
                 code: Some(code), ..
             } => error_code_action(*code),
             Self::InvalidInput(_) | Self::Config(_) => "fix_input",
+            Self::Configuration(error) if error.code() == "revision_conflict" => "refresh",
+            Self::Configuration(_) => "fix_input",
             Self::NotFound(_) => "refresh",
             Self::Unauthorized
             | Self::Revoked
@@ -635,6 +647,7 @@ mod tests {
 mod exhaustive_tests {
     use super::*;
     use crate::cache::CacheError;
+    use crate::configuration::{ConfigurationError, TlsConfiguration};
     use crate::pairing::PairingError;
     use crate::security::SecurityError;
 
@@ -730,6 +743,22 @@ mod exhaustive_tests {
             CoreError::Security("x".into()),
             CoreError::Internal("x".into()),
             CoreError::Config("x".into()),
+            CoreError::from(ConfigurationError::RevisionConflict {
+                expected: None,
+                current_revision: Some("sha256:aa".into()),
+                draft: Box::new(crate::configuration::ConfigPatch::SpecializeBuiltin(
+                    crate::configuration::BuiltinSpecialization {
+                        environment: "production".into(),
+                        label: None,
+                        clear_label: false,
+                        tls: Some(TlsConfiguration::System),
+                        clear_tls: false,
+                    },
+                )),
+            }),
+            CoreError::from(ConfigurationError::InvalidTls {
+                message: "x".into(),
+            }),
         ];
         for error in errors {
             assert!(!error.code().is_empty());
@@ -895,6 +924,22 @@ mod exhaustive_tests {
             CoreError::Security("x".into()),
             CoreError::Internal("x".into()),
             CoreError::Config("x".into()),
+            CoreError::from(ConfigurationError::RevisionConflict {
+                expected: None,
+                current_revision: Some("sha256:aa".into()),
+                draft: Box::new(crate::configuration::ConfigPatch::SpecializeBuiltin(
+                    crate::configuration::BuiltinSpecialization {
+                        environment: "production".into(),
+                        label: None,
+                        clear_label: false,
+                        tls: Some(TlsConfiguration::System),
+                        clear_tls: false,
+                    },
+                )),
+            }),
+            CoreError::from(ConfigurationError::InvalidTls {
+                message: "x".into(),
+            }),
         ];
         for error in errors {
             assert!(

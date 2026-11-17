@@ -1965,3 +1965,44 @@ test('Remove this computer opens the browser-authorized management URL and stays
     await runtime.dispose()
   }
 })
+
+test('official local environment stays labeled and can be selected beside staging', async () => {
+  const runtime = await createManagedRuntime({ development: true })
+  try {
+    runtime.setStatus({ ...runtime.getStatus(), profiles: [
+      { id: 'production-one', label: 'WhaleRein Cloud', environment: 'production', active: true, managed: true },
+      { id: 'local-one', label: 'WhaleRein Cloud Local', environment: 'local', active: false, managed: true },
+    ] })
+    await runtime.refresh()
+    runtime.render()
+    await managedButton(runtime, '使用本地开发').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'switchProfile'), [['switchProfile', 'local-one']])
+    runtime.setStatus({ ...runtime.getStatus(), environment: 'local', profileId: 'local-one' })
+    await runtime.refresh()
+    assert.match(text(runtime.render()), /本地开发/)
+  } finally { await runtime.dispose() }
+})
+
+test('managed settings show desired-vs-current and configuration provenance', async () => {
+  const runtime = await createManagedRuntime({ development: false })
+  try {
+    runtime.setStatus({
+      ...runtime.getStatus(),
+      environment: 'production',
+      configuration: {
+        sourceKind: 'explicit',
+        selectedEnvironment: 'staging',
+        desiredDefault: 'staging',
+        definitionSource: 'builtin',
+        selectionSource: 'file',
+      },
+    })
+    await runtime.refresh()
+    const rendered = text(runtime.render())
+    assert.match(rendered, /目标环境/)
+    assert.match(rendered, /官方目录/)
+    assert.match(rendered, /Staging/)
+    assert.equal(runtime.getStatus().environment, 'production')
+  } finally { await runtime.dispose() }
+})

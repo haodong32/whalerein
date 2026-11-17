@@ -4,6 +4,7 @@
 //! Noise messages stay behind it.
 
 pub(crate) mod config;
+pub mod configuration;
 pub(crate) mod core;
 mod error;
 mod proto_compat;
@@ -25,6 +26,7 @@ pub use crate::security::KeyringSecretStore;
 pub use crate::security::{FileSecretStore, MemorySecretStore, SecretError, SecretStore};
 pub use crate::session::SessionKey;
 pub use config::default_data_dir;
+pub use configuration::*;
 pub use core::{Core, CoreOptions, ForkOutcome};
 pub use error::{error_code_action, error_code_exit_code, error_code_name, CoreError, CoreResult};
 pub use proto_compat::{

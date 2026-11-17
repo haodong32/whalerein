@@ -93,6 +93,42 @@ intentional breaking change requires an explicit baseline update with a
 rationale. A failure in either script prints an actionable `::error::` message
 naming the file to review; do not regenerate a snapshot just to make it pass.
 
+## Client environment contract checks
+
+The shared contract at `contracts/client-environment/` is the only schema source.
+Rust and Node parity tests read `cases.json` and must produce the same
+normalized document or stable error code for every fixture and resolution entry;
+neither runtime may relax the corpus to match its implementation. A Node test
+compares `catalog.json` and `cases.json` against the canonical files byte for
+byte; regenerate only with
+`host/runtime/scripts/sync-client-environment-contract.mjs`.
+
+Rust embeds the catalog and corpus with `include_str!`; the Node package ships
+generated copies under `src/configuration/` and the integration Dockerfile
+copies `contracts/client-environment/`, so installed artifacts resolve built-ins
+without a checkout-relative path. Packaging and clean-room probes (embedded
+catalog from a moved source tree, `npm pack` tarball, Docker context copy) are
+recorded evidence, not a substitute for a full Linux image build or a release
+installation.
+
+Both runtimes implement the same writer protocol: the sidecar
+`<config>.lock.sqlite` with table `whalerein_config_lock`, `BEGIN IMMEDIATE`,
+a revision recheck under the lock, and temp + fsync + rename + directory fsync.
+Unit tests cover stale revisions, changed targets, validation before write,
+fault injection, crash lock release and concurrent writers per runtime. The
+cross-runtime lock and reader matrix is recorded macOS evidence only; Linux,
+Windows, NFS/SMB, power-loss durability and an automated cross-runtime CI case
+are not run.
+
+Platform and native gates remain honest limitations, not implied passes:
+two-device isolation, real Cordis/DSH browser lifecycle, macOS Keychain and real
+DSH credential write/restart, live enrollment and TLS/MQTT ALPN against real
+ingress stay BLOCKED where no prerequisite exists. Fixture certificates,
+loopback handshakes, synthetic legacy layouts and file secret stores do not
+establish those claims. Record per-AC status and prerequisites under
+`.local-docs/acceptance/`; a skipped platform test is not evidence for that
+platform.
+
 ## Deployment acceptance
 
 `tests/acceptance` is an opt-in Go suite with the `acceptance` build tag. It

@@ -1,0 +1,6 @@
+# Operator notes must survive settings updates.
+version = 1
+environment = "production" # saved default
+
+[environments.production]
+label = "WhaleRein Cloud (work laptop)"

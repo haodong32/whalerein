@@ -1,0 +1,9 @@
+version = 1
+environment = "lab"
+
+[environments.lab]
+mode = "standalone"
+
+[environments.lab.tls]
+ca_provider = "file"
+ca_file = "/opt/lab/rootCA.pem"

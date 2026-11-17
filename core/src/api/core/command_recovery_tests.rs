@@ -832,6 +832,11 @@ async fn pending_admission_rechecks_fence_after_lock_is_released() {
     let channel = core.ensure_channel("host-1", false).await.unwrap();
     let service = core.command_service().unwrap();
     let held = crate::security::device::ProfileLock::acquire_admission(dir.path()).unwrap();
+    // Publish the revocation fence while the admission lock is held. The
+    // worker can only acquire the lock after the release below, so the test
+    // observes the recheck deterministically instead of racing the marker
+    // write against coverage-instrumented scheduling.
+    super::revoked_commands::write_marker(dir.path(), "confirmed").unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -851,7 +856,6 @@ async fn pending_admission_rechecks_fence_after_lock_is_released() {
         ))
     });
     started_rx.recv().unwrap();
-    super::revoked_commands::write_marker(dir.path(), "confirmed").unwrap();
     drop(held);
     assert!(matches!(worker.join().unwrap(), Err(CoreError::Revoked)));
     assert_eq!(access.host.lock().unwrap().commands_seen, 0);

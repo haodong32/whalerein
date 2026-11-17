@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::api::{CoreError, CoreResult};
+use crate::configuration::{ConfigurationError, EnvironmentDefinition, EnvironmentMode};
 
 /// How a profile obtains identity and Host authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +23,16 @@ pub enum ProfileMode {
     Account,
 }
 
+impl ProfileMode {
+    /// Map a resolved environment mode to the profile mode it requires.
+    pub fn from_environment_mode(mode: EnvironmentMode) -> Self {
+        match mode {
+            EnvironmentMode::Account => Self::Account,
+            EnvironmentMode::Standalone => Self::Standalone,
+        }
+    }
+}
+
 /// The selected account service family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,6 +42,8 @@ pub enum ServiceKind {
     OfficialProduction,
     /// Official staging service, available only through explicit testing setup.
     OfficialStaging,
+    /// Official local development service.
+    OfficialLocal,
     /// Operator-provided compatible service.
     Custom,
 }
@@ -41,6 +54,7 @@ pub enum ServiceKind {
 pub enum Environment {
     Production,
     Staging,
+    Local,
     Custom,
     Standalone,
 }
@@ -50,12 +64,13 @@ impl ServiceKind {
         match self {
             Self::OfficialProduction => Environment::Production,
             Self::OfficialStaging => Environment::Staging,
+            Self::OfficialLocal => Environment::Local,
             Self::Custom => Environment::Custom,
         }
     }
 
     pub fn is_testing(self) -> bool {
-        matches!(self, Self::OfficialStaging)
+        matches!(self, Self::OfficialStaging | Self::OfficialLocal)
     }
 
     pub fn is_official(self) -> bool {
@@ -111,6 +126,68 @@ impl ServiceDescriptor {
             native_client_id: None,
             access_url: None,
         }
+    }
+
+    pub fn official_local() -> Self {
+        Self {
+            kind: ServiceKind::OfficialLocal,
+            ..Self::official_production()
+        }
+    }
+
+    /// Build the account-service descriptor for one resolved environment.
+    ///
+    /// A standalone environment has no account descriptor. Built-in identities
+    /// keep their stable [`ServiceKind`] and never repeat catalog endpoints; a
+    /// custom account environment carries its explicit authority. Managed
+    /// routes are never part of this descriptor.
+    pub(crate) fn from_environment_definition(
+        definition: &EnvironmentDefinition,
+        builtin: bool,
+    ) -> CoreResult<Option<Self>> {
+        let mode = definition.mode.ok_or_else(|| {
+            CoreError::from(ConfigurationError::InvalidMode {
+                environment: definition.id.clone(),
+            })
+        })?;
+        if mode == EnvironmentMode::Standalone {
+            return Ok(None);
+        }
+        if builtin {
+            let descriptor = match definition.id.as_str() {
+                "official-production" => Self::official_production(),
+                "official-staging" => Self::official_staging(),
+                "official-local" => Self::official_local(),
+                _ => {
+                    return Err(CoreError::from(ConfigurationError::InvalidMode {
+                        environment: definition.id.clone(),
+                    }))
+                }
+            };
+            descriptor.validate()?;
+            return Ok(Some(descriptor));
+        }
+        let api_origin = definition.api_origin.clone().ok_or_else(|| {
+            CoreError::from(ConfigurationError::InvalidModeFields {
+                environment: definition.id.clone(),
+            })
+        })?;
+        let issuer = definition.issuer.clone().ok_or_else(|| {
+            CoreError::from(ConfigurationError::InvalidModeFields {
+                environment: definition.id.clone(),
+            })
+        })?;
+        let native_client_id = definition.native_client_id.clone().ok_or_else(|| {
+            CoreError::from(ConfigurationError::InvalidModeFields {
+                environment: definition.id.clone(),
+            })
+        })?;
+        Ok(Some(Self::custom(CustomServiceInput {
+            api_origin,
+            issuer,
+            native_client_id,
+            access_url: None,
+        })?))
     }
 
     pub fn custom(input: CustomServiceInput) -> CoreResult<Self> {
@@ -176,7 +253,9 @@ impl ServiceDescriptor {
                     }
                 }
             }
-            ServiceKind::OfficialProduction | ServiceKind::OfficialStaging => {
+            ServiceKind::OfficialProduction
+            | ServiceKind::OfficialStaging
+            | ServiceKind::OfficialLocal => {
                 // Official presets are built in. An edited registry must not
                 // smuggle a different authority under an official label.
                 if self.api_origin.is_some()
@@ -206,6 +285,7 @@ impl ServiceDescriptor {
         match self.kind {
             ServiceKind::OfficialProduction => "WhaleRein official production",
             ServiceKind::OfficialStaging => "WhaleRein official staging (testing only)",
+            ServiceKind::OfficialLocal => "WhaleRein official local (testing only)",
             ServiceKind::Custom => "Custom account service",
         }
     }
@@ -215,13 +295,84 @@ impl ServiceDescriptor {
         match self.kind {
             ServiceKind::OfficialProduction => "official-production",
             ServiceKind::OfficialStaging => "official-staging",
+            ServiceKind::OfficialLocal => "official-local",
             ServiceKind::Custom => "custom",
+        }
+    }
+
+    /// Resolve bootstrap configuration without persisting endpoint copies.
+    pub fn bootstrap_api_origin(&self) -> CoreResult<String> {
+        self.validate()?;
+        match self.kind {
+            ServiceKind::OfficialLocal => configuration_catalog_origin("local"),
+            ServiceKind::Custom => self
+                .api_origin
+                .clone()
+                .ok_or_else(|| CoreError::Config("custom API origin missing".into())),
+            ServiceKind::OfficialProduction | ServiceKind::OfficialStaging => {
+                let key = if self.kind == ServiceKind::OfficialProduction {
+                    "production"
+                } else {
+                    "staging"
+                };
+                official_catalog()[key]["api_origin"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        CoreError::Config("official environment catalog is invalid".into())
+                    })
+            }
         }
     }
 
     pub fn issuer_display(&self) -> &str {
         self.issuer.as_deref().unwrap_or("not configured")
     }
+}
+
+/// Public built-in environment catalog shared with the Node Host package.
+///
+/// The canonical client-environment catalog is embedded by Core, so the binary
+/// never depends on a repository-relative JSON file or a prototype descriptor.
+fn official_catalog() -> serde_json::Value {
+    let catalog: serde_json::Value =
+        serde_json::from_str(crate::configuration::CONFIG_CATALOG_JSON)
+            .expect("built-in official catalog must be valid JSON");
+    catalog["environments"].clone()
+}
+
+/// Read the canonical bootstrap origin for a built-in environment. The shared
+/// client-environment catalog is the sole authority; no prototype descriptor
+/// file is consulted.
+fn configuration_catalog_origin(environment: &str) -> CoreResult<String> {
+    let catalog: serde_json::Value =
+        serde_json::from_str(crate::configuration::CONFIG_CATALOG_JSON)
+            .map_err(|_| CoreError::Config("client environment catalog is invalid".into()))?;
+    catalog["environments"][environment]["api_origin"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| CoreError::Config("official environment catalog is invalid".into()))
+}
+
+/// Stable authority fingerprint for one resolved environment definition.
+///
+/// Labels are deliberately absent: renaming a display label never re-binds a
+/// profile. The fingerprint covers the environment identity, mode and account
+/// authority fields, so a changed origin/issuer/client is a different authority.
+pub(crate) fn environment_authority_fingerprint(definition: &EnvironmentDefinition) -> String {
+    let mode = definition
+        .mode
+        .map(EnvironmentMode::as_str)
+        .unwrap_or("unresolved");
+    let material = format!(
+        "whalerein/v1/profile-authority\nid={}\nmode={}\napi_origin={}\nissuer={}\nnative_client_id={}",
+        definition.id,
+        mode,
+        definition.api_origin.as_deref().unwrap_or(""),
+        definition.issuer.as_deref().unwrap_or(""),
+        definition.native_client_id.as_deref().unwrap_or("")
+    );
+    crate::util::sha256_hex(material.as_bytes())
 }
 
 /// Opaque binding recorded after an account session is established.
@@ -316,10 +467,35 @@ mod tests {
     }
 
     #[test]
+    fn local_descriptor_is_catalog_driven() {
+        assert_eq!(
+            official_catalog()["production"]["id"],
+            "official-production"
+        );
+        assert_eq!(
+            official_catalog()["local"]["api_origin"],
+            "https://app.whalerein.test"
+        );
+        let local = ServiceDescriptor::official_local();
+        local.validate().unwrap();
+        assert_eq!(local.environment(), Environment::Local);
+        assert!(local.is_testing());
+        assert!(local.label().contains("local"));
+        assert_eq!(
+            local.bootstrap_api_origin().unwrap(),
+            "https://app.whalerein.test"
+        );
+    }
+
+    #[test]
     fn official_presets_are_valid_and_labeled() {
         let production = ServiceDescriptor::official_production();
         let staging = ServiceDescriptor::official_staging();
         production.validate().unwrap();
+        assert_eq!(
+            production.bootstrap_api_origin().unwrap(),
+            "https://app.whalerein.com"
+        );
         staging.validate().unwrap();
         assert_eq!(production.environment(), Environment::Production);
         assert_eq!(staging.environment(), Environment::Staging);
@@ -390,6 +566,92 @@ mod tests {
     fn unknown_service_fields_are_rejected() {
         let json = r#"{"kind":"official-production","unexpected":"authority"}"#;
         assert!(serde_json::from_str::<ServiceDescriptor>(json).is_err());
+    }
+
+    #[test]
+    fn config_env_ac_07_definition_maps_mode_service_and_authority() {
+        use crate::configuration::{EnvironmentMode, TlsConfig, TlsProvider};
+
+        let custom = EnvironmentDefinition {
+            id: "company".into(),
+            mode: Some(EnvironmentMode::Account),
+            label: Some("Company Cloud".into()),
+            api_origin: Some("https://api.corp.example".into()),
+            issuer: Some("https://id.corp.example".into()),
+            native_client_id: Some("whalerein-cli".into()),
+            environment: None,
+            tls: Some(TlsConfig {
+                ca_provider: TlsProvider::System,
+                ca_file: None,
+            }),
+        };
+        assert_eq!(
+            ProfileMode::from_environment_mode(EnvironmentMode::Account),
+            ProfileMode::Account
+        );
+        let descriptor = ServiceDescriptor::from_environment_definition(&custom, false).unwrap();
+        let descriptor = descriptor.unwrap();
+        assert_eq!(descriptor.kind, ServiceKind::Custom);
+        assert_eq!(
+            descriptor.issuer.as_deref(),
+            Some("https://id.corp.example")
+        );
+
+        let mut labelled = custom.clone();
+        labelled.label = Some("Renamed".into());
+        assert_eq!(
+            environment_authority_fingerprint(&custom),
+            environment_authority_fingerprint(&labelled),
+            "labels must not participate in authority binding"
+        );
+        let mut changed = custom.clone();
+        changed.api_origin = Some("https://api.other.example".into());
+        assert_ne!(
+            environment_authority_fingerprint(&custom),
+            environment_authority_fingerprint(&changed)
+        );
+
+        let standalone = EnvironmentDefinition {
+            id: "lab".into(),
+            mode: Some(EnvironmentMode::Standalone),
+            label: None,
+            api_origin: None,
+            issuer: None,
+            native_client_id: None,
+            environment: None,
+            tls: None,
+        };
+        assert_eq!(
+            ServiceDescriptor::from_environment_definition(&standalone, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            ProfileMode::from_environment_mode(EnvironmentMode::Standalone),
+            ProfileMode::Standalone
+        );
+
+        let builtin_local = EnvironmentDefinition {
+            id: "official-local".into(),
+            mode: Some(EnvironmentMode::Account),
+            label: None,
+            api_origin: None,
+            issuer: None,
+            native_client_id: None,
+            environment: Some("local".into()),
+            tls: None,
+        };
+        let local = ServiceDescriptor::from_environment_definition(&builtin_local, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.kind, ServiceKind::OfficialLocal);
+        assert_eq!(local.environment(), Environment::Local);
+        assert_eq!(
+            local.bootstrap_api_origin().unwrap(),
+            "https://app.whalerein.test"
+        );
+        let mut missing_mode = custom;
+        missing_mode.mode = None;
+        assert!(ServiceDescriptor::from_environment_definition(&missing_mode, false).is_err());
     }
 
     #[test]

@@ -1,0 +1,7 @@
+version = 1
+
+[environments.company]
+mode = "standalone"
+
+[environments.company.tls]
+ca_provider = "disabled"

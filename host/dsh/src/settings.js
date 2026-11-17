@@ -8,13 +8,14 @@
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { createInvitation, revokeDevice } from './pairing.js'
 import { testConnection } from './connection-test.js'
+import { open, view as configurationView } from 'whalerein-host/configuration'
 
 export const CONNECTION_STATES = Object.freeze([
   'idle', 'requesting', 'awaiting_approval', 'enrolling', 'recovering',
   'connecting', 'connected', 'reconnecting', 'disconnected', 'denied',
   'expired', 'action_required', 'removing', 'removed',
 ])
-const ENVIRONMENTS = new Set(['production', 'staging', 'custom', 'standalone'])
+const ENVIRONMENTS = new Set(['production', 'staging', 'local', 'custom', 'standalone'])
 const CAPABILITIES = new Set(['pairing', 'removal', 'switching', 'custom-service', 'staging'])
 const ERROR_CODE = /^[a-z][a-z0-9_./-]{0,63}$/
 
@@ -26,6 +27,7 @@ export const EMPTY_SETTINGS_STATUS = Object.freeze({
   devices: Object.freeze([]),
   diagnostics: null,
   configError: null,
+  configuration: null,
 })
 
 export const EMPTY_MANAGED_SNAPSHOT = Object.freeze({
@@ -45,6 +47,7 @@ export const EMPTY_MANAGED_SNAPSHOT = Object.freeze({
   profiles: Object.freeze([]),
   capabilities: Object.freeze([]),
   configError: null,
+  configuration: null,
 })
 
 /** Bound non-secret display text and remove control characters/newlines. */
@@ -71,6 +74,87 @@ function safeApprovalUrl(value) {
   }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) return ''
   return url.toString()
+}
+
+function safeConfigurationError(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const code = typeof raw.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(raw.code) ? raw.code : 'unreadable_config'
+  return {
+    code,
+    message: text(raw.message, 240) || 'configuration could not be resolved',
+    environment: typeof raw.environment === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(raw.environment) ? raw.environment : null,
+  }
+}
+
+const CONFIG_SOURCES = new Set(['invocation', 'file', 'default'])
+const CONFIG_DEFINITION_SOURCES = new Set(['builtin', 'file'])
+
+/** Project the Host configuration view without secrets or credential URLs. */
+export function sanitizeConfigurationView(raw = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  const definition = raw.definition && typeof raw.definition === 'object'
+    ? {
+        id: text(raw.definition.id, 128),
+        mode: raw.definition.mode === 'account' || raw.definition.mode === 'standalone' ? raw.definition.mode : null,
+        label: text(raw.definition.label, 64),
+      }
+    : null
+  const provenance = {}
+  if (raw.field_provenance && typeof raw.field_provenance === 'object') {
+    for (const key of ['id', 'mode', 'label', 'environment', 'tls', 'api_origin', 'issuer', 'native_client_id']) {
+      const value = raw.field_provenance[key]
+      if (value === 'catalog' || value === 'file' || value === 'default') provenance[key] = value
+    }
+  }
+  return {
+    path: text(raw.path, 2048),
+    sourceKind: ['explicit', 'environment', 'default'].includes(raw.source_kind) ? raw.source_kind : 'explicit',
+    revision: typeof raw.revision === 'string' && /^sha256:[a-f0-9]{64}$/.test(raw.revision) ? raw.revision : null,
+    selectedEnvironment: typeof raw.selected_environment === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(raw.selected_environment)
+      ? raw.selected_environment : null,
+    selectionSource: CONFIG_SOURCES.has(raw.selection_source) ? raw.selection_source : null,
+    definitionSource: CONFIG_DEFINITION_SOURCES.has(raw.definition_source) ? raw.definition_source : null,
+    desiredDefault: typeof raw.desired_default === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(raw.desired_default)
+      ? raw.desired_default : null,
+    effectiveOverride: typeof raw.effective_override === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(raw.effective_override)
+      ? raw.effective_override : null,
+    definition,
+    provenance,
+    validation: {
+      scope: raw.validation?.scope === 'live' ? 'live' : 'offline',
+      liveReadiness: text(raw.validation?.live_readiness, 64) || 'not_checked',
+    },
+    errors: Array.isArray(raw.errors) ? raw.errors.slice(0, 4).map(safeConfigurationError).filter(Boolean) : [],
+  }
+}
+
+/** Read the configuration view from the manager, or the plugin's reference. */
+export function projectConfiguration(host) {
+  const manager = managedManager(host)
+  if (manager && typeof manager.configurationView === 'function') {
+    try {
+      return sanitizeConfigurationView(manager.configurationView())
+    } catch {
+      return null
+    }
+  }
+  if (typeof host?.configPath === 'string' && host.configPath !== '') {
+    try {
+      const snapshot = open({ configFile: host.configPath, inspectionOnly: true })
+      const view = configurationView(snapshot, { override: host.environmentOverride ?? null })
+      return sanitizeConfigurationView(view)
+    } catch (error) {
+      return sanitizeConfigurationView({
+        path: host.configPath,
+        source_kind: 'explicit',
+        selected_environment: null,
+        desired_default: null,
+        effective_override: host.environmentOverride ?? null,
+        errors: [{ code: error?.code ?? 'unreadable_config', message: 'configuration could not be resolved' }],
+      })
+    }
+  }
+  return null
 }
 
 function safeProfiles(value) {
@@ -178,22 +262,24 @@ export function settingsStatus(host) {
   const configError = host?.configError ?? null
   if (isManagedHost(host)) {
     const manager = managedManager(host)
+    const configuration = projectConfiguration(host)
     if (!manager || typeof manager.snapshot !== 'function') {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError, configuration }
     }
     let raw
     try {
       raw = manager.snapshot()
     } catch {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError, configuration }
     }
     if (!raw || typeof raw !== 'object') {
-      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError }
+      return { ...EMPTY_MANAGED_SNAPSHOT, error: { code: 'unavailable' }, configError, configuration }
     }
-    return sanitizeManagerSnapshot(raw, {
+    const snapshot = sanitizeManagerSnapshot(raw, {
       configError,
       developerTools: host.developerToolsEnabled === true,
     })
+    return { ...snapshot, configuration: projectConfiguration(host) }
   }
   if (!host?.started) {
     return {
@@ -201,6 +287,7 @@ export function settingsStatus(host) {
       hostId: typeof host?.config?.hostId === 'string' ? host.config.hostId : '',
       devices: [],
       configError,
+      configuration: null,
     }
   }
   const security = host.security
@@ -227,6 +314,7 @@ export function settingsStatus(host) {
     devices,
     diagnostics: settingsDiagnostics(host),
     configError,
+    configuration: null,
   }
 }
 
@@ -276,6 +364,55 @@ function customService(value) {
     throw new RemoteError('whalerein/invalid-input', 'invalid service origin')
   }
   return { label, apiOrigin: parsed.toString() }
+}
+
+const CONFIG_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+function configName(value, label = 'environment') {
+  if (typeof value !== 'string' || !CONFIG_NAME.test(value)) {
+    throw new RemoteError('whalerein/invalid-input', `invalid ${label}`)
+  }
+  return value
+}
+
+function optionalLabel(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const label = text(value, 64)
+  if (label === '') throw new RemoteError('whalerein/invalid-input', 'invalid label')
+  return label
+}
+
+function optionalTls(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new RemoteError('whalerein/invalid-input', 'invalid trust settings')
+  const provider = value.ca_provider
+  if (!['system', 'mkcert', 'file'].includes(provider)) throw new RemoteError('whalerein/invalid-input', 'invalid trust provider')
+  if (provider === 'file') {
+    const caFile = text(value.ca_file, 4096)
+    if (caFile === '') throw new RemoteError('whalerein/invalid-input', 'invalid CA file')
+    return { ca_provider: 'file', ca_file: caFile }
+  }
+  return { ca_provider: provider }
+}
+
+function customDefinition(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RemoteError('whalerein/invalid-input', 'invalid environment definition')
+  }
+  const mode = value.mode
+  if (!['account', 'standalone'].includes(mode)) throw new RemoteError('whalerein/invalid-input', 'invalid environment mode')
+  const definition = { mode }
+  const label = optionalLabel(value.label)
+  if (label !== undefined) definition.label = label
+  if (mode === 'account') {
+    for (const key of ['api_origin', 'issuer', 'native_client_id']) {
+      definition[key] = text(value[key], 2048)
+      if (definition[key] === '') throw new RemoteError('whalerein/invalid-input', `missing ${key}`)
+    }
+  }
+  const tls = optionalTls(value.tls)
+  if (tls !== undefined) definition.tls = tls
+  return definition
 }
 
 export class WhaleReinSettingsService extends TypertRemoteService {
@@ -331,6 +468,71 @@ export class WhaleReinSettingsService extends TypertRemoteService {
   enableStaging() { return this._forward('enableStaging') }
   async addCustomService(value) { return this._forward('addCustomService', customService(value)) }
   async deleteProfile(id) { return this._forward('deleteProfile', profileId(id)) }
+
+  configuration() {
+    return projectConfiguration(this.host)
+  }
+
+  async _updateConfiguration(patch) {
+    const manager = this.manager
+    if (!manager || typeof manager.updateConfiguration !== 'function') {
+      throw new RemoteError(this.managed ? 'whalerein/unavailable' : 'whalerein/unsupported_capability', 'configuration settings are unavailable')
+    }
+    let view
+    try {
+      view = await manager.updateConfiguration(patch)
+    } catch {
+      throw new RemoteError('whalerein/action-failed', 'configuration update failed')
+    }
+    return { ...this.snapshot(), configuration: sanitizeConfigurationView(view) }
+  }
+
+  async saveDefaultEnvironment(value) {
+    return this._updateConfiguration({ type: 'SetDefaultEnvironment', environment: configName(value?.environment) })
+  }
+
+  async specializeBuiltin(value) {
+    const environment = configName(value?.environment)
+    if (!['local', 'staging', 'production'].includes(environment)) {
+      throw new RemoteError('whalerein/invalid-input', 'invalid built-in environment')
+    }
+    const patch = { type: 'SpecializeBuiltin', environment }
+    const label = optionalLabel(value?.label)
+    if (label !== undefined) patch.label = label
+    const tls = optionalTls(value?.tls)
+    if (tls !== undefined) patch.tls = tls
+    return this._updateConfiguration(patch)
+  }
+
+  async saveCustomEnvironment(value) {
+    return this._updateConfiguration({
+      type: 'UpsertCustomEnvironment',
+      name: configName(value?.name, 'environment name'),
+      definition: customDefinition(value?.definition),
+    })
+  }
+
+  async removeCustomEnvironment(value) {
+    return this._updateConfiguration({
+      type: 'RemoveCustomEnvironment',
+      environment: configName(value?.name ?? value?.environment, 'environment name'),
+    })
+  }
+
+  async applyEnvironment(value) {
+    const environment = configName(value?.environment)
+    const manager = this.manager
+    if (!manager || typeof manager.applyEnvironment !== 'function') {
+      throw new RemoteError(this.managed ? 'whalerein/unavailable' : 'whalerein/unsupported_capability', 'environment switching is unavailable')
+    }
+    let result
+    try {
+      result = await manager.applyEnvironment(environment)
+    } catch {
+      throw new RemoteError('whalerein/action-failed', 'environment switch failed')
+    }
+    return { ...this.snapshot(), action: sanitizeAction({ id: result.profileId, environment: result.environment, active: true }) }
+  }
 
   _requirePairing() {
     if (!this.managed) return
@@ -407,6 +609,12 @@ for (const method of MANAGER_METHODS) {
 markRemote(WhaleReinSettingsService.prototype.invite, 'invite')
 markRemote(WhaleReinSettingsService.prototype.revoke, 'revoke')
 markRemote(WhaleReinSettingsService.prototype.testConnection, 'testConnection')
+markRemote(WhaleReinSettingsService.prototype.configuration, 'configuration')
+markRemote(WhaleReinSettingsService.prototype.saveDefaultEnvironment, 'saveDefaultEnvironment')
+markRemote(WhaleReinSettingsService.prototype.specializeBuiltin, 'specializeBuiltin')
+markRemote(WhaleReinSettingsService.prototype.saveCustomEnvironment, 'saveCustomEnvironment')
+markRemote(WhaleReinSettingsService.prototype.removeCustomEnvironment, 'removeCustomEnvironment')
+markRemote(WhaleReinSettingsService.prototype.applyEnvironment, 'applyEnvironment')
 
 function initializeRemoteSnapshot() {
   for (const initializer of remoteInitializers) initializer.call(this)

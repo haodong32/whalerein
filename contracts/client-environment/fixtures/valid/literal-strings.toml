@@ -1,0 +1,10 @@
+# User strings are literals: no shell, JavaScript or interpolation.
+version = 1
+environment = "company"
+
+[environments.company]
+label = "$(touch /tmp/whalerein-should-not-run) ${HOME} `id`"
+mode = "account"
+api_origin = "https://cloud.example.com"
+issuer = "https://auth.example.com/oidc"
+native_client_id = "whalerein-cli"

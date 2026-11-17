@@ -15,7 +15,7 @@ function run(t, initial) {
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const file = join(directory, 'cordis.patch.yml')
   if (initial !== undefined) writeFileSync(file, initial)
-  const result = spawnSync('python3', [helper, file, 'host-seeded', '/tmp/whalerein-state'], { encoding: 'utf8' })
+  const result = spawnSync('python3', [helper, file, '/tmp/whalerein-state'], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
   return { file, text: readFileSync(file, 'utf8') }
 }
@@ -28,7 +28,7 @@ test('a default comment-only empty profile patch becomes one valid entry, not an
   assert.match(text, /^# a top-level YAML array of entries\.$/m)
   assert.match(text, /^- id: whalerein-dsh$/m)
   assert.equal(text.match(/^- id:/gm).length, 1)
-  assert.match(text, /host_id: "host-seeded"/)
+  assert.match(text, /state_dir: "\/tmp\/whalerein-state"/)
 })
 
 test('an existing profile list gains exactly one WhaleRein entry and stays idempotent', (t) => {
@@ -38,11 +38,11 @@ test('an existing profile list gains exactly one WhaleRein entry and stays idemp
   assert.match(first.text, /- id: other/)
   assert.match(first.text, /^- id: whalerein-dsh$/m)
   assert.equal(first.text.match(/^- id:/gm).length, 2)
-  const second = spawnSync('python3', [helper, first.file, 'host-other', '/tmp/other'], { encoding: 'utf8' })
+  const second = spawnSync('python3', [helper, first.file, '/tmp/other'], { encoding: 'utf8' })
   assert.equal(second.status, 0, second.stderr)
   const text = readFileSync(first.file, 'utf8')
   assert.equal(text.match(/^- id: whalerein-dsh$/gm).length, 1)
-  assert.match(text, /host_id: "host-seeded"/)
+  assert.match(text, /state_dir: "\/tmp\/whalerein-state"/)
 })
 
 test('a missing patch file is created with the entry', (t) => {
@@ -50,4 +50,21 @@ test('a missing patch file is created with the entry', (t) => {
   const { text } = run(t)
   assert.match(text, /^- id: whalerein-dsh$/m)
   assert.match(text, /adapter: real/)
+  assert.doesNotMatch(text, /host_id|host_token|server:|mqtt_url|access_url|ca_file/)
+})
+
+test('the launcher never injects a Cloud-generated environment descriptor', (t) => {
+  if (!hasPython) return t.skip('python3 is unavailable on this platform')
+  const directory = mkdtempSync(join(tmpdir(), 'whalerein-local-profile-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'cordis.patch.yml')
+  const result = spawnSync('python3', [helper, file, ''], {
+    encoding: 'utf8',
+    env: { ...process.env, WHALEREIN_LOCAL_ENVIRONMENT: '/generated/environment.json', WHALEREIN_UPSTREAM_ROOT: '/cloud' },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /connection_mode: managed/)
+  assert.match(text, /adapter: real/)
+  assert.doesNotMatch(text, /local_environment_file|WHALEREIN_LOCAL_ENVIRONMENT|environment: local|host_token|server:|ca_file:/)
 })

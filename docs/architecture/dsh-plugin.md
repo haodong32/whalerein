@@ -15,7 +15,7 @@ re-exported by the connector. Repository test support is not published.
 | Location | Responsibility |
 | --- | --- |
 | `index.js`, `cordis.patch.yml` | Cordis registration, entry configuration and runtime construction. |
-| `src/config.js` | DSH profile configuration and stable existing state paths. |
+| `src/config.js` | DSH profile shape, configuration-file reference and per-instance environment override. |
 | `src/credentials.js` | DSH credential-store binding, separate from conversation APIs. |
 | `src/adapter/base.js` | Source contract and native operation adaptation. |
 | `src/adapter/real.js`, `fake.js` | Native source interaction and the isolated test authority. |
@@ -137,3 +137,30 @@ result polling as the client liveness signal: `Submit` records a claim, every
 matching request scope; the adapter `finally` releases the native question
 claim. MQTT will/keepalive remains for long-lived event connections only. TTL
 is still the fallback.
+
+## Client environment configuration
+
+The reusable configuration module is `host/runtime/src/configuration/`. It owns
+the same contract as Core: one-file path resolution, strict version-1 TOML
+parsing and catalog resolution, the revisioned typed writer with the
+`<config>.lock.sqlite` sidecar, the Core-shaped settings view, and scoped
+`system`/`mkcert`/`file` trust through a per-environment undici agent. It never
+invokes Core or a CLI, and the packaged generated catalog copy ships with Host
+instead of being read from a checkout path.
+
+The DSH native profile holds only a configuration-file reference (`config_file`)
+and an optional per-instance `environment` override. Empty `config_file` follows
+`WHALEREIN_CONFIG`, then `~/.whalerein/config.toml`. The override is validated by
+Host resolution, is never persisted into the file, and never creates a second
+default. `state_root` stays exactly the caller value; the configuration file
+never relocates or rekeys state.
+
+Settings project the Host configuration view (path, source, revision, desired
+default versus current selection, field provenance, offline errors) and send
+saved default, custom, built-in and remove actions to the Host
+`updateConfiguration`. The plugin keeps no environment catalog, endpoint table
+or TOML writer. Startup no longer requires a Cloud-generated environment
+descriptor or `WHALEREIN_LOCAL_ENVIRONMENT`; built-in `local` authority, native
+registration and mkcert defaults come from the packaged catalog. A changed
+authority under the same name fails closed until a new Host profile is created,
+and a live authority stays pinned until an explicit `applyEnvironment`.

@@ -38,6 +38,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `diagnostics` | Bounded redacted operation history and exports. |
 | `profiles` | Local profile registry, selection and cross-process activation. |
 | `account` | Validated account-service descriptors and opaque account binding. |
+| `configuration` | Client-environment TOML, built-in catalog, resolution, typed writes, scoped trust and legacy import. |
 
 `api/core.rs` owns the client facade. Its unit tests live in `api/core/`,
 while watch orchestration and its focused tests remain in `api/watch.rs` and
@@ -85,6 +86,104 @@ lock is released on crash; there is no daemon or owner record. A switch preserve
 pending journals and never deletes local profile state. An older binary ignores
 the registry, so managed selections report a rollback warning and downgrade
 requires stopping those clients.
+
+### Client environment configuration
+
+Core owns the complete client-environment configuration contract; CLI and
+adapters pass typed values and never parse TOML. The canonical catalog and
+corpus live in `contracts/client-environment/` and are embedded in the binary
+with `include_str!`; the Host package ships byte-identical generated copies.
+
+Exactly one file is selected: an explicit `--config`/`config_file` path, then
+`WHALEREIN_CONFIG`, then `~/.whalerein/config.toml`. There is no current-directory
+search and no merge. A missing default is initialized atomically on ordinary
+startup only when no legacy state is detected; `show`, `check`, help and import
+preview opens never write. An explicit or environment-selected missing file
+fails as `missing_config`. The revision is `sha256:<hex>` of the exact file
+bytes.
+
+The document is strict version-1 TOML: `version`, optional `environment`, and
+`[environments.<name>]` entries with `label`, `mode`, account fields and `tls`.
+Built-in names `local`, `staging` and `production` come from the catalog and may
+be specialized only by label and trust; any other field is
+`authority_override`. Custom names follow the shared identifier rule. Managed
+route keys, credential-shaped fields and unknown fields fail as `unknown_field`;
+an unknown, missing or future version is rejected without rewriting the file.
+Validation runs in the contract order so Rust and Node report the same first
+stable error.
+
+Resolution is invocation override, then the file default, then `production`.
+The override is ephemeral and never persists; an unknown name fails as
+`unknown_environment` instead of falling back. Each resolution carries its
+selection source (`invocation`, `file`, `default`) and definition source
+(`builtin`, `file`), plus field provenance for `config show/check`. Validation
+is offline; `live_readiness` is always `not_checked`, so a valid file never
+claims connectivity.
+
+Updates use typed patches only: set or clear the default, upsert a custom
+environment, specialize a built-in label/trust, or remove a custom environment.
+Callers supply the expected revision. Core takes `<canonical-config>.lock.sqlite`
+(SQLite `BEGIN IMMEDIATE`, table `whalerein_config_lock`), rechecks the canonical
+target and current revision, applies the patch while preserving untouched
+comments and keys, revalidates, and replaces the file atomically (temp file,
+fsync, rename, directory fsync). A stale revision or retargeted symlink is
+`revision_conflict` with the current revision and the caller draft retained.
+External editors do not take the lock; a change detected before commit is a
+revision conflict, not a transaction.
+
+TLS trust is resolved per selected environment: the platform store, the fixed
+per-user mkcert root (built-in `local` only), or an explicit `ca_file` resolved
+against the configuration parent with one `~` expansion. Resolution returns
+public PEM and a scope; it never installs a certificate, copies a CA key, runs a
+shell helper, or mutates a process-global TLS store.
+
+#### Environment-scoped identities
+
+`profiles.json` records `ProfileRecord.environment`, the stable `authority`
+fingerprint of the definition the identity was created for (labels excluded),
+and `active_by_environment`, which selects one identity inside a named
+environment. The global `active` record remains for legacy and downgrade; a
+configuration file never selects or overrides an identity. A registry without
+these fields infers the environment from the recorded service; an unknown value
+is preserved.
+
+An identity belongs to exactly one environment. Resolving an environment returns
+its selected identity, or `None` without creating one. Explicit creation adds at
+most one deterministic profile and never writes an environment-scoped
+activation. Additional identities use `add_environment_profile`; activation is
+only through `use_profile_in_environment`, which refuses a profile from another
+environment and reuses the existing exclusive activation lease. A recorded
+authority that no longer matches the resolved definition fails as
+`authority_override`; the only rebind path is an explicit new profile. Identity
+state directories, SecretStore keys and cache provenance are never moved or
+rekeyed by configuration changes.
+
+#### Legacy adoption
+
+`detect_legacy` and `preview_import` read legacy state without writing: flat Core
+`config.json`, Core profile registries, evaluated Cordis managed/Standalone
+profiles, and the unmerged generated local-environment prototype. Preview
+returns a deterministic `preview_id`, a status (`ready`, `retain_only`,
+`blocked`, `conflict`), proposed environments and typed retained references
+(state paths, profile ids, credential namespaces, secret slots, pending
+journals, trust files). It never emits literal tokens or secret values.
+
+`commit_import` reuses the same sidecar lock, rechecks source and target
+revisions, validates the rendered TOML before publishing, then advances a 0600
+non-secret journal at `<canonical-config>.import-journal.json` through
+`previewed`/`prepared`/`published`/`activated`/`complete`. `recover_import`
+returns `not_imported`, `imported` or `conflict` and never overwrites a newer
+target. Import never mints identity, moves or rewrites a profile directory,
+writes credentials, or activates a profile; activation stays an explicit
+profile operation. The completed journal is the adoption marker.
+
+The Cloud-generated `environment.json` descriptor is no longer a configuration
+source. `WHALEREIN_LOCAL_ENVIRONMENT`, the `LocalEnvironment` loader and the
+Host descriptor path are removed; built-in `local` authority comes only from
+the catalog. The old document is still recognized read-only by import so
+existing state can be adopted by reference.
+
+### Session keys
 
 A SessionKey is `(host_id, session_id)`. Resolve an unqualified session ID
 against the current authorized Host set. With multiple Hosts, every source

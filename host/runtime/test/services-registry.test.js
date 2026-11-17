@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -411,7 +411,7 @@ test('registry validates every documented record and binding failure mode', () =
     const base = { ...state, profiles: [{ ...state.profiles[0] }], prepared: null }
     const record = () => ({ ...state.profiles[0], bindings: {}, pending: {} })
     const cases = [
-      { ...base, profiles: [{ ...record(), environment: 'invalid' }] },
+      { ...base, profiles: [{ ...record(), environment: 'Invalid Env' }] },
       { ...base, profiles: [{ ...record(), mode: 'invalid' }] },
       { ...base, profiles: [{ ...record(), legacy: 'no' }] },
       { ...base, profiles: [{ ...record(), createdAt: -1 }] },
@@ -488,4 +488,22 @@ test('a busy registry lock fails closed with an actionable code', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('official services are derived from the canonical catalog with no duplicate endpoint table', () => {
+  const catalogPath = new URL('../src/configuration/catalog.json', import.meta.url)
+  const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
+  for (const [name, entry] of Object.entries(catalog.environments)) {
+    assert.equal(OFFICIAL_SERVICES[name].id, entry.id)
+    assert.equal(OFFICIAL_SERVICES[name].environment, entry.environment)
+    assert.equal(OFFICIAL_SERVICES[name].apiOrigin, entry.api_origin)
+    assert.equal(OFFICIAL_SERVICES[name].issuer, entry.issuer)
+    assert.equal(OFFICIAL_SERVICES[name].nativeClientId, entry.native_client_id)
+  }
+  const source = readFileSync(new URL('../src/services.js', import.meta.url), 'utf8')
+  for (const endpoint of Object.values(catalog.environments).map((entry) => entry.api_origin)) {
+    assert.equal(source.includes(endpoint), false, 'services.js must not duplicate catalog endpoints')
+  }
+  assert.equal(existsSync(new URL('../src/official-services.json', import.meta.url)), false)
+  assert.equal(existsSync(new URL('../src/local-environment.js', import.meta.url)), false)
 })

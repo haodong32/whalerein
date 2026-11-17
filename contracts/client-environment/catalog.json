@@ -1,0 +1,45 @@
+{
+  "schema": "whalerein/v1/client-environment-catalog",
+  "version": 1,
+  "environments": {
+    "local": {
+      "id": "official-local",
+      "label": "WhaleRein Cloud Local (testing only)",
+      "mode": "account",
+      "api_origin": "https://app.whalerein.test",
+      "issuer": "https://auth.whalerein.test/oidc",
+      "native_client_id": "whalerein-cli",
+      "environment": "local",
+      "tls": {
+        "ca_provider": "mkcert",
+        "ca_file": null
+      }
+    },
+    "staging": {
+      "id": "official-staging",
+      "label": "WhaleRein Cloud Staging (testing only)",
+      "mode": "account",
+      "api_origin": "https://app.staging.whalerein.com",
+      "issuer": "https://auth.staging.whalerein.com/oidc",
+      "native_client_id": "whalerein-cli",
+      "environment": "staging",
+      "tls": {
+        "ca_provider": "system",
+        "ca_file": null
+      }
+    },
+    "production": {
+      "id": "official-production",
+      "label": "WhaleRein Cloud",
+      "mode": "account",
+      "api_origin": "https://app.whalerein.com",
+      "issuer": "https://login.whalerein.com/oidc",
+      "native_client_id": "whalerein-cli",
+      "environment": "production",
+      "tls": {
+        "ca_provider": "system",
+        "ca_file": null
+      }
+    }
+  }
+}

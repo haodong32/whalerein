@@ -12,11 +12,8 @@
 # Launch overrides:
 #   WHALEREIN_DSH_PORT           default 3099
 #   WHALEREIN_DSH_PROFILE        default whalerein-debug
-#   WHALEREIN_HOST_ID            used only when the profile has no WhaleRein config yet
-#   WHALEREIN_HOST_TOKEN         default dev-host-token; exported because the seeded
-#                                profile stores host_token as an env expression
-#   WHALEREIN_ADMIN_TOKEN        default dev-admin-token; same, for the seeded admin token
-#   WHALEREIN_STATE_DIR          used only for the first seed
+#   WHALEREIN_CONFIG             optional explicit per-device TOML path
+#   WHALEREIN_STATE_DIR          used only for the first managed state seed
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -24,8 +21,6 @@ DATA_DIR="${WHALEREIN_DATA_DIR:-$ROOT/.data}"
 PORT="${WHALEREIN_DSH_PORT:-3099}"
 PROFILE="${WHALEREIN_DSH_PROFILE:-whalerein-debug}"
 PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/$PROFILE"
-HOST_TOKEN="${WHALEREIN_HOST_TOKEN:-dev-host-token}"
-ADMIN_TOKEN="${WHALEREIN_ADMIN_TOKEN:-dev-admin-token}"
 STATE_DIR="${WHALEREIN_STATE_DIR:-$DATA_DIR/plugin-real-state}"
 
 if ! command -v dsh >/dev/null 2>&1; then
@@ -60,34 +55,14 @@ PY
 
 mkdir -p "$STATE_DIR"
 
-# A missing profile entry gets one host id. An existing entry, including a saved
-# host-real, is left alone. WHALEREIN_HOST_ID is only that first seed.
-NEEDS_HOST_SEED=0
-if [[ ! -f "$PROFILE_DIR/cordis.patch.yml" ]] || ! grep -q 'id: whalerein-dsh' "$PROFILE_DIR/cordis.patch.yml"; then
-  NEEDS_HOST_SEED=1
-fi
-HOST_ID=""
-if [[ "$NEEDS_HOST_SEED" == 1 ]]; then
-  if [[ -n "${WHALEREIN_HOST_ID:-}" ]]; then
-    HOST_ID="$WHALEREIN_HOST_ID"
-  else
-    HOST_ID="$(cd "$ROOT/host/dsh" && node --input-type=module -e "import os from 'node:os'; import { generateHostId } from 'whalerein-host/host-id.js'; process.stdout.write(generateHostId(os.hostname()))")"
-  fi
-fi
+# First launch seeds one managed entry with no endpoint or trust material. Later
+# launches leave that file alone; the per-device TOML file and settings page are
+# the editors.
+python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PROFILE_DIR/cordis.patch.yml" "$STATE_DIR"
 
-# First launch writes the local Compose defaults into the profile. Later launches
-# leave that file alone; the settings page is the editor.
-python3 "$ROOT/host/dsh/bin/profile-patch.py" "$PROFILE_DIR/cordis.patch.yml" "$HOST_ID" "$STATE_DIR"
-
-if [[ -n "$HOST_ID" ]]; then
-  echo "starting real DSH: profile=$PROFILE host=$HOST_ID port=$PORT"
-else
-  echo "starting real DSH: profile=$PROFILE port=$PORT"
-fi
+echo "starting real DSH: profile=$PROFILE port=$PORT"
 echo "Connection settings are in $PROFILE_DIR/cordis.patch.yml."
+echo "Per-device environment configuration: ${WHALEREIN_CONFIG:-~/.whalerein/config.toml}"
 echo "Open the URL printed below on port $PORT; the existing 3080 DSH is a separate instance."
 echo "Press Ctrl-C to stop."
-exec env \
-  WHALEREIN_HOST_TOKEN="$HOST_TOKEN" \
-  WHALEREIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  dsh --profile "$PROFILE" --port "$PORT"
+exec dsh --profile "$PROFILE" --port "$PORT" --no-open

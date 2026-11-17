@@ -411,6 +411,10 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
             "{}; upgrade WhaleRein so the CLI, Host plugin, and Access share a supported protocol version (do not retry the same request)",
             error
         ),
+        ("authority_override", _) => format!(
+            "{}; built-in environment names cannot be removed or have their authority replaced. Define a different service with a new custom name (`whalerein config set environment <name> ...`)",
+            error
+        ),
         ("security_error", _) => format!(
             "{}; if the Host identity or credentials were rebuilt, revoke this device and pair again (`whalerein revoke --yes`, or `whalerein forget --local-only --yes` when local keys are lost), then run `whalerein pair <new-invitation>`",
             error

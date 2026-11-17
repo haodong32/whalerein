@@ -12,6 +12,33 @@ fn profiles_at(dir: &tempfile::TempDir) -> Profiles {
     Profiles::new(dir.path())
 }
 
+fn resolve_toml(dir: &tempfile::TempDir, name: &str, toml: &str) -> EnvironmentResolution {
+    let path = dir.path().join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, toml).unwrap();
+    let snapshot =
+        crate::configuration::Configuration::open(&crate::configuration::ConfigOpenOptions {
+            explicit_path: Some(&path),
+            ..Default::default()
+        })
+        .unwrap();
+    snapshot.resolve(None).unwrap()
+}
+
+fn custom_account_toml(environment: &str, api_origin: &str, issuer: &str) -> String {
+    format!(
+        "version = 1\nenvironment = \"{environment}\"\n\n[environments.{environment}]\n\
+         mode = \"account\"\napi_origin = \"{api_origin}\"\nissuer = \"{issuer}\"\n\
+         native_client_id = \"whalerein-cli\"\n"
+    )
+}
+
+fn builtin_toml(environment: &str) -> String {
+    format!("version = 1\nenvironment = \"{environment}\"\n")
+}
+
 #[test]
 fn fresh_selection_defaults_to_official_production_without_writing_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -997,4 +1024,549 @@ fn open_while_a_switch_holds_the_exclusive_lease_is_a_conflict_not_an_old_select
     })
     .unwrap();
     assert_eq!(core.profile().name.as_deref(), Some("official-staging"));
+}
+
+#[test]
+fn official_environment_selection_reuses_identity_and_keeps_staging_isolated() {
+    let root = tempfile::tempdir().unwrap();
+    let profiles = profiles_at(&root);
+    let secrets = memory();
+    let production = profiles
+        .select_environment(Environment::Production, &secrets)
+        .unwrap();
+    let staging = profiles
+        .select_environment(Environment::Staging, &secrets)
+        .unwrap();
+    assert_ne!(production.profile.id, staging.profile.id);
+    let again = profiles
+        .select_environment(Environment::Production, &secrets)
+        .unwrap();
+    assert_eq!(production.profile.id, again.profile.id);
+    assert!(profiles
+        .select_environment(Environment::Custom, &secrets)
+        .is_err());
+}
+
+#[test]
+fn config_env_ac_07_environment_identity_isolation_across_environments() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let staging = resolve_toml(&dir, "staging.toml", &builtin_toml("staging"));
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+
+    let staging_profile = profiles
+        .resolve_environment_identity(&staging, &secrets, true)
+        .unwrap()
+        .unwrap();
+    let company_profile = profiles
+        .resolve_environment_identity(&company, &secrets, true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(staging_profile.environment_id, "staging");
+    assert_eq!(company_profile.environment_id, "company");
+    assert_ne!(staging_profile.id, company_profile.id);
+    assert_ne!(
+        profiles.managed_dir(&staging_profile.id),
+        profiles.managed_dir(&company_profile.id)
+    );
+
+    let before = profiles.load().unwrap().unwrap();
+    assert_eq!(
+        before.active_by_environment.len(),
+        0,
+        "creation must not activate a scoped identity"
+    );
+    let global_active = before.active.clone();
+
+    profiles
+        .use_profile_in_environment(&staging, &staging_profile.name)
+        .unwrap();
+    let after = profiles.load().unwrap().unwrap();
+    assert_eq!(
+        after
+            .active_by_environment
+            .get("staging")
+            .map(String::as_str),
+        Some(staging_profile.id.as_str())
+    );
+    assert_eq!(
+        after.active, global_active,
+        "global default identity is unchanged"
+    );
+    assert!(
+        !after.active_by_environment.contains_key("company"),
+        "selecting staging must not touch company"
+    );
+
+    let reopened = profiles
+        .resolve_environment_identity(&company, &secrets, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.id, company_profile.id);
+    assert!(!reopened.active, "company identity is still not selected");
+    let staging_now = profiles
+        .resolve_environment_identity(&staging, &secrets, false)
+        .unwrap()
+        .unwrap();
+    assert!(staging_now.active);
+}
+
+#[test]
+fn config_env_ac_07_multiple_accounts_coexist_within_one_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+
+    let work = profiles
+        .add_environment_profile(&company, "work-laptop", &secrets)
+        .unwrap();
+    let personal = profiles
+        .add_environment_profile(&company, "personal-laptop", &secrets)
+        .unwrap();
+    assert_eq!(work.environment_id, "company");
+    assert_eq!(personal.environment_id, "company");
+    assert_ne!(work.id, personal.id);
+    assert_ne!(
+        profiles.managed_dir(&work.id),
+        profiles.managed_dir(&personal.id)
+    );
+
+    profiles
+        .use_profile_in_environment(&company, "work-laptop")
+        .unwrap();
+    profiles
+        .use_profile_in_environment(&company, "personal-laptop")
+        .unwrap();
+    let listed = profiles
+        .environment_profiles("company", true, &secrets)
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed
+        .iter()
+        .any(|profile| profile.name == "work-laptop" && !profile.active));
+    assert!(listed
+        .iter()
+        .any(|profile| profile.name == "personal-laptop" && profile.active));
+    assert!(profiles.managed_dir(&work.id).is_dir());
+    assert!(profiles.managed_dir(&personal.id).is_dir());
+    assert_eq!(
+        profiles
+            .resolve_environment_identity(&company, &secrets, false)
+            .unwrap()
+            .unwrap()
+            .id,
+        personal.id
+    );
+}
+
+#[test]
+fn config_env_ac_07_label_rename_does_not_rotate_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let added = profiles
+        .add_environment_profile(&company, "old-label", &secrets)
+        .unwrap();
+    let state_dir = profiles.managed_dir(&added.id);
+    let identity = device::load_or_create(&secrets, &state_dir, None).unwrap();
+    let device_id = identity.device_id.clone();
+    let slot = crate::security::keys::device_private_key(&device_id);
+
+    let mut registry = profiles.load().unwrap().unwrap();
+    registry
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == added.id)
+        .unwrap()
+        .name = "new-label".into();
+    profiles.save(&mut registry).unwrap();
+
+    let resolved = profiles
+        .resolve_environment_identity(&company, &secrets, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.id, added.id);
+    assert_eq!(resolved.name, "new-label");
+    assert_eq!(
+        device::existing_device_id(&secrets, &state_dir)
+            .unwrap()
+            .as_deref(),
+        Some(device_id.as_str())
+    );
+    assert!(secrets.load(&slot).unwrap().is_some());
+    assert_eq!(profiles.managed_dir(&resolved.id), state_dir);
+}
+
+#[test]
+fn config_env_ac_07_authority_change_refuses_old_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let before = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let profile = profiles
+        .add_environment_profile(&before, "old-authority", &secrets)
+        .unwrap();
+    let state_dir = profiles.managed_dir(&profile.id);
+    let device_id = device::load_or_create(&secrets, &state_dir, None)
+        .unwrap()
+        .device_id;
+
+    let changed = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.other.example",
+            "https://id.corp.example",
+        ),
+    );
+    let error = profiles
+        .resolve_environment_identity(&changed, &secrets, false)
+        .expect_err("changed authority must not silently reuse the old profile");
+    assert_eq!(error.code(), "authority_override");
+    assert!(state_dir.is_dir());
+    assert_eq!(
+        device::existing_device_id(&secrets, &state_dir)
+            .unwrap()
+            .as_deref(),
+        Some(device_id.as_str())
+    );
+
+    // An explicit new profile is the only supported rebind.
+    let replacement = profiles
+        .add_environment_profile(&changed, "new-authority", &secrets)
+        .unwrap();
+    assert_ne!(replacement.id, profile.id);
+    assert!(state_dir.is_dir());
+}
+
+#[test]
+fn config_env_ac_14_use_in_environment_keeps_the_activation_fence_and_pending_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let first = profiles
+        .add_environment_profile(&company, "first", &secrets)
+        .unwrap();
+    let second = profiles
+        .add_environment_profile(&company, "second", &secrets)
+        .unwrap();
+    let first_dir = profiles.managed_dir(&first.id);
+    let identity = device::load_or_create(&secrets, &first_dir, None).unwrap();
+    let pending_key = crate::security::keys::pending_pairing(&identity.device_id);
+    secrets.save(&pending_key, b"pending-finish").unwrap();
+    let journal = first_dir
+        .join("unconfirmed-commands")
+        .join("a".repeat(32) + ".json");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(&journal, b"pending-command").unwrap();
+
+    let guard = ActivationGuard::exclusive(dir.path()).unwrap();
+    let blocked = profiles
+        .use_profile_in_environment(&company, "second")
+        .expect_err("activation fence must block a switch");
+    assert!(matches!(blocked, CoreError::Conflict(_)), "{blocked:?}");
+    drop(guard);
+
+    let generation_before = profiles.load().unwrap().unwrap().activation_generation;
+    profiles
+        .use_profile_in_environment(&company, "second")
+        .unwrap();
+    let generation_after = profiles.load().unwrap().unwrap().activation_generation;
+    assert_eq!(generation_after, generation_before + 1);
+    assert_eq!(
+        secrets.load(&pending_key).unwrap(),
+        Some(b"pending-finish".to_vec())
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), b"pending-command");
+    assert_eq!(
+        device::existing_device_id(&secrets, &first_dir)
+            .unwrap()
+            .as_deref(),
+        Some(identity.device_id.as_str())
+    );
+    assert!(profiles.managed_dir(&first.id).is_dir());
+    assert!(profiles.managed_dir(&second.id).is_dir());
+}
+
+#[test]
+fn config_env_ac_18_legacy_registry_loads_without_environment_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let id = "a".repeat(32);
+    let registry = format!(
+        "{{\"schema\":\"whalerein/v1/profiles\",\"revision\":1,\"activation_generation\":0,\
+         \"active\":\"{id}\",\"profiles\":[{{\"id\":\"{id}\",\"name\":\"official-production\",\
+         \"mode\":\"account\",\"legacy\":false,\
+         \"service\":{{\"kind\":\"official-production\"}},\"created_unix_ms\":0}}]}}"
+    );
+    std::fs::write(dir.path().join(PROFILES_FILE), registry).unwrap();
+    std::fs::create_dir_all(profiles.managed_dir(&id)).unwrap();
+
+    let loaded = profiles.load().unwrap().unwrap();
+    assert_eq!(loaded.profiles[0].environment, "production");
+    assert_eq!(loaded.profiles[0].authority, None);
+    assert!(loaded.active_by_environment.is_empty());
+    let production = resolve_toml(&dir, "production.toml", &builtin_toml("production"));
+    let resolved = profiles
+        .resolve_environment_identity(&production, &secrets, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.id, id);
+    assert_eq!(resolved.name, PRODUCTION_PROFILE_NAME);
+    assert_eq!(resolved.environment_id, "production");
+    // Saving preserves the inferred environment instead of losing the identity.
+    let mut loaded = loaded;
+    profiles.save(&mut loaded).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join(PROFILES_FILE)).unwrap()).unwrap();
+    assert_eq!(saved["profiles"][0]["environment"], "production");
+    assert_eq!(saved["profiles"][0]["id"], id);
+}
+
+#[test]
+fn config_env_ac_18_no_profile_state_is_explicit_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let production = resolve_toml(&dir, "production.toml", &builtin_toml("production"));
+    assert!(profiles
+        .resolve_environment_identity(&production, &secrets, false)
+        .unwrap()
+        .is_none());
+    assert!(profiles
+        .environment_profiles("production", true, &secrets)
+        .unwrap()
+        .is_empty());
+    assert!(!dir.path().join(PROFILES_FILE).exists());
+    assert!(!dir.path().join(PROFILES_DIR).exists());
+
+    let created = profiles
+        .resolve_environment_identity(&production, &secrets, true)
+        .unwrap()
+        .unwrap();
+    // Creation may materialize the ordinary fresh default, but it never writes
+    // an environment-scoped activation entry; switching stays explicit.
+    let registry = profiles.load().unwrap().unwrap();
+    assert!(registry.active_by_environment.is_empty());
+    assert_eq!(
+        profiles
+            .environment_profiles("production", true, &secrets)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(created.environment_id, "production");
+}
+
+#[test]
+fn config_env_ac_18_moving_config_leaves_profile_dirs_and_keys_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let original = resolve_toml(
+        &dir,
+        "old/config.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let profile = profiles
+        .add_environment_profile(&original, "laptop", &secrets)
+        .unwrap();
+    let state_dir = profiles.managed_dir(&profile.id);
+    let identity = device::load_or_create(&secrets, &state_dir, None).unwrap();
+    let device_id = identity.device_id.clone();
+    let registry_before = std::fs::read(dir.path().join(PROFILES_FILE)).unwrap();
+
+    let moved = resolve_toml(
+        &dir,
+        "new/config.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let reopened = profiles
+        .resolve_environment_identity(&moved, &secrets, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.id, profile.id);
+    assert_eq!(profiles.managed_dir(&reopened.id), state_dir);
+    assert!(state_dir.is_dir());
+    assert_eq!(
+        device::existing_device_id(&secrets, &state_dir)
+            .unwrap()
+            .as_deref(),
+        Some(device_id.as_str())
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(PROFILES_FILE)).unwrap(),
+        registry_before,
+        "resolving must not rewrite the registry"
+    );
+}
+
+#[test]
+fn config_env_ac_19_use_profile_refuses_another_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let staging = resolve_toml(&dir, "staging.toml", &builtin_toml("staging"));
+    let company_profile = profiles
+        .add_environment_profile(&company, "company-laptop", &secrets)
+        .unwrap();
+    profiles
+        .use_profile_in_environment(&company, "company-laptop")
+        .unwrap();
+    let error = profiles
+        .use_profile_in_environment(&staging, "company-laptop")
+        .expect_err("another environment's identity must be refused");
+    assert!(matches!(error, CoreError::Conflict(_)), "{error:?}");
+    let registry = profiles.load().unwrap().unwrap();
+    assert_eq!(
+        registry
+            .active_by_environment
+            .get("company")
+            .map(String::as_str),
+        Some(company_profile.id.as_str())
+    );
+    assert!(!registry.active_by_environment.contains_key("staging"));
+}
+
+#[test]
+fn config_env_ac_19_profile_selection_does_not_create_an_environment_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    let company = resolve_toml(
+        &dir,
+        "company.toml",
+        &custom_account_toml(
+            "company",
+            "https://api.corp.example",
+            "https://id.corp.example",
+        ),
+    );
+    let _first = profiles
+        .add_environment_profile(&company, "first", &secrets)
+        .unwrap();
+    let second = profiles
+        .add_environment_profile(&company, "second", &secrets)
+        .unwrap();
+    let before = profiles.load().unwrap().unwrap();
+    profiles
+        .use_profile_in_environment(&company, "first")
+        .unwrap();
+    profiles
+        .use_profile_in_environment(&company, "second")
+        .unwrap();
+    let after = profiles.load().unwrap().unwrap();
+    assert_eq!(after.active, before.active);
+    assert_eq!(after.active_by_environment.len(), 1);
+    assert_eq!(
+        after
+            .active_by_environment
+            .get("company")
+            .map(String::as_str),
+        Some(second.id.as_str())
+    );
+    assert_ne!(after.active, second.id);
+    assert_eq!(
+        profiles.current(&secrets).unwrap().active.unwrap().name,
+        PRODUCTION_PROFILE_NAME
+    );
+}
+
+#[test]
+fn config_env_ac_19_select_environment_still_resolves_official_builtins() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    // No WHALEREIN_LOCAL_ENVIRONMENT descriptor is required: the catalog is
+    // authority and trust is resolved separately.
+    let local = profiles
+        .select_environment(Environment::Local, &secrets)
+        .unwrap();
+    assert_eq!(
+        local
+            .profile
+            .service
+            .as_ref()
+            .map(ServiceDescriptor::kind_name),
+        Some("official-local")
+    );
+    assert_eq!(local.profile.environment_id, "local");
+    assert_eq!(local.profile.environment, Environment::Local);
+    let staging = profiles
+        .select_environment(Environment::Staging, &secrets)
+        .unwrap();
+    assert_eq!(staging.profile.environment_id, "staging");
+    assert_eq!(
+        profiles
+            .load()
+            .unwrap()
+            .unwrap()
+            .active_by_environment
+            .get("local")
+            .cloned(),
+        Some(local.profile.id)
+    );
 }

@@ -27,6 +27,8 @@ import { randomBytes } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { PluginError } from './errors.js'
+import { isBuiltinEnvironment } from './configuration/catalog.js'
+import { IDENTIFIER_PATTERN } from './configuration/document.js'
 import { OFFICIAL_SERVICES, PROFILE_MODES, validateServiceOrigin } from './services.js'
 
 export const HOST_PROFILES_SCHEMA = 'whalerein-host/v1/profiles'
@@ -39,6 +41,7 @@ export const LEGACY_PROFILE_LABEL = 'Existing configuration'
 const PROFILE_ID_RE = /^[a-f0-9]{32}$/
 const FIXED_PROFILE_IDS = new Set([LEGACY_PROFILE_ID])
 const BINDING_KEYS = new Set([
+  'serviceAuthority',
   'hostId',
   'signingPublicKey',
   'noisePublicKey',
@@ -52,6 +55,7 @@ const PENDING_KEYS = new Set(['paused', 'removal', 'intentId', 'operationId', 'p
 const PENDING_PHASES = new Set(['approval', 'enrollment', 'credential', 'removal'])
 const REMOVAL_STATES = new Set(['removing', 'removed', 'failed'])
 const RECORD_KEYS = new Set(['id', 'label', 'environment', 'mode', 'service', 'stateDir', 'bindings', 'pending', 'legacy', 'createdAt'])
+const SERVICE_KEYS = new Set(['id', 'environment', 'label', 'apiOrigin', 'issuer', 'nativeClientId'])
 const REGISTRY_KEYS = new Set(['schema', 'schemaVersion', 'revision', 'activationGeneration', 'active', 'developerToolsEnabled', 'prepared', 'profiles'])
 const PREPARED_KEYS = new Set(['profileId', 'expectedRevision', 'generation'])
 
@@ -194,31 +198,34 @@ function validateService(service, environment, label) {
     return
   }
   if (!isPlainObject(service)) fail('registry_corrupt', 'profile service must be an object')
-  exactKeys(service, new Set(['id', 'environment', 'label', 'apiOrigin']), 'profile service')
+  exactKeys(service, SERVICE_KEYS, 'profile service')
   if (typeof service.id !== 'string' || service.id === '' || typeof service.label !== 'string') {
     fail('registry_corrupt', 'profile service is missing its identity')
   }
-  if (environment === 'custom') {
-    // An explicitly configured compatible service may report production or
-    // staging as its own environment; the local profile stays custom.
-    if (!['production', 'staging', 'custom'].includes(service.environment))
-      fail('registry_corrupt', 'profile service environment is invalid')
-  } else if (service.environment !== environment) {
-    fail('registry_corrupt', 'profile service environment does not match')
-  }
   if (environment === 'standalone') fail('registry_corrupt', 'standalone profile cannot select a managed service')
-  let origin
-  try {
-    origin = validateServiceOrigin(service.apiOrigin, { allowLoopback: true })
-  } catch {
-    fail('registry_corrupt', 'profile service origin is invalid')
+  if (isBuiltinEnvironment(environment)) {
+    const official = OFFICIAL_SERVICES[environment]
+    if (service.id !== official.id) fail('registry_corrupt', 'official service descriptor is reserved')
+    if (service.environment !== official.environment) fail('registry_corrupt', 'official service environment does not match')
+    if (service.apiOrigin !== official.apiOrigin) fail('registry_corrupt', 'official service origin does not match the catalog')
+  } else {
+    // A custom environment's service identity is reported by its own metadata,
+    // never inferred from the local configuration name.
+    if (typeof service.environment !== 'string' || service.environment === '' || service.environment === 'standalone') {
+      fail('registry_corrupt', 'custom service environment is invalid')
+    }
+    let origin
+    try {
+      origin = validateServiceOrigin(service.apiOrigin, { allowLoopback: true })
+    } catch {
+      fail('registry_corrupt', 'profile service origin is invalid')
+    }
+    if (origin !== service.apiOrigin) fail('registry_corrupt', 'profile service origin is not canonical')
   }
-  if (origin !== service.apiOrigin) fail('registry_corrupt', 'profile service origin is not canonical')
-  if (environment === 'production' && service.id !== OFFICIAL_SERVICES.production.id) {
-    fail('registry_corrupt', 'official production descriptor is reserved')
-  }
-  if (environment === 'staging' && service.id !== OFFICIAL_SERVICES.staging.id) {
-    fail('registry_corrupt', 'official staging descriptor is reserved')
+  for (const key of ['issuer', 'nativeClientId']) {
+    if (service[key] !== undefined && service[key] !== null && typeof service[key] !== 'string') {
+      fail('registry_corrupt', `profile service ${key} is invalid`)
+    }
   }
   if (label.length > 64) fail('registry_corrupt', 'profile label is too long')
 }
@@ -230,7 +237,10 @@ function validateRecord(record, stateRoot) {
   if (typeof record.label !== 'string' || record.label === '' || record.label.trim() !== record.label || record.label.length > 64) {
     fail('registry_corrupt', 'profile label is invalid')
   }
-  if (!['production', 'staging', 'custom', 'standalone'].includes(record.environment)) {
+  const environment = record.environment
+  if (environment === 'standalone') {
+    // reserved for the legacy Standalone profile
+  } else if (typeof environment !== 'string' || !IDENTIFIER_PATTERN.test(environment)) {
     fail('registry_corrupt', 'profile environment is invalid')
   }
   if (!PROFILE_MODES.includes(record.mode)) fail('registry_corrupt', 'profile mode is invalid')
