@@ -9,6 +9,7 @@ from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
+from . import test_cost
 from .diagnostics import sanitize
 from .errors import RepoError, UsageError
 from .reports.html import render
@@ -84,6 +85,7 @@ def run(root, projects, runner, request, output=None):
     directory.mkdir(parents=True, exist_ok=True)
     if any((directory / name).exists() for name in ("report.json", "report.html")):
         raise UsageError("output directory already contains a report; choose a new directory")
+    history = test_cost.announce(root, request, runner.out)
     started = monotonic()
     scopes = []
     interrupted = False
@@ -231,6 +233,7 @@ def run(root, projects, runner, request, output=None):
         "schema_version": VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
         "configuration": configuration,
+        "timing_environment": test_cost.environment(),
         "scope": "partial" if request.only or request.group or request.suite != "all" else "full",
         "completeness": "complete"
         if all(s["completeness"] == "complete" for s in scopes)
@@ -271,9 +274,15 @@ def run(root, projects, runner, request, output=None):
         for scope in scopes:
             for case in scope["tests"]:
                 runner.out.info(case["id"])
+    if document["duration_ms"] > test_cost.QUICK_TARGET_MS:
+        runner.out.warn(
+            "Test execution exceeded the three-minute quick-feedback target; "
+            "review scope before repeating. Test results determine success."
+        )
     runner.out.info("Report: " + str(directory / "report.html"))
     return {
         "summary": document["summary"],
+        "historical_duration": history,
         "json": str(directory / "report.json"),
         "html": str(directory / "report.html"),
     }, 130 if interrupted else int(failed)

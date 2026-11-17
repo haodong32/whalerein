@@ -389,6 +389,34 @@ For example, with project ID `host` and file `test/example.test.js`:
 The first selects the slash name; the second selects the literal tilde name.
 The example file/names illustrate syntax; use actual IDs from your saved report.
 
+## Test scope and cost notices
+
+Use [staged validation](../../docs/testing.md#choose-checks-for-a-change) to choose
+iteration, final unit coverage and integration scope. Command defaults remain
+compatible; agent-driven unit commands select projects explicitly.
+
+Before discovery, compilation or execution, `test` prints the selected suite,
+projects/integration group, case-filter state, coverage state and parallelism.
+The filter text itself is not printed. JSON mode keeps notices on stderr and
+adds `historical_duration` (`samples`, `median_ms`) to the result data.
+
+History reads at most the 100 most recent `.data/runs/*/report.json` files, up to
+8 MiB each, and takes the median of up to five complete successful runs with the
+same suite, project set, case filter, integration group, coverage/discovery mode,
+parallelism, OS and CPU architecture. New reports record `timing_environment`;
+older reports without it, corrupt/unreadable reports, failed/incomplete runs and
+missing durations do not supply a cost estimate. Custom `--output` destinations
+outside that directory remain valid reports but are not searched for history.
+
+No comparable run means **unknown**, not zero. History includes recorded run wall
+time (including test compilation), not a sum of case timings or a cold-build
+prediction. Tool versions, input revisions, cache state and machine load may
+vary; history neither proves current correctness nor prevents re-execution.
+The three-minute quick-feedback target only produces warnings for expensive
+history or an observed long run. Test results and existing execution deadlines
+continue to determine success. There is no new deadline, approval, automatic
+selection or result-skipping mechanism.
+
 ## Coverage and report facts
 
 The repository enforces 90% per first-party scope. Go's native unit is statements
@@ -448,6 +476,7 @@ scripts come from native manifests; new projects require explicit registration.
 | `projects.py` | Registration validation and exact ID selection. |
 | `toolchain.py` | Sequential formatting/check/build coordination. |
 | `testing.py` | Immutable test requests, execution and result aggregation. |
+| `test_cost.py` | Advisory selection notices and comparable local wall-time history. |
 | `runners/` | Ecosystem-specific commands, discovery and coverage. |
 | `process.py` | Child processes, deadlines, process-group cancellation and capture. |
 | `reports/model.py` | Versioned facts, validation and atomic persistence. |

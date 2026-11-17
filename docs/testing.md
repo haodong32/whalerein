@@ -133,23 +133,54 @@ with another agent's Compose run.
 
 ## Choose checks for a change
 
-Run commands from the repository root:
+Use the smallest scope that exercises the changed behavior, then finish with
+complete affected-project validation. Run from the repository root:
 
-```bash
-./repo check --project core
-./repo test --project core
-./repo test --project core --only reconnect
-./repo test --project core --coverage
-```
+| Stage | Selection | Completion |
+|---|---|---|
+| Iteration | `./repo check --project ID` and `./repo test --project ID --only TEXT` | The changed behavior and regression cases pass; coverage is deferred. |
+| Final code validation | `./repo test --project ID --coverage` for affected projects, plus relevant checks/builds | Run once after the final relevant edit; each affected first-party scope meets the coverage gate. |
+| Documentation only | Review links, command accuracy and `git diff --check` | Product tests are needed only if executable behavior also changed. |
 
-- During iteration, run focused unit tests and the affected project's checks.
-- Protocol changes require `./repo proto --check` and
-  `./repo test --suite integration --group protocol`. Regenerate intentional
-  binding changes with `./repo proto` and review the generated diff.
-- Cross-component, recovery and release changes require the full integration
-  suite: `./repo test --suite integration`.
-- `./repo test` runs all registered unit projects. Integration is slow and opt-in.
-  Use `./repo test --suite all` for one report containing both suites.
+Select project IDs explicitly for agent-driven format/check/build/unit commands.
+Use known case names, source searches or saved reports to choose `--only`;
+`--list` can compile Rust or build an integration image and is not a free probe.
+A focused pass verifies only its selected behavior. It does not replace final
+unit coverage, native platform validation, or a required integration run.
+
+Before expanding or repeating tests, state the new relevant source/test/config
+edit, observed failure, or specific uncovered risk that requires the run. Once
+checks pass, document wording, PR descriptions and progress updates alone do not
+justify repeating product tests. A base merge or dependency/toolchain change may
+invalidate results and must be assessed. This is a selection rule, not automatic
+result caching: the tool always executes the requested tests.
+
+Choose integration scope by behavior, not the number of changed directories:
+
+- Protocol schema, serialization or cross-language binding changes: run
+  `./repo proto --check` and `./repo test --suite integration --group protocol`.
+- Storage transactions, persistence or migrations: select `--group storage`.
+- MQTT/TLS connections, transport framing or reconnect handling: select
+  `--group transport`; add chain cases if end-to-end recovery is affected.
+- CLI/Access/Host request flow, approval, deduplication or recovery: select
+  relevant `--group chain` cases using `--only TEXT` during iteration, then the
+  affected group at completion.
+- Real DSH adapter, session or browser interactions: select `--group native-dsh`.
+- Run the complete integration suite for release validation or shared changes
+  with identified risks across multiple groups that narrower checks cannot
+  establish. Name those risks before starting; crossing directories alone is
+  insufficient. A full suite deferred to CI is reported as pending, not passed.
+
+Local command defaults stay compatible: bare `./repo test` selects all registered
+unit projects, and `--suite all` selects all unit and integration tests. Use these
+intentionally for repository-wide validation, with the scope reason stated.
+
+Every test invocation displays its selected projects/group, whether a case filter
+and coverage are enabled, and comparable historical wall time before compilation
+or execution. History is a local observation, not a cold-build prediction or a
+pass receipt. Three minutes is the quick-feedback target; a historical estimate
+above it or a completed run exceeding it produces a warning, without cancelling
+tests, changing results, asking for approval, or automatically changing scope.
 
 For the Mosquitto line, two opt-in fixtures back the replacement acceptance
 record. The native broker fixture needs the pinned Mosquitto 2.1.2 headers and
