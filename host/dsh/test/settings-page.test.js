@@ -336,6 +336,8 @@ async function createSettingsRuntime({
       enableStaging: managerAction('enableStaging'),
       addCustomService: managerAction('addCustomService'),
       deleteProfile: managerAction('deleteProfile'),
+      applyEnvironment: managerAction('applyEnvironment'),
+      saveDefaultEnvironment: managerAction('saveDefaultEnvironment'),
     },
     settings: {
       describe: async () => describe(),
@@ -471,6 +473,7 @@ test('remote descriptors keep the gateway contract: unique endpoints, no reserve
       'snapshot', 'invite', 'revoke', 'testConnection',
       'details', 'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect',
       'removeComputer', 'switchProfile', 'enableStaging', 'addCustomService', 'deleteProfile',
+      'applyEnvironment', 'saveDefaultEnvironment',
     ])
     const endpoints = contribution.descriptors.map((descriptor) => `${descriptor.namespace}/${descriptor.method}`)
     assert.equal(new Set(endpoints).size, endpoints.length, 'remote endpoints must be unique')
@@ -749,6 +752,26 @@ test('when disconnected, settings opens connection controls and hides debug deta
     assert.match(text(tree), /device-phone/)
     assert.doesNotMatch(text(tree), /已覆盖|继承默认/)
     assert.doesNotMatch(text(tree), /运行诊断|Noise XX|pnpm start/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('developer mode offers explicit local environment switch and default save', async () => {
+  const runtime = await createManagedRuntime({ development: true })
+  try {
+    runtime.render()
+    await runtime.settle()
+    assert.ok(managedButton(runtime, '立即切到本地'), 'local switch control is rendered')
+    assert.ok(managedButton(runtime, '保存本地为默认'), 'save-default control is rendered')
+    await managedButton(runtime, '立即切到本地').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'applyEnvironment'), [['applyEnvironment', 'local']])
+    assert.match(text(runtime.render()), /环境已切换/)
+    await managedButton(runtime, '保存本地为默认').props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([name]) => name === 'saveDefaultEnvironment'), [['saveDefaultEnvironment', 'local']])
+    assert.match(text(runtime.render()), /默认环境已保存/)
   } finally {
     await runtime.dispose()
   }

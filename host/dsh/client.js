@@ -214,6 +214,12 @@ window.__ModuleLoader__.load({
       cloudDeveloperToolsHint: 'Test environments are hidden until you enable them here.',
       cloudLocal: 'Local development',
       cloudUseLocal: 'Use local development',
+      cloudEnvironmentHint: 'Use the per-device environment file to switch, or save a new default here.',
+      cloudUseLocalNow: 'Switch to local now',
+      cloudSaveLocalDefault: 'Save local as default',
+      cloudSavingDefault: 'Saving…',
+      cloudDefaultSaved: 'Default environment saved. Restart or switch explicitly to apply it.',
+      cloudEnvironmentSwitched: 'Environment switched.',
       cloudEnableStaging: 'Enable staging',
       cloudEnablingStaging: 'Enabling…',
       cloudStagingNote: 'Enabling staging does not switch this computer. A staging profile must be selected explicitly.',
@@ -429,6 +435,12 @@ window.__ModuleLoader__.load({
       cloudDeveloperToolsHint: '测试环境默认隐藏，需要在这里显式启用。',
       cloudLocal: '本地开发',
       cloudUseLocal: '使用本地开发',
+      cloudEnvironmentHint: '可通过本机环境配置文件切换，或在此保存新的默认环境。',
+      cloudUseLocalNow: '立即切到本地',
+      cloudSaveLocalDefault: '保存本地为默认',
+      cloudSavingDefault: '正在保存…',
+      cloudDefaultSaved: '默认环境已保存。重启或显式切换后生效。',
+      cloudEnvironmentSwitched: '环境已切换。',
       cloudEnableStaging: '启用 Staging',
       cloudEnablingStaging: '正在启用…',
       cloudStagingNote: '启用 Staging 不会切换这台电脑，必须显式选择 Staging 配置。',
@@ -1230,6 +1242,8 @@ window.__ModuleLoader__.load({
         enableStaging: () => invoke('enableStaging'),
         addCustomService: (value) => invoke('addCustomService', value),
         deleteProfile: (id) => invoke('deleteProfile', id),
+        applyEnvironment: (environment) => invoke('applyEnvironment', environment),
+        saveDefaultEnvironment: (environment) => invoke('saveDefaultEnvironment', environment),
       }
     }
 
@@ -1411,6 +1425,34 @@ window.__ModuleLoader__.load({
         } else {
           try { tab?.close?.() } catch { /* already closed */ }
         }
+        setBusy('')
+      }
+      const saveDefaultEnvironment = async (environment) => {
+        if (busy || typeof connection?.invoke !== 'function') return
+        setBusy('default')
+        setActionError('')
+        setProfileNotice('')
+        const result = await connection.invoke('saveDefaultEnvironment', environment)
+        if (!result.ok) {
+          setActionError('cloudActionFailed')
+        } else {
+          setProfileNotice('cloudDefaultSaved')
+        }
+        await status.refresh?.()
+        setBusy('')
+      }
+      const applyEnvironment = async (environment) => {
+        if (busy || typeof connection?.invoke !== 'function') return
+        setBusy('environment')
+        setActionError('')
+        setProfileNotice('')
+        const result = await connection.invoke('applyEnvironment', environment)
+        if (!result.ok) {
+          setActionError('cloudActionFailed')
+        } else {
+          setProfileNotice('cloudEnvironmentSwitched')
+        }
+        await status.refresh?.()
         setBusy('')
       }
       const enableStaging = async () => {
@@ -1618,11 +1660,16 @@ window.__ModuleLoader__.load({
             t: tr, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen,
             setDeveloperOpen, onEnableStaging: enableStaging,
             onSwitch: (id) => run('switchProfile', 'switch', id),
+            onApplyEnvironment: applyEnvironment,
+            onSaveDefaultEnvironment: saveDefaultEnvironment,
+            profileNotice,
           })
           : null)
     }
 
-    function DeveloperToolsSection({ t, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen, setDeveloperOpen, onEnableStaging, onSwitch }) {
+    function DeveloperToolsSection({ t, snapshot, isStaging, stagingProfileId, productionProfileId, busy, developerOpen, setDeveloperOpen, onEnableStaging, onSwitch, onApplyEnvironment, onSaveDefaultEnvironment, profileNotice }) {
+      const desired = snapshot?.configuration?.desiredDefault ?? null
+      const selected = snapshot?.configuration?.selectedEnvironment ?? snapshot?.environment ?? null
       return h('section', { style: styles.details },
         h(DisclosureRow, {
           title: t('cloudDeveloperTools'), icon: h(IconCodeOutlineRegular, { size: 16 }),
@@ -1631,6 +1678,17 @@ window.__ModuleLoader__.load({
           onToggle: () => setDeveloperOpen((open) => !open),
         }, h('div', { style: styles.form },
           h('p', { style: styles.hint }, t('cloudDeveloperToolsHint')),
+          h('p', { style: styles.hint }, `${t('cloudDetailsDesired')}: ${desired ?? '—'} · ${t('cloudDetailsEnvironment')}: ${selected ?? '—'}`),
+          h('p', { style: styles.hint }, t('cloudEnvironmentHint')),
+          h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+            h(Button, {
+              variant: 'primary', size: 'sm', disabled: !!busy,
+              onClick: () => onApplyEnvironment?.('local'),
+            }, busy === 'environment' ? t('cloudSwitching') : t('cloudUseLocalNow')),
+            h(Button, {
+              variant: 'outline', size: 'sm', disabled: !!busy,
+              onClick: () => onSaveDefaultEnvironment?.('local'),
+            }, busy === 'default' ? t('cloudSavingDefault') : t('cloudSaveLocalDefault'))),
           ...(snapshot.profiles ?? []).filter((p) => p.environment === 'local').map((p) =>
             h(Button, { key: p.id, variant: 'outline', size: 'sm', disabled: !!busy || p.active,
               onClick: () => onSwitch(p.id) }, t('cloudUseLocal'))),
@@ -1653,7 +1711,8 @@ window.__ModuleLoader__.load({
                   : h(Button, {
                     variant: 'primary', size: 'sm', disabled: !!busy || !stagingProfileId,
                     onClick: () => onSwitch(stagingProfileId),
-                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudUseStaging')))))))
+                  }, busy === 'switch' ? t('cloudSwitching') : t('cloudUseStaging'))))),
+          profileNotice ? h('p', { style: styles.success, role: 'status' }, t(profileNotice)) : null))
     }
 
     function SettingsPage(props) {
@@ -1834,6 +1893,8 @@ window.__ModuleLoader__.load({
       ['enableStaging', [], 'WhaleReinConnectionSnapshot'],
       ['addCustomService', [{ name: 'value', wire: 'value', source: 'json', codec: jsonCodec('CustomService') }], 'WhaleReinConnectionSnapshot'],
       ['deleteProfile', [{ name: 'id', wire: 'id', source: 'json', codec: jsonCodec('ProfileId') }], 'WhaleReinConnectionSnapshot'],
+      ['applyEnvironment', [{ name: 'environment', wire: 'environment', source: 'json', codec: jsonCodec('EnvironmentName') }], 'WhaleReinConnectionSnapshot'],
+      ['saveDefaultEnvironment', [{ name: 'environment', wire: 'environment', source: 'json', codec: jsonCodec('EnvironmentName') }], 'WhaleReinConnectionSnapshot'],
     ].map(([method, parameters, typeSymbol]) => ({
       id: `whalerein-dsh#whalerein/${method}`,
       service: 'whalereinSettings',
