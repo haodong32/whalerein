@@ -33,6 +33,24 @@ function makeAccess(overrides = {}) {
   return { broker, access, options, accesses }
 }
 
+test('only an mqtts URL on port 443 offers the MQTT ALPN protocol', () => {
+  const shared = makeAccess({ url: 'mqtts://access.example:443' })
+  shared.access.start()
+  assert.deepEqual(shared.options[0].opts.ALPNProtocols, ['mqtt'])
+
+  const plainTLS = makeAccess({ url: 'mqtts://broker.test:8883' })
+  plainTLS.access.start()
+  assert.equal(plainTLS.options[0].opts.ALPNProtocols, undefined)
+
+  const implicit = makeAccess({ url: 'mqtts://broker.test' })
+  implicit.access.start()
+  assert.equal(implicit.options[0].opts.ALPNProtocols, undefined)
+
+  const loopback = makeAccess({ url: 'mqtt://127.0.0.1:1883' })
+  loopback.access.start()
+  assert.equal(loopback.options[0].opts.ALPNProtocols, undefined)
+})
+
 test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends HostReady', async () => {
   const { broker, access, options } = makeAccess()
   const calls = { connected: 0, ready: 0, requests: [] }
