@@ -90,6 +90,7 @@ type Store interface {
 // PostgreSQL remains authoritative and reconciliation repairs local state.
 type Admission interface {
 	Authorize(ctx context.Context, hostID, deviceID string) (bool, error)
+	BeginGrantRevoke(hostID, deviceID string) func()
 	Deny(hostID, deviceID string)
 	DenyDevice(deviceID string)
 	CompleteDeviceRevoke(deviceID string)

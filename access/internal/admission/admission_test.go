@@ -19,15 +19,17 @@ type fakeStore struct {
 	loads   map[Key]int
 	total   int
 	block   map[Key]chan struct{}
+	entered map[Key]chan struct{}
 	err     error
 	listErr error
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		grants: map[Key]store.AdmissionGrant{},
-		loads:  map[Key]int{},
-		block:  map[Key]chan struct{}{},
+		grants:  map[Key]store.AdmissionGrant{},
+		loads:   map[Key]int{},
+		block:   map[Key]chan struct{}{},
+		entered: map[Key]chan struct{}{},
 	}
 }
 
@@ -47,6 +49,20 @@ func (f *fakeStore) blockKey(hostID, deviceID string) chan struct{} {
 	return release
 }
 
+// blockKeySignal returns a channel closed after the grant value has been
+// captured but before the read returns, plus the release channel. It makes the
+// pause deterministic instead of sleep-based.
+func (f *fakeStore) blockKeySignal(hostID, deviceID string) (<-chan struct{}, chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := Key{HostID: hostID, DeviceID: deviceID}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	f.block[key] = release
+	f.entered[key] = entered
+	return entered, release
+}
+
 func (f *fakeStore) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (store.AdmissionGrant, error) {
 	key := Key{HostID: hostID, DeviceID: deviceID}
 	f.mu.Lock()
@@ -55,6 +71,10 @@ func (f *fakeStore) AdmissionGrantFor(ctx context.Context, hostID, deviceID stri
 	release := f.block[key]
 	err := f.err
 	grant, ok := f.grants[key]
+	if entered, blocked := f.entered[key]; blocked {
+		close(entered)
+		delete(f.entered, key)
+	}
 	f.mu.Unlock()
 	if release != nil {
 		select {
@@ -402,5 +422,137 @@ func TestDenyIgnoresEmptyScopesAndCheckHandlesDenials(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(service.metrics.AdmissionDenied); got != 1 {
 		t.Fatalf("denied metric = %v", got)
+	}
+}
+
+func TestPairingCompletionCannotClearPendingRevocation(t *testing.T) {
+	for _, scope := range []string{"host", "device"} {
+		t.Run(scope, func(t *testing.T) {
+			const hostID, deviceID = "host", "device"
+			source := newFakeStore()
+			source.put(hostID, deviceID, true, 1)
+			service := newService(t, source, Config{})
+
+			var finish func()
+			if scope == "host" {
+				first := service.BeginGrantRevoke(hostID, deviceID)
+				finish = service.BeginGrantRevoke(hostID, deviceID)
+				first()
+			} else {
+				service.DenyDevice(deviceID)
+				finish = func() { service.CompleteDeviceRevoke(deviceID) }
+			}
+			if err := service.Allow(t.Context(), hostID, deviceID); err == nil {
+				t.Fatal("pairing completion accepted a grant with a pending revocation")
+			}
+			if allowed, known := service.Check(hostID, deviceID); allowed || !known {
+				t.Fatal("admission fence was lost before the durable revocation")
+			}
+			source.put(hostID, deviceID, false, 1)
+			service.Deny(hostID, deviceID)
+			finish()
+			if err := service.Allow(t.Context(), hostID, deviceID); err == nil {
+				t.Fatal("pairing completion accepted a revoked grant")
+			}
+			source.put(hostID, deviceID, true, 2)
+			if err := service.Allow(t.Context(), hostID, deviceID); err != nil {
+				t.Fatalf("new pairing after revocation was denied: %v", err)
+			}
+		})
+	}
+}
+
+// TestDelayedPairingCompletionCannotReopenRevokedHostGrant pins the ordering
+// rule that a Host-scoped revocation which commits while a pairing completion
+// is mid-read wins. The completion captured the old active grant before the
+// fence was installed, so it must not clear that fence.
+func TestDelayedPairingCompletionCannotReopenRevokedHostGrant(t *testing.T) {
+	source := newFakeStore()
+	source.put("revoked-host", "device", true, 1)
+	source.put("other-host", "device", true, 1)
+	service := newService(t, source, Config{LoadTimeout: 2 * time.Second})
+
+	entered, release := source.blockKeySignal("revoked-host", "device")
+	completion := make(chan error, 1)
+	go func() {
+		completion <- service.Allow(context.Background(), "revoked-host", "device")
+	}()
+	<-entered // the active grant is captured but the read has not returned.
+
+	// Production order for a Host-scoped revoke: fence local admission, then
+	// commit the durable revocation while the pairing read is still paused.
+	finish := service.BeginGrantRevoke("revoked-host", "device")
+	source.put("revoked-host", "device", false, 1)
+	finish()
+	close(release)
+
+	if err := <-completion; err == nil {
+		t.Fatal("delayed pairing completion cleared a committed revocation")
+	}
+	if allowed, err := service.Authorize(context.Background(), "revoked-host", "device"); err != nil || allowed {
+		t.Fatalf("revoked host authorized after delayed completion: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := service.Authorize(context.Background(), "other-host", "device"); err != nil || !allowed {
+		t.Fatalf("unrelated host grant was denied: allowed=%v err=%v", allowed, err)
+	}
+
+	// Positive control: a separately authorized newer generation (a fresh
+	// pairing) may clear the earlier fence.
+	source.put("revoked-host", "device", true, 2)
+	if err := service.Allow(context.Background(), "revoked-host", "device"); err != nil {
+		t.Fatalf("newer pairing generation was not usable: %v", err)
+	}
+	if allowed, err := service.Authorize(context.Background(), "revoked-host", "device"); err != nil || !allowed {
+		t.Fatalf("newer generation did not authorize: allowed=%v err=%v", allowed, err)
+	}
+}
+
+// TestDelayedPairingCompletionCannotEscapeDeviceWideFence covers the
+// device-wide revocation variant: the provisional device fence and the
+// confirmed per-grant denials must both survive the delayed completion.
+func TestDelayedPairingCompletionCannotEscapeDeviceWideFence(t *testing.T) {
+	source := newFakeStore()
+	source.put("host-a", "device", true, 1)
+	source.put("host-b", "device", true, 1)
+	service := newService(t, source, Config{LoadTimeout: 2 * time.Second})
+
+	entered, release := source.blockKeySignal("host-a", "device")
+	completion := make(chan error, 1)
+	go func() {
+		completion <- service.Allow(context.Background(), "host-a", "device")
+	}()
+	<-entered
+
+	// Production order for a device-wide revoke: provisional device fence,
+	// durable commit of every grant, confirmed per-grant denials, then narrow
+	// the provisional fence.
+	service.DenyDevice("device")
+	source.put("host-a", "device", false, 1)
+	source.put("host-b", "device", false, 1)
+	service.Deny("host-a", "device")
+	service.Deny("host-b", "device")
+	service.CompleteDeviceRevoke("device")
+	close(release)
+
+	if err := <-completion; err == nil {
+		t.Fatal("delayed pairing completion escaped a device-wide revocation")
+	}
+	for _, hostID := range []string{"host-a", "host-b"} {
+		if allowed, err := service.Authorize(context.Background(), hostID, "device"); err != nil || allowed {
+			t.Fatalf("%s authorized after device-wide revocation: allowed=%v err=%v", hostID, allowed, err)
+		}
+	}
+
+	// Positive control: a newer pairing generation for one host is usable
+	// after the device-wide revocation completed.
+	source.put("host-a", "device", true, 2)
+	if err := service.Allow(context.Background(), "host-a", "device"); err != nil {
+		t.Fatalf("newer generation after device-wide revocation: %v", err)
+	}
+	if allowed, err := service.Authorize(context.Background(), "host-a", "device"); err != nil || !allowed {
+		t.Fatalf("newer generation did not authorize: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, _ := service.Authorize(context.Background(), "host-b", "device"); allowed {
+		t.Fatal("unrelated revoked grant reopened after device-wide revocation")
 	}
 }

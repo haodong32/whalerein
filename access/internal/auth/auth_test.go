@@ -309,6 +309,11 @@ func (f *fakeAdmission) Deny(hostID, deviceID string) {
 	f.denied[grantKey(hostID, deviceID)] = true
 }
 
+func (f *fakeAdmission) BeginGrantRevoke(hostID, deviceID string) func() {
+	f.Deny(hostID, deviceID)
+	return func() { f.record("admission.finish_grant_revoke") }
+}
+
 func (f *fakeAdmission) DenyDevice(deviceID string) {
 	f.record("admission.deny_device")
 	f.deviceDenied[deviceID] = true
