@@ -62,6 +62,14 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 	if req.ResultBody == nil {
 		req.ResultBody = []byte{}
 	}
+	if req.ClientLeaseState == "" {
+		req.ClientLeaseState = ClientLeaseLive
+	}
+	switch req.ClientLeaseState {
+	case ClientLeaseLive, ClientLeaseExpired, ClientLeaseClosed:
+	default:
+		return CreateOutcome{}, fmt.Errorf("create request: invalid client lease state %q", req.ClientLeaseState)
+	}
 
 	args := []any{
 		req.RequestID,
@@ -86,12 +94,17 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 		req.CreatedAt,
 		req.UpdatedAt,
 		int32(req.ClientTransportVersion),
+		req.ClientLeaseUntil,
+		string(req.ClientLeaseState),
+		req.CancelPending,
+		req.CancelPublishedAt,
+		req.CancelAttempts,
 	}
 
 	if req.CommandID != "" {
 		insertSQL := `
 			INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,true)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,true)
 			ON CONFLICT (host_id, device_id, command_id) WHERE command_id <> '' DO NOTHING
 			RETURNING ` + requestColumns
 		row := queryRow(ctx, insertSQL, args...)
@@ -117,7 +130,7 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 
 	insertSQL := `
 		INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,true)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,true)
 		RETURNING ` + requestColumns
 	row := queryRow(ctx, insertSQL, args...)
 	inserted, err := scanRequest(row)
@@ -149,6 +162,152 @@ func (s *Store) GetRequest(ctx context.Context, requestID string) (Request, erro
 		return Request{}, wrapRequestScan(err)
 	}
 	return req, nil
+}
+
+// nonTerminalStatuses is the durable set that may still renew or expire. It
+// mirrors the HostResult matrix: every other status is terminal and stops
+// liveness work without rewriting the recorded outcome.
+const nonTerminalStatuses = "'received','host_accepted'"
+
+// RenewClientLease conditionally extends the exact request's live lease using
+// database time. It never touches a sibling request, never extends past the
+// original expires_at, rejects a wrong device, and cannot revive a row whose
+// lease already elapsed or whose state is expired/closed. The null lease case
+// is a historical row with unrecorded liveness: the first exact heartbeat may
+// record it, but the sweep never treats NULL as elapsed.
+func (s *Store) RenewClientLease(ctx context.Context, deviceID, requestID string, lease time.Duration) (bool, error) {
+	if deviceID == "" || requestID == "" || lease <= 0 {
+		return false, errors.New("renew client lease: invalid scope")
+	}
+	cmd, err := s.db.Exec(ctx, `
+		UPDATE requests
+		SET client_lease_until = LEAST(expires_at,
+		        GREATEST(COALESCE(client_lease_until, clock_timestamp()), clock_timestamp() + $3)),
+		    updated_at = GREATEST(updated_at, clock_timestamp())
+		WHERE request_id = $1 AND device_id = $2
+		  AND client_lease_state = 'live'
+		  AND status IN (`+nonTerminalStatuses+`)
+		  AND expires_at > clock_timestamp()
+		  AND (client_lease_until IS NULL OR client_lease_until > clock_timestamp())`,
+		requestID, deviceID, lease)
+	if err != nil {
+		return false, fmt.Errorf("renew client lease: %w", err)
+	}
+	return cmd.RowsAffected() == 1, nil
+}
+
+// ExpireClientLeases atomically moves a bounded batch of elapsed live leases to
+// expired. The outer UPDATE repeats the elapsed predicate so a concurrent
+// renewal that commits first makes the expiry a no-op after its row lock is
+// released; renewal and expiry therefore have exactly one winner. Expiry also
+// stops forwarding and records pending exact-cancellation metadata. It never
+// changes the recorded Host result: an expiry timestamp is not proof of native
+// release.
+func (s *Store) ExpireClientLeases(ctx context.Context, limit int) ([]Request, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		WITH due AS (
+			SELECT request_id FROM requests
+			WHERE client_lease_state = 'live'
+			  AND client_lease_until IS NOT NULL
+			  AND client_lease_until <= clock_timestamp()
+			  AND status IN (`+nonTerminalStatuses+`)
+			ORDER BY client_lease_until, request_id
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE requests r
+		SET client_lease_state = 'expired',
+		    cancel_pending = true,
+		    cancel_published_at = NULL,
+		    cancel_attempts = 0,
+		    forward_state = 'none',
+		    updated_at = GREATEST(r.updated_at, clock_timestamp())
+		FROM due
+		WHERE r.request_id = due.request_id
+		  AND r.client_lease_state = 'live'
+		  AND r.client_lease_until IS NOT NULL
+		  AND r.client_lease_until <= clock_timestamp()
+		  AND r.status IN (`+nonTerminalStatuses+`)
+		RETURNING `+requestColumnsR, limit)
+	if err != nil {
+		return nil, fmt.Errorf("expire client leases: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Request, 0, limit)
+	for rows.Next() {
+		req, err := scanRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("expire client leases: %w", err)
+		}
+		out = append(out, req)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("expire client leases: %w", err)
+	}
+	return out, nil
+}
+
+// PendingCancelRequests reads a bounded batch of expired rows whose exact
+// cancellation has not been published yet. Rows stay here across restart and
+// publication failure until a publish is recorded.
+func (s *Store) PendingCancelRequests(ctx context.Context, limit int) ([]Request, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT `+requestColumns+` FROM requests
+		WHERE cancel_pending AND client_lease_state = 'expired'
+		ORDER BY client_lease_until, request_id
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("pending cancel requests: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Request, 0, limit)
+	for rows.Next() {
+		req, err := scanRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("pending cancel requests: %w", err)
+		}
+		out = append(out, req)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pending cancel requests: %w", err)
+	}
+	return out, nil
+}
+
+// MarkCancelPublished records a successful exact-cancellation publish. It does
+// not reopen the lease or rewrite the request status: MQTT publication is not
+// native claim release.
+func (s *Store) MarkCancelPublished(ctx context.Context, requestID string) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE requests
+		SET cancel_pending = false,
+		    cancel_published_at = clock_timestamp(),
+		    updated_at = GREATEST(updated_at, clock_timestamp())
+		WHERE request_id = $1 AND cancel_pending AND client_lease_state = 'expired'`, requestID)
+	if err != nil {
+		return fmt.Errorf("mark cancellation published: %w", err)
+	}
+	return nil
+}
+
+// MarkCancelAttempt records a failed cancellation publish so the bounded
+// attempt count is durable for replay and diagnostics.
+func (s *Store) MarkCancelAttempt(ctx context.Context, requestID string) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE requests
+		SET cancel_attempts = cancel_attempts + 1,
+		    updated_at = GREATEST(updated_at, clock_timestamp())
+		WHERE request_id = $1 AND cancel_pending AND client_lease_state = 'expired'`, requestID)
+	if err != nil {
+		return fmt.Errorf("mark cancellation attempt: %w", err)
+	}
+	return nil
 }
 
 // ClaimDueRequests leases due pending rows with FOR UPDATE SKIP LOCKED. The
@@ -453,7 +612,7 @@ func (s *Store) CountRequests(ctx context.Context) (int, error) {
 func (s *Store) DeleteExpiredQueries(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.Exec(ctx, `DELETE FROM requests WHERE request_id IN (
         SELECT request_id FROM requests WHERE expires_at <= $1 AND command_id=''
-        AND kind IN (1,2) ORDER BY expires_at,request_id LIMIT 2000)`, before)
+        AND kind IN (1,2) AND NOT cancel_pending ORDER BY expires_at,request_id LIMIT 2000)`, before)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired query records: %w", err)
 	}

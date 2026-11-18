@@ -923,8 +923,11 @@ let channelQueueBarrier = null
           }
           if (method === 'question-start-remote-fixture') {
             const agent = ctx.agents.get(sessionId)
+            // Cases that must survive the Access request-deadline fallback ask
+            // for a longer native question window; the default stays 30s.
+            const questionMs = Number.isSafeInteger(config?.questionMs) && config.questionMs > 0 ? config.questionMs : 30000
             const pending = ctx.userQuestions.askTimed({ agent, questions: [{ id: 'q1', question: 'Fixture',
-              options: [{ label: 'Yes' }, { label: 'No' }] }] }, 'remote-fixture', 30000)
+              options: [{ label: 'Yes' }, { label: 'No' }] }] }, 'remote-fixture', questionMs)
             questionRuns.set(sessionId, pending)
             pending.catch(() => {})
             await new Promise(resolve => setImmediate(resolve))

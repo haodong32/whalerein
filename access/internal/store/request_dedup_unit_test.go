@@ -37,6 +37,11 @@ func requestFixtureRow(digest []byte) pgx.Row {
 		*d[19].(*time.Time) = at
 		*d[20].(*time.Time) = at
 		*d[21].(*uint32) = 2
+		*d[22].(**time.Time) = nil
+		*d[23].(*string) = "live"
+		*d[24].(*bool) = false
+		*d[25].(**time.Time) = nil
+		*d[26].(*int) = 0
 	}}
 }
 func TestCreateRequestDeduplicatesOnlyWithinHostDeviceCommandAndDigest(t *testing.T) {
@@ -59,7 +64,7 @@ func TestCreateRequestDeduplicatesOnlyWithinHostDeviceCommandAndDigest(t *testin
 			query := func(_ context.Context, sql string, args ...any) pgx.Row {
 				calls++
 				if calls == 1 {
-					if !strings.Contains(sql, "ON CONFLICT (host_id, device_id, command_id)") || len(args) != 22 || args[1] != "host" || args[2] != "device" || args[3] != "command" {
+					if !strings.Contains(sql, "ON CONFLICT (host_id, device_id, command_id)") || len(args) != 27 || args[1] != "host" || args[2] != "device" || args[3] != "command" {
 						t.Fatal("insert did not preserve the dedupe scope")
 					}
 					switch tc.mode {
@@ -105,7 +110,7 @@ func TestCreateReadOnlyRequestHasNoCommandDeduplication(t *testing.T) {
 			calls := 0
 			query := func(_ context.Context, sql string, args ...any) pgx.Row {
 				calls++
-				if strings.Contains(sql, "ON CONFLICT") || len(args) != 22 || args[3] != "" {
+				if strings.Contains(sql, "ON CONFLICT") || len(args) != 27 || args[3] != "" {
 					t.Fatal("read-only request was treated as a control")
 				}
 				if tc.scanErr != nil {

@@ -90,6 +90,17 @@ those deleted credentials.
 Access commits first, disconnects the device and delivers applicable notices.
 Hosts wait for replay completion before new channels. Reconnect uses fresh keys.
 
+Three lifetimes are deliberately distinct. Losing an observation connection or
+replacing its secure channel does not by itself revoke authorization or cancel a
+separately live HTTP answer. Exact request-lease expiry closes renewal and
+forwarding for that one request and schedules its exact Host cancellation, but it
+is not proof that no native action occurred: a confirmed receipt or conservative
+`unknown` outcome remains recoverable, and no path retries the answer
+automatically. Applicable grant/device revocation fences every affected
+observation and execution regardless of a fresh heartbeat. Cancellation notices
+carry bounded host/device/request/command/digest/deadline metadata and no question
+or answer content.
+
 Revocation clears client pairing/cache but retains key identity; explicit `forget`
 requires no active pairing. Local file deletion does not revoke remote grants.
 For lost credentials, revoke the confirmed old device ID through host/admin

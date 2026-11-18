@@ -427,6 +427,10 @@ mod fake_host_tests {
         let watch = RequestPayload {
             payload: Some(Payload::WatchSession(WatchSession {
                 session_id: "session-1".into(),
+                interests: Some(whalerein_proto::ObservationInterests {
+                    conversation: true,
+                    questions: false,
+                }),
             })),
         };
         let traced = access.host.lock().unwrap().request_traces.len();
@@ -487,6 +491,10 @@ mod fake_host_tests {
             RequestPayload {
                 payload: Some(Payload::WatchSession(WatchSession {
                     session_id: "session-1".into(),
+                    interests: Some(whalerein_proto::ObservationInterests {
+                        conversation: true,
+                        questions: false,
+                    }),
                 })),
             },
             RequestPayload {

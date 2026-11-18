@@ -47,6 +47,7 @@ pub use crate::account::{
     AccountBinding, CustomServiceInput, ProfileMode, ServiceDescriptor, ServiceKind,
 };
 pub use crate::diagnostics::MetricSample;
+pub use crate::observation::SessionObservation;
 pub use crate::pairing::{PairingDecision, PairingError};
 #[cfg(test)]
 pub use crate::profiles::{
@@ -71,13 +72,14 @@ pub use proto_compat::{
     decode_json, protocol_incompatible, require_payload, require_protocol_version, wire_error,
 };
 pub use types::{
-    ApprovalInfo, CommandDiagnostics, CommandHandle, CreateSessionInput, DoctorReport,
-    ExportManifest, HostCapabilities, HostInfo, LifecycleReceipt, ModelCatalog, ModelChoice,
-    ModelSelectionReceipt, OnlineStatus, PairingHistoryRecord, PairingOutcome, PairingPrompt,
-    PendingCommand, PendingQueue, PendingQueueAction, QuestionAnswer, QuestionBatchInfo,
-    QuestionItemInfo, QuestionOptionInfo, QuestionPageInfo, QuestionReceiptInfo, RevocationOutcome,
-    RevocationRetention, SessionCapabilities, SessionList, SessionModel, SessionSummary, WaitInput,
-    WaitObservation, WaitReason, WaitState,
+    ApprovalInfo, Cancellation, CommandDiagnostics, CommandHandle, CreateSessionInput,
+    DoctorReport, ExportManifest, HostCapabilities, HostInfo, LifecycleReceipt, ModelCatalog,
+    ModelChoice, ModelSelectionReceipt, ObservationInterests, OnlineStatus, PairingHistoryRecord,
+    PairingOutcome, PairingPrompt, PendingCommand, PendingQueue, PendingQueueAction,
+    QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo, QuestionOptionInfo,
+    QuestionPageInfo, QuestionReceiptInfo, QuestionStamp, QuestionView, RevocationOutcome,
+    RevocationRetention, SessionCapabilities, SessionEvent, SessionEventPayload, SessionList,
+    SessionModel, SessionSummary, WaitInput, WaitObservation, WaitReason, WaitState,
 };
 
 // Delivery choices are Core-owned; wire conversion stays internal.

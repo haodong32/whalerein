@@ -10,15 +10,15 @@ use whalerein_core::api::{
 use whalerein_core::Core;
 use whalerein_proto::{Approval, ApprovalDecision, ApprovalState, ErrorCode};
 
-struct Fixture {
-    _directory: TempDir,
+pub(super) struct Fixture {
+    pub(super) directory: TempDir,
     config: PathBuf,
     secrets: Arc<dyn SecretStore>,
-    access: FakeAccess,
+    pub(super) access: FakeAccess,
 }
 
 impl Fixture {
-    async fn paired() -> Self {
+    pub(super) async fn paired() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("client.toml");
         Core::write_config(
@@ -33,14 +33,14 @@ impl Fixture {
             .await
             .unwrap();
         Self {
-            _directory: directory,
+            directory,
             config,
             secrets,
             access,
         }
     }
 
-    async fn run(&self, args: &[&str]) -> CliOutcome {
+    pub(super) async fn run(&self, args: &[&str]) -> CliOutcome {
         self.run_with_interrupt(args, std::future::pending()).await
     }
 
@@ -282,7 +282,7 @@ async fn grouped_diagnostics_retains_failure_identity_and_redacts_bundle() {
     assert_eq!(value["error"]["layer"], "core");
     assert!(missing.render().contains(diagnostic));
 
-    let path = f._directory.path().join("diagnostics.json");
+    let path = f.directory.path().join("diagnostics.json");
     let path = path.to_str().unwrap();
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let denied = f.run(&["doctor", "--export", path]).await;
@@ -294,7 +294,7 @@ async fn grouped_diagnostics_retains_failure_identity_and_redacts_bundle() {
             "doctor",
             "--yes",
             "--export",
-            f._directory.path().to_str().unwrap(),
+            f.directory.path().to_str().unwrap(),
         ])
         .await;
     assert_eq!(invalid.to_json()["error"]["code"], "invalid_argument");

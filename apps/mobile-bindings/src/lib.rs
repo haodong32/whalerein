@@ -20,5 +20,7 @@ pub use secret::{MemorySecretStore, SecretStore, SecretStoreError};
 pub use types::{
     ApprovalView, BlockView, ClientStatusView, CommandView, ConversationEvent, DeliveryChoice,
     DiagnosticsReportView, HostSummary, MessageReplyView, MessageView, PairingPromptView,
+    QuestionAnswerView, QuestionBatchView, QuestionIntentView, QuestionItemView,
+    QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
     SendOperationView, SessionCapabilitiesView, SessionSummaryView,
 };

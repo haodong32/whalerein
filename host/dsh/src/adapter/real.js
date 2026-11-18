@@ -8,7 +8,10 @@ import path from 'node:path'
 // alongside unit tests. README.md separates that evidence from deployment gates.
 
 import { assistantReplyData, assistantStreamEvent } from './assistant-stream.js'
-import { OpenQuestionBroker, QuestionHandles, QuestionProjection, assertQuestionAdmission, validateQuestionAnswers } from './questions.js'
+import {
+  OpenQuestionBroker, QuestionHandles, QuestionProjection, QuestionStampTracker,
+  assertQuestionAdmission, questionInventoryFingerprint, validateQuestionAnswers,
+} from './questions.js'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { approvalDigest, bytesEqual, randomId, sha256Text } from 'whalerein-host/security/digest.js'
 import {
@@ -183,6 +186,8 @@ export class RealDshAdapter extends DshAdapter {
   #questionHandles = new QuestionHandles()
   #questionProjection = new QuestionProjection()
   #questionOwnerEpochs = new WeakMap()
+  #questionStamps = new QuestionStampTracker()
+  #questionHandleUnsubscribe = null
   #questionContext = null
   #openQuestionBroker = null
 
@@ -240,7 +245,10 @@ export class RealDshAdapter extends DshAdapter {
     const agents = scope.agents
     const userQuestions = scope.userQuestions
     if (!agents || !userQuestions) return undefined
-    const broker = new OpenQuestionBroker({ agents, userQuestions, handles: this.#questionHandles, now: this.now })
+    const broker = new OpenQuestionBroker({
+      agents, userQuestions, handles: this.#questionHandles, now: this.now,
+      onChange: sessionId => this.notifyQuestionsChanged(sessionId),
+    })
     this.#openQuestionBroker = broker
     const dispose = scope.on('user-questions/request', (request, next) => broker.capture(request, next), { global: true, prepend: true })
     return typeof dispose === 'function' ? dispose : undefined
@@ -305,6 +313,9 @@ export class RealDshAdapter extends DshAdapter {
       const approvalDisposer = on('approval/request', (request, next) => this.#onApprovalRequest(request, next), { global: true, prepend: true })
       if (typeof approvalDisposer === 'function') this.#disposers.push(approvalDisposer)
     }
+    // A broker capture/answer claim is a question inventory change even when
+    // no transcript event accompanies it.
+    this.#questionHandleUnsubscribe = this.#questionHandles.subscribe(event => this.notifyQuestionsChanged(event.sessionId))
     this.#closed = false
     this.opened = true
   }
@@ -312,8 +323,11 @@ export class RealDshAdapter extends DshAdapter {
   async close() {
     await super.close()
     this.#closed = true
+    this.#questionHandleUnsubscribe?.()
+    this.#questionHandleUnsubscribe = null
     this.#questionHandles.close()
     this.#questionProjection.clear()
+    this.#questionStamps.reset()
     this.#questionOwnerEpochs = new WeakMap()
     this.#questionContext = null
     this.#openQuestionBroker?.close()
@@ -708,9 +722,12 @@ export class RealDshAdapter extends DshAdapter {
     return (await this.#readQuestionProjection(sessionId, signal)).batches
   }
 
-  async listQuestionPage(sessionId, query = {}) {
+  // One authoritative inventory read produces both the wire page collection
+  // and the semantic stamp that certifies it. Broker-only questions without a
+  // committed Message participate in the same ordered collection.
+  async #questionInventory(sessionId, query = {}) {
     if (query.cursor) throw new AdapterError('invalid_argument')
-    const { batches: projected, asOfSeq } = await this.#readQuestionProjection(sessionId, query.signal)
+    const { batches: projected, asOfSeq, ownerAgent, ownerSession } = await this.#readQuestionProjection(sessionId, query.signal)
     if (query.signal?.aborted) throw new AdapterError('unavailable')
     this.#assertQuestionOwnership(sessionId)
     const live = this.#openQuestionBroker?.list(sessionId) ?? []
@@ -747,10 +764,27 @@ export class RealDshAdapter extends DshAdapter {
         ordered.push({ batch, position: marker.position, tie: 0, ordinal: marker.ordinal })
       }
       ordered.sort((a, b) => a.position - b.position || a.tie - b.tie || a.ordinal - b.ordinal)
-      return { batches: ordered.map(item => item.batch), next_cursor: '' }
+      const orderedBatches = ordered.map(item => item.batch)
+      return { batches: orderedBatches, stamp: this.#sampleStamp(sessionId, ownerAgent, ownerSession, orderedBatches) }
     }
     batches.push(...liveByCall.values())
-    return { batches, next_cursor: '' }
+    return { batches, stamp: this.#sampleStamp(sessionId, ownerAgent, ownerSession, batches) }
+  }
+
+  #sampleStamp(sessionId, ownerAgent, ownerSession, batches) {
+    const owner = ownerAgent && ownerSession ? [ownerAgent, ownerSession] : null
+    return this.#questionStamps.sample(sessionId, owner, questionInventoryFingerprint(batches))
+  }
+
+  async listQuestionPage(sessionId, query = {}) {
+    return this.#questionInventory(sessionId, query)
+  }
+
+  async readQuestionStamp(sessionId, options = {}) {
+    if (typeof sessionId !== 'string' || sessionId === '') throw new AdapterError('invalid_argument')
+    const page = await this.#questionInventory(sessionId, { signal: options?.signal })
+    if (options?.signal?.aborted) throw new AdapterError('unavailable')
+    return { availability: 'available', stamp: page.stamp }
   }
 
   async getQuestion(sessionId, batchId, options = {}) {

@@ -401,6 +401,26 @@ export class StateStore {
     })
   }
 
+  /**
+   * Install a terminal pre-admission cancellation fence on the existing
+   * command journal. An existing row is never overwritten: a duplicate notice
+   * or a later legitimate request for a fresh identity cannot erase proven
+   * evidence.
+   */
+  fenceCancelledCommand({ deviceId, commandId, requestId = '', digest = null, expiresAt = 0, errorCode = 'unavailable', now = this.#now() }) {
+    this.pruneCommandResults(now)
+    return this.#tx(() => {
+      const existing = this.#db.prepare('SELECT * FROM commands WHERE device_id = ? AND command_id = ?').get(deviceId, commandId)
+      if (existing) return { fenced: false, command: rowCommand(existing) }
+      this.#db.prepare(`
+        INSERT INTO commands (device_id, command_id, request_id, digest, status, result_payload, error_code, created_at, updated_at, expires_at)
+        VALUES (?, ?, ?, ?, 'failed', NULL, ?, ?, ?, ?)
+      `).run(deviceId, commandId, requestId, blob(digest ?? new Uint8Array(0)), errorCode, now, now, expiresAt)
+      const row = this.#db.prepare('SELECT * FROM commands WHERE device_id = ? AND command_id = ?').get(deviceId, commandId)
+      return { fenced: true, command: rowCommand(row) }
+    })
+  }
+
   getCommand(deviceId, commandId) {
     return rowCommand(this.#db.prepare('SELECT * FROM commands WHERE device_id = ? AND command_id = ?').get(deviceId, commandId))
   }
@@ -435,7 +455,7 @@ export class StateStore {
     return Number(info.changes) === 1
   }
 
-  updateLifecycleOperation({ deviceId, commandId, phase, entered = true, sessionId = '', parentSessionId = '', outcome = '', now = this.#now() }) {
+  updateLifecycleOperation({ deviceId, commandId, phase, entered = true, sessionId = '', parentSessionId = '', outcome = '', warningCode = '', now = this.#now() }) {
     const existing = this.getLifecycleOperation(deviceId, commandId)
     if (!existing) return false
     const state = JSON.stringify({
@@ -448,6 +468,9 @@ export class StateStore {
       // It survives a failed terminal command write so recovery keeps the
       // proven identity and never repeats the mutation.
       ...(outcome === '' ? {} : { outcome }),
+      // A warning code is part of the observable READY_WITH_WARNING outcome.
+      // Persist it with the proven identity so recovery does not have to guess.
+      ...(warningCode === '' ? {} : { warningCode }),
     })
     const info = this.#db.prepare(`
       UPDATE commands SET operation_state = ?, updated_at = ?

@@ -49,10 +49,19 @@ produce a Message. Preview text is provisional, never committed history.
 ## Source adapter
 
 The Host consumes a source adapter with lifecycle, session listing/lookup,
-`watch`, `readHistory`, `readState`, and command execution operations. The adapter
-translates native data into the shared types and advertises per-session
-capabilities such as resumable history, live text, interruption and approvals.
+`watch`, `readHistory`, `readState`, `readQuestionStamp`, `listQuestionPage`,
+`getQuestion`, and command execution operations. `watch` takes explicit
+interests (conversation and/or questions); a questions-only observation does not
+read history or require a history head. The adapter translates native data into
+the shared types and advertises per-session capabilities such as resumable
+history, live text, interruption, approvals and question read/open/continued.
 Unsupported capabilities return explicit results; adapters do not simulate them.
+
+Question reads return a source-owned observation stamp with every page: an epoch
+that changes with the adapter incarnation/exact native owner and a monotonic
+revision over normalized pending inventory. The final page certifies a complete
+same-stamp collection; a different stamp, epoch, duplicate or non-progressing
+cursor invalidates the stage. Reads never acquire a native answer claim.
 
 The adapter owns native ID mapping only when the source lacks stable IDs. Any
 persisted mapping contains identity/view metadata, not conversation content.

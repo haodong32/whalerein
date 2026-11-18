@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use whalerein_core::api::KeyringSecretStore;
+use whalerein_core::api::{Cancellation, ObservationInterests, SessionEventPayload};
+use whalerein_core::conversation::ViewUpdate;
 use whalerein_core::Core;
 
 #[tokio::main]
@@ -28,17 +30,28 @@ async fn main() {
     let watch_resets = resets.clone();
     let mut watcher = tokio::spawn(async move {
         let mut ready_tx = Some(ready_tx);
-        watch_core
-            .watch_session(&watch_key, Some(Duration::from_secs(20)), move |event| {
-                if matches!(event, whalerein_core::conversation::ViewUpdate::Reset) {
+        let mut observation = watch_core
+            .observe_session(
+                &watch_key,
+                ObservationInterests::conversation(),
+                Cancellation::new(),
+            )
+            .await?;
+        let _ = tokio::time::timeout(Duration::from_secs(20), async {
+            while let Some(event) = observation.next_event().await {
+                if matches!(
+                    event.payload,
+                    SessionEventPayload::Conversation(ViewUpdate::Reset)
+                ) {
                     watch_resets.fetch_add(1, Ordering::SeqCst);
                 }
                 if let Some(ready) = ready_tx.take() {
                     let _ = ready.send(());
                 }
-                true
-            })
-            .await
+            }
+        })
+        .await;
+        Ok::<(), whalerein_core::CoreError>(())
     });
     let first_core = core.clone();
     let mut first = tokio::spawn(async move { first_core.wait_session(&first_key, 20000).await });

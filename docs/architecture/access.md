@@ -48,7 +48,7 @@ Handlers do not access SQL/MQTT directly. `cmd/server` wires callbacks;
 | `schema_migrations` | Applied migration names and SHA-256 checksums. |
 | `grants` | Host/device authorization, revocation, replay acknowledgement. |
 | `pairing_tokens` | Invitation hash, expiry, use marker, failure count. |
-| `requests` | Bodies/status, command identity/digest, forwarding lease/retries. |
+| `requests` | Bodies/status, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay. |
 
 Nine tables use checksummed, apply-once migrations under an advisory lock.
 Unversioned installations are adopted without deletion; changed historical
@@ -97,6 +97,24 @@ retains small control tombstones rather than weakening uncertain-outcome safety.
 Final statuses cannot be overwritten; `unknown` may become succeeded/failed.
 Expiry cleanup removes bodies but retains identity, digest, and status. Late
 results cannot restore expired bodies. Access never generates DSH success.
+
+## Exact request liveness and cancellation
+
+A non-terminal one-shot request owns one client lease on its existing request
+row. Only that authenticated device and request pair renews it, through its own
+`GET /v1/requests/{id}` or `POST /v1/requests/{id}/heartbeat`; renewal uses
+database time, cannot pass the original `expires_at`, and cannot revive an
+expired lease. Unrelated requests, sibling polling and observation traffic never
+renew it. A lease that is absent on a historical row is unknown, not expired.
+
+A bounded sweep atomically moves one elapsed live lease to an irreversible
+`expired` state, stops forwarding, and records a retryable pending cancellation
+on the same row. The published notice is bounded and scoped to the exact
+Host/device/request/command/digest/deadline; it contains no question or answer
+content. Publish success is not native release, and a notice that cannot be
+published replays after restart or broker recovery. A late read may return the
+recorded outcome but cannot reopen execution. Authorization revocation remains
+independent and stronger than transport or lease liveness.
 
 ## Pairing and revocation
 

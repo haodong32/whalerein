@@ -9,11 +9,11 @@ package requests
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/broker"
@@ -45,6 +45,11 @@ type Store interface {
 	MarkPublished(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration) error
 	MarkPublishFailure(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration, maxAttempts int) error
 	ApplyHostResult(ctx context.Context, update store.HostResultUpdate) (bool, error)
+	RenewClientLease(ctx context.Context, deviceID, requestID string, lease time.Duration) (bool, error)
+	ExpireClientLeases(ctx context.Context, limit int) ([]store.Request, error)
+	PendingCancelRequests(ctx context.Context, limit int) ([]store.Request, error)
+	MarkCancelPublished(ctx context.Context, requestID string) error
+	MarkCancelAttempt(ctx context.Context, requestID string) error
 }
 
 // Broker publishes one HostRequest after the transaction commits.
@@ -97,20 +102,16 @@ type Service struct {
 	masker   *diagnostics.Masker
 	logger   *slog.Logger
 	now      func() time.Time
-	claimsMu sync.Mutex
-	claims   map[string]clientClaim
 }
 
-// clientClaim is an in-memory liveness lease for a device that polls a
-// non-terminal request over HTTP. Polling renews it; silence means the client
-// is gone. TTL remains the fallback when a request never polls.
-type clientClaim struct {
-	hostID   string
-	deviceID string
-	seen     time.Time
-}
-
-const clientPollLease = 10 * time.Second
+const (
+	// clientPollLease is the exact-request HTTP liveness window. Only that
+	// request's own polling or heartbeat renews it.
+	clientPollLease = 10 * time.Second
+	// clientSweepBatch bounds one expiry/replay pass. The caller's loop
+	// repeats, so a backlog drains without one unbounded statement.
+	clientSweepBatch = 100
+)
 
 // SubmitInput identifies the authenticated device and the request body.
 type SubmitInput struct {
@@ -151,7 +152,6 @@ func New(deps Dependencies) (*Service, error) {
 		masker:   deps.Masker,
 		logger:   deps.Logger,
 		now:      deps.Now,
-		claims:   make(map[string]clientClaim),
 	}, nil
 }
 
@@ -195,10 +195,13 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 			"host", s.masker.Host(input.HostID), "device", s.masker.Device(input.DeviceID))
 		return outcome.Request, false, ErrDigestMismatch
 	}
-	s.recordClientClaim(outcome.Request)
 	if !outcome.Created {
-		// Same command id and digest: return the existing row without a
-		// second publish.
+		// Same command id and digest: renew only the existing row's own lease
+		// and return it without a second publish.
+		if _, renewErr := s.store.RenewClientLease(ctx, input.DeviceID, outcome.Request.RequestID, clientPollLease); renewErr != nil {
+			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			return store.Request{}, false, fmt.Errorf("renew replayed request: %w", renewErr)
+		}
 		s.metrics.ObserveHostRequest(s.now().Sub(started), false)
 		return outcome.Request, false, nil
 	}
@@ -274,7 +277,19 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 		ExpiresAt:              expiresAt,
 		CreatedAt:              now,
 		UpdatedAt:              now,
+		ClientLeaseUntil:       leaseDeadline(&expiresAt, now, clientPollLease),
+		ClientLeaseState:       store.ClientLeaseLive,
 	}, nil
+}
+
+// leaseDeadline bounds the exact-request liveness deadline by the original
+// request deadline, so renewal can never extend past expires_at.
+func leaseDeadline(expiresAt *time.Time, now time.Time, lease time.Duration) *time.Time {
+	deadline := now.Add(lease)
+	if deadline.After(*expiresAt) {
+		deadline = *expiresAt
+	}
+	return &deadline
 }
 
 // ForwardDue leases due rows with FOR UPDATE SKIP LOCKED, publishes outside the
@@ -391,93 +406,125 @@ func terminalStatus(status whalereinv1.OnlineStatus) bool {
 	}
 }
 
-func (s *Service) recordClientClaim(req store.Request) {
-	if req.RequestID == "" || req.HostID == "" || terminalStatus(req.Status) {
-		return
+// Touch renews only the exact request's own live lease using database time.
+// Unrelated same-device traffic never renews another request, a wrong device
+// is rejected, and a terminal, expired or elapsed row cannot be revived.
+func (s *Service) Touch(ctx context.Context, deviceID, requestID string) (bool, error) {
+	if deviceID == "" || requestID == "" {
+		return false, nil
 	}
-	s.claimsMu.Lock()
-	for id, entry := range s.claims {
-		if entry.deviceID == req.DeviceID {
-			entry.seen = s.now()
-			s.claims[id] = entry
-		}
+	renewed, err := s.store.RenewClientLease(ctx, deviceID, requestID, clientPollLease)
+	if err != nil {
+		return false, fmt.Errorf("touch request: %w", err)
 	}
-	s.claims[req.RequestID] = clientClaim{hostID: req.HostID, deviceID: req.DeviceID, seen: s.now()}
-	s.claimsMu.Unlock()
+	return renewed, nil
 }
 
-// Touch renews the HTTP polling lease for one non-terminal request. A terminal
-// request is removed from the lease map.
-func (s *Service) Touch(deviceID, requestID string, status whalereinv1.OnlineStatus) {
-	if requestID == "" {
-		return
-	}
-	s.claimsMu.Lock()
-	defer s.claimsMu.Unlock()
-	if terminalStatus(status) {
-		delete(s.claims, requestID)
-	}
-	// Any successful HTTP call from this device proves it is still alive, so
-	// renew every non-terminal claim owned by the device. The answer claim may
-	// be waiting while the CLI polls a different result/query request id.
-	for id, entry := range s.claims {
-		if entry.deviceID == deviceID {
-			entry.seen = s.now()
-			s.claims[id] = entry
-		}
-	}
+// cancellationPayload is the bounded exact-scope cancellation published to the
+// owning Host presence topic. It carries identity and deadline metadata only;
+// no question, answer, request body or result content is included.
+type cancellationPayload struct {
+	Event     string `json:"event"`
+	RequestID string `json:"request_id"`
+	HostID    string `json:"host_id"`
+	DeviceID  string `json:"device_id"`
+	CommandID string `json:"command_id,omitempty"`
+	// Digest binds a command notice to the exact payload; absent for queries.
+	Digest          string `json:"digest,omitempty"`
+	ExpiresAtUnixMs int64  `json:"expires_at_unix_ms"`
+	Reason          string `json:"reason"`
+	ObservedAt      string `json:"observed_at"`
 }
 
-// SweepClientClaims releases requests whose device stopped polling. The event
-// is a bounded control message; Host aborts the request scope and the adapter
-// finally releases the native claim.
-func (s *Service) SweepClientClaims(ctx context.Context) {
+// SweepClientLeases durably expires elapsed exact-request leases and replays
+// pending exact cancellations. Expiry and renewal have one transaction winner;
+// a failed or unavailable publish leaves cancel_pending set so a later sweep
+// (including after restart) retries the same exact identity. Publication alone
+// is never reported as native release.
+func (s *Service) SweepClientLeases(ctx context.Context) {
 	now := s.now()
-	type staleClaim struct {
-		id string
-		clientClaim
+	expired, err := s.store.ExpireClientLeases(ctx, clientSweepBatch)
+	if err != nil {
+		s.logger.Warn("client lease expiry failed", "error", err.Error())
+		return
 	}
-	s.claimsMu.Lock()
-	stale := make([]staleClaim, 0)
-	for id, entry := range s.claims {
-		if now.Sub(entry.seen) >= clientPollLease {
-			stale = append(stale, staleClaim{id, entry})
-			delete(s.claims, id)
-		}
+	if len(expired) > 0 && s.metrics != nil {
+		s.metrics.RequestClaimStale()
 	}
-	s.claimsMu.Unlock()
-	for _, item := range stale {
-		row, err := s.store.GetRequest(ctx, item.id)
-		if err != nil || terminalStatus(row.Status) {
-			continue
-		}
-		payload, err := json.Marshal(map[string]string{
-			"event":       "request_stale",
-			"request_id":  item.id,
-			"host_id":     item.hostID,
-			"device_id":   item.deviceID,
-			"reason":      "client_poll_expired",
-			"observed_at": now.UTC().Format(time.RFC3339Nano),
-		})
+	candidates := expired
+	if len(expired) < clientSweepBatch {
+		pending, err := s.store.PendingCancelRequests(ctx, clientSweepBatch)
 		if err != nil {
-			continue
+			s.logger.Warn("pending cancellation query failed", "error", err.Error())
+			return
 		}
-		if err := s.broker.PublishPresence(ctx, item.hostID, payload); err != nil {
-			if s.metrics != nil {
-				s.metrics.RequestClaimStale()
+		seen := make(map[string]bool, len(expired)+len(pending))
+		for _, row := range expired {
+			seen[row.RequestID] = true
+		}
+		for _, row := range pending {
+			if !seen[row.RequestID] {
+				candidates = append(candidates, row)
 			}
-			s.logger.Warn("request stale publish failed",
-				"host", s.masker.Host(item.hostID), "device", s.masker.Device(item.deviceID),
-				"request", s.masker.Request(item.id), "error", err.Error())
-			continue
 		}
-		if s.metrics != nil {
-			s.metrics.RequestClaimStale()
-		}
-		s.logger.Info("request stale released",
-			"host", s.masker.Host(item.hostID), "device", s.masker.Device(item.deviceID),
-			"request", s.masker.Request(item.id))
 	}
+	for _, row := range candidates {
+		if ctx.Err() != nil {
+			return
+		}
+		s.publishCancellation(ctx, row, now)
+	}
+}
+
+// cancellationDigest renders the exact command payload digest for a notice.
+// Queries and handshakes have no digest and carry no executable command scope.
+func cancellationDigest(row store.Request) string {
+	if row.CommandID == "" || len(row.PayloadDigest) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(row.PayloadDigest)
+}
+
+func (s *Service) publishCancellation(ctx context.Context, row store.Request, now time.Time) {
+	if !s.presence.Available() || !s.presence.IsHostOnline(ctx, row.HostID) {
+		// Unknown/offline transport is a retryable delivery condition, not a
+		// reason to drop the retained cancellation.
+		return
+	}
+	payload, err := json.Marshal(cancellationPayload{
+		Event:           "request_stale",
+		RequestID:       row.RequestID,
+		HostID:          row.HostID,
+		DeviceID:        row.DeviceID,
+		CommandID:       row.CommandID,
+		Digest:          cancellationDigest(row),
+		ExpiresAtUnixMs: row.ExpiresAt.UnixMilli(),
+		Reason:          "client_poll_expired",
+		ObservedAt:      now.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return
+	}
+	if err := s.broker.PublishPresence(ctx, row.HostID, payload); err != nil {
+		s.logger.Warn("request stale publish failed",
+			"host", s.masker.Host(row.HostID), "device", s.masker.Device(row.DeviceID),
+			"request", s.masker.Request(row.RequestID), "attempt", row.CancelAttempts+1, "error", err.Error())
+		if markErr := s.store.MarkCancelAttempt(ctx, row.RequestID); markErr != nil {
+			s.logger.Warn("request stale attempt not recorded",
+				"request", s.masker.Request(row.RequestID), "error", markErr.Error())
+		}
+		return
+	}
+	if err := s.store.MarkCancelPublished(ctx, row.RequestID); err != nil {
+		// The notice may already have reached the Host; retaining pending
+		// metadata can duplicate a harmless exact notice, never reopen R.
+		s.logger.Warn("request stale publish not recorded",
+			"request", s.masker.Request(row.RequestID), "error", err.Error())
+		return
+	}
+	s.logger.Info("request stale released",
+		"host", s.masker.Host(row.HostID), "device", s.masker.Device(row.DeviceID),
+		"request", s.masker.Request(row.RequestID), "command", s.masker.Request(row.CommandID))
 }
 
 // Run drives the forwarding retry loop until ctx is cancelled.
@@ -496,7 +543,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if err := s.ForwardDue(ctx); err != nil && ctx.Err() == nil {
 				s.logger.Warn("forward loop failed", "error", err.Error())
 			}
-			s.SweepClientClaims(ctx)
+			s.SweepClientLeases(ctx)
 		}
 	}
 }

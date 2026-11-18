@@ -61,7 +61,7 @@ type PairingService interface {
 type RequestService interface {
 	Submit(ctx context.Context, input requests.SubmitInput) (store.Request, bool, error)
 	Get(ctx context.Context, deviceID, requestID string) (store.Request, error)
-	Touch(deviceID, requestID string, status whalereinv1.OnlineStatus)
+	Touch(ctx context.Context, deviceID, requestID string) (bool, error)
 }
 
 // Dependencies wires the HTTP server.

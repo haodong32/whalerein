@@ -835,6 +835,32 @@ test('question operations require separately advertised capabilities and never r
   assert.equal((await service.handle({ request: makeRequest(), payload: invalid })).errorCode, 'invalid_argument')
 })
 
+test('session-observation/AC-14.watch interests are required and forwarded explicitly', async () => {
+  const calls=[]
+  const { service } = makeService({ events: {
+    readHistory: async () => ({}),
+    watch: async (...args) => { calls.push(args); return { watch_id: 'w1', state: { session: { host_id: 'host-1', session_id: 's1' } }, lease_ms: 1 } },
+    refresh: async () => ({ watches: [] }),
+    unwatch() {},
+  } })
+  const query = makeRequest({ kind: 'REQUEST_KIND_QUERY' })
+  for (const watch_session of [
+    { session_id: 's1' },
+    { session_id: 's1', interests: {} },
+    { session_id: 's1', interests: { conversation: false, questions: false } },
+    { session_id: 's1', interests: { conversation: 'yes', questions: false } },
+    { session_id: '', interests: { conversation: true, questions: false } },
+  ]) {
+    assert.equal((await service.handle({ request: query, payload: { watch_session } })).errorCode, 'invalid_argument')
+  }
+  assert.equal(calls.length, 0, 'invalid interests never reach source registration')
+  const accepted = await service.handle({ request: query, payload: {
+    watch_session: { session_id: 's1', interests: { conversation: false, questions: true } } } })
+  assert.equal(accepted.status, 'succeeded')
+  assert.deepEqual(calls[0][4], { conversation: false, questions: true })
+  assert.equal((await service.handle({ request: query, payload: { refresh_watches: { watch_ids: ['w1'] } } })).status, 'succeeded')
+})
+
 test('fork journals only confirmed identities and replays one native invocation', async () => {
   const {service, adapter, store} = makeService()
   let calls = 0
@@ -1740,7 +1766,7 @@ test('question capability and acceptance delays cannot cross the command deadlin
   assert.equal(result.errorCode, 'expired'); assert.equal(sourceCalls, 0)
 })
 
-test('question channel loss and explicit open cancellation stop capability preflight', async () => {
+test('explicit cancellation or revocation stops question capability preflight', async () => {
   for (const phase of ['QUESTION_OPEN', 'QUESTION_CONTINUED']) {
     const ctx = makeService(), gate = Promise.withResolvers()
     let sourceCalls = 0
@@ -1754,12 +1780,73 @@ test('question channel loss and explicit open cancellation stop capability prefl
       const cancel = await ctx.service.handle({ request: makeRequest({ kind: 'REQUEST_KIND_QUERY' }),
         payload: { cancel_question_answer: { session_id: 's1', command_id: request.command_id } } })
       assert.equal(cancel.response.question_cancel_receipt.cancellation_requested, true)
-    } else ctx.service.cancelChannel(request.device_id, request.channel_id)
+    } else {
+      // Continued answers are not addressable by the open-answer cancel
+      // receipt; applicable revocation still fences the scope.
+      ctx.service.cancelChannel(request.device_id, request.channel_id, 'revoked')
+    }
     const result = await pending
     assert.equal(result.status, 'failed'); assert.equal(result.errorCode, 'unavailable')
     gate.resolve(); await new Promise(resolve => setImmediate(resolve))
     assert.equal(sourceCalls, 0)
   }
+})
+
+function answerService(phase = 'QUESTION_CONTINUED') {
+  const ctx = makeService(), gate = Promise.withResolvers()
+  let started = 0
+  ctx.adapter.getSession = async id => ({ sessionId: id, sourceCapabilities: { questions_answer_open: true, questions_answer_continued: true } })
+  ctx.adapter.execute = async (session, payload, context) => {
+    started++
+    return new Promise((resolve, reject) => {
+      context.signal.addEventListener('abort', () => reject(new DefinitiveExecutionError('unavailable')), { once: true })
+      gate.promise.then(() => resolve({ question_receipt: { batch_id: 'b', phase: 'QUESTION_REPLY_QUEUED' } }), reject)
+    })
+  }
+  const request = makeRequest({ expiresAt: 60_000 })
+  const pending = ctx.service.handle({ request, payload: { answer_question: { session_id: 's1', batch_id: 'b', expected_phase: phase } } })
+  return { ctx, request, pending, gate, started: () => started }
+}
+
+test('session-observation/AC-25.device-offline and channel replacement do not abort a live HTTP answer', async () => {
+  for (const cancel of [
+    harness => harness.ctx.service.cancelDevice(harness.request.device_id, 'device_offline'),
+    harness => harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id, 'channel_replaced'),
+    harness => harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id),
+  ]) {
+    const harness = answerService()
+    try {
+      while (!harness.started()) await new Promise(resolve => setImmediate(resolve))
+      cancel(harness)
+      const result = await (async () => { harness.gate.resolve(); return harness.pending })()
+      assert.equal(result.status, 'succeeded', 'observation loss cannot cancel an admitted answer')
+      assert.equal(harness.started(), 1)
+    } finally { harness.ctx.store.close() }
+  }
+})
+
+test('session-observation/AC-33.revocation remains authoritative for a live HTTP answer', async () => {
+  const harness = answerService()
+  try {
+    while (!harness.started()) await new Promise(resolve => setImmediate(resolve))
+    harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id, 'revoked')
+    const result = await harness.pending
+    assert.equal(result.status, 'unknown')
+    assert.equal(harness.started(), 1)
+  } finally { harness.ctx.store.close() }
+})
+
+test('session-observation/AC-33.exact request cancellation stops only its own answer', async () => {
+  const first = answerService(), second = answerService()
+  try {
+    while (!first.started() || !second.started()) await new Promise(resolve => setImmediate(resolve))
+    first.ctx.service.cancelRequest(first.request.request_id, 'client_poll_expired')
+    const aborted = await first.pending
+    assert.equal(aborted.status, 'unknown')
+    second.gate.resolve()
+    assert.equal((await second.pending).status, 'succeeded')
+    assert.equal(second.started(), 1)
+  } finally { first.ctx.store.close(); second.ctx.store.close() }
 })
 
 test('question completion after source invocation and deadline remains unknown', async () => {
@@ -2583,3 +2670,82 @@ test('concurrent start-if-idle sends serialize so the loser observes the started
   assert.equal(store.getCommand('device-1', 'start-second').errorCode, 'conflict')
   store.close()
 })
+
+for (const scenario of [
+  { kind: 'create', label: 'create with a proven attach warning', disposition: 'READY_WITH_WARNING', sessionId: 'created-warning' },
+  { kind: 'create', label: 'create with an ambiguous native outcome', disposition: 'UNKNOWN', sessionId: null },
+  { kind: 'fork', label: 'fork with a proven attach warning', disposition: 'READY_WITH_WARNING', sessionId: 'child-warning' },
+  { kind: 'fork', label: 'fork with an ambiguous native outcome', disposition: 'UNKNOWN', sessionId: null },
+]) {
+  test(`recovered ${scenario.label} keeps its disposition contract across a failed terminal write and reopen`, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'whalerein-lifecycle-recovery-'))
+    const path = join(directory, 'state.sqlite')
+    let store = new StateStore({ path, now: () => 1000 })
+    t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
+    let hostCalls = 0
+    let forkCalls = 0
+    const adapter = new TestSource({ now: () => 1000 })
+    adapter.describeHostCapabilities = async () => ({ session_create: true, session_fork: true })
+    adapter.getSession = async () => ({ sourceCapabilities: { session_fork: true } })
+    adapter.executeHost = async () => {
+      hostCalls += 1
+      return scenario.sessionId
+        ? { entered: true, identity: { session_id: scenario.sessionId }, attach_error: 'workspace_attach_failed' }
+        : { entered: true, failure_code: 'transport_lost' }
+    }
+    adapter.execute = async () => {
+      forkCalls += 1
+      return scenario.sessionId
+        ? { entered: true, identity: { session_id: scenario.sessionId }, attach_error: 'workspace_attach_failed' }
+        : { entered: true, failure_code: 'transport_lost' }
+    }
+    const service = new CommandService({ store, adapter, events: {}, now: () => 1000, codec: proto })
+    const failTerminalWrite = store.setCommandStatus.bind(store)
+    store.setCommandStatus = fields => {
+      if (fields.status === 'succeeded') throw new Error('fixture terminal write fault')
+      return failTerminalWrite(fields)
+    }
+    const request = makeRequest({ commandId: `lifecycle-recovery-${scenario.kind}-${scenario.disposition}` })
+    const payload = scenario.kind === 'create' ? { create_session: {} } : { fork_session: { session_id: 'parent' } }
+    const first = await service.handle({ request, payload })
+    assert.equal(first.status, 'unknown', 'a failed terminal write stays uncertain instead of claiming an outcome')
+    assert.equal(scenario.kind === 'create' ? hostCalls : forkCalls, 1)
+
+    store.close()
+    store = new StateStore({ path, now: () => 1000 })
+    const restarted = new CommandService({ store, adapter, events: {}, now: () => 1000, codec: proto })
+    restarted.recover()
+
+    const lookup = async () => (await restarted.handle({
+      request: makeRequest({ kind: 'REQUEST_KIND_QUERY' }),
+      payload: { get_command_result: { command_id: request.command_id } },
+    })).response.command_result
+    const command = await lookup()
+    assert.equal(command.found, true)
+    assert.equal(command.status, 'unknown')
+    const inner = proto.decode('whalerein.v1.ResponsePayload', command.result_payload).lifecycle_receipt
+    assert.equal(inner.operation, scenario.kind)
+    assert.ok(typeof inner.operation_id === 'string' && inner.operation_id !== '')
+    if (scenario.disposition === 'READY_WITH_WARNING') {
+      assert.equal(inner.disposition, 'READY_WITH_WARNING')
+      assert.equal(inner.session_id, scenario.sessionId, 'the observed identity survives recovery')
+      assert.equal(inner.warning_code, 'workspace_attach_failed', 'the recovered warning code is the one the fixture proved')
+      if (scenario.kind === 'fork') assert.equal(inner.parent_session_id, 'parent')
+    } else {
+      assert.equal(inner.disposition, 'UNKNOWN')
+      assert.equal(inner.session_id, undefined, 'UNKNOWN must not claim an unproven identity')
+      assert.ok(['OPERATION_ID', 'PREFERRED_SESSION_ID', 'PARENT_SESSION_ID', 'MANUAL'].includes(inner.reconcile_mode))
+      assert.equal(typeof inner.reconcile_key, 'string')
+      if (scenario.kind === 'create') assert.equal(inner.reconcile_mode, 'OPERATION_ID')
+      if (scenario.kind === 'fork') {
+        assert.equal(inner.reconcile_mode, 'PARENT_SESSION_ID')
+        assert.equal(inner.reconcile_key, 'parent')
+      }
+    }
+    const repeated = await lookup()
+    assert.deepEqual(repeated.result_payload, command.result_payload, 'recovery is stable across repeated lookup')
+    const replay = await restarted.handle({ request, payload })
+    assert.equal(replay.status, 'unknown')
+    assert.equal(scenario.kind === 'create' ? hostCalls : forkCalls, 1, 'recovery and replay never invoke the native action again')
+  })
+}

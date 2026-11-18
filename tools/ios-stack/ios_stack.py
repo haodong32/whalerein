@@ -1087,7 +1087,10 @@ plugin_opt_policy_ttl_ms 15000
         is unavailable, then `start` restores it.
         """
         if action == "stop":
-            docker("stop", MOSQUITTO_CONTAINER, timeout=120)
+            # A graceful stop can outlive the control request timeout and leaves
+            # the device MQTT socket half-open; kill the broker so transport
+            # loss is immediate and deterministic.
+            docker("kill", MOSQUITTO_CONTAINER, timeout=120)
             log_line(self.directory, "broker stopped")
             return {"action": "stop", "ready": self.health()}
         if action == "start":

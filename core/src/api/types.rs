@@ -1053,6 +1053,175 @@ pub struct QuestionBatchInfo {
 pub struct QuestionPageInfo {
     pub batches: Vec<QuestionBatchInfo>,
     pub next_cursor: String,
+    /// Stamp of the complete inventory this page was derived from. Present on
+    /// the new contract; a missing stamp never establishes a current view.
+    pub stamp: Option<QuestionStamp>,
+    /// True only on the final page of the same stamped inventory.
+    pub complete: bool,
+    /// Encoded wire size of this page (including its stamp, cursor and batches
+    /// but excluding the outer HostResult envelope). Core charges the complete
+    /// staged collection against the existing logical-envelope budget.
+    pub encoded_bytes: usize,
+}
+
+/// Which facets one session observation should deliver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationInterests {
+    pub conversation: bool,
+    pub questions: bool,
+}
+
+impl ObservationInterests {
+    pub fn conversation() -> Self {
+        Self {
+            conversation: true,
+            questions: false,
+        }
+    }
+
+    pub fn questions() -> Self {
+        Self {
+            conversation: false,
+            questions: true,
+        }
+    }
+
+    pub fn both() -> Self {
+        Self {
+            conversation: true,
+            questions: true,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.conversation && !self.questions
+    }
+}
+
+impl From<ObservationInterests> for whalerein_proto::ObservationInterests {
+    fn from(value: ObservationInterests) -> Self {
+        Self {
+            conversation: value.conversation,
+            questions: value.questions,
+        }
+    }
+}
+
+/// Source observation epoch plus monotonic normalized-inventory revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionStamp {
+    pub observation_epoch: String,
+    pub revision: u64,
+}
+
+impl From<whalerein_proto::QuestionStamp> for QuestionStamp {
+    fn from(value: whalerein_proto::QuestionStamp) -> Self {
+        Self {
+            observation_epoch: value.observation_epoch,
+            revision: value.revision,
+        }
+    }
+}
+
+impl From<QuestionStamp> for whalerein_proto::QuestionStamp {
+    fn from(value: QuestionStamp) -> Self {
+        Self {
+            observation_epoch: value.observation_epoch,
+            revision: value.revision,
+        }
+    }
+}
+
+/// Readiness of the question facet. Only `Current` can establish an empty
+/// pending collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionFreshness {
+    Loading,
+    Current,
+    Stale,
+    Unavailable,
+    Unsupported,
+}
+
+/// Core-owned question facet state delivered by one observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionView {
+    pub freshness: QuestionFreshness,
+    pub stamp: Option<QuestionStamp>,
+    pub batches: Vec<QuestionBatchInfo>,
+    /// Stable failure code, never question content.
+    pub error: Option<String>,
+}
+
+impl QuestionView {
+    pub fn loading() -> Self {
+        Self {
+            freshness: QuestionFreshness::Loading,
+            stamp: None,
+            batches: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub fn current(stamp: QuestionStamp, batches: Vec<QuestionBatchInfo>) -> Self {
+        Self {
+            freshness: QuestionFreshness::Current,
+            stamp: Some(stamp),
+            batches,
+            error: None,
+        }
+    }
+
+    pub fn stale(
+        stamp: Option<QuestionStamp>,
+        batches: Vec<QuestionBatchInfo>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            freshness: QuestionFreshness::Stale,
+            stamp,
+            batches,
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn unavailable(
+        stamp: Option<QuestionStamp>,
+        batches: Vec<QuestionBatchInfo>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            freshness: QuestionFreshness::Unavailable,
+            stamp,
+            batches,
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn unsupported(error: impl Into<String>) -> Self {
+        Self {
+            freshness: QuestionFreshness::Unsupported,
+            stamp: None,
+            batches: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// One producer-scoped observation event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionEvent {
+    pub session: crate::session::SessionKey,
+    pub observation_id: String,
+    pub generation: u64,
+    pub payload: SessionEventPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionEventPayload {
+    Conversation(crate::conversation::ViewUpdate),
+    Questions(QuestionView),
 }
 
 impl From<whalerein_proto::QuestionBatch> for QuestionBatchInfo {
@@ -1112,5 +1281,47 @@ impl QuestionBatchInfo {
     /// so a newer Host cannot be silently treated as answerable.
     pub fn phase_value(&self) -> Option<QuestionPhase> {
         QuestionPhase::parse(&self.phase)
+    }
+}
+
+/// Shared cancellation flag for one observation or command task.
+///
+/// The flag is cloneable and visible to every task the caller started; the
+/// internal notification wakes an idle observation so cancellation does not
+/// wait for the next refresh tick.
+#[derive(Debug, Clone, Default)]
+pub struct Cancellation(std::sync::Arc<CancellationState>);
+
+#[derive(Debug, Default)]
+struct CancellationState {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Cancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.0.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 }

@@ -358,7 +358,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return errors.Join(revocationErr, externalService.HandleHostReady(ctx, hostID))
 	})
 
-	api, err := httpapi.New(httpapi.Dependencies{
+	dependencies := httpapi.Dependencies{
 		Auth:          authService,
 		Pairing:       pairingService,
 		Requests:      requestService,
@@ -368,8 +368,14 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Logger:        logger,
 		InternalToken: cfg.Internal.CallbackToken,
 		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
-		External:      externalService,
-	})
+	}
+	// Assign through the interface only when external mode is configured. A
+	// typed nil *external.Service would make the interface non-nil and turn the
+	// documented 501 into a nil-pointer panic.
+	if externalService != nil {
+		dependencies.External = externalService
+	}
+	api, err := httpapi.New(dependencies)
 	if err != nil {
 		return err
 	}

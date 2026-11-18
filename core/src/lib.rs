@@ -12,6 +12,7 @@ mod commands;
 mod configuration;
 mod diagnostics;
 mod drafts;
+mod observation;
 mod pairing;
 #[cfg(test)]
 mod profiles;

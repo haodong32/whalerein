@@ -32,6 +32,17 @@ protocol SessionService: AnyObject {
     func send(hostId: String, sessionId: String, text: String, delivery: DeliveryChoice) async throws -> CommandReceipt
     func stop(hostId: String, sessionId: String) async throws -> CommandReceipt
 
+    // Questions (Core-owned observation state; reads never acquire a claim)
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt
+    func cancelQuestionAnswer(hostId: String, sessionId: String, commandId: String) async throws -> Bool
+
     // Approvals
     func approvals(hostId: String, sessionId: String) async throws -> [Approval]
     func resolveApproval(

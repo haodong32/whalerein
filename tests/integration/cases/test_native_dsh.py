@@ -802,7 +802,11 @@ def test_native_question_continued_remote_without_projection_override(scenario, 
     assert queued["phase"] == "QUESTION_REPLY_QUEUED" and not queued["answerable"]
     assert queued["version"] > batch["version"] and queued["digest"] != batch["digest"]
     code, result = paired_device.invoke(*args, success=False)
-    assert code == 8 and result[-1]["error"]["code"] == "conflict"
+    # A batch that is already reply_queued is an unanswerable phase; the
+    # retained CLI contract classifies that as an input error, not a stale
+    # conflict. The native arbitration still reports REPLY_QUEUED downstream.
+    assert code == 2 and result[-1]["error"]["code"] == "invalid_argument"
+    assert "not answerable" in result[-1]["error"]["message"]
     assert scenario.request("question-continued-duplicate", sessionId=session)["code"] == "REPLY_QUEUED"
     scenario.model.release.set()
     wait(lambda: paired_device.call("session", "question", "list", "--session", session)["batches"] == [], timeout=15, process=scenario.native)

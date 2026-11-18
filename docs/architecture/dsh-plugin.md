@@ -45,9 +45,21 @@ actual tail, not from the full native array.
 State refresh uses the native live head directly when available rather than
 materializing conversation content on every heartbeat.
 
-Questions stay source-owned. An open answer claims a live native handle for the
-duration of the answer; a session interrupt releases that claim and settles only
-the in-flight answer, so a later question is never permanently `conflict`.
+Questions stay source-owned. Reading, listing, observing or editing a question
+never acquires a native answer claim; only an explicit answer submission claims
+a live handle for the duration of that answer. A session interrupt releases that
+claim and settles only the in-flight answer, so a later question is never
+permanently `conflict`.
+
+The adapter owns the collection stamp: an observation epoch that changes when
+its incarnation or exact native owner object/session changes, and a revision
+that advances only when normalized inventory (ordered membership, content,
+guards, phase, answerability or unavailable metadata) changes. Unchanged reads
+and unrelated token/runtime output keep the same stamp. Broker-only questions
+participate even without a committed Message, and native question insertion,
+removal, phase/local resolution and root replacement invalidate the inventory.
+A question page certifies the complete inventory it was sampled from and is
+complete only on its final page; the stamp is not answer authority.
 Question list cursors are authenticated by device and session, persist a per-Host
 key in the Host state store, and resume from the last delivered batch identity
 rather than from a whole-snapshot fingerprint. Adding, answering or removing a
@@ -119,24 +131,33 @@ verified behavior on every environment.
 
 Access resolves a device last will or `$SYS` disconnect into a host-scoped
 `whalerein/v1/h/<host_id>/presence` event. Host subscribes only to its exact
-presence topic; on `device_offline` it clears that device's live channel and
-aborts its request/model/question scopes. The adapter's existing `finally`
-releases the native question `attachWait`; there is no separate claim registry,
-lease, token or protocol claim field. TTL remains the fallback when presence is
-absent. The broker-to-Access presence edge is unit-tested but not yet verified
+presence topic; on `device_offline` it clears that device's live channel and its
+observation scopes. Transport loss alone no longer aborts a separately live HTTP
+answer: an admitted answer keeps its exact request authority until its own
+cancellation, lease expiry or the hard request deadline. Applicable grant/device
+revocation remains stronger and fences both observation and execution. The
+adapter's existing `finally` releases the native question `attachWait`; there is
+no separate claim registry, lease, token or protocol claim field. TTL remains the
+fallback when presence is absent. The broker-to-Access presence edge is unit-tested but not yet verified
 end-to-end against Mosquitto in the integration harness.
 
 
 ## HTTP claim lease
 
 One-shot CLI commands submit and poll through the Access HTTP API; they do not
-hold a device MQTT session. Access therefore treats a non-terminal request's
-result polling as the client liveness signal: `Submit` records a claim, every
-`GET /v1/requests/{id}` renews it, and a 10s silent lease renewed by the CLI 5s heartbeat publishes a bounded
-`request_stale` event on the host's exact presence topic. Host aborts the
-matching request scope; the adapter `finally` releases the native question
-claim. MQTT will/keepalive remains for long-lived event connections only. TTL
-is still the fallback.
+hold a device MQTT session. Liveness is exact and durable on the request row:
+only the authenticated device's own `GET /v1/requests/{id}` or
+`POST /v1/requests/{id}/heartbeat` renews that request's 10-second lease, bounded
+by its original deadline, using database time. Other requests, other devices and
+observation traffic cannot renew it. A bounded sweep atomically expires an
+elapsed lease exactly once, records retryable cancellation metadata on the same
+row, stops forwarding a closed request, and publishes a bounded exact-scope
+`request_stale` notice on the host's presence topic. Publication alone is not
+proof of native release; pending notices replay after restart or broker failure.
+Host validates the exact host/device/request/command/digest/deadline binding,
+fences a not-yet-admitted request through its command journal, and cancels only
+that execution. MQTT will/keepalive remains for long-lived event connections
+only, and the hard request deadline remains the final fallback.
 
 ## Profile-owned connection configuration
 

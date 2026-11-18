@@ -27,7 +27,8 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 
 | Module | Responsibility |
 | --- | --- |
-| `api` | Pairing, commands and typed watch orchestration; one overall deadline. |
+| `api` | Pairing, commands and the typed session-observation interface; one overall deadline. |
+| `observation` | One private observation owner: profile lease, transport pump, independent Conversation and Questions reconciliation. |
 | `runtime` | Channels, connection state and reconnect policy. |
 | `security`, `pairing` | Persistent device identity, Noise and authenticated payloads. |
 | `commands` | Idempotent submission/result recovery and command projection writes. |
@@ -40,8 +41,9 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
 
 `api/core.rs` owns the client facade. Its unit tests live in `api/core/`,
-while watch orchestration and its focused tests remain in `api/watch.rs` and
-`api/tail_tests.rs`. Facade tests are grouped by cache, command recovery, pairing,
+while `observation/` owns session observation and `api/watch.rs` keeps only the
+shared key/history helpers and the thin CLI-facing adapter used by existing
+callers. Observation tests live with the module and in `api/tail_tests.rs`. Facade tests are grouped by cache, command recovery, pairing,
 diagnostics and approval/revocation behavior, with shared setup in `test_support.rs`.
 
 ### Client instance
@@ -125,6 +127,16 @@ unknown or unpinned Host is `not_found`, never a reason to pair again. That Host
 argument describes the listing; it is not an ambient scope that changes other
 operations, which take the key resolved for them.
 
+One `observe_session` call selects Conversation, Questions or both on the same
+device transport owner and delivers producer-scoped `SessionEvent`s. Conversation
+covers committed history, live Attempts, runtime and Approvals. Questions is an
+independent facet: a questions-only observation does not read history, require a
+history head, or fail Conversation when its read is unsupported. A question
+descriptor carries a source observation epoch and monotonic revision; Core reads
+authoritative pages only when that stamp changes and installs a collection only
+when every page certifies the same complete stamp. Stale, Unavailable,
+Unsupported, Loading and Current-empty remain distinct, and observing or listing
+never acquires a native answer claim.
 Watching subscribes MQTT before registering a source Watch and synchronizing its
 fixed history cut. A bounded background pump continues processing receipts during
 HTTP history reads. Channel/watch replacement rejects old updates. RefreshWatch
@@ -138,8 +150,10 @@ A reconnect or a `BatchOutcome::Gap` recovers the missed committed messages and
 delivers each unseen message identity exactly once, deduplicated against what
 this viewer already printed. The same dedupe prevents a replayed batch or a
 snapshot that overlaps live output from printing a message twice.
-One instance owns one active watch. The watch holds an OS-released lease.
-A competing watch fails with `conflict` while send and wait remain available.
+One client instance owns one active observation. The observation holds an
+OS-released lease. A competing watch fails with `conflict` while send and wait
+remain available. Closing or replacing an observation stops its recovery,
+staging and scoped delivery while a separate answer command can continue.
 
 Interrupt follows an accepted stop to its terminal receipt, as send does. An
 accepted stop without terminal confirmation is reported as unknown, and a

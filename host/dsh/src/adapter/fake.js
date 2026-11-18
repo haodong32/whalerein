@@ -4,7 +4,7 @@
 
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { approvalDigest, bytesEqual, randomId } from 'whalerein-host/security/digest.js'
-import { QuestionProjection, validateQuestionAnswers } from './questions.js'
+import { QuestionProjection, QuestionStampTracker, questionInventoryFingerprint, validateQuestionAnswers } from './questions.js'
 import {
   APPROVAL_REASON_MAX,
   DshAdapter,
@@ -26,6 +26,8 @@ export class FakeDshAdapter extends DshAdapter {
   #firstMessage = true
   #defaultModel = { provider: 'fixture-provider', model: 'fixture-model' }
   #questionProjection = new QuestionProjection()
+  #questionStamps = new QuestionStampTracker()
+  #questionOwners = new Map()
   #questions = new Map()
   #heldQuestions = new Set()
   #waitingQuestions = new Set()
@@ -79,6 +81,8 @@ export class FakeDshAdapter extends DshAdapter {
     await super.close()
     this.opened = false
     this.#eventSubscribers.clear()
+    this.#questionStamps.reset()
+    this.#questionOwners.clear()
   }
 
   describe() {
@@ -263,31 +267,56 @@ export class FakeDshAdapter extends DshAdapter {
     return this.#sessions.has(sessionId)
   }
 
+  #changed(sessionId) { this.notifyQuestionsChanged(sessionId) }
+
+  // Deterministic incarnation/owner hooks for tests. A replacement changes the
+  // stamp epoch without pretending the inventory content changed.
+  replaceFixtureQuestionOwner(sessionId) {
+    this.#session(sessionId)
+    this.#questionOwners.set(sessionId, {})
+  }
+
+  resetFixtureQuestionIncarnation() {
+    this.#questionStamps.reset()
+    this.#questionOwners.clear()
+  }
+
+  #questionOwner(sessionId) {
+    let owner = this.#questionOwners.get(sessionId)
+    if (!owner) { owner = {}; this.#questionOwners.set(sessionId, owner) }
+    return owner
+  }
+
   setFixtureQuestion(sessionId, nativeQuestion) {
     this.#session(sessionId)
     if (!this.behavior.questions) throw new AdapterError('unsupported_capability')
     this.#questions.set(sessionId, [nativeQuestion])
+    this.#changed(sessionId)
   }
 
   setFixtureQuestions(sessionId, nativeQuestions) {
     this.#session(sessionId)
     if (!this.behavior.questions || !Array.isArray(nativeQuestions)) throw new AdapterError('unsupported_capability')
     this.#questions.set(sessionId, nativeQuestions)
+    this.#changed(sessionId)
   }
 
   appendFixtureQuestion(sessionId, nativeQuestion) {
     this.#session(sessionId)
     if (!this.behavior.questions || !nativeQuestion) throw new AdapterError('unsupported_capability')
     this.#questions.set(sessionId, [...(this.#questions.get(sessionId) ?? []), nativeQuestion])
+    this.#changed(sessionId)
   }
 
   removeFixtureQuestion(sessionId, callId) {
     const remaining = (this.#questions.get(sessionId) ?? []).filter(question => question.callId !== callId)
     if (remaining.length) this.#questions.set(sessionId, remaining)
     else this.#questions.delete(sessionId)
+    this.#changed(sessionId)
   }
 
   holdFixtureQuestion(sessionId) { this.#heldQuestions.add(sessionId) }
+  releaseFixtureQuestionHold(sessionId) { this.#heldQuestions.delete(sessionId) }
   fixtureQuestionWaiting(sessionId) { return this.#waitingQuestions.has(sessionId) }
 
   async listQuestionPage(sessionId, query = {}) {
@@ -296,7 +325,15 @@ export class FakeDshAdapter extends DshAdapter {
     if (query.cursor) throw new AdapterError('invalid_argument')
     const native = this.#questions.get(sessionId)
     const batches = this.#questionProjection.project(sessionId, { active: native ?? [] })
-    return { batches: batches.map(batch => ({ ...batch, answerable: batch.phase === 'QUESTION_CONTINUED' || (batch.phase === 'QUESTION_OPEN' && this.behavior.questionsOpen) })), next_cursor: '' }
+      .map(batch => ({ ...batch, answerable: batch.phase === 'QUESTION_CONTINUED' || (batch.phase === 'QUESTION_OPEN' && this.behavior.questionsOpen) }))
+    const stamp = this.#questionStamps.sample(sessionId, this.#questionOwner(sessionId), questionInventoryFingerprint(batches))
+    return { batches, next_cursor: '', stamp }
+  }
+
+  async readQuestionStamp(sessionId, options = {}) {
+    const page = await this.listQuestionPage(sessionId, { signal: options?.signal })
+    if (options?.signal?.aborted) throw new AdapterError('unavailable')
+    return { availability: 'available', stamp: page.stamp }
   }
 
   async getQuestion(sessionId, batchId) {
@@ -358,6 +395,7 @@ export class FakeDshAdapter extends DshAdapter {
     const remaining = (this.#questions.get(sessionId) ?? []).filter(question => question.callId !== callId)
     if (remaining.length) this.#questions.set(sessionId, remaining)
     else this.#questions.delete(sessionId)
+    this.#changed(sessionId)
   }
 
   #session(sessionId) {
@@ -573,6 +611,7 @@ export class FakeDshAdapter extends DshAdapter {
       // Interrupting an idle session is accepted but emits no state or attempt
       // event: there is no running attempt to end (STREAM-05).
       if (session.running !== true) return { accepted: true }
+      this.notifyQuestionsChanged(sessionId)
       session.running = false
       session.updatedAt = this.now()
       this.emit(sessionId, { type: 'session/interrupted', kind: 'session_state', data: { interrupted: true } })

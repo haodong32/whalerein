@@ -246,7 +246,10 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, err)
 		return
 	}
-	s.deps.Requests.Touch(identity.DeviceID, row.RequestID, row.Status)
+	// Renewal is best-effort for a read: the recorded outcome stays
+	// recoverable even when liveness bookkeeping fails, and a GET never
+	// reopens an expired lease.
+	_, _ = s.deps.Requests.Touch(r.Context(), identity.DeviceID, requestID)
 	s.writeProto(w, http.StatusOK, &whalereinv1.RequestState{
 		RequestId:       row.RequestID,
 		HostId:          row.HostID,
@@ -274,12 +277,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params 
 		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
-	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID)
-	if err != nil {
+	if _, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	s.deps.Requests.Touch(identity.DeviceID, row.RequestID, row.Status)
+	if _, err := s.deps.Requests.Touch(r.Context(), identity.DeviceID, requestID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

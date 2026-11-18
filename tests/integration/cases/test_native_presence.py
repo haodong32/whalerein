@@ -20,7 +20,7 @@ def _answer_process(scenario, paired_device, session, batch, answer):
 
 
 def test_native_question_simulated_presence_releases_claim(scenario, paired_device):
-    """A Host device_offline event aborts the exact request scope and releases the native claim once."""
+    """Observation loss does not cancel a live answer; its exact request lease expiry releases the claim once."""
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
@@ -38,8 +38,13 @@ def test_native_question_simulated_presence_releases_claim(scenario, paired_devi
         except (subprocess.TimeoutExpired, OSError):
             pass
         assert scenario.request("simulate-device-offline", deviceId=paired_device.identity["device_id"])["simulated"]
-        wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=5, process=scenario.native)
-        assert time.monotonic() - started < 8
+        # Observation transport loss is not HTTP execution death. The killed
+        # client's exact request lease must expire before its native claim is
+        # released; the blanket device_offline path must not release it.
+        time.sleep(3)
+        assert scenario.request("question-native-claim-status")["held"] == 1
+        wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=20, process=scenario.native)
+        assert time.monotonic() - started < 25
         assert scenario.request("question-restore-native-claim")["restored"]
         current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert current["batch_id"] == batch["batch_id"]

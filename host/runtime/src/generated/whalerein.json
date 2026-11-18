@@ -96,6 +96,14 @@
                 "APPROVAL_DECISION_REJECT": 2
               }
             },
+            "QuestionAvailability": {
+              "values": {
+                "QUESTION_AVAILABILITY_UNSPECIFIED": 0,
+                "QUESTION_AVAILABILITY_UNSUPPORTED": 1,
+                "QUESTION_AVAILABILITY_UNAVAILABLE": 2,
+                "QUESTION_AVAILABILITY_AVAILABLE": 3
+              }
+            },
             "CapabilitySet": {
               "fields": {
                 "capabilities": {
@@ -1609,6 +1617,34 @@
                 }
               }
             },
+            "QuestionStamp": {
+              "fields": {
+                "observation_epoch": {
+                  "type": "string",
+                  "id": 1
+                },
+                "revision": {
+                  "type": "uint64",
+                  "id": 2
+                }
+              }
+            },
+            "QuestionDescriptor": {
+              "fields": {
+                "availability": {
+                  "type": "QuestionAvailability",
+                  "id": 1
+                },
+                "unavailable_code": {
+                  "type": "string",
+                  "id": 2
+                },
+                "stamp": {
+                  "type": "QuestionStamp",
+                  "id": 3
+                }
+              }
+            },
             "QuestionBatch": {
               "fields": {
                 "session_id": {
@@ -1684,6 +1720,14 @@
                 "next_cursor": {
                   "type": "string",
                   "id": 2
+                },
+                "stamp": {
+                  "type": "QuestionStamp",
+                  "id": 3
+                },
+                "complete": {
+                  "type": "bool",
+                  "id": 4
                 }
               }
             },
@@ -2551,6 +2595,10 @@
                   "rule": "repeated",
                   "type": "Approval",
                   "id": 6
+                },
+                "questions": {
+                  "type": "QuestionDescriptor",
+                  "id": 7
                 }
               }
             },
@@ -2569,7 +2617,8 @@
                     "history",
                     "live",
                     "state",
-                    "reset"
+                    "reset",
+                    "questions"
                   ]
                 }
               },
@@ -2597,6 +2646,22 @@
                 "reset": {
                   "type": "HistoryReset",
                   "id": 6
+                },
+                "questions": {
+                  "type": "QuestionDescriptor",
+                  "id": 7
+                }
+              }
+            },
+            "ObservationInterests": {
+              "fields": {
+                "conversation": {
+                  "type": "bool",
+                  "id": 1
+                },
+                "questions": {
+                  "type": "bool",
+                  "id": 2
                 }
               }
             },
@@ -2605,6 +2670,10 @@
                 "session_id": {
                   "type": "string",
                   "id": 1
+                },
+                "interests": {
+                  "type": "ObservationInterests",
+                  "id": 2
                 }
               }
             },
@@ -2621,6 +2690,10 @@
                 "lease_ms": {
                   "type": "uint32",
                   "id": 3
+                },
+                "questions": {
+                  "type": "QuestionDescriptor",
+                  "id": 4
                 }
               }
             },

@@ -2,7 +2,9 @@
 //! and diagnostics. CLI calls this type only.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -22,7 +24,7 @@ use super::types::{
     QuestionAnswer, QuestionBatchInfo, QuestionPageInfo, QuestionPhase, RevocationOutcome,
     RevocationRetention, SessionList, SessionModel, SessionSummary,
 };
-use crate::access::{AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
+use crate::access::{AccessClient, MqttSettings};
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
@@ -165,13 +167,13 @@ fn wire_question_phase(phase: QuestionPhase) -> i32 {
 #[derive(Clone)]
 pub struct Core {
     options: CoreOptions,
-    config: Arc<RwLock<Option<PersistedConfig>>>,
-    runtime: Arc<Runtime>,
+    pub(crate) config: Arc<RwLock<Option<PersistedConfig>>>,
+    pub(crate) runtime: Arc<Runtime>,
     journal: Arc<diagnostics::journal::Journal>,
     identity: Arc<Mutex<Option<Arc<crate::security::device::DeviceIdentity>>>>,
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
-    watch_active: Arc<AtomicBool>,
+    pub(crate) watch_active: Arc<AtomicBool>,
     instance: Option<Arc<Instance>>,
     #[cfg(test)]
     profile: Option<crate::profiles::ProfileContext>,
@@ -516,6 +518,11 @@ impl Core {
         self.journal.save_failure(&self.options.data_dir, code)
     }
 
+    /// Bounded operation history shared with the private observation owner.
+    pub(crate) fn record_journal(&self, layer: &str, action: &str, outcome: &str, code: &str) {
+        self.journal.record(layer, action, outcome, code);
+    }
+
     /// Remove the previous failure record without contacting Access or DSH.
     pub fn clear_diagnostics(&self) -> CoreResult<()> {
         match std::fs::remove_file(
@@ -578,11 +585,15 @@ impl Core {
         self.runtime.metrics()
     }
 
+    pub(crate) fn secret_store(&self) -> &Arc<dyn SecretStore> {
+        &self.options.secrets
+    }
+
     fn current_config(&self) -> Option<PersistedConfig> {
         self.config.read().expect("config lock").clone()
     }
 
-    fn require_config(&self) -> CoreResult<PersistedConfig> {
+    pub(crate) fn require_config(&self) -> CoreResult<PersistedConfig> {
         self.current_config().ok_or(CoreError::NotPaired)
     }
 
@@ -898,7 +909,7 @@ impl Core {
         }
     }
 
-    fn sync_service(&self) -> CoreResult<SyncService> {
+    pub(crate) fn sync_service(&self) -> CoreResult<SyncService> {
         Ok(SyncService::new(self.cache()?))
     }
 
@@ -924,7 +935,7 @@ impl Core {
     /// Scope authorization is checked at the operation boundary so a key that
     /// was valid at resolution time cannot be used after revocation or after
     /// this profile stopped authorizing that Host.
-    fn authorized_session(&self, key: &SessionKey) -> CoreResult<()> {
+    pub(crate) fn authorized_session(&self, key: &SessionKey) -> CoreResult<()> {
         if key.session_id.is_empty() {
             return Err(CoreError::InvalidInput("session identity missing".into()));
         }
@@ -966,7 +977,7 @@ impl Core {
         })
     }
 
-    async fn ensure_channel(
+    pub(crate) async fn ensure_channel(
         &self,
         host_id: &str,
         force_new: bool,
@@ -1054,7 +1065,11 @@ impl Core {
         self.settle(opened).await
     }
 
-    async fn query(&self, host_id: &str, payload: RequestPayload) -> CoreResult<ResponsePayload> {
+    pub(crate) async fn query(
+        &self,
+        host_id: &str,
+        payload: RequestPayload,
+    ) -> CoreResult<ResponsePayload> {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
@@ -2368,26 +2383,17 @@ impl Core {
             .await
             .map_err(|error| self.uncertain_recovery_error(error))?;
         let commands = self.command_service()?;
-        let access = self.access_client()?;
-        let heartbeat_id = handle.request_id.clone();
-        let terminal = commands.await_command_result(
-            host_id,
-            &config.device_id,
-            &channel,
-            &handle.request_id,
-            &handle.command_id,
-        );
-        tokio::pin!(terminal);
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let result = loop {
-            tokio::select! {
-                result = &mut terminal => break result,
-                _ = heartbeat.tick() => {
-                    let _ = access.heartbeat_request(&heartbeat_id).await;
-                }
-            }
-        };
+        // Renewal of the original request R lives in commands, together with
+        // the result polling it protects.
+        let result = commands
+            .await_command_result(
+                host_id,
+                &config.device_id,
+                &channel,
+                &handle.request_id,
+                &handle.command_id,
+            )
+            .await;
         let result = match result {
             Err(error)
                 if matches!(error, CoreError::ChannelMismatch)
@@ -2535,15 +2541,38 @@ impl Core {
                         "question response scope mismatch".into(),
                     ));
                 }
+                let encoded_bytes = prost::Message::encoded_len(&page);
                 Ok(QuestionPageInfo {
                     batches: page.batches.into_iter().map(Into::into).collect(),
                     next_cursor: page.next_cursor,
+                    stamp: page.stamp.map(Into::into),
+                    complete: page.complete,
+                    encoded_bytes,
                 })
             }
             _ => Err(CoreError::Internal(
                 "unexpected question list response".into(),
             )),
         }
+    }
+
+    /// Read one authoritative question page. One-shot callers share this
+    /// reader with automatic observation; neither acquires a native claim.
+    pub async fn read_questions(
+        &self,
+        key: &SessionKey,
+        cursor: &str,
+    ) -> CoreResult<QuestionPageInfo> {
+        self.list_questions(key, cursor).await
+    }
+
+    /// Read one authoritative question batch through the shared reader.
+    pub async fn read_question(
+        &self,
+        key: &SessionKey,
+        batch_id: &str,
+    ) -> CoreResult<QuestionBatchInfo> {
+        self.get_question(key, batch_id).await
     }
 
     pub async fn get_question(
@@ -3555,11 +3584,11 @@ impl Core {
     pub async fn sync_session(&self, key: &SessionKey) -> CoreResult<u64> {
         self.authorized_session(key)?;
         let mut conversation = crate::conversation::Conversation::default();
-        self.sync_conversation(key, &mut conversation, true, true, &mut |_| true)
+        self.sync_conversation(key, &mut conversation, true, true, &mut watch::AcceptAll)
             .await
     }
 
-    fn mqtt_settings(&self, config: &PersistedConfig) -> CoreResult<MqttSettings> {
+    pub(crate) fn mqtt_settings(&self, config: &PersistedConfig) -> CoreResult<MqttSettings> {
         let override_url = self.mqtt_override().or_else(|| config.mqtt_url.clone());
         let settings = match override_url {
             Some(url) => MqttSettings::parse(&url)?,
@@ -3798,7 +3827,7 @@ mod approval_revocation_tests;
 mod tail_tests;
 
 #[path = "watch.rs"]
-mod watch;
+pub(crate) mod watch;
 
 mod operation;
 pub use operation::{AccountState, ClientStatus, DeviceAccess, MessageReply, SendOperation};

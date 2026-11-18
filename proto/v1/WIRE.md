@@ -18,6 +18,19 @@ golden artifacts and `tests/integration/drivers/protobuf/proto_compat.py`
 fails a build that removes a field, reuses a tag number, changes a type or
 JSON name, changes oneof membership, or reuses an enum number.
 
+This revision intentionally replaces the observation contract inside version 1:
+`WatchSession.interests` is required, `WatchReady.questions`,
+`SessionState.questions`, `SessionUpdate.questions` and the `QuestionDescriptor`
+and `QuestionStamp` payloads are part of the only supported contract. There is
+no old-contract reader, compatibility fallback or hidden second version. A
+matching Access/Host/Core/CLI/mobile set is deployed together; the unchanged
+numeric version is not evidence that arbitrary older version-1 builds remain
+compatible. Missing required observation fields fail explicitly instead of
+becoming an empty question collection. Keys, pins, grants, Source sessions,
+pager keys and command recovery identities are retained across the cut; an old
+client must be stopped rather than handed uninterpreted queued or signed
+material.
+
 Readers follow one policy:
 
 1. **Unknown field names and unknown binary tags are ignored.** Adding a field
@@ -511,8 +524,31 @@ tokens. There is no normal raw-native JSON output mode.
 ## Typed conversations, watches and synchronization
 
 SessionKey is the Host/session pair. EventPayload contains only SessionUpdate:
-a watch-scoped HistoryBatch, LiveFrame, SessionState or HistoryReset. There are
-no native type strings, data_json payloads or public integer event sequences.
+a watch-scoped HistoryBatch, LiveFrame, SessionState, HistoryReset or an
+independent QuestionDescriptor. There are no native type strings, data_json
+payloads or public integer event sequences.
+
+`WatchSession.interests` is required and selects conversation, questions or
+both. An absent or empty selection is `invalid_argument`; there is no implicit
+conversation default. A questions-only observation may omit `SessionState` and
+must not read history. A conversation observation keeps its existing history,
+live Attempt, runtime and Approval behavior. Questions readiness is independent:
+a failed or unsupported Questions facet never ends a supported conversation.
+
+`QuestionDescriptor` is `unsupported`, `unavailable` with a stable code, or
+`available` with a `QuestionStamp`. An available descriptor with an empty epoch
+or revision zero is invalid. A descriptor is not an answer guard and never
+authorizes a native submission. Unchanged normalized inventory keeps the same
+stamp; token output, runtime updates and repeated reads do not advance it.
+
+Question pages carry the stamp of the complete inventory they were derived from
+and certify completion only on the final page of that same inventory. A client
+stage must reject a page with another stamp, a different epoch, a duplicate, or
+a non-progressing continuation and restart from the first page against the
+current descriptor. Only a complete same-stamp collection establishes Current,
+including the genuinely empty collection. Mixed or partial pages are never
+presented as complete. The authenticated mutable list cursor remains a
+continuation cursor for explicit listing, not a future-event cursor.
 
 HistoryRead returns a fixed-cut HistoryPage. Cursor tokens belong to their Source,
 session and view; clients compare continuity, not numeric/lexical order. Batches

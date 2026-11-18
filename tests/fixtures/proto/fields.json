@@ -392,6 +392,24 @@
         "number": 4
       }
     ],
+    "QuestionAvailability": [
+      {
+        "name": "QUESTION_AVAILABILITY_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "QUESTION_AVAILABILITY_UNSUPPORTED",
+        "number": 1
+      },
+      {
+        "name": "QUESTION_AVAILABILITY_UNAVAILABLE",
+        "number": 2
+      },
+      {
+        "name": "QUESTION_AVAILABILITY_AVAILABLE",
+        "number": 3
+      }
+    ],
     "QuestionPhase": [
       {
         "name": "QUESTION_PHASE_UNSPECIFIED",
@@ -2459,6 +2477,24 @@
         }
       ]
     },
+    "ObservationInterests": {
+      "fields": [
+        {
+          "json_name": "conversation",
+          "name": "conversation",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
     "OperationStatus": {
       "fields": [
         {
@@ -3177,6 +3213,33 @@
         }
       ]
     },
+    "QuestionDescriptor": {
+      "fields": [
+        {
+          "json_name": "availability",
+          "name": "availability",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.QuestionAvailability"
+        },
+        {
+          "json_name": "unavailableCode",
+          "name": "unavailable_code",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "stamp",
+          "name": "stamp",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionStamp"
+        }
+      ]
+    },
     "QuestionDisplay": {
       "fields": [
         {
@@ -3367,6 +3430,21 @@
           "number": 2,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "stamp",
+          "name": "stamp",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionStamp"
+        },
+        {
+          "json_name": "complete",
+          "name": "complete",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_BOOL"
         }
       ]
     },
@@ -3386,6 +3464,24 @@
           "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.QuestionPhase"
+        }
+      ]
+    },
+    "QuestionStamp": {
+      "fields": [
+        {
+          "json_name": "observationEpoch",
+          "name": "observation_epoch",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "revision",
+          "name": "revision",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT64"
         }
       ]
     },
@@ -4360,6 +4456,14 @@
           "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.Approval"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionDescriptor"
         }
       ]
     },
@@ -4511,6 +4615,15 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.HistoryReset"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 7,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionDescriptor"
         }
       ]
     },
@@ -4944,6 +5057,14 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionDescriptor"
         }
       ]
     },
@@ -4955,6 +5076,14 @@
           "number": 1,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "interests",
+          "name": "interests",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ObservationInterests"
         }
       ]
     },

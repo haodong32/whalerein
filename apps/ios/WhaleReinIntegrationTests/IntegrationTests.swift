@@ -169,8 +169,13 @@ final class LiveCase {
     /// Drops the current Core instance (releasing its instance lock), then
     /// creates a new one over the same data directory and Keychain namespace.
     func recreate() async throws {
-        service = nil
+        // A process restart must stop the old watch before the profile lease is
+        // released to the replacement Core, otherwise the new attachment can
+        // race the old observation and never install its baseline.
+        service.stopWatch()
         try await Task.sleep(for: .milliseconds(700))
+        service = nil
+        try await Task.sleep(for: .milliseconds(300))
         service = try makeService()
     }
 
@@ -298,6 +303,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .capabilities: return "capabilities"
         case .approvals: return "approvals"
         case .approvalChanged: return "approvalChanged"
+        case .questions: return "questions"
         case .commandStatus: return "commandStatus"
         case .error: return "error"
         case .watchEnded: return "watchEnded"
@@ -695,6 +701,12 @@ extension IntegrationTestCase {
             "watch did not report an online connection; last=\(String(describing: lastConnection(in: collector.envelopes))); events=\(eventKinds(collector.envelopes))"
         )
 
+        let warmSessions = try await live.service.cachedSessions(hostId: environment.hostId)
+        XCTAssertFalse(
+            warmSessions.isEmpty,
+            "the watch did not warm the durable session cache before the broker stopped"
+        )
+
         try await live.control.stopBroker()
         addBrokerRestoreTeardown(live)
 
@@ -702,7 +714,10 @@ extension IntegrationTestCase {
             guard let status = lastConnection(in: envelopes) else { return false }
             return status != .online
         }
-        XCTAssertTrue(degraded, "watch did not report a non-online connection while MQTT was down")
+        XCTAssertTrue(
+            degraded,
+            "watch did not report a non-online connection while MQTT was down; last=\(String(describing: lastConnection(in: collector.envelopes))); events=\(eventKinds(collector.envelopes))"
+        )
 
         // HTTPS-backed operations remain available with the broker down.
         let hosts = try await live.service.hosts()
@@ -725,10 +740,25 @@ extension IntegrationTestCase {
         let expected = try await live.expectedTranscript()
 
         let before = try await startWatching(live)
-        _ = await before.wait(timeout: 20) { transcript(from: $0).count >= expected.count }
+        let initialLoaded = await before.wait(timeout: 20) {
+            transcript(from: $0).count >= expected.count
+        }
+        XCTAssertTrue(
+            initialLoaded,
+            "first watch did not deliver seeded history; events=\(eventKinds(before.envelopes))"
+        )
         let beforeTranscript = transcript(from: before.envelopes).map(\.plainText)
         XCTAssertEqual(beforeTranscript, expected)
         before.cancel()
+
+        let cachedBeforeRestart = try await live.service.cachedTranscript(
+            hostId: environment.hostId,
+            sessionId: environment.sessionId
+        )
+        XCTAssertFalse(
+            cachedBeforeRestart.isEmpty,
+            "the first watch did not commit its baseline to the encrypted cache"
+        )
 
         try await live.recreate()
         let hosts = try await live.waitForHost()
@@ -743,7 +773,11 @@ extension IntegrationTestCase {
             replayed,
             "post-restart watch did not rebuild history; events=\(eventKinds(after.envelopes))"
         )
-        XCTAssertEqual(transcript(from: after.envelopes).map(\.plainText), expected)
+        XCTAssertEqual(
+            transcript(from: after.envelopes).map(\.plainText),
+            expected,
+            "post-restart events=\(eventKinds(after.envelopes))"
+        )
         XCTAssertEqual(
             Set(transcript(from: after.envelopes).map(\.messageId)).count,
             expected.count,
