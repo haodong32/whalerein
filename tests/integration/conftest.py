@@ -325,6 +325,8 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         from native_environment import NativeScenario
 
         value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
+        if "host_mqtt_relay" in request.fixturenames:
+            value.mqtt_port = request.getfixturevalue("host_mqtt_relay").port
     else:
         value = Scenario(tmp_path, schema)
     tls_marker = request.node.get_closest_marker("tls")

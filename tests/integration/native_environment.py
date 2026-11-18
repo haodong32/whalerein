@@ -146,6 +146,7 @@ class NativeScenario(Scenario):
         self.socket = directory / "native.sock"
         self.home = directory / "dsh-home"
         self.http_port = 3109
+        self.mqtt_port = 1883
         self.work = directory / "work"
         self.work.mkdir()
         self.overlay = directory / "native-overlay.yml"
@@ -258,7 +259,7 @@ class NativeScenario(Scenario):
                 "service": "standalone",
                 "server": "127.0.0.1",
                 "access_port": "18080",
-                "mqtt_port": "1883",
+                "mqtt_port": str(self.mqtt_port),
                 "host_id": self.host,
                 "host_token": self.env["WHALEREIN_HOST_PROVISIONING_TOKEN"],
                 "state_dir": str(self.directory / "plugin"),
