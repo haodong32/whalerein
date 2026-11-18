@@ -93,7 +93,7 @@ def test_two_native_hosts_colliding_session_ids_require_explicit_routing(scenari
         assert other.request('gx-revoke-host-grant', deviceId=paired_device.identity['device_id'])['revoked']
         wait(lambda: other.host not in {row['host_id'] for row in paired_device.hosts()}, timeout=20)
         code, values = paired_device.invoke('session', 'interrupt', shared, '--host', other.host, success=False)
-        assert code != 0 and values[-1]['error']['code'] == 'not_found'
+        assert code == 4 and values[-1]['error']['code'] == 'forbidden'
         scenario.model.plan()
         accepted = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', "--detach")
         assert accepted['receipt']['status'] == 'succeeded'
