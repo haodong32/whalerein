@@ -2,6 +2,7 @@
 
 import html
 import json
+import re
 from pathlib import Path
 from string import Template
 
@@ -13,6 +14,11 @@ def duration_label(value):
     if not isinstance(value, (int, float)):
         return "—"
     return f"{value:.1f}ms" if value < 1000 else f"{value / 1000:.2f}s"
+
+
+def verification_label(value):
+    """Only render machine labels from verification lifecycle records."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,120}", value) else "—"
 
 
 def render(data):
@@ -330,6 +336,62 @@ def render(data):
         ),
     ]
     stat_filters = {"Passed": "passed", "Failed": "failed", "Skipped / Blocked": "attention"}
+    verification = ""
+    facts = data.get("verification")
+    if isinstance(facts, dict):
+        raw_code = facts.get("exit_code")
+        code = raw_code if type(raw_code) is int else None
+        outcome, badge = {
+            0: ("Listed" if data["configuration"].get("list_only") else "Passed", "badge-success"),
+            1: ("Failed", "badge-error"),
+            2: ("Invalid request", "badge-warning"),
+            3: ("Blocked", "badge-warning"),
+            130: ("Interrupted", "badge-warning"),
+        }.get(code, ("Unknown", "badge-neutral"))
+        status_classes = {
+            "complete": "badge-success",
+            "failed": "badge-error",
+            "running": "badge-info",
+            "pending": "badge-warning",
+        }
+        rows = []
+        phases = facts.get("phases")
+        for phase in phases if isinstance(phases, list) else ():
+            if not isinstance(phase, dict):
+                continue
+            status = verification_label(phase.get("status"))
+            rows.append(
+                fill(
+                    "test-report-verification-phase.html",
+                    phase_name=esc(verification_label(phase.get("name"))),
+                    status=esc(status),
+                    badge=status_classes.get(status, "badge-neutral"),
+                    duration=duration_label(phase.get("duration_ms")),
+                )
+            )
+        cleanup = facts.get("cleanup")
+        cleanup = cleanup if isinstance(cleanup, dict) else {}
+        errors = cleanup.get("errors")
+        cleanup_errors = [
+            f"<li>{esc(verification_label(error.get('resource')))} · "
+            f"{esc(verification_label(error.get('code')))}</li>"
+            for error in (errors if isinstance(errors, list) else ())
+            if isinstance(error, dict)
+        ]
+        verification = fill(
+            "test-report-verification.html",
+            outcome=outcome,
+            badge=badge,
+            error=esc(verification_label(facts.get("error_code"))) if code else "—",
+            last_completed=esc(verification_label(facts.get("last_completed_phase"))),
+            cleanup=esc(verification_label(cleanup.get("status"))),
+            cleanup_errors=(
+                '<ul class="attention-list">' + "".join(cleanup_errors) + "</ul>"
+                if cleanup_errors
+                else ""
+            ),
+            phase_rows="".join(rows),
+        )
     return fill(
         "test-report.html",
         css=(assets / "daisyui.css").read_text(),
@@ -343,6 +405,7 @@ def render(data):
             )
         ),
         configuration=esc(json.dumps(data.get("configuration", {}), sort_keys=True)),
+        verification=verification,
         completeness=labels.get(data.get("completeness"), "Unknown"),
         attention="".join(item for _, item in sorted(attention, key=lambda pair: pair[0]))
         or "<li>No failures, skips, collection gaps or coverage errors recorded.</li>",

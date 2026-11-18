@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # Shared broker bootstrap credentials. The plugin authenticates the Access
 # identity locally against its password file; the internal token authenticates
 # the Access callback the plugin makes for external principals.
-BROKER_PASSWORD = "integration-broker-password"
-INTERNAL_TOKEN = "compose-internal-token"
+BROKER_PASSWORD = uuid.uuid4().hex
+INTERNAL_TOKEN = uuid.uuid4().hex
 
 
 def wait(predicate, timeout=60, process=None):
@@ -39,6 +39,18 @@ def wait(predicate, timeout=60, process=None):
         # command completion are observed promptly without busy-waiting.
         time.sleep(0.02)
     raise TimeoutError("Expected fixture condition was not observed")
+
+
+def owns_listener(process, port):
+    """Tie a loopback health response to the exact fixture process."""
+    proc = Path("/proc") / str(process.child.pid)
+    address = f"0100007F:{port:04X}"
+    listeners = set()
+    for line in (proc / "net/tcp").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1] == address and fields[3] == "0A":
+            listeners.add(f"socket:[{fields[9]}]")
+    return any(str(descriptor.readlink()) in listeners for descriptor in (proc / "fd").iterdir())
 
 
 class Process:
@@ -553,14 +565,21 @@ log:
         failing admission and retrying.
         """
         self.access = Process(
-            ["/usr/local/bin/whalerein-access", "--config", str(self.config)],
+            ["/workspace/.verification/bin/whalerein-access", "--config", str(self.config)],
             self.directory,
             self.env,
         )
         self.processes.append(self.access)
 
     def wait_access_ready(self):
-        wait(lambda: http("/readyz"), process=self.access)
+        binary = ROOT / ".verification/bin/whalerein-access"
+        executable = Path(f"/proc/{self.access.child.pid}/exe")
+        wait(
+            lambda: executable.samefile(binary)
+            and owns_listener(self.access, 18080)
+            and http("/readyz"),
+            process=self.access,
+        )
 
     def start_access(self):
         self.start_access_process()

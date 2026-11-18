@@ -25,11 +25,7 @@ pytest_plugins = ("integration_report",)
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--group",
-        action="append",
-        choices=["protocol", "storage", "transport", "chain", "native-dsh"],
-    )
+    parser.addoption("--partial-scope", action="store_true")
     parser.addoption("--only", help="Select a pytest case by substring")
     parser.addoption(
         "--shard",
@@ -45,7 +41,6 @@ def pytest_collection_modifyitems(config, items):
         validate_descriptions(items)
     except ValueError as error:
         raise pytest.UsageError(str(error)) from error
-    groups = config.getoption("--group") or []
     only = config.getoption("--only")
     if only is not None and not only.strip():
         raise pytest.UsageError("--only requires nonempty text")
@@ -58,25 +53,23 @@ def pytest_collection_modifyitems(config, items):
     selected = []
     deselected = []
     for item in items:
-        memberships = {marker.name for marker in item.iter_markers()}
         (
             selected
-            if (not groups or memberships.intersection(groups))
-            and (not only or only in item.nodeid)
+            if not only or only in item.nodeid
             else deselected
         ).append(item)
     if len({item.nodeid for item in items}) != len(items):
         raise pytest.UsageError("Duplicate integration case identity")
     sharded = bool(shard is not None)
+    if not selected:
+        raise pytest.UsageError("No integration cases match the selection")
     if sharded:
-        # Sharding applies after --group/--only and distributes the remaining
+        # Sharding applies after path/--only selection and distributes the remaining
         # selection; an empty shard is a legitimate result when COUNT exceeds
         # the number of selected cases.
         selected = partition(selected, index, count)
         selected_ids = {item.nodeid for item in selected}
         deselected = [item for item in items if item.nodeid not in selected_ids]
-    if not selected and not sharded:
-        raise pytest.UsageError("No integration cases match the selection")
     config.hook.pytest_deselected(items=deselected)
     items[:] = selected
 
@@ -85,7 +78,7 @@ def pytest_collection_modifyitems(config, items):
 def container_only():
     if os.environ.get("WHALEREIN_INTEGRATION_CONTAINER") != "1":
         pytest.fail(
-            "Run integration cases with ./repo test --suite integration", pytrace=False
+            "Run integration cases with ./repo test integration", pytrace=False
         )
 
 
@@ -207,7 +200,7 @@ class Broker:
                 "log_dest stdout",
                 "log_type error",
                 "connection_messages false",
-                "plugin /usr/local/lib/mosquitto/whalerein.so",
+                "plugin /workspace/.verification/lib/whalerein.so",
                 "plugin_opt_access_username access",
                 f"plugin_opt_access_password_file {password_file}",
                 "plugin_opt_access_auth_url http://127.0.0.1:18081/internal/broker/connect",

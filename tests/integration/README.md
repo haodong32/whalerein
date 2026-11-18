@@ -1,44 +1,40 @@
 # Linux integration tests
 
-All cases, pytest, product processes, PostgreSQL 18, and Mosquitto 2.1.2 with
-the WhaleRein plugin run in one Docker container. The host Python/uv runner uses Docker buildx to build and start
-the container, collect its export and verify cleanup. The container receives no
-Docker socket and publishes no host ports; product builds do not use host native
-compilers or development services. See the [testing policy](../../docs/testing.md).
+The repository runner builds selected product artifacts with pinned Linux tools
+and runs each pytest shard in a disposable Docker container. Product processes and
+fixtures share its loopback network. The container receives no Docker socket
+and publishes no host ports. Use a native Linux host with uv and Docker BuildKit.
+See the [testing policy](../../docs/testing.md).
 
 ## Run
 
-The full container suite is slow and runs only when explicitly selected.
-Use focused unit tests during iteration, then select the integration group that
-exercises the changed behavior. Follow the [staged validation policy](../../docs/testing.md#choose-checks-for-a-change)
-when expanding scope or repeating a run; directory count is not a test selector.
+Select the smallest target that exercises the changed behavior. Use
+[staged validation](../../docs/testing.md#choose-checks-for-a-change) when
+expanding scope or repeating a run.
 
 ```bash
-./repo test --suite integration
-./repo test --suite integration --integration-timeout 10800
-./repo test --suite integration --group protocol
-./repo test --suite integration --group storage
-./repo test --suite integration --group storage --parallel 2
-./repo test --suite integration --group native-dsh
-./repo test --suite integration --group chain --parallel 3
-./repo test --suite integration --group native-dsh --only test_native_browser
-./repo test --suite integration --only test_send
-./repo test --suite integration --list
+./repo test protocol-vectors --only observation_artifact
+./repo test protocol-http
+./repo test storage --parallel 2
+./repo test chain --only test_send
+./repo test native-dsh --only test_native_browser
+./repo test protocol
+./repo test protocol-vectors --list
+./repo test integration --integration-timeout 10800
 ```
 
-The launcher always checks the image build; unchanged layers are cached. Native
-executables and language dependencies are prepared during the image build.
-The host Python runner requires uv and Docker buildx. It owns image preparation,
-container cancellation and verified cleanup. Pytest discovery, selection and all
-fixture code execute inside the container. Protocol-only selection starts no PostgreSQL or broker.
+The [Linux target catalog](../../tools/repo/src/repo/integration_targets.py)
+assigns every test module to one leaf and defines the product artifacts it needs.
+Pytest receives only the selected collection paths. `protocol` covers both vector
+and live HTTP cases. `protocol-vectors` does not start product services.
+`integration` covers every leaf. A case filter applies within a specific leaf
+after collection. An unmatched filter stops before product services start.
 
-Pytest discovers `cases/test_*.py`. Group markers are filters, not another catalog.
-Native PostgreSQL case IDs are generated from compiled Go test binaries during
-image construction, excluding tests already selected by the unit build.
-The Rust MQTT receiver is an example executable used by its Go integration driver,
-not an additional unit case. Go integration assertions use the `integration`
-build tag and are invoked individually by pytest. Node's large-message regression
-also lives here rather than in the package unit glob.
+The storage target compiles tagged Go test binaries and publishes the native
+case inventories and authored descriptions before importing its Python module.
+Tests already present in the unit binaries are excluded from the inventory.
+The Rust MQTT receiver is an example executable used by a Go integration case.
+Node's large-message regression is executed by the transport target.
 
 ## Isolation and fixtures
 
@@ -59,8 +55,8 @@ broker, each shard container starts and reuses its own warm broker.
 A warm broker is shared by default for local/CI speed:
 
 ```bash
-./repo test --suite integration --group chain
-WHALEREIN_INTEGRATION_SHARED_BROKER=0 ./repo test --suite integration --group chain  # per-case broker
+./repo test chain
+WHALEREIN_INTEGRATION_SHARED_BROKER=0 ./repo test chain  # per-case broker
 ```
 
 It starts one Mosquitto broker per container and reuses it across cases. MQTT
@@ -91,7 +87,7 @@ implicitly. An unavailable required facility fails setup instead of skipping.
 
 ## Native DSH and browser journeys
 
-`native-dsh` uses the same integration image and runner. It runs the actual pinned
+`native-dsh` uses the Linux runner with the native tools and browser image. It runs the actual pinned
 DSH `0.2.2-rc.1`, the real WhaleRein connector, CLI/Core and Access, with Playwright
 Chromium for settings and browser ownership checks. Backend and browser cases are
 one group; `--only` selects individual journeys. `--list` discovers them without
@@ -126,7 +122,7 @@ production TLS, external model quality and other DSH versions remain release wor
 
 ## Protocol
 
-Protocol compatibility is a group of integration cases. Existing fixed fixtures
+`protocol-vectors` covers protocol compatibility checks. Existing fixed fixtures
 remain in `tests/fixtures`; their Node/Rust drivers are in `drivers/noise` and
 `drivers/protobuf`. Each implementation/vector is a separate pytest case, using
 its stable `caseId`. Descriptor and field-contract checks are separate cases.
@@ -135,16 +131,16 @@ interoperability remain additional coverage work, not claimed existing behavior.
 
 Regenerate intentional protocol changes with `./repo proto` and the relevant
 Node driver's `--write` option, review the fixture/schema diff, and rerun the
-protocol group. Fixed private keys are public fixture data and must never be used
+`protocol` target. Fixed private keys are public fixture data and must never be used
 outside tests.
 
 ## Parallel shards
 
-`./repo test --suite integration --parallel N` accepts 1-8 (default 1). It is
-valid only with the integration suite and cannot combine with `--list`. The
-image is built once and each container runs its own export directory
+`./repo test integration --parallel N` accepts 1–8 (default 1) and cannot
+combine with `--list`. One platform image and one set of published artifacts
+serve the selected suite. Each shard runs with its own export directory
 (`container/0` through `container/N-1`) with `--shard i/N`. Collection applies
-`--group`/`--only` first, then partitions the remaining cases by
+the target paths and `--only` first, then partitions the remaining cases by
 `CRC32(nodeid) % N`. The union of all shards equals the full selection exactly;
 an empty shard is valid when N exceeds the selected case count.
 
@@ -162,16 +158,16 @@ scope: tests, errors and checks are combined, duplicate case identities are
 rejected, `duration_ms` is the parallel wall time (not a sum), and completeness
 is `complete` only when every shard export is valid and complete. A shard that
 is missing, invalid or incomplete keeps the merged report incomplete; the run
-passes only when every shard exited 0 or 5 and reported no errors. Startup and
+passes only when every shard exited successfully and reported no errors. Startup and
 cleanup failures remain execution errors rather than test cases. Required
 skipped cases also fail the integration gate.
 
 For output paths, JSON/HTML schemas, offline rendering and cancellation behavior,
 see [report contracts](../../tools/repo/README.md#coverage-and-report-facts).
 Runtime credentials, process logs and captured product payloads stay in private
-fixture state and are not exported. No test containers should remain after a run.
+fixture state and are not exported. The report records the expected image identity, case inventory, and verified cleanup.
 
-Tooling regressions run with `./repo test --project repo`. Separate invocations
+Tooling regressions run with `./repo test repo`. Separate invocations
 own distinct containers and output directories. Release-only behaviors still
 require their actual environments; see the testing policy.
 
@@ -182,40 +178,22 @@ Write the condition and expected outcome in English beside the assertions. Use
 or vector changes. The reporter prefers that parameter description over a shared
 docstring, and keeps the technical node ID in Details. Missing/shared descriptions
 fail collection. Native Go scenarios use their adjacent source comments; the
-image exports those comments alongside its compiled case inventory.
+builder exports those comments alongside its compiled case inventory.
 
 ## Build cache
 
-Integration execution defaults to 7200 seconds. Set `--integration-timeout`
-to a positive number of seconds for a longer or shorter execution deadline;
-the image build has a separate 1800-second deadline. When execution times out,
-the container sends SIGINT to pytest; the host runner allows a short shutdown
-grace period, retains any exported partial report, and verifies cleanup. A timeout
-is a failed, incomplete run. Individual test and fixture deadlines are unchanged.
+The default run deadline is 7200 seconds. Use `--integration-timeout` to
+set a different deadline. The report retains completed case observations if
+execution is interrupted or loses the final session export. The runner gives
+owned container cleanup a separate deadline.
 
-The launcher requires Docker buildx/BuildKit and uses one build path:
-`docker buildx build --load --progress=plain --iidfile FILE`. The runner starts
-the immutable ID from that file for every shard; parallel worktrees and
-containers do not share a mutable tag. It still checks current sources
-on every invocation; there is no skip-build or stale-image shortcut.
+The platform images contain pinned Linux tools, stable fixtures, and locked
+Node dependencies. The build reads a frozen source tree. A per-worktree build
+lock protects the native Go and Cargo caches and stable compiler paths. Compiler
+outputs and required native inventories are published into the run directory
+and included in its artifact manifest. Each shard mounts the source and artifacts
+read-only and keeps mutable runtime state in its own temporary space.
 
-Rust, Go and Node are independent build stages. Rust caches its registry, git
-sources and target directory; Go caches modules and compiler output; Node caches
-the pnpm store. Cache mounts use locked sharing, and architecture-sensitive
-caches include the target architecture. Rust executables are copied out before
-the target cache is unmounted. Only runtime dependencies and exported artifacts
-reach the final test image.
-
-Go module download and Node dependency installation precede source COPY steps.
-The Node stage installs the root pnpm workspace with its shared lockfile and
-copies the root virtual store alongside both packages into the runtime image.
-Python cases, fixtures and the shared timing helper are copied into the runtime
-last.
-Editing these files does not invalidate language build stages. Native Go case
-descriptions are Go source comments, so editing them still invalidates the Go
-stage; the compiler cache can reuse unaffected work. Protocol/schema changes
-are intentionally shared inputs where applicable.
-
-Inspect storage with `docker system df` and BuildKit cache with
-`docker buildx du`. Caches consume disk space; the launcher does not prune user
-images, containers, or caches automatically. No legacy-builder fallback exists.
+The launcher uses BuildKit directly. Inspect disk use with `docker system df`
+and `docker buildx du`. The launcher does not prune user images, containers,
+or caches.

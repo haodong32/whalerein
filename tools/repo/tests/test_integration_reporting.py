@@ -51,7 +51,9 @@ def finish(
     )
     config = SimpleNamespace(
         option=SimpleNamespace(collectonly=collect, shard=shard),
-        getoption=lambda name: group if name == "--group" else only if name == "--only" else None,
+        getoption=lambda name: (
+            bool(group) if name == "--partial-scope" else only if name == "--only" else None
+        ),
     )
     session = SimpleNamespace(items=[item] if items is None else items, config=config, exitstatus=0)
     module.pytest_sessionfinish(session, exitstatus)
@@ -314,10 +316,9 @@ def test_native_selection_excludes_unmatched_bodies(tmp_path, collect):
         "def test_native_excluded():\n"
         '    """When excluded by a name filter, the native body never runs."""\n'
         '    raise AssertionError("excluded body ran")\n'
-        "@pytest.mark.chain\n"
-        "def test_other_selected():\n"
-        '    """When excluded by group, the chain body never runs."""\n'
-        '    raise AssertionError("other group ran")\n'
+    )
+    (tmp_path / "test_other.py").write_text(
+        'raise AssertionError("unselected module was imported")\n'
     )
     result = subprocess.run(
         [
@@ -325,8 +326,8 @@ def test_native_selection_excludes_unmatched_bodies(tmp_path, collect):
             "-m",
             "pytest",
             "-q",
-            "--group",
-            "native-dsh",
+            "test_selection.py",
+            "--partial-scope",
             "--only",
             "selected",
             *(["--collect-only"] if collect else []),
@@ -346,7 +347,7 @@ def test_native_selection_excludes_unmatched_bodies(tmp_path, collect):
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "executed").exists() is not collect
     if collect:
-        assert "2 deselected" in result.stdout
+        assert "1 deselected" in result.stdout
     else:
         assert '"total": 1' in result.stdout
 
@@ -369,11 +370,10 @@ def test_sharded_group_selection_remains_partial(reporting, tmp_path):
     assert document["scope"]["selection"] == "partial"
 
 
-def test_nonsharded_deselection_keeps_the_existing_selection_semantics(reporting, tmp_path):
+def test_nonsharded_case_filter_is_partial(reporting, tmp_path):
     for when in ("setup", "call", "teardown"):
         phase(reporting, when)
-    reporting._DESELECTED = True
-    _, document = finish(reporting, tmp_path)
+    _, document = finish(reporting, tmp_path, only="one")
     assert document["scope"]["selection"] == "partial"
 
 

@@ -3,6 +3,8 @@
 import json
 import sys
 
+import pytest
+
 from repo.output import Output
 from repo.process import Runner
 from repo.progress import PREFIX, parse
@@ -301,13 +303,14 @@ def test_long_case_description_preserves_live_counts_and_elapsed(monkeypatch):
         display.close()
 
 
-def test_cancelled_run_summary_is_interrupted(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("code", "label"), [(2, "INVALID REQUEST"), (3, "BLOCKED"), (130, "INTERRUPTED")]
+)
+def test_run_summary_distinguishes_evidence_statuses(monkeypatch, capsys, code, label):
     from repo.progress import Display
 
     monkeypatch.setenv("NO_COLOR", "1")
     display = Display()
-    display.result({"scopes": []}, 2)
+    display.result({"scopes": []}, code)
     display.close()
-    output = capsys.readouterr().err
-    assert "Test execution INTERRUPTED" in output
-    assert "Test execution FAIL" not in output
+    assert f"Test execution {label}" in capsys.readouterr().err

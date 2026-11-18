@@ -1,454 +1,668 @@
-"""Own the integration container(s); consume only versioned scope exports."""
+"""Build and execute public Linux suites in labeled, isolated containers."""
 
+from __future__ import annotations
+
+import hashlib
 import json
 import os
-import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from time import monotonic
+import re
+import shutil
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from time import monotonic, sleep
 from uuid import uuid4
 
-from ..diagnostics import sanitize
 from ..errors import RepoError
+from ..integration_targets import (
+    collection_paths,
+    select_leaves,
+    selected_artifacts,
+    validate_inventory,
+)
 from ..reports.model import validate_scope
+from ..sources import SourceSelection
+from ..verification import Invocation, VerificationError, run_suite
 
-DEFAULT_EXECUTION_TIMEOUT_SECONDS = 7200
-CONTAINER_TIMEOUT_GRACE_SECONDS = 40
+DEFAULT_RUN_TIMEOUT_SECONDS = 7200
+OWNER_LABEL = "org.whalerein.verification.run"
 
 
 def collect(root, runner, request, directory):
-    scope = {
-        "suite_id": "integration",
-        "project": "integration",
-        "tests": [],
-        "coverage": [],
-        "completeness": "incomplete",
-        "errors": [],
-        "exit_code": 1,
-    }
-    parallel = getattr(request, "parallel", None) or 1
-    if parallel > 1:
-        return _collect_parallel(root, runner, request, directory, scope, parallel)
-    container = "whalerein-test-" + uuid4().hex[:12]
-    export = directory / "container"
-    export.mkdir()
-    launched = False
+    """Dispatch the public testing CLI through the shared lifecycle."""
+    target = request.group or "integration"
     try:
-        image = _build_image(root, runner, directory, scope)
-        if image is None:
-            return scope
-        execution_timeout = request.integration_timeout or DEFAULT_EXECUTION_TIMEOUT_SECONDS
-        arguments = _arguments(
-            container,
-            image,
-            export,
-            execution_timeout,
-            request,
-        )
-        launched = True
-        result = runner.run(
-            arguments,
-            root,
-            quiet=True,
-            timeout=execution_timeout + CONTAINER_TIMEOUT_GRACE_SECONDS,
-        )
-        scope["exit_code"] = result.returncode
-        if result.returncode == 124:
-            scope["errors"].append(
-                f"Integration execution timed out after {execution_timeout} seconds"
-            )
-    except KeyboardInterrupt:
-        scope["exit_code"] = 130
-    except (OSError, ValueError) as exc:
-        scope["errors"].append(sanitize(exc))
-    finally:
-        if launched:
-            # The name belongs exclusively to this invocation; never stop shared services.
-            stopped = runner.run(
-                ["docker", "stop", "--signal", "SIGINT", "--timeout", "35", container],
-                root,
-                timeout=45,
-                quiet=True,
-            )
-            if not stopped.ok and scope["exit_code"] in (124, 130):
-                scope["errors"].append("Could not gracefully stop integration container")
-            removed = runner.run(
-                ["docker", "rm", "--force", container], root, timeout=30, quiet=True
-            )
-            verified = runner.run(
-                ["docker", "ps", "-aq", "--filter", f"name=^/{container}$"],
-                root,
-                timeout=15,
-                quiet=True,
-            )
-            if not removed.ok or not verified.ok or verified.stdout.strip():
-                scope["errors"].append("Could not verify owned container cleanup")
-    try:
-        payload = json.loads((export / "integration.json").read_text())
-        if payload.get("version") != 1:
-            raise ValueError("unsupported integration export")
-        native = payload["scope"]
-        validate_scope(native)
-        errors, code = scope["errors"], scope["exit_code"]
-        scope = native
-        scope["errors"] = [*native.get("errors", []), *errors]
-        scope["exit_code"] = code
-        if code == 124:
-            scope["completeness"] = "incomplete"
-    except (RepoError, OSError, ValueError, KeyError, TypeError) as exc:
-        scope["errors"].append("Missing or invalid integration export: " + sanitize(exc))
-    if scope["exit_code"] not in (0, 5):
-        scope["errors"].append("Integration command exited " + str(scope["exit_code"]))
-    return scope
+        paths = collection_paths(target)
+    except RepoError as exc:
+        raise VerificationError("unknown-integration-target", 2) from exc
 
+    def platform(context):
+        run_platform(context, runner, request, paths)
 
-def _build_image(root, runner, directory, scope):
-    """Build the immutable image once, recording failures on the scope."""
-    image_file = directory / "image.id"
-    try:
-        probe = runner.run(["docker", "buildx", "version"], root, timeout=15, quiet=True)
-        if not probe.ok:
-            scope["errors"].append("Docker buildx is required")
-            return None
-        # Release reserved physical space before serializing failure evidence.
-        # A full Docker disk must not hide the build error behind report I/O.
-        with tempfile.TemporaryFile(dir=directory) as reserve:
-            for _ in range(32):
-                reserve.write(b"\0" * (1024 * 1024))
-            reserve.flush()
-            built = runner.run(
-                [
-                    "docker",
-                    "buildx",
-                    "build",
-                    "--load",
-                    "--progress=plain",
-                    "-f",
-                    str(root / "tests/integration/Dockerfile"),
-                    "--iidfile",
-                    str(image_file),
-                    str(root),
-                ],
-                root,
-                timeout=1800,
-                quiet=True,
-            )
-        if not built.ok:
-            scope["errors"].append("Integration image build failed: " + sanitize(built.tail()))
-            scope["exit_code"] = built.returncode
-            return None
-        image = image_file.read_text().strip()
-        if not image.startswith("sha256:") or len(image) != 71:
-            scope["errors"].append("Invalid built image ID")
-            return None
-        return image
-    except (OSError, ValueError) as exc:
-        scope["errors"].append(sanitize(exc))
-        return None
-
-
-def _arguments(container, image, export, execution_timeout, request, shard=None):
-    arguments = [
-        "docker",
-        "run",
-        "--init",
-        "--sig-proxy=false",
-        "--network",
-        "none",
-        "--tmpfs",
-        "/tmp:rw,exec,size=1024m,mode=1777",
-        "--name",
-        container,
-        "--env",
-        "WHALEREIN_PROGRESS=events",
-        "--env",
-        f"WHALEREIN_INTEGRATION_TIMEOUT={execution_timeout}",
-        *(
-            [
-                "--env",
-                f"WHALEREIN_INTEGRATION_SHARED_BROKER={os.environ['WHALEREIN_INTEGRATION_SHARED_BROKER']}",
-            ]
-            if os.environ.get("WHALEREIN_INTEGRATION_SHARED_BROKER") is not None
-            else []
+    timeout = request.integration_timeout or DEFAULT_RUN_TIMEOUT_SECONDS
+    formal = os.environ.get("GITHUB_ACTIONS") == "true"
+    return run_suite(
+        Invocation(
+            purpose="ci" if formal else "local",
+            suite=target,
+            sources=(SourceSelection("public", root, revision="HEAD" if formal else None),),
+            case_filter=request.only,
+            timeout=timeout,
+            output=directory,
+            configuration={
+                "suite": "integration",
+                "group": request.group,
+                "only": request.only,
+                "parallel": request.parallel or 1,
+                "list_only": request.list_only,
+                "integration_timeout": timeout,
+            },
         ),
-        "--mount",
-        f"type=bind,src={export},dst=/reports",
-        image,
-    ]
-    if request.list_only:
-        arguments += ["--collect-only", "-q"]
-    if request.only:
-        arguments += ["--only", request.only]
-    if request.group:
-        arguments += ["--group", request.group]
-    if shard is not None:
-        arguments += ["--shard", shard]
-    return arguments
+        platform,
+    )
+
+
+def _mount(host, guest, *, readonly=False):
+    return ["--mount", f"type=bind,src={host},dst={guest}" + (",readonly" if readonly else "")]
+
+
+def _command(context, runner, argv, cwd, code, *, blocked=False):
+    result = context.run(runner, argv, cwd)
+    if not result.ok:
+        # Command output can include product data; keep stable failure codes.
+        raise VerificationError(code, 3 if blocked else 1)
+    return result.stdout.strip()
+
+
+def _build_target(context, runner, source, target):
+    image_file = context.run_directory / f"{target}.image"
+    _command(
+        context,
+        runner,
+        [
+            "docker",
+            "buildx",
+            "build",
+            "--load",
+            "--progress=plain",
+            "--target",
+            target,
+            "-f",
+            str(source / "tests/integration/Dockerfile"),
+            "--iidfile",
+            str(image_file),
+            str(source),
+        ],
+        source,
+        "linux-platform-build-failed",
+    )
+    image = image_file.read_text().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise VerificationError("invalid-image-identity")
+    loaded = _command(
+        context,
+        runner,
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        source,
+        "linux-platform-image-unavailable",
+    )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", loaded):
+        raise VerificationError("invalid-image-identity")
+    context.record_artifact(f"platform-{target}", {"digest": image, "image_id": loaded})
+    return loaded
 
 
 @dataclass
-class _Shard:
-    index: int
-    export: object
-    name: str = ""
-    code: object = None
-    launched: bool = False
-    verified: bool = False
-    cleanup_error: bool = False
-    errors: list = field(default_factory=list)
+class _Container:
+    context: object
+    runner: object
+    cwd: Path
+    name: str
+    label: str
+    image: str
+    identity: str | None = None
+    running: bool = False
+    removed: bool = False
+
+    def create(self, options, command):
+        # Register intent before creation. Cleanup can acquire the exact
+        # identity by name and label if create completed during cancellation.
+        self.context.record_resource(self.name, {"kind": "docker-container", "label": self.label})
+        self.context.register_cleanup(self.name, self.cleanup)
+        identity = _command(
+            self.context,
+            self.runner,
+            [
+                "docker",
+                "create",
+                "--init",
+                "--name",
+                self.name,
+                "--label",
+                f"{OWNER_LABEL}={self.label}",
+                *options,
+                self.image,
+                *command,
+            ],
+            self.cwd,
+            "docker-container-create-failed",
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise VerificationError("invalid-container-identity")
+        self.identity = identity
+        self.context.record_resource(
+            self.name, {"kind": "docker-container", "id": identity, "label": self.label}
+        )
+        if self.inspect(self.context.remaining()) != self.image:
+            raise VerificationError("runtime-identity-mismatch")
+
+    def inspect(self, timeout):
+        if timeout <= 0:
+            raise VerificationError("docker-cleanup-deadline")
+        result = self.runner.run(
+            [
+                "docker",
+                "container",
+                "inspect",
+                "--format",
+                '{{.Id}} {{index .Config.Labels "'
+                + OWNER_LABEL
+                + '"}} {{.Image}} {{.State.Running}}',
+                self.identity or self.name,
+            ],
+            self.cwd,
+            timeout=min(timeout, 10),
+            quiet=True,
+        )
+        if not result.ok:
+            exists = self.runner.run(
+                ["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{self.name}$"],
+                self.cwd,
+                timeout=min(timeout, 10),
+                quiet=True,
+            )
+            if exists.ok and not exists.stdout.strip():
+                return None
+            raise VerificationError("docker-ownership-unverified")
+        try:
+            identity, label, image, running = result.stdout.strip().split()
+        except ValueError as exc:
+            raise VerificationError("docker-ownership-unverified") from exc
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", identity)
+            or self.identity not in (identity, None)
+            or label != self.label
+            or running not in ("true", "false")
+        ):
+            raise VerificationError("docker-ownership-conflict")
+        self.identity = identity
+        self.running = running == "true"
+        return image
+
+    def execute(self):
+        assert self.identity is not None
+        return self.runner.run(
+            ["docker", "start", "--attach", self.identity],
+            self.cwd,
+            timeout=self.context.remaining(),
+            quiet=True,
+        )
+
+    def cleanup(self, deadline):
+        if self.removed:
+            return
+        if self.inspect(deadline - monotonic()) is not None:
+            if self.running:
+                self.runner.run(
+                    ["docker", "stop", "--signal", "SIGINT", "--timeout", "8", self.identity],
+                    self.cwd,
+                    timeout=min(12, max(1, deadline - monotonic())),
+                    quiet=True,
+                )
+            removal = self.runner.run(
+                ["docker", "rm", "--force", self.identity],
+                self.cwd,
+                timeout=min(15, max(1, deadline - monotonic())),
+                quiet=True,
+            )
+            # The client can reach its wait limit while the daemon still
+            # removes the same identified container. Wait only for that
+            # in-flight operation within the original cleanup deadline.
+            while self.inspect(deadline - monotonic()) is not None:
+                if removal.returncode != 124 or monotonic() >= deadline:
+                    raise VerificationError("docker-cleanup-unverified")
+                sleep(0.2)
+        self.removed = True
 
 
-def _collect_parallel(root, runner, request, directory, scope, parallel):
-    export_root = directory / "container"
-    export_root.mkdir(exist_ok=True)
-    exports = []
-    for index in range(parallel):
-        export = export_root / str(index)
-        export.mkdir()
-        exports.append(export)
-    image = _build_image(root, runner, directory, scope)
-    if image is None:
-        return scope
-    execution_timeout = request.integration_timeout or DEFAULT_EXECUTION_TIMEOUT_SECONDS
-    states = [
-        _Shard(index=index, export=exports[index], name="whalerein-test-" + uuid4().hex[:12])
-        for index in range(parallel)
-    ]
-    started = monotonic()
-    lock = threading.Lock()
-    launched = set()
-    stop = threading.Event()
-    interrupted = False
-    display = getattr(runner, "progress", None)
-    # Per-shard status lines replace the shared live display, which is not
-    # thread-safe. The containers' own progress events are suppressed.
-    runner.progress = None
+def _container(context, runner, cwd, image, phase, *, name=None):
+    token = uuid4().hex[:16]
+    return _Container(context, runner, cwd, name or f"wr-verify-{phase}-{token}", token, image)
+
+
+def recover_container(runner, cwd, name, ownership, deadline):
+    """Release a recorded Linux container after the caller proves the run abandoned."""
+    label = ownership.get("label", "")
+    identity = ownership.get("id")
+    if (
+        ownership.get("kind") != "docker-container"
+        or not re.fullmatch(
+            r"wr-verify-(?:build|mirror|collect|test|benchmark)-[0-9a-f]{16,24}", name
+        )
+        or not re.fullmatch(r"[0-9a-f]{16}", label)
+        or (identity is not None and not re.fullmatch(r"[0-9a-f]{64}", identity))
+    ):
+        raise VerificationError("invalid-docker-ownership")
+    _Container(None, runner, cwd, name, label, "", identity).cleanup(deadline)
+
+
+def _compile(context, runner, source, worktree, builder, architecture, artifacts, products):
     try:
-        with ThreadPoolExecutor(max_workers=parallel) as executor:
-            futures = {}
-            for state in states:
-                runner.out.info(f"Shard {state.index}/{parallel}: starting ({state.name})")
-                futures[
-                    executor.submit(
-                        _run_shard,
-                        root,
-                        runner,
-                        image,
-                        request,
-                        state,
-                        execution_timeout,
-                        parallel,
-                        lock,
-                        launched,
-                        stop,
-                    )
-                ] = state
+        import fcntl
+    except ImportError as exc:
+        raise VerificationError("requires-posix-build-host", 3) from exc
+
+    # The same daemon and worktree share the compiler cache and input mirror.
+    # Image IDs can change when BuildKit regenerates attestations. Key the
+    # mutable native cache by the compiler inputs and target architecture.
+    fingerprint = hashlib.sha256(f"{worktree}:{os.getuid()}:{architecture}".encode())
+    for path in (
+        "tests/integration/Dockerfile",
+        "tools/repo/linux-rust-packages.txt",
+        "tools/repo/protoc-linux.sh",
+    ):
+        fingerprint.update((source / path).read_bytes())
+    owner = fingerprint.hexdigest()[:24]
+    lock = worktree / ".data" / "locks" / f"verification-{owner}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a") as handle:
+        with context.phase("lock-wait"):
+            while True:
+                context.remaining()
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    sleep(0.1)
+        build_name = f"wr-verify-build-{owner}"
+        with context.phase("build-input-preparation"):
+            active = _command(
+                context,
+                runner,
+                ["docker", "ps", "-aq", "--filter", f"name=^/{build_name}$"],
+                source,
+                "docker-build-ownership-unverified",
+            )
+            if active:
+                raise VerificationError("recover-abandoned-build", 3)
+            mirror = _container(
+                context, runner, source, builder, "mirror", name=f"wr-verify-mirror-{owner}"
+            )
+            # Preserve timestamps for equal bytes and advance them for
+            # actual changes, including checkouts of older source files.
+            mirror.create(
+                [
+                    "--network",
+                    "none",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    *_mount(source, "/input", readonly=True),
+                    "--mount",
+                    f"type=volume,src=wr-source-{owner},dst=/mirror",
+                ],
+                [
+                    "bash",
+                    "-c",
+                    "mkdir -p /mirror/tree && "
+                    "exec rsync -rlpc --chmod=Du+rwx,Fu+rw --delete /input/ /mirror/tree/",
+                ],
+            )
             try:
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except KeyboardInterrupt:
-                        raise
-                    except Exception as exc:  # pragma: no cover - defensive boundary
-                        futures[future].errors.append("Shard failed: " + sanitize(exc))
-            except KeyboardInterrupt:
-                interrupted = True
-                runner.interrupted = True
-                _stop_launched(runner, root, lock, launched, stop)
-                executor.shutdown(wait=True, cancel_futures=True)
-    finally:
-        runner.progress = display
-    for state in states:
-        _verify_cleanup(root, runner, state, parallel)
-        if state.code is None:
-            state.code = 130 if interrupted else 1
-            state.errors.append(f"Shard {state.index}/{parallel}: did not execute")
-        if state.code not in (0, 5):
-            state.errors.append(
-                f"Shard {state.index}/{parallel}: integration command exited {state.code}"
+                result = mirror.execute()
+                if result.returncode == 130:
+                    raise KeyboardInterrupt
+                if not result.ok:
+                    raise VerificationError("linux-build-input-preparation-failed")
+            finally:
+                mirror.cleanup(monotonic() + 40)
+        with context.phase("compilation"):
+            container = _container(context, runner, source, builder, "build", name=build_name)
+            container.create(
+                [
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--mount",
+                    f"type=volume,src=wr-source-{owner},dst=/workspace,volume-subpath=tree,readonly",
+                    *_mount(products, "/products"),
+                    "--mount",
+                    f"type=volume,src=wr-build-{owner},dst=/cache",
+                ],
+                ["bash", "tests/integration/build-artifacts.sh", *artifacts],
             )
-    merged = _merge(states, parallel, interrupted, started)
-    for state in states:
-        label = (
-            "passed" if state.code in (0, 5) else "interrupted" if state.code == 130 else "failed"
+            try:
+                result = container.execute()
+                if result.returncode == 130:
+                    raise KeyboardInterrupt
+                if not result.ok:
+                    raise VerificationError("linux-compilation-failed")
+            finally:
+                # Stop compiler readers before releasing the mirror's writer
+                # lock, including when docker attach hits its deadline.
+                container.cleanup(monotonic() + 40)
+
+
+def _merge_tree(source, target):
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        destination = target / entry.name
+        if entry.is_symlink():
+            destination.symlink_to(entry.readlink())
+        elif entry.is_dir():
+            _merge_tree(entry, destination)
+        else:
+            try:
+                os.link(entry, destination)
+            except OSError:
+                # Cross-filesystem output and Docker-created files may need
+                # copying without weakening source or artifact permissions.
+                if destination.exists():
+                    raise
+                shutil.copy2(entry, destination)
+
+
+def _product_manifest(products):
+    manifest = {}
+    for path in sorted(products.rglob("*")):
+        relative = path.relative_to(products).as_posix()
+        if path.is_symlink():
+            manifest[relative] = {"link": str(path.readlink())}
+        elif path.is_file():
+            with path.open("rb") as stream:
+                sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+            manifest[relative] = {"sha256": sha256, "mode": path.stat().st_mode & 0o777}
+    return manifest
+
+
+def _expected_paths(artifacts):
+    paths = {
+        "access": [".verification/bin/whalerein-access"],
+        "broker-plugin": [".verification/lib/whalerein.so"],
+        "cli": ["target/debug/whalerein"],
+        "noise-peer": [
+            "tests/integration/drivers/noise/rust-peer/target/debug/whalerein-noise-peer"
+        ],
+        "proto-peer": [
+            "tests/integration/drivers/protobuf/rust-peer/target/debug/whalerein-proto-peer"
+        ],
+        "mqtt-driver": ["target/debug/examples/mqtt_transport_driver"],
+        "delivery-driver": ["target/debug/examples/delivery_budget_driver"],
+        "wait-driver": ["target/debug/examples/wait_concurrency_driver"],
+        "broker-tests": [".verification/bin/broker-tests"],
+        "server-tests": [".verification/bin/server-tests"],
+        "storage-tests": [
+            path
+            for package in ("store", "store-support", "server", "external")
+            for path in (
+                f".verification/bin/{package}-tests",
+                f"tests/integration/fixtures/{package}-cases.txt",
+                f"tests/integration/fixtures/{package}-descriptions.json",
+            )
+        ],
+    }
+    return {path for artifact in artifacts for path in paths[artifact]}
+
+
+def prepare(context, runner, target):
+    """Prepare the same source, builder, and artifacts for suites or benchmarks."""
+    source = context.sources["public"]
+    worktree = context.invocation.sources[0].root
+    requirements = selected_artifacts(target)
+    artifacts = tuple(artifact for artifact in requirements if artifact != "node-dependencies")
+    runtime = (
+        "native"
+        if "native-dsh" in select_leaves(target)
+        else "services"
+        if "access" in artifacts
+        else "vectors"
+    )
+    products = context.run_directory / "products"
+    products.mkdir()
+    with context.phase("environment-preparation"):
+        _command(
+            context,
+            runner,
+            ["docker", "buildx", "version"],
+            source.root,
+            "docker-unavailable",
+            blocked=True,
         )
-        runner.out.info(f"Shard {state.index}/{parallel}: {label} (exit {state.code})")
-    return merged
+        architecture = _command(
+            context,
+            runner,
+            ["docker", "info", "--format", "{{.Architecture}}"],
+            source.root,
+            "docker-unavailable",
+            blocked=True,
+        )
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", architecture):
+            raise VerificationError("invalid-docker-architecture")
+        image = _build_target(context, runner, source.root, runtime)
+        builder_target = "services-builder" if "access" in artifacts else "vectors-builder"
+        builder = _build_target(context, runner, source.root, builder_target)
+    _compile(context, runner, source.root, worktree, builder, architecture, artifacts, products)
+    with context.phase("artifact-publication"):
+        manifest = _product_manifest(products)
+        if _expected_paths(artifacts).difference(manifest):
+            raise VerificationError("missing-build-artifact")
+        metadata = json.dumps(manifest, sort_keys=True)
+        (context.run_directory / "artifact-manifest.json").write_text(metadata)
+        context.record_artifact(
+            "products",
+            {
+                "digest": hashlib.sha256(metadata.encode()).hexdigest(),
+                "source": source.fingerprint,
+                "manifest": "artifact-manifest.json",
+            },
+        )
+        workspace = context.run_directory / "workspace"
+        _merge_tree(source.root, workspace)
+        _merge_tree(products, workspace)
+        if "node-dependencies" in requirements:
+            for path in (
+                Path("node_modules"),
+                Path("host/dsh/node_modules"),
+                Path("host/runtime/node_modules"),
+            ):
+                link = workspace / path
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(Path("/opt/whalerein-node") / path)
+    return image, workspace
 
 
-def _run_shard(
-    root,
-    runner,
-    image,
-    request,
-    state,
-    execution_timeout,
-    parallel,
-    lock,
-    launched,
-    stop,
+def _create_pytest(
+    context, runner, image, workspace, export, paths, request, *, list_only=False, shard=None
 ):
-    try:
-        with lock:
-            if stop.is_set():
-                state.code = 130
-                return
-            launched.add(state.name)
-        state.launched = True
-        arguments = _arguments(
-            state.name,
-            image,
-            state.export,
-            execution_timeout,
-            request,
-            shard=f"{state.index}/{parallel}",
-        )
-        result = runner.run(
-            arguments,
-            root,
-            quiet=True,
-            timeout=execution_timeout + CONTAINER_TIMEOUT_GRACE_SECONDS,
-        )
-        state.code = result.returncode
-        if result.returncode == 124:
-            state.errors.append(
-                f"Shard {state.index}/{parallel}: "
-                f"integration execution timed out after {execution_timeout} seconds"
-            )
-    except KeyboardInterrupt:
-        state.code = 130
-        raise
-    except (OSError, ValueError) as exc:
-        state.errors.append(f"Shard {state.index}/{parallel}: " + sanitize(exc))
-    finally:
-        if state.launched:
-            _cleanup(runner, root, state, parallel)
-
-
-def _cleanup(runner, root, state, parallel):
-    stopped = runner.run(
-        ["docker", "stop", "--signal", "SIGINT", "--timeout", "35", state.name],
-        root,
-        timeout=45,
-        quiet=True,
+    export.mkdir(parents=True)
+    container = _container(context, runner, workspace, image, "collect" if list_only else "test")
+    command = [
+        "python3",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-c",
+        "tests/integration/pytest.ini",
+        "--rootdir",
+        "tests/integration",
+        *paths,
+    ]
+    if list_only:
+        command += ["--collect-only", "-q"]
+    if request.group:
+        command += ["--partial-scope"]
+    if request.only:
+        command += ["--only", request.only]
+    if shard is not None:
+        command += ["--shard", shard]
+    container.create(
+        [
+            "--network",
+            "none",
+            "--tmpfs",
+            "/tmp:rw,exec,size=1024m,mode=1777",
+            "--env",
+            "WHALEREIN_PROGRESS=events",
+            "--env",
+            "WHALEREIN_INTEGRATION_SHARED_BROKER",
+            *_mount(workspace, "/workspace", readonly=True),
+            *_mount(export, "/reports"),
+        ],
+        command,
     )
-    if not stopped.ok and state.code in (124, 130):
-        state.errors.append(
-            f"Shard {state.index}/{parallel}: could not gracefully stop integration container"
-        )
-    runner.run(["docker", "rm", "--force", state.name], root, timeout=30, quiet=True)
-    _record_verified(runner, root, state, parallel)
+    return container
 
 
-def _verify_cleanup(root, runner, state, parallel):
-    """Re-verify every launched container after all workers have stopped."""
-    if not state.launched or state.verified:
-        return
-    runner.run(["docker", "rm", "--force", state.name], root, timeout=30, quiet=True)
-    _record_verified(runner, root, state, parallel)
+def _read_scope(export, shard=None):
+    payload = json.loads((export / "integration.json").read_text())
+    if payload["version"] != 1:
+        raise ValueError("unsupported integration export")
+    native = payload["scope"]
+    validate_scope(native)
+    if native.get("shard") != shard:
+        raise ValueError("unexpected integration shard")
+    return native
 
 
-def _record_verified(runner, root, state, parallel):
-    verified = runner.run(
-        ["docker", "ps", "-aq", "--filter", f"name=^/{state.name}$"],
-        root,
-        timeout=15,
-        quiet=True,
-    )
-    clean = verified.ok and not verified.stdout.strip()
-    state.verified = bool(clean)
-    if not clean and not state.cleanup_error:
-        state.cleanup_error = True
-        state.errors.append(
-            f"Shard {state.index}/{parallel}: could not verify owned container cleanup"
-        )
-
-
-def _stop_launched(runner, root, lock, launched, stop):
-    # Mark the stop before releasing the lock so no shard can launch afterwards.
-    with lock:
-        stop.set()
-        names = list(launched)
-    for name in names:
-        # Workers still own removal; stopping first lets them finish promptly.
-        runner.run(
-            ["docker", "stop", "--signal", "SIGINT", "--timeout", "35", name],
-            root,
-            timeout=45,
-            quiet=True,
-        )
-
-
-def _merge(states, parallel, interrupted, started):
-    tests, checks, coverage, errors = [], [], [], []
-    seen = set()
-    complete = True
-    partial = False
-    duplicate = False
-    for state in states:
-        native = _read_shard(state, parallel)
-        errors.extend(state.errors)
-        if native is None:
-            complete = False
+def _read_observations(context, exports):
+    for export in exports:
+        try:
+            records = (export / "observations.jsonl").read_text().splitlines()
+        except FileNotFoundError:
             continue
-        if native.get("completeness") != "complete":
-            complete = False
-        if native.get("selection") == "partial":
-            partial = True
-        checks.extend(native.get("checks", []))
-        coverage.extend(native.get("coverage", []))
-        for case in native["tests"]:
-            identity = case["id"]
-            if identity in seen:
-                duplicate = True
+        for record in records:
+            try:
+                case = json.loads(record)
+                context.record_case(case["id"], case["status"])
+            except (ValueError, KeyError):
                 continue
-            seen.add(identity)
-            tests.append(case)
-    if duplicate:
-        errors.append("Duplicate integration case identity across shards")
-        complete = False
-    if interrupted:
-        code = 130
-    elif any(state.code == 130 for state in states):
-        code = 130
-    elif any(state.code == 124 for state in states):
-        code = 124
-    elif any(state.code not in (0, 5) for state in states) or errors or not complete:
-        code = 1
-    else:
-        code = 0
-    if code not in (0, 5):
-        complete = False
-    merged = {
+
+
+def _combine(scopes, expected, errors, started):
+    scope = {
         "suite_id": "integration",
         "project": "integration",
-        "tests": tests,
-        "coverage": coverage,
-        "checks": checks,
-        "selection": "partial" if partial else "full",
-        "completeness": "complete" if complete and not interrupted else "incomplete",
+        "kind": "integration",
+        "tests": [],
+        "coverage": [],
+        "checks": [],
         "errors": errors,
-        "exit_code": code,
+        "selection": "full",
+        "completeness": "complete",
+        "exit_code": 0,
         "duration_ms": round((monotonic() - started) * 1000, 3),
     }
-    validate_scope(merged)
-    return merged
+    observed = set()
+    for native in scopes:
+        scope["errors"].extend(native.get("errors", []))
+        if native["selection"] == "partial":
+            scope["selection"] = "partial"
+        if native["completeness"] != "complete":
+            scope["completeness"] = "incomplete"
+        if native["exit_code"] != 0:
+            scope["exit_code"] = 1
+        for case in native["tests"]:
+            if case["id"] in observed:
+                scope["errors"].append("Duplicate integration case identity across shards")
+                continue
+            observed.add(case["id"])
+            scope["tests"].append(case)
+    if observed != expected:
+        scope["errors"].append("Observed integration cases do not match the collected inventory")
+    if scope["errors"]:
+        scope["completeness"] = "incomplete"
+        scope["exit_code"] = 1
+    return scope
 
 
-def _read_shard(state, parallel):
-    try:
-        payload = json.loads((state.export / "integration.json").read_text())
-        if payload.get("version") != 1:
-            raise ValueError("unsupported integration export")
-        native = payload["scope"]
-        validate_scope(native)
-        shard = native.get("shard")
-        if shard is not None and shard != f"{state.index}/{parallel}":
-            raise ValueError("unexpected shard identity " + str(shard))
-        return native
-    except (RepoError, OSError, ValueError, KeyError, TypeError) as exc:
-        state.errors.append(
-            f"Shard {state.index}: Missing or invalid integration export: " + sanitize(exc)
+def run_platform(context, runner, request, paths):
+    target = request.group or "integration"
+    with context.phase("scope"):
+        validate_inventory(context.sources["public"].root)
+    image, workspace = prepare(context, runner, target)
+    export_root = context.run_directory / "container"
+    with context.phase("collection"):
+        listing = export_root / "collection"
+        collector = _create_pytest(
+            context, runner, image, workspace, listing, paths, request, list_only=True
         )
-        return None
+        result = collector.execute()
+        if result.returncode == 130:
+            raise KeyboardInterrupt
+        if result.returncode == 4:
+            raise VerificationError("invalid-integration-selection", 2)
+        if not result.ok:
+            raise VerificationError("integration-collection-failed")
+        collected = _read_scope(listing)
+        identities = {case["id"] for case in collected["tests"]}
+        if not identities:
+            raise VerificationError("invalid-integration-selection", 2)
+        context.record_collection(sorted(identities))
+        if request.list_only:
+            for case in collected["tests"]:
+                case["status"] = "todo"
+            context.record_scope(collected)
+            return
+
+    parallel = request.parallel or 1
+    exports = [export_root / str(index) for index in range(parallel)]
+    shards = [f"{index}/{parallel}" if parallel > 1 else None for index in range(parallel)]
+    with context.phase("readiness"):
+        containers = [
+            _create_pytest(context, runner, image, workspace, export, paths, request, shard=shard)
+            for export, shard in zip(exports, shards, strict=True)
+        ]
+        for container in containers:
+            context.record_identity(container.name, image, container.inspect(context.remaining()))
+    started = monotonic()
+    with context.phase("execution"):
+        scopes, errors = [], []
+        interrupted = False
+        if parallel == 1:
+            results = [containers[0].execute()]
+        else:
+            display = getattr(runner, "progress", None)
+            runner.progress = None
+            try:
+                with ThreadPoolExecutor(max_workers=parallel) as executor:
+                    work = [executor.submit(container.execute) for container in containers]
+                    try:
+                        results = [future.result() for future in work]
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        deadline = monotonic() + 60
+                        for container in containers:
+                            try:
+                                # Removing also covers prepared containers
+                                # whose attach worker has not started yet.
+                                container.cleanup(deadline)
+                            except VerificationError:
+                                pass  # The registered cleanup verifies and reports again.
+                        results = [future.result() for future in work]
+            finally:
+                runner.progress = display
+        for result, export, shard in zip(results, exports, shards, strict=True):
+            interrupted |= result.returncode == 130
+            if result.returncode not in (0, 1):
+                errors.append("Integration execution did not finish")
+            try:
+                scopes.append(_read_scope(export, shard))
+            except (OSError, ValueError, RepoError, KeyError, TypeError):
+                errors.append("Missing or invalid integration export")
+        if errors:
+            _read_observations(context, exports)
+        combined = _combine(scopes, identities, errors, started)
+        context.record_scope(combined)
+        if interrupted:
+            raise KeyboardInterrupt
+        if combined["exit_code"]:
+            raise VerificationError("integration-execution-failed")

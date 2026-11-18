@@ -335,7 +335,7 @@ class Fixture:
                     "log_dest stdout",
                     "log_type error",
                     "connection_messages false",
-                    "plugin /usr/local/lib/mosquitto/whalerein.so",
+                    "plugin /workspace/.verification/lib/whalerein.so",
                     "plugin_opt_access_username access",
                     f"plugin_opt_access_password_file {password_file}",
                     "plugin_opt_access_auth_url http://127.0.0.1:18081/internal/broker/connect",
@@ -758,7 +758,7 @@ def _ceil(value):
 def artifacts():
     files = {
         "cli": ROOT / "target/debug/whalerein",
-        "access": Path("/usr/local/bin/whalerein-access"),
+        "access": Path("/workspace/.verification/bin/whalerein-access"),
         "plugin": ROOT / "host/dsh/package.json",
         "fixture": ROOT / "tests/integration/fixtures/dsh.mjs",
     }

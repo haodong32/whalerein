@@ -1,0 +1,11 @@
+<section class="card card-border surface" aria-labelledby="verification-heading">
+<div class="card-body">
+<div class="panel-heading"><h2 class="card-title" id="verification-heading">Verification lifecycle</h2><span class="badge $badge">$outcome</span></div>
+<p class="metadata">Last completed phase: $last_completed · Error: $error · Cleanup: $cleanup</p>
+$cleanup_errors
+<div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable verification phases">
+<table class="table table-sm"><thead><tr><th scope="col">Phase</th><th scope="col">Outcome</th><th scope="col">Duration</th></tr></thead>
+<tbody>$phase_rows</tbody></table>
+</div>
+</div>
+</section>

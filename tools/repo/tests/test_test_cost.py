@@ -165,8 +165,8 @@ def test_project_order_and_default_parallelism_do_not_change_selection(tmp_path)
     "suite,group,expected",
     [
         ("unit", None, "unit projects: core"),
-        ("integration", "protocol", "integration group: protocol"),
-        ("all", None, "unit projects: core; integration group: ALL"),
+        ("integration", "protocol-vectors", "target: protocol-vectors"),
+        ("integration", None, "target: integration"),
     ],
 )
 def test_notice_describes_scope_without_printing_filter(tmp_path, suite, group, expected):
@@ -225,7 +225,7 @@ def test_cli_prints_notice_before_execution_and_preserves_json(
         }
 
     monkeypatch.setattr(rust, "collect", collect)
-    args = ["--json", "test", "--project", "core", "--only", "regression"]
+    args = ["--json", "test", "core", "--only", "regression"]
     assert cli.main(args) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["ok"] and result["data"]["historical_duration"]["samples"] == 0

@@ -77,8 +77,8 @@ def test_execution_excludes_unselected_projects_and_unsupported_build(monkeypatc
     monkeypatch.setattr(ci.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
     ci.run_projects(ROOT, ["dsh"])
     assert calls == [
-        [sys.executable, "-m", "repo", "check", "--project", "dsh"],
-        [sys.executable, "-m", "repo", "test", "--project", "dsh", "--coverage"],
+        [sys.executable, "-m", "repo", "check", "dsh"],
+        [sys.executable, "-m", "repo", "test", "dsh", "--coverage"],
     ]
     calls.clear()
     ci.run_projects(ROOT, ["cli"])
@@ -213,3 +213,17 @@ def test_quick_cli_dispatch(monkeypatch):
     monkeypatch.setattr(ci, "run_quick", lambda root, projects: calls.append(projects))
     ci.main()
     assert calls == [["cli"]]
+
+
+def test_full_ci_reports_every_selected_target_at_the_failing_stage(monkeypatch):
+    calls = []
+
+    def fail_core_check(command, **kwargs):
+        calls.append(command[3:])
+        if command[3:] == ["check", "core"]:
+            raise ci.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(ci.subprocess, "run", fail_core_check)
+    with pytest.raises(ci.subprocess.CalledProcessError):
+        ci.run_projects(ROOT, ["core", "proto"])
+    assert calls == [["check", "core"], ["check", "proto-rust"]]

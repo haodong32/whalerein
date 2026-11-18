@@ -48,3 +48,53 @@ def test_native_pytest_phases_and_interruption(tmp_path, interrupted):
 def test_missing_timing_is_not_zero():
     assert duration_label(None) == "—"
     assert duration_label(0) == "0.0ms"
+
+
+@pytest.mark.parametrize(
+    ("code", "outcome"),
+    [(0, "Passed"), (1, "Failed"), (2, "Invalid request"), (3, "Blocked"), (130, "Interrupted")],
+)
+def test_report_exposes_safe_verification_phases_and_outcome(code, outcome):
+    from repo.reports.html import render
+    from repo.reports.model import VERSION, summary
+
+    scopes = [
+        {
+            "suite_id": "integration",
+            "project": "integration",
+            "completeness": "complete",
+            "tests": [],
+        }
+    ]
+    page = render(
+        {
+            "schema_version": VERSION,
+            "configuration": {},
+            "scopes": scopes,
+            "summary": summary(scopes),
+            "completeness": "complete",
+            "verification": {
+                "exit_code": code,
+                "error_code": "cleanup-failed",
+                "last_completed_phase": "execution",
+                "phases": [
+                    {"name": "execution", "status": "complete", "duration_ms": 1250},
+                    {"name": "cleanup", "status": "failed", "duration_ms": 15},
+                    {"name": "<payload>", "status": "<payload>"},
+                ],
+                "cleanup": {
+                    "status": "failed",
+                    "errors": [{"resource": "owned-container", "code": "cleanup-failed"}],
+                },
+                "sensitive": "not-a-rendered-field",
+            },
+        }
+    )
+    verification_section = page.split('id="verification-heading"', 1)[1].split("</section>", 1)[0]
+    assert f">{outcome}</span>" in verification_section
+    assert "Last completed phase: execution" in verification_section
+    assert "owned-container · cleanup-failed" in verification_section
+    assert ">1.25s</td>" in verification_section
+    assert ">15.0ms</td>" in verification_section
+    assert "<payload>" not in verification_section
+    assert "not-a-rendered-field" not in verification_section

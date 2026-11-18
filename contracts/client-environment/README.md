@@ -144,6 +144,6 @@ production when the selected name is unknown.
   `host/runtime/scripts/sync-client-environment-contract.mjs` and shipped by
   the package `files` list. A repository test fails when a generated copy
   differs from the canonical file.
-- `tests/integration/Dockerfile` copies `contracts/client-environment` so
-  container builds do not depend on a Cloud checkout or a repository-relative
-  runtime lookup.
+- The Linux integration builder reads `contracts/client-environment` from its
+  frozen public source. The resulting Core artifacts retain the embedded
+  contract and can execute independently of the Cloud checkout.

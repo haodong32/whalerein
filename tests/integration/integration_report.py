@@ -12,7 +12,6 @@ from repo.test_timing import finish_interrupted, record_phase
 _RESULTS = {}
 _PHASES = {}
 _COLLECTION_ERRORS = False
-_DESELECTED = False
 
 
 def describe_item(item):
@@ -45,11 +44,6 @@ def validate_descriptions(items):
 def pytest_collectreport(report):
     global _COLLECTION_ERRORS
     _COLLECTION_ERRORS |= report.failed
-
-
-def pytest_deselected(items):
-    global _DESELECTED
-    _DESELECTED |= bool(items)
 
 
 def failure_message(report):
@@ -96,6 +90,13 @@ def pytest_runtest_logreport(report):
         record["status"] = "skipped"
 
     if report.when == "teardown":
+        # Complete per-case facts survive loss of the native session export.
+        # Export no messages, fixture parameters, or subprocess output.
+        if os.environ.get("WHALEREIN_INTEGRATION_CONTAINER") == "1":
+            observation = {"id": report.nodeid, "status": record["status"]}
+            Path("/reports").mkdir(exist_ok=True)
+            with Path("/reports/observations.jsonl").open("a") as stream:
+                stream.write(json.dumps(observation) + "\n")
         progress(
             {
                 "event": "finish",
@@ -152,12 +153,8 @@ def pytest_sessionfinish(session, exitstatus):
     ):
         session.exitstatus = 1
     # With --shard, deselecting the other shards is distribution rather than a
-    # narrowed user selection. --group/--only still make the selection partial.
-    partial = (
-        bool(session.config.getoption("--group") or session.config.getoption("--only"))
-        if shard
-        else _DESELECTED
-    )
+    # narrowed user selection. An explicit leaf or case filter narrows it.
+    partial = bool(session.config.getoption("--partial-scope") or session.config.getoption("--only"))
     scope = {
         "project": "integration",
         "kind": "integration",
@@ -187,7 +184,9 @@ def pytest_sessionfinish(session, exitstatus):
     if not session.config.option.collectonly and _SESSION_STARTED is not None:
         scope["duration_ms"] = round((monotonic() - _SESSION_STARTED) * 1000, 3)
     scope["errors"] = ["Integration collection failed"] if _COLLECTION_ERRORS else []
-    Path("/reports/integration.json").write_text(json.dumps({"version": 1, "scope": scope}))
+    temporary = Path("/reports/integration.json.tmp")
+    temporary.write_text(json.dumps({"version": 1, "scope": scope}))
+    temporary.replace(temporary.with_suffix(""))
     if _PROGRESS_STREAM is not None:
         _PROGRESS_STREAM.close()
 

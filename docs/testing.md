@@ -74,7 +74,7 @@ The `Contract checks` job runs when the affected set includes the `proto`
 project. It is offline and runs three checks:
 
 ```bash
-./repo proto --check
+./repo check proto
 python3 proto/v1/bindings/swift/check_swift_surface.py
 python3 tests/integration/drivers/protobuf/proto_compat.py --check
 ```
@@ -174,8 +174,8 @@ complete affected-project validation. Run from the repository root:
 
 | Stage | Selection | Completion |
 |---|---|---|
-| Iteration | `./repo check --project ID` and `./repo test --project ID --only TEXT` | The changed behavior and regression cases pass; coverage is deferred. |
-| Final code validation | `./repo test --project ID --coverage` for affected projects, plus relevant checks/builds | Run once after the final relevant edit; each affected first-party scope meets the coverage gate. |
+| Iteration | `./repo check ID` and `./repo test ID --only TEXT` | The changed behavior and regression cases pass; coverage is deferred. |
+| Final code validation | `./repo test ID --coverage` for affected projects, plus relevant checks/builds | Run once after the final relevant edit; each affected first-party scope meets the coverage gate. |
 | Documentation only | Review links, command accuracy and `git diff --check` | Product tests are needed only if executable behavior also changed. |
 
 Select project IDs explicitly for agent-driven format/check/build/unit commands.
@@ -194,22 +194,22 @@ result caching: the tool always executes the requested tests.
 Choose integration scope by behavior, not the number of changed directories:
 
 - Protocol schema, serialization or cross-language binding changes: run
-  `./repo proto --check` and `./repo test --suite integration --group protocol`.
-- Storage transactions, persistence or migrations: select `--group storage`.
+  `./repo check proto` and `./repo test protocol`.
+- Storage transactions, persistence or migrations: select `./repo test storage`.
 - MQTT/TLS connections, transport framing or reconnect handling: select
-  `--group transport`; add chain cases if end-to-end recovery is affected.
+  `./repo test transport`; add chain cases if end-to-end recovery is affected.
 - CLI/Access/Host request flow, approval, deduplication or recovery: select
-  relevant `--group chain` cases using `--only TEXT` during iteration, then the
+  relevant `./repo test chain` cases using `--only TEXT` during iteration, then the
   affected group at completion.
-- Real DSH adapter, session or browser interactions: select `--group native-dsh`.
+- Real DSH adapter, session or browser interactions: select `./repo test native-dsh`.
 - Run the complete integration suite for release validation or shared changes
   with identified risks across multiple groups that narrower checks cannot
   establish. Name those risks before starting; crossing directories alone is
   insufficient. A full suite deferred to CI is reported as pending, not passed.
 
-Local command defaults stay compatible: bare `./repo test` selects all registered
-unit projects, and `--suite all` selects all unit and integration tests. Use these
-intentionally for repository-wide validation, with the scope reason stated.
+Bare `./repo test` selects all registered unit projects. Use
+`./repo test integration` for the complete Linux integration scope. State the
+scope reason when running repository-wide validation.
 
 Every test invocation displays its selected projects/group, whether a case filter
 and coverage are enabled, and comparable historical wall time before compilation
@@ -261,12 +261,13 @@ The Mosquitto broker binds in well under a second, and a full stack start
 Wall time is dominated by per-case pairing setup (about 0.5 s), real command
 round trips, and deliberate deadline waits.
 
-Measured on the development host for the `chain` group (83 cases):
+Before the verification runner cutover, the development host measured 83
+`chain` cases as follows:
 
 | Invocation | Wall time |
 |---|---|
-| `./repo test --suite integration --group chain` | ~200 s |
-| `./repo test --suite integration --group chain --parallel 4` | ~64 s |
+| `./repo test chain` | ~200 s |
+| `./repo test chain --parallel 4` | ~64 s |
 
 Shard large groups (`chain`, `native-dsh`) with `--parallel 4`. Keep small,
 startup-dominated groups (`protocol`, `transport`) serial. `--parallel 8`

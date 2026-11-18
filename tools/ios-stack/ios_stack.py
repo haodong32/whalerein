@@ -55,8 +55,11 @@ RUN_MARKER_ARG = "--ios-stack-run"
 ACCESS_BIN = BIN_DIR / "whalerein-access"
 ACCESS_SOURCE = "access/cmd/server"
 
-POSTGRES_IMAGE = "postgres:18-alpine"
-MOSQUITTO_IMAGE = "whalerein-mosquitto:local"
+POSTGRES_IMAGE = (
+    "postgres:18.7-alpine3.24@sha256:"
+    "75dcac3dfb1cd01ca3536910bbc84128759362f8b118bf8c55b38a94f68f3b73"
+)
+MOSQUITTO_IMAGE = os.environ.get("WHALEREIN_IOS_BROKER_IMAGE", "whalerein-mosquitto:local")
 MOSQUITTO_DOCKERFILE = ROOT / "deploy" / "docker" / "mosquitto.Dockerfile"
 
 WORKTREE_ID = hashlib.sha256(os.fsencode(ROOT)).hexdigest()[:12]
@@ -195,33 +198,44 @@ def docker(*args: str, timeout: float = 60.0, check: bool = True) -> subprocess.
 
 
 def container_info(name: str):
-    completed = docker("inspect", name, "--format", "{{json .State}}|{{json .Config.Labels}}", check=False)
+    completed = docker(
+        "container", "inspect", name, "--format", "{{.Id}}|{{.Image}}|{{json .State}}|{{json .Config.Labels}}",
+        check=False,
+    )
     if completed.returncode != 0:
-        return None
-    state_text, _, labels_text = completed.stdout.strip().partition("|")
+        listing = docker(
+            "ps", "-aq", "--no-trunc", "--filter", f"name=^/{name}$", check=False,
+        )
+        if listing.returncode == 0 and not listing.stdout.strip():
+            return None
+        raise StackError("container_unverified", f"Cannot verify container {name}")
     try:
+        identity, image, state_text, labels_text = completed.stdout.strip().split("|", 3)
         state = json.loads(state_text)
-        labels = json.loads(labels_text) if labels_text else {}
-    except ValueError:
-        return None
-    return {"state": state, "labels": labels or {}}
+        labels = json.loads(labels_text)
+    except ValueError as error:
+        raise StackError("container_unverified", f"Cannot verify container {name}") from error
+    return {"id": identity, "image": image, "state": state, "labels": labels or {}}
 
 
-def remove_owned_container(name: str) -> bool:
-    """Remove one exact container only when it carries our stack label."""
+def remove_owned_container(name: str, run_id: str | None) -> bool:
+    """Remove the inspected container ID only when it belongs to this run."""
     info = container_info(name)
     if info is None:
         return False
     if (
-        info["labels"].get(LABEL_STACK) != "1"
+        not run_id
+        or info["labels"].get(LABEL_STACK) != "1"
         or info["labels"].get(LABEL_WORKTREE) != WORKTREE_ID
+        or info["labels"].get(LABEL_RUN) != run_id
     ):
         raise StackError(
             "container_conflict",
-            f"Docker container {name} exists but is not owned by tools/ios-stack; "
-            "refusing to remove it",
+            f"Docker container {name} does not belong to this run",
         )
-    docker("rm", "-f", name, timeout=60, check=False)
+    docker("rm", "-f", info["id"], timeout=60, check=False)
+    if container_info(name) is not None:
+        raise StackError("container_unverified", f"Cannot verify removal of {name}")
     return True
 
 
@@ -471,7 +485,7 @@ plugin_opt_policy_ttl_ms 15000
     def _ensure_no_foreign_container(self, name: str) -> None:
         info = container_info(name)
         if info is not None:
-            remove_owned_container(name)
+            remove_owned_container(name, self.run_id)
 
     def start_postgres(self) -> None:
         self._ensure_no_foreign_container(POSTGRES_CONTAINER)
@@ -593,6 +607,7 @@ plugin_opt_policy_ttl_ms 15000
             env=self._access_environment(),
             log_path=self.directory / "access.log",
         )
+        self._write_pids()
         log_line(self.directory, "access process started")
 
         def health() -> bool:
@@ -643,6 +658,7 @@ plugin_opt_policy_ttl_ms 15000
             log_path=self.directory / "dsh.log",
             control=True,
         )
+        self._write_pids()
         wait_until("FakeDSH control socket", socket_path.exists, READY_TIMEOUT, child=self.dsh.process)
         self.dsh.call("create_session", session_id=FIXTURE_SESSION_ID)
         for _ in INITIAL_TRANSCRIPT:
@@ -663,6 +679,7 @@ plugin_opt_policy_ttl_ms 15000
             env=self._fixture_environment(),
             log_path=self.directory / "plugin.log",
         )
+        self._write_pids()
         log_path = self.directory / "plugin.log"
 
         def ready() -> bool:
@@ -893,6 +910,9 @@ plugin_opt_policy_ttl_ms 15000
             "dsh": self.dsh.process.pid if self.dsh else None,
             "plugin": self.plugin.process.pid if self.plugin else None,
         }
+        pids["starts"] = {
+            str(pid): _process_start(pid) for pid in pids.values() if pid is not None
+        }
         atomic_write_json(self.directory / "pids.json", pids, 0o600)
 
     # ---- lifecycle ------------------------------------------------------
@@ -900,6 +920,8 @@ plugin_opt_policy_ttl_ms 15000
     def start(self) -> None:
         os.makedirs(self.directory, exist_ok=True)
         os.chmod(self.directory, 0o711)
+        atomic_write(self.directory / "run.marker", self.run_id + "\n")
+        self._write_pids()
         self._load_or_create_secrets()
         self.ports = {
             "access": free_port(),
@@ -963,9 +985,15 @@ plugin_opt_policy_ttl_ms 15000
             if current is not None and current.get("state") == "pending":
                 pending_approval = self.last_approval
         containers = {}
+        artifacts = {}
         for key, name in (("postgres", POSTGRES_CONTAINER), ("broker", MOSQUITTO_CONTAINER)):
             info = container_info(name)
             containers[key] = None if info is None else info["state"].get("Status")
+            if info is not None:
+                artifacts[key] = info["image"]
+        if ACCESS_BIN.is_file():
+            with ACCESS_BIN.open("rb") as binary:
+                artifacts["access"] = hashlib.file_digest(binary, "sha256").hexdigest()
         return {
             "schema": SCHEMA,
             "ready": self.health(),
@@ -983,6 +1011,7 @@ plugin_opt_policy_ttl_ms 15000
                 "plugin": bool(self.plugin and self.plugin.alive()),
             },
             "containers": containers,
+            "artifacts": artifacts,
             "fixture": fixture,
             "pending_approval": pending_approval,
             "invitation_expires_at_unix_ms": getattr(self, "invitation", {}).get(
@@ -1126,7 +1155,7 @@ plugin_opt_policy_ttl_ms 15000
                 errors.append(f"{child.name}: {error}")
         for name in (MOSQUITTO_CONTAINER, POSTGRES_CONTAINER):
             try:
-                if remove_owned_container(name):
+                if remove_owned_container(name, self.run_id):
                     removed.append(name)
             except StackError as error:
                 errors.append(error.message)
@@ -1332,8 +1361,13 @@ def _pid_matches(pid: int, needles: list[str]) -> bool:
     return bool(command) and any(needle and needle in command for needle in needles)
 
 
-def _terminate_pid(pid: int, needles: list[str], grace: float = 5.0) -> bool:
-    if not _pid_alive(pid) or not _pid_matches(pid, needles):
+def _process_start(pid: int) -> str:
+    completed = run(["ps", "-p", str(pid), "-o", "lstart="], check=False, timeout=5)
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _terminate_pid(pid: int, start: str, needles: list[str], grace: float = 5.0) -> bool:
+    if not start or start != _process_start(pid) or not _pid_matches(pid, needles):
         return False
     try:
         if os.getpgid(pid) == pid:
@@ -1344,9 +1378,11 @@ def _terminate_pid(pid: int, needles: list[str], grace: float = 5.0) -> bool:
         return False
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not _pid_alive(pid) or _process_start(pid) != start:
             return True
         time.sleep(0.1)
+    if _process_start(pid) != start or not _pid_matches(pid, needles):
+        return False
     try:
         if os.getpgid(pid) == pid:
             os.killpg(pid, signal.SIGKILL)
@@ -1390,6 +1426,11 @@ def cleanup_run(directory: Path, state: dict | None = None) -> dict:
     run_id = (state or {}).get("run_id") or (read_json(directory / "state.json") or {}).get(
         "run_id"
     )
+    if not run_id:
+        try:
+            run_id = (directory / "run.marker").read_text().strip()
+        except FileNotFoundError:
+            pass
     markers = [
         f"_supervise --dir {directory}",
         f"{RUN_MARKER_ARG} {run_id}" if run_id else "",
@@ -1397,13 +1438,18 @@ def cleanup_run(directory: Path, state: dict | None = None) -> dict:
         f"--config {directory / 'access.yaml'}",
     ]
     supervisor_pid = pids.get("supervisor")
-    if isinstance(supervisor_pid, int) and _pid_matches(supervisor_pid, markers):
-        _terminate_pid(supervisor_pid, markers)
-    for pid in find_owned_pids(directory, run_id):
-        _terminate_pid(pid, markers)
+    starts = pids.get("starts", {})
+    candidates = find_owned_pids(directory, run_id)
+    if supervisor_pid in candidates:
+        candidates.remove(supervisor_pid)
+        candidates.insert(0, supervisor_pid)
+    for pid in candidates:
+        start = starts.get(str(pid), "")
+        if _pid_alive(pid) and not _terminate_pid(pid, start, markers) and _pid_alive(pid):
+            errors.append(f"process ownership unverified: {pid}")
     for name in (MOSQUITTO_CONTAINER, POSTGRES_CONTAINER):
         try:
-            if remove_owned_container(name):
+            if remove_owned_container(name, run_id):
                 removed.append(name)
         except StackError as error:
             errors.append(error.message)
@@ -1444,7 +1490,10 @@ def ensure_access_binary() -> None:
     go = shutil.which("go")
     if go is None:
         raise StackError("missing_command", "go is required to build WhaleRein Access")
-    run([go, "build", "-trimpath", "-o", str(ACCESS_BIN), "./" + ACCESS_SOURCE], timeout=900)
+    run(
+        [go, "build", "-buildvcs=false", "-trimpath", "-o", str(ACCESS_BIN), "./" + ACCESS_SOURCE],
+        timeout=900,
+    )
     if not ACCESS_BIN.exists():
         raise StackError("build_failed", "Access binary was not produced")
     os.chmod(ACCESS_BIN, 0o755)
@@ -1501,8 +1550,10 @@ def cmd_up(args: argparse.Namespace) -> int:
                 return 0
         if directory.exists():
             sys.stderr.write("cleaning stale ios-stack state...\n")
-            cleanup_run(directory)
-            shutil.rmtree(directory, ignore_errors=True)
+            cleanup = cleanup_run(directory)
+            if cleanup["errors"]:
+                raise StackError("stale_cleanup_failed", "Cannot verify cleanup of the old stack")
+            shutil.rmtree(directory)
         sys.stderr.write("building WhaleRein Access from the current worktree...\n")
         ensure_access_binary()
         ensure_dependencies()
@@ -1521,7 +1572,11 @@ def cmd_up(args: argparse.Namespace) -> int:
             text=True,
         )
         stream.close()
-        atomic_write_json(directory / "pids.json", {"supervisor": process.pid}, 0o600)
+        if not (directory / "pids.json").exists():
+            atomic_write_json(directory / "pids.json", {
+                "supervisor": process.pid,
+                "starts": {str(process.pid): _process_start(process.pid)},
+            })
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline:
             error = read_json(directory / "error.json")

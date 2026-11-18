@@ -3,7 +3,8 @@
 The integration TLS cases need a small certificate hierarchy: a trusted CA, a
 second CA for rotation, a valid server leaf, and negative leaves (expired,
 wrong host, self-signed). They are generated at test time by
-`tests/integration/tls_environment.py` with the `openssl` CLI, not committed:
+`tests/integration/tls_environment.py` with the `openssl` CLI inside the
+container’s temporary filesystem. They are never committed:
 private keys must never enter the repository.
 
 | File | Purpose |
@@ -17,5 +18,4 @@ private keys must never enter the repository.
 | `ca2.pem` / `ca2.key` | Independent second authority for CA rotation. |
 | `server2.pem` / `server2.key` | `localhost` identity signed by `ca2.pem`. |
 
-Generated names match the `*.pem` / `*.key` patterns in the root `.gitignore`.
-Deleting the generated files is safe; the next run recreates them.
+The files are discarded with the test container.

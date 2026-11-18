@@ -50,7 +50,7 @@ def test_ordinary_pr_never_checks_out_or_builds_ios(tmp_path, action, label):
         LABEL=label,
     )
     assert code == 0
-    assert outputs == {"build": "false", "ios": "false"}
+    assert outputs == {"build": "false"}
 
 
 def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
@@ -100,13 +100,8 @@ def test_ios_gate_requires_successful_selection_even_when_build_is_skipped(tmp_p
         "ios.yml",
         "Check required results",
         CHANGES_RESULT=changes,
-        EVENT="pull_request",
-        SUITE="full",
-        BUILD_REQUIRED="false",
-        BUILD_RESULT="skipped",
-        UNIT_RESULT="skipped",
-        SMOKE_RESULT="skipped",
-        FULL_RESULT="skipped",
+        NATIVE_REQUIRED="false",
+        NATIVE_RESULT="skipped",
     )
     assert (code == 0) == (changes == "success")
 
@@ -118,13 +113,8 @@ def test_requested_ios_full_ui_failure_blocks_gate(tmp_path, result):
         "ios.yml",
         "Check required results",
         CHANGES_RESULT="success",
-        EVENT="pull_request",
-        SUITE="full",
-        BUILD_REQUIRED="true",
-        BUILD_RESULT="success",
-        UNIT_RESULT="success",
-        SMOKE_RESULT="skipped",
-        FULL_RESULT=result,
+        NATIVE_REQUIRED="true",
+        NATIVE_RESULT=result,
     )
     assert (code == 0) == (result == "success")
 

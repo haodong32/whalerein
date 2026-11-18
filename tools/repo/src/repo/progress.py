@@ -181,7 +181,11 @@ class Display:
                 "PASS"
                 if self.exit_code == 0
                 else "INTERRUPTED"
-                if self.exit_code in (2, 130, 143)
+                if self.exit_code in (130, 143)
+                else "INVALID REQUEST"
+                if self.exit_code == 2
+                else "BLOCKED"
+                if self.exit_code == 3
                 else "FAIL"
                 if self.exit_code is not None
                 else "progress"

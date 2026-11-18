@@ -13,21 +13,22 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from uuid import uuid4
 
 from ..diagnostics import sanitize
 from ..errors import RepoError, ToolMissingError, UsageError
 from ..reports.model import atomic_write
-from ..runners.integration import (
-    CONTAINER_TIMEOUT_GRACE_SECONDS,
-    _build_image,
-    _record_verified,
-    _Shard,
+from ..runners.integration import _container, prepare
+from ..sources import SourceError, SourceSelection, capture_sources
+from ..verification import (
+    Invocation,
+    RunContext,
+    VerificationError,
+    interrupt_on_termination,
+    run_lock,
 )
 from . import model
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 900
-ENTRY_POINT = "benchmark"
 
 EXIT_OK = 0
 EXIT_FAILED_ATTEMPTS = 1
@@ -104,49 +105,52 @@ def run(root, runner, request, directory):
     """Execute one benchmark run; never raises for measurement or cleanup faults."""
     directory = Path(directory).resolve()
     request.validate()
-    if (directory / "benchmark.json").exists():
-        raise UsageError(
-            "output directory already contains a benchmark report; choose a new directory"
-        )
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(mode=0o700, parents=True)
+    except FileExistsError as exc:
+        raise UsageError("output directory already exists; choose a new directory") from exc
+    with run_lock(directory), interrupt_on_termination():
+        return _run_in_directory(root, runner, request, directory)
+
+
+def _run_in_directory(root, runner, request, directory):
     export = directory / "container"
     export.mkdir()
-    container = "whalerein-bench-" + uuid4().hex[:12]
     timeout = request.timeout or DEFAULT_EXECUTION_TIMEOUT_SECONDS
     errors = []
     exit_code = EXIT_FAILED_ATTEMPTS
     document = None
     cleanup = {"result": "unverified", "reason": "container_not_launched"}
-    launched = False
     interrupted = False
     started = monotonic()
+    context = RunContext(
+        Invocation("benchmark", "protocol-http", (SourceSelection("public", root),), timeout=3600),
+        directory,
+    )
     try:
-        probe = runner.run(["docker", "buildx", "version"], root, timeout=15, quiet=True)
-        if not probe.ok:
-            raise ToolMissingError("Docker buildx is required for ./repo bench")
-        image_errors = []
-        image = _build_image(root, runner, directory, {"errors": image_errors})
-        if image is None:
-            # A rejected build is invalid execution, not a crash: keep the
-            # explicit failure and publish no invented attempts.
-            errors.extend(image_errors)
-            errors.append("Benchmark image build failed")
-            exit_code = EXIT_FAILED_ATTEMPTS
-        else:
-            launched = True
-            result = runner.run(
-                _container_arguments(container, image, export, timeout, request),
-                root,
-                quiet=True,
-                timeout=timeout + CONTAINER_TIMEOUT_GRACE_SECONDS,
-            )
-            exit_code = result.returncode
-            if result.returncode == 124:
-                errors.append(f"Benchmark execution timed out after {timeout} seconds")
-            elif result.returncode not in (0, EXIT_FAILED_ATTEMPTS):
-                # Exit 1 means "ran, with failed attempts" and the export carries
-                # that outcome. Any other status means execution itself failed.
-                errors.append("Benchmark entry point exited " + str(result.returncode))
+        with context.phase("source-capture"):
+            context.sources = capture_sources(context.invocation.sources, directory / "sources")
+        image, workspace = prepare(context, runner, "protocol-http")
+        container = _container(context, runner, workspace, image, "benchmark")
+        container.create(
+            _container_options(workspace, export, timeout, request),
+            [
+                "timeout",
+                "--signal=INT",
+                "--kill-after=10s",
+                f"{timeout}s",
+                "python3",
+                "tests/integration/benchmark/main.py",
+            ],
+        )
+        result = container.execute()
+        exit_code = result.returncode
+        if exit_code == 130:
+            raise KeyboardInterrupt
+        if exit_code == 124:
+            errors.append(f"Benchmark execution timed out after {timeout} seconds")
+        elif exit_code not in (0, EXIT_FAILED_ATTEMPTS):
+            errors.append("Benchmark entry point exited " + str(exit_code))
     except KeyboardInterrupt:
         interrupted = True
         exit_code = EXIT_INTERRUPTED
@@ -156,11 +160,20 @@ def run(root, runner, request, directory):
         raise
     except UsageError:
         raise
+    except (VerificationError, SourceError) as exc:
+        errors.append(str(exc))
+        if isinstance(exc, VerificationError) and exc.exit_code == 3:
+            raise ToolMissingError(str(exc)) from exc
     except (OSError, ValueError) as exc:
         errors.append(sanitize(exc))
     finally:
-        if launched:
-            cleanup = _stop_and_verify(root, runner, container)
+        context.cleanup()
+        if context.cleanups:
+            cleanup = (
+                {"result": "unverified", "reason": "container_cleanup_not_verified"}
+                if context.cleanup_errors
+                else {"result": "verified", "reason": None}
+            )
         document = _load(export / "benchmark.json", errors, interrupted)
     if document is None:
         document = _placeholder(request, errors)
@@ -206,18 +219,12 @@ def run(root, runner, request, directory):
     return BenchResult(document, exit_code, path, errors)
 
 
-def _container_arguments(container, image, export, timeout, request):
+def _container_options(workspace, export, timeout, request):
     return [
-        "docker",
-        "run",
-        "--init",
-        "--sig-proxy=false",
         "--network",
         "none",
         "--tmpfs",
         "/tmp:rw,exec,size=1024m,mode=1777",
-        "--name",
-        container,
         "--env",
         "WHALEREIN_PROGRESS=events",
         "--env",
@@ -226,26 +233,10 @@ def _container_arguments(container, image, export, timeout, request):
         "WHALEREIN_BENCHMARK_CONFIG="
         + json.dumps(request.as_configuration(), separators=(",", ":")),
         "--mount",
+        f"type=bind,src={workspace},dst=/workspace,readonly",
+        "--mount",
         f"type=bind,src={export},dst=/reports",
-        image,
-        ENTRY_POINT,
     ]
-
-
-def _stop_and_verify(root, runner, container):
-    """Stop only this run's container and verify it is gone."""
-    runner.run(
-        ["docker", "stop", "--signal", "SIGINT", "--timeout", "10", container],
-        root,
-        timeout=25,
-        quiet=True,
-    )
-    runner.run(["docker", "rm", "--force", container], root, timeout=30, quiet=True)
-    state = _Shard(index=0, export=None, name=container, launched=True)
-    _record_verified(runner, root, state, 1)
-    if state.verified:
-        return {"result": "verified", "reason": None}
-    return {"result": "unverified", "reason": "container_cleanup_not_verified"}
 
 
 def _load(path, errors, interrupted):

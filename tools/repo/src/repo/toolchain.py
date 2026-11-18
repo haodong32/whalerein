@@ -29,9 +29,11 @@ def run(projects, runner, action, explicit=False):
             continue
         plans.extend(RUNNERS[project.kind].steps(project, action))
     results = []
+    blocked = False
     for step in plans:
         runner.out.info(step.label)
         result = runner.run(step.argv, step.cwd, timeout=1800)
+        blocked |= result.missing
         ok = result.ok and not (step.fail_on_output and result.stdout.strip())
         if not ok:
             runner.out.error(f"{step.label}: exited {result.returncode}\n{result.tail()}")
@@ -48,5 +50,7 @@ def run(projects, runner, action, explicit=False):
     return {"steps": results, "not_applicable": skipped}, (
         130
         if any(s["exit_code"] == 130 for s in results)
+        else 3
+        if blocked
         else int(any(not s["ok"] for s in results))
     )

@@ -21,11 +21,12 @@ def environment():
 
 def selection(configuration):
     """Execution limits do not change selection; parallelism changes wall time."""
+    suite = configuration.get("suite", "unit")
+    target = configuration.get("group") or suite
     return (
-        configuration.get("suite", "unit"),
+        target,
         tuple(sorted(configuration.get("projects", []))),
         configuration.get("only"),
-        configuration.get("group"),
         configuration.get("coverage", False),
         configuration.get("list_only", False),
         configuration.get("parallel") or 1,
@@ -88,11 +89,12 @@ def historical_duration(root, request):
 
 def announce(root, request, out):
     """Describe the request before discovery, compilation or test execution."""
-    projects = ", ".join(request.projects) or "none"
-    scope = f"unit projects: {projects}" if request.suite != "integration" else ""
-    if request.suite in ("integration", "all"):
-        scope += ("; " if scope else "") + f"integration group: {request.group or 'ALL'}"
-    out.info(f"Test selection: suite={request.suite}; {scope}")
+    scope = (
+        f"target: {request.group or 'integration'}"
+        if request.suite == "integration"
+        else f"unit projects: {', '.join(request.projects)}"
+    )
+    out.info(f"Test selection: {scope}")
     out.info(
         f"Mode: {'discovery' if request.list_only else 'execution'}; "
         f"case filter={'on' if request.only else 'off'}; "

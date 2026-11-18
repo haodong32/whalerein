@@ -70,7 +70,7 @@ notification. A watch lease expires after 30 seconds without refresh. Text
 coalescing is bounded to 20 ms / 8 KiB; one slow recipient does not own another
 recipient's publication queue.
 
-Use `./repo test --project host --coverage` from the repository root for this
+Use `./repo test host --coverage` from the repository root for this
 package; see [repo commands](../../tools/repo/README.md) for other operations.
 Unit coverage includes
 this package's own source, not its test fixtures. `test/support/` owns the generic

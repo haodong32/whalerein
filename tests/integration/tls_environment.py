@@ -3,7 +3,7 @@
 The default integration stack is plaintext loopback. These helpers start a
 second, case-scoped Mosquitto listener with the same plugin configuration but a
 real TLS handshake, and reconfigure Access, the plugin and the CLI to trust the
-test CA. Certificate material lives in `fixtures/tls/` and is public test data.
+test CA. Certificates and private keys are generated in container-local scratch space.
 
 Negative handshake cases do not use this module's broker: they start Access with
 one certificate variant and assert `/readyz` fails closed with a transport
@@ -22,12 +22,11 @@ from pathlib import Path
 from environment import (
     BROKER_PASSWORD,
     INTERNAL_TOKEN,
-    ROOT,
     Process,
     wait,
 )
 
-TLS_DIR = ROOT / "tests/integration/fixtures/tls"
+TLS_DIR = Path("/tmp/whalerein-integration-tls")
 
 _GENERATED = (
     "ca.pem", "ca.key", "ca2.pem", "ca2.key",
@@ -94,7 +93,7 @@ def ensure_certificates():
     """
     if all((TLS_DIR / name).is_file() for name in _GENERATED):
         return
-    TLS_DIR.mkdir(parents=True, exist_ok=True)
+    TLS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     _ca("ca", "WhaleRein Test CA")
     _ca("ca2", "WhaleRein Rotation CA")
     _leaf("server", "localhost", "ca", "DNS:localhost,IP:127.0.0.1")
@@ -218,7 +217,7 @@ class TlsBroker:
                 f"certfile {plugin / 'server.pem'}",
                 f"keyfile {plugin / 'server.key'}",
                 "tls_version tlsv1.2",
-                "plugin /usr/local/lib/mosquitto/whalerein.so",
+                "plugin /workspace/.verification/lib/whalerein.so",
                 "plugin_opt_access_username access",
                 f"plugin_opt_access_password_file {password_file}",
                 "plugin_opt_access_auth_url http://127.0.0.1:18081/internal/broker/connect",

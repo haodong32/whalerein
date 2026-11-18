@@ -17,25 +17,27 @@ without executing a task.
 | Command | Behavior |
 |---|---|
 | `projects` | List registered IDs, paths, languages and supported operations. |
-| `doctor [--for TASK]` | Probe basic tools or check/build/test/coverage/integration/proto prerequisites. |
-| `fmt [--project ID]` | Write formatting changes. |
-| `check [--project ID]` | Check formatting and run static analysis without modifying source. |
-| `build [--project ID]` | Build applicable projects; Access writes `.data/bin/whalerein-access`. |
-| `test` | Run native unit tests by default; see selection below. |
-| `report FILE --output FILE` | Render saved JSON facts to offline HTML. |
-| `proto [--check]` | Generate committed Go/JS bindings, or check their consistency. |
+| `doctor [TARGET]` | Probe basic tools or prerequisites for a target. |
+| `fmt [TARGET]` | Write formatting changes. |
+| `check [TARGET]` | Check formatting and run static analysis without modifying source. |
+| `build [TARGET]` | Build applicable projects; Access writes `.data/bin/whalerein-access`. |
+| `test [TARGET]` | Run native unit tests by default; see selection below. |
+| `report RUN_DIRECTORY` | Render saved report.json as report.html in the run directory. |
+| `recover RUN_DIRECTORY` | Clean up resources whose ownership is recorded in an abandoned run. |
+| `proto` | Generate committed Go/JS bindings. Use `check proto` to verify consistency. |
 | `bench` | Run the opt-in streaming-reply product benchmark in an isolated container. |
 | `bench-compare -b DIR -c DIR` | Compare saved benchmark runs under the predeclared protocol. |
 
-`--project` accepts exact IDs and is repeatable. Defaults select all applicable
-registered projects. Explicitly selecting an unsupported operation fails before
-native execution. Inspect [projects.toml](projects.toml) or `./repo projects`;
-paths and package names are not alternate selectors.
+Targets are exact IDs scoped to the action. Bare `check` selects local static
+checks and bare `test` selects unit targets. Command help lists the valid targets
+and their tools. Inspect [projects.toml](projects.toml) or `./repo projects` for the
+registered native projects.
 
 Rust formatting targets selected packages. Node format/check/build operations
 require manifest scripts (`fmt`, `fmt:check`/`lint`, `build`). Python supports
 format/check/test. `check` does not execute tests, start services or generate
-bindings. Run `proto --check` explicitly for protocol consistency.
+bindings. `check proto` verifies the generated Go/JS bindings. `check proto-rust`
+selects only the Rust binding project's static checks.
 
 `doctor` probes executables and versions without installing tools. Package
 installation, daemon readiness and deployment behavior require separate checks.
@@ -125,30 +127,26 @@ when the run fails its coverage gate.
 The separate Integration workflow provides merge-queue, daily (03:17
 Asia/Shanghai), manual and reusable release-gate execution. See
 [CI test tiers](../../docs/testing.md#ci-test-tiers) for trigger, evidence,
-concurrency and report rules. It calls the existing
-`./repo test --suite integration`; it does not require local server services.
+concurrency and report rules. It calls `./repo test integration`, which
+starts its own isolated test runtime.
 
 The workflows already run the complete suite on a `merge_group` tree, but this
 personal repository cannot enable GitHub's merge-queue ruleset, so that tier is
 inactive here. On a pull request, add the `run-integration` label to request the
 suite for that label event; later pushes do not rerun it, so remove and re-add
-the label to verify a new revision. A complete run takes about 90 minutes, so
-the check is reported but not required. PR and queue runs do not establish the
+the label to verify a new revision. The check is reported but not required. PR and queue runs do not establish the
 scheduled main-branch cache baseline. Reports are uploaded as
 `integration-<run-id>-<attempt>` Artifacts.
 
 Every run reclaims unused preinstalled images and SDKs on its disposable
 GitHub-hosted Linux VM and requires 24 GiB free before image building. The
-storage helper rejects local, self-hosted and non-Linux environments. Image
-builds temporarily reserve 32 MiB on the report filesystem, then release it
-before saving failure reports so build storage exhaustion does not mask its
-original error. Verbose exception diagnostics include numeric OS error codes
-without exception messages or filenames.
+storage helper rejects local, self-hosted and non-Linux environments.
+The runner preserves observed execution facts when a run fails.
 
 Inspect its content fingerprint locally:
 
 ```bash
-python3 tools/repo/src/repo/integration_ci.py key --revision HEAD
+PYTHONPATH=tools/repo/src python3 -m repo.integration_ci key --revision HEAD
 ```
 
 Only complete successful full-suite reports can create a cached receipt; errors,
@@ -168,9 +166,8 @@ codes are retained in results; the CLI reports:
 |---|---|
 | 0 | Success. |
 | 1 | Operation, collection or coverage failure. |
-| 2 | Invalid CLI request. |
+| 2 | Invalid CLI request, unknown target or unmatched case filter. |
 | 3 | Missing prerequisite reported by doctor or a prerequisite error. |
-| 4 | Unknown project ID. |
 | 130 | Interruption. |
 
 There is no global dry-run or native argument passthrough. Use native tools for
@@ -180,10 +177,9 @@ specialized options that the repository interface does not expose.
 
 `./repo bench` measures one client-observable workflow: a user sends a message
 while the conversation is open, and the benchmark records how long the first
-visible reply text and the correct final reply take. It runs in the same
-isolated container image as the integration suite, through the real CLI, Access,
-Host and plugin against FakeDSH. It is opt-in and never runs as part of
-`./repo test`.
+visible reply text and the correct final reply take. It uses the Linux
+integration builder and the same artifacts for the real CLI, Access, Host and
+plugin against FakeDSH. Run it explicitly with `./repo bench`.
 
 ```bash
 ./repo bench
@@ -334,36 +330,35 @@ comparing releases.
 validation are required. The command accepts:
 
 ```bash
-./repo test --project core
-./repo test --project core --only reconnect
-./repo test --project core --list
-./repo test --project repo --coverage
-./repo test --suite integration --group protocol
-./repo test --suite integration --group chain --parallel 2
-./repo test --suite integration --only test_send
-./repo test --suite integration --list
-./repo test --suite all
+./repo test core
+./repo test core --only reconnect
+./repo test core --list
+./repo test repo --coverage
+./repo test protocol
+./repo test chain --parallel 2
+./repo test chain --only test_send
+./repo test protocol-vectors --list
+./repo test integration
+./repo test ios-integration --simulator SIMULATOR_UDID
 ```
 
-`--suite` is unit (default), integration or all. `--only` matches case IDs by
-literal, case-sensitive substring; no matches fail. Supported combinations are:
+`protocol` aggregates `protocol-vectors` and `protocol-http`. `integration` runs
+both protocol targets and the `storage`, `transport`, `chain`, and `native-dsh`
+targets. The iOS targets require a native macOS host. Use
+`ios-unit`, `ios-ui`, and `ios-integration` for whole plans, or `ios-ui-smoke`
+for the CI smoke selection. Bare test selects registered unit targets only.
 
-| Option | Suites | Additional constraints |
+| Option | Targets | Additional constraints |
 |---|---|---|
-| `--project ID` | unit | Repeatable; exact registered IDs. |
-| `--group GROUP` | integration | One of protocol/storage/transport/chain/native-dsh. |
-| `--integration-timeout SECONDS` | integration, all | Positive execution deadline; defaults to 7200 seconds. Image build has a separate 1800-second limit. |
-| `--parallel N` | integration only | 1-8 independent containers, each with a deterministic hash shard of the selected cases. Defaults to 1 (today's single-container path). Incompatible with `--list`. |
-| `--only TEXT` | unit, integration | Nonempty; unit requires one project; incompatible with coverage. |
-| `--coverage` | unit, all | No `--only` or `--list`; all measures only its unit portion. |
-| `--list` | unit, integration, all | No coverage; Node static listing is unsupported. |
+| `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. |
+| `--coverage` | Unit targets | No `--only` or `--list`. |
+| `--list` | Unit, Linux integration, and iOS leaves | No coverage; Node static listing is unsupported. |
+| `--parallel N` | Linux integration targets | 1–8 independent hash shards, default 1; incompatible with `--list`. |
+| `--integration-timeout SECONDS` | Linux integration targets | Positive run deadline covering preparation through execution, defaults to 7200 seconds. |
+| `--simulator UDID` | iOS targets | Exact Simulator device UDID. |
 
-In particular, `--suite all --only TEXT`, `--suite integration --coverage` and
-`--parallel` with the unit/all suites or `--list` are invalid requests.
-`--parallel N` is an integration execution mode, not a selector: the selected
-case set is unchanged and shards are distributed by a stable CRC32 of each
-pytest node ID. The image is built once per invocation and every shard runs that
-immutable image ID in its own container, bind mount and fixed-port namespace.
+`--parallel N` preserves the selected case set and distributes cases by a stable
+CRC32 of each pytest node ID. Each shard has its own runtime and result export.
 
 `--list` discovers cases without executing test bodies. Rust discovery can
 compile tests and integration discovery can build its image. Node static listing
@@ -385,8 +380,8 @@ provided. For a root test named `parent/child`, the name portion of its ID is
 For example, with project ID `host` and file `test/example.test.js`:
 
 ```bash
-./repo test --project host --only 'parent~1child'
-./repo test --project host --only 'host::test/example.test.js::parent~01child'
+./repo test host --only 'parent~1child'
+./repo test host --only 'host::test/example.test.js::parent~01child'
 ```
 
 The first selects the slash name; the second selects the literal tilde name.
@@ -395,18 +390,19 @@ The example file/names illustrate syntax; use actual IDs from your saved report.
 ## Test scope and cost notices
 
 Use [staged validation](../../docs/testing.md#choose-checks-for-a-change) to choose
-iteration, final unit coverage and integration scope. Command defaults remain
-compatible; agent-driven unit commands select projects explicitly.
+iteration, final unit coverage and integration scope. During iteration, select a
+target explicitly.
 
-Before discovery, compilation or execution, `test` prints the selected suite,
-projects/integration group, case-filter state, coverage state and parallelism.
+Before discovery, compilation or execution, public unit and Linux integration
+tests print the selected projects or target, case-filter state, coverage state
+and parallelism.
 The filter text itself is not printed. JSON mode keeps notices on stderr and
 adds `historical_duration` (`samples`, `median_ms`) to the result data.
 
 History reads at most the 100 most recent `.data/runs/*/report.json` files, up to
 8 MiB each, and takes the median of up to five complete successful runs with the
-same suite, project set, case filter, integration group, coverage/discovery mode,
-parallelism, OS and CPU architecture. New reports record `timing_environment`;
+same target or project set, case filter, coverage/discovery mode, parallelism,
+OS and CPU architecture. New reports record `timing_environment`;
 older reports without it, corrupt/unreadable reports, failed/incomplete runs and
 missing durations do not supply a cost estimate. Custom `--output` destinations
 outside that directory remain valid reports but are not searched for history.
@@ -452,18 +448,21 @@ Shared fixture setup belongs to its first consumer. Case times must not be summe
 to infer wall time; missing or interrupted observations are not invented. Rust
 stable libtest has no reliable per-case timing in this collector.
 
-Runs default to unique directories under `.data/runs/`. `--output DIR` selects a
-fresh directory; one already containing a report is rejected. Saved version 3
-`report.json` and `report.html` use the same in-memory facts and atomic writes.
-When execution fails or is interrupted, the tool saves facts it can assemble;
-JSON is saved before rendering HTML. Older report schemas are rejected.
+Runs default to unique directories under `.data/runs/`. Use `--output DIR` to
+select a new run directory. `report.json` is authoritative and the tool renders
+`report.html` from those facts. Environment-backed verification reports include
+source and artifact identities, runtime checks, measured phase outcomes and
+cleanup. Interrupted runs retain available observations. The offline HTML shows
+the run outcome separately from inventory and case outcomes.
 
 ```bash
-./repo test --project repo --output .data/runs/my-check
-./repo report .data/runs/my-check/report.json --output /tmp/test-report.html
+./repo test repo --output .data/runs/my-check
+./repo report .data/runs/my-check
 ```
 
-Rendering requires neither native test tools nor network access. Diagnostic
+Rendering uses only saved facts. Use `./repo recover RUN_DIRECTORY` after an
+abandoned run to acquire its lease and retry cleanup of its recorded resources.
+Diagnostic
 redaction is bounded and best effort; tests must not print secrets or private
 business contents.
 
@@ -476,9 +475,13 @@ scripts come from native manifests; new projects require explicit registration.
 | Module | Owns |
 |---|---|
 | `cli.py` | Request parsing, dispatch, final output and exit status. |
+| `targets.py` | Action target support, scope resolution, and prerequisite help. |
 | `projects.py` | Registration validation and exact ID selection. |
 | `toolchain.py` | Sequential formatting/check/build coordination. |
-| `testing.py` | Immutable test requests, execution and result aggregation. |
+| `testing.py` | Public test routing, native unit execution and coverage policy. |
+| `verification.py` | Shared run directory, phases, deadlines, cleanup and report. |
+| `sources.py` | Frozen source inputs and their identities. |
+| `integration_targets.py` | Linux integration scope, collection paths and artifact requirements. |
 | `test_cost.py` | Advisory selection notices and comparable local wall-time history. |
 | `runners/` | Ecosystem-specific commands, discovery and coverage. |
 | `process.py` | Child processes, deadlines, process-group cancellation and capture. |
@@ -486,25 +489,20 @@ scripts come from native manifests; new projects require explicit registration.
 | `reports/html.py` | Offline HTML presentation. |
 | `doctor.py`, `proto.py`, `commits.py` | Independent repository workflows. |
 
-The CLI does not mutate its arguments to dispatch another command. Execution is
-sequential. There is no dynamic plugin registry, second discovery catalog or
-implicit development-service startup. The host integration runner owns its
-container and pins it to the built image ID, independently of parallel worktrees; each run mounts a private tmpfs at `/tmp`, discarded with the container. With
-`--parallel N`, the same runner builds one image, starts N containers concurrently
-with separate exports, stops and verifies every launched container, then merges
-their version 1 scopes into one report. An interrupted or invalid shard keeps the
-merged result incomplete; duplicate case identities are rejected. The container exports one version 1 scope for host validation and
-aggregation. The container enforces the selected execution deadline and sends
-SIGINT to pytest; the host runner allows a short shutdown grace period, verifies
-container cleanup and retains any exported partial report. A timed-out run is
-marked incomplete and never passes. See [integration implementation](../../tests/integration/README.md).
+The CLI resolves a target once and delegates to its native runner.
+Linux integration uses a stable runtime image and compiles the selected product
+artifacts from frozen inputs with native incremental caches. It verifies the
+runtime identity and merged case inventory before finalizing its report.
+`--parallel N` creates separate owned containers and exports, with a bounded
+cleanup independent of the execution deadline. See the
+[integration implementation](../../tests/integration/README.md).
 
 ## Maintaining the tool
 
 ```bash
-./repo fmt --project repo
-./repo check --project repo
-./repo test --project repo --coverage
+./repo fmt repo
+./repo check repo
+./repo test repo --coverage
 ```
 
 Read [commit rules](../../docs/commits.md) before committing. Git hooks invoke
