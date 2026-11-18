@@ -220,7 +220,7 @@ try {
       await advanced.focus()
       await page.keyboard.press('Enter')
       await expect(advanced).toHaveAttribute('aria-expanded', 'true')
-      const menu = panel.locator('button[aria-haspopup="menu"]')
+      const menu = panel.getByRole('button', { name: /^(?:Log level|日志级别)(?:\s|$)/ })
       await menu.focus()
       await page.keyboard.press('Enter')
       await page.getByRole('menuitem').first().waitFor()
