@@ -201,7 +201,7 @@ def test_native_creation_history_refresh_failure_recovers_without_recreate(scena
     session = receipt["session_id"]
     assert receipt["disposition"] == "READY"
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
+    paired_device.send_confirmed(session, "synthetic fixture", delivery="start-if-idle")
     scenario.wait_idle(session)
     cached_before = paired_device.cached_history_state(scenario.host, session)
     assert scenario.request("creation-fail-next-history")["armed"]

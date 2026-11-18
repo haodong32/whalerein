@@ -25,7 +25,7 @@ def test_gx05_native_default_open_capabilities_preserve_existing_operations(scen
     assert code != 0 and values[-1]["error"]["code"] != "unsupported_capability"
     assert scenario.request("question-root-probe", sessionId=session)["answered"]
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic baseline", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
+    paired_device.send_confirmed(session, "synthetic baseline", delivery="start-if-idle")
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 

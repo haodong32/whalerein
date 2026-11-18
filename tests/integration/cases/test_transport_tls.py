@@ -98,8 +98,7 @@ def test_tls_transport_carries_pairing_and_messages(scenario, paired_device):
     watch = paired_device.start_watch('session', 'watch', identity, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
-        sent = paired_device.send(identity, "tls fixture message")
-        assert sent["receipt"]["status"] == "succeeded"
+        paired_device.send_confirmed(identity, "tls fixture message")
         watch.wait(lambda value: _event(value).get("type") == "message", timeout=25)
     finally:
         watch.close()

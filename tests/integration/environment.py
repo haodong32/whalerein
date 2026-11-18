@@ -266,8 +266,9 @@ class Device:
             # intent before reading its receipt. Detach avoids waiting for
             # a model reply while the case holds the active run.
             code, envelopes = self.invoke(
-                "session", "send", session, "--detach", *delivery_args,
-                "--operation-id", operation, "--timeout", str(int(remaining)),
+                "session", "send", session, "--host", target["host_id"],
+                "--detach", *delivery_args, "--operation-id", operation,
+                "--timeout", str(int(remaining)),
                 "--", text, success=False,
             )
             envelope = envelopes[-1]

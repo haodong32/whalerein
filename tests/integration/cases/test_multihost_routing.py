@@ -40,12 +40,14 @@ def test_two_native_hosts_colliding_session_ids_require_explicit_routing(scenari
         assert code != 0 and values[-1]['error']['code'] == 'conflict'
         scenario.model.plan()
         result = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', '--host', scenario.host, "--detach")
-        assert result['receipt']['status'] == 'succeeded'
+        assert result["target"] == {"host_id": scenario.host, "session_id": shared}
+        paired_device.confirm_detached_delivery(result, shared, "synthetic route", "start-if-idle")
         scenario.wait_idle(shared)
         assert scenario.model.calls == 1 and other.model.calls == 0
         other.model.plan()
         result = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', '--host', other.host, "--detach")
-        assert result['receipt']['status'] == 'succeeded'
+        assert result["target"] == {"host_id": other.host, "session_id": shared}
+        paired_device.confirm_detached_delivery(result, shared, "synthetic route", "start-if-idle")
         other.wait_idle(shared)
         assert scenario.model.calls == 1 and other.model.calls == 1
         for host in (scenario.host, other.host):

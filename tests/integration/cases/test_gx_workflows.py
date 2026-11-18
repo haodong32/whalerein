@@ -62,8 +62,9 @@ def test_gx01_native_continued_native_timeout_then_answer(scenario, paired_devic
     select_model(paired_device, scenario.host, session)
     scenario.model.plan("question", hold=True)
     try:
-        receipt = paired_device.send(session, "synthetic continued question", delivery="enqueue-after-run")
-        assert receipt["receipt"]["status"] == "succeeded" and receipt["receipt"]["delivery_id"]
+        paired_device.send_confirmed(
+            session, "synthetic continued question", delivery="enqueue-after-run"
+        )
         wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=15, process=scenario.native)
         batches = paired_device.call('session', 'question', 'list', "--session", session)["batches"]
         assert len(batches) == 1 and batches[0]["phase"] == "QUESTION_CONTINUED"
