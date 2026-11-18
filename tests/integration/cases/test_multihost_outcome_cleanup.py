@@ -108,8 +108,11 @@ def _exercise_committed_outcome_cleanup(revoke_host, retain_operation, scenario,
         if retain_operation:
             # Model a persisted state with the operation retained after request body cleanup.
             if replay_commit:
-                # Legacy transient ACK was verified but not written to requests.
-                query = f"UPDATE {scenario.schema}.requests SET result_body=''::bytea,status='received' WHERE request_id=(SELECT commit_request_id FROM {scenario.schema}.pairing_operations WHERE host_id='{other.host}' AND device_id='{device.identity['device_id']}')"
+                # Preserve the retained COMMIT while simulating a lost durable
+                # ACK. An unknown result can be recovered explicitly without
+                # putting the row back into the received-only forward queue.
+                assert other.request('arm-pair-commit-replay-count')['armed']
+                query = f"UPDATE {scenario.schema}.requests SET result_body=''::bytea,status='unknown',forward_state='none' WHERE request_id=(SELECT commit_request_id FROM {scenario.schema}.pairing_operations WHERE host_id='{other.host}' AND device_id='{device.identity['device_id']}')"
             else:
                 query = f"UPDATE {scenario.schema}.requests SET request_body=''::bytea, result_body=''::bytea,bodies_cleared=true WHERE request_id=(SELECT commit_request_id FROM {scenario.schema}.pairing_operations WHERE host_id='{other.host}' AND device_id='{device.identity['device_id']}')"
             if unproven:
@@ -127,7 +130,7 @@ def _exercise_committed_outcome_cleanup(revoke_host, retain_operation, scenario,
             def generation():
                 return subprocess.run(['psql','-h','127.0.0.1','-p','55432','-U','postgres','-d','whalerein_test','-tAc',generation_query],check=True,capture_output=True,text=True,timeout=5).stdout.strip()
             before = generation()
-            assert other.request('arm-pair-commit-replay-count')['armed']
+            assert other.request('pair-commit-replay-count')['calls'] == 0
             stage('replay-resume-start')
             outcome = device.call('operation', 'recover', operation_id)['connection']
             stage('replay-resume-success')
