@@ -274,7 +274,7 @@ def test_native_remote_session_create_and_reuse(scenario, paired_device):
     assert reused["session_id"] == session
     assert any(item["session_id"] == session for item in paired_device.sessions(scenario.host))
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]['status'] == 'succeeded'
+    assert paired_device.send_confirmed(session, "synthetic fixture", delivery="start-if-idle")['status'] == 'succeeded'
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -1624,7 +1624,7 @@ def test_native_interrupt_keeps_queued_delivery(scenario, paired_device):
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")["receipt"]
+    queued = paired_device.send_confirmed(session, "synthetic queued")
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
@@ -1663,7 +1663,7 @@ def test_native_start_if_idle_after_local_start_race(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("arm-start-if-idle-race")
-    receipt = paired_device.send(session, "synthetic remote race", delivery="start-if-idle")["receipt"]
+    receipt = paired_device.send_confirmed(session, "synthetic remote race", delivery="start-if-idle")
     assert receipt["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
     wait(
