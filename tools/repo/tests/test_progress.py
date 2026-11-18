@@ -19,6 +19,19 @@ def test_parses_go_events_but_omits_test_output():
     assert event == {"event": "finish", "id": "p::Case", "status": "passed"}
 
 
+def test_go_progress_masks_labeled_case_values_without_losing_package_identity():
+    event = parse(
+        json.dumps(
+            {
+                "Action": "run",
+                "Package": "example.test/authorization",
+                "Test": "TestCases/token=test-fixture-value",
+            }
+        )
+    )
+    assert event["id"] == "example.test/authorization::TestCases/token=<redacted>"
+
+
 def test_malformed_or_unknown_events_are_ignored():
     for text in ("42", "[]", PREFIX + "{", PREFIX + "{}", "ordinary child output"):
         assert parse(text) is None

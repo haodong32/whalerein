@@ -631,3 +631,57 @@ def test_rustdoc_compile_output_matches_listed_cases(tmp_path, only):
     )
     assert result["completeness"] == "complete"
     assert [(case["id"], case["status"]) for case in result["tests"]] == expected
+
+
+@pytest.mark.parametrize("only", [None, "authorization::TestSecond"])
+def test_go_authorization_package_retains_distinct_filterable_case_ids(tmp_path, only):
+    from repo.process import ProcessResult
+    from repo.projects import Project
+    from repo.reports.model import validate_scope
+
+    package = "example.test/internal/adapters/authorization"
+    names = ("TestFirst", "TestSecond")
+    selected = names if only is None else names[1:]
+
+    def response(action, cases):
+        events = [
+            {
+                "Action": action,
+                "Package": package,
+                **({"Output": name + "\n"} if action == "output" else {"Test": name}),
+            }
+            for name in cases
+        ]
+        events.append({"Action": "pass", "Package": package})
+        return ProcessResult((), str(tmp_path), 0, stdout="\n".join(map(json.dumps, events)))
+
+    runner = FakeRunner(
+        responses=([response("output", names)] if only else []) + [response("pass", selected)]
+    )
+    project = Project("p", "go", tmp_path, tmp_path / "go.mod", tmp_path)
+    scope = collect(project, runner, execute=True, only=only)
+    scope["suite_id"] = "unit:go"
+    validate_scope(scope)
+    assert scope["completeness"] == "complete"
+    assert scope["tests"] == [{"id": f"{package}::{name}", "status": "passed"} for name in selected]
+    if only:
+        assert runner.calls[-1][0][-3:] == ("-run", "^TestSecond$", package)
+
+
+def test_go_redaction_collision_does_not_merge_native_outcomes_or_expose_values(tmp_path):
+    from repo.projects import Project
+    from repo.reports.model import validate_scope
+
+    names = ("TestCases", "TestCases/token=private-first", "TestCases/token=private-second")
+    events = [{"Action": "pass", "Package": "p", "Test": name} for name in names]
+    events.append({"Action": "pass", "Package": "p"})
+    project = Project("p", "go", tmp_path, tmp_path / "go.mod", tmp_path)
+    scope = collect(
+        project, FakeRunner(default_stdout="\n".join(map(json.dumps, events))), execute=True
+    )
+    scope["suite_id"] = "unit:go"
+    validate_scope(scope)
+    assert scope["completeness"] == "incomplete"
+    assert scope["errors"] == ["Go case IDs collide after redaction"]
+    assert scope["tests"] == [{"id": "p::TestCases", "status": "passed"}]
+    assert "private-first" not in json.dumps(scope) and "private-second" not in json.dumps(scope)

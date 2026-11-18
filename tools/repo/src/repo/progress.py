@@ -263,9 +263,11 @@ def parse(line):
         return None
     action = value.get("Action")
     if value.get("Test") and action in ("run", "pass", "fail", "skip"):
+        from .runners.go import case_id
+
         return {
             "event": "start" if action == "run" else "finish",
-            "id": value.get("Package", "") + "::" + value["Test"],
+            "id": case_id(value.get("Package", ""), value["Test"]),
             "status": {"pass": "passed", "fail": "failed", "skip": "skipped"}.get(action),
         }
     if value.get("name") == value.get("file") and value.get("status") == "passed":
