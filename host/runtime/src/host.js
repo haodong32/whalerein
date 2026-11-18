@@ -236,12 +236,13 @@ export class HostRuntime {
   #handleRequestStale(event) {
     const requestId = event?.request_id
     if (typeof requestId !== 'string' || !requestId) return
-    if (event.host_id !== undefined && event.host_id !== this.#config.hostId) {
+    const sessionEnded = event.reason === 'cloud_session_ended'
+    if ((sessionEnded || event.host_id !== undefined) && event.host_id !== this.#config.hostId) {
       this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'host_mismatch' })
       return
     }
     const active = this.#commands?.requestScope(requestId) ?? null
-    const deviceId = event.device_id ?? active?.deviceId
+    const deviceId = sessionEnded ? event.device_id : event.device_id ?? active?.deviceId
     if (typeof deviceId !== 'string' || !deviceId) {
       this.#logger?.warn('presence_rejected', { code: 'invalid_argument', reason: 'device_missing' })
       return
@@ -283,7 +284,8 @@ export class HostRuntime {
         this.#logger?.warn('presence_fence_failed', { code: 'internal' })
       }
     }
-    this.#commands?.cancelRequest(requestId, 'client_poll_expired')
+    const reason = sessionEnded ? 'cloud_session_ended' : 'client_poll_expired'
+    this.#commands?.cancelRequest(deviceId, requestId, reason)
     this.presenceEvents += 1
     this.#logger?.info('request_stale', { request: requestId, reason: String(event?.reason ?? '').slice(0, 32) })
   }

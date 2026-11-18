@@ -1,4 +1,4 @@
-//! Provider-issued Cloud account sessions and official environment names.
+//! Cloud-owned App sessions and official environment names.
 
 pub(crate) mod native;
 

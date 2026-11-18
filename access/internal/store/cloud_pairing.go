@@ -26,13 +26,51 @@ func lockCloudHost(ctx context.Context, tx pgx.Tx, hostID string) error {
 }
 
 func verifyCloudPairing(ctx context.Context, tx pgx.Tx, op *PairingOperation, hostID, deviceID string) error {
+	if op.CloudSessionID != "" {
+		if err := lockActiveDeviceSession(ctx, tx, op.CloudSessionID, deviceID, op.CloudWorkspaceID, servingDeviceSessionAuthority(ctx)); err != nil {
+			if errors.Is(err, ErrDeviceSessionEnded) {
+				return ErrPairingFenced
+			}
+			return err
+		}
+		var bound bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pairing_device_sessions
+			WHERE claim_id=$1 AND session_id=$2 AND host_id=$3 AND device_id=$4
+			AND authority_revision=(SELECT authority_revision FROM device_sessions WHERE session_id=$2))`,
+			op.ClaimID, op.CloudSessionID, hostID, deviceID).Scan(&bound)
+		if err != nil {
+			return err
+		}
+		if !bound {
+			return ErrPairingFenced
+		}
+	}
 	var eligible bool
-	err := tx.QueryRow(ctx, `
+	eligibility := `
 		SELECT EXISTS(SELECT 1 FROM external_enrollments
 			WHERE host_id=$1 AND workspace_id=$3 AND enrollment_revision=$4 AND state='enrollment_ready' AND disabled_at IS NULL)
-		AND NOT EXISTS(SELECT 1 FROM external_device_revocations WHERE host_id=$1 AND device_id=$2)
-		AND NOT EXISTS(SELECT 1 FROM grants WHERE host_id=$1 AND device_id=$2)`,
-		hostID, deviceID, op.CloudWorkspaceID, op.CloudEnrollmentRevision).Scan(&eligible)
+		AND NOT EXISTS(SELECT 1 FROM external_device_revocations WHERE host_id=$1 AND device_id=$2)`
+	if op.CloudSessionID == "" {
+		eligibility += ` AND NOT EXISTS(SELECT 1 FROM grants WHERE host_id=$1 AND device_id=$2)`
+	} else {
+		// A terminal, unconfirmed grant incarnation can be replaced. Its
+		// generation and exact Host acknowledgments still fence delayed work.
+		eligibility += ` AND NOT EXISTS(SELECT 1 FROM grants g WHERE g.host_id=$1 AND g.device_id=$2
+			AND (g.revoked_at IS NOT NULL OR NOT EXISTS (
+				SELECT 1 FROM pairing_outcomes o
+				JOIN pairing_device_sessions p ON p.claim_id=o.claim_id
+				JOIN device_sessions prior ON prior.session_id=p.session_id
+				WHERE o.host_id=g.host_id AND o.device_id=g.device_id AND o.grant_generation=g.grant_generation
+				  AND NOT (o.host_confirmed AND o.host_confirmation_verified AND o.commit_binding_verified)
+				  AND (prior.revoked OR p.expires_at<=clock_timestamp() OR prior.authority_revision<>p.authority_revision
+				       OR p.authority_revision<>(SELECT authority_revision FROM device_sessions WHERE session_id=$5))
+			)))`
+	}
+	args := []any{hostID, deviceID, op.CloudWorkspaceID, op.CloudEnrollmentRevision}
+	if op.CloudSessionID != "" {
+		args = append(args, op.CloudSessionID)
+	}
+	err := tx.QueryRow(ctx, eligibility, args...).Scan(&eligible)
 	if err != nil {
 		return err
 	}

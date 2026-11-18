@@ -136,6 +136,14 @@ impl ProfileLock {
         Self::acquire_file_waiting(profile, "identity.lock", false, LOCK_RETRY_BUDGET)
     }
 
+    pub(crate) fn acquire_cloud_pairing(profile: &Path, host: &str) -> std::io::Result<Self> {
+        let name = format!(
+            "cloud-pairing-{}.lock",
+            crate::util::sha256_hex(host.as_bytes())
+        );
+        Self::acquire_file_waiting(profile, &name, false, LOCK_RETRY_BUDGET)
+    }
+
     /// Admission operation guarded by a bounded wait for transient contention.
     pub(crate) fn acquire_admission_waiting(profile: &Path) -> std::io::Result<Self> {
         Self::acquire_file_waiting(profile, "admission.lock", false, LOCK_RETRY_BUDGET)

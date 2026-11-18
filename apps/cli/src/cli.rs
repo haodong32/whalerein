@@ -63,6 +63,10 @@ enum AccountArgs {
         #[arg(long, value_name = "FILE")]
         export: Option<PathBuf>,
     },
+    Account {
+        #[command(subcommand)]
+        action: CloudAccountArgs,
+    },
     Host {
         #[command(subcommand)]
         action: HostArgs,
@@ -97,12 +101,33 @@ impl AccountArgs {
                 },
                 None,
             ),
+            Self::Account { action } => (
+                match action {
+                    CloudAccountArgs::Sessions => Command::AccountSessions,
+                    CloudAccountArgs::RevokeAllSessions => Command::AccountRevokeAllSessions,
+                    CloudAccountArgs::RevokeSession { id } => Command::AccountRevokeSession { id },
+                },
+                None,
+            ),
             Self::Host { action } => action.into_command(),
             Self::Session { action } => action.into_command(),
             Self::Device { action } => action.into_command(),
             Self::Operation { action } => action.into_command(),
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum CloudAccountArgs {
+    /// List Cloud sign-ins for your account.
+    Sessions,
+    /// Sign out every Cloud session for this account in the selected environment.
+    RevokeAllSessions,
+    /// Sign out a Cloud session belonging to your account.
+    RevokeSession {
+        #[arg(value_name = "SESSION_ID")]
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -591,6 +616,11 @@ pub enum Command {
     Login,
     /// Verify the account signed in to the selected environment.
     AccountStatus,
+    AccountSessions,
+    AccountRevokeAllSessions,
+    AccountRevokeSession {
+        id: String,
+    },
     /// Clear this instance's Cloud sign-in.
     Logout,
 
@@ -876,6 +906,9 @@ impl Command {
         match self {
             Self::Login => "login",
             Self::AccountStatus => "status",
+            Self::AccountSessions => "account.sessions",
+            Self::AccountRevokeAllSessions => "account.revoke-all-sessions",
+            Self::AccountRevokeSession { .. } => "account.revoke-session",
             Self::Connect { .. } => "host.connect",
             Self::DefaultHost { .. } => "host.default",
             Self::Logout => "logout",

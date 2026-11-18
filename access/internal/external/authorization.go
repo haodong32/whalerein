@@ -46,10 +46,12 @@ type VerificationKey struct {
 
 // Trust is the configured account service.
 type Trust struct {
-	Issuer          string
-	ServiceIdentity string
-	Region          string
-	Keys            []VerificationKey
+	SessionEnvironment       string
+	SessionAuthorityRevision string
+	Issuer                   string
+	ServiceIdentity          string
+	Region                   string
+	Keys                     []VerificationKey
 	// ClockSkew tolerates small differences when checking key windows.
 	ClockSkew time.Duration
 }

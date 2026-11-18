@@ -68,6 +68,9 @@
 #define DEFAULT_WORKERS 8
 #define DEFAULT_TTL_MS 15000
 #define MAX_TTL_MS 120000
+#define MAX_SESSION_MS 300000
+#define SESSION_ID_SIZE 97
+#define SESSION_SCAN_INTERVAL_MS 100
 
 #ifndef UNUSED
 #  define UNUSED(A) (void)(A)
@@ -104,6 +107,9 @@ struct wclient {
 	enum principal_kind kind;
 	char *host_id;
 	char *device_id;
+	char session_id[SESSION_ID_SIZE];
+	uint64_t session_revision;
+	int64_t session_deadline_ms;
 	uint64_t conn_id;
 	uint64_t seq;
 	uint64_t revision;
@@ -122,6 +128,12 @@ struct fence {
 	uint64_t order;
 };
 
+struct session_fence {
+	struct session_fence *next;
+	char session_id[SESSION_ID_SIZE];
+	int64_t retained_until_ms;
+};
+
 struct auth_result {
 	struct auth_result *next;
 	char *client_id;
@@ -130,6 +142,9 @@ struct auth_result {
 	char *username;
 	char *host_id;
 	char *device_id;
+	char session_id[SESSION_ID_SIZE];
+	uint64_t session_revision;
+	int64_t session_deadline_ms;
 	uint64_t revision;
 	bool ready;
 	bool completed_auth;
@@ -167,6 +182,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 /* Guarded by `lock`. */
 static struct wclient *clients = NULL;
 static struct fence *fences = NULL;
+static struct session_fence *session_fences = NULL;
 static struct auth_result *completed = NULL;
 static struct auth_job *jobs_head = NULL;
 static struct auth_job *jobs_tail = NULL;
@@ -380,6 +396,23 @@ static struct fence *fence_find_locked(const char *device_id, const char *host_i
 	return NULL;
 }
 
+static bool session_fenced_locked(const char *id)
+{
+	struct session_fence *fence;
+
+	for (fence = session_fences; fence; fence = fence->next) {
+		if (strcmp(fence->session_id, id) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool session_valid_locked(const char *id, int64_t deadline_ms)
+{
+	return id[0] == '\0' || (deadline_ms > now_ms() && !session_fenced_locked(id));
+}
+
 /* Fence generations and stale policy. */
 static bool acl_still_valid_locked(const struct wclient *client, const struct acl_entry *entry)
 {
@@ -423,7 +456,8 @@ static int acl_decide_locked(struct wclient *client, int access, const char *top
 	if (!policy_fresh_locked()) {
 		return MOSQ_ERR_ACL_DENIED;
 	}
-	if (client->valid_until_ms <= now_ms()) {
+	if (client->valid_until_ms <= now_ms() ||
+	    !session_valid_locked(client->session_id, client->session_deadline_ms)) {
 		return MOSQ_ERR_ACL_DENIED;
 	}
 	/* Control topics are reserved for the internal Access identity. */
@@ -798,7 +832,8 @@ static void handle_set(struct request *request, char *body, size_t body_len)
 	}
 	client_clear_acls(client);
 	for (i = 0; i < acl_count; i++) {
-		if (!acl_still_valid_locked(client, &acls[i])) {
+		if ((client->session_id[0] && !acls[i].host_id) ||
+		    !acl_still_valid_locked(client, &acls[i])) {
 			clear_parsed_acls(&acls[i], 1);
 			continue;
 		}
@@ -1004,10 +1039,80 @@ static void handle_kick(struct request *request, char *body, size_t body_len)
 	snprintf(body, body_len, "ok\nseq %llu\n", (unsigned long long)next_seq);
 }
 
+/* Session controls never act on a Device username. A terminal fence is
+ * retained long enough to cover any queued authentication and its permit. */
+static void handle_end_session(struct request *request, char *body, size_t body_len, bool terminal)
+{
+	char id[SESSION_ID_SIZE];
+	char username[SESSION_ID_SIZE + 8];
+	struct session_fence *fence;
+	int rc;
+
+	if (!line_value(request, "session", id, sizeof(id)) || filter_has_control_chars(id)) {
+		set_reply_error(body, body_len, "invalid_argument", "missing session");
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	if (terminal && !session_fenced_locked(id)) {
+		fence = calloc(1, sizeof(*fence));
+		if (!fence) {
+			pthread_mutex_unlock(&lock);
+			set_reply_error(body, body_len, "internal", "out of memory");
+			return;
+		}
+		snprintf(fence->session_id, sizeof(fence->session_id), "%s", id);
+		fence->retained_until_ms = now_ms() + MAX_SESSION_MS + 30000;
+		fence->next = session_fences;
+		session_fences = fence;
+	}
+	pthread_mutex_unlock(&lock);
+	snprintf(username, sizeof(username), "session:%s", id);
+	rc = mosquitto_kick_client_by_username(username, false);
+	if (rc != MOSQ_ERR_SUCCESS && rc != MOSQ_ERR_NOT_FOUND) {
+		set_reply_error(body, body_len, "internal", "could not close managed session");
+		return;
+	}
+	snprintf(body, body_len, "ok\n");
+}
+
+static void handle_renew_session(struct request *request, char *body, size_t body_len)
+{
+	char id[SESSION_ID_SIZE];
+	uint64_t revision, deadline;
+	struct wclient *client;
+	struct auth_result *result;
+
+	if (!line_value(request, "session", id, sizeof(id)) ||
+	    !line_uint(request, "session_revision", &revision, true) ||
+	    !line_uint(request, "deadline_ms", &deadline, true) ||
+	    deadline > (uint64_t)(now_ms() + MAX_SESSION_MS + 30000)) {
+		set_reply_error(body, body_len, "invalid_argument", "invalid session renewal");
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	if (!session_fenced_locked(id)) {
+		for (client = clients; client; client = client->next) {
+			if (client->connected && strcmp(client->session_id, id) == 0 &&
+			    revision > client->session_revision) {
+				client->session_revision = revision;
+				client->session_deadline_ms = (int64_t)deadline;
+			}
+		}
+		for (result = completed; result; result = result->next) {
+			if (strcmp(result->session_id, id) == 0 && revision > result->session_revision) {
+				result->session_revision = revision;
+				result->session_deadline_ms = (int64_t)deadline;
+			}
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	snprintf(body, body_len, "ok\n");
+}
+
 static size_t snapshot_line(char *out, size_t out_len, const struct wclient *client, uint64_t seq)
 {
 	return (size_t)snprintf(out, out_len,
-				"client %s %s %s %s %llu %llu %s %llu %lld\n",
+				"client %s %s %s %s %llu %llu %s %llu %lld %s\n",
 				client->client_id,
 				client->kind == KIND_HOST ? "host" :
 				client->kind == KIND_DEVICE ? "device" :
@@ -1018,7 +1123,8 @@ static size_t snapshot_line(char *out, size_t out_len, const struct wclient *cli
 				(unsigned long long)client->revision,
 				client->connected ? "connected" : "offline",
 				(unsigned long long)seq,
-				(long long)client->connected_at_ms);
+				(long long)client->connected_at_ms,
+				client->session_id[0] ? client->session_id : "-");
 }
 
 static char *handle_snapshot(char *body, size_t body_len)
@@ -1032,7 +1138,7 @@ static char *handle_snapshot(char *body, size_t body_len)
 	 * follow carry a strictly greater sequence, so Access can discard only
 	 * events the snapshot supersedes. */
 	seq = next_seq > 0 ? next_seq - 1 : 0;
-	used = (size_t)snprintf(body, body_len, "ok\nseq %llu\nrevision %llu\n",
+	used = (size_t)snprintf(body, body_len, "ok\nseq %llu\nrevision %llu\nsession_capability 1\n",
 				 (unsigned long long)seq, (unsigned long long)applied_revision);
 	for (client = clients; client && used < body_len - 1; client = client->next) {
 		size_t written = snapshot_line(body + used, body_len - used, client, seq);
@@ -1119,6 +1225,12 @@ static void handle_control(const struct mosquitto_evt_control *ed)
 		handle_deny(&request, body, AUTH_RESPONSE_MAX);
 	} else if (strcmp(op, "kick") == 0) {
 		handle_kick(&request, body, AUTH_RESPONSE_MAX);
+	} else if (strcmp(op, "end_session") == 0) {
+		handle_end_session(&request, body, AUTH_RESPONSE_MAX, true);
+	} else if (strcmp(op, "session_absent") == 0) {
+		handle_end_session(&request, body, AUTH_RESPONSE_MAX, false);
+	} else if (strcmp(op, "renew_session") == 0) {
+		handle_renew_session(&request, body, AUTH_RESPONSE_MAX);
 	} else {
 		set_reply_error(body, AUTH_RESPONSE_MAX, "invalid_argument", "unknown op");
 	}
@@ -1387,6 +1499,14 @@ static struct auth_result *result_parse(const char *client_id, const char *body,
 		} else if (strncmp(line, "device ", 7) == 0) {
 			safe_free(&result->device_id);
 			result->device_id = dup_string(line + 7);
+		} else if (strncmp(line, "session ", 8) == 0) {
+			unsigned long long revision;
+			long long deadline;
+
+			if (sscanf(line + 8, "%96s %llu %lld", result->session_id, &revision, &deadline) == 3) {
+				result->session_revision = revision;
+				result->session_deadline_ms = deadline;
+			}
 		} else if (strncmp(line, "revision ", 9) == 0) {
 			result->revision = strtoull(line + 9, NULL, 10);
 		} else if (strncmp(line, "ready ", 6) == 0) {
@@ -1528,6 +1648,8 @@ static void *worker_main(void *arg)
 		auth_worker(job, &result);
 		pthread_mutex_lock(&lock);
 		if (result) {
+			result->username = job->username;
+			job->username = NULL;
 			result->queued_ms = now_ms();
 			result->next = completed;
 			completed = result;
@@ -1555,7 +1677,7 @@ static enum principal_kind kind_from_username(const char *username)
 	if (strncmp(username, "host:", 5) == 0) {
 		return KIND_HOST;
 	}
-	if (strncmp(username, "device:", 7) == 0) {
+	if (strncmp(username, "device:", 7) == 0 || strncmp(username, "session:", 8) == 0) {
 		return KIND_DEVICE;
 	}
 	if (strncmp(username, "probe:", 6) == 0) {
@@ -1710,6 +1832,9 @@ static void install_policy_locked(struct wclient *client, struct auth_result *re
 	size_t i;
 
 	client->kind = result->kind;
+	snprintf(client->session_id, sizeof(client->session_id), "%s", result->session_id);
+	client->session_revision = result->session_revision;
+	client->session_deadline_ms = result->session_deadline_ms;
 	safe_free(&client->host_id);
 	safe_free(&client->device_id);
 	client->host_id = dup_string(result->host_id);
@@ -1799,6 +1924,7 @@ static int connect_callback(int event, void *event_data, void *userdata)
 	seq = client->seq;
 	publish_event_locked(seq, "connected", client, client->client_id,
 			     client->kind == KIND_HOST ? "host" :
+			     client->session_id[0] ? "session" :
 			     client->kind == KIND_DEVICE ? "device" :
 			     client->kind == KIND_PROBE ? "probe" : "access",
 			     client->host_id, client->device_id, client->conn_id, 0);
@@ -1843,6 +1969,7 @@ static int disconnect_callback(int event, void *event_data, void *userdata)
 	seq = client->seq;
 	snprintf(kind, sizeof(kind), "%s",
 		 client->kind == KIND_HOST ? "host" :
+		 client->session_id[0] ? "session" :
 		 client->kind == KIND_DEVICE ? "device" :
 		 client->kind == KIND_PROBE ? "probe" : "access");
 	publish_event_locked(seq, "disconnected", client, client_id, kind,
@@ -1936,6 +2063,36 @@ static int control_callback(int event, void *event_data, void *userdata)
 	return MOSQ_ERR_SUCCESS;
 }
 
+static void close_expired_session_clients(int64_t now)
+{
+	char clients_to_close[256][256];
+	size_t count = 0;
+	size_t index;
+	struct wclient *client;
+	struct session_fence **link;
+	struct session_fence *fence;
+
+	pthread_mutex_lock(&lock);
+	for (link = &session_fences; (fence = *link) != NULL;) {
+		if (fence->retained_until_ms <= now) {
+			*link = fence->next;
+			free(fence);
+		} else {
+			link = &fence->next;
+		}
+	}
+	for (client = clients; client && count < 256; client = client->next) {
+		if (client->connected && client->session_id[0] &&
+		    !session_valid_locked(client->session_id, client->session_deadline_ms)) {
+			snprintf(clients_to_close[count++], sizeof(clients_to_close[0]), "%s", client->client_id);
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	for (index = 0; index < count; index++) {
+		mosquitto_kick_client_by_clientid(clients_to_close[index], false);
+	}
+}
+
 static int tick_callback(int event, void *event_data, void *userdata)
 {
 	struct mosquitto_evt_tick *ed = event_data;
@@ -1943,14 +2100,19 @@ static int tick_callback(int event, void *event_data, void *userdata)
 	struct wclient *client;
 	struct wclient **link;
 	time_t now;
+	static int64_t next_session_scan_ms;
 
 	UNUSED(event);
 	UNUSED(userdata);
 
 	now = now_ms();
+	if (now >= next_session_scan_ms) {
+		close_expired_session_clients(now);
+		next_session_scan_ms = now + SESSION_SCAN_INTERVAL_MS;
+	}
 	{
 		struct {
-			char client_id[128];
+			char client_id[256];
 			int rc;
 		} batch[256];
 		size_t batch_count = 0;
@@ -1963,7 +2125,10 @@ static int tick_callback(int event, void *event_data, void *userdata)
 			if (result->completed_auth) {
 				continue;
 			}
-			if (rc == MOSQ_ERR_SUCCESS && (!result->ready || result->kind == KIND_NONE)) {
+			if (rc == MOSQ_ERR_SUCCESS && (!result->ready || result->kind == KIND_NONE ||
+			    !session_valid_locked(result->session_id, result->session_deadline_ms) ||
+			    (result->username && strncmp(result->username, "session:", 8) == 0 &&
+			     strcmp(result->session_id, result->username + 8) != 0))) {
 				rc = MOSQ_ERR_AUTH;
 			}
 			if (inflight > 0) {
@@ -2220,6 +2385,12 @@ int mosquitto_plugin_cleanup(void *user_data, struct mosquitto_opt *opts, int op
 		fences = fence->next;
 		safe_free(&fence->device_id);
 		safe_free(&fence->host_id);
+		free(fence);
+	}
+	while (session_fences) {
+		struct session_fence *fence = session_fences;
+
+		session_fences = fence->next;
 		free(fence);
 	}
 	clients_free_all_locked();

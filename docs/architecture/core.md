@@ -37,7 +37,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
 | `access` | HTTPS and device MQTT, including opaque fragmentation. |
 | `diagnostics` | Bounded redacted operation history and exports. |
-| `account` | Provider device authorization, verified Cloud account scope, and serialized token sessions. |
+| `account` | Cloud App sessions, verified account scope, regional permission renewal, and durable sign-out retries. |
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
 
 `api/core.rs` owns the client facade. Its unit tests live in `api/core/`,
@@ -82,27 +82,36 @@ client before switching.
 
 ### Cloud account and pairing
 
-Cloud account sign-in uses the provider's device authorization flow. Core
-validates the issuer and API resource using the chosen service. The Cloud
-account API verifies the provider-issued token and its native application
-registration and returns the account subject and workspace. Core records that
-binding in the manifest before saving credentials. An instance accepts only
-that verified account and workspace on subsequent sign-in and refresh. Account
-session changes serialize through a local OS-released lock. Logout ends the
-account session. The regional Device grant independently governs regional
-access.
+Cloud owns native App sessions and the provider device authorization exchange.
+Core starts the exchange at the configured Cloud API, verifies that the browser
+URL belongs to the configured issuer, and polls with a separate attempt
+credential. The account response identifies the issuer, subject and workspace.
+Core checks this binding against the instance manifest whenever it uses the
+account. Opaque credentials stay in SecretStore, with local mutations serialized
+through an OS-released instance lock.
 
-Cloud pairing reserves an operation before requesting its portable
-authorization. Core verifies the returned scope and checks the Host key
-from the Noise handshake against the authorized key. Access authenticates the
-signed grant and waits for Host confirmation. Core saves the regional
-configuration and selected Host after that confirmation. It retains sensitive
-pairing material in SecretStore so recovery can reconstruct the original
-HELLO or repeat the exact FINISH. Recovery requests fresh authorization for
-the same scope and operation ID. Bootstrap authorization expires separately
-from the regional Device grant. The instance retains the authorized regional
-origin and Host pin. During a Cloud outage, Access still enforces the grant
-for that exact target.
+Core uses the live Cloud session to obtain renewable regional permission. It
+proves possession of the existing Device key for issuance and uses a distinct
+regional credential for each App session. HTTP and MQTT use that credential
+alongside the existing Host grant and pin. A regional outage may interrupt an
+eligible connection while the Cloud login stays valid. Cached permission works
+through its current deadline. Route changes require the selected authority to
+confirm a matching Host grant and fingerprint.
+
+Core persists sign-out and its session-scoped retry credential in shared
+instance state before contacting Cloud. Running processes check the current
+session before sending requests or delivering live observation events.
+A later login can use the existing Noise identity and eligible Host grants with
+its new regional credential. Standalone continues to use its invitation-created
+Device credential and local authorization.
+
+Cloud pairing records a recoverable operation per Host before requesting a
+signed authorization. The Noise peer must match the authorized Host key, and
+Core saves the pinned Host only after Access confirms activation. Sensitive
+material stays in SecretStore so recovery can reconstruct the original HELLO
+or repeat the exact FINISH. An operation begun under an earlier Cloud session
+is reconciled through Access using current authorization. Connecting to
+another Host remains available while an earlier operation is unresolved.
 
 ### Session keys
 

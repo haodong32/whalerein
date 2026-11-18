@@ -2,6 +2,8 @@ package external
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,6 +46,22 @@ func (s *Service) PairDevice(ctx context.Context, authorization *whalereinv1.Ext
 		return nil, ErrEnforcementUnavailable
 	}
 	now := s.now()
+	var permission store.DeviceSession
+	if s.requireDeviceSession || (s.trust.SessionAuthorityRevision != "" && authorization.GetPrecondition() != "") {
+		digest, _ := ctx.Value(deviceSessionCredentialKey{}).([]byte)
+		if len(digest) != sha256.Size || s.deviceSessions == nil {
+			return nil, ErrAuthorizationMismatch
+		}
+		var err error
+		permission, err = s.deviceSessions.DeviceSessionByCredential(ctx, digest, now)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrAuthorizationMismatch
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := s.trust.Verify(authorization, PurposeDevicePairing, now); err != nil {
 		return nil, err
 	}
@@ -58,6 +76,15 @@ func (s *Service) PairDevice(ctx context.Context, authorization *whalereinv1.Ext
 	for _, value := range []string{a.AuthorizationId, a.Issuer, a.Audience, a.WorkspaceId, a.RegionId,
 		a.EnrollmentRevision, a.HostId, a.DeviceId, a.OperationId} {
 		if value == "" || strings.ContainsAny(value, "\r\n") {
+			return nil, ErrAuthorizationMismatch
+		}
+	}
+	if permission.ID != "" {
+		fingerprint := sha256.Sum256(a.DevicePublicKeys[0])
+		if permission.ID != a.Precondition || permission.DeviceID != a.DeviceId ||
+			permission.WorkspaceID != a.WorkspaceId || permission.RegionID != a.RegionId ||
+			permission.KeyFingerprint != hex.EncodeToString(fingerprint[:]) ||
+			permission.AuthorityRevision != s.trust.SessionAuthorityRevision {
 			return nil, ErrAuthorizationMismatch
 		}
 	}
@@ -78,10 +105,13 @@ func (s *Service) PairDevice(ctx context.Context, authorization *whalereinv1.Ext
 	if host.EnrollmentRevision != a.EnrollmentRevision {
 		return nil, ErrStaleRevision
 	}
+	if permission.ID != "" {
+		ctx = store.WithDeviceSessionAuthority(ctx, s.trust.SessionAuthorityRevision)
+	}
 	return s.devicePairing.ClaimCloud(ctx, claim, pairing.CloudScope{
 		Issuer: a.Issuer, Audience: a.Audience, WorkspaceID: a.WorkspaceId, RegionID: a.RegionId,
 		Revision: a.EnrollmentRevision, HostID: a.HostId, DeviceID: a.DeviceId,
-		OperationID: a.OperationId, HostKey: host.HostNoisePublicKey, DeviceKey: a.DevicePublicKeys[0],
+		OperationID: a.OperationId, SessionID: permission.ID, HostKey: host.HostNoisePublicKey, DeviceKey: a.DevicePublicKeys[0],
 		ExpiresAt: time.UnixMilli(a.ExpiresAtUnixMs),
 	})
 }

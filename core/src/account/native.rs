@@ -1,23 +1,26 @@
-//! Provider-issued native account sessions. Cloud only accepts access tokens
-//! addressed to its native client API. Regional device authorization is independent.
+//! Native App sessions owned by the configured Cloud account authority.
 
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use hmac::{Hmac, Mac};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::time::{sleep, timeout_at, Instant};
 use url::Url;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::api::instance::{AccountScope, Instance};
 use crate::api::{CoreError, CoreResult, SecretStore};
+use crate::security::device::DeviceIdentity;
 
-const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const MAX_BODY: usize = 1024 * 1024;
 const MAX_LOGIN: u64 = 20 * 60;
-const ACCOUNT_SESSION: &str = "account-session";
+const ACCOUNT_SESSION: &str = "cloud-app-session";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SignedInAccount {
@@ -57,62 +60,108 @@ pub struct AccountHost {
     pub device_access: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSessionInfo {
+    pub session_id: String,
+    pub instance_id: String,
+    pub expires_at: u64,
+    pub state: AccountSessionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSessionState {
+    Active,
+    Pending,
+    Revoked,
+}
+
+impl AccountSessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Pending => "pending",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 pub struct AccountLoginPrompt {
     pub verification_uri: Url,
     pub user_code: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Registration {
-    issuer: Url,
-    resource: Url,
-    client_id: String,
-}
-
-#[derive(Deserialize)]
-struct Discovery {
-    issuer: Url,
-    device_authorization_endpoint: Url,
-    token_endpoint: Url,
-    revocation_endpoint: Url,
-}
-
-#[derive(Deserialize)]
-struct DeviceGrant {
-    device_code: String,
+struct LoginPrompt {
     user_code: String,
     verification_uri: Url,
-    expires_in: u64,
-    #[serde(default = "default_interval")]
-    interval: u64,
-}
-
-fn default_interval() -> u64 {
-    5
+    expires_at: u64,
+    interval_seconds: u64,
 }
 
 #[derive(Deserialize)]
-struct Tokens {
-    access_token: String,
-    refresh_token: Option<String>,
-    token_type: String,
-    expires_in: u64,
+#[serde(rename_all = "camelCase")]
+struct ActiveSession {
+    session_id: String,
+    expires_at: u64,
+    #[serde(flatten)]
+    account: SignedInAccount,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Session {
-    client_id: String,
-    access: String,
-    refresh: String,
+    id: String,
+    credential: String,
+    revocation: String,
     expires: u64,
+    verified: SignedInAccount,
+    regional: Option<RegionalSession>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RegionalSession {
+    pub id: String,
+    pub token: String,
+    device_id: String,
+    pub permission: Option<RegionalPermission>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegionalPermission {
+    pub region: String,
     #[serde(default)]
-    verified: Option<SignedInAccount>,
+    pub revision: u64,
+    pub access_origin: Url,
+    pub expires_at: u64,
 }
 
 #[derive(Deserialize)]
-struct OAuthError {
-    error: String,
+struct RevocationStatus {
+    state: AccountSessionState,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Logout {
+    id: String,
+    revocation: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LoginAttempt {
+    credential: String,
+    revocation: String,
+    token: String,
+    prompt: Option<LoginPrompt>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AccountState {
+    active: Option<Session>,
+    attempt: Option<LoginAttempt>,
+    logouts: Vec<Logout>,
 }
 
 pub struct AccountClient {
@@ -120,9 +169,7 @@ pub struct AccountClient {
     api: Url,
     issuer: Url,
     secrets: Arc<dyn SecretStore>,
-    slot: String,
     instance: Arc<Instance>,
-    _session_lock: std::fs::File,
 }
 
 impl AccountClient {
@@ -143,12 +190,33 @@ impl AccountClient {
         } else if instance.manifest()?.is_none() || secrets.load(ACCOUNT_SESSION)?.is_none() {
             return Err(CoreError::Unauthorized);
         }
+        let mut builder = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15));
+        if let Some(pem) = &instance.ca_pem {
+            for ca in reqwest::Certificate::from_pem_bundle(pem)
+                .map_err(|_| CoreError::Config("account CA bundle is invalid".into()))?
+            {
+                builder = builder.add_root_certificate(ca);
+            }
+        }
+        Ok(Self {
+            http: builder.build().map_err(|_| unavailable())?,
+            api,
+            issuer,
+            secrets,
+            instance,
+        })
+    }
+
+    async fn lock(&self, name: &str) -> CoreResult<std::fs::File> {
+        let instance = &self.instance;
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(instance.runtime_dir().join("account.lock"))
+            .open(instance.runtime_dir().join(name))
             .map_err(|_| CoreError::Config("account session lock is unavailable".into()))?;
         let deadline = Instant::now() + Duration::from_secs(MAX_LOGIN);
         loop {
@@ -169,27 +237,7 @@ impl AccountClient {
                 }
             }
         }
-        let mut builder = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15));
-        if let Some(pem) = &instance.ca_pem {
-            for ca in reqwest::Certificate::from_pem_bundle(pem)
-                .map_err(|_| CoreError::Config("account CA bundle is invalid".into()))?
-            {
-                builder = builder.add_root_certificate(ca);
-            }
-        }
-        Ok(Self {
-            http: builder.build().map_err(|_| unavailable())?,
-            api,
-            issuer,
-            // Logto assigns application IDs at registration. The trusted Cloud
-            // endpoint publishes the actual ID and checks the token's authorized party.
-            secrets,
-            slot: ACCOUNT_SESSION.into(),
-            instance,
-            _session_lock: lock,
-        })
+        Ok(lock)
     }
 
     pub(crate) fn local_status(
@@ -199,18 +247,206 @@ impl AccountClient {
         let Some(manifest) = instance.manifest()? else {
             return Ok(None);
         };
-        let Some(bytes) = secrets.load(ACCOUNT_SESSION)? else {
+        let Some(session) = load_state(secrets)?.active else {
             return Ok(None);
         };
-        let session: Session = serde_json::from_slice(&bytes)
-            .map_err(|_| CoreError::Security("stored account session is invalid".into()))?;
-        let account = session
-            .verified
-            .ok_or_else(|| CoreError::Security("account binding is missing".into()))?;
+        if session.expires <= unix_now() {
+            return Ok(None);
+        }
+        let account = session.verified;
         if manifest.account.as_ref() != Some(&account.scope()) {
             return Err(CoreError::Unauthorized);
         }
         Ok(Some(account))
+    }
+
+    pub(crate) fn local_session_id(
+        instance: &Instance,
+        secrets: &Arc<dyn SecretStore>,
+    ) -> CoreResult<Option<String>> {
+        if instance.manifest()?.is_none() {
+            return Ok(None);
+        }
+        Ok(load_state(secrets)?
+            .active
+            .filter(|session| session.expires > unix_now())
+            .map(|session| session.id))
+    }
+
+    pub(crate) fn local_logout_pending(secrets: &Arc<dyn SecretStore>) -> CoreResult<bool> {
+        Ok(!load_state(secrets)?.logouts.is_empty())
+    }
+
+    pub(crate) fn local_regional_session(
+        secrets: &Arc<dyn SecretStore>,
+        device_id: Option<&str>,
+    ) -> CoreResult<Option<RegionalSession>> {
+        Ok(load_state(secrets)?
+            .active
+            .filter(|session| session.expires > unix_now())
+            .and_then(|session| session.regional)
+            .filter(|regional| device_id.is_none_or(|device| regional.device_id == device)))
+    }
+
+    pub(crate) async fn regional_session(
+        &self,
+        identity: &DeviceIdentity,
+    ) -> CoreResult<RegionalSession> {
+        let (session, regional) = {
+            let _lock = self.lock("account.lock").await?;
+            let mut state = load_state(&self.secrets)?;
+            let active = state
+                .active
+                .as_mut()
+                .ok_or(CoreError::AuthenticationRequired)?;
+            if active.expires <= unix_now() {
+                return Err(CoreError::AuthenticationRequired);
+            }
+            verify_bound_scope(&self.instance, &active.verified)?;
+            let created = active.regional.is_none();
+            let regional = active.regional.get_or_insert_with(|| RegionalSession {
+                id: active.id.clone(),
+                token: new_token(),
+                device_id: identity.device_id.clone(),
+                permission: None,
+            });
+            if regional.device_id != identity.device_id {
+                return Err(CoreError::Conflict(
+                    "Cloud session belongs to a different Device".into(),
+                ));
+            }
+            if regional.permission.as_ref().is_some_and(|permit| {
+                permit.expires_at > unix_now().saturating_add(60)
+                    || (permit.expires_at > unix_now() && permit.expires_at == active.expires)
+            }) {
+                return Ok(regional.clone());
+            }
+            let regional = regional.clone();
+            let session = active.clone();
+            if created {
+                self.save(&state)?;
+            }
+            (session, regional)
+        };
+
+        self.retry_remote_signout().await?;
+        let renewed = self
+            .renew_region(identity, &regional.token, &session.credential)
+            .await;
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let active = state
+            .active
+            .as_mut()
+            .filter(|active| active.id == session.id && active.expires > unix_now())
+            .ok_or(CoreError::AuthenticationRequired)?;
+        let expires = active.expires;
+        let regional = active
+            .regional
+            .as_mut()
+            .filter(|current| current.token == regional.token)
+            .ok_or(CoreError::AuthenticationRequired)?;
+        let permission = match renewed {
+            Ok(permission) => permission,
+            Err(error @ (CoreError::Timeout | CoreError::Unavailable(_))) => {
+                if regional
+                    .permission
+                    .as_ref()
+                    .is_some_and(|permit| permit.expires_at > unix_now())
+                {
+                    return Ok(regional.clone());
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if permission.expires_at <= unix_now()
+            || permission.expires_at > expires
+            || permission.region.is_empty()
+            || permission.access_origin.scheme() != "https"
+            || !permission.access_origin.username().is_empty()
+            || permission.access_origin.password().is_some()
+            || permission.access_origin.fragment().is_some()
+            || permission.access_origin.query().is_some()
+            || permission.access_origin.path() != "/"
+        {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        if regional.permission.as_ref().is_none_or(|installed| {
+            if installed.revision != 0 || permission.revision != 0 {
+                installed.revision <= permission.revision
+            } else {
+                installed.expires_at <= permission.expires_at
+            }
+        }) {
+            regional.permission = Some(permission);
+        }
+        let ready = regional.clone();
+        self.save(&state)?;
+        Ok(ready)
+    }
+
+    async fn renew_region(
+        &self,
+        identity: &DeviceIdentity,
+        regional_token: &str,
+        credential: &str,
+    ) -> CoreResult<RegionalPermission> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Device<'a> {
+            device_id: &'a str,
+            device_noise_key: String,
+            credential_digest: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Challenge {
+            challenge_id: String,
+            public_key: String,
+            expires_at: u64,
+        }
+        let response = self
+            .http
+            .post(self.endpoint("session/permission/challenge")?)
+            .bearer_auth(credential)
+            .json(&Device {
+                device_id: &identity.device_id,
+                device_noise_key: URL_SAFE_NO_PAD.encode(identity.key.public_key()),
+                credential_digest: token_digest(regional_token),
+            })
+            .send()
+            .await
+            .map_err(request_error)?;
+        let challenge: Challenge =
+            decode_scoped(self.check_active(response, credential).await?).await?;
+        let key: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(challenge.public_key)
+            .map_err(|_| CoreError::ProtocolIncompatible)?
+            .try_into()
+            .map_err(|_| CoreError::ProtocolIncompatible)?;
+        if challenge.expires_at <= unix_now() || challenge.challenge_id.is_empty() {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        let shared =
+            StaticSecret::from(*identity.key.private_key()).diffie_hellman(&PublicKey::from(key));
+        if !shared.was_contributory() {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(shared.as_bytes())
+            .map_err(|_| CoreError::ProtocolIncompatible)?;
+        mac.update(b"whalerein/device-session/v1:");
+        mac.update(challenge.challenge_id.as_bytes());
+        let proof = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let response = self
+            .http
+            .post(self.endpoint("session/permission")?)
+            .bearer_auth(credential)
+            .json(&serde_json::json!({ "challengeId": challenge.challenge_id, "proof": proof }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        decode_scoped(self.check_active(response, credential).await?).await
     }
 
     pub(crate) async fn hosts_for_device(
@@ -229,14 +465,16 @@ impl AccountClient {
         if let Some(id) = device_id {
             url.query_pairs_mut().append_pair("deviceId", id);
         }
+        let credential = self.access().await?;
         let response = self
             .http
             .get(url)
-            .bearer_auth(self.access().await?)
+            .bearer_auth(&credential)
             .send()
             .await
             .map_err(request_error)?;
-        let listing: Listing = decode_success(response).await?;
+        let listing: Listing =
+            decode_success(self.check_active(response, &credential).await?).await?;
         if self
             .instance
             .manifest()?
@@ -253,6 +491,15 @@ impl AccountClient {
         segments: &[&str],
         body: &impl Serialize,
     ) -> CoreResult<T> {
+        self.post_scoped_for_session(segments, body, None).await
+    }
+
+    pub(crate) async fn post_scoped_for_session<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        body: &impl Serialize,
+        expected_session: Option<&str>,
+    ) -> CoreResult<T> {
         let mut target = self
             .api
             .join("api/v1/client/")
@@ -262,267 +509,397 @@ impl AccountClient {
             .map_err(|_| CoreError::ProtocolIncompatible)?
             .pop_if_empty()
             .extend(segments.iter().copied());
+        let credential = self.active_credential(expected_session).await?;
         let response = self
             .http
             .post(target)
-            .bearer_auth(self.access().await?)
+            .bearer_auth(&credential)
             .json(body)
             .send()
             .await
             .map_err(request_error)?;
-        decode_scoped(response).await
+        decode_scoped(self.check_active(response, &credential).await?).await
     }
 
     pub async fn login(
         &self,
         present: impl FnOnce(AccountLoginPrompt),
     ) -> CoreResult<SignedInAccount> {
+        let _login = self.lock("account-login.lock").await?;
         match self.status().await {
             Ok(account) => return Ok(account),
-            Err(CoreError::Unauthorized) => {}
+            Err(CoreError::Unauthorized | CoreError::AuthenticationRequired) => {}
             Err(error) => return Err(error),
         }
-        let registration = self.registration().await?;
-        let discovery = self.discovery().await?;
-        let grant: DeviceGrant = decode_success(
-            self.http
-                .post(discovery.device_authorization_endpoint)
-                .form(&[
-                    ("client_id", registration.client_id.as_str()),
-                    ("scope", "openid offline_access"),
-                    ("resource", registration.resource.as_str()),
-                ])
+        let mut attempt = {
+            let _lock = self.lock("account.lock").await?;
+            let mut state = load_state(&self.secrets)?;
+            if state.attempt.as_ref().is_none_or(|attempt| {
+                attempt
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.expires_at <= unix_now())
+            }) {
+                state.attempt = Some(LoginAttempt {
+                    credential: new_token(),
+                    revocation: new_token(),
+                    token: new_token(),
+                    prompt: None,
+                });
+                self.save(&state)?;
+            }
+            state.attempt.expect("login attempt allocated")
+        };
+        if attempt.prompt.is_none() {
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct StartLogin<'a> {
+                instance_id: &'a str,
+                credential_digest: String,
+                revocation_digest: String,
+                attempt_digest: String,
+            }
+
+            let manifest = self.instance.manifest()?.ok_or(CoreError::Unauthorized)?;
+            let body = StartLogin {
+                instance_id: &manifest.id,
+                credential_digest: token_digest(&attempt.credential),
+                revocation_digest: token_digest(&attempt.revocation),
+                attempt_digest: token_digest(&attempt.token),
+            };
+            let response = self
+                .http
+                .post(self.endpoint("login")?)
+                .json(&body)
                 .send()
                 .await
-                .map_err(request_error)?,
-        )
-        .await?;
-        if !same_authority(&grant.verification_uri, &self.issuer)
-            || grant.expires_in == 0
-            || grant.device_code.is_empty()
-            || grant.user_code.is_empty()
-            || grant.user_code.len() > 128
-            || grant.user_code.chars().any(char::is_control)
-        {
-            return Err(CoreError::ProtocolIncompatible);
+                .map_err(request_error)?;
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ) {
+                return Err(CoreError::ProtocolIncompatible);
+            }
+            let prompt: LoginPrompt = decode_scoped(response).await?;
+            if !same_authority(&prompt.verification_uri, &self.issuer)
+                || prompt.expires_at <= unix_now()
+                || prompt.user_code.is_empty()
+                || prompt.user_code.len() > 128
+                || prompt.user_code.chars().any(char::is_control)
+            {
+                return Err(CoreError::ProtocolIncompatible);
+            }
+            attempt.prompt = Some(prompt);
+            let _lock = self.lock("account.lock").await?;
+            let mut state = load_state(&self.secrets)?;
+            if state
+                .attempt
+                .as_ref()
+                .is_none_or(|pending| pending.token != attempt.token)
+            {
+                return Err(CoreError::Unauthorized);
+            }
+            state.attempt = Some(attempt.clone());
+            self.save(&state)?;
         }
-        let end = Instant::now() + Duration::from_secs(grant.expires_in.min(MAX_LOGIN));
+
+        let prompt = attempt.prompt.as_ref().expect("login prompt allocated");
+        let end = Instant::now()
+            + Duration::from_secs(prompt.expires_at.saturating_sub(unix_now()).min(MAX_LOGIN));
         present(AccountLoginPrompt {
-            verification_uri: grant.verification_uri.clone(),
-            user_code: grant.user_code.clone(),
+            verification_uri: prompt.verification_uri.clone(),
+            user_code: prompt.user_code.clone(),
         });
-        let initial = timeout_at(
-            end,
-            self.poll(&grant, &registration, &discovery.token_endpoint),
-        )
-        .await
-        .map_err(|_| CoreError::Timeout)??;
-        let refresh = initial
-            .refresh_token
-            .filter(|token| !token.is_empty())
-            .ok_or(CoreError::ProtocolIncompatible)?;
-        let mut session = self
-            .refresh(&registration, &discovery.token_endpoint, &refresh)
-            .await?;
-        let account = self.me(&session.access).await?;
-        self.instance.bind_account(&account.scope())?;
-        session.verified = Some(account.clone());
-        self.save(&session)?;
-        Ok(account)
+        let result = timeout_at(end, self.poll(&attempt.token, prompt.interval_seconds))
+            .await
+            .map_err(|_| CoreError::Timeout)?;
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let current = state
+            .attempt
+            .as_ref()
+            .is_some_and(|pending| pending.token == attempt.token);
+        let active = match result {
+            Ok(active) => active,
+            Err(error @ (CoreError::Unauthorized | CoreError::Timeout)) => {
+                if current {
+                    state.attempt = None;
+                    self.save(&state)?;
+                }
+                return Err(error);
+            }
+            Err(other) => return Err(other),
+        };
+        self.validate_active(&active)?;
+        if !current {
+            state.logouts.push(Logout {
+                id: active.session_id,
+                revocation: attempt.revocation,
+            });
+            self.save(&state)?;
+            return Err(CoreError::Unauthorized);
+        }
+        self.instance.bind_account(&active.account.scope())?;
+        state.attempt = None;
+        let verified = active.account;
+        state.active = Some(Session {
+            id: active.session_id,
+            credential: attempt.credential,
+            revocation: attempt.revocation,
+            expires: active.expires_at,
+            verified: verified.clone(),
+            regional: None,
+        });
+        self.save(&state)?;
+        Ok(verified)
     }
 
     pub async fn status(&self) -> CoreResult<SignedInAccount> {
-        let account = self.me(&self.access().await?).await?;
-        verify_bound_scope(&self.instance, &account)?;
-        Ok(account)
-    }
-
-    pub async fn logout(&self) -> CoreResult<()> {
-        let Some(session) = self.load()? else {
-            return Ok(());
-        };
-        let remote = async {
-            let discovery = self.discovery().await?;
-            let response = self
-                .http
-                .post(discovery.revocation_endpoint)
-                .form(&[
-                    ("client_id", session.client_id.as_str()),
-                    ("token", session.refresh.as_str()),
-                    ("token_type_hint", "refresh_token"),
-                ])
-                .send()
-                .await
-                .map_err(request_error)?;
-            if !response.status().is_success() {
-                return Err(unavailable());
-            }
-            Ok(())
-        }
-        .await;
-        self.secrets.delete(&self.slot)?;
-        remote
-    }
-
-    async fn registration(&self) -> CoreResult<Registration> {
-        let registration: Registration = self.get("api/v1/client/login", None).await?;
-        if registration.issuer != self.issuer
-            || registration.resource
-                != self
-                    .api
-                    .join("api/v1/client")
-                    .map_err(|_| CoreError::ProtocolIncompatible)?
-            || registration.client_id.is_empty()
-        {
+        self.retry_remote_signout().await?;
+        let session = load_state(&self.secrets)?
+            .active
+            .ok_or(CoreError::Unauthorized)?;
+        let active: ActiveSession = self
+            .get("api/v1/client/me", Some(&session.credential))
+            .await?;
+        self.validate_active(&active)?;
+        if session.id != active.session_id {
             return Err(CoreError::ProtocolIncompatible);
         }
-        Ok(registration)
+        verify_bound_scope(&self.instance, &active.account)?;
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let session = state
+            .active
+            .as_mut()
+            .filter(|current| current.id == session.id)
+            .ok_or(CoreError::AuthenticationRequired)?;
+        session.expires = active.expires_at;
+        session.verified = active.account.clone();
+        self.save(&state)?;
+        Ok(active.account)
     }
 
-    async fn discovery(&self) -> CoreResult<Discovery> {
-        let url = format!(
-            "{}/.well-known/openid-configuration",
-            self.issuer.as_str().trim_end_matches('/')
-        );
-        let discovery: Discovery =
-            decode_success(self.http.get(url).send().await.map_err(request_error)?).await?;
-        if discovery.issuer != self.issuer
-            || [
-                &discovery.device_authorization_endpoint,
-                &discovery.token_endpoint,
-                &discovery.revocation_endpoint,
-            ]
-            .iter()
-            .any(|endpoint| !same_authority(endpoint, &self.issuer))
-        {
-            return Err(CoreError::ProtocolIncompatible);
+    pub(crate) async fn sessions(&self) -> CoreResult<Vec<AccountSessionInfo>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            sessions: Vec<AccountSessionInfo>,
         }
-        Ok(discovery)
+        let credential = self.access().await?;
+        let listing: Listing = self
+            .get("api/v1/client/sessions", Some(&credential))
+            .await?;
+        Ok(listing.sessions)
     }
 
-    async fn poll(
-        &self,
-        grant: &DeviceGrant,
-        registration: &Registration,
-        endpoint: &Url,
-    ) -> CoreResult<Tokens> {
-        let mut interval = Duration::from_secs(grant.interval.clamp(1, MAX_LOGIN));
-        loop {
-            sleep(interval).await;
-            let response = self
-                .http
-                .post(endpoint.clone())
-                .form(&[
-                    ("client_id", registration.client_id.as_str()),
-                    ("grant_type", DEVICE_GRANT),
-                    ("device_code", grant.device_code.as_str()),
-                ])
-                .send()
-                .await
-                .map_err(request_error)?;
-            if response.status().is_success() {
-                return decode(response).await;
-            }
-            if response.status() != StatusCode::BAD_REQUEST {
-                return Err(unavailable());
-            }
-            let error: OAuthError = decode(response).await?;
-            match error.error.as_str() {
-                "authorization_pending" => {}
-                "slow_down" => interval += Duration::from_secs(5),
-                "expired_token" => return Err(CoreError::Timeout),
-                "access_denied" => return Err(CoreError::Unauthorized),
-                _ => return Err(unavailable()),
-            }
+    pub(crate) async fn revoke_session(&self, session_id: &str) -> CoreResult<AccountSessionState> {
+        if !valid_session_id(session_id) {
+            return Err(CoreError::InvalidInput("invalid Cloud session ID".into()));
         }
-    }
-
-    async fn refresh(
-        &self,
-        registration: &Registration,
-        endpoint: &Url,
-        refresh: &str,
-    ) -> CoreResult<Session> {
+        if self.begin_local_logout(Some(session_id)).await? {
+            self.retry_remote_signout().await?;
+            let pending = load_state(&self.secrets)?
+                .logouts
+                .iter()
+                .any(|logout| logout.id == session_id);
+            return Ok(if !pending {
+                AccountSessionState::Revoked
+            } else {
+                AccountSessionState::Pending
+            });
+        }
         let response = self
             .http
-            .post(endpoint.clone())
-            .form(&[
-                ("client_id", registration.client_id.as_str()),
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh),
-                ("resource", registration.resource.as_str()),
-            ])
+            .post(self.endpoint(&format!("sessions/{session_id}/revoke"))?)
+            .bearer_auth(self.access().await?)
             .send()
             .await
             .map_err(request_error)?;
-        if response.status() == StatusCode::BAD_REQUEST {
-            let error: OAuthError = decode(response).await?;
-            return Err(if error.error == "invalid_grant" {
-                CoreError::Unauthorized
-            } else {
-                unavailable()
+        let result: RevocationStatus = decode_scoped(response).await?;
+        Ok(result.state)
+    }
+
+    pub(crate) async fn revoke_all_sessions(&self) -> CoreResult<AccountSessionState> {
+        let credential = self.access().await?;
+        let response = self
+            .http
+            .post(self.endpoint("session-revocations")?)
+            .bearer_auth(&credential)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        let rejected = response
+            .as_ref()
+            .is_ok_and(|response| response.status().is_client_error());
+        let result = match response {
+            Ok(response) => decode_scoped::<RevocationStatus>(response)
+                .await
+                .map(|value| value.state),
+            Err(error) => Err(request_error(error)),
+        };
+        if rejected {
+            return result;
+        }
+        // An ambiguous result can mean Cloud committed the account-wide
+        // revocation. End the initiating login locally and reconcile its
+        // exact ID with the separate revocation credential.
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        if let Some(active) = state
+            .active
+            .take_if(|active| active.credential == credential)
+        {
+            if !matches!(result, Ok(AccountSessionState::Revoked)) {
+                state.logouts.push(Logout {
+                    id: active.id,
+                    revocation: active.revocation,
+                });
+            }
+            self.save(&state)?;
+        }
+        result.map_err(|_| CoreError::Unavailable(
+            "Account-wide sign-out could not be confirmed. Check your other app sessions from the console.".into(),
+        ))
+    }
+
+    pub async fn logout(&self) -> CoreResult<bool> {
+        self.begin_local_logout(None).await?;
+        self.retry_remote_signout().await?;
+        Ok(!Self::local_logout_pending(&self.secrets)?)
+    }
+
+    async fn begin_local_logout(&self, expected: Option<&str>) -> CoreResult<bool> {
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        if expected.is_some_and(|id| state.active.as_ref().is_none_or(|active| active.id != id)) {
+            return Ok(false);
+        }
+        if let Some(session) = state.active.take() {
+            state.logouts.push(Logout {
+                id: session.id,
+                revocation: session.revocation,
             });
         }
-        let tokens: Tokens = decode_success(response).await?;
-        if !tokens.token_type.eq_ignore_ascii_case("Bearer")
-            || tokens.access_token.is_empty()
-            || tokens.expires_in == 0
-        {
-            return Err(CoreError::ProtocolIncompatible);
-        }
-        Ok(Session {
-            client_id: registration.client_id.clone(),
-            access: tokens.access_token,
-            refresh: tokens
-                .refresh_token
-                .filter(|token| !token.is_empty())
-                .unwrap_or_else(|| refresh.into()),
-            expires: unix_now().saturating_add(tokens.expires_in),
-            verified: None,
-        })
+        state.attempt = None;
+        self.save(&state)?;
+        Ok(true)
     }
 
-    async fn access(&self) -> CoreResult<String> {
-        let session = self.load()?.ok_or(CoreError::Unauthorized)?;
-        let account = session.verified.as_ref().ok_or(CoreError::Unauthorized)?;
-        verify_bound_scope(&self.instance, account)?;
-        if session.expires > unix_now().saturating_add(30) {
-            return Ok(session.access);
+    pub(crate) async fn retry_remote_signout(&self) -> CoreResult<()> {
+        let logouts = load_state(&self.secrets)?.logouts;
+        for logout in logouts {
+            let url = self.endpoint(&format!("sessions/{}/revoke", logout.id))?;
+            let response = self
+                .http
+                .post(url)
+                .bearer_auth(&logout.revocation)
+                .timeout(Duration::from_secs(1))
+                .send()
+                .await;
+            let complete = match response {
+                Ok(response) if response.status() == StatusCode::OK => {
+                    decode::<RevocationStatus>(response)
+                        .await
+                        .is_ok_and(|status| status.state == AccountSessionState::Revoked)
+                }
+                _ => false,
+            };
+            if complete {
+                let _lock = self.lock("account.lock").await?;
+                let mut state = load_state(&self.secrets)?;
+                state.logouts.retain(|pending| pending.id != logout.id);
+                self.save(&state)?;
+            }
         }
-        let registration = self.registration().await?;
-        if session.client_id != registration.client_id {
-            return Err(CoreError::Unauthorized);
-        }
-        let discovery = self.discovery().await?;
-        let mut updated = self
-            .refresh(&registration, &discovery.token_endpoint, &session.refresh)
-            .await?;
-        let account = self.me(&updated.access).await?;
-        verify_bound_scope(&self.instance, &account)?;
-        updated.verified = Some(account);
-        self.save(&updated)?;
-        Ok(updated.access)
-    }
-
-    fn load(&self) -> CoreResult<Option<Session>> {
-        self.secrets
-            .load(&self.slot)?
-            .map(|bytes| {
-                serde_json::from_slice(&bytes)
-                    .map_err(|_| CoreError::Security("stored account session is invalid".into()))
-            })
-            .transpose()
-    }
-
-    fn save(&self, session: &Session) -> CoreResult<()> {
-        let bytes = serde_json::to_vec(session)
-            .map_err(|_| CoreError::Internal("could not encode account session".into()))?;
-        self.secrets.save(&self.slot, &bytes)?;
         Ok(())
     }
 
-    async fn me(&self, token: &str) -> CoreResult<SignedInAccount> {
-        self.get("api/v1/client/me", Some(token)).await
+    async fn poll(&self, attempt: &str, mut interval: u64) -> CoreResult<ActiveSession> {
+        loop {
+            sleep(Duration::from_secs(interval.clamp(1, MAX_LOGIN))).await;
+            let response = self
+                .http
+                .post(self.endpoint("login/poll")?)
+                .bearer_auth(attempt)
+                .send()
+                .await
+                .map_err(request_error)?;
+            match response.status() {
+                StatusCode::ACCEPTED => {
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Pending {
+                        interval_seconds: u64,
+                    }
+                    interval = decode::<Pending>(response).await?.interval_seconds;
+                }
+                StatusCode::GONE => return Err(CoreError::Timeout),
+                _ => return decode_scoped(response).await,
+            }
+        }
+    }
+
+    fn validate_active(&self, active: &ActiveSession) -> CoreResult<()> {
+        if active.expires_at <= unix_now() || !valid_session_id(&active.session_id) {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        Ok(())
+    }
+
+    async fn access(&self) -> CoreResult<String> {
+        self.active_credential(None).await
+    }
+
+    async fn active_credential(&self, expected: Option<&str>) -> CoreResult<String> {
+        self.retry_remote_signout().await?;
+        let session = load_state(&self.secrets)?
+            .active
+            .ok_or(CoreError::AuthenticationRequired)?;
+        verify_bound_scope(&self.instance, &session.verified)?;
+        if session.expires <= unix_now() || expected.is_some_and(|id| id != session.id) {
+            return Err(CoreError::AuthenticationRequired);
+        }
+        Ok(session.credential)
+    }
+
+    fn save(&self, state: &AccountState) -> CoreResult<()> {
+        let bytes = serde_json::to_vec(state)
+            .map_err(|_| CoreError::Internal("could not encode account state".into()))?;
+        self.secrets.save(ACCOUNT_SESSION, &bytes)?;
+        Ok(())
+    }
+
+    async fn check_active(&self, response: Response, credential: &str) -> CoreResult<Response> {
+        let state = load_state(&self.secrets)?;
+        let current = state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.credential == credential);
+        if !current {
+            return Err(CoreError::AuthenticationRequired);
+        }
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        if let Some(session) = state
+            .active
+            .take_if(|active| active.credential == credential)
+        {
+            state.logouts.push(Logout {
+                id: session.id,
+                revocation: session.revocation,
+            });
+            self.save(&state)?;
+        }
+        Err(CoreError::AuthenticationRequired)
+    }
+
+    fn endpoint(&self, relative: &str) -> CoreResult<Url> {
+        self.api
+            .join(&format!("api/v1/client/{relative}"))
+            .map_err(|_| CoreError::ProtocolIncompatible)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str, token: Option<&str>) -> CoreResult<T> {
@@ -535,8 +912,40 @@ impl AccountClient {
             Some(token) => request.bearer_auth(token),
             None => request,
         };
-        decode_success(request.send().await.map_err(request_error)?).await
+        let response = request.send().await.map_err(request_error)?;
+        let response = match token {
+            Some(credential) => self.check_active(response, credential).await?,
+            None => response,
+        };
+        decode_success(response).await
     }
+}
+
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn new_token() -> String {
+    URL_SAFE_NO_PAD.encode(crate::util::random_bytes(32))
+}
+
+fn token_digest(token: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+fn load_state(secrets: &Arc<dyn SecretStore>) -> CoreResult<AccountState> {
+    secrets
+        .load(ACCOUNT_SESSION)?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|_| CoreError::Security("stored account state is invalid".into()))
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 impl SignedInAccount {
@@ -613,6 +1022,8 @@ async fn decode_scoped<T: DeserializeOwned>(response: Response) -> CoreResult<T>
         .map(|problem| problem.code);
     let error = match code.as_deref() {
         Some("device_revoked") => CoreError::Revoked,
+        Some("client_upgrade_required") => CoreError::ProtocolIncompatible,
+        _ if status == StatusCode::UPGRADE_REQUIRED => CoreError::ProtocolIncompatible,
         Some("authorization_expired") => CoreError::AuthorizationExpired,
         Some("step_up_required") => CoreError::AuthenticationRequired,
         Some("intent_conflict") => {
@@ -759,43 +1170,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_device_flow_denial_expiry_and_cancellation_leave_no_session() {
-        for (provider_error, expires_in, expected, polls) in [
-            ("access_denied", 60, "unauthorized", 1),
-            ("expired_token", 60, "timeout", 1),
-            ("authorization_pending", 1, "timeout", 0),
-            ("cancel", 60, "cancel", 0),
-        ] {
-            let count = Arc::new(AtomicUsize::new(0));
-            let received = count.clone();
+    async fn account_device_flow_denial_and_cancellation_leave_no_active_session() {
+        for cancel in [false, true] {
             let server = MockServer::start(Arc::new(move |request| {
                 let origin = format!("http://{}", request.headers["host"]);
                 match (request.method.as_str(), request.path.as_str()) {
-                    ("GET", "/api/v1/client/login") => MockResponse::json(200, &json!({
-                        "issuer": format!("{origin}/oidc"), "clientId": "device-app",
-                        "resource": format!("{origin}/api/v1/client"),
-                    })),
-                    ("GET", "/oidc/.well-known/openid-configuration") => MockResponse::json(200, &json!({
-                        "issuer": format!("{origin}/oidc"),
-                        "device_authorization_endpoint": format!("{origin}/device/auth"),
-                        "token_endpoint": format!("{origin}/token"),
-                        "revocation_endpoint": format!("{origin}/revoke"),
-                    })),
-                    ("POST", "/device/auth") => MockResponse::json(200, &json!({
-                        "device_code": "fixture-device-code", "user_code": "ABCD",
-                        "verification_uri": format!("{origin}/device"), "expires_in": expires_in,
-                        "interval": 3.min(expires_in + 1),
-                    })),
-                    ("POST", "/token") => {
-                        received.fetch_add(1, Ordering::SeqCst);
-                        MockResponse::json(400, &json!({"error": provider_error}))
-                    }
+                    ("POST", "/api/v1/client/login") => MockResponse::json(
+                        200,
+                        &json!({
+                            "verificationUri": format!("{origin}/device"), "userCode": "ABCD",
+                            "expiresAt": unix_now() + 60, "intervalSeconds": 1,
+                        }),
+                    ),
+                    ("POST", "/api/v1/client/login/poll") => MockResponse::empty(401),
                     _ => MockResponse::empty(404),
                 }
-            })).await;
-
+            }))
+            .await;
             let directory = tempfile::tempdir().unwrap();
-            let (instance, secrets, backend) = native_test_instance(directory.path());
+            let (instance, secrets, _) = native_test_instance(directory.path());
             let client = native_test_client(&instance, &secrets, &server, true).await;
             let (presented, prompt) = tokio::sync::oneshot::channel();
             let login =
@@ -803,105 +1196,73 @@ mod tests {
                     async move { client.login(|_| assert!(presented.send(()).is_ok())).await },
                 );
             prompt.await.unwrap();
-            if expected == "cancel" {
+            if cancel {
                 login.abort();
                 assert!(matches!(login.await, Err(error) if error.is_cancelled()));
             } else {
-                assert!(matches!(login.await.unwrap(), Err(error) if error.code() == expected));
+                assert!(matches!(login.await.unwrap(), Err(CoreError::Unauthorized)));
             }
-            assert_eq!(count.load(Ordering::SeqCst), polls);
             assert!(AccountClient::local_status(&instance, &secrets)
                 .unwrap()
                 .is_none());
             assert!(instance.manifest().unwrap().unwrap().account.is_none());
-            assert!(backend.is_empty());
-            let reopened = native_test_client(&instance, &secrets, &server, true).await;
-            assert!(matches!(
-                reopened.status().await,
-                Err(CoreError::Unauthorized)
-            ));
+            assert_eq!(load_state(&secrets).unwrap().attempt.is_some(), cancel);
         }
     }
 
     #[tokio::test]
-    async fn account_device_flow_refreshes_and_revokes_the_profile_session() {
-        let refreshes = Arc::new(AtomicUsize::new(0));
-        let revoked = Arc::new(AtomicUsize::new(0));
-        let count_refreshes = refreshes.clone();
-        let count_revoked = revoked.clone();
+    async fn account_device_flow_keeps_separate_credentials_and_retries_signout() {
+        let starts = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let revocations = Arc::new(AtomicUsize::new(0));
+        let recorded = starts.clone();
+        let counted = revocations.clone();
         let server = MockServer::start(Arc::new(move |request| {
             let origin = format!("http://{}", request.headers["host"]);
-            let form: std::collections::HashMap<String, String> =
-                url::form_urlencoded::parse(&request.body).into_owned().collect();
+            let active = || json!({
+                "state": "active", "sessionId": "fixture-session", "expiresAt": unix_now() + 600,
+                "account": {"id":"acct","email":"","issuer":"https://login.whalerein.com/oidc","subject":"subject"},
+                "workspace": {"id":"ws"},
+            });
+            let bearer_digest = || token_digest(request.headers["authorization"].strip_prefix("Bearer ").unwrap());
             match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/api/v1/client/login") => MockResponse::json(200, &json!({
-                    "issuer": format!("{origin}/oidc"), "clientId": "device-app",
-                    "resource": format!("{origin}/api/v1/client"),
-                })),
-                ("GET", "/oidc/.well-known/openid-configuration") => MockResponse::json(200, &json!({
-                    "issuer": format!("{origin}/oidc"),
-                    "device_authorization_endpoint": format!("{origin}/device/auth"),
-                    "token_endpoint": format!("{origin}/token"),
-                    "revocation_endpoint": format!("{origin}/revoke"),
-                })),
-                ("POST", "/device/auth") => {
-                    assert_eq!(form["client_id"], "device-app");
-                    assert_eq!(form["resource"], format!("{origin}/api/v1/client"));
+                ("POST", "/api/v1/client/login") => {
+                    let body = serde_json::from_slice(&request.body).unwrap();
+                    *recorded.lock().unwrap() = Some(body);
                     MockResponse::json(200, &json!({
-                        "device_code": "fixture-device-code", "user_code": "ABCD",
-                        "verification_uri": format!("{origin}/device"),
-                        "expires_in": 60, "interval": 1,
+                        "verificationUri": format!("{origin}/device"), "userCode": "ABCD",
+                        "expiresAt": unix_now() + 60, "intervalSeconds": 1,
                     }))
                 }
-                ("POST", "/token") if form["grant_type"] == DEVICE_GRANT => {
-                    assert_eq!(form["device_code"], "fixture-device-code");
-                    MockResponse::json(200, &json!({
-                        "access_token": "opaque-fixture", "refresh_token": "fixture-refresh-0",
-                        "token_type": "Bearer", "expires_in": 600,
-                    }))
-                }
-                ("POST", "/token") => {
-                    let revision = count_refreshes.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(form["grant_type"], "refresh_token");
-                    assert_eq!(form["refresh_token"], format!("fixture-refresh-{revision}"));
-                    assert_eq!(form["resource"], format!("{origin}/api/v1/client"));
-                    MockResponse::json(200, &json!({
-                        "access_token": "resource-fixture",
-                        "refresh_token": format!("fixture-refresh-{}", revision + 1),
-                        "token_type": "Bearer",
-                        "expires_in": if revision == 0 { 1 } else { 600 },
-                    }))
+                ("POST", "/api/v1/client/login/poll") => {
+                    assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["attemptDigest"], bearer_digest());
+                    MockResponse::json(200, &active())
                 }
                 ("GET", "/api/v1/client/me") => {
-                    assert_eq!(request.headers["authorization"], "Bearer resource-fixture");
-                    MockResponse::json(200, &json!({
-                        "account": {"id": "acct", "email": "", "issuer": "https://login.whalerein.com/oidc", "subject": "subject"}, "workspace": {"id": "ws"},
-                    }))
+                    assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["credentialDigest"], bearer_digest());
+                    MockResponse::json(200, &active())
                 }
                 ("GET", "/api/v1/client/hosts") => {
-                    assert_eq!(request.headers["authorization"], "Bearer resource-fixture");
+                    assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["credentialDigest"], bearer_digest());
                     MockResponse::json(200, &json!({
                         "workspace": {"id": "ws"},
                         "hosts": [{"hostId":"host-a","displayName":"Computer","enrolled":true,"online":false}],
                     }))
                 }
-                ("POST", "/revoke") => {
-                    assert_eq!(form["token"], "fixture-refresh-2");
-                    count_revoked.fetch_add(1, Ordering::SeqCst);
-                    MockResponse::empty(200)
+                ("POST", "/api/v1/client/sessions/fixture-session/revoke") => {
+                    assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["revocationDigest"], bearer_digest());
+                    match counted.fetch_add(1, Ordering::SeqCst) {
+                        0 => MockResponse::empty(503),
+                        1 => MockResponse::json(202, &json!({"state":"pending"})),
+                        _ => MockResponse::json(200, &json!({"state":"revoked"})),
+                    }
                 }
                 _ => MockResponse::empty(404),
             }
         })).await;
 
         let root = tempfile::tempdir().unwrap();
-        let (instance, namespaced, secrets) = native_test_instance(root.path());
-        let client = native_test_client(&instance, &namespaced, &server, true).await;
-
-        assert!(matches!(
-            client.status().await,
-            Err(CoreError::Unauthorized)
-        ));
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
         let account = client
             .login(|prompt| {
                 assert_eq!(prompt.verification_uri.path(), "/device");
@@ -910,42 +1271,337 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(account.workspace.id, "ws");
+        client
+            .login(|_| panic!("existing session should not prompt"))
+            .await
+            .unwrap();
         assert_eq!(
-            instance.manifest().unwrap().unwrap().account,
-            Some(account.scope())
+            client.hosts_for_device(None).await.unwrap()[0].host_id,
+            "host-a"
         );
-        assert!(AccountClient::local_status(&instance, &namespaced)
-            .unwrap()
-            .is_some());
-        assert!(!secrets.is_empty());
-        drop(client);
-        let list = async {
-            let client = native_test_client(&instance, &namespaced, &server, false).await;
-            client.hosts_for_device(None).await.unwrap()[0]
-                .host_id
-                .clone()
-        };
-        let status = async {
-            let client = native_test_client(&instance, &namespaced, &server, false).await;
-            client.status().await.unwrap().account.id
-        };
-        assert_eq!(tokio::join!(list, status), ("host-a".into(), "acct".into()));
-        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
-        let client = native_test_client(&instance, &namespaced, &server, false).await;
-        client.logout().await.unwrap();
-        assert_eq!(revoked.load(Ordering::SeqCst), 1);
-        assert!(secrets.is_empty());
-        assert!(AccountClient::local_status(&instance, &namespaced)
+        let state = load_state(&secrets).unwrap();
+        let session = state.active.unwrap();
+        assert!(session.credential != session.revocation);
+        assert!(!client.logout().await.unwrap());
+        assert!(AccountClient::local_status(&instance, &secrets)
             .unwrap()
             .is_none());
-        assert_eq!(
-            instance.manifest().unwrap().unwrap().account,
-            Some(account.scope())
+        assert!(AccountClient::local_logout_pending(&secrets).unwrap());
+        assert!(
+            !String::from_utf8(secrets.load(ACCOUNT_SESSION).unwrap().unwrap())
+                .unwrap()
+                .contains(&session.credential)
         );
+        drop(client);
+
+        let reopened = native_test_client(&instance, &secrets, &server, false).await;
+        assert!(!reopened.logout().await.unwrap());
+        assert!(reopened.logout().await.unwrap());
+        assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
+        assert_eq!(revocations.load(Ordering::SeqCst), 3);
+    }
+
+    fn seed_session(client: &AccountClient, id: &str) -> Session {
+        let account = SignedInAccount {
+            account: AccountIdentity {
+                id: "account".into(),
+                email: String::new(),
+                subject: "subject".into(),
+                issuer: client
+                    .instance
+                    .cloud
+                    .as_ref()
+                    .unwrap()
+                    .definition
+                    .issuer
+                    .clone()
+                    .unwrap(),
+            },
+            workspace: AccountWorkspace {
+                id: "workspace".into(),
+            },
+        };
+        client.instance.bind_account(&account.scope()).unwrap();
+        Session {
+            id: id.into(),
+            credential: new_token(),
+            revocation: new_token(),
+            expires: unix_now() + 600,
+            verified: account,
+            regional: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn account_regional_permission_proves_device_key_and_keeps_one_token() {
+        let device = DeviceIdentity {
+            device_id: "fixture-device".into(),
+            key: crate::security::StaticIdentity::generate(),
+        };
+        let device_key = *device.key.public_key();
+        let server_secret = StaticSecret::from([41u8; 32]);
+        let server_key = URL_SAFE_NO_PAD.encode(PublicKey::from(&server_secret).as_bytes());
+        let secret = server_secret.diffie_hellman(&PublicKey::from(device_key));
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(b"whalerein/device-session/v1:fixture-challenge");
+        let expected_proof = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let digests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent = digests.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            match request.path.as_str() {
+                "/api/v1/client/session/permission/challenge" => {
+                    assert_eq!(body["deviceId"], "fixture-device");
+                    assert_eq!(body["deviceNoiseKey"], URL_SAFE_NO_PAD.encode(device_key));
+                    sent.lock().unwrap().push(body["credentialDigest"].clone());
+                    MockResponse::json(
+                        200,
+                        &json!({
+                            "challengeId":"fixture-challenge",
+                            "publicKey":server_key,
+                            "expiresAt":unix_now() + 60,
+                        }),
+                    )
+                }
+                "/api/v1/client/session/permission" => {
+                    assert_eq!(body["challengeId"], "fixture-challenge");
+                    assert!(body["proof"] == expected_proof);
+                    MockResponse::json(
+                        200,
+                        &json!({
+                            "region":"fixture-region",
+                            "accessOrigin":"https://access.fixture.test",
+                            "expiresAt":unix_now() + 45,
+                        }),
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        client
+            .save(&AccountState {
+                active: Some(seed_session(&client, "fixture-session")),
+                ..AccountState::default()
+            })
+            .unwrap();
+
+        let first = client.regional_session(&device).await.unwrap();
+        let renewed = client.regional_session(&device).await.unwrap();
+        assert_eq!(first.id, renewed.id);
+        assert!(first.token == renewed.token);
+        {
+            let seen = digests.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert!(seen
+                .iter()
+                .all(|digest| *digest == token_digest(&first.token)));
+        }
+        assert!(!client.logout().await.unwrap());
+        assert!(
+            AccountClient::local_regional_session(&secrets, Some("fixture-device"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn account_regional_permission_uses_cache_during_outage_and_rejects_stale_authority() {
+        let response_kind = Arc::new(AtomicUsize::new(0));
+        let server_kind = response_kind.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            let kind = server_kind.load(Ordering::SeqCst);
+            match request.path.as_str() {
+                "/api/v1/client/session/permission/challenge" if kind == 0 => MockResponse::empty(503),
+                "/api/v1/client/session/permission/challenge" => {
+                    let key = if kind == 3 {
+                        [0; 32]
+                    } else {
+                        PublicKey::from(&StaticSecret::from([62; 32])).to_bytes()
+                    };
+                    MockResponse::json(200, &json!({
+                        "challengeId":"fixture-challenge",
+                        "publicKey": URL_SAFE_NO_PAD.encode(key),
+                        "expiresAt": unix_now() + 60,
+                    }))
+                }
+                "/api/v1/client/session/permission" => MockResponse::json(200, &json!({
+                    "region":"another-region",
+                    "accessOrigin": if kind == 2 { "http://access.fixture.test" } else { "https://standby.fixture.test" },
+                    "expiresAt":unix_now()+45,
+                    "revision":9,
+                })),
+                _ => MockResponse::empty(404),
+            }
+        })).await;
+        let directory = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(directory.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let identity = DeviceIdentity {
+            device_id: "fixture-device".into(),
+            key: crate::security::StaticIdentity::generate(),
+        };
+        let mut active = seed_session(&client, "fixture-session");
+        let mut regional = RegionalSession {
+            id: active.id.clone(),
+            token: new_token(),
+            device_id: identity.device_id.clone(),
+            permission: Some(RegionalPermission {
+                region: "current-region".into(),
+                revision: 10,
+                access_origin: Url::parse("https://access.fixture.test").unwrap(),
+                expires_at: unix_now() + 30,
+            }),
+        };
+        active.regional = Some(regional.clone());
+        client
+            .save(&AccountState {
+                active: Some(active.clone()),
+                ..AccountState::default()
+            })
+            .unwrap();
+        let cached = client.regional_session(&identity).await.unwrap();
+        assert_eq!(cached.permission.unwrap().region, "current-region");
+
+        response_kind.store(1, Ordering::SeqCst);
+        let renewed = client.regional_session(&identity).await.unwrap();
+        assert_eq!(renewed.permission.unwrap().revision, 10);
+
+        for kind in [2, 3] {
+            response_kind.store(kind, Ordering::SeqCst);
+            assert!(matches!(
+                client.regional_session(&identity).await,
+                Err(CoreError::ProtocolIncompatible)
+            ));
+        }
+        let other = DeviceIdentity {
+            device_id: "other-device".into(),
+            key: crate::security::StaticIdentity::generate(),
+        };
+        assert!(matches!(
+            client.regional_session(&other).await,
+            Err(CoreError::Conflict(_))
+        ));
+
+        response_kind.store(0, Ordering::SeqCst);
+        regional.permission.as_mut().unwrap().expires_at = unix_now().saturating_sub(1);
+        active.regional = Some(regional);
+        client
+            .save(&AccountState {
+                active: Some(active.clone()),
+                ..AccountState::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            client.regional_session(&identity).await,
+            Err(CoreError::Unavailable(_))
+        ));
+        active.expires = unix_now().saturating_sub(1);
+        client
+            .save(&AccountState {
+                active: Some(active),
+                ..AccountState::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            client.regional_session(&identity).await,
+            Err(CoreError::AuthenticationRequired)
+        ));
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn account_signout_status_does_not_clear_a_new_session() {
+        let server = MockServer::start(Arc::new(|request| match request.path.as_str() {
+            "/api/v1/client/me" => MockResponse::empty(401),
+            "/api/v1/client/sessions/previous-session/revoke" => {
+                MockResponse::json(200, &json!({"state":"revoked"}))
+            }
+            _ => MockResponse::empty(404),
+        }))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(directory.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let old = seed_session(&client, "previous-session");
+        client
+            .save(&AccountState {
+                active: Some(old.clone()),
+                ..AccountState::default()
+            })
+            .unwrap();
         assert!(matches!(
             client.status().await,
-            Err(CoreError::Unauthorized)
+            Err(CoreError::AuthenticationRequired)
         ));
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
+        assert!(AccountClient::local_logout_pending(&secrets).unwrap());
+
+        let active = seed_session(&client, "new-session");
+        let mut state = load_state(&secrets).unwrap();
+        state.active = Some(active);
+        client.save(&state).unwrap();
+        let response = client
+            .http
+            .get(server.url().join("api/v1/client/me").unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.check_active(response, &old.credential).await,
+            Err(CoreError::AuthenticationRequired)
+        ));
+        assert!(!client
+            .begin_local_logout(Some("previous-session"))
+            .await
+            .unwrap());
+        client.retry_remote_signout().await.unwrap();
+        assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("new-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn account_bulk_signout_ambiguous_response_reconciles_local_session() {
+        let server = MockServer::start(Arc::new(|request| match request.path.as_str() {
+            "/api/v1/client/session-revocations" => MockResponse::empty(503),
+            "/api/v1/client/sessions/current-session/revoke" => {
+                MockResponse::json(200, &json!({"state":"revoked"}))
+            }
+            _ => MockResponse::empty(404),
+        }))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(directory.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        client
+            .save(&AccountState {
+                active: Some(seed_session(&client, "current-session")),
+                ..AccountState::default()
+            })
+            .unwrap();
+
+        assert!(matches!(
+            client.revoke_all_sessions().await,
+            Err(CoreError::Unavailable(_))
+        ));
+        assert!(AccountClient::local_session_id(&instance, &secrets)
+            .unwrap()
+            .is_none());
+        assert!(AccountClient::local_logout_pending(&secrets).unwrap());
+        client.retry_remote_signout().await.unwrap();
+        assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
     }
 
     #[test]

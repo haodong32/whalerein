@@ -73,6 +73,10 @@ type Config struct {
 // and its issuer keys, and Access never falls back to Standalone or to an
 // unconfigured authority.
 type ExternalConfig struct {
+	RequireDeviceSession     bool   `yaml:"require_device_session"`
+	SessionEnvironment       string `yaml:"session_environment"`
+	SessionAuthorityRevision string `yaml:"session_authority_revision"`
+
 	ServiceIdentity  string                    `yaml:"service_identity"`
 	Issuer           string                    `yaml:"issuer"`
 	Region           string                    `yaml:"region"`
@@ -384,6 +388,10 @@ func (c Config) validateExternal() []string {
 	require("external.service_identity", c.External.ServiceIdentity)
 	require("external.issuer", c.External.Issuer)
 	require("external.region", c.External.Region)
+	if c.External.RequireDeviceSession {
+		require("external.session_environment", c.External.SessionEnvironment)
+		require("external.session_authority_revision", c.External.SessionAuthorityRevision)
+	}
 	require("external.mqtt_url", c.External.MQTTURL)
 	if len(c.External.VerificationKeys) == 0 {
 		problems = append(problems, "external.verification_keys needs at least one key")

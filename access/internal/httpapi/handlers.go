@@ -16,6 +16,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -36,6 +37,11 @@ const (
 )
 
 func (s *Server) handleInvitation(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	if s.deps.RequireDeviceSession {
+		s.writeError(w, r, auth.ErrForbidden)
+		return
+	}
+
 	var request whalereinv1.PairingInvitationRequest
 	if err := s.decodeProto(w, r, &request); err != nil {
 		s.writeError(w, r, err)
@@ -102,6 +108,11 @@ func validResourceID(value string) bool {
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	if s.deps.RequireDeviceSession {
+		s.writeError(w, r, auth.ErrForbidden)
+		return
+	}
+
 	var request whalereinv1.PairingClaimRequest
 	if err := s.decodeProto(w, r, &request); err != nil {
 		s.writeError(w, r, err)
@@ -214,9 +225,10 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map
 		}
 	}
 	row, _, err := s.deps.Requests.Submit(r.Context(), requests.SubmitInput{
-		DeviceID: identity.DeviceID,
-		HostID:   hostID,
-		Request:  &request,
+		DeviceID:  identity.DeviceID,
+		SessionID: identity.SessionID,
+		HostID:    hostID,
+		Request:   &request,
 	})
 	if err != nil {
 		s.writeError(w, r, err)
@@ -246,10 +258,16 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, err)
 		return
 	}
+	if identity.SessionID != "" {
+		if err := s.deps.Auth.AuthorizeHost(r.Context(), identity, row.HostID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	// Renewal is best-effort for a read: the recorded outcome stays
 	// recoverable even when liveness bookkeeping fails, and a GET never
 	// reopens an expired lease.
-	_, _ = s.deps.Requests.Touch(r.Context(), identity.DeviceID, requestID)
+	_, _ = s.deps.Requests.Touch(store.WithRequestDeviceSession(r.Context(), identity.SessionID), identity.DeviceID, requestID)
 	s.writeProto(w, http.StatusOK, &whalereinv1.RequestState{
 		RequestId:       row.RequestID,
 		HostId:          row.HostID,
@@ -277,11 +295,18 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params 
 		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
-	if _, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID); err != nil {
+	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	if _, err := s.deps.Requests.Touch(r.Context(), identity.DeviceID, requestID); err != nil {
+	if identity.SessionID != "" {
+		if err := s.deps.Auth.AuthorizeHost(r.Context(), identity, row.HostID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
+	if _, err := s.deps.Requests.Touch(store.WithRequestDeviceSession(r.Context(), identity.SessionID), identity.DeviceID, requestID); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -322,6 +347,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	if s.deps.RequireDeviceSession {
+		w.Header().Set("WhaleRein-Session-Authority-Revision", s.deps.SessionAuthorityRevision)
+	}
 	s.deps.Readiness.ReadyHandler().ServeHTTP(w, r)
 }
 

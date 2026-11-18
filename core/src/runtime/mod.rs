@@ -120,6 +120,7 @@ impl Default for HostRuntime {
 struct RuntimeInner {
     hosts: HashMap<String, HostRuntime>,
     revoked: bool,
+    cloud_session: Option<String>,
     recent_errors: VecDeque<String>,
     metrics: Metrics,
 }
@@ -141,6 +142,7 @@ impl Runtime {
             inner: Mutex::new(RuntimeInner {
                 hosts: HashMap::new(),
                 revoked: false,
+                cloud_session: None,
                 recent_errors: VecDeque::new(),
                 metrics: Metrics::new(),
             }),
@@ -340,6 +342,28 @@ impl Runtime {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn bind_cloud_session(&self, session: &str) {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        if inner.cloud_session.as_deref() != Some(session) {
+            inner.hosts.clear();
+            inner.cloud_session = Some(session.to_owned());
+        }
+    }
+
+    pub(crate) fn disconnect_cloud_session_if(&self, expected: Option<&str>) {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        if inner.cloud_session.as_deref() == expected {
+            inner.cloud_session = None;
+            inner.hosts.clear();
+        }
+    }
+
+    pub(crate) fn disconnect_cloud_session(&self) {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        inner.cloud_session = None;
+        inner.hosts.clear();
     }
 
     /// Allow a newly stored pairing to open channels after a revocation.

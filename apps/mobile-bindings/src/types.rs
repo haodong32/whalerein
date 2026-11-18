@@ -347,6 +347,7 @@ pub struct ClientStatusView {
     pub testing_environment: Option<String>,
     pub instance_id: Option<String>,
     pub account_state: String,
+    pub remote_signout_pending: bool,
     pub default_host: Option<String>,
     pub device_access: String,
 }
@@ -370,6 +371,7 @@ impl From<whalerein_core::api::ClientStatus> for ClientStatusView {
                 AccountState::SignedOut => "signed_out",
             }
             .into(),
+            remote_signout_pending: value.remote_signout_pending,
             default_host: value.default_host,
             device_access: match value.device_access {
                 DeviceAccess::Unpaired => "unpaired",
@@ -377,6 +379,7 @@ impl From<whalerein_core::api::ClientStatus> for ClientStatusView {
                 DeviceAccess::RevocationPending => "revocation_pending",
                 DeviceAccess::Revoked => "revoked",
                 DeviceAccess::Unavailable => "unavailable",
+                DeviceAccess::SignInRequired => "sign_in_required",
             }
             .into(),
         }

@@ -73,13 +73,15 @@ impl Core {
         deadline: Instant,
         transport: Arc<TransportObservation>,
     ) -> Result<ResponsePayload, (CoreError, Option<String>)> {
+        let expected_session = self.cloud_session_id().map_err(|error| (error, None))?;
         let config = self.require_config().map_err(|error| (error, None))?;
         let channel = self
             .ensure_wait_channel(host_id, fresh, stale_channel_id, transport.clone())
             .await
             .map_err(|error| (error, None))?;
         let channel_id = channel.channel_id().to_owned();
-        self.command_service()
+        self.command_service_for_session(expected_session.as_deref())
+            .await
             .map_err(|error| (error, Some(channel_id.clone())))?
             .query_wait(
                 host_id,

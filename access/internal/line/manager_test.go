@@ -637,3 +637,61 @@ func TestRevokeHostSwallowsAnAlreadyClosedSessionAndSurfacesOtherFailures(t *tes
 		t.Fatal("a line failure must be surfaced")
 	}
 }
+
+// A managed broker heartbeat verifies capability, renews a live session once
+// and removes a different session without replacing its ordinary Device ACLs.
+func TestManagedHeartbeatRefreshesOnlyCurrentSessionPolicies(t *testing.T) {
+	var capability bool
+	var projectionError error
+	control, recorded := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op != "snapshot" {
+			return "", nil
+		}
+		if !capability {
+			return "seq 50\n", nil
+		}
+		return "seq 50\nsession_capability 1\n" +
+			"client whalerein-session-old device - d1 1 1 connected 50 1000 old\n" +
+			"client whalerein-session-new device - d1 2 1 connected 50 1000 new\n" +
+			"client whalerein-session-new-watch device - d1 3 2 connected 50 1000 new\n", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	manager.SetSessionPolicy(func(_ context.Context, id, deviceID string) (policy.Connection, error) {
+		if deviceID != "d1" {
+			t.Fatal("wrong Device identity")
+		}
+		if projectionError != nil || id == "old" {
+			return policy.Connection{}, projectionError
+		}
+		return policy.Connection{Kind: policy.KindDevice, DeviceID: deviceID,
+			SessionID: id, SessionRevision: 3, SessionExpiresAt: 2000, Revision: 2}, nil
+	})
+	ctx := context.Background()
+	if err := manager.Heartbeat(ctx); err == nil || len(*recorded) != 1 {
+		t.Fatalf("missing capability should be fail-closed: %+v %v", *recorded, err)
+	}
+	capability = true
+	projectionError = errors.New("no current regional state")
+	if err := manager.Heartbeat(ctx); !errors.Is(err, projectionError) || len(*recorded) != 2 {
+		t.Fatalf("failed projection must not refresh the policy: %+v %v", *recorded, err)
+	}
+	projectionError = nil
+	if err := manager.Heartbeat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := (*recorded)[2:]
+	want := []string{"snapshot", "session_absent", "renew_session", "set", "ping"}
+	if len(got) != len(want) {
+		t.Fatalf("operations = %+v", got)
+	}
+	for i, op := range want {
+		if got[i].op != op {
+			t.Fatalf("operation %d = %s, want %s", i, got[i].op, op)
+		}
+	}
+	if !strings.Contains(strings.Join(got[1].fields, "\n"), "session old") ||
+		!strings.Contains(strings.Join(got[2].fields, "\n"), "session new\nsession_revision 3\ndeadline_ms 2000") ||
+		!strings.Contains(strings.Join(got[3].fields, "\n"), "client whalerein-session-new\n") {
+		t.Fatalf("unexpected policy scope: %+v", got)
+	}
+}

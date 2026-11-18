@@ -3,6 +3,8 @@ package external
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -160,5 +162,71 @@ func TestCloudDeviceRevocationCompletesOnlyAfterEnforcement(t *testing.T) {
 	}
 	if got := len(data.events); got != 2 || data.events[0] != "record" || data.events[1] != "complete" {
 		t.Fatalf("pre-grant revocation should record a fence without a live line, got %v", data.events)
+	}
+}
+
+// Both phases carry the regional bearer and a signed pairing scoped to that
+// same session, workspace, region, Device and pinned key.
+func TestManagedPairingRequiresMatchingSessionPermission(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	req := h.request(t)
+	if _, err := h.service.EnrollHost(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.data.MarkEnrollmentReady(ctx, req.HostId, issued); err != nil {
+		t.Fatal(err)
+	}
+	grants := &testDeviceGrants{}
+	noise := &capturedClaim{}
+	WithDeviceGrants(noise, grants, grants)(h.service)
+	a := proto.Clone(req.Authorization).(*whalereinv1.ExternalAuthorization)
+	a.Purpose, a.AuthorizationId, a.OperationId = PurposeDevicePairing, "auth", "operation"
+	a.EnrollmentRevision, a.Precondition, a.DeviceId = "1", "original-session", "device"
+	a.DevicePublicKeys = [][]byte{make([]byte, 32)}
+	claim := &whalereinv1.PairingClaimRequest{ClaimId: a.OperationId, DeviceId: a.DeviceId}
+	a = h.signer.authorize(t, a)
+	const token = "regional fixture token"
+	fingerprint := sha256.Sum256(a.DevicePublicKeys[0])
+	permission := store.DeviceSession{
+		ID: a.Precondition, DeviceID: a.DeviceId, AuthorityRevision: "serving",
+		WorkspaceID: a.WorkspaceId, RegionID: a.RegionId, KeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		CredentialHash: HashBytes([]byte(token)),
+	}
+	h.service.trust.SessionAuthorityRevision = "serving"
+	data := &sessionFixture{current: permission}
+	WithDeviceSessions(data, &sessionEnforcerFixture{}, true)(h.service)
+	if _, err := h.service.PairDevice(ctx, a, claim); !errors.Is(err, ErrAuthorizationMismatch) {
+		t.Fatalf("missing bearer accepted: %v", err)
+	}
+	if _, err := h.service.PairDevice(WithDeviceSessionCredential(ctx, "wrong"), a, claim); !errors.Is(err, ErrAuthorizationMismatch) {
+		t.Fatalf("unequal bearer accepted: %v", err)
+	}
+	authenticated := WithDeviceSessionCredential(ctx, token)
+	for _, mutation := range []func(*store.DeviceSession){
+		func(s *store.DeviceSession) { s.ID = "new-session" },
+		func(s *store.DeviceSession) { s.DeviceID = "different-device" },
+		func(s *store.DeviceSession) { s.WorkspaceID = "foreign" },
+		func(s *store.DeviceSession) { s.RegionID = "foreign" },
+		func(s *store.DeviceSession) { s.KeyFingerprint = "different-key" },
+		func(s *store.DeviceSession) { s.AuthorityRevision = "previous" },
+	} {
+		data.current = permission
+		mutation(&data.current)
+		if _, err := h.service.PairDevice(authenticated, a, claim); !errors.Is(err, ErrAuthorizationMismatch) {
+			t.Fatalf("mismatched session scope accepted: %v", err)
+		}
+	}
+	if noise.scope != nil {
+		t.Fatal("invalid permission reached Noise")
+	}
+	data.current = permission
+	data.refusal = errors.New("unavailable")
+	if _, err := h.service.PairDevice(authenticated, a, claim); !errors.Is(err, data.refusal) {
+		t.Fatalf("store failure classification: %v", err)
+	}
+	data.refusal = nil
+	if _, err := h.service.PairDevice(authenticated, a, claim); err != nil || noise.scope == nil || noise.scope.SessionID != permission.ID {
+		t.Fatalf("matched permission scope=%+v err=%v", noise.scope, err)
 	}
 }

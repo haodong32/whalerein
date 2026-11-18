@@ -241,7 +241,7 @@ test('an aborted approval precheck is journaled failed and a same-command retry 
   const pending = service.handle({ request, payload: resolvePayload(approval) })
   for (let i = 0; i < 200 && adapter.reads === 0; i++) await new Promise((resolve) => setImmediate(resolve))
   assert.equal(adapter.reads, 1)
-  service.cancelRequest(request.request_id, 'client_poll_expired')
+  service.cancelRequest(request.device_id, request.request_id, 'client_poll_expired')
   const rejected = await pending
   assert.equal(rejected.status, 'failed')
   assert.equal(rejected.errorCode, 'unavailable')
