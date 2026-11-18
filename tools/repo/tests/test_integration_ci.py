@@ -1,5 +1,6 @@
 """Scheduled reuse must never turn incomplete integration into a passed baseline."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ from repo import integration_ci as ci
 
 @pytest.fixture
 def report(tmp_path):
+    manifest = b'{"target/debug/whalerein":{"sha256":"fixture"}}'
+    (tmp_path / "artifact-manifest.json").write_bytes(manifest)
     document = {
         "configuration": {"suite": "integration"},
         "completeness": "complete",
@@ -29,7 +32,13 @@ def report(tmp_path):
                 "public": {"revision": "a" * 40, "mode": "commit", "fingerprint": "b" * 64}
             },
             "collected_cases": ["case"],
-            "artifacts": {"products": {"source": "b" * 64}},
+            "artifacts": {
+                "products": {
+                    "source": "b" * 64,
+                    "manifest": "artifact-manifest.json",
+                    "digest": hashlib.sha256(manifest).hexdigest(),
+                }
+            },
             "identities": {"test-container": {"expected": "image", "actual": "image"}},
         },
     }
@@ -164,4 +173,19 @@ def test_cannot_reuse_receipt_with_wrong_runtime_or_inputs(report, tmp_path, cha
         facts["purpose"] = "local"
     path.write_text(json.dumps(document))
     with pytest.raises(ValueError, match="expected inputs and scope"):
+        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)
+
+
+def test_changed_runner_image_invalidates_scheduled_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(ci.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=b""))
+    monkeypatch.setenv("ImageVersion", "first")
+    first = ci.fingerprint(tmp_path, "HEAD")
+    monkeypatch.setenv("ImageVersion", "next")
+    assert ci.fingerprint(tmp_path, "HEAD") != first
+
+
+def test_changed_artifact_manifest_rejects_receipt(report, tmp_path):
+    path, _ = report
+    (tmp_path / "artifact-manifest.json").write_text("{}")
+    with pytest.raises(ValueError, match="artifact manifest"):
         ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)

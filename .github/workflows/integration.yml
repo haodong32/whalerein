@@ -181,6 +181,7 @@ jobs:
           path: |
             .data/runs/integration/report.json
             .data/runs/integration/report.html
+            .data/runs/integration/artifact-manifest.json
             .data/integration-passed/receipt.json
           include-hidden-files: true
           if-no-files-found: warn

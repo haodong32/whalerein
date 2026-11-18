@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -29,7 +31,16 @@ def fingerprint(root: Path, revision: str) -> str:
         if path.endswith(".md") or path.startswith(("docs/", ".local-docs/")):
             continue
         records.append(record)
-    return hashlib.sha256(b"\0".join(records)).hexdigest()
+    environment = json.dumps(
+        {
+            "system": platform.system(),
+            "machine": platform.machine(),
+            "runner_image": os.environ.get("ImageOS"),
+            "runner_image_revision": os.environ.get("ImageVersion"),
+        },
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(b"\0".join((environment, *records))).hexdigest()
 
 
 def record_success(
@@ -45,6 +56,7 @@ def record_success(
     verification = document.get("verification", {})
     source = verification.get("sources", {}).get("public", {})
     artifacts = verification.get("artifacts", {})
+    products = artifacts.get("products", {})
     identities = verification.get("identities", {})
     collected = verification.get("collected_cases")
     observed = [case.get("id") for scope in scopes for case in scope["tests"]]
@@ -57,7 +69,8 @@ def record_success(
         or source.get("revision") != revision
         or source.get("mode") != "commit"
         or source.get("fingerprint") != expected_source
-        or artifacts.get("products", {}).get("source") != source["fingerprint"]
+        or products.get("source") != source["fingerprint"]
+        or products.get("manifest") != "artifact-manifest.json"
         or not identities
         or any(
             not item.get("expected") or item.get("expected") != item.get("actual")
@@ -87,6 +100,11 @@ def record_success(
             or any(case["status"] != "passed" for case in scope["tests"])
         ):
             raise ValueError("Integration execution or cleanup did not pass completely")
+    manifest = report.parent / "artifact-manifest.json"
+    if not manifest.is_file() or hashlib.sha256(manifest.read_bytes()).hexdigest() != products.get(
+        "digest"
+    ):
+        raise ValueError("Integration artifact manifest is missing or disagrees with the report")
     output.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(
         output,
