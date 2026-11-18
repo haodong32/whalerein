@@ -73,7 +73,7 @@ def test_cutover_retains_host_identity_pins_and_pager_key(
     scenario, paired_device, session_id
 ):
     scenario.dsh.process.control("request_question_pages", session_id=session_id)
-    first = paired_device.call("questions", "--session", session_id)
+    first = paired_device.call("session", "question", "list", "--session", session_id)
     assert first["next_cursor"]
     retained_cursor = first["next_cursor"]
 
@@ -127,7 +127,7 @@ def test_cutover_retains_host_identity_pins_and_pager_key(
 
     # The retained pager key authenticates the cursor issued before the cutover.
     second = paired_device.call(
-        "questions", "--session", session_id, "--cursor", retained_cursor
+        "session", "question", "list", "--session", session_id, "--cursor", retained_cursor
     )
     assert second["batches"]
     assert second["batches"][0]["session_id"] == session_id
@@ -135,7 +135,7 @@ def test_cutover_retains_host_identity_pins_and_pager_key(
     # A cursor from an older key generation is only reported as a snapshot
     # restart; it never becomes a conflict or a silently re-based page.
     code, values = paired_device.invoke(
-        "questions",
+        "session", "question", "list",
         "--session",
         session_id,
         "--cursor",
@@ -153,11 +153,11 @@ def test_cutover_does_not_replay_a_settled_answer(
     scenario, paired_device, session_id
 ):
     scenario.dsh.process.control("request_question_open", session_id=session_id)
-    batch = paired_device.call("questions", "--session", session_id)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session_id)["batches"][0]
     answer = scenario.directory / "cutover-answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     receipt = paired_device.call(
-        "answer",
+        "session", "question", "answer",
         "--session",
         session_id,
         "--batch",

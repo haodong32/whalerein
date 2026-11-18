@@ -8,7 +8,6 @@ no implicit answer, and a later answer that settles exactly once.
 """
 
 import json
-import os
 import signal
 import subprocess
 import time
@@ -31,30 +30,24 @@ QUESTION_WINDOW_MS = 120_000
 
 def _answer_process(paired_device, session, batch, answer, command_id):
     return subprocess.Popen(
-        [
-            str(ROOT / "target/debug/whalerein"), "--json", "--yes",
-            "--data-dir", str(paired_device.directory / "client"),
-            "answer", "--session", session,
+        paired_device.args(
+            "session", "question", "answer", "--session", session,
             "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
             "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer),
             "--command-id", command_id,
-        ],
+        ),
         cwd=ROOT,
-        env={
-            **os.environ,
-            "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-            "WHALEREIN_LOG": "error",
-        },
+        env=paired_device.env(WHALEREIN_LOG="error"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
 
 
-def _answer(scenario, paired_device, session, batch, answer, command_id):
+def _answer(paired_device, session, batch, answer, command_id):
     return paired_device.call(
-        "answer", "--session", session,
+        "session", "question", "answer", "--session", session,
         "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
         "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer),
@@ -72,12 +65,12 @@ def _held_question(scenario, paired_device):
     wait(
         lambda: any(
             item["answerable"]
-            for item in paired_device.call("questions", "--session", session)["batches"]
+            for item in paired_device.call("session", "question", "list", "--session", session)["batches"]
         ),
         timeout=20,
         process=scenario.native,
     )
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert batch["answerable"] and batch["phase"] == "QUESTION_OPEN"
     answer = scenario.directory / "presence-restart-answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
@@ -97,7 +90,7 @@ def _assert_released_without_answer(scenario, paired_device, session, batch, sta
     # The first answer was never settled or fabricated: the Host's live
     # question page still has the same open, answerable batch. Only the request
     # scope ended.
-    current = paired_device.call("questions", "--session", session)["batches"][0]
+    current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert current["batch_id"] == batch["batch_id"]
     assert current["answerable"] is True
     # One real native answer attempt was made; none of it settled the question.
@@ -106,13 +99,13 @@ def _assert_released_without_answer(scenario, paired_device, session, batch, sta
 
 
 def _later_answer_settles_once(scenario, paired_device, session, batch, answer):
-    receipt = _answer(scenario, paired_device, session, batch, answer, "presence-restart-after")
+    receipt = _answer(paired_device, session, batch, answer, "presence-restart-after")
     assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
     assert scenario.request("question-result-remote-fixture", sessionId=session) == {
         "selected": "Yes",
         "pending": False,
     }
-    assert paired_device.call("questions", "--session", session)["batches"] == []
+    assert paired_device.call("session", "question", "list", "--session", session)["batches"] == []
     # Exactly one more native attempt, and replaying the same command id does
     # not invoke the source again.
     assert scenario.request("gx-question-count")["count"] == 2

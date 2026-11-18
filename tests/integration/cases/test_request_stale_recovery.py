@@ -12,7 +12,6 @@ a durable retry queue.
 """
 
 import json
-import os
 import subprocess
 import time
 import urllib.request
@@ -31,21 +30,15 @@ DEADLINE_MARGIN = 15
 
 def _answer_process(paired_device, session, batch, answer, command_id):
     return subprocess.Popen(
-        [
-            str(ROOT / "target/debug/whalerein"), "--json", "--yes",
-            "--data-dir", str(paired_device.directory / "client"),
-            "answer", "--session", session,
+        paired_device.args(
+            "session", "question", "answer", "--session", session,
             "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
             "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer),
             "--command-id", command_id,
-        ],
+        ),
         cwd=ROOT,
-        env={
-            **os.environ,
-            "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-            "WHALEREIN_LOG": "error",
-        },
+        env=paired_device.env(WHALEREIN_LOG="error"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -54,7 +47,7 @@ def _answer_process(paired_device, session, batch, answer, command_id):
 
 def _answer(paired_device, session, batch, answer, command_id):
     return paired_device.call(
-        "answer", "--session", session,
+        "session", "question", "answer", "--session", session,
         "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
         "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer),
@@ -95,7 +88,7 @@ def test_failed_stale_presence_publish_releases_by_deadline_and_recovers(
 
         scenario.dsh.process.control("request_question_open", session_id=session_id)
         scenario.dsh.process.control("hold_question_answer", session_id=session_id)
-        batch = paired_device.call("questions", "--session", session_id)["batches"][0]
+        batch = paired_device.call("session", "question", "list", "--session", session_id)["batches"][0]
         assert batch["answerable"] and batch["phase"] == "QUESTION_OPEN"
         answer = scenario.directory / "stale-recovery-answer.json"
         answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
@@ -130,7 +123,7 @@ def test_failed_stale_presence_publish_releases_by_deadline_and_recovers(
         wait(lambda: proxy.connections > connections, timeout=20)
 
         # The first answer never settled: the batch is still open and answerable.
-        remaining = paired_device.call("questions", "--session", session_id)["batches"]
+        remaining = paired_device.call("session", "question", "list", "--session", session_id)["batches"]
         assert [item["batch_id"] for item in remaining] == [batch["batch_id"]]
         assert remaining[0]["answerable"] is True
         current = remaining[0]
@@ -142,7 +135,7 @@ def test_failed_stale_presence_publish_releases_by_deadline_and_recovers(
         # invoke the source a second time.
         receipt = _answer(paired_device, session_id, current, answer, "stale-recovered-answer")
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
-        assert paired_device.call("questions", "--session", session_id)["batches"] == []
+        assert paired_device.call("session", "question", "list", "--session", session_id)["batches"] == []
         assert scenario.dsh.process.control("question_answer_calls") == before_calls + 2
         status, replay = scenario.replay_command(paired_device)
         assert status in (200, 202) and replay["commandId"] == receipt["command_id"]
