@@ -204,8 +204,12 @@ def test_native_creation_history_refresh_failure_recovers_without_recreate(scena
     paired_device.send_confirmed(session, "synthetic fixture", delivery="start-if-idle")
     scenario.wait_idle(session)
     cached_before = paired_device.cached_history_state(scenario.host, session)
-    assert scenario.request("creation-fail-next-history")["armed"]
-    code, _ = paired_device.invoke("session", "watch", session, "--timeout", "1", success=False)
+    assert scenario.request("creation-hold-history-failure", sessionId=session)["armed"]
+    try:
+        code, _ = paired_device.invoke("session", "watch", session, "--timeout", "1", success=False)
+    finally:
+        fault = scenario.request("creation-release-history-failure")
+    assert fault["restored"] and fault["attempts"] > 0
     assert code != 0
     assert paired_device.cached_history_state(scenario.host, session) == cached_before
     assert scenario.request("session-count")["count"] == before + 1
