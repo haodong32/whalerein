@@ -2664,9 +2664,11 @@ def test_native_delivery_unknown_survives_restart(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan()
     scenario.request("arm-delivery-receipt-loss")
-    code, values = paired_device.invoke("session", "send", "--detach", session, "synthetic lost reply", success=False)
+    text = "synthetic lost reply"
+    code, values = paired_device.invoke("session", "send", "--detach", session, text, success=False)
+    code, outcome = paired_device.settle_detached_delivery(code, values[-1], session, text, None)
     assert code != 0
-    assert values[-1]["error"]["code"] == "unknown"
+    assert outcome["error"]["code"] == "unknown"
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
@@ -2750,10 +2752,14 @@ def test_native_start_if_idle_rejects_local_start_before_observation(scenario, p
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("arm-precheck-running-race")
+    text = "synthetic remote attempt"
     code, output = paired_device.invoke(
-        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic remote attempt", success=False,
+        "session", "send", "--detach", session, "--delivery", "start-if-idle", text, success=False,
     )
-    assert code == 8 and output[-1]["error"]["code"] == "conflict"
+    code, outcome = paired_device.settle_detached_delivery(
+        code, output[-1], session, text, "start-if-idle"
+    )
+    assert code == 8 and outcome["error"]["code"] == "conflict"
     assert scenario.model.started.wait(timeout=15)
     assert scenario.model.calls == 1
     scenario.model.release.set()
