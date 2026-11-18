@@ -34,6 +34,25 @@ type fakeStore struct {
 	applyCalls     []store.HostResultUpdate
 	applyResult    *bool
 	applyErr       error
+
+	renewCalls    []renewCall
+	renewResult   bool
+	renewErr      error
+	expireRows    []store.Request
+	expireErr     error
+	expireLimit   int
+	pendingRows   []store.Request
+	pendingErr    error
+	cancelMarked  []string
+	cancelMarkErr error
+	attemptMarked []string
+	attemptErr    error
+}
+
+type renewCall struct {
+	deviceID  string
+	requestID string
+	lease     time.Duration
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{rows: map[string]store.Request{}} }
@@ -101,6 +120,45 @@ func (f *fakeStore) ApplyHostResult(_ context.Context, update store.HostResultUp
 		return *f.applyResult, nil
 	}
 	return true, nil
+}
+
+func (f *fakeStore) RenewClientLease(_ context.Context, deviceID, requestID string, lease time.Duration) (bool, error) {
+	f.renewCalls = append(f.renewCalls, renewCall{deviceID: deviceID, requestID: requestID, lease: lease})
+	if f.renewErr != nil {
+		return false, f.renewErr
+	}
+	return f.renewResult, nil
+}
+
+func (f *fakeStore) ExpireClientLeases(_ context.Context, limit int) ([]store.Request, error) {
+	f.expireLimit = limit
+	if f.expireErr != nil {
+		return nil, f.expireErr
+	}
+	return f.expireRows, nil
+}
+
+func (f *fakeStore) PendingCancelRequests(_ context.Context, _ int) ([]store.Request, error) {
+	if f.pendingErr != nil {
+		return nil, f.pendingErr
+	}
+	return f.pendingRows, nil
+}
+
+func (f *fakeStore) MarkCancelPublished(_ context.Context, requestID string) error {
+	if f.cancelMarkErr != nil {
+		return f.cancelMarkErr
+	}
+	f.cancelMarked = append(f.cancelMarked, requestID)
+	return nil
+}
+
+func (f *fakeStore) MarkCancelAttempt(_ context.Context, requestID string) error {
+	if f.attemptErr != nil {
+		return f.attemptErr
+	}
+	f.attemptMarked = append(f.attemptMarked, requestID)
+	return nil
 }
 
 type fakeBroker struct {
@@ -720,70 +778,212 @@ func TestReceiverCapabilitySurvivesDurableForwardingAndRejectsUnknownVersions(t 
 	}
 }
 
-func TestClientPollLeaseReleasesStaleNonTerminalRequest(t *testing.T) {
+// TestSessionObservationAC26UnrelatedSubmitDoesNotRenew covers the
+// other-submit branch: a new request never renews R, while an idempotent replay
+// renews only its own exact row.
+func TestSessionObservationAC26UnrelatedSubmitDoesNotRenew(t *testing.T) {
 	f := newFixture(t)
-	row := store.Request{RequestID: "req-lease", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
-	f.store.rows[row.RequestID] = row
-	f.service.recordClientClaim(row)
-	f.now = f.now.Add(9 * time.Second)
-	f.service.Touch("d1", row.RequestID, whalereinv1.OnlineStatus_received)
-	f.now = f.now.Add(2 * time.Second)
-	f.service.SweepClientClaims(context.Background())
-	if len(f.broker.presence) != 0 {
-		t.Fatalf("renewed claim swept early: %v", f.broker.presence)
+	base := validRequest(f.now, "c1")
+	first, created, err := f.service.Submit(context.Background(), input(base))
+	if err != nil || !created {
+		t.Fatalf("submit R: created=%v err=%v", created, err)
 	}
-	f.now = f.now.Add(11 * time.Second)
-	f.service.SweepClientClaims(context.Background())
+	if first.ClientLeaseUntil == nil || first.ClientLeaseState != store.ClientLeaseLive {
+		t.Fatalf("submit did not record an exact live lease: %+v", first)
+	}
+	if want := f.now.Add(clientPollLease); !first.ClientLeaseUntil.Equal(want) {
+		t.Fatalf("initial lease = %v want %v", first.ClientLeaseUntil, want)
+	}
+	f.store.renewCalls = nil
+
+	other := validRequest(f.now, "c2")
+	other.RequestId = "req-other"
+	second, created, err := f.service.Submit(context.Background(), input(other))
+	if err != nil || !created {
+		t.Fatalf("submit unrelated: created=%v err=%v", created, err)
+	}
+	if len(f.store.renewCalls) != 0 {
+		t.Fatalf("unrelated submit renewed an existing request: %+v", f.store.renewCalls)
+	}
+
+	// A duplicate submit of the unrelated request is an exact replay and may
+	// renew only that request.
+	if _, _, err := f.service.Submit(context.Background(), input(other)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.store.renewCalls) != 1 || f.store.renewCalls[0].requestID != second.RequestID || f.store.renewCalls[0].deviceID != "d1" {
+		t.Fatalf("replay renewed the wrong scope: %+v", f.store.renewCalls)
+	}
+	if f.store.renewCalls[0].lease != clientPollLease {
+		t.Fatalf("replay lease = %v", f.store.renewCalls[0].lease)
+	}
+}
+
+// TestSessionObservationAC26TouchTargetsOnlyAddressedRequest covers
+// other-GET/other-heartbeat and wrong-device rejection at the service seam.
+func TestSessionObservationAC26TouchTargetsOnlyAddressedRequest(t *testing.T) {
+	f := newFixture(t)
+	f.store.renewResult = true
+	renewed, err := f.service.Touch(context.Background(), "d1", "req-own")
+	if err != nil || !renewed {
+		t.Fatalf("own renewal = %v %v", renewed, err)
+	}
+	if len(f.store.renewCalls) != 1 || f.store.renewCalls[0].requestID != "req-own" || f.store.renewCalls[0].deviceID != "d1" {
+		t.Fatalf("own renewal scope = %+v", f.store.renewCalls)
+	}
+
+	f.store.renewCalls = nil
+	f.store.renewResult = false
+	renewed, err = f.service.Touch(context.Background(), "d2", "req-own")
+	if err != nil || renewed {
+		t.Fatalf("wrong-device renewal = %v %v", renewed, err)
+	}
+	if len(f.store.renewCalls) != 1 || f.store.renewCalls[0].deviceID != "d2" || f.store.renewCalls[0].requestID != "req-own" {
+		t.Fatalf("wrong-device scope = %+v", f.store.renewCalls)
+	}
+}
+
+// TestSessionObservationAC27TerminalStatusStopsRenewal covers the
+// terminal-wait/cancel/drop branch at the service seam: the store owns the
+// status predicate, so Touch never reports success for a closed row.
+func TestSessionObservationAC27TerminalStatusStopsRenewal(t *testing.T) {
+	f := newFixture(t)
+	f.store.renewResult = false
+	for _, requestID := range []string{"req-succeeded", "req-failed", "req-cancelled"} {
+		renewed, err := f.service.Touch(context.Background(), "d1", requestID)
+		if err != nil || renewed {
+			t.Fatalf("terminal %s renewed: %v %v", requestID, renewed, err)
+		}
+	}
+}
+
+// TestSessionObservationAC28LeaseExpiryPublishesExactCancellation covers the
+// lease-expiry branch: the sweep publishes the expired exact identity.
+func TestSessionObservationAC28LeaseExpiryPublishesExactCancellation(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{RequestID: "req-expired", HostID: "h1", DeviceID: "d1", CommandID: "cmd-1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)}
+	f.store.expireRows = []store.Request{row}
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 1 || !strings.HasPrefix(f.broker.presence[0], "h1|") {
+		t.Fatalf("presence = %v", f.broker.presence)
+	}
+	if len(f.store.cancelMarked) != 1 || f.store.cancelMarked[0] != "req-expired" {
+		t.Fatalf("publish not recorded: %v", f.store.cancelMarked)
+	}
+	if len(f.store.attemptMarked) != 0 {
+		t.Fatalf("successful publish recorded as an attempt: %v", f.store.attemptMarked)
+	}
+}
+
+// TestSessionObservationAC30FirstPublishFailsThenRetries covers durable replay:
+// a failed publish retains pending metadata, and a later sweep retries the same
+// exact identity from the pending query.
+func TestSessionObservationAC30FirstPublishFailsThenRetries(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{RequestID: "req-retry", HostID: "h1", DeviceID: "d1", CommandID: "cmd-r", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)}
+	f.store.expireRows = []store.Request{row}
+	f.broker.err = errors.New("mqtt unavailable")
+	f.service.SweepClientLeases(context.Background())
+	if len(f.store.attemptMarked) != 1 || f.store.attemptMarked[0] != "req-retry" {
+		t.Fatalf("failed publish did not retain pending metadata: %v", f.store.attemptMarked)
+	}
+	if len(f.store.cancelMarked) != 0 {
+		t.Fatal("failed publish was recorded as published")
+	}
+
+	// Restart/pending replay: the same row is read from the pending query and
+	// published once. A second publish cannot affect another request.
+	f.broker.err = nil
+	f.store.expireRows = nil
+	f.store.pendingRows = []store.Request{row}
+	f.store.attemptMarked = nil
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 2 || !strings.Contains(f.broker.presence[1], "req-retry") {
+		t.Fatalf("replay did not publish the exact request: %v", f.broker.presence)
+	}
+	if len(f.store.cancelMarked) != 1 || f.store.cancelMarked[0] != "req-retry" {
+		t.Fatalf("replay publish not recorded: %v", f.store.cancelMarked)
+	}
+}
+
+// TestSessionObservationAC35PublishFailureIsNotNativeRelease covers the
+// honest-fallback branch: a failed publish never claims release, and the row
+// remains retryable.
+func TestSessionObservationAC35PublishFailureIsNotNativeRelease(t *testing.T) {
+	f := newFixture(t)
+	f.broker.err = errors.New("mqtt down")
+	f.store.expireRows = []store.Request{{RequestID: "req-fail", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)}}
+	f.service.SweepClientLeases(context.Background())
+	if len(f.store.cancelMarked) != 0 {
+		t.Fatal("failed publish marked native release")
+	}
+	if len(f.store.attemptMarked) != 1 {
+		t.Fatal("failed publish did not increment its durable attempt")
+	}
+}
+
+// TestSessionObservationAC33ExpiryTargetsOwningHostOnly covers the
+// Host-scoped branch: each cancellation goes only to its row's owning host.
+func TestSessionObservationAC33ExpiryTargetsOwningHostOnly(t *testing.T) {
+	f := newFixture(t)
+	f.presence.online["h2"] = true
+	f.store.expireRows = []store.Request{
+		{RequestID: "req-a", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)},
+		{RequestID: "req-b", HostID: "h2", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)},
+	}
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 2 {
+		t.Fatalf("presence = %v", f.broker.presence)
+	}
+	if !strings.HasPrefix(f.broker.presence[0], "h1|") || !strings.Contains(f.broker.presence[0], "req-a") {
+		t.Fatalf("first host scope = %q", f.broker.presence[0])
+	}
+	if !strings.HasPrefix(f.broker.presence[1], "h2|") || !strings.Contains(f.broker.presence[1], "req-b") {
+		t.Fatalf("second host scope = %q", f.broker.presence[1])
+	}
+}
+
+// TestSessionObservationAC34CancellationPayloadIsBoundedAndExact covers the
+// no-content/exact-scope branch: only bounded identity/deadline metadata is
+// published, never request, question or answer content.
+func TestSessionObservationAC34CancellationPayloadIsBoundedAndExact(t *testing.T) {
+	f := newFixture(t)
+	row := store.Request{
+		RequestID: "req-payload", HostID: "h1", DeviceID: "d1", CommandID: "cmd-payload",
+		Status:      whalereinv1.OnlineStatus_received,
+		ExpiresAt:   f.now.Add(time.Minute),
+		RequestBody: []byte("question-and-answer-secret"),
+		ResultBody:  []byte("answer-secret"),
+	}
+	f.store.expireRows = []store.Request{row}
+	f.service.SweepClientLeases(context.Background())
 	if len(f.broker.presence) != 1 {
-		t.Fatalf("stale claim not published: %v", f.broker.presence)
+		t.Fatalf("presence = %v", f.broker.presence)
 	}
-	if !strings.Contains(f.broker.presence[0], "request_stale") || !strings.Contains(f.broker.presence[0], "req-lease") {
-		t.Fatalf("presence payload = %q", f.broker.presence[0])
+	payload := f.broker.presence[0]
+	if !strings.HasPrefix(payload, "h1|") {
+		t.Fatalf("topic scope = %q", payload)
 	}
-}
-
-func TestClientPollLeaseIgnoresTerminalRequest(t *testing.T) {
-	f := newFixture(t)
-	row := store.Request{RequestID: "req-done", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_succeeded}
-	f.store.rows[row.RequestID] = row
-	f.service.recordClientClaim(row)
-	f.now = f.now.Add(11 * time.Second)
-	f.service.SweepClientClaims(context.Background())
-	if len(f.broker.presence) != 0 {
-		t.Fatalf("terminal claim published: %v", f.broker.presence)
+	body := strings.TrimPrefix(payload, "h1|")
+	if len(body) > 512 {
+		t.Fatalf("cancellation payload is unbounded: %d bytes", len(body))
 	}
-}
-
-func TestClientPollTouchIgnoresUnknownWrongDeviceAndTerminal(t *testing.T) {
-	f := newFixture(t)
-	row := store.Request{RequestID: "req-touch", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
-	f.store.rows[row.RequestID] = row
-	f.service.recordClientClaim(row)
-	f.service.Touch("other", row.RequestID, whalereinv1.OnlineStatus_received)
-	f.service.Touch("d1", "missing", whalereinv1.OnlineStatus_received)
-	f.now = f.now.Add(9 * time.Second)
-	f.service.SweepClientClaims(context.Background())
-	if len(f.broker.presence) != 0 {
-		t.Fatalf("ignored touch renewed or swept: %v", f.broker.presence)
+	for _, forbidden := range []string{"secret", "question", "answer", "request_body", "result_body"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("payload leaked %q: %s", forbidden, body)
+		}
 	}
-	f.service.Touch("d1", row.RequestID, whalereinv1.OnlineStatus_succeeded)
-	f.now = f.now.Add(11 * time.Second)
-	f.service.SweepClientClaims(context.Background())
-	if len(f.broker.presence) != 0 {
-		t.Fatalf("terminal touch not removed: %v", f.broker.presence)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("payload is not JSON: %v", err)
 	}
-}
-
-func TestClientPollSweepPublishFailureIsCounted(t *testing.T) {
-	f := newFixture(t)
-	f.broker.err = errors.New("offline")
-	row := store.Request{RequestID: "req-fail", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
-	f.store.rows[row.RequestID] = row
-	f.service.recordClientClaim(row)
-	f.now = f.now.Add(11 * time.Second)
-	f.service.SweepClientClaims(context.Background())
-	if len(f.broker.presence) != 1 {
-		t.Fatalf("publish attempt missing: %v", f.broker.presence)
+	for _, key := range []string{"event", "request_id", "host_id", "device_id", "command_id", "expires_at_unix_ms", "reason", "observed_at"} {
+		if _, ok := decoded[key]; !ok {
+			t.Fatalf("payload lost %q: %s", key, body)
+		}
+	}
+	if decoded["request_id"] != "req-payload" || decoded["command_id"] != "cmd-payload" {
+		t.Fatalf("payload identity = %s", body)
 	}
 }
 
@@ -851,5 +1051,107 @@ func TestPresenceUnavailableKnownUnknownAndOnlineAreDistinct(t *testing.T) {
 	}
 	if len(f.broker.published) != 1 || len(f.store.published) != 1 {
 		t.Fatalf("online request not forwarded: broker=%d store=%d", len(f.broker.published), len(f.store.published))
+	}
+}
+
+func TestSessionObservationAC27InitialLeaseIsBoundedByDeadline(t *testing.T) {
+	f := newFixture(t)
+	request := validRequest(f.now, "c-short")
+	request.ExpiresAtUnixMs = f.now.Add(2 * time.Second).UnixMilli()
+	row, created, err := f.service.Submit(context.Background(), input(request))
+	if err != nil || !created {
+		t.Fatalf("submit = %v %v", created, err)
+	}
+	if row.ClientLeaseUntil == nil || !row.ClientLeaseUntil.Equal(row.ExpiresAt) {
+		t.Fatalf("lease %v not bounded by request deadline %v", row.ClientLeaseUntil, row.ExpiresAt)
+	}
+}
+
+func TestSessionObservationAC29TouchReportsRenewalFailure(t *testing.T) {
+	f := newFixture(t)
+	f.store.renewErr = errors.New("database unavailable")
+	if renewed, err := f.service.Touch(context.Background(), "d1", "r1"); err == nil || renewed {
+		t.Fatalf("renewal failure = %v %v", renewed, err)
+	}
+}
+
+func TestSessionObservationAC30SweepStoreFailuresRetainWork(t *testing.T) {
+	f := newFixture(t)
+	f.store.expireErr = errors.New("database unavailable")
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatal("expiry failure published a notice")
+	}
+
+	f.store.expireErr = nil
+	f.store.pendingErr = errors.New("database unavailable")
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 0 {
+		t.Fatal("pending query failure published a notice")
+	}
+}
+
+func TestSessionObservationAC30OfflineHostRetainsPendingCancellation(t *testing.T) {
+	f := newFixture(t)
+	f.store.expireRows = []store.Request{{RequestID: "r1", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)}}
+	f.presence.online["h1"] = false
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 0 || len(f.store.cancelMarked) != 0 || len(f.store.attemptMarked) != 0 {
+		t.Fatalf("offline host was treated as delivered: %v %v %v", f.broker.presence, f.store.cancelMarked, f.store.attemptMarked)
+	}
+
+	unavailable := false
+	f.presence.available = &unavailable
+	f.presence.online["h1"] = true
+	f.service.SweepClientLeases(context.Background())
+	if len(f.broker.presence) != 0 || len(f.store.cancelMarked) != 0 {
+		t.Fatal("unavailable presence published a notice")
+	}
+}
+
+func TestSessionObservationAC35BookkeepingFailuresDoNotClaimRelease(t *testing.T) {
+	f := newFixture(t)
+	f.store.expireRows = []store.Request{{RequestID: "r1", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received, ExpiresAt: f.now.Add(time.Minute)}}
+	f.store.cancelMarkErr = errors.New("database unavailable")
+	f.service.SweepClientLeases(context.Background())
+	if len(f.store.attemptMarked) != 0 {
+		t.Fatal("a successful publish was counted as a failed attempt")
+	}
+
+	f.store.cancelMarkErr = nil
+	f.broker.err = errors.New("mqtt unavailable")
+	f.store.attemptErr = errors.New("database unavailable")
+	f.service.SweepClientLeases(context.Background())
+	if len(f.store.cancelMarked) != 0 {
+		t.Fatal("failed bookkeeping claimed release")
+	}
+}
+
+func TestSessionObservationAC30DuplicateSubmitRenewalFailure(t *testing.T) {
+	f := newFixture(t)
+	request := validRequest(f.now, "c-replay")
+	if _, _, err := f.service.Submit(context.Background(), input(request)); err != nil {
+		t.Fatal(err)
+	}
+	f.store.renewErr = errors.New("database unavailable")
+	if _, _, err := f.service.Submit(context.Background(), input(request)); err == nil {
+		t.Fatal("duplicate submit ignored renewal failure")
+	}
+}
+
+func TestNewRejectsMissingDependencies(t *testing.T) {
+	broker := &fakeBroker{}
+	presence := &fakePresence{online: map[string]bool{}}
+	for _, tc := range []struct {
+		name string
+		deps Dependencies
+	}{
+		{"store", Dependencies{Broker: broker, Presence: presence}},
+		{"broker", Dependencies{Store: newFakeStore(), Presence: presence}},
+		{"presence", Dependencies{Store: newFakeStore(), Broker: broker}},
+	} {
+		if _, err := New(tc.deps); err == nil {
+			t.Fatalf("missing %s accepted", tc.name)
+		}
 	}
 }

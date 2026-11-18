@@ -91,7 +91,7 @@ export async function startHarness(options = {}) {
     const device = await createDevice(deviceId)
     await pairDevice(device, pairingOptions)
     for (const session of await adapter.listSessions()) {
-      const watched = await device.query({watch_session:{session_id:session.sessionId}})
+      const watched = await device.query({watch_session:{session_id:session.sessionId,interests:{conversation:true,questions:false}}})
       if(watched.status!=='succeeded')throw new Error('fixture watch unavailable')
     }
     return device

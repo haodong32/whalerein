@@ -4,8 +4,10 @@
 //! only proven-unsent failures remove it. Network retries reuse the same
 //! request identity and encrypted payload. Cancellation keeps recovery metadata.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use prost::Message;
@@ -35,6 +37,45 @@ struct SubmitFailure {
 struct Admission {
     profile: std::path::PathBuf,
     secrets: std::sync::Arc<dyn crate::security::SecretStore>,
+}
+
+/// Bounded, non-blocking renewal of one command's original request identity.
+///
+/// The task renewal is independent of result polling, so a slow heartbeat can
+/// never stall terminal-result or deadline progress. Dropping the guard stops
+/// renewal; there is no detached heartbeat after completion or cancellation.
+struct CommandHeartbeat {
+    stop: Arc<AtomicBool>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl CommandHeartbeat {
+    fn start(access: Arc<AccessClient>, request_id: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = stop.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                if task_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = access.heartbeat_request(&request_id).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+        Self {
+            stop,
+            task: Some(task),
+        }
+    }
+}
+
+impl Drop for CommandHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 pub struct CommandService {
@@ -351,6 +392,9 @@ impl CommandService {
                 return Err(failure.error);
             }
         };
+        // The original R is registered now; renew exactly it while the Host
+        // acceptance receipt and the terminal result are awaited.
+        let _heartbeat = CommandHeartbeat::start(self.access.clone(), request_id.clone());
         let receipt_status =
             DomainStatus::from_proto(receipt.status).unwrap_or(DomainStatus::Unknown);
         // A terminal copy can describe a previously attempted command. In
@@ -471,6 +515,9 @@ impl CommandService {
         request_id: &str,
         command_id: &str,
     ) -> CoreResult<CommandHandle> {
+        // Terminal-result queries use their own request ids. Renewal must
+        // remain bound to the original accepted command R.
+        let _heartbeat = CommandHeartbeat::start(self.access.clone(), request_id.to_owned());
         for attempt in 0..50u32 {
             match self
                 .get_command_result(host_id, device_id, channel, command_id)

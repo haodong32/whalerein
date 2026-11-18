@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use serde_json::json;
 use whalerein_core::api::{
-    default_data_dir, CreateSessionInput, Environment, MemorySecretStore, PairingDecision,
-    PendingQueueAction, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome, SecretStore,
-    SessionKey, SessionModel, WaitReason,
+    default_data_dir, Cancellation, CreateSessionInput, Environment, MemorySecretStore,
+    ObservationInterests, PairingDecision, PendingQueueAction, ProfileSelection, ProfileSummary,
+    Profiles, RemovalOutcome, SecretStore, SessionEventPayload, SessionKey, SessionModel,
+    WaitReason,
 };
+use whalerein_core::conversation::ViewUpdate;
 use whalerein_core::{Core, CoreError, CoreOptions};
 
 use crate::cli::{Cli, Command, ModelAction, ProfileAction, QueueCommand};
@@ -981,7 +983,9 @@ async fn dispatch(
         }
         Command::Questions { cursor, .. } => {
             let key = resolved_key(key)?;
-            match core.list_questions(key, cursor).await {
+            // One-shot list on the shared Core question reader; observation and
+            // listing never acquire a native question claim.
+            match core.read_questions(key, cursor).await {
                 Ok(page) => Ok(CliOutcome::success(
                     command,
                     json!(page),
@@ -1023,7 +1027,7 @@ async fn dispatch(
                 }
             };
             let key = resolved_key(key)?;
-            match core.get_question(key, batch).await {
+            match core.read_question(key, batch).await {
                 Ok(current) => {
                     // An unknown or unanswerable phase is an input problem, not
                     // evidence that the source data went stale.
@@ -1431,6 +1435,27 @@ async fn pair(
     }
 }
 
+/// Render one typed observation event for `tail`.
+///
+/// JSON keeps the existing `whalerein/v1` envelope and adds the resolved
+/// session to the typed event. The human renderer owns terminal boundaries
+/// only; Core owns preview ordering and completion.
+fn render_tail_event(
+    json_output: bool,
+    renderer: &mut TailRenderer,
+    key: &SessionKey,
+    update: &ViewUpdate,
+) -> String {
+    if json_output {
+        let mut value = tail_event_json(update);
+        value["data"]["event"]["session"] =
+            json!({"host_id": key.host_id, "session_id": key.session_id});
+        format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
+    } else {
+        renderer.render(update)
+    }
+}
+
 async fn tail(
     core: &Core,
     command: &Command,
@@ -1443,30 +1468,64 @@ async fn tail(
     let mut renderer = TailRenderer::default();
     let mut visible = false;
     let mut closed = false;
-    let emitted = core
-        .watch_session(key, timeout, |event| {
-            let text = if json_output {
-                let mut value = tail_event_json(event);
-                value["data"]["event"]["session"] =
-                    json!({"host_id":key.host_id,"session_id":key.session_id});
-                format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
-            } else {
-                renderer.render(event)
+    let mut stopped = false;
+    let mut emitted = 0u64;
+    let mut observation = core
+        .observe_session(
+            key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await?;
+    let operation = async {
+        while let Some(event) = observation.next_event().await {
+            let SessionEventPayload::Conversation(update) = event.payload else {
+                continue;
             };
-            let written = crate::stream::to_stdout(text.as_bytes());
-            visible |= is_tail_output(event);
-            match written {
-                Ok(()) => !(once && visible),
+            if matches!(
+                update,
+                ViewUpdate::Preview { .. }
+                    | ViewUpdate::Message { .. }
+                    | ViewUpdate::AttemptEnded { .. }
+            ) {
+                emitted += 1;
+            }
+            let text = render_tail_event(json_output, &mut renderer, key, &update);
+            visible |= is_tail_output(&update);
+            match crate::stream::to_stdout(text.as_bytes()) {
+                Ok(()) => {
+                    if once && visible {
+                        stopped = true;
+                        observation.close().await;
+                        break;
+                    }
+                }
                 Err(failure) if failure.is_closed() => {
                     // The consumer closed the pipe (`tail | head -1`): stop the
                     // stream cleanly instead of panicking on the next write.
                     closed = true;
-                    false
+                    stopped = true;
+                    observation.close().await;
+                    break;
                 }
-                Err(_) => false,
+                Err(_) => {
+                    stopped = true;
+                    observation.close().await;
+                    break;
+                }
             }
-        })
-        .await;
+        }
+    };
+    let finished = match timeout {
+        Some(limit) => tokio::time::timeout(limit, operation).await.is_ok(),
+        None => {
+            operation.await;
+            true
+        }
+    };
+    if !finished {
+        observation.close().await;
+    }
     if closed {
         return Ok(CliOutcome::success(
             command,
@@ -1478,7 +1537,19 @@ async fn tail(
         let tail = renderer.finish_line();
         let _ = crate::stream::to_stdout(tail.as_bytes());
     }
-    let emitted = emitted?;
+    if !finished && emitted == 0 {
+        return Err(CoreError::Timeout);
+    }
+    if finished && !stopped {
+        // Core owns reconnect. An observation that ends before the caller's
+        // deadline or a consumer stop is terminal; surface its specific fatal
+        // cause (revoked, not paired, unsupported, ...) rather than a generic
+        // unavailable result.
+        if let Some(error) = observation.take_terminal_error() {
+            return Err(error);
+        }
+        return Err(CoreError::Unavailable("session observation ended".into()));
+    }
     if once && !visible {
         return Err(CoreError::Timeout);
     }
@@ -5093,5 +5164,270 @@ mod approval_read_tests {
         assert_eq!(value["data"]["approvals"][0]["approval_id"], "approval-1");
         assert!(value["data"].get("approval").is_none());
         assert!(value["data"].get("state").is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_observation_cli_tests {
+    use super::*;
+    use clap::Parser;
+    use serde_json::Value;
+    use whalerein_core::api::test_support::FakeAccess;
+    use whalerein_core::conversation::{
+        content_block::{self, TextContent},
+        AttemptOutcome, AttemptRef, ContentBlock, ConversationMessage, MessageRole,
+    };
+
+    async fn paired(access: &FakeAccess) -> (tempfile::TempDir, String, Arc<dyn SecretStore>) {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let data_dir = directory.path().to_str().unwrap().to_owned();
+        let pairing = access.pairing_uri();
+        let outcome = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                &data_dir,
+                "pair",
+                &pairing,
+                "--yes",
+            ])
+            .unwrap(),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        (directory, data_dir, secrets)
+    }
+
+    fn session_key() -> SessionKey {
+        SessionKey::new("host-1", "session-1").unwrap()
+    }
+
+    fn attempt() -> AttemptRef {
+        AttemptRef {
+            live_epoch: "epoch".into(),
+            attempt_id: "attempt-1".into(),
+        }
+    }
+
+    fn text_message(text: &str) -> ViewUpdate {
+        ViewUpdate::Message {
+            message: ConversationMessage {
+                message_id: "message-1".into(),
+                role: MessageRole::Assistant,
+                blocks: vec![ContentBlock {
+                    block_id: "text".into(),
+                    content: Some(content_block::Content::Text(TextContent {
+                        text: text.into(),
+                    })),
+                }],
+                authored_at_unix_ms: 1,
+            },
+            origin: Some(attempt()),
+            preview_prefix_bytes: None,
+        }
+    }
+
+    // AC-13 tail-human/JSON: both renderers consume the same Core-owned typed
+    // event, and JSON keeps its documented envelope without wire/native DTOs.
+    #[test]
+    fn cli_session_observation_ac_13_tail_human_and_json_shape_is_unchanged() {
+        let key = session_key();
+        let update = text_message("hello");
+        let human = render_tail_event(false, &mut TailRenderer::default(), &key, &update);
+        assert_eq!(human, "[ASSISTANT] hello\n");
+        let line = render_tail_event(true, &mut TailRenderer::default(), &key, &update);
+        assert!(line.ends_with('\n'), "{line:?}");
+        let value: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(value["schema"], "whalerein/v1");
+        assert_eq!(value["command"], "tail");
+        assert_eq!(value["data"]["event"]["type"], "message");
+        assert_eq!(value["data"]["event"]["session"]["host_id"], "host-1");
+        assert_eq!(value["data"]["event"]["session"]["session_id"], "session-1");
+        assert_eq!(value["data"]["event"]["blocks"][0]["type"], "text");
+        assert_eq!(value["data"]["event"]["blocks"][0]["text"], "hello");
+        assert!(value["data"]["event"].get("payload").is_none());
+        assert!(value["data"]["event"].get("data_json").is_none());
+    }
+
+    // AC-13 tail-completion: `--once` completes only on visible output, not on
+    // state/reset metadata or a committed attempt marker.
+    #[test]
+    fn cli_session_observation_ac_13_tail_completion_tracks_visible_output() {
+        let key = session_key();
+        let mut renderer = TailRenderer::default();
+        let state = ViewUpdate::State(Default::default());
+        assert!(!render_tail_event(false, &mut renderer, &key, &state).is_empty());
+        assert!(!is_tail_output(&state));
+        assert!(!is_tail_output(&ViewUpdate::Reset));
+        assert!(!is_tail_output(&ViewUpdate::Preview {
+            attempt: attempt(),
+            block_id: "text".into(),
+            text: String::new(),
+            replace: false,
+            incomplete: false,
+        }));
+        assert!(is_tail_output(&text_message("done")));
+        assert!(is_tail_output(&ViewUpdate::Preview {
+            attempt: attempt(),
+            block_id: "text".into(),
+            text: "live".into(),
+            replace: false,
+            incomplete: false,
+        }));
+        assert!(is_tail_output(&ViewUpdate::AttemptEnded {
+            attempt: attempt(),
+            outcome: AttemptOutcome::Abandoned,
+        }));
+        assert!(!is_tail_output(&ViewUpdate::AttemptEnded {
+            attempt: attempt(),
+            outcome: AttemptOutcome::Committed,
+        }));
+    }
+
+    // AC-13 tail-once: an observation with no visible output reaches the
+    // caller's deadline and reports the unchanged timeout envelope.
+    #[tokio::test]
+    async fn cli_session_observation_ac_13_tail_once_without_visible_output_times_out() {
+        let access = FakeAccess::start().await;
+        let (_directory, data_dir, secrets) = paired(&access).await;
+        let started = std::time::Instant::now();
+        let outcome = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                data_dir.as_str(),
+                "tail",
+                "--session",
+                "session-1",
+                "--once",
+                "--timeout",
+                "0.2",
+            ])
+            .unwrap(),
+            secrets,
+        )
+        .await;
+        assert_eq!(outcome.exit, 7, "{outcome:?}");
+        let value = outcome.to_json();
+        assert_eq!(value["schema"], "whalerein/v1");
+        assert_eq!(value["command"], "tail");
+        assert_eq!(value["error"]["code"], "timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "tail --once must honor its own deadline"
+        );
+    }
+
+    // AC-13 CLI-list/detail-once: `questions` remains one shot on the shared
+    // Core reader and its JSON page carries the Core stamp/complete metadata.
+    #[tokio::test]
+    async fn cli_session_observation_ac_13_question_list_is_one_shot_with_stamp() {
+        let access = FakeAccess::start().await;
+        let (_directory, data_dir, secrets) = paired(&access).await;
+        let before = access.host.lock().unwrap().question_reads;
+        let human = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--data-dir",
+                data_dir.as_str(),
+                "questions",
+                "--session",
+                "session-1",
+            ])
+            .unwrap(),
+            secrets.clone(),
+        )
+        .await;
+        assert_eq!(human.exit, 0, "{human:?}");
+        assert!(human.render().contains("batch batch-1"), "{human:?}");
+        assert!(human.render().contains("Synthetic question"), "{human:?}");
+        let json = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                data_dir.as_str(),
+                "questions",
+                "--session",
+                "session-1",
+            ])
+            .unwrap(),
+            secrets,
+        )
+        .await;
+        assert_eq!(json.exit, 0, "{json:?}");
+        let value = json.to_json();
+        assert_eq!(
+            value["data"]["stamp"]["observation_epoch"],
+            "question-epoch-1"
+        );
+        assert_eq!(value["data"]["stamp"]["revision"], 1);
+        assert_eq!(value["data"]["complete"], true);
+        assert_eq!(value["data"]["next_cursor"], "");
+        assert_eq!(value["data"]["batches"][0]["batch_id"], "batch-1");
+        // One authoritative read per one-shot command; no polling or native claim.
+        assert_eq!(
+            access.host.lock().unwrap().question_reads,
+            before + 2,
+            "one listing read per invocation"
+        );
+        // Core-owned page shape only: no descriptor/wire DTO fields leak.
+        assert!(value["data"].get("availability").is_none());
+        assert!(value["data"].get("unavailable_code").is_none());
+        assert!(value["data"].get("payload").is_none());
+    }
+
+    // AC-21 invalid/stale guards: the answer command reads current detail
+    // through the shared reader but rejects a stale batch before submission,
+    // so no native answer is attempted.
+    #[tokio::test]
+    async fn cli_session_observation_ac_21_answer_rejects_stale_batch_without_submission() {
+        let access = FakeAccess::start().await;
+        let (directory, data_dir, secrets) = paired(&access).await;
+        let answers = directory.path().join("answers.json");
+        std::fs::write(&answers, r#"{"answers":[{"id":"q","selected":["A"]}]}"#).unwrap();
+        let before = access.host.lock().unwrap().commands_seen;
+        let stale = run_with(
+            Cli::try_parse_from([
+                "whalerein",
+                "--json",
+                "--data-dir",
+                data_dir.as_str(),
+                "answer",
+                "--session",
+                "session-1",
+                "--batch",
+                "batch-1",
+                "--epoch",
+                "epoch",
+                "--version",
+                "2",
+                "--digest",
+                &"07".repeat(32),
+                "--phase",
+                "QUESTION_CONTINUED",
+                "--input",
+                answers.to_str().unwrap(),
+            ])
+            .unwrap(),
+            secrets,
+        )
+        .await;
+        assert_eq!(stale.exit, 8, "{stale:?}");
+        let value = stale.to_json();
+        assert_eq!(value["error"]["code"], "conflict");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("question changed"));
+        assert_eq!(
+            access.host.lock().unwrap().commands_seen,
+            before,
+            "a stale guard must not submit an answer"
+        );
     }
 }

@@ -329,6 +329,145 @@
         ]
       },
       "hex": "08011001180120012801320101"
+    },
+    {
+      "caseId": "typed-question-descriptor",
+      "description": "When {language} round-trips an available question descriptor, its observation epoch and monotonic revision survive as one stamp.",
+      "name": "whalerein.v1.QuestionDescriptor",
+      "json": {
+        "availability": "QUESTION_AVAILABILITY_AVAILABLE",
+        "stamp": {
+          "observationEpoch": "observation-epoch-1",
+          "revision": "7"
+        }
+      },
+      "hex": "08031a170a136f62736572766174696f6e2d65706f63682d311007"
+    },
+    {
+      "caseId": "typed-question-descriptor-unavailable",
+      "description": "When {language} round-trips an unavailable question descriptor, it stays distinct from an empty current collection.",
+      "name": "whalerein.v1.QuestionDescriptor",
+      "json": {
+        "availability": "QUESTION_AVAILABILITY_UNAVAILABLE",
+        "unavailableCode": "unavailable"
+      },
+      "hex": "0802120b756e617661696c61626c65"
+    },
+    {
+      "caseId": "typed-question-page",
+      "description": "When {language} round-trips a stamped question page, the page stamp, final-page marker and source order remain correlated.",
+      "name": "whalerein.v1.QuestionPage",
+      "json": {
+        "batches": [
+          {
+            "sessionId": "s",
+            "batchId": "b1",
+            "sourceEpoch": "epoch-1",
+            "version": "3",
+            "digest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            "phase": "QUESTION_CONTINUED",
+            "questions": [
+              {
+                "id": "q1",
+                "question": "proceed?",
+                "options": [
+                  {
+                    "label": "yes"
+                  }
+                ],
+                "intent": {
+                  "kind": "approval",
+                  "approve": "yes"
+                }
+              }
+            ],
+            "answerable": true
+          }
+        ],
+        "stamp": {
+          "observationEpoch": "observation-epoch-1",
+          "revision": "7"
+        },
+        "complete": true
+      },
+      "hex": "0a600a0173120262311a0765706f63682d3120032a20000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f30023a260a027131120870726f636565643f2a050a037965733a0f0a08617070726f76616c120379657340011a170a136f62736572766174696f6e2d65706f63682d3110072001"
+    },
+    {
+      "caseId": "typed-question-page-unavailable-detail",
+      "description": "When {language} round-trips an oversized indivisible batch, the page keeps bounded unavailable metadata instead of truncating content.",
+      "name": "whalerein.v1.QuestionPage",
+      "json": {
+        "batches": [
+          {
+            "sessionId": "s",
+            "batchId": "b1",
+            "sourceEpoch": "epoch-1",
+            "version": "3",
+            "digest": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            "phase": "QUESTION_OPEN",
+            "contentUnavailable": true
+          }
+        ],
+        "stamp": {
+          "observationEpoch": "observation-epoch-1",
+          "revision": "8"
+        },
+        "complete": true
+      },
+      "hex": "0a380a0173120262311a0765706f63682d3120032a20000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f300148011a170a136f62736572766174696f6e2d65706f63682d3110082001"
+    },
+    {
+      "caseId": "typed-watch-interests",
+      "description": "When {language} round-trips watch interests, conversation and questions remain explicit independent selections.",
+      "name": "whalerein.v1.WatchSession",
+      "json": {
+        "sessionId": "s",
+        "interests": {
+          "conversation": true,
+          "questions": true
+        }
+      },
+      "hex": "0a0173120408011001"
+    },
+    {
+      "caseId": "typed-watch-questions-only",
+      "description": "When {language} round-trips a questions-only watch baseline, it carries a descriptor without a conversation state.",
+      "name": "whalerein.v1.WatchReady",
+      "json": {
+        "watchId": "watch-1",
+        "leaseMs": 30000,
+        "questions": {
+          "availability": "QUESTION_AVAILABILITY_AVAILABLE",
+          "stamp": {
+            "observationEpoch": "observation-epoch-1",
+            "revision": "1"
+          }
+        }
+      },
+      "hex": "0a0777617463682d3118b0ea01221b08031a170a136f62736572766174696f6e2d65706f63682d311001"
+    },
+    {
+      "caseId": "typed-session-state-questions",
+      "description": "When {language} round-trips conversation state with a question descriptor, the two facets keep independent stamps.",
+      "name": "whalerein.v1.SessionState",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "liveEpoch": "epoch",
+        "revision": "42",
+        "historyHead": "opaque-beta",
+        "runPhase": "RUNNING",
+        "questions": {
+          "availability": "QUESTION_AVAILABILITY_AVAILABLE",
+          "stamp": {
+            "observationEpoch": "observation-epoch-1",
+            "revision": "9"
+          }
+        }
+      },
+      "hex": "0a060a0168120173120565706f6368182a220b6f70617175652d6265746128023a1b08031a170a136f62736572766174696f6e2d65706f63682d311009"
     }
   ]
 }

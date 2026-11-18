@@ -72,6 +72,7 @@ startup. The policy is intentionally asymmetric:
 | Expired request bodies | Cleared on the first cleanup pass after `expires_at`. | Large `bytea` payloads must not stay resident. |
 | Query/handshake metadata (`command_id = ''`, kind 1/2) | Deleted after the 24 h window, in batches of at most 2000 rows per pass. | Bounded disposable history. |
 | Command deduplication rows (`command_id <> ''`) | Retained after expiry; only their bodies are cleared. | Deleting them could let a retried or restored command execute twice. |
+| Exact client-lease and cancellation metadata | Rides the request identity; pending cancellation rows are excluded from cleanup until published (bounded retries). | Lease expiry and cancellation replay must survive an Access restart. |
 
 Capacity consequence: the `requests` table grows with the number of unique
 control commands, not with message payloads. Each retained row is small
@@ -81,9 +82,16 @@ control commands, not with message payloads. Each retained row is small
 SELECT pg_total_relation_size('requests') AS table_and_index_bytes,
        count(*) FILTER (WHERE command_id <> '') AS command_rows,
        count(*) FILTER (WHERE command_id = '') AS bodyless_query_rows,
-       count(*) FILTER (WHERE request_body <> ''::bytea OR result_body <> ''::bytea) AS rows_with_bodies
+       count(*) FILTER (WHERE request_body <> ''::bytea OR result_body <> ''::bytea) AS rows_with_bodies,
+       count(*) FILTER (WHERE cancel_pending) AS pending_cancellations,
+       count(*) FILTER (WHERE client_lease_state = 'expired') AS expired_client_leases
 FROM requests;
 ```
+
+A pending cancellation means Access has closed its forwarding/renewal authority
+but has not yet confirmed publication to the owning Host. It must not be reported
+as native claim release; it replays after broker or service recovery until
+published or until the bounded retention rule removes it.
 
 Choose an installation-specific retention/re-architecture decision before the
 command table becomes a meaningful share of the database. Do not delete command
@@ -198,6 +206,33 @@ Current limitations, recorded honestly:
   maintenance stop and rehearse the exact upgrade in an isolated installation;
 - an actual production rollout also needs TLS/trust, credential-store and
   broker-policy reconciliation checks that are environment-specific.
+
+## Coordinated version-one cutover
+
+The session-observation contract is a coordinated replacement inside application
+protocol version 1. The version number does not identify every older build, so
+mixed Access/Host/Core/CLI/mobile sets are unsupported and must not run
+concurrently. Stop all old clients and connectors, record the exact Access image
+digest plus Host/CLI/mobile revisions, take a coordinated backup, stop the old
+Access process, and only then start the matching new set. Access applies its
+migrations and starts; start the Host plugin and clients afterward and rebuild
+transient observations from current authority.
+
+Retained device/Host keys, pins, grants, invitations, Source sessions, pager keys
+and terminal/uncertain command identities survive. A retained non-terminal
+command is never forwarded automatically by the new Access: a row that was
+already published keeps its conservative status but stops retrying, and a row
+that never left `pending` becomes `unknown`. Historical rows without an exact
+client lease keep a NULL deadline and are never treated as expired. Old question
+pager cursors are reported as `snapshot_required`, never reinterpreted.
+
+Do not resend old signed pairing FINISH material or old queued observation
+events; replace them from current authority. An uncertain outcome remains
+`unknown` and recoverable by its original command identity; it is not proof that
+no native action occurred. Rollback is a stopped-stack restore of the
+coordinated backup plus matching older artifacts (then the documented restore
+invalidation/re-enrollment), never a reset of keys, pins or revocation
+generation.
 
 ## Deployment acceptance in CI
 

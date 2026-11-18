@@ -31,6 +31,10 @@ final class FixtureSessionService: SessionService {
     private var runningSessions: Set<String> = []
     private var messagesBySession: [String: [ConversationMessage]] = [:]
     private var approvalsBySession: [String: Approval] = [:]
+    private var questionBatchesBySession: [String: [QuestionBatch]] = [:]
+    private var questionRevisionBySession: [String: UInt64] = [:]
+    private var questionInitializedSessions: Set<String> = []
+    private var openQuestionCommands: Set<String> = []
     private var streamTask: Task<Void, Never>?
     private var leakTask: Task<Void, Never>?
     private var settlementTasks: [Task<Void, Never>] = []
@@ -198,6 +202,9 @@ final class FixtureSessionService: SessionService {
         let messages = messages(for: hostId, sessionId: sessionId)
         let approval = approval(for: hostId, sessionId: sessionId)
         emit(.reset(messages: messages, approvals: [approval]))
+        if options.questionsOnOpen {
+            emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
+        }
         startScriptedStreamIfNeeded(hostId: hostId, sessionId: sessionId)
         scheduleLifecycleEventsIfNeeded(hostId: hostId, sessionId: sessionId)
         if options.lateEventLeak, let previousWatch, previousWatch != activeWatch {
@@ -438,6 +445,85 @@ final class FixtureSessionService: SessionService {
         settlementTasks.append(task)
     }
 
+    // MARK: - Questions
+
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
+        try requirePaired()
+        let batches = questionBatches(hostId: hostId, sessionId: sessionId)
+        return QuestionPage(
+            batches: batches,
+            nextCursor: "",
+            stamp: questionStamp(sessionId: sessionId),
+            complete: true
+        )
+    }
+
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch {
+        try requirePaired()
+        guard let batch = questionBatches(hostId: hostId, sessionId: sessionId)
+            .first(where: { $0.batchID == batchId }) else {
+            throw SessionServiceError(.unavailable, detail: "question not found")
+        }
+        return batch
+    }
+
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt {
+        try requirePaired()
+        guard activeWatch == SessionContext(hostId: hostId, sessionId: sessionId) else {
+            throw SessionServiceError(.unavailable, detail: "watch not active")
+        }
+        guard let current = questionBatches(hostId: hostId, sessionId: sessionId)
+            .first(where: { $0.batchID == batch.batchID }) else {
+            throw SessionServiceError(.conflict, detail: "question is no longer pending")
+        }
+        guard current.guardValue == batch.guardValue else {
+            throw SessionServiceError(.conflict, detail: "question guard changed")
+        }
+        guard batch.canAnswer else {
+            throw SessionServiceError(.conflict, detail: "question phase is not answerable")
+        }
+        let questionIds = Set(batch.questions.map(\.id))
+        guard !answers.isEmpty,
+              answers.allSatisfy({ questionIds.contains($0.id) }) else {
+            throw SessionServiceError(.invalidInvitation, detail: "unknown question id")
+        }
+        questionBatchesBySession[sessionId] = []
+        questionRevisionBySession[sessionId] = (questionRevisionBySession[sessionId] ?? 1) + 1
+        emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
+        commandCounter += 1
+        let receipt = CommandReceipt(
+            commandId: String(format: "cmd-answer-%04d", commandCounter),
+            requestId: String(format: "req-answer-%04d", commandCounter),
+            status: .accepted,
+            delivery: nil
+        )
+        openQuestionCommands.insert(receipt.commandId)
+        let receiptID = receipt.commandId
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.clock.sleep(for: .milliseconds(320))
+            guard !Task.isCancelled else { return }
+            self.openQuestionCommands.remove(receiptID)
+            self.emit(.commandStatus(receipt), hostId: hostId, sessionId: sessionId)
+        }
+        settlementTasks.append(task)
+        return receipt
+    }
+
+    func cancelQuestionAnswer(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> Bool {
+        try requirePaired()
+        return openQuestionCommands.remove(commandId) != nil
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
@@ -583,6 +669,49 @@ final class FixtureSessionService: SessionService {
     }
 
     // MARK: - Test helpers
+
+    /// Emits the deterministic question state for one session. Unit tests use
+    /// this to drive freshness and guard changes without a Core observation.
+    func emitQuestionStateForTesting(_ state: QuestionsState, hostId: String, sessionId: String) {
+        emit(.questions(state), hostId: hostId, sessionId: sessionId)
+    }
+
+    private func emitQuestionsForTesting(hostId: String, sessionId: String) {
+        let batches = questionBatches(hostId: hostId, sessionId: sessionId)
+        emit(
+            .questions(
+                QuestionsState(
+                    freshness: .current,
+                    stamp: questionStamp(sessionId: sessionId),
+                    batches: batches,
+                    error: nil
+                )
+            ),
+            hostId: hostId,
+            sessionId: sessionId
+        )
+    }
+
+    private func questionBatches(hostId: String, sessionId: String) -> [QuestionBatch] {
+        if let cached = questionBatchesBySession[sessionId] {
+            return cached
+        }
+        guard options.questionsOnOpen,
+              questionInitializedSessions.insert(sessionId).inserted else {
+            return []
+        }
+        let batch = FixtureCatalog.questionBatch(sessionId: sessionId)
+        questionBatchesBySession[sessionId] = [batch]
+        questionRevisionBySession[sessionId] = 1
+        return [batch]
+    }
+
+    private func questionStamp(sessionId: String) -> QuestionStamp {
+        QuestionStamp(
+            observationEpoch: "fixture-questions-\(sessionId)",
+            revision: questionRevisionBySession[sessionId] ?? 1
+        )
+    }
 
     /// Emits an event for the active watch. Unit tests use this to drive the
     /// presentation model without starting scripted timers.

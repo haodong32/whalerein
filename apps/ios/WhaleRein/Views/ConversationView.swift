@@ -203,6 +203,15 @@ struct ConversationView: View {
                 .id("conversation.previewRow")
         }
 
+        QuestionStatusView(model: model)
+
+        ForEach(model.questionBatches) { batch in
+            QuestionCardView(model: model, batch: batch)
+                .id("question-\(batch.batchID)")
+        }
+
+        QuestionAnswerStatusView(model: model)
+
         ForEach(model.approvals) { approval in
             ApprovalCardView(model: model, approval: approval)
                 .id("approval-\(approval.approvalId)")

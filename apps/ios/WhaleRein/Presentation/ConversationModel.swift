@@ -27,12 +27,26 @@ final class ConversationModel {
         case failed(AppErrorCode)
     }
 
+    /// The user intent currently being submitted to the service. It is set
+    /// synchronously before the awaited call so a second tap in the same
+    /// submission window is coalesced instead of issuing another command.
+    enum PendingSubmission: Equatable, Sendable {
+        case send
+        case stop
+    }
+
     let hostId: String
     let sessionId: String
     let sessionTitle: String
 
     private(set) var messages: [ConversationMessage] = []
     private(set) var approvals: [Approval] = []
+    /// Core-owned question facet. Only `current` may establish an empty list.
+    private(set) var questions: QuestionsState = .loading
+    private(set) var questionReview: QuestionReview?
+    private(set) var questionAnswerState: QuestionAnswerState = .idle
+    private(set) var questionErrorKey: L10nKey?
+    private(set) var isLoadingTruncatedQuestions = false
     private(set) var previewText: String?
     private(set) var previewAttemptId: String?
     private(set) var connection: ConnectionStatus = .offline
@@ -45,6 +59,9 @@ final class ConversationModel {
     private(set) var lastStopStatus: CommandStatus?
     private(set) var inFlightSend: CommandReceipt?
     private(set) var pendingStop: CommandReceipt?
+    /// Command submission that has not settled yet. While set, the matching
+    /// affordance is disabled and repeated taps are ignored.
+    private(set) var pendingSubmission: PendingSubmission?
     private(set) var stopSettled = false
     private(set) var watchEnded = false
     private(set) var isSuspended = false
@@ -65,6 +82,12 @@ final class ConversationModel {
     var draft: String = ""
     var delivery: DeliveryChoice = .send
 
+    private struct QuestionDraft {
+        let guardValue: QuestionGuard
+        var selected: [String: Set<String>] = [:]
+        var custom: [String: String] = [:]
+    }
+
     private struct OptimisticMessage {
         let localId: String
         let commandId: String
@@ -84,11 +107,29 @@ final class ConversationModel {
     private var approvalExpiryTask: Task<Void, Never>?
     private var scrollRequestCounter = 0
     private var optimisticMessages: [String: OptimisticMessage] = [:]
+    /// Text submitted with the currently uncertain send. A later confirmation
+    /// may only consume the draft that was actually submitted, never a newer
+    /// draft the user typed while the response was in flight.
+    private var inFlightSendText: String?
+    /// Monotonic epoch for authoritative running/preview state. A Stop receipt
+    /// captured before this epoch advanced must not overwrite a newer run.
+    private var authoritativeRunEpoch = 0
+    /// Epoch captured when the pending Stop was submitted, used by both the
+    /// method return and a late status event.
+    private var pendingStopSubmissionEpoch: Int?
+    /// Status events for commands whose method response has not arrived yet.
+    /// Core can queue `commandStatus` before returning the command view, so the
+    /// event may legitimately precede the pending admission.
+    private var earlyCommandStatuses: [String: CommandStatus] = [:]
+    private var earlyCommandStatusOrder: [String] = []
     /// Approvals the Host has confirmed as still pending even though the local
     /// clock says their TTL passed. This is how a fast device clock stops
     /// disabling a valid request without letting a genuinely expired request
     /// stay clickable while offline.
     private var trustedPendingApprovalIds: Set<String> = []
+    /// Per-batch answer edits. A draft is kept only while the batch guard is
+    /// unchanged, so a changed owner/phase can never inherit a stale selection.
+    private var questionDrafts: [String: QuestionDraft] = [:]
 
     init(
         hostId: String,
@@ -122,11 +163,33 @@ final class ConversationModel {
     var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && inFlightSend == nil
+            && pendingSubmission == nil
             && !watchEnded
             && !isReconnecting
     }
 
-    var canStop: Bool { capabilities.running && pendingStop == nil }
+    var canStop: Bool {
+        capabilities.running
+            && pendingStop == nil
+            && pendingSubmission == nil
+    }
+
+    var questionBatches: [QuestionBatch] { questions.batches }
+
+    var questionsFreshness: QuestionFreshness { questions.freshness }
+
+    var questionEmptyIsCurrent: Bool {
+        questions.isCurrent && questions.batches.isEmpty
+    }
+
+    var hasPendingQuestions: Bool {
+        questions.isCurrent && !questions.batches.isEmpty
+    }
+
+    var canInteractWithQuestions: Bool {
+        questions.isCurrent && !watchEnded && connection.isOnline
+            && questionAnswerState != .submitting
+    }
 
     var pendingApprovals: [Approval] {
         approvals.filter { $0.state == .pending }
@@ -203,6 +266,10 @@ final class ConversationModel {
         watchEnded = false
         lastAppliedSequence = -1
         approvalClock = now()
+        questions = .loading
+        questionReview = nil
+        questionErrorKey = nil
+        questionAnswerState = .idle
         ensureSubscription()
         do {
             draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
@@ -242,6 +309,10 @@ final class ConversationModel {
         errorKey = nil
         lastAppliedSequence = -1
         approvalClock = now()
+        questions = .loading
+        questionReview = nil
+        questionErrorKey = nil
+        questionAnswerState = .idle
         if consumeTask == nil {
             ensureSubscription()
         }
@@ -256,6 +327,10 @@ final class ConversationModel {
         errorKey = nil
         lastAppliedSequence = -1
         approvalClock = now()
+        questions = .loading
+        questionReview = nil
+        questionErrorKey = nil
+        questionAnswerState = .idle
         consumeTask?.cancel()
         consumeTask = nil
         ensureSubscription()
@@ -320,6 +395,7 @@ final class ConversationModel {
             optimisticMessages.removeAll()
             previewText = nil
             previewAttemptId = nil
+            authoritativeRunEpoch += 1
             connection = .online
             loadState = .loaded
             approvalClock = now()
@@ -328,8 +404,10 @@ final class ConversationModel {
             restartApprovalTimer()
 
         case .message(let message):
-            let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
+            // A committed message identity is idempotent: a replay must not
+            // touch (or consume) any optimistic row.
             guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
+            let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
             if let echoIndex {
                 messages.insert(message, at: min(echoIndex, messages.count))
             } else {
@@ -369,6 +447,7 @@ final class ConversationModel {
         case .attemptEnded:
             previewText = nil
             previewAttemptId = nil
+            authoritativeRunEpoch += 1
             updateCapabilities(running: false)
 
         case .state(let status):
@@ -379,6 +458,13 @@ final class ConversationModel {
             updateConnection(status)
 
         case .capabilities(let capabilities):
+            // Any capabilities refresh advances the epoch, including an
+            // approval-only or same-running update. A Stop submitted just before
+            // such an update is therefore treated as stale on its confirmed
+            // return, leaving running/preview for one transient frame; the next
+            // authoritative idle state self-corrects it. Narrowing this would
+            // require an attempt/run identity on the capabilities event.
+            authoritativeRunEpoch += 1
             applyCapabilities(capabilities)
 
         case .approvals(let approvals):
@@ -391,6 +477,9 @@ final class ConversationModel {
             applyServerApproval(approval)
             approvalClock = now()
             restartApprovalTimer()
+
+        case .questions(let state):
+            applyQuestions(state)
 
         case .commandStatus(let receipt):
             applyCommandStatus(receipt)
@@ -411,6 +500,57 @@ final class ConversationModel {
         }
     }
 
+    /// User-initiated content load for a Core view that was too large to inline.
+    /// This is not a discovery loop: observation still owns freshness and the
+    /// stamp; only the oversized content is paged on demand.
+    func loadTruncatedQuestions() async {
+        guard questions.truncatedForDisplay, !isLoadingTruncatedQuestions else { return }
+        isLoadingTruncatedQuestions = true
+        defer { isLoadingTruncatedQuestions = false }
+        var collected: [QuestionBatch] = []
+        var cursor = ""
+        do {
+            for _ in 0..<64 {
+                let page = try await service.listQuestions(
+                    hostId: hostId,
+                    sessionId: sessionId,
+                    cursor: cursor
+                )
+                collected.append(contentsOf: page.batches)
+                cursor = page.nextCursor
+                if cursor.isEmpty { break }
+            }
+            questions.batches = collected
+            questions.batchCount = collected.count
+            questions.truncatedForDisplay = false
+            questions.error = nil
+            questionErrorKey = nil
+        } catch {
+            questionErrorKey = .questionsUnavailable
+        }
+    }
+
+    private func applyQuestions(_ state: QuestionsState) {
+        // Keep edits only for a batch whose exact guard still matches.
+        var guards: [String: QuestionGuard] = [:]
+        for batch in state.batches {
+            guards[batch.batchID] = batch.guardValue
+        }
+        questionDrafts = questionDrafts.filter { batchId, draft in
+            guards[batchId] == draft.guardValue
+        }
+        var reviewInvalidated = false
+        if let review = questionReview, guards[review.guardValue.batchID] != review.guardValue {
+            questionReview = nil
+            questionErrorKey = .questionsGuardChanged
+            reviewInvalidated = true
+        }
+        questions = state
+        if state.freshness == .current && !reviewInvalidated {
+            questionErrorKey = nil
+        }
+    }
+
     private func updateConnection(_ status: ConnectionStatus) {
         connection = status
         onConnectionChange?(status)
@@ -426,18 +566,36 @@ final class ConversationModel {
 
     func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, inFlightSend == nil, !watchEnded else { return }
+        guard !text.isEmpty, inFlightSend == nil, pendingSubmission == nil, !watchEnded else { return }
+        // Resolve the delivery mode before claiming the submission: an
+        // unsupported mode is rejected locally and must not block the composer.
+        let choice: DeliveryChoice
         do {
-            let choice = try DeliveryPolicy.resolve(delivery, for: capabilities)
-            let receipt = try await service.send(
+            choice = try DeliveryPolicy.resolve(delivery, for: capabilities)
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            sendErrorKey = L10nKey.errorKey(for: code)
+            reportFatalIfNeeded(code)
+            return
+        }
+        pendingSubmission = .send
+        do {
+            var receipt = try await service.send(
                 hostId: hostId,
                 sessionId: sessionId,
                 text: text,
                 delivery: choice
             )
+            // The submission settled: release the gate even though an uncertain
+            // receipt continues to block Send until reconciliation.
+            pendingSubmission = nil
+            if let early = takeEarlyCommandStatus(for: receipt.commandId) {
+                receipt.status = preferredStatus(early, over: receipt.status)
+            }
             sendErrorKey = nil
             lastSendStatus = receipt.status
             inFlightSend = receipt.status == .uncertain ? receipt : nil
+            inFlightSendText = receipt.status == .uncertain ? text : nil
             if receipt.status != .rejected {
                 appendOptimisticUserMessage(text: text, receipt: receipt)
             }
@@ -445,15 +603,26 @@ final class ConversationModel {
                 updateCapabilities(running: true)
             }
             if receipt.status == .uncertain {
-                // Keep the draft until the original request is reconciled.
+                // Keep the current draft (which may already be a newer message)
+                // until the original request is reconciled.
                 await persistDraftNow()
-            } else {
-                await clearDraftNow()
+            } else if receipt.status != .rejected {
+                // A successful older send consumes only the text it submitted.
+                // Text typed while the response was in flight belongs to a
+                // newer message and must survive.
+                if draftMatchesSubmission(text) {
+                    await clearDraftNow()
+                } else {
+                    await persistDraftNow()
+                }
             }
             if receipt.status == .uncertain {
                 requestScroll(animated: true)
             }
         } catch {
+            // A definite failure releases the gate so the same intent can be
+            // retried; a late settlement of the failed command cannot re-arm it.
+            pendingSubmission = nil
             let code = (error as? SessionServiceError)?.code ?? .internalError
             sendErrorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
@@ -462,16 +631,182 @@ final class ConversationModel {
 
     func stopRun() async {
         guard canStop else { return }
+        // Capture the authoritative run this Stop was requested for. If a newer
+        // run becomes authoritative before a late confirmation arrives, that
+        // confirmation must settle this operation without clearing the new run.
+        let submissionEpoch = authoritativeRunEpoch
+        pendingSubmission = .stop
         do {
-            let receipt = try await service.stop(hostId: hostId, sessionId: sessionId)
-            pendingStop = receipt
-            lastStopStatus = receipt.status
-            stopSettled = false
+            var receipt = try await service.stop(hostId: hostId, sessionId: sessionId)
+            // The submission settled; an accepted or uncertain Stop remains
+            // pending through `pendingStop` until the Host reconciles it.
+            pendingSubmission = nil
+            if let early = takeEarlyCommandStatus(for: receipt.commandId) {
+                receipt.status = preferredStatus(early, over: receipt.status)
+            }
             sendErrorKey = nil
+            applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
         } catch {
+            // A definite failure releases the gate so Stop can be retried. A
+            // late settlement for the failed command is only remembered as an
+            // early status and never resurrects this cleared intent.
+            pendingSubmission = nil
             let code = (error as? SessionServiceError)?.code ?? .internalError
             sendErrorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
+        }
+    }
+
+    // MARK: - Questions
+
+    /// Current edits for one question item. Presentation reads this instead of
+    /// owning selection state, so observation updates cannot wipe an edit for an
+    /// unchanged batch guard.
+    func questionSelection(batchId: String, itemId: String) -> Set<String> {
+        questionDrafts[batchId]?.selected[itemId] ?? []
+    }
+
+    func questionCustomText(batchId: String, itemId: String) -> String {
+        questionDrafts[batchId]?.custom[itemId] ?? ""
+    }
+
+    func toggleQuestionOption(batchId: String, itemId: String, label: String) {
+        guard let batch = questions.batches.first(where: { $0.batchID == batchId }),
+              batch.guardValue.isAnswerablePhase,
+              let item = batch.questions.first(where: { $0.id == itemId }),
+              item.options.contains(where: { $0.label == label }) else { return }
+        var draft = questionDrafts[batchId]
+            ?? QuestionDraft(guardValue: batch.guardValue)
+        guard draft.guardValue == batch.guardValue else { return }
+        var selected = draft.selected[itemId] ?? []
+        if item.multiSelect {
+            if selected.contains(label) {
+                selected.remove(label)
+            } else {
+                selected.insert(label)
+            }
+        } else {
+            selected = [label]
+        }
+        draft.selected[itemId] = selected
+        questionDrafts[batchId] = draft
+        questionErrorKey = nil
+    }
+
+    func setQuestionCustomText(batchId: String, itemId: String, text: String) {
+        guard let batch = questions.batches.first(where: { $0.batchID == batchId }),
+              let item = batch.questions.first(where: { $0.id == itemId }) else { return }
+        var draft = questionDrafts[batchId]
+            ?? QuestionDraft(guardValue: batch.guardValue)
+        guard draft.guardValue == batch.guardValue else { return }
+        draft.custom[itemId] = String(text.prefix(4_000))
+        questionDrafts[batchId] = draft
+        questionErrorKey = nil
+    }
+
+    /// Captures the exact reviewed guard and inputs. This is the explicit phase
+    /// review: nothing is submitted until the caller confirms this snapshot.
+    func beginQuestionReview(batchId: String) -> QuestionReview? {
+        guard canInteractWithQuestions,
+              let batch = questions.batches.first(where: { $0.batchID == batchId }) else {
+            questionErrorKey = .questionsUnavailable
+            return nil
+        }
+        guard batch.canAnswer else {
+            questionErrorKey = .questionsUnavailable
+            return nil
+        }
+        let draft = questionDrafts[batchId]
+            ?? QuestionDraft(guardValue: batch.guardValue)
+        guard draft.guardValue == batch.guardValue else {
+            questionErrorKey = .questionsGuardChanged
+            return nil
+        }
+        var answers: [QuestionAnswer] = []
+        for item in batch.questions {
+            let allowed = Set(item.options.map(\.label))
+            let selected = (draft.selected[item.id] ?? []).filter { allowed.contains($0) }
+            let custom = (draft.custom[item.id] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if selected.isEmpty && custom.isEmpty { continue }
+            answers.append(
+                QuestionAnswer(
+                    id: item.id,
+                    selected: selected.sorted(),
+                    custom: custom.isEmpty ? nil : custom
+                )
+            )
+        }
+        guard !answers.isEmpty else {
+            questionErrorKey = .questionsSelectAnswer
+            return nil
+        }
+        let review = QuestionReview(guardValue: batch.guardValue, answers: answers)
+        questionReview = review
+        questionErrorKey = nil
+        return review
+    }
+
+    func cancelQuestionReview() {
+        questionReview = nil
+    }
+
+    /// Submit the reviewed snapshot. The task is independent of the visible
+    /// observation: closing or replacing the watch never cancels it.
+    func submitQuestionReview() async {
+        guard let review = questionReview else { return }
+        guard canInteractWithQuestions,
+              let batch = questions.batches.first(where: { $0.batchID == review.guardValue.batchID }),
+              batch.guardValue == review.guardValue else {
+            questionReview = nil
+            questionAnswerState = .failed
+            questionErrorKey = .questionsGuardChanged
+            return
+        }
+        questionAnswerState = .submitting
+        questionErrorKey = nil
+        do {
+            let receipt = try await service.answerQuestion(
+                hostId: hostId,
+                sessionId: sessionId,
+                batch: batch,
+                answers: review.answers
+            )
+            switch receipt.status {
+            case .uncertain:
+                questionAnswerState = .uncertain(commandId: receipt.commandId)
+            case .rejected:
+                questionAnswerState = .failed
+                questionErrorKey = .questionsAnswerRejected
+            default:
+                questionAnswerState = .submitted(receipt.status)
+                questionReview = nil
+                questionDrafts[batch.batchID] = nil
+            }
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            questionAnswerState = .failed
+            questionErrorKey = code == .conflict || code == .staleApproval
+                ? .questionsGuardChanged
+                : L10nKey.errorKey(for: code)
+            reportFatalIfNeeded(code)
+        }
+    }
+
+    /// Requests cancellation of an uncertain open answer. When `false`, the
+    /// answer may still complete; the UI must not promise a rollback.
+    func cancelQuestionAnswer() async {
+        guard case .uncertain(let commandId) = questionAnswerState else { return }
+        do {
+            let requested = try await service.cancelQuestionAnswer(
+                hostId: hostId,
+                sessionId: sessionId,
+                commandId: commandId
+            )
+            questionErrorKey = requested ? .questionsCancelRequested : .questionsCancelUnconfirmed
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            questionErrorKey = L10nKey.errorKey(for: code)
         }
     }
 
@@ -705,6 +1040,13 @@ final class ConversationModel {
 
     @discardableResult
     private func appendOptimisticUserMessage(text: String, receipt: CommandReceipt) -> String? {
+        // The committed echo may have arrived before the send response (Core can
+        // deliver the message event first). In that case the authoritative row
+        // already exists and a local placeholder would be a duplicate.
+        if let committedId = receipt.messageId,
+           messages.contains(where: { $0.messageId == committedId }) {
+            return nil
+        }
         let messageId = "local-\(receipt.commandId)"
         guard !messages.contains(where: { $0.messageId == messageId }) else { return nil }
         optimisticMessages[messageId] = OptimisticMessage(
@@ -733,14 +1075,15 @@ final class ConversationModel {
 
     /// Removes the optimistic row that stands in for this committed echo and
     /// returns its index, so the committed message can take the same position.
-    /// Matching prefers the Core message/delivery id and falls back to the exact
-    /// text for Sources that do not echo a correlation id.
+    /// Matching uses the Core message id when the receipt supplied one; only
+    /// Sources that never echo a correlation id fall back to exact text. Text
+    /// fallback must not merge two distinct authoritative identities.
     private func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
         let echoText = normalizedText(message.plainText)
         let match = messages.firstIndex { local in
             guard let pending = optimisticMessages[local.messageId] else { return false }
-            if let committed = pending.committedMessageId, committed == message.messageId {
-                return true
+            if let committed = pending.committedMessageId {
+                return committed == message.messageId
             }
             return normalizedText(pending.text) == echoText
         }
@@ -754,29 +1097,83 @@ final class ConversationModel {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func draftMatchesSubmission(_ submittedText: String) -> Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines) == submittedText
+    }
+
     private func applyCommandStatus(_ receipt: CommandReceipt) {
         if let inFlightSend, inFlightSend.commandId == receipt.commandId {
             lastSendStatus = receipt.status
             if receipt.status != .uncertain {
                 self.inFlightSend = nil
                 if receipt.status == .confirmed || receipt.status == .accepted {
-                    clearDraftAfterSubmission()
+                    let submitted = inFlightSendText
+                    if let submitted, draftMatchesSubmission(submitted) {
+                        clearDraftAfterSubmission()
+                    }
                 }
+                inFlightSendText = nil
             }
             return
         }
         if let pendingStop, pendingStop.commandId == receipt.commandId {
-            lastStopStatus = receipt.status
-            if receipt.status == .confirmed {
-                self.pendingStop = nil
-                stopSettled = true
+            let submissionEpoch = pendingStopSubmissionEpoch ?? authoritativeRunEpoch
+            applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
+            return
+        }
+        // The method response may still be in flight; remember the early
+        // settlement so the return can apply it instead of discarding it.
+        rememberEarlyCommandStatus(receipt)
+    }
+
+    private func applyStopReceipt(_ receipt: CommandReceipt, submissionEpoch: Int) {
+        lastStopStatus = receipt.status
+        switch receipt.status {
+        case .confirmed:
+            pendingStop = nil
+            pendingStopSubmissionEpoch = nil
+            stopSettled = true
+            // Settle the operation, but only let it stop the run it was
+            // requested for. A newer authoritative run remains running.
+            if submissionEpoch == authoritativeRunEpoch {
                 updateCapabilities(running: false)
                 previewText = nil
                 previewAttemptId = nil
             }
-            return
+        case .accepted, .uncertain:
+            pendingStop = receipt
+            pendingStopSubmissionEpoch = submissionEpoch
+            stopSettled = false
+        case .rejected, .cancelled:
+            pendingStop = nil
+            pendingStopSubmissionEpoch = nil
+            stopSettled = true
         }
-        // Unknown or duplicate settlement: never apply it twice.
+    }
+
+    private func preferredStatus(_ early: CommandStatus, over returned: CommandStatus) -> CommandStatus {
+        switch returned {
+        case .confirmed, .rejected, .cancelled:
+            return returned
+        case .accepted, .uncertain:
+            return early
+        }
+    }
+
+    private func rememberEarlyCommandStatus(_ receipt: CommandReceipt) {
+        if earlyCommandStatuses[receipt.commandId] == nil {
+            earlyCommandStatusOrder.append(receipt.commandId)
+        }
+        earlyCommandStatuses[receipt.commandId] = receipt.status
+        while earlyCommandStatusOrder.count > 32 {
+            let oldest = earlyCommandStatusOrder.removeFirst()
+            earlyCommandStatuses.removeValue(forKey: oldest)
+        }
+    }
+
+    private func takeEarlyCommandStatus(for commandId: String) -> CommandStatus? {
+        earlyCommandStatusOrder.removeAll { $0 == commandId }
+        return earlyCommandStatuses.removeValue(forKey: commandId)
     }
 
     private func clearDraftAfterSubmission() {

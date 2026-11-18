@@ -298,6 +298,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .capabilities: return "capabilities"
         case .approvals: return "approvals"
         case .approvalChanged: return "approvalChanged"
+        case .questions: return "questions"
         case .commandStatus: return "commandStatus"
         case .error: return "error"
         case .watchEnded: return "watchEnded"

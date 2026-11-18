@@ -12,6 +12,7 @@ import { lockInstance } from './state/instance-lock.js'
 import { StateStore } from './state/store.js'
 import { SecurityManager } from './security/manager.js'
 import { authorizationPublicKey } from './security/host-auth.js'
+import { bytesEqual } from './security/digest.js'
 import { CommandService } from './commands/service.js'
 import { questionResponseBudget } from './commands/question-pager.js'
 import { WatchedEvents } from './events/watches.js'
@@ -219,14 +220,7 @@ export class HostRuntime {
 
 
   #handleDeviceOffline(event) {
-    if (event?.event === 'request_stale') {
-      const requestId = event?.request_id
-      if (typeof requestId !== 'string' || !requestId) return
-      this.#commands?.cancelRequest(requestId, 'client_poll_expired')
-      this.presenceEvents += 1
-      this.#logger?.info('request_stale', { request: requestId, reason: String(event?.reason ?? '').slice(0, 32) })
-      return
-    }
+    if (event?.event === 'request_stale') return this.#handleRequestStale(event)
     const deviceId = event?.device_id
     if (typeof deviceId !== 'string' || !deviceId) return
     const closed = this.#security?.clearDeviceChannels(deviceId) ?? []
@@ -234,6 +228,64 @@ export class HostRuntime {
     this.#commands?.cancelDevice(deviceId, 'device_offline')
     this.presenceEvents += 1
     this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32), closed: closed.length })
+  }
+
+  // A cancellation notice is only authoritative for its exact existing scope.
+  // A foreign Host/device, an unknown peer, a mismatched command/digest or an
+  // invalid deadline is rejected without exposing or cancelling anything.
+  #handleRequestStale(event) {
+    const requestId = event?.request_id
+    if (typeof requestId !== 'string' || !requestId) return
+    if (event.host_id !== undefined && event.host_id !== this.#config.hostId) {
+      this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'host_mismatch' })
+      return
+    }
+    const active = this.#commands?.requestScope(requestId) ?? null
+    const deviceId = event.device_id ?? active?.deviceId
+    if (typeof deviceId !== 'string' || !deviceId) {
+      this.#logger?.warn('presence_rejected', { code: 'invalid_argument', reason: 'device_missing' })
+      return
+    }
+    // An unpaired device cannot own an execution on this Host.
+    if (!this.#store?.getPeerKey(deviceId)) {
+      this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'unknown_device' })
+      return
+    }
+    if (active && active.deviceId !== deviceId) {
+      this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'device_scope_mismatch' })
+      return
+    }
+    // A deadline alone is context, not a command scope: query/handshake
+    // leases can expire without an executable command to fence. The binding
+    // becomes mandatory exactly when a command identity or digest is present.
+    const hasBinding = event.command_id !== undefined || event.digest !== undefined
+    if (hasBinding) {
+      const commandId = event.command_id
+      const digest = cancellationDigest(event.digest)
+      const deadline = Number(event.deadline_unix_ms ?? event.expires_at_unix_ms)
+      if (event.host_id !== this.#config.hostId
+          || typeof commandId !== 'string' || commandId === '' || commandId.length > 256 || !digest
+          || !Number.isSafeInteger(deadline) || deadline <= 0) {
+        this.#logger?.warn('presence_rejected', { code: 'invalid_argument', reason: 'binding_invalid' })
+        return
+      }
+      if (active?.commandId && active.commandId !== commandId) {
+        this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'command_scope_mismatch' })
+        return
+      }
+      if (active?.payloadDigest && !bytesEqual(active.payloadDigest, digest)) {
+        this.#logger?.warn('presence_rejected', { code: 'forbidden', reason: 'digest_mismatch' })
+        return
+      }
+      try {
+        this.#commands?.fenceCancelledCommand({ deviceId, requestId, commandId, digest, expiresAt: deadline, errorCode: 'unavailable' })
+      } catch {
+        this.#logger?.warn('presence_fence_failed', { code: 'internal' })
+      }
+    }
+    this.#commands?.cancelRequest(requestId, 'client_poll_expired')
+    this.presenceEvents += 1
+    this.#logger?.info('request_stale', { request: requestId, reason: String(event?.reason ?? '').slice(0, 32) })
   }
 
   // A reconnect can publish HostReady before Access has resubscribed to the
@@ -615,6 +667,17 @@ export class HostRuntime {
       },
       activeChannels: channelIds.length,
     }
+  }
+}
+
+function cancellationDigest(value) {
+  if (typeof value !== 'string' || value.length > 128) return null
+  if (/^[a-f0-9]{64}$/i.test(value)) return new Uint8Array(Buffer.from(value, 'hex'))
+  try {
+    const bytes = Buffer.from(value, 'base64')
+    return bytes.length === 32 ? new Uint8Array(bytes) : null
+  } catch {
+    return null
   }
 }
 

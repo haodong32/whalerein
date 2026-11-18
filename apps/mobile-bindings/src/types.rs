@@ -6,8 +6,10 @@
 
 use std::collections::HashMap;
 
+use whalerein_core::api as core_api;
 use whalerein_core::api::{
-    ApprovalInfo, DeliveryMode, HostInfo, PairingPrompt, SessionCapabilities, SessionSummary,
+    ApprovalInfo, DeliveryMode, HostInfo, PairingPrompt, QuestionBatchInfo, QuestionFreshness,
+    QuestionPageInfo, SessionCapabilities, SessionSummary,
 };
 use whalerein_core::conversation::{
     content_block, ApprovalState, AttemptOutcome, ConversationMessage, MessageRole, RunPhase,
@@ -384,6 +386,11 @@ pub enum ConversationEvent {
     ApprovalChanged {
         approval: ApprovalView,
     },
+    /// Core-owned question state for the active observation. Only `current`
+    /// establishes that no pending questions exist.
+    Questions {
+        view: QuestionsView,
+    },
     Error {
         code: String,
         message: String,
@@ -460,6 +467,299 @@ pub(crate) fn convert_update(
             attempt_id: attempt.attempt_id.clone(),
             outcome: attempt_outcome_name(*outcome),
         }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pending questions
+//
+// These are Core-owned projections. A client never parses native or wire
+// structures: the stamp, the batch guard and the freshness label are already
+// decided by Core observation. `QuestionBatchView` carries the exact guard a
+// submission must revalidate, so an observed card alone never authorizes an
+// answer.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionOptionView {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionSubjectView {
+    pub name: String,
+    pub icon: Option<String>,
+}
+
+/// Normalized native intent. Translation maps are keyed by locale tag.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionIntentView {
+    pub kind: String,
+    pub approve: String,
+    pub reject: Option<String>,
+    pub always: Option<String>,
+    pub call_id: Option<String>,
+    pub subject: Option<QuestionSubjectView>,
+    pub display_question: Option<HashMap<String, String>>,
+    pub display_detail: Option<HashMap<String, String>>,
+    pub display_approve: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionItemView {
+    pub id: String,
+    pub question: String,
+    pub detail: Option<String>,
+    pub header: Option<String>,
+    pub options: Vec<QuestionOptionView>,
+    pub multi_select: bool,
+    pub intent: Option<QuestionIntentView>,
+}
+
+/// One pending batch with the exact guards a submission must echo back.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionBatchView {
+    pub session_id: String,
+    pub batch_id: String,
+    pub source_epoch: String,
+    pub version: u64,
+    pub digest_hex: String,
+    pub phase: String,
+    pub questions: Vec<QuestionItemView>,
+    pub answerable: bool,
+    pub content_unavailable: bool,
+}
+
+/// Source observation epoch plus monotonic normalized-inventory revision.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionStampView {
+    pub observation_epoch: String,
+    pub revision: u64,
+}
+
+/// One authoritative Core question view. `freshness` is a stable lowercase
+/// label: `loading`, `current`, `stale`, `unavailable` or `unsupported`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionsView {
+    pub freshness: String,
+    pub stamp: Option<QuestionStampView>,
+    pub batches: Vec<QuestionBatchView>,
+    pub error: Option<String>,
+    /// True when the complete Core view was too large to copy into the mobile
+    /// event queue. `batches` is then empty and `batch_count` is authoritative;
+    /// the UI must read pages on demand and never render this as empty.
+    pub truncated_for_display: bool,
+    /// Number of batches in the Core-owned view, even when the content is not
+    /// inlined. Zero only when the view genuinely has no batches.
+    pub batch_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionPageView {
+    pub batches: Vec<QuestionBatchView>,
+    pub next_cursor: String,
+    pub stamp: Option<QuestionStampView>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionAnswerView {
+    pub id: String,
+    pub selected: Vec<String>,
+    pub custom: Option<String>,
+}
+
+impl From<QuestionAnswerView> for core_api::QuestionAnswer {
+    fn from(value: QuestionAnswerView) -> Self {
+        Self {
+            id: value.id,
+            selected: value.selected,
+            custom: value.custom,
+        }
+    }
+}
+
+pub(crate) fn question_freshness_name(value: QuestionFreshness) -> String {
+    match value {
+        QuestionFreshness::Loading => "loading",
+        QuestionFreshness::Current => "current",
+        QuestionFreshness::Stale => "stale",
+        QuestionFreshness::Unavailable => "unavailable",
+        QuestionFreshness::Unsupported => "unsupported",
+    }
+    .to_owned()
+}
+
+fn question_stamp_view(value: &core_api::QuestionStamp) -> QuestionStampView {
+    QuestionStampView {
+        observation_epoch: value.observation_epoch.clone(),
+        revision: value.revision,
+    }
+}
+
+pub(crate) fn question_batch_view(value: &QuestionBatchInfo) -> QuestionBatchView {
+    QuestionBatchView {
+        session_id: value.session_id.clone(),
+        batch_id: value.batch_id.clone(),
+        source_epoch: value.source_epoch.clone(),
+        version: value.version,
+        digest_hex: hex::encode(&value.digest),
+        phase: value.phase.clone(),
+        questions: value
+            .questions
+            .iter()
+            .map(|item| QuestionItemView {
+                id: item.id.clone(),
+                question: item.question.clone(),
+                detail: item.detail.clone(),
+                header: item.header.clone(),
+                options: item
+                    .options
+                    .iter()
+                    .map(|option| QuestionOptionView {
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                multi_select: item.multi_select,
+                intent: item.intent.as_ref().map(|intent| QuestionIntentView {
+                    kind: intent.kind.clone(),
+                    approve: intent.approve.clone(),
+                    reject: intent.reject.clone(),
+                    always: intent.always.clone(),
+                    call_id: intent.call_id.clone(),
+                    subject: intent.subject.as_ref().map(|subject| QuestionSubjectView {
+                        name: subject.name.clone(),
+                        icon: subject.icon.clone(),
+                    }),
+                    display_question: intent
+                        .display
+                        .as_ref()
+                        .and_then(|display| display.question.clone()),
+                    display_detail: intent
+                        .display
+                        .as_ref()
+                        .and_then(|display| display.detail.clone()),
+                    display_approve: intent
+                        .display
+                        .as_ref()
+                        .and_then(|display| display.approve.clone()),
+                }),
+            })
+            .collect(),
+        answerable: value.answerable,
+        content_unavailable: value.content_unavailable,
+    }
+}
+
+pub(crate) fn questions_view(value: &core_api::QuestionView) -> QuestionsView {
+    QuestionsView {
+        freshness: question_freshness_name(value.freshness),
+        stamp: value.stamp.as_ref().map(question_stamp_view),
+        batches: value.batches.iter().map(question_batch_view).collect(),
+        error: value.error.clone(),
+        truncated_for_display: false,
+        batch_count: value.batches.len() as u64,
+    }
+}
+
+/// Approximate encoded/UniFFI-visible size of one question view. It counts
+/// UTF-8 bytes plus fixed per-record overhead and is intentionally conservative;
+/// the exact wire accounting lives in Core.
+pub(crate) const MAX_INLINE_QUESTION_VIEW_BYTES: usize = 1024 * 1024;
+
+fn string_bytes(value: &str) -> usize {
+    value.len()
+}
+
+fn option_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, |text| string_bytes(text))
+}
+
+fn translations_bytes(value: &Option<std::collections::HashMap<String, String>>) -> usize {
+    value.as_ref().map_or(0, |translations| {
+        translations
+            .iter()
+            .map(|(key, text)| key.len() + text.len())
+            .sum()
+    })
+}
+
+fn question_batch_bytes(batch: &QuestionBatchView) -> usize {
+    let mut bytes = 128
+        + string_bytes(&batch.session_id)
+        + string_bytes(&batch.batch_id)
+        + string_bytes(&batch.source_epoch)
+        + batch.digest_hex.len()
+        + string_bytes(&batch.phase);
+    for item in &batch.questions {
+        bytes += 64
+            + string_bytes(&item.id)
+            + string_bytes(&item.question)
+            + option_bytes(&item.detail)
+            + option_bytes(&item.header);
+        for option in &item.options {
+            bytes += 24 + string_bytes(&option.label) + option_bytes(&option.description);
+        }
+        if let Some(intent) = &item.intent {
+            bytes += 96
+                + string_bytes(&intent.kind)
+                + string_bytes(&intent.approve)
+                + option_bytes(&intent.reject)
+                + option_bytes(&intent.always)
+                + option_bytes(&intent.call_id)
+                + intent
+                    .subject
+                    .as_ref()
+                    .map_or(0, |subject| string_bytes(&subject.name))
+                + translations_bytes(&intent.display_question)
+                + translations_bytes(&intent.display_detail)
+                + translations_bytes(&intent.display_approve);
+        }
+    }
+    bytes
+}
+
+pub(crate) fn questions_view_bytes(view: &QuestionsView) -> usize {
+    64 + option_bytes(&view.error) + view.batches.iter().map(question_batch_bytes).sum::<usize>()
+}
+
+/// Keep the event queue bounded by bytes, not only by event count. A complete
+/// view above the inline budget is replaced by a bounded summary so a large
+/// collection cannot be copied hundreds of times into the 512-entry queue.
+pub(crate) fn bounded_question_view(mut view: QuestionsView) -> QuestionsView {
+    view.batch_count = view.batches.len() as u64;
+    if questions_view_bytes(&view) > MAX_INLINE_QUESTION_VIEW_BYTES {
+        view.batches.clear();
+        view.truncated_for_display = true;
+        view.error = Some("question_view_too_large_for_display".into());
+    }
+    view
+}
+
+pub(crate) fn question_page_view(value: &QuestionPageInfo) -> QuestionPageView {
+    QuestionPageView {
+        batches: value.batches.iter().map(question_batch_view).collect(),
+        next_cursor: value.next_cursor.clone(),
+        stamp: value.stamp.as_ref().map(question_stamp_view),
+        complete: value.complete,
+    }
+}
+
+/// Rebuild the Core guard value from exactly what the client reviewed. Only the
+/// guard fields are used for submission; content is never re-sent to Core.
+pub(crate) fn question_guard(value: &QuestionBatchView) -> core_api::QuestionBatchInfo {
+    QuestionBatchInfo {
+        session_id: value.session_id.clone(),
+        batch_id: value.batch_id.clone(),
+        source_epoch: value.source_epoch.clone(),
+        version: value.version,
+        digest: hex::decode(&value.digest_hex).unwrap_or_default(),
+        phase: value.phase.clone(),
+        questions: Vec::new(),
+        answerable: value.answerable,
+        content_unavailable: value.content_unavailable,
     }
 }
 
@@ -934,5 +1234,47 @@ mod tests {
                 other => panic!("unexpected event: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_large_question_view_is_replaced_by_a_bounded_summary() {
+        let view = QuestionsView {
+            freshness: "current".into(),
+            stamp: Some(QuestionStampView {
+                observation_epoch: "epoch-1".into(),
+                revision: 3,
+            }),
+            batches: vec![QuestionBatchView {
+                session_id: "session-1".into(),
+                batch_id: "batch-1".into(),
+                source_epoch: "epoch-1".into(),
+                version: 3,
+                digest_hex: "00".repeat(32),
+                phase: "QUESTION_OPEN".into(),
+                questions: vec![QuestionItemView {
+                    id: "q1".into(),
+                    question: "x".repeat(MAX_INLINE_QUESTION_VIEW_BYTES + 1),
+                    detail: None,
+                    header: None,
+                    options: Vec::new(),
+                    multi_select: false,
+                    intent: None,
+                }],
+                answerable: true,
+                content_unavailable: false,
+            }],
+            error: None,
+            truncated_for_display: false,
+            batch_count: 0,
+        };
+        let bounded = bounded_question_view(view);
+        assert!(bounded.truncated_for_display);
+        assert_eq!(bounded.batch_count, 1);
+        assert!(bounded.batches.is_empty());
+        assert_eq!(
+            bounded.error.as_deref(),
+            Some("question_view_too_large_for_display")
+        );
+        assert_eq!(bounded.freshness, "current");
     }
 }

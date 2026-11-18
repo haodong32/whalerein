@@ -224,8 +224,12 @@ export class CommandService {
     for (const entry of this.modelQueries.values()) {
       if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
     }
-    for (const entry of this.questionAnswers.values()) {
-      if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
+    // Transport loss and channel replacement stop observation, not an
+    // independently live HTTP answer. Only applicable revocation fences it.
+    if (reason === 'revoked') {
+      for (const entry of this.questionAnswers.values()) {
+        if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
+      }
     }
     for (const wait of this.waits.values()) {
       if (wait.deviceId === deviceId && wait.channelId === channelId) {
@@ -252,6 +256,32 @@ export class CommandService {
     }
   }
 
+  /** Exact live scope metadata used to authenticate a cancellation notice. */
+  requestScope(requestId) {
+    if (!requestId) return null
+    for (const entry of this.requests) {
+      if (entry.requestId === requestId) {
+        return { deviceId: entry.deviceId, channelId: entry.channelId, commandId: entry.commandId ?? '', payloadDigest: entry.payloadDigest ?? null }
+      }
+    }
+    for (const entry of this.questionAnswers.values()) {
+      if (entry.requestId === requestId) {
+        return { deviceId: entry.deviceId, channelId: entry.channelId, commandId: entry.commandId, payloadDigest: null }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Persist an exact pre-admission cancellation fence in the existing command
+   * journal. An already journaled command keeps its proven outcome; a delayed
+   * request with the same identity replays this failed terminal result instead
+   * of invoking the source.
+   */
+  fenceCancelledCommand({ deviceId, requestId = '', commandId, digest, expiresAt = 0, errorCode = 'unavailable' }) {
+    return this.store.fenceCancelledCommand({ deviceId, requestId, commandId, digest, expiresAt, errorCode, now: this.now() })
+  }
+
   /** Abort every scope owned by one device after a broker presence loss. */
   cancelDevice(deviceId, reason = 'device_offline') {
     for (const entry of this.requests) {
@@ -260,9 +290,9 @@ export class CommandService {
     for (const entry of this.modelQueries.values()) {
       if (entry.deviceId === deviceId) entry.controller.abort('unavailable')
     }
-    for (const entry of this.questionAnswers.values()) {
-      if (entry.deviceId === deviceId) entry.controller.abort('unavailable')
-    }
+    // A device MQTT disconnect does not establish the death of a separately
+    // live HTTP answer. Exact request cancellation (request_stale) still stops
+    // the matching answer, and revocation remains authoritative.
     for (const wait of this.waits.values()) {
       if (wait.deviceId === deviceId) {
         wait.reason = reason
@@ -487,7 +517,22 @@ export class CommandService {
         return { status: 'succeeded', response: { history_page: await this.events.readHistory(payload.read_history.session_id, payload.read_history, scope.controller.signal) } }
       }
       if (payload.watch_session) {
-        return { status: 'succeeded', response: { watch_ready: await this.events.watch(request.device_id, request.channel_id, payload.watch_session.session_id, scope.controller.signal) } }
+        const watch = payload.watch_session
+        const interests = watch.interests
+        if (typeof watch.session_id !== 'string' || watch.session_id === '') return failed('invalid_argument')
+        if (!interests || typeof interests !== 'object') return failed('invalid_argument')
+        // Proto3 omits an absent false scalar, so only an absent message is
+        // missing; an explicit non-boolean value is never coerced.
+        const conversation = interests.conversation === undefined ? false : interests.conversation
+        const questions = interests.questions === undefined ? false : interests.questions
+        if (typeof conversation !== 'boolean' || typeof questions !== 'boolean' || (!conversation && !questions)) return failed('invalid_argument')
+        return {
+          status: 'succeeded',
+          response: {
+            watch_ready: await this.events.watch(request.device_id, request.channel_id, watch.session_id, scope.controller.signal,
+              { conversation, questions }),
+          },
+        }
       }
       if (payload.refresh_watches) {
         return { status: 'succeeded', response: { watch_states: await this.events.refresh(request.device_id, request.channel_id, payload.refresh_watches.watch_ids??[], scope.controller.signal) } }
@@ -684,30 +729,34 @@ export class CommandService {
     // A stale in-flight operation read after restart is unresolved. Surface a
     // stable UNKNOWN receipt keyed by the persisted operation identity rather
     // than an empty or success-looking payload.
-    if (command.status === 'unknown' && command.operation?.outcome) {
+    const operation = command.operation
+    const proven = operation?.outcome && operation.outcome !== 'UNKNOWN'
+      && (operation.outcome !== 'READY_WITH_WARNING' || safeWarningCode(operation.warningCode))
+    if (command.status === 'unknown' && proven) {
       // The native action completed with a proven outcome, but its terminal
       // command write failed. Recovery returns that outcome instead of UNKNOWN.
       resultPayload = this.codec.encode('whalerein.v1.ResponsePayload', {
         lifecycle_receipt: lifecycleReceipt({
-          operation: command.operation.operation === 'fork' ? 'fork' : 'create',
-          operationId: command.operation.operationId,
-          disposition: command.operation.outcome,
-          phase: command.operation.phase,
-          sessionId: command.operation.sessionId ?? '',
-          parentSessionId: command.operation.parentSessionId ?? '',
+          operation: operation.operation === 'fork' ? 'fork' : 'create',
+          operationId: operation.operationId,
+          disposition: operation.outcome,
+          phase: operation.phase,
+          sessionId: operation.sessionId ?? '',
+          parentSessionId: operation.parentSessionId ?? '',
+          warningCode: operation.warningCode ?? '',
         }),
       })
-    } else if (command.status === 'unknown' && command.operation) {
-      const kind = command.operation.operation === 'fork' ? 'fork' : 'create'
-      const preferred = command.operation.preferredSessionId ?? ''
-      const parent = command.operation.parentSessionId ?? ''
+    } else if (command.status === 'unknown' && operation) {
+      const kind = operation.operation === 'fork' ? 'fork' : 'create'
+      const preferred = operation.preferredSessionId ?? ''
+      const parent = operation.parentSessionId ?? ''
       const reconcile = kind === 'create'
-        ? preferred !== '' ? { mode: 'PREFERRED_SESSION_ID', key: preferred } : { mode: 'OPERATION_ID', key: command.operation.operationId }
+        ? preferred !== '' ? { mode: 'PREFERRED_SESSION_ID', key: preferred } : { mode: 'OPERATION_ID', key: operation.operationId }
         : parent !== '' ? { mode: 'PARENT_SESSION_ID', key: parent } : { mode: 'MANUAL', key: '' }
       try {
         resultPayload = this.codec.encode('whalerein.v1.ResponsePayload', {
           lifecycle_receipt: lifecycleReceipt({
-            operation: kind, operationId: command.operation.operationId, disposition: 'UNKNOWN',
+            operation: kind, operationId: operation.operationId, disposition: 'UNKNOWN',
             phase: 'NATIVE', reasonCode: 'PROCESS_INTERRUPTED',
             reconcileMode: reconcile.mode, reconcileKey: reconcile.key,
           }),
@@ -766,6 +815,8 @@ export class CommandService {
       }
       return this.#replay(existing)
     }
+    scope.commandId = commandId
+    scope.payloadDigest = request.payload_digest
     const { command, created } = this.store.createOrGetCommand({
       deviceId: request.device_id,
       commandId,
@@ -1107,12 +1158,12 @@ export class CommandService {
     throw new DefinitiveExecutionError('internal', 'lifecycle operation record unavailable')
   }
 
-  #persistLifecycleResult(kind, request, phase, identity = null, entered = true, outcome = '') {
+  #persistLifecycleResult(kind, request, phase, identity = null, entered = true, outcome = '', warningCode = '') {
     try {
       this.store.updateLifecycleOperation({
         deviceId: request.device_id, commandId: request.command_id, phase, entered,
         sessionId: identity?.session_id ?? '', parentSessionId: identity?.parent_session_id ?? '',
-        outcome,
+        outcome, warningCode,
         now: this.now(),
       })
     } catch {
@@ -1131,7 +1182,7 @@ export class CommandService {
     const identity = receipt.session_id
       ? { session_id: receipt.session_id, parent_session_id: receipt.parent_session_id ?? '' }
       : null
-    this.#persistLifecycleResult(kind, request, phase, identity, receipt.disposition !== 'FAILED', receipt.disposition)
+    this.#persistLifecycleResult(kind, request, phase, identity, receipt.disposition !== 'FAILED', receipt.disposition, receipt.warning_code ?? '')
     const fields = {
       operation: kind, disposition: receipt.disposition, phase, reason: receipt.reason_code ?? '',
       identity_present: Boolean(receipt.session_id), warning: receipt.warning_code ?? '',

@@ -54,6 +54,8 @@ struct LaunchOptions: Sendable {
     var diagnosticsFailure: Bool
     /// Simulate a locked/unavailable Keychain at launch.
     var keychainLocked: Bool
+    /// Deliver a deterministic pending question with the first watch.
+    var questionsOnOpen: Bool
     var arguments: [String]
 
     init(arguments: [String] = CommandLine.arguments, defaults: UserDefaults = .standard) {
@@ -83,6 +85,7 @@ struct LaunchOptions: Sendable {
         slowPairing = flags.contains("-ui-slow-pairing")
         diagnosticsFailure = flags.contains("-ui-diagnostics-failure")
         keychainLocked = flags.contains("-ui-keychain-locked")
+        questionsOnOpen = flags.contains("-ui-questions")
         approvalVariant = FixtureApprovalVariant(
             rawValue: defaults.string(forKey: "ui-approval-state") ?? ""
         ) ?? .current

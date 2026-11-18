@@ -164,6 +164,16 @@ apps/ios/scripts/test-integration.sh  # 21 stack-backed XCTest cases
 apps/ios/scripts/test.sh UI       # 19 XCUITest cases
 ```
 
+## Composer submissions
+
+Send and Stop each represent one user intent per submission. While a Send or
+Stop submission is pending, that pending state is set synchronously before the
+service call, the affordance (`canSend`/`canStop`) is disabled, and repeated
+taps are coalesced so they never issue a second command. A definite failure
+clears the pending state and permits retry; an accepted or uncertain receipt
+stays recoverable through the existing command reconciliation, and a late
+settlement of a failed submission never re-arms or acts on a newer intent.
+
 ## Diagnostics visibility
 
 The diagnostics entry point in the conversation toolbar is compiled only in
@@ -208,6 +218,26 @@ header row under the title bar.
 The app supports English and Simplified Chinese through a String Catalog,
 VoiceOver labels and values, Dynamic Type including accessibility sizes, and
 system light and dark appearance. Status is never conveyed by color alone.
+
+## Session questions
+
+`MobileCore.startWatch` opens one Core observation selecting Conversation and
+Questions on the same device transport. Each queued event retains its producer
+Host/session, Core observation identity and binding generation; replacing the
+watch drops only output from the replaced watch while pairing and command events
+survive. Questions are `loading`, `current`, `stale`, `unavailable` or
+`unsupported`, and only a complete current collection can mean that no pending
+questions exist. A batch carries its session, source epoch, version, digest,
+phase and answerable/content-unavailable flags; edits survive an unchanged guard
+and are discarded when the guard changes. The UI requires an explicit review
+before submitting and Core revalidates the guard at invocation. The answer task
+is independent of the visible observation, so closing or replacing a view does
+not cancel it, and there is no discovery polling loop.
+
+One-shot `listQuestions`/`getQuestion` and guarded `answerQuestion`/
+`cancelQuestionAnswer` are flat binding APIs; no wire or native DTO crosses into
+Swift. The question fixture appears only when the app is launched with
+`-ui-questions`.
 
 ## Known limitations
 

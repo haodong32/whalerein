@@ -137,13 +137,17 @@ func (f *fakePairing) Claim(context.Context, *whalereinv1.PairingClaimRequest) (
 }
 
 type fakeRequests struct {
-	row        store.Request
-	created    bool
-	submitErr  error
-	getErr     error
-	submitted  []requests.SubmitInput
-	gotDevice  string
-	gotRequest string
+	row          store.Request
+	created      bool
+	submitErr    error
+	getErr       error
+	touchErr     error
+	touchRenewed bool
+	submitted    []requests.SubmitInput
+	gotDevice    string
+	gotRequest   string
+	touchDevice  string
+	touchRequest string
 }
 
 func (f *fakeRequests) Submit(_ context.Context, input requests.SubmitInput) (store.Request, bool, error) {
@@ -157,7 +161,11 @@ func (f *fakeRequests) Get(_ context.Context, deviceID, requestID string) (store
 	return f.row, f.getErr
 }
 
-func (f *fakeRequests) Touch(_ string, _ string, _ whalereinv1.OnlineStatus) {}
+func (f *fakeRequests) Touch(_ context.Context, deviceID, requestID string) (bool, error) {
+	f.touchDevice = deviceID
+	f.touchRequest = requestID
+	return f.touchRenewed, f.touchErr
+}
 
 type apiFixture struct {
 	server   *Server
@@ -409,6 +417,17 @@ func TestGetRequestRouteReturnsAuthorizedRequest(t *testing.T) {
 	if f.requests.gotDevice != "d1" || f.requests.gotRequest != "r1" {
 		t.Fatalf("get args = %q %q", f.requests.gotDevice, f.requests.gotRequest)
 	}
+	if f.requests.touchDevice != "d1" || f.requests.touchRequest != "r1" {
+		t.Fatalf("get renewed %q %q instead of the exact request", f.requests.touchDevice, f.requests.touchRequest)
+	}
+	// Read-only recovery: a failed renewal must not hide the recorded outcome
+	// and a read never reopens an expired lease.
+	f.requests.touchErr = errors.New("lease update failed")
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("read-only recovery status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	f.requests.touchErr = nil
 	f.requests.getErr = requests.ErrNotFound
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
 	assertError(t, recorder, http.StatusNotFound, whalereinv1.ErrorCode_not_found)
@@ -871,9 +890,48 @@ func TestHeartbeatRouteTouchesTheAuthorizedRequest(t *testing.T) {
 	if f.requests.gotDevice != "d1" || f.requests.gotRequest != "r1" {
 		t.Fatalf("heartbeat read device=%q request=%q", f.requests.gotDevice, f.requests.gotRequest)
 	}
+	if f.requests.touchDevice != "d1" || f.requests.touchRequest != "r1" {
+		t.Fatalf("heartbeat renewed %q %q instead of the exact request", f.requests.touchDevice, f.requests.touchRequest)
+	}
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, nil)
 	assertError(t, recorder, http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized)
+	f.requests.touchErr = errors.New("lease update failed")
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, map[string]string{"Authorization": "Bearer device-token"})
+	assertError(t, recorder, http.StatusInternalServerError, whalereinv1.ErrorCode_internal)
+	f.requests.touchErr = nil
 	f.requests.getErr = errors.New("db down")
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, map[string]string{"Authorization": "Bearer device-token"})
 	assertError(t, recorder, http.StatusInternalServerError, whalereinv1.ErrorCode_internal)
+}
+
+// TestSessionObservationAC26HeartbeatRenewsOnlyTheAddressedRequest proves the
+// HTTP heartbeat forwards the path identity, never a device-wide renewal.
+func TestSessionObservationAC26HeartbeatRenewsOnlyTheAddressedRequest(t *testing.T) {
+	f := newAPIFixture(t)
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/requests/r1/heartbeat", nil, map[string]string{"Authorization": "Bearer device-token"})
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("heartbeat status = %d", recorder.Code)
+	}
+	if f.requests.touchDevice != "d1" || f.requests.touchRequest != "r1" {
+		t.Fatalf("heartbeat renewed %q %q", f.requests.touchDevice, f.requests.touchRequest)
+	}
+}
+
+// TestSessionObservationAC27ReadRecoversOutcomeWithoutRenewal proves renewal
+// failure is bounded I/O: the recorded outcome is still returned and no lease
+// is reopened by the read path.
+func TestSessionObservationAC27ReadRecoversOutcomeWithoutRenewal(t *testing.T) {
+	f := newAPIFixture(t)
+	f.requests.touchErr = errors.New("lease update failed")
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("read status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var state whalereinv1.RequestState
+	if err := protojson.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.GetRequestId() != "r1" || string(state.GetResultBody()) != "result" {
+		t.Fatalf("recorded outcome lost: %+v", &state)
+	}
 }

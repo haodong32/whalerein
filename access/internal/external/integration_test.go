@@ -528,7 +528,7 @@ func (stubRequests) Get(context.Context, string, string) (store.Request, error) 
 	return store.Request{}, errors.New("unused")
 }
 
-func (stubRequests) Touch(string, string, whalereinv1.OnlineStatus) {}
+func (stubRequests) Touch(context.Context, string, string) (bool, error) { return false, nil }
 
 // TestHostProofStatusReadsTheEnrollmentWithoutACredential proves that the
 // original Host can read state/revision with a scoped proof while a bare id,

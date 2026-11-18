@@ -92,6 +92,11 @@ try {
       fs.unlinkSync(marker)
       return
     }
+    // Hold every published command result (acceptance and terminal) while the
+    // marker exists. The Host journal still records the outcome, so recovery
+    // can prove it without another source invocation.
+    const holdResults = path.join(process.env.WHALEREIN_STATE_DIR, 'gx-hold-command-results')
+    if (result.command_id && fs.existsSync(holdResults)) return
     // Test-only expiry of one completed read-only request after a valid slice.
     const waitExpiry = path.join(process.env.WHALEREIN_STATE_DIR, 'test-wait-expire-result')
     if (fs.existsSync(waitExpiry) && result.request_id && result.status === 'succeeded' && !result.command_id) {

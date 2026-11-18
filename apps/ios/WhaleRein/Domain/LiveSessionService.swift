@@ -197,6 +197,11 @@ final class LiveSessionService: SessionService {
             latestApprovals.append(mapped)
             broadcast(.approvalChanged(mapped), scope: scope)
 
+        case .questions(let view):
+            // Core owns reconciliation and freshness. The app never polls or
+            // turns a missing/loading view into an empty collection.
+            broadcast(.questions(Self.map(questions: view)), scope: scope)
+
         case .error(let code, _):
             broadcast(
                 .error(code: Self.map(code: code), message: Self.staticMessage(for: Self.map(code: code))),
@@ -432,6 +437,59 @@ final class LiveSessionService: SessionService {
         return Self.map(command: view, delivery: nil)
     }
 
+    // MARK: - Questions
+
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
+        let core = self.core
+        let page = try await call {
+            try core.listQuestions(hostId: hostId, sessionId: sessionId, cursor: cursor)
+        }
+        return Self.map(page: page)
+    }
+
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch {
+        let core = self.core
+        let batch = try await call {
+            try core.getQuestion(hostId: hostId, sessionId: sessionId, batchId: batchId)
+        }
+        return Self.map(questionBatch: batch)
+    }
+
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt {
+        let core = self.core
+        let bindingBatch = Self.map(questionBatch: batch)
+        let bindingAnswers = answers.map(Self.map(answer:))
+        let view = try await call {
+            try core.answerQuestion(
+                hostId: hostId,
+                sessionId: sessionId,
+                batch: bindingBatch,
+                answers: bindingAnswers
+            )
+        }
+        return Self.map(command: view, delivery: nil)
+    }
+
+    func cancelQuestionAnswer(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> Bool {
+        let core = self.core
+        return try await call {
+            try core.cancelQuestionAnswer(
+                hostId: hostId,
+                sessionId: sessionId,
+                commandId: commandId
+            )
+        }
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
@@ -534,6 +592,128 @@ final class LiveSessionService: SessionService {
     }
 
     // MARK: - Binding mapping
+
+    private static func map(questions view: WhaleReinMobile.QuestionsView) -> QuestionsState {
+        QuestionsState(
+            freshness: QuestionFreshness(bindingLabel: view.freshness),
+            stamp: view.stamp.map {
+                QuestionStamp(observationEpoch: $0.observationEpoch, revision: $0.revision)
+            },
+            batches: view.batches.map(map(questionBatch:)),
+            error: view.error,
+            truncatedForDisplay: view.truncatedForDisplay,
+            batchCount: Int(view.batchCount)
+        )
+    }
+
+    private static func map(page view: WhaleReinMobile.QuestionPageView) -> QuestionPage {
+        QuestionPage(
+            batches: view.batches.map(map(questionBatch:)),
+            nextCursor: view.nextCursor,
+            stamp: view.stamp.map {
+                QuestionStamp(observationEpoch: $0.observationEpoch, revision: $0.revision)
+            },
+            complete: view.complete
+        )
+    }
+
+    private static func map(questionBatch view: WhaleReinMobile.QuestionBatchView) -> QuestionBatch {
+        QuestionBatch(
+            sessionID: view.sessionId,
+            batchID: view.batchId,
+            sourceEpoch: view.sourceEpoch,
+            version: view.version,
+            digestHex: view.digestHex,
+            phase: view.phase,
+            questions: view.questions.map(map(questionItem:)),
+            answerable: view.answerable,
+            contentUnavailable: view.contentUnavailable
+        )
+    }
+
+    private static func map(questionItem view: WhaleReinMobile.QuestionItemView) -> QuestionItem {
+        QuestionItem(
+            id: view.id,
+            question: view.question,
+            detail: view.detail,
+            header: view.header,
+            options: view.options.map {
+                QuestionOption(label: $0.label, description: $0.description)
+            },
+            multiSelect: view.multiSelect,
+            intent: view.intent.map { intent in
+                QuestionIntent(
+                    kind: intent.kind,
+                    approve: intent.approve,
+                    reject: intent.reject,
+                    always: intent.always,
+                    callID: intent.callId,
+                    subject: intent.subject.map {
+                        QuestionSubject(name: $0.name, icon: $0.icon)
+                    },
+                    displayQuestion: intent.displayQuestion,
+                    displayDetail: intent.displayDetail,
+                    displayApprove: intent.displayApprove
+                )
+            }
+        )
+    }
+
+    /// Rebuild the exact reviewed guard for Core. Content is carried for the
+    /// UniFFI record shape; Core only revalidates the guard fields.
+    private static func map(questionBatch batch: QuestionBatch) -> WhaleReinMobile.QuestionBatchView {
+        WhaleReinMobile.QuestionBatchView(
+            sessionId: batch.sessionID,
+            batchId: batch.batchID,
+            sourceEpoch: batch.sourceEpoch,
+            version: batch.version,
+            digestHex: batch.digestHex,
+            phase: batch.phase,
+            questions: batch.questions.map { item in
+                WhaleReinMobile.QuestionItemView(
+                    id: item.id,
+                    question: item.question,
+                    detail: item.detail,
+                    header: item.header,
+                    options: item.options.map {
+                        WhaleReinMobile.QuestionOptionView(
+                            label: $0.label,
+                            description: $0.description
+                        )
+                    },
+                    multiSelect: item.multiSelect,
+                    intent: item.intent.map { intent in
+                        WhaleReinMobile.QuestionIntentView(
+                            kind: intent.kind,
+                            approve: intent.approve,
+                            reject: intent.reject,
+                            always: intent.always,
+                            callId: intent.callID,
+                            subject: intent.subject.map {
+                                WhaleReinMobile.QuestionSubjectView(
+                                    name: $0.name,
+                                    icon: $0.icon
+                                )
+                            },
+                            displayQuestion: intent.displayQuestion,
+                            displayDetail: intent.displayDetail,
+                            displayApprove: intent.displayApprove
+                        )
+                    }
+                )
+            },
+            answerable: batch.answerable,
+            contentUnavailable: batch.contentUnavailable
+        )
+    }
+
+    private static func map(answer: QuestionAnswer) -> WhaleReinMobile.QuestionAnswerView {
+        WhaleReinMobile.QuestionAnswerView(
+            id: answer.id,
+            selected: answer.selected,
+            custom: answer.custom
+        )
+    }
 
     private static func map(session view: WhaleReinMobile.SessionSummaryView) -> SessionSummary {
         SessionSummary(

@@ -120,3 +120,68 @@ test('an oversized single batch is replaced by bounded metadata without losing i
   assert.equal(large.batches[0].phase, 'QUESTION_OPEN')
   assert.equal(large.batches[0].digest.length, 32)
 })
+
+const stamp={observation_epoch:'epoch-1',revision:7}
+
+test('session-observation/AC-07.every page carries one source stamp and only the final page is complete', () => {
+  const pager=new QuestionPager(proto)
+  const source={batches:[batch('one'),batch('two'),batch('three')],stamp}
+  const inputs={deviceId:'d1',sessionId:'s',source}
+  // Find a budget that returns a strict first page (one batch, more pending).
+  let budget=1
+  for(;budget<2000;budget++){
+    try{const page=pager.page({...inputs,maxBytes:budget});if(page.batches.length===1&&page.complete===false)break}catch{}
+  }
+  const first=pager.page({...inputs,maxBytes:budget})
+  const second=pager.page({...inputs,cursor:first.next_cursor,maxBytes:1000})
+  const last=pager.page({...inputs,cursor:second.next_cursor,maxBytes:1000})
+  for(const page of [first,second,last]) {
+    assert.deepEqual(decode(page).stamp,stamp)
+    assert.equal(page.complete,page.next_cursor==='')
+  }
+  assert.deepEqual(first.batches.map(item=>item.batch_id),['one'])
+  assert.equal(first.complete,false)
+  assert.equal(last.complete,true)
+  assert.equal(last.next_cursor,'')
+  // A different source sample stamps its own pages; one page never mixes.
+  const other={...source,stamp:{observation_epoch:'epoch-2',revision:1}}
+  assert.deepEqual(decode(pager.page({...inputs,source:other,maxBytes:budget})).stamp,{observation_epoch:'epoch-2',revision:1})
+})
+
+test('session-observation/AC-16.encoded budget includes the stamp overhead', () => {
+  const pager=new QuestionPager(proto)
+  const plain={batches:[batch('one'),batch('two')]}
+  const stamped={...plain,stamp}
+  const inputs={deviceId:'d1',sessionId:'s'}
+  const plainBudget=oneBatchBudget(pager,{...inputs,source:plain})
+  const stampedBudget=oneBatchBudget(pager,{...inputs,source:stamped})
+  assert.ok(stampedBudget>plainBudget,'the stamp contributes to the actual encoded page budget')
+  const page=pager.page({...inputs,source:stamped,maxBytes:stampedBudget})
+  assert.ok(size(page)<=stampedBudget)
+  // Below the measured at-budget boundary the page fails explicitly or sheds a
+  // whole batch; it never silently emits unaccounted bytes.
+  for(let candidate=1;candidate<=stampedBudget;candidate++){
+    try{assert.ok(size(pager.page({...inputs,source:stamped,maxBytes:candidate}))<=candidate)}
+    catch(error){assert.ok(['payload_too_large','invalid_argument'].includes(error.code))}
+  }
+})
+
+test('session-observation/AC-16 first page sizing does not encode the whole inventory', () => {
+  const calls = new Map()
+  const counting = {
+    encode(type, value) {
+      calls.set(type, (calls.get(type) ?? 0) + 1)
+      return proto.encode(type, value)
+    },
+  }
+  const pager = new QuestionPager(counting)
+  const source = { batches: Array.from({ length: 50 }, (_, index) => batch(`b${index}`)) }
+  const inputs = { deviceId: 'd1', sessionId: 's' }
+  const budget = oneBatchBudget(new QuestionPager(proto), { ...inputs, source, maxBytes: 1000 })
+  const page = pager.page({ ...inputs, source, maxBytes: budget })
+  assert.equal(page.batches.length, 1)
+  assert.ok(
+    (calls.get('whalerein.v1.QuestionBatch') ?? 0) <= 3,
+    `sizing a one-batch page encoded ${calls.get('whalerein.v1.QuestionBatch')} batches`,
+  )
+})

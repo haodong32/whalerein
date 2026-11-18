@@ -174,6 +174,57 @@ export class QuestionProjection {
   clear() { this.#ids.clear(); this.#epoch = randomBytes(16).toString('hex') }
 }
 
+// Semantic stamps for the normalized pending-question inventory. An epoch is
+// minted per adapter incarnation and again whenever the exact native owner
+// object changes; the revision only advances when the normalized observable
+// inventory changes. Reads never mint a revision by themselves.
+export class QuestionStampTracker {
+  #incarnation = randomBytes(16).toString('hex')
+  #states = new Map()
+
+  #sameOwner(state, owner) {
+    if (!state) return false
+    if (Array.isArray(state.owner) || Array.isArray(owner)) {
+      return Array.isArray(state.owner) && Array.isArray(owner)
+        && state.owner.length === owner.length && state.owner.every((value, index) => value === owner[index])
+    }
+    return state.owner === owner
+  }
+
+  sample(sessionId, owner, inventory) {
+    const fingerprint = JSON.stringify(inventory)
+    let state = this.#states.get(sessionId)
+    if (!this.#sameOwner(state, owner)) {
+      state = {
+        epoch: `${this.#incarnation}:${randomBytes(8).toString('hex')}`,
+        revision: 1,
+        fingerprint,
+        owner: Array.isArray(owner) ? [...owner] : owner,
+      }
+      this.#states.set(sessionId, state)
+    } else if (state.fingerprint !== fingerprint) {
+      state.revision += 1
+      state.fingerprint = fingerprint
+    }
+    return { observation_epoch: state.epoch, revision: state.revision }
+  }
+
+  reset() {
+    this.#incarnation = randomBytes(16).toString('hex')
+    this.#states.clear()
+  }
+}
+
+// Inventory fields covered by the stamp: ordered membership, content, guards,
+// phase, answerability and content-unavailable metadata.
+export function questionInventoryFingerprint(batches) {
+  return (batches ?? []).map(batch => [
+    batch.batch_id ?? '', batch.session_id ?? '', batch.source_epoch ?? '', batch.version ?? 0,
+    Buffer.from(batch.digest ?? []).toString('hex'), batch.phase ?? '',
+    batch.answerable === true, batch.content_unavailable === true, batch.questions ?? [],
+  ])
+}
+
 // Observes a live native waterfall while allowing the next provider to run
 // immediately. Construction alone installs no listener and claims no wait.
 export class OpenQuestionBroker {
@@ -183,14 +234,20 @@ export class OpenQuestionBroker {
   #agents
   #service
   #now
+  #onChange
   #closed = false
   #nextPosition = 0
 
-  constructor({ agents, userQuestions, handles, now = Date.now }) {
+  constructor({ agents, userQuestions, handles, onChange = null, now = Date.now }) {
     this.#agents = agents
     this.#service = userQuestions
     this.#handles = handles
+    this.#onChange = onChange
     this.#now = now
+  }
+
+  #changed(sessionId) {
+    try { this.#onChange?.(sessionId) } catch { /* observers are independent */ }
   }
 
   #isRoot(agent) {
@@ -221,6 +278,7 @@ export class OpenQuestionBroker {
     const record = { agent, ownerSession: agent.session, callId, questions, request, sourceSignal, remote, ended, completed, busy: false, claim: null,
       position: Number.isSafeInteger(seq) ? seq : null, ordinal: ++this.#nextPosition }
     this.#records.set(key, record)
+    this.#changed(agent.id)
     const onAbort = () => ended.resolve({ kind: 'abort', error: sourceSignal.reason })
     sourceSignal?.addEventListener('abort', onAbort, { once: true })
     // Start the next native provider now, not after a remote response. Its
@@ -251,12 +309,20 @@ export class OpenQuestionBroker {
       if (this.#records.get(key) === record) this.#records.delete(key)
       if (record.claim) { try { record.claim.release() } catch { /* Native cancellation remains authoritative. */ } }
       if (!this.#closed) this.#projection.project(agent.id, this.#view(agent.id))
+      if (!this.#closed) this.#changed(agent.id)
     }
   }
 
-  #view(sessionId) {
-    return { active: [...this.#records.values()].filter(record => record.agent.id === sessionId)
-      .map(record => ({ callId: record.callId, state: 'open', questions: record.request.questions })) }
+  // A record only owns native scope while its exact agent object is still the
+  // current root and its capture-time session is unchanged. Replacing either
+  // object invalidates the open handle even when the session ID is identical.
+  #ownedRecords(sessionId) {
+    return [...this.#records.values()].filter(record =>
+      record.agent?.id === sessionId && this.#isRoot(record.agent) && record.agent.session === record.ownerSession)
+  }
+
+  #view(sessionId, records = this.#ownedRecords(sessionId)) {
+    return { active: records.map(record => ({ callId: record.callId, state: 'open', questions: record.request.questions })) }
   }
 
   list(sessionId) {
