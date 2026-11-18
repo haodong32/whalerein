@@ -98,7 +98,11 @@ def test_gx02_native_fork_model_and_independent_history(scenario, paired_device)
     paired_device.sessions(scenario.host)
     select_model(paired_device, scenario.host, parent)
     scenario.model.plan()
-    assert paired_device.send(parent, "synthetic parent", delivery="enqueue-after-run")["receipt"]["status"] == "succeeded"
+    parent_text = "synthetic parent"
+    parent_send = paired_device.send(parent, parent_text, delivery="enqueue-after-run")
+    paired_device.confirm_detached_delivery(
+        parent_send, parent, parent_text, "enqueue-after-run"
+    )
     scenario.wait_idle(parent)
     paired_device.observe_history(parent)
     before = scenario.cached(paired_device, parent)

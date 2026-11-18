@@ -237,34 +237,47 @@ class Device:
         options = ["--delivery", delivery] if delivery else []
         return self.call("session", "send", session, "--detach", *options, "--", message)
 
-    def confirm_detached_delivery(self, submission, session, text, delivery):
-        """Observe terminal delivery for the exact recorded send intent."""
+    def settle_detached_delivery(self, code, envelope, session, text, delivery):
+        """Read the exact recorded send's terminal effect without waiting for a reply."""
+        if code != 0:
+            return code, envelope
+        submission = envelope["data"]
         operation = submission["operation_id"]
         target = submission["target"]
         assert isinstance(operation, str) and operation.strip() == operation and operation
         deadline = time.monotonic() + 20
         while True:
+            submission = envelope["data"]
             assert submission["state"] == "submission"
             assert submission["operation_id"] == operation and submission["target"] == target
-            receipt = submission["receipt"]
-            status = receipt["status"]
-            if status == "succeeded":
-                identity = receipt.get("delivery_id")
-                assert isinstance(identity, str) and identity and identity.strip() == identity
-                return receipt
-            assert status in {"received", "host_accepted"}, "Delivery did not succeed"
+            if submission["receipt"]["status"] not in {"received", "host_accepted"}:
+                return code, envelope
             remaining = deadline - time.monotonic()
             if remaining < 1:
                 raise TimeoutError("Detached delivery did not reach a terminal receipt")
             time.sleep(0.1)
             # Core resolves a saved operation ID and checks the original
-            # intent before reading its receipt. Keep detach to avoid waiting
-            # for a model reply while the case holds the active run.
-            submission = self.call(
+            # intent before reading its receipt. Detach avoids waiting for
+            # a model reply while the case holds the active run.
+            code, envelopes = self.invoke(
                 "session", "send", session, "--detach", "--delivery", delivery,
-                "--operation-id", operation, "--timeout", str(max(1, int(remaining))),
-                "--", text,
+                "--operation-id", operation, "--timeout", str(int(remaining)),
+                "--", text, success=False,
             )
+            envelope = envelopes[-1]
+            if code != 0:
+                return code, envelope
+
+    def confirm_detached_delivery(self, submission, session, text, delivery):
+        code, envelope = self.settle_detached_delivery(
+            0, {"data": submission}, session, text, delivery
+        )
+        assert code == 0, "Delivery did not succeed"
+        receipt = envelope["data"]["receipt"]
+        identity = receipt.get("delivery_id")
+        assert receipt["status"] == "succeeded"
+        assert isinstance(identity, str) and identity and identity.strip() == identity
+        return receipt
 
     def approvals(self, session):
         return self.call("session", "approval", "list", "--session", session)["approvals"]
