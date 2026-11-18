@@ -150,6 +150,13 @@ final class LiveSessionService: SessionService {
             capabilities.running = running
             cachedCapabilities = capabilities
             broadcast(.capabilities(capabilities), scope: scope)
+            // Core emits this state after the baseline history has been
+            // committed to the encrypted cache. Refresh the local transcript
+            // now so a cold watch shows seeded history even though the first
+            // reset ran before the baseline completed.
+            Task { @MainActor [weak self] in
+                await self?.reloadCachedHistory(scope: scope)
+            }
 
         case .historyReset:
             broadcast(.reset(messages: cachedHistory, approvals: latestApprovals), scope: scope)
@@ -334,8 +341,18 @@ final class LiveSessionService: SessionService {
 
     func sessions(hostId: String) async throws -> [SessionSummary] {
         let core = self.core
-        let sessions = try await call { try core.sessions(hostId: hostId) }
-        return sessions.map(Self.map(session:))
+        do {
+            let sessions = try await call { try core.sessions(hostId: hostId) }
+            return sessions.map(Self.map(session:))
+        } catch let error as SessionServiceError
+            where error.code == .timeout || error.code == .unavailable || error.code == .hostOffline {
+            // With the broker down the remote list cannot complete, but the
+            // encrypted cache is still an authoritative offline view. Return it
+            // instead of surfacing a transport timeout.
+            let cached = try await cachedSessions(hostId: hostId)
+            if !cached.isEmpty { return cached }
+            throw error
+        }
     }
 
     func cachedSessions(hostId: String) async throws -> [SessionSummary] {
@@ -376,6 +393,9 @@ final class LiveSessionService: SessionService {
         // Record the real Source capabilities for this session before the
         // stream starts so state events can update only the running flag.
         cachedCapabilities = try? await capabilities(hostId: hostId, sessionId: sessionId)
+        // Warm the durable session list while the Host is reachable so offline
+        // lists can fall back to the cache when the broker is down.
+        _ = try? await sessions(hostId: hostId)
 
         // Load the encrypted local transcript so the reset event can restore
         // history after a reconnect or process restart. Live messages with the
@@ -435,6 +455,15 @@ final class LiveSessionService: SessionService {
         let core = self.core
         let view = try await call { try core.stop(hostId: hostId, sessionId: sessionId) }
         return Self.map(command: view, delivery: nil)
+    }
+
+    /// Encrypted local transcript for restart/cache verification.
+    func cachedTranscript(hostId: String, sessionId: String) async throws -> [ConversationMessage] {
+        let core = self.core
+        let cached = try await call {
+            try core.cachedMessages(hostId: hostId, sessionId: sessionId)
+        }
+        return cached.map(Self.map(message:))
     }
 
     // MARK: - Questions
@@ -819,6 +848,18 @@ final class LiveSessionService: SessionService {
         case "interrupted": return .cancelled
         default: return .failed
         }
+    }
+
+    private func reloadCachedHistory(scope: SessionContext) async {
+        let core = self.core
+        guard let cached = try? await call({
+            try core.cachedMessages(hostId: scope.hostId, sessionId: scope.sessionId)
+        }) else { return }
+        let mapped = cached.map(Self.map(message:))
+        guard mapped.map(\.messageId) != cachedHistory.map(\.messageId) else { return }
+        cachedHistory = mapped
+        cachedHistoryById = Dictionary(uniqueKeysWithValues: mapped.map { ($0.messageId, $0) })
+        broadcast(.reset(messages: mapped, approvals: latestApprovals), scope: scope)
     }
 
     private static func map(connection status: String) -> ConnectionStatus {

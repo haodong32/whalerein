@@ -431,6 +431,9 @@ async fn run_owner(
             Ok(End::Done) => break,
             Ok(End::Reconnect) => {
                 signal_lost(questions.as_ref(), "observation_interrupted");
+                let _ = core
+                    .runtime
+                    .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
                 tokio::time::sleep(core.runtime.next_reconnect_delay(&key.host_id)).await;
             }
@@ -440,6 +443,9 @@ async fn run_owner(
                 // loop is still running, so a bounded caller reports the
                 // actionable cause instead of a bare timeout.
                 *shared.last.lock().expect("observation error mutex") = Some(error);
+                let _ = core
+                    .runtime
+                    .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
                 tokio::time::sleep(core.runtime.next_reconnect_delay(&key.host_id)).await;
             }
@@ -563,6 +569,14 @@ async fn run_connection(
 ) -> CoreResult<End> {
     let config = core.require_config()?;
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
+    // The secure channel is only one part of observation. Until the device MQTT
+    // subscription and baseline are ready, report reconnecting rather than
+    // online, so a broker outage cannot look healthy through HTTPS alone.
+    if fresh {
+        let _ = core
+            .runtime
+            .set_state(&key.host_id, ConnectionState::Reconnecting);
+    }
     let token =
         load_device_token(core.secret_store(), &config.device_id)?.ok_or(CoreError::NotPaired)?;
     let client = DeviceMqttClient::new(
@@ -580,6 +594,7 @@ async fn run_connection(
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = stop.clone();
     let runtime = core.runtime.clone();
+    let state_host = key.host_id.clone();
     let interrupted = Arc::new(AtomicBool::new(false));
     let task_interrupted = interrupted.clone();
     let queued = Arc::new(AtomicUsize::new(0));
@@ -613,6 +628,10 @@ async fn run_connection(
                     }
                     MqttConnectionEvent::Disconnected => {
                         task_interrupted.store(true, Ordering::SeqCst);
+                        // The transport is down now, not when the reconnect
+                        // loop happens to wake. Publish that immediately so a
+                        // connection poller cannot keep reporting online.
+                        let _ = runtime.set_state(&state_host, ConnectionState::Reconnecting);
                     }
                     _ => {}
                 },

@@ -742,3 +742,42 @@ async fn session_observation_ac_18_terminal_error_preserves_the_fatal_code() {
     assert!(observation.take_terminal_error().is_none(), "take once");
     peer.abort();
 }
+
+#[tokio::test]
+async fn session_observation_ac_25_mqtt_loss_reports_reconnecting() {
+    use crate::runtime::ConnectionState;
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
+    let peer = tokio::spawn(async move {
+        let stream = subscribe(&listener).await;
+        let _ = drop_rx.await;
+        drop(stream);
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        core.get_connection_state(&key.host_id),
+        ConnectionState::Connected
+    );
+    drop_tx.send(()).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if core.get_connection_state(&key.host_id) != ConnectionState::Connected {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "MQTT loss never changed the connection state"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    observation.close().await;
+    peer.abort();
+}
