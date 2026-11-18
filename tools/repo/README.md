@@ -367,6 +367,11 @@ require execution and can be selected by a full `package::TestParent/child` ID.
 Necessary imports, fixtures and parent test code can still execute for a selected
 child. Unselected cases do not inflate totals.
 
+Rustdoc uses the case IDs shown by discovery, including for compile-only
+examples. Select the complete documentation target with
+`./repo test core --only doctest::`. A narrower selection runs only when
+Rustdoc can isolate the selected examples from the rest of the inventory.
+
 Node IDs use `file::parent/child` name paths. Each segment escapes `~` as `~0`
 and `/` as `~1`: a root named `parent child`, a root named `parent/child` and
 `child` under `parent` have distinct IDs. Line numbers are location metadata.

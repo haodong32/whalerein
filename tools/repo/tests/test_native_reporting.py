@@ -591,3 +591,43 @@ def test_rust_stderr_panic_keeps_only_the_source_location(tmp_path):
     assert result["tests"][0]["diagnostics"] == [
         {"phase": "test", "message": "Rust panic at core\\src\\sample.rs:42:9"}
     ]
+
+
+@pytest.mark.parametrize("only", [None, "line 10)"])
+def test_rustdoc_compile_output_matches_listed_cases(tmp_path, only):
+    from conftest import ok
+
+    from repo.projects import Project
+    from repo.runners.rust import collect as collect_rust
+
+    manifest = tmp_path / "Cargo.toml"
+    manifest.write_text('[package]\nname="p"\nversion="0.1.0"\n')
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").touch()
+    names = [f"src/lib.rs - api (line {line})" for line in (10, 14, 18)]
+    listing = "".join(f"{name}: test\n" for name in names)
+    execution = (
+        f"test {names[0]} - compile fail ... ok\n"
+        f"test {names[1]} - compile ... ok\n"
+        f"test {names[2]} ... ignored\n"
+        "test result: ok. 2 passed; 0 failed; 1 ignored;\n"
+    )
+    expected = [
+        (f"doctest::{name}", status)
+        for name, status in zip(names, ("passed", "passed", "skipped"), strict=True)
+    ]
+    if only:
+        execution = (
+            f"test {names[0]} - compile fail ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored;\n"
+        )
+        expected = expected[:1]
+    result = collect_rust(
+        Project("p", "rust", tmp_path, manifest, tmp_path),
+        FakeRunner(responses=[ok(""), ok(listing), ok(execution)]),
+        True,
+        only=only,
+    )
+    assert result["completeness"] == "complete"
+    assert [(case["id"], case["status"]) for case in result["tests"]] == expected
