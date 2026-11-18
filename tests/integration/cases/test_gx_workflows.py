@@ -215,9 +215,13 @@ def test_gx03_native_interrupt_acceptance_requires_confirmation(scenario, paired
     assert scenario.request("gx-hold-interrupt")["armed"]
     released = False
     try:
-        receipt = paired_device.interrupt(session)
-        assert receipt["status"] == "host_accepted"
+        code, values = paired_device.invoke("session", "interrupt", session, success=False)
+        assert code == 7 and values[-1]["error"]["code"] == "unknown"
         wait(lambda: scenario.request("gx-held-interrupt-status")["entered"], timeout=10)
+        pending = paired_device.call("operation", "list")["pending_commands"]
+        assert len(pending) == 1 and pending[0]["host_id"] == scenario.host
+        receipt = pending[0]
+
         def journal_status():
             with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
                 row = db.execute("SELECT status FROM commands WHERE device_id=? AND command_id=?", (paired_device.identity["device_id"], receipt["command_id"])).fetchone()
