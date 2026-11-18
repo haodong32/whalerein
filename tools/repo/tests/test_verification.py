@@ -254,3 +254,18 @@ def test_cleanup_failure_does_not_erase_completed_scope(checkout, tmp_path):
     assert report["verification"]["last_completed_phase"] == "execution"
     assert report["verification"]["cleanup"]["status"] == "failed"
     assert status == 1
+
+
+def test_capture_canonicalizes_temporary_directory_alias(checkout, tmp_path):
+    from repo.sources import capture_sources
+
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    sources = capture_sources(
+        (SourceSelection("public", checkout, revision="HEAD"),),
+        alias / "sources",
+    )
+    assert sources["public"].root == real / "sources"
+    assert (sources["public"].root / "input").read_text() == "base"

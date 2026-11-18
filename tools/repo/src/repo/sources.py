@@ -152,6 +152,7 @@ def _capture_revision(selection, revision, root, excluded):
 
 def capture_sources(selections, layout):
     """Assemble the complete layout, then seal every declared input together."""
+    layout = layout.resolve()
     layout.mkdir()
     pending = {}
     for selection in selections:
