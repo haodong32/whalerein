@@ -2649,15 +2649,16 @@ def test_native_steer_during_abort_targets_next_turn(scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     scenario.request("arm-delivery-barrier")
     scenario.request("arm-abort-steer-observation", sessionId=session)
+    text = "synthetic during abort"
     with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(paired_device.send, session, "synthetic during abort", "steer")
+        pending = executor.submit(paired_device.send, session, text, "steer")
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=10, process=scenario.native)
             other.interrupt(session)
-            receipt = pending.result(timeout=20)
+            submission = pending.result(timeout=20)
         finally:
             scenario.request("release-delivery-barrier")
-    assert receipt["delivery_id"]
+    paired_device.confirm_detached_delivery(submission, session, text, "steer")
     observation = scenario.request("abort-steer-observation")
     assert observation == {"aborted": True, "nextTurn": True}
     scenario.model.release.set()

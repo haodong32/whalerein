@@ -74,7 +74,7 @@ def test_native_remote_reuse_then_started_fallback(scenario, paired_device):
     reused = paired_device.call("session", "create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
     assert reused["disposition"] == "READY" and reused["session_id"] == session
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
+    paired_device.send_confirmed(session, "synthetic fixture", delivery="start-if-idle")
     scenario.wait_idle(session)
     fallback = paired_device.call("session", "create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
     assert fallback["disposition"] == "READY" and fallback["session_id"] != session
