@@ -1,7 +1,6 @@
 """GX-04 native delivery mode recovery across isolated result faults."""
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -31,24 +30,23 @@ def test_gx04_native_delivery_modes_recover_without_replay(delivery, fault, scen
     else:
         assert scenario.request("gx-drop-next-command-success")["armed"]
     stage("send")
-    code, envelopes = paired_device.invoke("send", "--session", session, "--delivery", delivery, "synthetic delivery", success=False)
+    code, envelopes = paired_device.invoke("session", "send", "--detach", session, "--delivery", delivery, "synthetic delivery", success=False)
     stage("sent", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-        pending = paired_device.call("commands-pending")["commands"]
+        pending = paired_device.call("operation", "list")["sends"]
         stage("pending", count=len(pending))
         assert len(pending) == 1
-        request = pending[0]["request_id"]
+        request = pending[0]["operation_id"]
         receipt = None
     else:
         assert code == 0
-        receipt = envelopes[-1]["data"]
+        operation = envelopes[-1]["data"]
+        receipt = operation["receipt"]
         drop_count = scenario.request("gx-drop-status")["count"]
         stage("notification-receipt", has_delivery=bool(receipt.get("delivery_id")), drops=drop_count)
         assert receipt["delivery_id"] and drop_count == 1
-        request = receipt["request_id"]
-        with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
-            assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
+        request = operation["operation_id"]
     stage("wait-idle")
     scenario.wait_idle(session)
     before = scenario.request("gx-user-delivery-count", sessionId=session)["count"]
@@ -57,12 +55,12 @@ def test_gx04_native_delivery_modes_recover_without_replay(delivery, fault, scen
     stage("restart")
     scenario.native.close()
     scenario.start_native()
-    code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+    code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
     stage("recovered", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     else:
-        assert code == 0 and envelopes[-1]["data"]["delivery_id"] == receipt["delivery_id"]
+        assert code == 0 and envelopes[-1]["data"]["receipt"]["delivery_id"] == receipt["delivery_id"]
     assert scenario.request("gx-user-delivery-count", sessionId=session)["count"] == before
     assert scenario.model.calls == 1
     stage("done")

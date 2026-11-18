@@ -28,7 +28,7 @@ def test_gx04_native_queue_actions_recover_without_replay(action, fault, scenari
         scenario.request("queue-add", sessionId=session)
         assert scenario.request("queue-read", sessionId=session)["available"]
         paired_device.sessions(scenario.host)
-        queue = paired_device.call("queue", "list", "--session", session)
+        queue = paired_device.call("session", "queue", "list", "--session", session)
         item = queue["items"][0]["item_id"]
         assert scenario.request("gx-arm-queue-counter")["armed"]
         before = scenario.request("gx-queue-count")["count"]
@@ -37,27 +37,27 @@ def test_gx04_native_queue_actions_recover_without_replay(action, fault, scenari
         else:
             assert scenario.request("gx-drop-next-command-success")["armed"]
         stage("mutate")
-        args = ["queue", action, "--session", session, "--item", item] + (["replacement fixture"] if action == "edit" else [])
+        args = ["session", "queue", action, "--session", session, "--item", item] + (["replacement fixture"] if action == "edit" else [])
         code, envelopes = paired_device.invoke(*args, success=False)
         stage("mutated", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
         assert scenario.request("gx-queue-count")["count"] == before + 1
         if fault == "journal":
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-            pending = paired_device.call("commands-pending")["commands"]
+            pending = paired_device.call("operation", "list")["pending_commands"]
             assert len(pending) == 1
             request, receipt = pending[0]["request_id"], None
         else:
             assert code == 0 and scenario.request("gx-drop-status")["count"] == 1
             receipt = envelopes[-1]["data"]["command"]
             request = receipt["request_id"]
-            with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+            with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
                 assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
         stage("restart")
         scenario.native.close()
         scenario.start_native()
         assert scenario.request("gx-arm-queue-counter")["armed"]
         assert scenario.request("gx-queue-count")["count"] == before + 1
-        code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+        code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
         stage("recovered", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
         if fault == "journal":
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"

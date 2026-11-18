@@ -18,6 +18,10 @@ pub enum CoreError {
     NotFound(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("fresh Cloud authentication is required")]
+    AuthenticationRequired,
+    #[error("Cloud authorization has expired")]
+    AuthorizationExpired,
     #[error("device is revoked")]
     Revoked,
     #[error(
@@ -99,6 +103,8 @@ impl CoreError {
             Self::InvalidInput(_) => "invalid_argument",
             Self::NotFound(_) => "not_found",
             Self::Unauthorized => "unauthorized",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::AuthorizationExpired => "authorization_expired",
             Self::Revoked | Self::RevokedRetentionUnverified => "revoked",
             Self::HostOffline => "host_offline",
             Self::HostRejected => "rejected",
@@ -147,6 +153,7 @@ impl CoreError {
             Self::Security(_) | Self::FingerprintMismatch { .. } => "security",
             Self::Cache(_) => "storage",
             Self::Unavailable(_) => "transport",
+            Self::AuthenticationRequired | Self::AuthorizationExpired => "cloud",
             Self::Revoked | Self::RevokedRetentionUnverified => "access",
             _ => "core",
         }
@@ -167,6 +174,8 @@ impl CoreError {
             Self::InvalidInput(_) | Self::Config(_) | Self::Configuration(_) => 2,
             Self::NotFound(_) => 3,
             Self::Unauthorized
+            | Self::AuthenticationRequired
+            | Self::AuthorizationExpired
             | Self::Revoked
             | Self::RevokedRetentionUnverified
             | Self::NotPaired => 4,
@@ -210,6 +219,8 @@ impl CoreError {
             Self::Configuration(_) => "fix_input",
             Self::NotFound(_) => "refresh",
             Self::Unauthorized
+            | Self::AuthenticationRequired
+            | Self::AuthorizationExpired
             | Self::Revoked
             | Self::RevokedRetentionUnverified
             | Self::NotPaired => "reauth",
@@ -647,7 +658,7 @@ mod tests {
 mod exhaustive_tests {
     use super::*;
     use crate::cache::CacheError;
-    use crate::configuration::{ConfigurationError, TlsConfiguration};
+    use crate::configuration::ConfigurationError;
     use crate::pairing::PairingError;
     use crate::security::SecurityError;
 
@@ -743,19 +754,7 @@ mod exhaustive_tests {
             CoreError::Security("x".into()),
             CoreError::Internal("x".into()),
             CoreError::Config("x".into()),
-            CoreError::from(ConfigurationError::RevisionConflict {
-                expected: None,
-                current_revision: Some("sha256:aa".into()),
-                draft: Box::new(crate::configuration::ConfigPatch::SpecializeBuiltin(
-                    crate::configuration::BuiltinSpecialization {
-                        environment: "production".into(),
-                        label: None,
-                        clear_label: false,
-                        tls: Some(TlsConfiguration::System),
-                        clear_tls: false,
-                    },
-                )),
-            }),
+            CoreError::from(ConfigurationError::Storage),
             CoreError::from(ConfigurationError::InvalidTls {
                 message: "x".into(),
             }),
@@ -924,19 +923,7 @@ mod exhaustive_tests {
             CoreError::Security("x".into()),
             CoreError::Internal("x".into()),
             CoreError::Config("x".into()),
-            CoreError::from(ConfigurationError::RevisionConflict {
-                expected: None,
-                current_revision: Some("sha256:aa".into()),
-                draft: Box::new(crate::configuration::ConfigPatch::SpecializeBuiltin(
-                    crate::configuration::BuiltinSpecialization {
-                        environment: "production".into(),
-                        label: None,
-                        clear_label: false,
-                        tls: Some(TlsConfiguration::System),
-                        clear_tls: false,
-                    },
-                )),
-            }),
+            CoreError::from(ConfigurationError::Storage),
             CoreError::from(ConfigurationError::InvalidTls {
                 message: "x".into(),
             }),

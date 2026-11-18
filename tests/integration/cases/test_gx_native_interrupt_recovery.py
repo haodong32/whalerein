@@ -33,7 +33,7 @@ def test_gx04_native_interrupt_recovers_without_replay(fault, scenario, paired_d
         else:
             assert scenario.request("gx-drop-next-command-success")["armed"]
         stage("interrupt")
-        code, envelopes = paired_device.invoke("interrupt", "--session", session, success=False)
+        code, envelopes = paired_device.invoke("session", "interrupt", session, success=False)
         stage("initial", exit=code, status=envelopes[-1].get("data",{}).get("status"), error_code=envelopes[-1].get("error",{}).get("code"))
         if code == 0:
             initial = envelopes[-1]["data"]
@@ -41,12 +41,12 @@ def test_gx04_native_interrupt_recovers_without_replay(fault, scenario, paired_d
             request = initial["request_id"]
         else:
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-            pending = paired_device.call("commands-pending")["commands"]
+            pending = paired_device.call("operation", "list")["pending_commands"]
             assert len(pending) == 1
             request = pending[0]["request_id"]
         result = {}
         def terminal():
-            status, values = paired_device.invoke("command-recover", "--request", request, success=False)
+            status, values = paired_device.invoke("operation", "recover", request, success=False)
             if status == 0 and values[-1]["data"]["status"] == "host_accepted":
                 return False
             result.update({"exit":status,"envelope":values[-1]})
@@ -61,14 +61,14 @@ def test_gx04_native_interrupt_recovers_without_replay(fault, scenario, paired_d
             assert result["exit"] == 7 and result["envelope"]["error"]["code"] == "unknown"
         else:
             assert result["exit"] == 0 and scenario.request("gx-drop-status")["count"] == 1
-            with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+            with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
                 assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
         stage("restart")
         scenario.native.close()
         scenario.start_native()
         assert scenario.request("gx-arm-interrupt-counter")["armed"]
         assert scenario.request("gx-interrupt-count")["count"] == before + 1
-        code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+        code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
         if fault == "journal":
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
         else:

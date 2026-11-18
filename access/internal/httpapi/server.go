@@ -151,6 +151,9 @@ func (s *Server) publicRoutes() []routeSpec {
 	// a mistyped path (404) stays distinguishable from a disabled mode.
 	return append(routes,
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
+		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/devices/pairing", handler: s.handleCloudPairing},
+		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}", handler: s.handleCloudDeviceStatus},
+		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation", handler: s.handleCloudDeviceRevocation},
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/disable", handler: s.handleDisableHostEnrollment},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/credential", handler: s.handleCredentialReplacement},

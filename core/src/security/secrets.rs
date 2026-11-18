@@ -71,15 +71,15 @@ impl SecretStore for MemorySecretStore {
 
 /// Test-only file-backed secret store.
 ///
-/// It is selected only through the explicit `WHALEREIN_SECRET_BACKEND=file:<dir>`
-/// override used by the integration harness. Files are written with 0600
-/// permissions, but this store does **not** provide OS keyring protection and
-/// must never be the production default.
+/// Unit tests exercise it through the SecretStore boundary.
+/// Files use 0600 permissions. Production clients use the OS keyring.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct FileSecretStore {
     directory: std::path::PathBuf,
 }
 
+#[cfg(test)]
 impl FileSecretStore {
     pub fn new(directory: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -111,6 +111,7 @@ impl FileSecretStore {
     }
 }
 
+#[cfg(test)]
 impl SecretStore for FileSecretStore {
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, SecretError> {
         match std::fs::read(self.path(key)) {

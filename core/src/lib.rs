@@ -14,6 +14,7 @@ mod diagnostics;
 mod drafts;
 mod observation;
 mod pairing;
+#[cfg(test)]
 mod profiles;
 mod runtime;
 mod security;
@@ -22,10 +23,10 @@ mod sync;
 
 pub(crate) mod util;
 
-pub use api::{
-    Core, CoreError, CoreOptions, FileSecretStore, MemorySecretStore, Profiles, SecretError,
-    SecretStore,
-};
+pub use api::{Core, CoreError, MemorySecretStore, SecretError, SecretStore};
+
+#[cfg(test)]
+pub use api::{CoreOptions, Profiles};
 
 pub mod conversation;
 

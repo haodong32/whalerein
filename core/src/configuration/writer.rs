@@ -13,12 +13,6 @@ use super::ConfigurationError;
 
 pub(crate) const LOCK_TABLE: &str = "whalerein_config_lock";
 
-/// Revision marker for one exact file content.
-pub(crate) fn content_revision(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
-}
-
 pub(crate) fn lock_path(config: &Path) -> PathBuf {
     let mut path = config.as_os_str().to_os_string();
     path.push(".lock.sqlite");
@@ -72,18 +66,36 @@ impl Drop for ConfigLock {
 /// Durable atomic replace: temp in the same directory, fsync file, rename, fsync
 /// directory. A failure never removes the previous complete document.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), ConfigurationError> {
-    write_with_fault(path, bytes)
+    write_with_fault(
+        path,
+        bytes,
+        path.parent().ok_or(ConfigurationError::Storage)?,
+    )
+}
+
+pub(crate) fn write_with_temporary_parent(
+    path: &Path,
+    bytes: &[u8],
+    temporary_parent: &Path,
+) -> Result<(), ConfigurationError> {
+    write_with_fault(path, bytes, temporary_parent)
 }
 
 #[cfg(test)]
-pub(crate) static FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+std::thread_local! {
+    pub(crate) static FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn fault_at(point: u8) -> bool {
-    FAULT.load(std::sync::atomic::Ordering::SeqCst) == point
+    FAULT.get() == point
 }
 
-fn write_with_fault(path: &Path, bytes: &[u8]) -> Result<(), ConfigurationError> {
+fn write_with_fault(
+    path: &Path,
+    bytes: &[u8],
+    temporary_parent: &Path,
+) -> Result<(), ConfigurationError> {
     #[cfg(test)]
     if fault_at(1) {
         return Err(ConfigurationError::Storage);
@@ -91,7 +103,7 @@ fn write_with_fault(path: &Path, bytes: &[u8]) -> Result<(), ConfigurationError>
     let parent = path.parent().ok_or(ConfigurationError::Storage)?;
     std::fs::create_dir_all(parent).map_err(|_| ConfigurationError::Storage)?;
     let name = path.file_name().ok_or(ConfigurationError::Storage)?;
-    let temporary = parent.join(format!(
+    let temporary = temporary_parent.join(format!(
         ".{}.tmp-{}",
         name.to_string_lossy(),
         crate::util::random_id(16)

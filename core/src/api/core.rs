@@ -16,6 +16,7 @@ use whalerein_proto::{
 
 use super::config::{self, ConfigStore, PersistedConfig};
 use super::error::{CoreError, CoreResult};
+use super::instance::{ClientConfig, ClientService, Instance, InstanceSecrets};
 use super::types::{
     ApprovalInfo, CommandHandle, CreateSessionInput, DeliveryMode, DoctorReport, ExportManifest,
     HostCapabilities, HostInfo, ModelCatalog, ModelChoice, ModelSelectionReceipt, OnlineStatus,
@@ -34,6 +35,7 @@ use crate::security::{keys, load_device_token, load_or_create_cache_key, SecretS
 use crate::session::SessionKey;
 use crate::sync::SyncService;
 
+pub(super) mod cloud_pairing;
 pub(crate) mod revoked_commands;
 
 /// Injected Core options. `data_dir` is a path, not a second dependency seam.
@@ -131,6 +133,7 @@ fn is_absolute_host_path(value: &str) -> bool {
 /// Bounded, secret-free candidate Host list for an ambiguous approval choice.
 /// Mirrors the session-routing ambiguity message so the CLI can render an
 /// actionable `--host` choice without dumping every Host.
+#[cfg(test)]
 fn bounded_approval_host_candidates(hosts: &[HostInfo]) -> String {
     const MAX_HOSTS: usize = 8;
     const MAX_HOST_CHARS: usize = 48;
@@ -171,31 +174,192 @@ pub struct Core {
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
     pub(crate) watch_active: Arc<AtomicBool>,
-    profile: crate::profiles::ProfileContext,
-    _activation: Arc<crate::profiles::ActivationGuard>,
+    instance: Option<Arc<Instance>>,
+    #[cfg(test)]
+    profile: Option<crate::profiles::ProfileContext>,
+    #[cfg(test)]
+    _activation: Option<Arc<crate::profiles::ActivationGuard>>,
     #[cfg(all(test, unix))]
     fail_waiting_marker: Arc<AtomicBool>,
 }
 
 impl Core {
+    /// Open one platform-selected TOML configuration and validate existing state offline.
+    pub fn open(config_path: &Path, secrets: Arc<dyn SecretStore>) -> CoreResult<Self> {
+        let instance = Arc::new(Instance::open(config_path)?);
+        let data_dir = instance.runtime_dir();
+        let config = ConfigStore::for_instance(&data_dir)
+            .load()
+            .map_err(|error| {
+                CoreError::Config(format!(
+                    "{}: {error}; choose a fresh data_dir",
+                    instance.root.display()
+                ))
+            })?;
+        let secrets = Arc::new(InstanceSecrets {
+            instance: instance.clone(),
+            backend: secrets,
+        });
+        Ok(Self::from_parts(
+            CoreOptions { data_dir, secrets },
+            config,
+            Some(instance),
+        ))
+    }
+
+    /// Create or replace a validated configuration using the shared typed contract.
+    pub fn write_config(config_path: &Path, config: &ClientConfig) -> CoreResult<()> {
+        Instance::write(config_path, config)
+    }
+
+    pub fn client_config(&self) -> &ClientConfig {
+        &self
+            .instance
+            .as_ref()
+            .expect("selected client instance")
+            .configuration
+    }
+
+    pub fn config_path(&self) -> &Path {
+        &self
+            .instance
+            .as_ref()
+            .expect("selected client instance")
+            .config_path
+    }
+
+    pub fn configured_data_dir(&self) -> &Path {
+        &self
+            .instance
+            .as_ref()
+            .expect("selected client instance")
+            .root
+    }
+
+    pub fn service_label(&self) -> &str {
+        self.instance
+            .as_ref()
+            .and_then(|instance| instance.cloud.as_ref())
+            .and_then(|cloud| cloud.definition.label.as_deref())
+            .unwrap_or("Standalone")
+    }
+
+    pub fn instance_id(&self) -> CoreResult<Option<String>> {
+        match &self.instance {
+            Some(instance) => Ok(instance.manifest()?.map(|manifest| manifest.id)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn ensure_instance_state(&self) -> CoreResult<()> {
+        if let Some(instance) = &self.instance {
+            instance.prepare_runtime()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ca_pem(&self) -> Option<Vec<u8>> {
+        match &self.instance {
+            Some(instance) => instance.ca_pem.clone(),
+            #[cfg(test)]
+            None => config::ca_pem_from_env(),
+            #[cfg(not(test))]
+            None => None,
+        }
+    }
+
+    fn mqtt_override(&self) -> Option<String> {
+        #[cfg(test)]
+        {
+            self.instance
+                .is_none()
+                .then(config::mqtt_url_from_env)
+                .flatten()
+        }
+        #[cfg(not(test))]
+        None
+    }
+
+    fn from_parts(
+        options: CoreOptions,
+        config: Option<PersistedConfig>,
+        instance: Option<Arc<Instance>>,
+    ) -> Self {
+        Self {
+            options,
+            config: Arc::new(RwLock::new(config)),
+            runtime: Arc::new(Runtime::new()),
+            journal: Arc::new(diagnostics::journal::Journal::default()),
+            identity: Arc::new(Mutex::new(None)),
+            identity_init: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(None)),
+            watch_active: Arc::new(AtomicBool::new(false)),
+            instance,
+            #[cfg(test)]
+            profile: None,
+            #[cfg(test)]
+            _activation: None,
+            #[cfg(all(test, unix))]
+            fail_waiting_marker: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub async fn login(
+        &self,
+        present: impl FnOnce(crate::api::AccountLoginPrompt),
+    ) -> CoreResult<crate::api::SignedInAccount> {
+        self.account_client(true).await?.login(present).await
+    }
+
+    pub async fn logout(&self) -> CoreResult<()> {
+        match self.account_client(false).await {
+            Ok(client) => client.logout().await,
+            Err(CoreError::Unauthorized) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Inspect the locally retained verified account without network requests or refresh.
+    pub fn account_status(&self) -> CoreResult<Option<crate::api::SignedInAccount>> {
+        let Some(instance) = &self.instance else {
+            return Ok(None);
+        };
+        crate::account::native::AccountClient::local_status(instance, &self.options.secrets)
+    }
+
+    pub async fn account_hosts(&self) -> CoreResult<Vec<crate::api::AccountHost>> {
+        let device_id = if self.options.data_dir.is_dir() {
+            crate::security::device::existing_device_id(
+                &self.options.secrets,
+                &self.options.data_dir,
+            )?
+        } else {
+            None
+        };
+        self.account_client(false)
+            .await?
+            .hosts_for_device(device_id.as_deref())
+            .await
+    }
+
+    async fn account_client(
+        &self,
+        create: bool,
+    ) -> CoreResult<crate::account::native::AccountClient> {
+        let instance = self.instance.as_ref().ok_or(CoreError::Unsupported)?;
+        crate::account::native::AccountClient::for_instance(
+            instance.clone(),
+            self.options.secrets.clone(),
+            create,
+        )
+        .await
+    }
     /// Allocate a non-secret command identity before starting a control.
     pub fn new_command_id() -> String {
         crate::util::random_id(16)
     }
-    pub fn new(options: CoreOptions) -> CoreResult<Self> {
-        Self::new_in_environment(options, None)
-    }
-
-    /// Open Core with an explicit effective environment.
-    ///
-    /// `None` keeps the historical global-active resolution used by callers
-    /// that do not select an environment (tests and embeds). CLI and future
-    /// bindings pass the resolved environment so an identity from another
-    /// environment cannot be used silently.
-    pub fn new_in_environment(
-        mut options: CoreOptions,
-        environment: Option<&str>,
-    ) -> CoreResult<Self> {
+    #[cfg(test)]
+    pub fn new(mut options: CoreOptions) -> CoreResult<Self> {
         let root = options.data_dir.clone();
         let existed = root.exists();
         std::fs::create_dir_all(&root)
@@ -231,12 +395,7 @@ impl Core {
         // leave Core on a selection the lease no longer covers.
         let activation = Arc::new(crate::profiles::ActivationGuard::shared(&root)?);
         let profiles = crate::profiles::Profiles::new(&root);
-        let profile = match environment {
-            Some(environment) => {
-                profiles.resolve_active_in_environment(environment, &options.secrets)?
-            }
-            None => profiles.resolve_active(&options.secrets)?,
-        };
+        let profile = profiles.resolve_active(&options.secrets)?;
         options.data_dir = profile.state_dir.clone();
         let store = ConfigStore::new(&options.data_dir);
         let startup_marker = revoked_commands::marker(&options.data_dir)?;
@@ -266,20 +425,9 @@ impl Core {
             }
             Err(error) => return Err(error),
         };
-        let core = Self {
-            options,
-            config: Arc::new(RwLock::new(config)),
-            runtime: Arc::new(Runtime::new()),
-            journal: Arc::new(diagnostics::journal::Journal::default()),
-            identity: Arc::new(Mutex::new(None)),
-            identity_init: Arc::new(Mutex::new(())),
-            cache: Arc::new(Mutex::new(None)),
-            watch_active: Arc::new(AtomicBool::new(false)),
-            profile,
-            _activation: activation,
-            #[cfg(all(test, unix))]
-            fail_waiting_marker: Arc::new(AtomicBool::new(false)),
-        };
+        let mut core = Self::from_parts(options, config, None);
+        core.profile = Some(profile);
+        core._activation = Some(activation);
         if startup_marker
             .as_deref()
             .and_then(revoked_commands::confirmed_phase)
@@ -335,6 +483,7 @@ impl Core {
         Ok(core)
     }
 
+    #[cfg(test)]
     fn resume_unconfigured_revocation(&self, device_id: &str, expected: &str) -> CoreResult<()> {
         let _admission =
             crate::security::device::ProfileLock::acquire_admission_waiting(&self.options.data_dir)
@@ -363,6 +512,9 @@ impl Core {
 
     /// Persist only bounded diagnostic metadata, never the error message.
     pub fn save_failure(&self, code: &str) -> CoreResult<()> {
+        if self.instance.is_some() && !self.options.data_dir.is_dir() {
+            return Ok(());
+        }
         self.journal.save_failure(&self.options.data_dir, code)
     }
 
@@ -390,11 +542,11 @@ impl Core {
         &self.options.data_dir
     }
 
-    /// Resolved local profile for this Core instance. Account data is metadata
-    /// only until the account transport gates pass; Standalone performs no
-    /// account-service activity.
+    /// Resolved local profile for this regional Core instance. Native account
+    /// sign-in and directory reads use the account client.
+    #[cfg(test)]
     pub fn profile(&self) -> &crate::profiles::ProfileContext {
-        &self.profile
+        self.profile.as_ref().expect("legacy profile")
     }
 
     #[cfg(test)]
@@ -404,6 +556,21 @@ impl Core {
 
     pub fn is_paired(&self) -> bool {
         self.config.read().expect("config lock").is_some()
+    }
+
+    /// Local enforcement evidence. This check does not contact Cloud or Access.
+    pub fn local_revocation_state(&self) -> CoreResult<Option<&'static str>> {
+        if !self.options.data_dir.is_dir() {
+            return Ok(None);
+        }
+        if let Some(state) = self.local_cloud_revocation_state()? {
+            return Ok(Some(state));
+        }
+        match revoked_commands::marker(&self.options.data_dir)? {
+            Some(marker) if marker.starts_with("confirmed:") => Ok(Some("revoked")),
+            Some(marker) if marker.starts_with("pending:") => Ok(Some("revocation_pending")),
+            _ => Ok(None),
+        }
     }
 
     pub fn access_address(&self) -> Option<String> {
@@ -431,7 +598,19 @@ impl Core {
     }
 
     fn config_store(&self) -> ConfigStore {
-        ConfigStore::new(&self.options.data_dir)
+        #[cfg(test)]
+        if self.instance.is_none() {
+            return ConfigStore::new(&self.options.data_dir);
+        }
+        ConfigStore::for_instance(&self.options.data_dir)
+    }
+
+    fn refresh_regional_state(&self) -> CoreResult<()> {
+        if self.instance.is_some() {
+            let state = self.config_store().load()?;
+            *self.config.write().expect("config lock") = state;
+        }
+        Ok(())
     }
 
     fn access_client(&self) -> CoreResult<AccessClient> {
@@ -440,7 +619,7 @@ impl Core {
             .ok_or(CoreError::NotPaired)?;
         let base = Url::parse(&config.access_url)
             .map_err(|_| CoreError::Config("invalid Access URL".into()))?;
-        let ca = config::ca_pem_from_env();
+        let ca = self.ca_pem();
         AccessClient::with_ca(base, Some(token), ca.as_deref())
             .map(|access| access.with_trace_id(self.diagnostic_id()))
             .map_err(Into::into)
@@ -520,8 +699,16 @@ impl Core {
     }
 
     fn forget_identity(&self, local_only: bool) -> CoreResult<()> {
+        if self.instance.is_some() && !self.options.data_dir.is_dir() {
+            return Ok(());
+        }
         let _guard = self.identity_lock()?;
-        if !local_only && self.is_paired() && !self.runtime.is_revoked() {
+        self.refresh_regional_state()?;
+        if !local_only
+            && self.is_paired()
+            && !self.runtime.is_revoked()
+            && !self.cloud_grants_locally_revoked()?
+        {
             return Err(CoreError::Conflict(
                 "revoke the active pairing before forgetting this device".into(),
             ));
@@ -529,7 +716,11 @@ impl Core {
         let _admission =
             crate::security::device::ProfileLock::acquire_admission_waiting(&self.options.data_dir)
                 .map_err(|_| CoreError::Unavailable("profile admission lock unavailable".into()))?;
-        if !local_only && self.is_paired() && !self.runtime.is_revoked() {
+        if !local_only
+            && self.is_paired()
+            && !self.runtime.is_revoked()
+            && !self.cloud_grants_locally_revoked()?
+        {
             return Err(CoreError::Conflict(
                 "revoke the active pairing before forgetting this device".into(),
             ));
@@ -542,6 +733,7 @@ impl Core {
             self.clear_local_pairing_credentials(&config.device_id, _guard.directory(), None)?;
         }
         crate::security::device::forget(&self.options.secrets, &self.options.data_dir)?;
+        self.clear_cloud_pairing_material()?;
         *self.identity.lock().expect("identity mutex") = None;
         Ok(())
     }
@@ -556,6 +748,9 @@ impl Core {
     }
 
     fn cache(&self) -> CoreResult<Arc<Cache>> {
+        if self.instance.is_some() && !self.options.data_dir.is_dir() {
+            return Err(CoreError::NotPaired);
+        }
         #[cfg(any(unix, windows))]
         {
             let (state, warning) =
@@ -720,8 +915,11 @@ impl Core {
 
     fn command_service(&self) -> CoreResult<CommandService> {
         let access = Arc::new(self.access_client()?);
-        Ok(CommandService::new(access, self.cache()?)
-            .with_admission(self.options.data_dir.clone(), self.options.secrets.clone()))
+        Ok(CommandService::new(access, self.cache()?).with_admission(
+            self.config_store(),
+            self.options.data_dir.clone(),
+            self.options.secrets.clone(),
+        ))
     }
 
     fn cache_or_empty(&self) -> CoreResult<Arc<Cache>> {
@@ -749,6 +947,7 @@ impl Core {
     }
 
     /// Resolve a Host that the current Access listing still advertises.
+    #[cfg(test)]
     async fn live_authorized_host(&self, host_id: &str) -> CoreResult<String> {
         if host_id.trim().is_empty() {
             return Err(CoreError::InvalidInput("Host identity missing".into()));
@@ -931,6 +1130,17 @@ impl Core {
         payload: RequestPayload,
         command_id: Option<&str>,
     ) -> CoreResult<CommandHandle> {
+        self.control_with_identity(host_id, payload, command_id, None)
+            .await
+    }
+
+    async fn control_with_identity(
+        &self,
+        host_id: &str,
+        payload: RequestPayload,
+        command_id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> CoreResult<CommandHandle> {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
@@ -938,15 +1148,27 @@ impl Core {
             let commands = self
                 .command_service()?
                 .with_host_fingerprint(Some(self.confirmed_host_fingerprint(host_id)?));
-            let submitted = match command_id {
-                Some(id) => {
+            let submitted = match (command_id, request_id) {
+                (None, None) => {
+                    commands
+                        .control(host_id, &config.device_id, &channel, payload)
+                        .await
+                }
+                (Some(id), None) => {
                     commands
                         .control_with_id(host_id, &config.device_id, &channel, payload, Some(id))
                         .await
                 }
-                None => {
+                (id, request_id) => {
                     commands
-                        .control(host_id, &config.device_id, &channel, payload)
+                        .control_with_identity(
+                            host_id,
+                            &config.device_id,
+                            &channel,
+                            payload,
+                            id,
+                            request_id,
+                        )
                         .await
                 }
             };
@@ -1140,16 +1362,25 @@ impl Core {
 
     /// Run the complete pairing flow. `decide` is called after HELLO with the
     /// Noise-derived fingerprint; rejecting or mismatching never sends msg3.
-    pub async fn pair<F>(&self, uri: &str, decide: F) -> CoreResult<PairingOutcome>
+    #[cfg(test)]
+    pub(crate) async fn pair<F>(&self, uri: &str, decide: F) -> CoreResult<PairingOutcome>
     where
         F: FnOnce(&PairingPrompt) -> PairingDecision,
     {
-        self.pair_as(uri, decide, "").await
+        self.connect_standalone(uri, decide).await
+    }
+
+    /// Connect from a Standalone invitation and select the activated Host.
+    pub async fn connect_standalone<F>(&self, uri: &str, decide: F) -> CoreResult<PairingOutcome>
+    where
+        F: FnOnce(&PairingPrompt) -> PairingDecision,
+    {
+        self.connect_standalone_as(uri, decide, "").await
     }
 
     /// Pair and carry `display_name` inside the Noise HELLO. The name is a
     /// label. An empty name stays empty after sanitizing.
-    pub async fn pair_as<F>(
+    pub async fn connect_standalone_as<F>(
         &self,
         uri: &str,
         decide: F,
@@ -1158,8 +1389,19 @@ impl Core {
     where
         F: FnOnce(&PairingPrompt) -> PairingDecision,
     {
+        if self
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.configuration.service != ClientService::Standalone)
+        {
+            return Err(CoreError::InvalidInput(
+                "invitations require the standalone service".into(),
+            ));
+        }
         let parsed = parse_pairing_uri(uri)?;
+        self.ensure_instance_state()?;
         let guard = self.identity_lock()?;
+        self.refresh_regional_state()?;
         let identity = self.device_identity_locked(&guard)?;
         if self.is_paired() {
             let config = self.require_config()?;
@@ -1251,7 +1493,7 @@ impl Core {
             display_name,
         )?;
 
-        let ca = config::ca_pem_from_env();
+        let ca = self.ca_pem();
         let access = AccessClient::with_ca(parsed.access_url.clone(), None, ca.as_deref())?
             .with_trace_id(self.diagnostic_id());
         let hello_response = access
@@ -1297,7 +1539,7 @@ impl Core {
         let finish = session.write_finish()?;
         let mut persisted = PersistedConfig::new(
             parsed.access_url.to_string(),
-            config::mqtt_url_from_env().or(parsed.mqtt_url.clone()),
+            self.mqtt_override().or(parsed.mqtt_url.clone()),
             parsed.host_id.clone(),
             device_id.clone(),
         );
@@ -1335,12 +1577,15 @@ impl Core {
             pairing_marker.as_deref(),
             pairing_epoch.as_deref(),
         )?;
-        Ok(PairingOutcome {
+        let outcome = PairingOutcome {
+            operation_id: Some(finish.claim_id),
             host_id: parsed.host_id,
             device_id,
             fingerprint: completion.host_fingerprint,
             access_url: parsed.access_url.to_string(),
-        })
+        };
+        self.complete_standalone_pairing(&outcome)?;
+        Ok(outcome)
     }
 
     // -----------------------------------------------------------------
@@ -1408,10 +1653,12 @@ impl Core {
     }
 
     /// Alias kept for the architecture's `listHosts()` shape.
+    #[cfg(test)]
     pub async fn list_hosts(&self) -> CoreResult<Vec<HostInfo>> {
         self.hosts().await
     }
 
+    #[cfg(test)]
     pub async fn get_host(&self, host_id: &str) -> CoreResult<HostInfo> {
         let cache = self.cache()?;
         if let Some(host) = cache
@@ -1493,6 +1740,7 @@ impl Core {
     }
 
     /// Alias kept for the architecture's `listSessions()` shape.
+    #[cfg(test)]
     pub async fn list_sessions(&self, host_id: &str) -> CoreResult<SessionList> {
         self.sessions(host_id).await
     }
@@ -1821,6 +2069,7 @@ impl Core {
     /// directory is known. Callers that show the child location should use
     /// [`Core::fork_session_outcome`] so an unreadable directory is reported
     /// instead of silently omitted.
+    #[cfg(test)]
     pub async fn fork_session(&self, key: &SessionKey) -> CoreResult<CommandHandle> {
         Ok(self.fork_session_outcome(key).await?.handle)
     }
@@ -1988,11 +2237,13 @@ impl Core {
         self.await_command_terminal(host, handle).await
     }
 
+    #[cfg(test)]
     pub async fn send_message(&self, key: &SessionKey, text: &str) -> CoreResult<CommandHandle> {
         self.send_message_with_delivery(key, text, DeliveryMode::EnqueueAfterRun)
             .await
     }
 
+    #[cfg(test)]
     pub async fn send_message_with_delivery(
         &self,
         key: &SessionKey,
@@ -2082,6 +2333,7 @@ impl Core {
     /// Follow an accepted send to a terminal receipt. An unknown observation
     /// keeps the command identity (and an idempotency record) instead of
     /// inviting a resend that would duplicate the user message.
+    #[cfg(test)]
     async fn observe_send_terminal(
         &self,
         host_id: &str,
@@ -2161,6 +2413,7 @@ impl Core {
     /// unambiguous; several authorized Hosts produce a bounded, actionable
     /// conflict instead of guessing. The approval identity is Host-scoped and
     /// is never probed across Hosts.
+    #[cfg(test)]
     pub async fn approval_host(&self, explicit_host: Option<&str>) -> CoreResult<String> {
         if let Some(host) = explicit_host {
             return self.live_authorized_host(host).await;
@@ -2169,6 +2422,7 @@ impl Core {
         self.approval_host_from(&hosts)
     }
 
+    #[cfg(test)]
     fn approval_host_from(&self, hosts: &[HostInfo]) -> CoreResult<String> {
         match hosts {
             [host] => Ok(host.host_id.clone()),
@@ -3305,7 +3559,14 @@ impl Core {
                 failed |= revoked_commands::remove_profile_entry(directory, name).is_err();
             }
         }
-        failed |= revoked_commands::remove_profile_entry(directory, "config.json").is_err();
+        failed |= revoked_commands::remove_profile_entry(
+            directory,
+            self.config_store()
+                .file_name()
+                .to_str()
+                .expect("ASCII state name"),
+        )
+        .is_err();
         *self.config.write().expect("config lock") = None;
         if failed {
             Err(CoreError::Internal("pairing cleanup incomplete".into()))
@@ -3319,6 +3580,7 @@ impl Core {
     // -----------------------------------------------------------------
 
     /// Synchronize the Source-owned committed conversation through opaque cursors.
+    #[cfg(test)]
     pub async fn sync_session(&self, key: &SessionKey) -> CoreResult<u64> {
         self.authorized_session(key)?;
         let mut conversation = crate::conversation::Conversation::default();
@@ -3327,7 +3589,7 @@ impl Core {
     }
 
     pub(crate) fn mqtt_settings(&self, config: &PersistedConfig) -> CoreResult<MqttSettings> {
-        let override_url = config::mqtt_url_from_env().or_else(|| config.mqtt_url.clone());
+        let override_url = self.mqtt_override().or_else(|| config.mqtt_url.clone());
         let settings = match override_url {
             Some(url) => MqttSettings::parse(&url)?,
             None => {
@@ -3336,7 +3598,7 @@ impl Core {
                 MqttSettings::from_access_url(&access)?
             }
         };
-        Ok(settings.with_ca(config::ca_pem_from_env()))
+        Ok(settings.with_ca(self.ca_pem()))
     }
 
     // -----------------------------------------------------------------
@@ -3567,6 +3829,8 @@ mod tail_tests;
 #[path = "watch.rs"]
 pub(crate) mod watch;
 
+mod operation;
+pub use operation::{AccountState, ClientStatus, DeviceAccess, MessageReply, SendOperation};
 mod pairing_recovery;
 
 #[path = "wait.rs"]

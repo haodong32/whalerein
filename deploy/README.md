@@ -158,8 +158,8 @@ override. Reconnect clients after changing negotiated transport limits.
 
 Set `mode: standalone` in the Access YAML. No account registration, official
 service, login key or license server is required. Keep one Access process per
-installation. External account mode is not implemented and is rejected rather
-than falling back to local authorization.
+installation. Official Cloud regions use explicit external account mode with
+the configured account service trust and regional identity.
 
 For a deployment beyond the loopback development stack, create independent random
 administrator, Host provisioning, broker and callback credentials using a secret
@@ -169,7 +169,7 @@ The Host provisioning credential authorizes first registration in this local
 installation. Confirm the Host's Noise fingerprint when pairing each client.
 
 If a FINISH response is lost, keep the same client data directory and SecretStore
-and run `whalerein pair-resume` before `pairing.claim_ttl` expires. This never needs
+and run `whalerein operation recover <id>` before `pairing.claim_ttl` expires. This never needs
 the invitation URI on the command line again. If the pending operation expired or
 SecretStore was lost, revoke the old device through Host/admin access, then
 explicitly forget the local identity and use a fresh invitation. Deleting local

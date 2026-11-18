@@ -27,7 +27,6 @@ from journey_helpers import (
     invitation,
     invoke_approval,
     live_grants,
-    mark_command_unknown,
     pending_commands,
     request_approval,
     relocate_access,
@@ -74,18 +73,18 @@ def test_journey_first_self_hosted_message(scenario):
     assert int(sql(scenario.schema, "SELECT count(*) FROM grants")) == 0
     assert row_count(scenario.schema, "requests") == 0
     assert row_count(scenario.schema, "devices") == 0
-    code, values = device.invoke("hosts", success=False)
+    code, values = device.invoke("host", "list", success=False)
     assert code == 4 and values[-1]["error"]["code"] == "not_paired"
 
     # Documented operator invitation endpoint, then the documented CLI flow.
-    device.identity = device.call("pair", invitation(scenario))
+    device.identity = device.pair(invitation(scenario))
     wait_online(device, scenario.host)
     hosts = device.hosts()
     assert [row["host_id"] for row in hosts] == [scenario.host]
     assert hosts[0]["online"] is True
 
     assert device.sessions(scenario.host) == []
-    created = device.call("session-create", "--host", scenario.host)
+    created = device.call("session", "create", "--host", scenario.host)
     receipt = created["lifecycle_receipt"]
     assert created["status"] == "succeeded" and receipt["disposition"] == "READY"
     session = receipt["session_id"]
@@ -93,11 +92,11 @@ def test_journey_first_self_hosted_message(scenario):
     # The quickstart opens `tail` in one terminal before sending from another.
     # Sync first so the watcher attaches to a committed cut: snapshot history is
     # not replayed as new output (STREAM-01).
-    device.sync(session)
-    watch = device.start_watch("tail", "--session", session, "--timeout", "30")
+    device.observe_history(session)
+    watch = device.start_watch("session", "watch", session, "--timeout", "30")
     try:
-        watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
-        sent = device.send(session, "first self-hosted message")
+        watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
+        sent = device.send(session, "first self-hosted message")["receipt"]
         assert sent["status"] == "succeeded" and sent["delivery_id"]
         watch.wait(
             lambda value: any(
@@ -140,7 +139,7 @@ def test_journey_approval_expires_while_away(scenario, paired_device):
     assert values[-1].get("data") is None
     assert effects(scenario, "resolveApproval") == 0
 
-    observation = paired_device.call("wait", "--session", session, "--timeout", "1")
+    observation = paired_device.call("session", "wait", session, "--timeout", "1")
     # An expired approval releases the native turn: the session is idle, with no
     # phantom pending input. It must not report a stale running/input-required.
     assert observation["reason"] == "idle"
@@ -158,10 +157,10 @@ def test_journey_network_path_change_rebuilds_the_channel(scenario, paired_devic
     """A broker/Access path change ends in a rebuilt channel, not a stuck watch."""
     session = _session(scenario)
     paired_device.send(session, "before path change")
-    paired_device.sync(session)
-    watch = paired_device.start_watch("tail", "--session", session, "--timeout", "90")
+    paired_device.observe_history(session)
+    watch = paired_device.start_watch("session", "watch", session, "--timeout", "90")
     try:
-        watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
+        watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
         # The path disappears, Access notices the missing Host, and both sides restart.
         stop_broker(scenario)
         wait_online(paired_device, scenario.host, online=False, timeout=30)
@@ -179,7 +178,7 @@ def test_journey_network_path_change_rebuilds_the_channel(scenario, paired_devic
             )
         except Exception as error:  # noqa: BLE001 - observation then re-raise
             raise
-        later = paired_device.send(session, "after path change")
+        later = paired_device.send(session, "after path change")["receipt"]
         assert later["status"] == "succeeded"
         watch.wait(
             lambda value: any("after path change" in text for text in _texts(_event(value))),
@@ -201,12 +200,12 @@ def test_journey_two_watchers_baseline_and_live_boundary(scenario, paired_device
     """A late watcher joins through a baseline and shares the live boundary."""
     session = _session(scenario)
     paired_device.send(session, "baseline fixture")
-    first = paired_device.start_watch("tail", "--session", session, "--timeout", "60")
+    first = paired_device.start_watch("session", "watch", session, "--timeout", "60")
     second = scenario.pair_second()
     other = None
     try:
         first.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
-        other = second.start_watch("tail", "--session", session, "--timeout", "60")
+        other = second.start_watch("session", "watch", session, "--timeout", "60")
         other.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
         paired_device.send(session, "live boundary fixture")
         for watch in (first, other):
@@ -242,7 +241,7 @@ def test_journey_stale_approval_card_after_a_second_operator(scenario, paired_de
     stale_card = second.approvals(session)[0]
     assert stale_card["approval_id"] == first_card["approval_id"]
 
-    while_running = second.send(session, "operator B send fixture")
+    while_running = second.send(session, "operator B send fixture")["receipt"]
     assert while_running["status"] == "succeeded"
     decision = paired_device.resolve("approve", first_card)
     assert decision["status"] in {"host_accepted", "succeeded"}
@@ -265,29 +264,24 @@ def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     """Retention cleans expired records but never the recovery identity."""
     session = _session(scenario)
     paired_device.send(session, "last night fixture")
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     assert invitation(scenario)
 
     marker = scenario.directory / "plugin" / "gx-drop-terminal"
     marker.write_text("armed")
+    request_id = uuid.uuid4().hex
     code, values = paired_device.invoke(
-        "send", "--session", session, "uncertain command fixture", success=False
+        "session", "send", session, "--detach", "--operation-id", request_id,
+        "uncertain command fixture", success=False,
     )
     assert not marker.exists()
-    payload = values[-1].get("data") or {}
-    if payload.get("request_id"):
-        request_id = payload["request_id"]
-        command_id = payload["command_id"]
-        mark_command_unknown(paired_device, request_id)
-    else:
-        pending = pending_commands(paired_device)
-        assert code == 7 and len(pending) == 1
-        request_id = pending[0]["request_id"]
-        command_id = pending[0]["command_id"]
+    assert code in (0, 7)
+    assert values[-1]["data"]["operation_id"] == request_id
+    records = paired_device.call("operation", "list")["sends"]
+    assert any(record["operation_id"] == request_id for record in records)
     restart_plugin(scenario)
     wait_online(paired_device, scenario.host)
-    assert [item["request_id"] for item in pending_commands(paired_device)] == [request_id]
-    assert paired_device.call("doctor")["commands"]["unknown"] == 1
+    assert any(record["operation_id"] == request_id for record in paired_device.call("operation", "list")["sends"])
 
     # Record the read-only requests that this case already created; the next
     # day's sweep must remove exactly those aged records. Requests created after
@@ -350,9 +344,10 @@ def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     ) == "t"
 
     before = effects(scenario, "sendUserMessage")
-    recovered = paired_device.call("command-recover", "--request", request_id)
-    assert recovered["command_id"] == command_id
-    assert recovered["status"] == "succeeded"
+    recovered = paired_device.call("operation", "recover", request_id)
+    assert recovered["operation_id"] == request_id
+    assert recovered["receipt"]["command_id"] == request_id
+    assert recovered["reply"]["state"] == "committed"
     assert effects(scenario, "sendUserMessage") == before
 
     assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
@@ -380,22 +375,16 @@ def test_journey_plugin_upgrade_mid_task(scenario, paired_device):
 
     marker = scenario.directory / "plugin" / "gx-drop-terminal"
     marker.write_text("armed")
+    request_id = uuid.uuid4().hex
     code, values = paired_device.invoke(
-        "send", "--session", session, "mid task upgrade command", success=False
+        "session", "send", session, "--detach", "--operation-id", request_id,
+        "mid task upgrade command", success=False,
     )
     assert not marker.exists()
-    payload = values[-1].get("data") or {}
-    if payload.get("request_id"):
-        request_id = payload["request_id"]
-        command_id = payload["command_id"]
-        mark_command_unknown(paired_device, request_id)
-    else:
-        pending = pending_commands(paired_device)
-        assert code == 7 and len(pending) == 1
-        request_id = pending[0]["request_id"]
-        command_id = pending[0]["command_id"]
-    before = effects(scenario, "sendUserMessage")
-
+    assert code in (0, 7)
+    assert values[-1]["data"]["operation_id"] == request_id
+    records = paired_device.call("operation", "list")["sends"]
+    assert any(record["operation_id"] == request_id for record in records)
     queued_before = scenario.dsh.snapshot(session)["summary"]["queuedPrompts"]
     assert queued_before == 2
 
@@ -407,14 +396,20 @@ def test_journey_plugin_upgrade_mid_task(scenario, paired_device):
     )
     assert listed["source_capabilities"]["pending_queue_read"] is False
     code, values = paired_device.invoke(
-        "queue", "list", "--session", session, success=False
+        "session", "queue", "list", "--session", session, success=False
     )
     assert code == 9 and values[-1]["error"]["code"] == "unsupported_capability"
 
-    recovered = paired_device.call("command-recover", "--request", request_id)
-    assert recovered["command_id"] == command_id and recovered["status"] == "succeeded"
-    assert effects(scenario, "sendUserMessage") == before
-    assert scenario.dsh.snapshot(session)["summary"]["queuedPrompts"] == queued_before
+    scenario.dsh.process.control("idle", session_id=session)
+    wait(lambda: scenario.dsh.snapshot(session)["summary"]["queuedPrompts"] == 0)
+    queued_before_recovery = scenario.dsh.snapshot(session)["summary"]["queuedPrompts"]
+    before_recovery = effects(scenario, "sendUserMessage")
+    recovered = paired_device.call("operation", "recover", request_id)
+    assert recovered["operation_id"] == request_id
+    assert recovered["receipt"]["command_id"] == request_id
+    assert recovered["reply"]["state"] == "committed"
+    assert effects(scenario, "sendUserMessage") == before_recovery
+    assert scenario.dsh.snapshot(session)["summary"]["queuedPrompts"] == queued_before_recovery
 
 
 # --- JRNY-10 ----------------------------------------------------------------
@@ -429,7 +424,7 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     proxy = PairingInterruption(drop_at="hello")
     try:
         link = invitation(scenario)
-        code, _ = device.invoke("pair", proxy.route(link), success=False)
+        code, _ = device.invoke("host", "connect", "--invite-stdin", "--yes", stdin_text=proxy.route(link), success=False)
         assert code != 0 and proxy.lost.is_set()
         assert row_count(scenario.schema, "grants") == 0
     finally:
@@ -443,7 +438,7 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     restart_plugin(scenario)
 
     # The interrupted invitation was never consumed, so the same link still pairs.
-    device.identity = device.call("pair", link)
+    device.identity = device.pair(link)
     assert live_grants(scenario.schema, device.identity["device_id"]) == 1
     session = _session(scenario)
     device.sessions(scenario.host)
@@ -451,15 +446,8 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     scenario.dsh.process.control("hang_next", method_name="sendUserMessage")
     before = effects(scenario, "sendUserMessage")
     attempt = subprocess.Popen(
-        [
-            str(ROOT / "target/debug/whalerein"),
-            "--json",
-            "--yes",
-            "--data-dir",
-            str(device.data_dir),
-            "send",
-            "--session",
-            session,
+        [*device.args(),
+            "session", "send", session,
             "in-flight during upgrade",
         ],
         cwd=ROOT,
@@ -476,10 +464,8 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
         output, _ = attempt.communicate(timeout=40)
         assert attempt.returncode != 0
         envelopes = [json.loads(line) for line in output.splitlines() if line.strip()]
-        assert envelopes and (
-            envelopes[-1].get("data") is None
-            or envelopes[-1]["data"].get("status") != "succeeded"
-        )
+        assert envelopes and envelopes[-1].get("error")
+        assert "reply" not in (envelopes[-1].get("data") or {})
     finally:
         if attempt.poll() is None:
             attempt.kill()
@@ -490,13 +476,13 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     wait_online(device, scenario.host, timeout=45)
     assert effects(scenario, "sendUserMessage") == before + 1
     for pending in pending_commands(device):
-        device.invoke("command-recover", "--request", pending["request_id"], success=False)
+        device.invoke("operation", "recover", pending["request_id"], success=False)
     assert effects(scenario, "sendUserMessage") == before + 1
 
     # Releasing the hung command requires a Host restart; afterwards a new send works once.
     restart_plugin(scenario)
     wait_online(device, scenario.host)
-    after = device.send(session, "after the Access upgrade")
+    after = device.send(session, "after the Access upgrade")["receipt"]
     assert after["status"] == "succeeded"
     assert effects(scenario, "sendUserMessage") == before + 2
 
@@ -517,10 +503,10 @@ def test_journey_host_identity_loss_guidance(scenario, paired_device):
         paired_device, lambda config: config.__setitem__("host_fingerprint", "00" * 32)
     )
     code, values = paired_device.invoke(
-        "send", "--session", session, "after the identity change", success=False
+        "session", "send", session, "--detach", "after the identity change", success=False
     )
     assert code == 8 and values[-1]["error"]["code"] == "host_fingerprint_mismatch"
-    assert values[-1].get("data") is None
+    assert values[-1]["data"]["target"] == {"host_id": scenario.host, "session_id": session}
     assert effects(scenario, "sendUserMessage") == before
     mismatch_message = values[-1]["error"]["message"]
     # Local authorization is preserved, so recovery does not silently log the user out.
@@ -528,13 +514,13 @@ def test_journey_host_identity_loss_guidance(scenario, paired_device):
     assert live_grants(scenario.schema, paired_device.identity["device_id"]) == 1
 
     # The documented last-resort local recovery is available and explicit.
-    paired_device.call("forget", "--local-only")
-    code, values = paired_device.invoke("hosts", success=False)
+    paired_device.call("device", "forget", "--local-only", "--yes")
+    code, values = paired_device.invoke("host", "list", success=False)
     assert code == 4 and values[-1]["error"]["code"] == "not_paired"
 
     assert any(
         hint in mismatch_message
-        for hint in ("whalerein pair", "whalerein forget", "revoke", "re-pair")
+        for hint in ("whalerein host connect", "whalerein device forget", "revoke", "re-pair")
     ), "a changed Host fingerprint must name the explicit revoke/forget/re-pair path"
 
 
@@ -597,9 +583,11 @@ def test_journey_overnight_disconnect_and_both_restarts(scenario, paired_device)
     scenario.access.close()
     time.sleep(2)
     code, values = paired_device.invoke(
-        "send", "--session", session, "during the gap", success=False
+        "session", "send", session, "--detach", "during the gap", success=False
     )
-    assert code in {5, 7} and values[-1].get("data") is None
+    assert code in {5, 7}
+    assert values[-1]["data"]["target"] == {"host_id": scenario.host, "session_id": session}
+    assert "reply" not in values[-1]["data"]
     assert effects(scenario, "sendUserMessage") == before
 
     scenario.start_access()
@@ -621,7 +609,7 @@ def test_journey_overnight_disconnect_and_both_restarts(scenario, paired_device)
     assert effects(scenario, "resolveApproval") == 1
 
     scenario.dsh.process.control("idle", session_id=session)
-    after = paired_device.send(session, "after the gap")
+    after = paired_device.send(session, "after the gap")["receipt"]
     assert after["status"] == "succeeded"
     events = scenario.dsh.snapshot(session)["events"]
     for text in ("before the overnight gap", "after the gap"):
@@ -636,7 +624,7 @@ def test_journey_overnight_disconnect_and_both_restarts(scenario, paired_device)
 
 
 @pytest.mark.description(
-    "A CLI killed while its send is in flight is recovered the next day through commands-pending and command-recover without resending the message."
+    "A CLI killed while its send is in flight is recovered the next day through operation list and operation recover without resending the message."
 )
 def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     """A crashed CLI leaves a recoverable identity, never a silent resend."""
@@ -644,15 +632,8 @@ def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     scenario.dsh.process.control("hang_next", method_name="sendUserMessage")
     before = effects(scenario, "sendUserMessage")
     attempt = subprocess.Popen(
-        [
-            str(ROOT / "target/debug/whalerein"),
-            "--json",
-            "--yes",
-            "--data-dir",
-            str(paired_device.data_dir),
-            "send",
-            "--session",
-            session,
+        [*paired_device.args(),
+            "session", "send", session,
             "crashed command fixture",
         ],
         cwd=ROOT,
@@ -685,14 +666,15 @@ def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     restart_plugin(scenario)
     wait_online(paired_device, scenario.host)
     recover_code, recover_values = paired_device.invoke(
-        "command-recover", "--request", request_id, success=False
+        "operation", "recover", request_id, success=False
     )
     if recover_code == 0:
         # The Host completed the source call before the crash: the recovered
         # copy is the accepted/terminal outcome and the identity must match.
         recovered = recover_values[-1]["data"]
-        assert recovered["command_id"] == command_id
-        assert recovered["status"] in {"host_accepted", "succeeded"}
+        assert recovered["operation_id"] == request_id
+        assert recovered["receipt"]["command_id"] == command_id
+        assert recovered["reply"]["state"] == "committed"
     else:
         # The hung source call was aborted by the Host restart. Its durable
         # outcome is explicitly unknown; that is never a false success.
@@ -702,7 +684,7 @@ def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     events = scenario.dsh.snapshot(session)["events"]
     assert all("crashed command fixture" not in json.dumps(event) for event in events)
 
-    sent = paired_device.send(session, "after the crash")
+    sent = paired_device.send(session, "after the crash")["receipt"]
     assert sent["status"] == "succeeded"
     assert effects(scenario, "sendUserMessage") == before + 2
 
@@ -719,14 +701,14 @@ def test_journey_pairing_interrupted_before_commit(scenario):
     proxy = PairingInterruption(drop_at="hello")
     try:
         link = invitation(scenario)
-        code, _ = device.invoke("pair", proxy.route(link), success=False)
+        code, _ = device.invoke("host", "connect", "--invite-stdin", "--yes", stdin_text=proxy.route(link), success=False)
         assert code != 0 and proxy.lost.is_set()
         assert row_count(scenario.schema, "grants") == 0
         assert row_count(scenario.schema, "devices") == 0
     finally:
         proxy.close()
 
-    device.identity = device.call("pair", link)
+    device.identity = device.pair(link)
     assert live_grants(scenario.schema, device.identity["device_id"]) == 1
     assert scenario.host_peer_exists(device.identity["device_id"])
     assert device.sessions(scenario.host) == []
@@ -747,14 +729,14 @@ def test_journey_pairing_interrupted_after_commit_resumes(scenario, paired_devic
     )
     try:
         scenario.start_access()
-        code, _ = paired_device.invoke("pair", proxy.route(link), success=False)
+        code, values = paired_device.invoke("host", "connect", "--invite-stdin", "--yes", stdin_text=proxy.route(link), success=False)
         assert code != 0 and proxy.lost.is_set()
         assert live_grants(scenario.schema, paired_device.identity["device_id"]) == 2
         proxy.drop_at = None
-        resumed = paired_device.call("pair-resume")
+        resumed = paired_device.call("operation", "recover", values[-1]["data"]["operation_id"])["connection"]
         assert resumed["host_id"] == other.host
         assert live_grants(scenario.schema, paired_device.identity["device_id"]) == 2
-        assert paired_device.call("commands-pending")["commands"] == []
+        assert paired_device.call("operation", "list")["pending_commands"] == []
         wait(
             lambda: other.peer_exists(paired_device.identity["device_id"]),
             timeout=15,
@@ -793,11 +775,11 @@ def test_journey_token_and_certificate_rotation_keeps_grants(scenario, paired_de
     assert live_grants(scenario.schema, device_id) == 1
     assert host_online(paired_device, scenario.host) is True
     # STREAM-01: synchronize the committed cut before observing new output.
-    paired_device.sync(session)
-    watch = paired_device.start_watch("tail", "--session", session, "--timeout", "30")
+    paired_device.observe_history(session)
+    watch = paired_device.start_watch("session", "watch", session, "--timeout", "30")
     try:
-        watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
-        sent = paired_device.send(session, "after rotation")
+        watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
+        sent = paired_device.send(session, "after rotation")["receipt"]
         assert sent["status"] == "succeeded"
         watch.wait(
             lambda value: any("after rotation" in text for text in _texts(_event(value))),
@@ -871,12 +853,12 @@ def test_journey_frozen_host_clock_and_backoff(scenario, paired_device):
 def test_journey_empty_state_guidance(scenario):
     """First-run guidance must tell the operator what to run next."""
     device = Device(scenario.directory)
-    code, stdout, stderr = human_invoke(device, "hosts")
+    code, stdout, stderr = human_invoke(device, "host", "list")
     text = stdout + stderr
     assert code == 4 and "not_paired" in text
     # The empty authorized-host projection already names the pair command; the
     # reachable unpaired error must not be shorter than that projection.
-    assert "whalerein pair" in text or "whalerein forget" in text, (
+    assert "whalerein host connect" in text or "whalerein device forget" in text, (
         "an unpaired empty state must name the next command, got: " + text.strip()
     )
 
@@ -885,10 +867,10 @@ def test_journey_empty_state_guidance(scenario):
 
 
 @pytest.mark.description(
-    "Two Hosts exposing the same session id produce an ambiguity that still routes explicitly, and the ambiguity must list the candidate Hosts for the operator."
+    "With two Hosts exposing the same session id, explicit selection routes to each Host and an unqualified operation uses the selected default."
 )
 def test_journey_multihost_same_named_session_selection(scenario, paired_device):
-    """Ambiguity must be actionable, not a dead end."""
+    """Default and explicit targets remain Host-qualified."""
     other = SecondHost(scenario)
     try:
         other.pair(paired_device)
@@ -904,20 +886,17 @@ def test_journey_multihost_same_named_session_selection(scenario, paired_device)
 
         # Explicit routing selects the intended Host.
         first = paired_device.call(
-            "--host", scenario.host, "interrupt", "--session", shared
+            "session", "interrupt", shared, "--host", scenario.host
         )
         assert first["status"] == "succeeded"
         second = paired_device.call(
-            "--host", other.host, "interrupt", "--session", shared
+            "session", "interrupt", shared, "--host", other.host
         )
         assert second["status"] == "succeeded"
 
-        code, values = paired_device.invoke("interrupt", "--session", shared, success=False)
-        assert code == 8 and values[-1]["error"]["code"] == "conflict"
-        message = values[-1]["error"]["message"]
-        assert scenario.host in message and other.host in message, (
-            "an ambiguous session must list its candidate Hosts, got: " + message
-        )
+        assert paired_device.call("status")["default_host"] == other.host
+        default = paired_device.call("session", "interrupt", shared)
+        assert default["target"] == {"host_id": other.host, "session_id": shared}
     finally:
         other.close()
 
@@ -933,8 +912,8 @@ def test_journey_two_operators_answer_one_question(scenario, paired_device):
     session = _session(scenario)
     second = scenario.pair_second()
     scenario.dsh.process.control("request_question_open", session_id=session)
-    first_card = paired_device.call("questions", "--session", session)["batches"][0]
-    second_card = second.call("questions", "--session", session)["batches"][0]
+    first_card = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
+    second_card = second.call("session", "question", "list", "--session", session)["batches"][0]
     assert first_card["batch_id"] == second_card["batch_id"]
     assert first_card["digest"] == second_card["digest"]
     before = effects(scenario, "answerOpenQuestion")
@@ -944,7 +923,7 @@ def test_journey_two_operators_answer_one_question(scenario, paired_device):
     answer = second.directory / f"journey-answer-{second.namespace}.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     code, values = second.invoke(
-        "answer",
+        "session", "question", "answer",
         "--session",
         session,
         "--batch",
@@ -963,4 +942,4 @@ def test_journey_two_operators_answer_one_question(scenario, paired_device):
     )
     assert code == 8 and values[-1]["error"]["code"] == "conflict"
     assert effects(scenario, "answerOpenQuestion") == before + 1
-    assert paired_device.call("questions", "--session", session)["batches"] == []
+    assert paired_device.call("session", "question", "list", "--session", session)["batches"] == []

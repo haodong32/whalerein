@@ -12,31 +12,44 @@ fn profiles_at(dir: &tempfile::TempDir) -> Profiles {
     Profiles::new(dir.path())
 }
 
-fn resolve_toml(dir: &tempfile::TempDir, name: &str, toml: &str) -> EnvironmentResolution {
-    let path = dir.path().join(name);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+fn account_resolution(environment: &str, api_origin: &str, issuer: &str) -> EnvironmentResolution {
+    let builtin = crate::configuration::document::catalog()
+        .unwrap()
+        .get(environment)
+        .cloned();
+    let definition = crate::configuration::EnvironmentDefinition {
+        id: builtin
+            .as_ref()
+            .map_or_else(|| environment.into(), |entry| entry.id.clone()),
+        mode: Some(crate::configuration::EnvironmentMode::Account),
+        label: builtin.as_ref().map(|entry| entry.label.clone()),
+        api_origin: Some(
+            builtin
+                .as_ref()
+                .map_or_else(|| api_origin.into(), |entry| entry.api_origin.clone()),
+        ),
+        issuer: Some(
+            builtin
+                .as_ref()
+                .map_or_else(|| issuer.into(), |entry| entry.issuer.clone()),
+        ),
+        native_client_id: Some(builtin.as_ref().map_or_else(
+            || "whalerein-cli".into(),
+            |entry| entry.native_client_id.clone(),
+        )),
+        environment: builtin.as_ref().map(|entry| entry.environment.clone()),
+        tls: None,
+    };
+    EnvironmentResolution {
+        environment: environment.into(),
+        selection_source: crate::configuration::SelectionSource::File,
+        definition_source: if builtin.is_some() {
+            crate::configuration::DefinitionSource::Builtin
+        } else {
+            crate::configuration::DefinitionSource::File
+        },
+        definition,
     }
-    std::fs::write(&path, toml).unwrap();
-    let snapshot =
-        crate::configuration::Configuration::open(&crate::configuration::ConfigOpenOptions {
-            explicit_path: Some(&path),
-            ..Default::default()
-        })
-        .unwrap();
-    snapshot.resolve(None).unwrap()
-}
-
-fn custom_account_toml(environment: &str, api_origin: &str, issuer: &str) -> String {
-    format!(
-        "version = 1\nenvironment = \"{environment}\"\n\n[environments.{environment}]\n\
-         mode = \"account\"\napi_origin = \"{api_origin}\"\nissuer = \"{issuer}\"\n\
-         native_client_id = \"whalerein-cli\"\n"
-    )
-}
-
-fn builtin_toml(environment: &str) -> String {
-    format!("version = 1\nenvironment = \"{environment}\"\n")
 }
 
 #[test]
@@ -1052,15 +1065,11 @@ fn config_env_ac_07_environment_identity_isolation_across_environments() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let staging = resolve_toml(&dir, "staging.toml", &builtin_toml("staging"));
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let staging = account_resolution("staging", "", "");
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
 
     let staging_profile = profiles
@@ -1125,14 +1134,10 @@ fn config_env_ac_07_multiple_accounts_coexist_within_one_environment() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
 
     let work = profiles
@@ -1182,14 +1187,10 @@ fn config_env_ac_07_label_rename_does_not_rotate_keys() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let added = profiles
         .add_environment_profile(&company, "old-label", &secrets)
@@ -1229,14 +1230,10 @@ fn config_env_ac_07_authority_change_refuses_old_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let before = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let before = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let profile = profiles
         .add_environment_profile(&before, "old-authority", &secrets)
@@ -1246,14 +1243,10 @@ fn config_env_ac_07_authority_change_refuses_old_credentials() {
         .unwrap()
         .device_id;
 
-    let changed = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.other.example",
-            "https://id.corp.example",
-        ),
+    let changed = account_resolution(
+        "company",
+        "https://api.other.example",
+        "https://id.corp.example",
     );
     let error = profiles
         .resolve_environment_identity(&changed, &secrets, false)
@@ -1280,14 +1273,10 @@ fn config_env_ac_14_use_in_environment_keeps_the_activation_fence_and_pending_wo
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let first = profiles
         .add_environment_profile(&company, "first", &secrets)
@@ -1352,7 +1341,7 @@ fn config_env_ac_18_legacy_registry_loads_without_environment_field() {
     assert_eq!(loaded.profiles[0].environment, "production");
     assert_eq!(loaded.profiles[0].authority, None);
     assert!(loaded.active_by_environment.is_empty());
-    let production = resolve_toml(&dir, "production.toml", &builtin_toml("production"));
+    let production = account_resolution("production", "", "");
     let resolved = profiles
         .resolve_environment_identity(&production, &secrets, false)
         .unwrap()
@@ -1374,7 +1363,7 @@ fn config_env_ac_18_no_profile_state_is_explicit_and_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let production = resolve_toml(&dir, "production.toml", &builtin_toml("production"));
+    let production = account_resolution("production", "", "");
     assert!(profiles
         .resolve_environment_identity(&production, &secrets, false)
         .unwrap()
@@ -1409,14 +1398,10 @@ fn config_env_ac_18_moving_config_leaves_profile_dirs_and_keys_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let original = resolve_toml(
-        &dir,
-        "old/config.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let original = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let profile = profiles
         .add_environment_profile(&original, "laptop", &secrets)
@@ -1426,14 +1411,10 @@ fn config_env_ac_18_moving_config_leaves_profile_dirs_and_keys_untouched() {
     let device_id = identity.device_id.clone();
     let registry_before = std::fs::read(dir.path().join(PROFILES_FILE)).unwrap();
 
-    let moved = resolve_toml(
-        &dir,
-        "new/config.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let moved = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let reopened = profiles
         .resolve_environment_identity(&moved, &secrets, false)
@@ -1460,16 +1441,12 @@ fn config_env_ac_19_use_profile_refuses_another_environment() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
-    let staging = resolve_toml(&dir, "staging.toml", &builtin_toml("staging"));
+    let staging = account_resolution("staging", "", "");
     let company_profile = profiles
         .add_environment_profile(&company, "company-laptop", &secrets)
         .unwrap();
@@ -1496,14 +1473,10 @@ fn config_env_ac_19_profile_selection_does_not_create_an_environment_default() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = memory();
     let profiles = profiles_at(&dir);
-    let company = resolve_toml(
-        &dir,
-        "company.toml",
-        &custom_account_toml(
-            "company",
-            "https://api.corp.example",
-            "https://id.corp.example",
-        ),
+    let company = account_resolution(
+        "company",
+        "https://api.corp.example",
+        "https://id.corp.example",
     );
     let _first = profiles
         .add_environment_profile(&company, "first", &secrets)
@@ -1532,6 +1505,61 @@ fn config_env_ac_19_profile_selection_does_not_create_an_environment_default() {
     assert_eq!(
         profiles.current(&secrets).unwrap().active.unwrap().name,
         PRODUCTION_PROFILE_NAME
+    );
+}
+
+#[test]
+fn scoped_runtime_picks_the_single_cloud_profile_instead_of_legacy_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = memory();
+    let profiles = profiles_at(&dir);
+    std::fs::write(dir.path().join("config.json"), b"{}").unwrap();
+    assert!(
+        profiles
+            .resolve_active_in_environment("production", &secrets)
+            .unwrap()
+            .legacy
+    );
+    assert!(matches!(
+        profiles.resolve_active_in_environment("local", &secrets),
+        Err(CoreError::NotFound(_))
+    ));
+
+    let local = account_resolution("local", "", "");
+    let account = profiles
+        .resolve_environment_identity(&local, &secrets, true)
+        .unwrap()
+        .unwrap();
+    assert!(!account.active);
+    let scoped = profiles
+        .resolve_active_in_environment("local", &secrets)
+        .unwrap();
+    assert_eq!(scoped.id.as_deref(), Some(account.id.as_str()));
+    assert_eq!(scoped.mode, ProfileMode::Account);
+    assert!(!scoped.runtime_state_is_root());
+    assert!(
+        profiles
+            .resolve_active_in_environment("production", &secrets)
+            .unwrap()
+            .legacy
+    );
+
+    let other = profiles
+        .add_environment_profile(&local, "other", &secrets)
+        .unwrap();
+    assert!(matches!(
+        profiles.resolve_active_in_environment("local", &secrets),
+        Err(CoreError::Conflict(_))
+    ));
+    profiles
+        .use_profile_in_environment(&local, "other")
+        .unwrap();
+    assert_eq!(
+        profiles
+            .resolve_active_in_environment("local", &secrets)
+            .unwrap()
+            .id,
+        Some(other.id)
     );
 }
 

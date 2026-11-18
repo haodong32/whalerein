@@ -77,7 +77,8 @@ def test_second_node_serves_the_operation_recorded_by_the_first(scenario, paired
     await_ready(node, scenario)
     # Admit work through the first node, then read the same grant on the second.
     device.sessions(scenario.host)
-    status, hosts = read_at(NODE_B, '/v1/hosts', device.transport_token())
+    with scenario.fixture_bearer(device) as token:
+        status, hosts = read_at(NODE_B, '/v1/hosts', token)
     assert status == 200
     assert scenario.host in {row['hostId'] for row in hosts['hosts']}
     request_id, kind = latest_request(scenario.schema, device.identity['device_id'])
@@ -85,8 +86,9 @@ def test_second_node_serves_the_operation_recorded_by_the_first(scenario, paired
     # `kind` proves the record is the handshake/query just admitted, not an
     # unrelated earlier row. The column stores the enum number (1 or 2).
     assert kind in {'1', '2', 'HANDSHAKE', 'QUERY'}
-    first_status, first_body = read_at(18080, f'/v1/requests/{request_id}', device.transport_token())
-    second_status, second_body = read_at(NODE_B, f'/v1/requests/{request_id}', device.transport_token())
+    with scenario.fixture_bearer(device) as token:
+        first_status, first_body = read_at(18080, f'/v1/requests/{request_id}', token)
+        second_status, second_body = read_at(NODE_B, f'/v1/requests/{request_id}', token)
     assert first_status == second_status == 200
     assert first_body['status'] == second_body['status']
 
@@ -98,9 +100,10 @@ def test_pairing_through_the_second_node_consumes_the_invitation_once(scenario):
     device = Device(scenario.directory)
     invitation = http('/v1/pairing/invitations', {'hostId': scenario.host}, scenario.admin)
     uri = invitation['pairingUri'].replace('18080', str(NODE_B))
-    device.identity = device.call('pair', uri)
+    device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=uri)
     assert device.identity['host_id'] == scenario.host
-    status, hosts = read_at(18080, '/v1/hosts', device.transport_token())
+    with scenario.fixture_bearer(device) as token:
+        status, hosts = read_at(18080, '/v1/hosts', token)
     assert status == 200
     assert scenario.host in {row['hostId'] for row in hosts['hosts']}
     # The used invitation cannot start another claim on either node.

@@ -67,26 +67,26 @@ def test_device_revocation_while_host_offline_replays_on_reconnect(
 ):
     device = paired_device
     device_id = device.identity["device_id"]
-    token = device.transport_token()
-    assert scenario.request("ready")["connected"]
-    assert scenario.host_peer_exists(device_id)
+    with scenario.fixture_bearer(device) as token:
+        assert scenario.request("ready")["connected"]
+        assert scenario.host_peer_exists(device_id)
 
-    offline_broker.close()
-    wait(lambda: not scenario.request("ready")["connected"], timeout=20)
-    device.revoke()
-    assert live_grants(scenario.schema, device_id) == "0"
-    assert pending_replays(scenario.schema, device_id) == "1"
-    assert scenario.request("ready")["connected"] is False
+        offline_broker.close()
+        wait(lambda: not scenario.request("ready")["connected"], timeout=20)
+        device.revoke()
+        assert live_grants(scenario.schema, device_id) == "0"
+        assert pending_replays(scenario.schema, device_id) == "1"
+        assert scenario.request("ready")["connected"] is False
 
-    offline_broker.ensure_started()
-    wait(lambda: scenario.request("ready")["connected"], timeout=60)
-    wait(
-        lambda: pending_replays(scenario.schema, device_id) == "0",
-        timeout=60,
-    )
-    wait(lambda: not scenario.host_peer_exists(device_id), timeout=30)
-    assert scenario.request("ready")["replayPending"] is False
-    revoked_token_is_rejected(token)
+        offline_broker.ensure_started()
+        wait(lambda: scenario.request("ready")["connected"], timeout=60)
+        wait(
+            lambda: pending_replays(scenario.schema, device_id) == "0",
+            timeout=60,
+        )
+        wait(lambda: not scenario.host_peer_exists(device_id), timeout=30)
+        assert scenario.request("ready")["replayPending"] is False
+        revoked_token_is_rejected(token)
 
 
 @pytest.mark.description(
@@ -98,22 +98,22 @@ def test_host_signed_revocation_while_disconnected_is_queued(
 ):
     device = paired_device
     device_id = device.identity["device_id"]
-    token = device.transport_token()
-    assert scenario.request("ready")["connected"]
-    assert scenario.host_peer_exists(device_id)
+    with scenario.fixture_bearer(device) as token:
+        assert scenario.request("ready")["connected"]
+        assert scenario.host_peer_exists(device_id)
 
-    offline_broker.close()
-    wait(lambda: not scenario.request("ready")["connected"], timeout=20)
-    assert scenario.request("gx-revoke-host-grant", deviceId=device_id)["revoked"]
-    assert live_grants(scenario.schema, device_id) == "0"
-    assert pending_replays(scenario.schema, device_id) == "1"
+        offline_broker.close()
+        wait(lambda: not scenario.request("ready")["connected"], timeout=20)
+        assert scenario.request("gx-revoke-host-grant", deviceId=device_id)["revoked"]
+        assert live_grants(scenario.schema, device_id) == "0"
+        assert pending_replays(scenario.schema, device_id) == "1"
 
-    offline_broker.ensure_started()
-    wait(lambda: scenario.request("ready")["connected"], timeout=60)
-    wait(
-        lambda: pending_replays(scenario.schema, device_id) == "0",
-        timeout=60,
-    )
-    wait(lambda: not scenario.host_peer_exists(device_id), timeout=30)
-    assert scenario.request("ready")["replayPending"] is False
-    revoked_token_is_rejected(token)
+        offline_broker.ensure_started()
+        wait(lambda: scenario.request("ready")["connected"], timeout=60)
+        wait(
+            lambda: pending_replays(scenario.schema, device_id) == "0",
+            timeout=60,
+        )
+        wait(lambda: not scenario.host_peer_exists(device_id), timeout=30)
+        assert scenario.request("ready")["replayPending"] is False
+        revoked_token_is_rejected(token)

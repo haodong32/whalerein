@@ -1,6 +1,9 @@
 # Client environment contract
 
-One canonical contract drives Rust Core and the Node Host runtime. The
+The official environment catalog drives Rust Core and the Node Host runtime.
+CLI and mobile select the client instance TOML described in the [CLI guide](../../apps/cli/README.md).
+The remaining corpus describes the environment document used by Host runtime
+configuration and cross-runtime fixture validation. The
 editable sources are in this directory; generated distribution copies are
 byte-identical and are never edited by hand.
 

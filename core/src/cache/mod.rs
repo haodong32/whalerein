@@ -25,6 +25,7 @@ const HISTORY_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// How long an unknown send keeps its idempotency record. It is deliberately
 /// longer than one command request lifetime so a retry after reconnecting can
 /// still recover instead of submitting duplicate user text.
+#[cfg(test)]
 const SEND_INTENT_TTL_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
@@ -453,8 +454,11 @@ impl Cache {
                  sealed_text BLOB NOT NULL,
                  updated_at_unix_ms INTEGER NOT NULL,
                  PRIMARY KEY(host_id,session_id)
-             );
-             CREATE TABLE IF NOT EXISTS send_intents (
+             );",
+        )?;
+        #[cfg(test)]
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS send_intents (
                  host_id TEXT NOT NULL,
                  session_id TEXT NOT NULL,
                  digest TEXT NOT NULL,
@@ -553,6 +557,7 @@ impl Cache {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn load_hosts(&self) -> Result<Vec<HostInfo>, CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
         let mut statement = conn
@@ -1133,13 +1138,14 @@ impl Cache {
         }
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(
-            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts; DELETE FROM send_intents;",
+            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts;",
         )?;
+        #[cfg(test)]
+        conn.execute_batch("DELETE FROM send_intents;")?;
         Ok(())
     }
 
-    /// Keyed digest of outgoing text: it binds a retry to the same profile
-    /// without storing the message in plaintext.
+    /// Bind outgoing intent to this identity without storing plaintext.
     pub(crate) fn send_intent_digest(&self, text: &str) -> String {
         let mut material = self.key.to_vec();
         material.extend_from_slice(text.as_bytes());
@@ -1148,6 +1154,7 @@ impl Cache {
 
     /// Remember a send whose observation ended unknown so an identical resend
     /// recovers the original command instead of creating a second user message.
+    #[cfg(test)]
     pub(crate) fn record_send_intent(
         &self,
         host_id: &str,
@@ -1176,6 +1183,7 @@ impl Cache {
 
     /// The retained request for an identical send that has not been confirmed
     /// yet, if one is still inside the idempotency window.
+    #[cfg(test)]
     pub(crate) fn unresolved_send_intent(
         &self,
         host_id: &str,
@@ -1197,6 +1205,7 @@ impl Cache {
             .optional()?)
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_send_intent(
         &self,
         host_id: &str,

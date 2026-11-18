@@ -12,12 +12,15 @@ mod error;
 mod secret;
 mod types;
 
-pub use client::{core_revision, MobileCore};
+pub use client::{
+    core_revision, write_client_config, MobileClientService, MobileCloudEnvironment, MobileCore,
+};
 pub use error::MobileError;
 pub use secret::{MemorySecretStore, SecretStore, SecretStoreError};
 pub use types::{
-    ApprovalView, BlockView, CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView,
-    HostSummary, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionIntentView, QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView,
-    QuestionSubjectView, QuestionsView, SessionCapabilitiesView, SessionSummaryView,
+    ApprovalView, BlockView, ClientStatusView, CommandView, ConversationEvent, DeliveryChoice,
+    DiagnosticsReportView, HostSummary, MessageReplyView, MessageView, PairingPromptView,
+    QuestionAnswerView, QuestionBatchView, QuestionIntentView, QuestionItemView,
+    QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
+    SendOperationView, SessionCapabilitiesView, SessionSummaryView,
 };

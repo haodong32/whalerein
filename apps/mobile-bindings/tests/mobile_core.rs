@@ -12,12 +12,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess};
 use whalerein_mobile::{
-    ConversationEvent, DeliveryChoice, MemorySecretStore, MessageView, MobileCore,
+    write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore, MessageView,
+    MobileClientService, MobileCore,
 };
+
+fn write_config(dir: &std::path::Path) -> String {
+    let config = dir.join("config.toml").to_string_lossy().into_owned();
+    write_client_config(
+        config.clone(),
+        MobileClientService::Standalone,
+        "instance".into(),
+        None,
+        None,
+    )
+    .expect("write client config");
+    config
+}
 
 fn new_core(data_dir: &std::path::Path) -> std::sync::Arc<MobileCore> {
     MobileCore::new(
-        data_dir.to_string_lossy().into_owned(),
+        write_config(data_dir),
         MemorySecretStore::new(),
         "test-app".to_owned(),
     )
@@ -274,11 +288,8 @@ fn pair(core: &MobileCore, access: &FakeAccess) -> String {
 #[test]
 fn memory_constructor_and_revision_accessors_work() {
     let dir = tempfile::tempdir().unwrap();
-    let core = MobileCore::new_with_memory_secret_store(
-        dir.path().to_string_lossy().into_owned(),
-        "t".into(),
-    )
-    .unwrap();
+    let core =
+        MobileCore::new_with_memory_secret_store(write_config(dir.path()), "t".into()).unwrap();
     assert_eq!(core.core_revision(), whalerein_mobile::core_revision());
     assert!(!core.core_revision().is_empty());
 }
@@ -350,6 +361,15 @@ fn sessions_send_stop_and_approvals_reach_the_fixture_host() {
     assert!(sent.status == "succeeded" || sent.status == "host_accepted");
     assert!(!sent.request_id.is_empty());
     assert!(sent.message_id.is_some());
+    let recovered = core.recover_send(sent.request_id.clone(), true).unwrap();
+    assert_eq!(recovered.operation_id, sent.request_id);
+    assert_eq!(recovered.host_id, host_id);
+    assert_eq!(recovered.session_id, "session-1");
+    assert!(matches!(
+        recovered.reply,
+        Some(whalerein_mobile::MessageReplyView::Committed { ref attempt_id, .. })
+            if attempt_id == "fixture-attempt"
+    ));
     // The same result is queued for observers.
     assert!(core.poll_events(0).iter().any(|event| matches!(
         event,

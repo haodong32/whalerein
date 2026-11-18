@@ -38,11 +38,12 @@ implementation modules are private.
 
 ## Local data
 
-- `config.json` contains only the Access URL, optional MQTT URL, host id,
-  device id and protocol version.
-- `cache.sqlite3` holds encrypted host/session/event/projection data.
-- The default `data_dir` is the OS project data directory. Override it with
-  `WHALEREIN_DATA_DIR` or the CLI `--data-dir`.
+- Open Core with the platform-selected version 1 TOML and a SecretStore.
+- The required `data_dir` resolves relative to the selected configuration.
+  Its `instance.json` binds the stable identity and service authority.
+- `state/regional.json` holds the verified regional endpoint and Host pins.
+- `state/cache.sqlite3` holds encrypted Host, Session and conversation data.
+- Recover retained operations with their original IDs under the same instance.
 
 ## Tests
 

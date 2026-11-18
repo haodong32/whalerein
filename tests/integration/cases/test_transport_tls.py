@@ -87,19 +87,19 @@ def _restart_plugin(scenario):
 )
 def test_tls_transport_carries_pairing_and_messages(scenario, paired_device):
     """The production TLS handshake path must work for the full product chain."""
-    assert paired_device.call("hosts")["hosts"][0]["online"] is True
-    session = paired_device.call("session-create", "--host", scenario.host)
+    assert paired_device.call('host', 'list')["hosts"][0]["online"] is True
+    session = paired_device.call('session', 'create', "--host", scenario.host)
     identity = session["lifecycle_receipt"]["session_id"]
     assert session["status"] == "succeeded"
     # Establish the committed cut before attaching: snapshot history is not
     # replayed as new output (STREAM-01). The live turn then crosses the TLS
     # MQTT session that the CLI/Core opens for tail.
-    paired_device.sync(identity)
-    watch = paired_device.start_watch("tail", "--session", identity, "--timeout", "30")
+    paired_device.observe_history(identity)
+    watch = paired_device.start_watch('session', 'watch', identity, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
         sent = paired_device.send(identity, "tls fixture message")
-        assert sent["status"] == "succeeded"
+        assert sent["receipt"]["status"] == "succeeded"
         watch.wait(lambda value: _event(value).get("type") == "message", timeout=25)
     finally:
         watch.close()
@@ -195,12 +195,12 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
     scenario, paired_device
 ):
     """A rotation is a trust-store event, never a re-pairing event."""
-    assert paired_device.call("hosts")["hosts"][0]["online"] is True
-    session = paired_device.call("session-create", "--host", scenario.host)
+    assert paired_device.call('host', 'list')["hosts"][0]["online"] is True
+    session = paired_device.call('session', 'create', "--host", scenario.host)
     identity = session["lifecycle_receipt"]["session_id"]
     # STREAM-01: synchronize before the sends so the post-rotation observer reads
     # them as new output instead of suppressed snapshot history.
-    paired_device.sync(identity)
+    paired_device.observe_history(identity)
     paired_device.send(identity, "before rotation")
     # Steps 2 and 4 prove an untrusted rotation fails closed by asserting the
     # logged x509 reason, so this Access session must emit warnings.
@@ -208,7 +208,7 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
     scenario.access.close()
     scenario.start_access()
     wait(
-        lambda: paired_device.call("hosts")["hosts"][0]["online"] is True,
+        lambda: paired_device.call('host', 'list')["hosts"][0]["online"] is True,
         timeout=30,
     )
 
@@ -220,10 +220,10 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
         rotated_leaf.start()
         wait(_ready, timeout=30)
         wait(
-            lambda: paired_device.call("hosts")["hosts"][0]["online"] is True,
+            lambda: paired_device.call('host', 'list')["hosts"][0]["online"] is True,
             timeout=30,
         )
-        assert paired_device.send(identity, "after leaf rotation")["status"] == "succeeded"
+        assert paired_device.send(identity, "after leaf rotation")["receipt"]["status"] == "succeeded"
 
         # 2. New authority that Access does not trust: fail closed, not offline.
         rotated_leaf.close()
@@ -235,23 +235,23 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
         # 3. Trust the new authority (keep the old one): reconnect without
         #    re-pairing. The same device identity and grant still work.
         trust = ca_bundle(scenario.directory, "ca", "ca2")
-        paired_device.extra_env = {"WHALEREIN_CA_FILE": str(trust)}
+        paired_device.configure_tls(trust)
         _restart_access_with_trust(scenario, trust)
         _restart_plugin(scenario)
         wait(
-            lambda: paired_device.call("hosts")["hosts"][0]["online"] is True,
+            lambda: paired_device.call('host', 'list')["hosts"][0]["online"] is True,
             timeout=30,
         )
         # The paired device's own MQTT TLS session must reconnect under the
         # new trust bundle; tail is the command that opens it.
-        paired_device.sync(identity)
+        paired_device.observe_history(identity)
         watch = paired_device.start_watch(
-            "tail", "--session", identity, "--timeout", "30"
+            'session', 'watch', identity, "--timeout", "30"
         )
         try:
             watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
             assert (
-                paired_device.send(identity, "after CA rotation")["status"]
+                paired_device.send(identity, "after CA rotation")["receipt"]["status"]
                 == "succeeded"
             )
             watch.wait(
@@ -263,7 +263,7 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
 
         # 4. Removing the old authority must still fail closed. Access now
         #    trusts only ca2; point it back at the ca1-signed listener.
-        paired_device.extra_env = {"WHALEREIN_CA_FILE": str(TLS_DIR / "ca2.pem")}
+        paired_device.configure_tls(TLS_DIR / "ca2.pem")
         _restart_access_with_trust(scenario, TLS_DIR / "ca2.pem")
         rotated_ca.close()
         old_leaf = TlsBroker(scenario.directory / "tls-old-ca", cert="server")
@@ -309,14 +309,10 @@ def test_cli_rejects_untrusted_broker_identity(scenario, paired_device, kind):
     bad = TlsBroker(scenario.directory / f"tls-client-{kind}", cert=kind, port=8884)
     bad.start()
     try:
-        session = paired_device.call("session-create", "--host", scenario.host)
+        session = paired_device.call('session', 'create', "--host", scenario.host)
         identity = session["lifecycle_receipt"]["session_id"]
         code, values = paired_device.invoke(
-            "tail",
-            "--session",
-            identity,
-            "--timeout",
-            "3",
+            'session', 'watch', identity, "--timeout", "3",
             success=False,
             env={
                 "WHALEREIN_CA_FILE": str(certificate(kind)["ca"]),
@@ -343,14 +339,10 @@ def test_cli_rejects_untrusted_broker_identity(scenario, paired_device, kind):
     "The CLI/Core MQTT client with an unreadable CA path fails explicitly with invalid_configuration instead of silently trusting system roots or reporting the host offline."
 )
 def test_cli_missing_ca_file_fails_explicitly(scenario, paired_device):
-    session = paired_device.call("session-create", "--host", scenario.host)
+    session = paired_device.call('session', 'create', "--host", scenario.host)
     identity = session["lifecycle_receipt"]["session_id"]
     code, values = paired_device.invoke(
-        "tail",
-        "--session",
-        identity,
-        "--timeout",
-        "3",
+        'session', 'watch', identity, "--timeout", "3",
         success=False,
         env={
             "WHALEREIN_CA_FILE": str(scenario.directory / "missing-ca.pem"),

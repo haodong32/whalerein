@@ -19,11 +19,12 @@ ownership; these are not implemented security guarantees.
 | Access device/invitation credentials | Hashes in PostgreSQL. |
 | Deployment secrets | Configuration outside Git. |
 
-Account authentication is not shipped while the pinned provider lacks DPoP.
-The client does not create a Bearer account session as an interim fallback:
-device-bound account credentials remain required, so login, refresh, directory
-and account-authorized pairing stay unavailable. Revisit only after a maintained
-provider supports DPoP and a native feasibility run proves the flow.
+CLI account authentication uses the provider's OAuth device authorization
+grant. The short-lived, audience-scoped access token and rotating refresh
+token are bearer credentials kept in the profile's SecretStore. Possession
+of a valid access token is sufficient to read the account's CLI directory
+until that token expires. This account session does not grant regional
+Access authority or replace the device proofs used for pairing.
 
 Profile state is isolated by local directory and device identity; account
 credentials, device keys, pins, cache and pending recovery do not cross

@@ -513,6 +513,16 @@ export class CommandService {
         if (!batch) return failed('not_found')
         return { status: 'succeeded', response: { question_batch: batch } }
       }
+      if (payload.read_message_reply) {
+        const read = payload.read_message_reply
+        if (!read.session_id || !read.message_id || read.message_id.length > 512) return failed('invalid_argument')
+        if (typeof this.adapter.readMessageReply !== 'function') return failed('unsupported_capability')
+        const result = await this.adapter.readMessageReply(read.session_id, read.message_id, scope.controller.signal)
+        this.#assertScope(scope)
+        return { status: 'succeeded', response: { message_reply: {
+          session_id: read.session_id, message_id: read.message_id, ...result,
+        } } }
+      }
       if (payload.read_history) {
         return { status: 'succeeded', response: { history_page: await this.events.readHistory(payload.read_history.session_id, payload.read_history, scope.controller.signal) } }
       }

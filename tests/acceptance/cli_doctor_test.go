@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -64,13 +65,13 @@ func cliBinary(t *testing.T) string {
 
 func runCLI(t *testing.T, dataDir string, extraEnv []string, args ...string) cliRun {
 	t.Helper()
-	secrets := filepath.Join(dataDir, "secrets")
-	if err := os.MkdirAll(secrets, 0o700); err != nil {
-		t.Fatalf("create secret directory: %v", err)
+	configPath := filepath.Join(t.TempDir(), "client.toml")
+	config := "version = 1\nservice = \"standalone\"\ndata_dir = " + strconv.Quote(dataDir) + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write selected client TOML: %v", err)
 	}
-	command := exec.Command(cliBinary(t), append([]string{"--data-dir", dataDir}, args...)...)
-	command.Env = append(os.Environ(), "WHALEREIN_SECRET_BACKEND=file:"+secrets)
-	command.Env = append(command.Env, extraEnv...)
+	command := exec.Command(cliBinary(t), append([]string{"--config", configPath}, args...)...)
+	command.Env = append(os.Environ(), extraEnv...)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -92,7 +93,7 @@ func decodeEnvelope(t *testing.T, run cliRun) map[string]any {
 	if err := json.Unmarshal([]byte(run.stdout), &envelope); err != nil {
 		t.Fatalf("stdout is not one JSON envelope: %v (%q)", err, run.stdout)
 	}
-	if envelope["schema"] != "whalerein/v1" {
+	if envelope["schema"] != "whalerein/client/v1" {
 		t.Fatalf("envelope schema = %v", envelope["schema"])
 	}
 	return envelope
@@ -104,41 +105,24 @@ func decodeEnvelope(t *testing.T, run cliRun) map[string]any {
 // leave no partial file, successful exports are private, and a symlinked export
 // either refuses to write or leaves a private, redacted bundle.
 //
-// A paired profile whose cache file is corrupt currently returns a structured
-// `cache_error` envelope with exit 1. Producing a degraded report instead is a
-// Core behavior change owned outside this test; this case asserts the safe
-// failure shape (no panic, no hang, one envelope) rather than inventing a
-// report the implementation does not provide.
+
 func TestCLIDoctorDegradedEnvironment(t *testing.T) {
-	t.Run("corrupt cache fails safely with one envelope", func(t *testing.T) {
+	t.Run("legacy state is rejected without mutation", func(t *testing.T) {
 		dataDir := t.TempDir()
-		config := map[string]any{
-			"schema":           "whalerein/v1/config",
-			"access_url":       "http://127.0.0.1:1",
-			"host_id":          "host-corrupt",
-			"device_id":        "device-corrupt",
-			"protocol_version": 1,
-		}
-		encoded, err := json.Marshal(config)
-		if err != nil {
+		legacy := filepath.Join(dataDir, "config.json")
+		fixture := []byte(`{"schema":"whalerein/v1/config"}`)
+		if err := os.WriteFile(legacy, fixture, 0o600); err != nil {
 			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dataDir, "config.json"), encoded, 0o600); err != nil {
-			t.Fatalf("write config: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dataDir, "cache.sqlite3"), []byte("not-a-sqlite-database"), 0o600); err != nil {
-			t.Fatalf("write corrupt cache: %v", err)
 		}
 		run := runCLI(t, dataDir, nil, "doctor", "--json")
 		envelope := decodeEnvelope(t, run)
-		if run.exit != 0 && run.exit != 1 {
-			t.Fatalf("doctor exit = %d, want a structured 0 or 1", run.exit)
+		errorValue, _ := envelope["error"].(map[string]any)
+		if run.exit != 2 || errorValue["code"] != "invalid_configuration" {
+			t.Fatalf("legacy opening returned exit %d, code %v", run.exit, errorValue["code"])
 		}
-		if run.exit == 1 {
-			errorValue, ok := envelope["error"].(map[string]any)
-			if !ok || errorValue["code"] == "" {
-				t.Fatalf("failed doctor did not return a structured error: %v", envelope)
-			}
+		contents, err := os.ReadFile(legacy)
+		if err != nil || !bytes.Equal(contents, fixture) {
+			t.Fatal("legacy state changed")
 		}
 	})
 

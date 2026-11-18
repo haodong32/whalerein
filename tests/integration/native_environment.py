@@ -7,7 +7,6 @@ import os
 import signal
 import re
 import socket
-import sqlite3
 import subprocess
 import threading
 from pathlib import Path
@@ -303,31 +302,16 @@ class NativeScenario(Scenario):
 
     def tail(self, device, session, baseline=False):
         process = Process(
-            [
-                str(ROOT / "target/debug/whalerein"),
-                "--json",
-                "--yes",
-                "--data-dir",
-                str(device.directory / "client"),
-                "tail",
-                "--session",
-                session,
-                "--timeout",
-                "12",
-            ],
+            device.args("session", "watch", session, "--host", self.host, "--timeout", "12"),
             self.directory,
-            {
-                "WHALEREIN_SECRET_BACKEND": "file:" + str(device.directory / "secrets"),
-                "WHALEREIN_LOG": "error",
-            },
+            device.env(),
         )
         self.processes.append(process)
         wait(lambda: self.request("watches") > 0, process=process)
         if baseline:
-            # This case mutates history immediately after starting the watch;
-            # wait for the initial snapshot so a late first reset cannot be
-            # mistaken for a later reset. The barrier-based watch tests need
-            # their baselines to remain in flight and pass baseline=False.
+            # A reset precedes history sync. The scoped state arrives after
+            # the committed baseline, so subsequent mutations stay live.
+            # Barrier-based tests leave the baseline in flight.
             def baseline_ready():
                 try:
                     lines = Path(process.output.name).read_text().splitlines()
@@ -340,7 +324,10 @@ class NativeScenario(Scenario):
                         event = json.loads(line).get("data", {}).get("event", {})
                     except ValueError:
                         continue
-                    if event.get("type") == "reset":
+                    if event.get("type") == "state" and event.get("session") == {
+                        "host_id": self.host,
+                        "session_id": session,
+                    }:
                         return True
                 return False
             wait(baseline_ready, process=process)
@@ -370,18 +357,7 @@ class NativeScenario(Scenario):
         ]
 
     def cached(self, device, session):
-        with sqlite3.connect(device.directory / "client/cache.sqlite3") as db:
-            cursor = db.execute(
-                "SELECT cursor FROM conversation_views WHERE session_id=?", (session,)
-            ).fetchone()
-            ids = tuple(
-                row[0]
-                for row in db.execute(
-                    "SELECT message_id FROM conversation_messages WHERE session_id=? ORDER BY ordinal",
-                    (session,),
-                )
-            )
-        return (cursor[0] if cursor else None, ids)
+        return device.cached_history_state(self.host, session)
 
     def web_url(self):
         text = Path(self.native.output.name).read_text()

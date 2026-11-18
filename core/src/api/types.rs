@@ -642,6 +642,8 @@ pub struct PairingHistoryRecord {
 /// Result of a successful pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub host_id: String,
     pub device_id: String,
     pub fingerprint: String,

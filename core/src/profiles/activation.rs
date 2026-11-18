@@ -15,6 +15,7 @@ pub(crate) struct ActivationGuard {
 }
 
 impl ActivationGuard {
+    #[cfg(any(test, feature = "test-support", feature = "protocol-testing"))]
     pub(crate) fn shared(root: &Path) -> CoreResult<Self> {
         Self::acquire(root, false)
     }

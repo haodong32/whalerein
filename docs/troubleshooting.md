@@ -3,7 +3,7 @@
 Start with the CLI error code and Diagnostic ID. Search Access/plugin logs by
 that ID as `trace_id`; masked request/device IDs differ between services.
 
-`whalerein doctor` reads local diagnostics; `whalerein hosts` checks authorization
+`whalerein doctor` reads local diagnostics; `whalerein host list` checks authorization
 and broker-derived presence. Export with `whalerein doctor --export <file>` after
 review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnostics).
 
@@ -17,7 +17,7 @@ review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnosti
 | Channel rejected | Core retries read-only queries on a fresh channel; verify token rejection before re-pairing. |
 | Device revoked | Confirm Access rejected the stored token, then pair again. |
 | Command timeout/`unknown` | Reconcile the original command result; do not blindly repeat it with a new ID. |
-| Tail gap/stall | Check channel/cursor recovery; run `whalerein sync --session <id>`. |
+| Tail gap/stall | Check channel/cursor recovery; run `whalerein session watch <id>`. |
 | Approval rejected | Refresh pending approval state, digest, version and expiry. |
 | Large snapshot fails | Check peer capability, ACK ACLs and [transport/HTTP limits](../proto/v1/WIRE.md#transport-size-budget). |
 | Duplicate device names | Identify the obsolete device ID before revoking it. |

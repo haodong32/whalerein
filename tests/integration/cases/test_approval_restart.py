@@ -17,7 +17,7 @@ pytestmark = pytest.mark.chain
 
 def _resolve(device, approval, decision="approve"):
     return device.invoke(
-        decision,
+        "session", "approval", decision,
         "--request",
         approval["approval_id"],
         "--digest",
@@ -104,7 +104,8 @@ def test_access_restart_keeps_pending_approval_resolvable(scenario):
     recovered = _card(device, session, pending["approval_id"])
     assert recovered["state"] == "APPROVAL_STATE_PENDING"
     resolved = device.resolve("approve", recovered)
-    assert resolved["status"] == "succeeded"
+    assert resolved["status"] in {"host_accepted", "succeeded"}
+    wait(lambda: scenario.dsh.approval(pending["approval_id"])["state"] == "approved")
     assert _resolve_count(scenario) == before + 1
     assert scenario.dsh.approval(pending["approval_id"])["state"] == "approved"
 

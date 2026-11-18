@@ -2,13 +2,15 @@
 
 import pytest
 
+from environment import wait
+
 pytestmark = pytest.mark.chain
 
 
 
 def _resolve(device, approval, decision="approve"):
     return device.invoke(
-        decision,
+        "session", "approval", decision,
         "--request",
         approval["approval_id"],
         "--digest",
@@ -55,7 +57,8 @@ def test_revocation_and_approval_decision_order_keeps_one_winner(scenario):
     before = _resolve_count(scenario)
     stale.revoke()
     resolved = active.resolve("approve", approval)
-    assert resolved["status"] == "succeeded"
+    assert resolved["status"] in {"host_accepted", "succeeded"}
+    wait(lambda: scenario.dsh.approval(approval["approval_id"])["state"] == "approved")
     assert _resolve_count(scenario) == before + 1
     code, values = _resolve(stale, approval)
     assert code == 4

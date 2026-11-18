@@ -22,7 +22,7 @@ def test_gx04_native_model_recovery_without_replay(fault, scenario, paired_devic
     assert scenario.request("test-enable-gx")["enabled"]
     session = scenario.create()
     paired_device.sessions(scenario.host)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     group = next(group for group in catalog["groups"] if group["models"])
     assert len(group["models"]) >= 2
     model = group["models"][0]
@@ -33,12 +33,12 @@ def test_gx04_native_model_recovery_without_replay(fault, scenario, paired_devic
     else:
         assert scenario.request("gx-drop-next-command-success")["armed"]
     stage("select")
-    code, envelopes = paired_device.invoke("model", "set", "--session", session, "--provider", group["id"], "--model", model["id"], success=False)
+    code, envelopes = paired_device.invoke("session", "model", "set", "--session", session, "--provider", group["id"], "--model", model["id"], success=False)
     stage("selected", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     assert scenario.request("gx-model-count")["count"] == before + 1
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-        pending = paired_device.call("commands-pending")["commands"]
+        pending = paired_device.call("operation", "list")["pending_commands"]
         assert len(pending) == 1
         request = pending[0]["request_id"]
         receipt = None
@@ -47,7 +47,7 @@ def test_gx04_native_model_recovery_without_replay(fault, scenario, paired_devic
         receipt = envelopes[-1]["data"]
         assert receipt["model_selection"]["default_persistence"] == "unconfirmed"
         request = receipt["request_id"]
-        with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+        with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
             assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
     stage("restart")
     scenario.native.close()
@@ -58,7 +58,7 @@ def test_gx04_native_model_recovery_without_replay(fault, scenario, paired_devic
         later = {"provider": group["id"], "model": group["models"][1]["id"]}
         scenario.request("model-select-local", sessionId=session, selection=later)
         assert scenario.request("model-read", sessionId=session)["pending"]["model"] == later["model"]
-    code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+    code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
     stage("recovered", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
@@ -76,7 +76,7 @@ def test_native_model_failed_default_save_is_not_retried_after_restart(scenario,
     assert scenario.request("test-enable-gx")["enabled"]
     session = scenario.create()
     paired_device.sessions(scenario.host)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     stage('catalog')
     group = next(group for group in catalog["groups"] if len(group["models"]) >= 2)
     default = scenario.request("model-catalog")["default_selection"]
@@ -85,7 +85,7 @@ def test_native_model_failed_default_save_is_not_retried_after_restart(scenario,
     assert scenario.request("gx-arm-model-counter")["armed"]
     stage('set')
     before = scenario.request("gx-model-count")["count"]
-    receipt = paired_device.call("model", "set", "--session", session, "--provider", group["id"], "--model", alternative["id"])
+    receipt = paired_device.call("session", "model", "set", "--session", session, "--provider", group["id"], "--model", alternative["id"])
     stage('receipt')
     assert receipt["status"] == "succeeded" and receipt["model_selection"]["default_persistence"] == "unconfirmed"
     wait(lambda: scenario.request("test-model-default-failure-count")["count"] == 1, process=scenario.native)

@@ -1,6 +1,5 @@
 """Secondary native Host FINISH response loss under real Access."""
 import json
-import hashlib
 import socket
 import threading
 import urllib.parse
@@ -95,10 +94,10 @@ def _exercise_committed_outcome_cleanup(revoke_host, retain_operation, scenario,
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
         stage('primary-paired')
         allow_finish.clear()
-        code, _ = device.invoke('pair', invitation(other.host), success=False)
+        code, _ = device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host), success=False)
         assert lost.is_set() and code != 0
         stage('finish-response-lost')
         if revoke_host:
@@ -120,6 +119,8 @@ def _exercise_committed_outcome_cleanup(revoke_host, retain_operation, scenario,
         subprocess.run(['psql','-h','127.0.0.1','-p','55432','-U','postgres','-d','whalerein_test','-c',query],check=True,capture_output=True,timeout=5)
         stage('body-cleared')
         allow_finish.set()
+        if not revoke_host:
+            operation_id, _ = device.call('operation', 'list')['pending_pairing']
         if replay_commit:
             stage('replay-generation-start')
             generation_query = f"SELECT grant_generation FROM {scenario.schema}.grants WHERE host_id='{other.host}' AND device_id='{device.identity['device_id']}'"
@@ -128,33 +129,32 @@ def _exercise_committed_outcome_cleanup(revoke_host, retain_operation, scenario,
             before = generation()
             assert other.request('arm-pair-commit-replay-count')['armed']
             stage('replay-resume-start')
-            outcome = device.call('pair-resume')
+            outcome = device.call('operation', 'recover', operation_id)['connection']
             stage('replay-resume-success')
             assert outcome['host_id'] == other.host
             assert generation() == before
             assert other.request('pair-commit-replay-count')['calls'] == 1
             assert other.host_peer_exists(device.identity['device_id'])
         elif unproven and not revoke_host:
-            pending_key = f"whalerein:v1:pending-pairing:{device.identity['device_id']}".encode().hex()
-            pending_file = device.directory / 'secrets' / pending_key
-            pending_digest = hashlib.sha256(pending_file.read_bytes()).digest()
-            primary_digest = hashlib.sha256(device.transport_token().encode()).digest()
+            pending = device.call('operation', 'list')['pending_pairing']
+            operation_id, pending_host = pending
+            assert pending_host == other.host
             for _ in range(2):
-                code, values = device.invoke('pair-resume', success=False)
+                code, values = device.invoke('operation', 'recover', operation_id, success=False)
                 assert code != 0 and values[-1]['error']['code'] == 'pairing_committed_unconfirmed'
-                assert hashlib.sha256(pending_file.read_bytes()).digest() == pending_digest
-                assert hashlib.sha256(device.transport_token().encode()).digest() == primary_digest
+                assert device.call('operation', 'list')['pending_pairing'] == pending
+                assert device.call('status')['default_host'] == scenario.host
             assert scenario.host in {row['host_id'] for row in device.hosts()}
         elif not revoke_host:
             stage('resume-start')
-            outcome = device.call('pair-resume')
+            outcome = device.call('operation', 'recover', operation_id)['connection']
             stage('resume-success')
             assert outcome['host_id'] == other.host
-            assert device.call('pairing-history')['pairings'] == []
+            assert device.call('operation', 'list')['pairing_history'] == []
         else:
-            outcome = device.call('pair', invitation(other.host))
+            outcome = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host))
             assert outcome['host_id'] == other.host
-            history = device.call('pairing-history')['pairings']
+            history = device.call('operation', 'list')['pairing_history']
             assert len(history) == 1 and history[0]['host_id'] == other.host and history[0]['claim_id']
             assert history[0]['status'] == 'committed_unavailable'
         assert {scenario.host, other.host} <= {row['host_id'] for row in device.hosts()}

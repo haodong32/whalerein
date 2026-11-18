@@ -219,6 +219,7 @@ pub struct FakeHost {
     pub wait_queries: usize,
     pub wait_last_timeout_ms: u32,
     pub wait_bad_id: bool,
+    pub message_reply_state: Option<whalerein_proto::MessageReplyState>,
     pub wait_drop_channel_once: bool,
     pub wait_replaced_once: bool,
     pub wait_extra_replacements: usize,
@@ -358,6 +359,7 @@ impl FakeHost {
             wait_queries: 0,
             wait_last_timeout_ms: 0,
             wait_bad_id: false,
+            message_reply_state: None,
             wait_drop_channel_once: false,
             wait_replaced_once: false,
             wait_extra_replacements: 0,
@@ -1103,6 +1105,21 @@ impl FakeHost {
                         },
                     ),
                 ),
+                ..Default::default()
+            },
+            Some(Payload::ReadMessageReply(read)) => ResponsePayload {
+                payload: Some(whalerein_proto::response_payload::Payload::MessageReply(
+                    whalerein_proto::MessageReply {
+                        session_id: read.session_id,
+                        message_id: read.message_id,
+                        state: self
+                            .message_reply_state
+                            .unwrap_or(whalerein_proto::MessageReplyState::MessageReplyCommitted)
+                            as i32,
+                        attempt_id: "fixture-attempt".into(),
+                        text: "fixture-reply".into(),
+                    },
+                )),
                 ..Default::default()
             },
             Some(Payload::ReadHistory(read)) => {

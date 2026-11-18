@@ -32,13 +32,13 @@ def test_gx04_native_question_answers_recover_without_replay(phase, fault, scena
             scenario.model.plan("question", hold=True)
             paired_device.send(session, "synthetic question", delivery="enqueue-after-run")
             wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=15, process=scenario.native)
-        batches = paired_device.call("questions", "--session", session)["batches"]
+        batches = paired_device.call("session", "question", "list", "--session", session)["batches"]
         assert len(batches) == 1 and batches[0]["answerable"]
         batch = batches[0]
         assert batch["phase"] == ("QUESTION_OPEN" if phase == "open" else "QUESTION_CONTINUED")
         answer = scenario.directory / "gx-question-answer.json"
         answer.write_text(json.dumps({"answers":[{"id":"q1", "selected":["Yes"]}]}))
-        args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-question-answer"]
+        args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-question-answer"]
         assert scenario.request("gx-arm-question-counter", config={"phase":phase})["armed"]
         before = scenario.request("gx-question-count")["count"]
         if fault == "journal":
@@ -51,7 +51,7 @@ def test_gx04_native_question_answers_recover_without_replay(phase, fault, scena
         assert scenario.request("gx-question-count")["count"] == before + 1
         if fault == "journal":
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-            pending = paired_device.call("commands-pending")["commands"]
+            pending = paired_device.call("operation", "list")["pending_commands"]
             assert len(pending) == 1
             request, receipt = pending[0]["request_id"], None
         else:
@@ -60,7 +60,7 @@ def test_gx04_native_question_answers_recover_without_replay(phase, fault, scena
             expected = "QUESTION_SETTLED" if phase == "open" else "QUESTION_REPLY_QUEUED"
             assert receipt["question_receipt"]["phase"] == expected
             request = receipt["request_id"]
-            with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+            with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
                 assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
         if phase == "open":
             assert scenario.request("question-result-remote-fixture", sessionId=session) == {"selected":"Yes", "pending":False}
@@ -71,7 +71,7 @@ def test_gx04_native_question_answers_recover_without_replay(phase, fault, scena
         scenario.start_native()
         assert scenario.request("gx-arm-question-counter", config={"phase":phase})["armed"]
         assert scenario.request("gx-question-count")["count"] == before + 1
-        code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+        code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
         stage("recovered", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
         if fault == "journal":
             assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"

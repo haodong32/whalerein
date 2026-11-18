@@ -72,6 +72,6 @@ def test_offline_host_does_not_lock_a_legitimate_invitation(scenario):
     # locked out by an outage.
     scenario.start_plugin()
     device = Device(scenario.directory, namespace="offline-recovery")
-    identity = device.call("pair", invitation["pairingUri"])
+    identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     assert identity["device_id"]
     assert device.hosts(), "paired device cannot list its host"

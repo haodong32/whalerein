@@ -78,15 +78,18 @@ def test_existing_host_finish_cannot_reactivate_after_host_revoke(drop_fenced, s
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
-        device.call('pair', invitation(other.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
+        device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host))
         # A repeated Host revoke must fence a re-pair started after the first one.
         assert other.request('gx-revoke-host-grant', deviceId=device.identity['device_id'])['revoked']
         assert counts(device) == 1
         secondary_uri = invitation(other.host)
         armed.set()
         if drop_fenced: lose_fenced.set()
-        process = subprocess.Popen([str(ROOT/'target/debug/whalerein'),'--json','--yes','--data-dir',str(device.directory/'client'),'pair',secondary_uri],cwd=ROOT,env={**os.environ,'WHALEREIN_SECRET_BACKEND':'file:'+str(device.directory/'secrets'),'WHALEREIN_LOG':'error'},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        process = subprocess.Popen(device.args("host", "connect", "--invite-stdin", "--yes"), cwd=ROOT, env=device.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process.stdin.write(secondary_uri)
+        process.stdin.close()
+        process.stdin = None
         assert entered.wait(20)
         assert other.request('gx-revoke-host-grant', deviceId=device.identity['device_id'])['revoked']
         assert counts(device) == 1
@@ -103,7 +106,7 @@ def test_existing_host_finish_cannot_reactivate_after_host_revoke(drop_fenced, s
         assert live == 1
         assert process.returncode != 0
         assert scenario.host in {row['host_id'] for row in device.hosts()}
-        renewed = device.call('pair', invitation(other.host))
+        renewed = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host))
         assert renewed['host_id'] == other.host and counts(device) == 2
     finally:
         release.set()

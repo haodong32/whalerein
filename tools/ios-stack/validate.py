@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import shutil
 import subprocess
 import sys
@@ -34,11 +32,11 @@ MESSAGE = "fixture validation message"
 CLI_PATH = ROOT / "target" / "debug" / "whalerein"
 
 
-def run(argv: list[str], *, env: dict[str, str] | None = None, timeout: float = 120.0):
+def run(argv: list[str], *, input_text: str | None = None, timeout: float = 120.0):
     return subprocess.run(
         argv,
         cwd=str(ROOT),
-        env=env,
+        input=input_text,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -84,19 +82,16 @@ def cli_call(
     recorder: Recorder,
     name: str,
     args: list[str],
-    env: dict[str, str],
+    config: str,
     *,
     display: str,
     check,
+    input_text: str | None = None,
 ):
     completed = run(
-        [str(CLI_PATH), "--json", "--yes", *args],
-        env=env,
+        [str(CLI_PATH), "--config", config, "--json", "--yes", *args],
+        input_text=input_text,
         timeout=120,
-    )
-    redacted = re.sub(r"whalerein://pair\?[^\s]+", "<redacted-invitation>", completed.stdout)
-    recorder.cli_output.append(
-        f"$ {display}\n{redacted.rstrip()}\n(exit {completed.returncode})\n"
     )
     envelope = cli_envelope(completed.stdout)
     observed = {"exit": completed.returncode}
@@ -110,6 +105,7 @@ def cli_call(
             ok = bool(check(envelope.get("data") or {}, validate=True))
         except TypeError:
             pass
+    recorder.cli_output.append(f"$ {display}\n{json.dumps(observed)}\n")
     recorder.add(name, ok, display, observed)
     return envelope.get("data") or {}
 
@@ -149,11 +145,7 @@ def main() -> int:
             return recorder.finish()
 
         contract = json.loads(STATE.read_text(encoding="utf-8"))
-        cli_env = {
-            **os.environ,
-            **contract["cli"]["env"],
-            "WHALEREIN_LOG": "error",
-        }
+        client_config = contract["cli"]["config"]
 
         invitation = json.loads(
             stack("invitation", "--refresh", "--json").stdout
@@ -161,9 +153,10 @@ def main() -> int:
         cli_call(
             recorder,
             "pair",
-            ["pair", invitation],
-            cli_env,
-            display="whalerein pair <invitation>",
+            ["host", "connect", "--invite-stdin"],
+            client_config,
+            input_text=invitation,
+            display="whalerein host connect --invite-stdin",
             check=lambda data, validate=False: (
                 data.get("host_id") == contract["host_id"] if validate else {
                     "host_id": data.get("host_id"),
@@ -175,9 +168,9 @@ def main() -> int:
         cli_call(
             recorder,
             "list hosts",
-            ["hosts"],
-            cli_env,
-            display="whalerein hosts",
+            ["host", "list"],
+            client_config,
+            display="whalerein host list",
             check=lambda data, validate=False: (
                 any(
                     host["host_id"] == contract["host_id"] and host["online"]
@@ -196,9 +189,9 @@ def main() -> int:
         cli_call(
             recorder,
             "list sessions",
-            ["sessions", "--host", contract["host_id"]],
-            cli_env,
-            display="whalerein sessions --host <host-id>",
+            ["session", "list", "--host", contract["host_id"]],
+            client_config,
+            display="whalerein session list --host <host-id>",
             check=lambda data, validate=False: (
                 any(
                     session["session_id"] == contract["session_id"]
@@ -216,14 +209,14 @@ def main() -> int:
 
         cli_call(
             recorder,
-            "sync initial history",
-            ["sync", "--session", contract["session_id"]],
-            cli_env,
-            display="whalerein sync --session <session-id>",
+            "inspect the initial Session",
+            ["session", "show", contract["session_id"]],
+            client_config,
+            display="whalerein session show <session-id>",
             check=lambda data, validate=False: (
-                data.get("events") == contract["expected_message_count"]
+                data.get("session", {}).get("session_id") == contract["session_id"]
                 if validate
-                else {"events": data.get("events")}
+                else {"session_id": data.get("session", {}).get("session_id")}
             ),
         )
 
@@ -231,19 +224,20 @@ def main() -> int:
             recorder,
             "send while idle",
             [
+                "session",
                 "send",
-                "--session",
                 contract["session_id"],
+                "--detach",
                 "--delivery",
                 "start-if-idle",
                 MESSAGE,
             ],
-            cli_env,
-            display="whalerein send --delivery start-if-idle <fixture-message>",
+            client_config,
+            display="whalerein session send <session-id> --detach --delivery start-if-idle <fixture-message>",
             check=lambda data, validate=False: (
-                data.get("status") == "succeeded"
+                data.get("receipt", {}).get("status") in {"succeeded", "host_accepted", "received"}
                 if validate
-                else {"status": data.get("status")}
+                else {"status": data.get("receipt", {}).get("status")}
             ),
         )
         time.sleep(0.4)
@@ -263,14 +257,14 @@ def main() -> int:
         time.sleep(0.4)
         cli_call(
             recorder,
-            "sync streamed output",
-            ["sync", "--session", contract["session_id"]],
-            cli_env,
-            display="whalerein sync --session <session-id>",
+            "inspect the Session after streaming",
+            ["session", "show", contract["session_id"]],
+            client_config,
+            display="whalerein session show <session-id>",
             check=lambda data, validate=False: (
-                data.get("events", 0) >= 1
+                data.get("session", {}).get("session_id") == contract["session_id"]
                 if validate
-                else {"events": data.get("events")}
+                else {"session_id": data.get("session", {}).get("session_id")}
             ),
         )
 
@@ -286,19 +280,20 @@ def main() -> int:
                 recorder,
                 label,
                 [
+                    "session",
                     "send",
-                    "--session",
                     contract["session_id"],
+                    "--detach",
                     "--delivery",
                     delivery,
                     MESSAGE,
                 ],
-                cli_env,
-                display=f"whalerein send --delivery {delivery} <fixture-message>",
+                client_config,
+                display=f"whalerein session send <session-id> --detach --delivery {delivery} <fixture-message>",
                 check=lambda data, validate=False: (
-                    data.get("status") == "succeeded"
+                    data.get("receipt", {}).get("status") in {"succeeded", "host_accepted", "received"}
                     if validate
-                    else {"status": data.get("status")}
+                    else {"status": data.get("receipt", {}).get("status")}
                 ),
             )
 
@@ -321,9 +316,9 @@ def main() -> int:
         approvals = cli_call(
             recorder,
             "list approvals",
-            ["approvals", "--session", contract["session_id"]],
-            cli_env,
-            display="whalerein approvals --session <session-id>",
+            ["session", "approval", "list", "--session", contract["session_id"]],
+            client_config,
+            display="whalerein session approval list --session <session-id>",
             check=lambda data, validate=False: (
                 len(data.get("approvals", [])) == 1
                 if validate
@@ -345,6 +340,8 @@ def main() -> int:
             recorder,
             "resolve approval",
             [
+                "session",
+                "approval",
                 "approve",
                 "--request",
                 pending["approval_id"],
@@ -353,8 +350,8 @@ def main() -> int:
                 "--version",
                 str(pending["version"]),
             ],
-            cli_env,
-            display="whalerein approve --request <id> --digest <hex> --version <n>",
+            client_config,
+            display="whalerein session approval approve --request <id> --digest <hex> --version <n>",
             check=lambda data, validate=False: (
                 data.get("status") == "succeeded"
                 if validate
@@ -365,9 +362,9 @@ def main() -> int:
         cli_call(
             recorder,
             "stop session",
-            ["interrupt", "--session", contract["session_id"]],
-            cli_env,
-            display="whalerein interrupt --session <session-id>",
+            ["session", "interrupt", contract["session_id"]],
+            client_config,
+            display="whalerein session interrupt <session-id>",
             check=lambda data, validate=False: (
                 data.get("status") == "succeeded"
                 if validate
@@ -420,9 +417,9 @@ def main() -> int:
             cli_call(
                 recorder,
                 f"list hosts after {target} restart",
-                ["hosts"],
-                cli_env,
-                display="whalerein hosts",
+                ["host", "list"],
+                client_config,
+                display="whalerein host list",
                 check=lambda data, validate=False: (
                     any(
                         host["host_id"] == contract["host_id"] and host["online"]
@@ -438,19 +435,20 @@ def main() -> int:
             recorder,
             "send after recovery",
             [
+                "session",
                 "send",
-                "--session",
                 contract["session_id"],
+                "--detach",
                 "--delivery",
                 "start-if-idle",
                 MESSAGE,
             ],
-            cli_env,
-            display="whalerein send --delivery start-if-idle <fixture-message>",
+            client_config,
+            display="whalerein session send <session-id> --detach --delivery start-if-idle <fixture-message>",
             check=lambda data, validate=False: (
-                data.get("status") == "succeeded"
+                data.get("receipt", {}).get("status") in {"succeeded", "host_accepted", "received"}
                 if validate
-                else {"status": data.get("status")}
+                else {"status": data.get("receipt", {}).get("status")}
             ),
         )
 

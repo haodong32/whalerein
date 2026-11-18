@@ -2,7 +2,8 @@
 
 import pytest
 
-from journey_helpers import restart_plugin, wait_online
+from environment import wait
+from journey_helpers import restart_plugin
 
 pytestmark = pytest.mark.chain
 
@@ -25,39 +26,40 @@ def _messages_with(watcher, needle):
 
 
 @pytest.mark.description(
-    "When the Host connection restarts, an attached tail reconnects without replaying committed history and receives exactly one copy of the next turn."
+    "When the Host connection restarts, an attached watcher reconnects without replaying committed history and receives exactly one copy of the next turn."
 )
-def test_reconnect_does_not_replay_committed_history(scenario, paired_device, session_id):
-    paired_device.send(session_id, "baseline history fixture")
-    paired_device.sync(session_id)
-    tail = paired_device.start_watch(
-        "tail", "--session", session_id, "--timeout", "60"
-    )
+def test_reconnect_does_not_replay_committed_history(scenario, paired_client, session_id):
+    paired_client.call("session", "send", session_id, "baseline history fixture", "--detach")
+    paired_client.call("session", "show", session_id)
+    watcher = paired_client.watch("session", "watch", session_id, "--timeout", "60")
     try:
-        tail.wait(
+        watcher.wait(
             lambda value: value.get("data", {}).get("event", {}).get("type")
             == "state",
             timeout=25,
         )
         restart_plugin(scenario)
-        wait_online(paired_device, scenario.host, timeout=45)
-        paired_device.send(session_id, "after reconnect fixture")
-        tail.wait(
-            lambda value: value.get("data", {}).get("event", {}).get("type")
-            == "message"
-            and any(
-                "after reconnect fixture" in block.get("text", "")
-                for block in value["data"]["event"].get("blocks", [])
-            ),
+
+        def host_online():
+            code, value = paired_client.invoke("host", "list")
+            return code == 0 and any(
+                row["host_id"] == scenario.host and row["online"]
+                for row in value["data"]["hosts"]
+            )
+
+        wait(host_online, timeout=45)
+        paired_client.call("session", "send", session_id, "after reconnect fixture", "--detach")
+        watcher.wait(
+            lambda _: len(_messages_with(watcher, "after reconnect fixture")) >= 2,
             timeout=45,
         )
     finally:
-        tail.close()
-    assert not _messages_with(tail, "baseline history fixture"), (
+        watcher.close()
+    assert not _messages_with(watcher, "baseline history fixture"), (
         "the reconnected watch must not replay committed history: "
-        f"{_messages_with(tail, 'baseline history fixture')}"
+        f"{_messages_with(watcher, 'baseline history fixture')}"
     )
-    messages = _messages_with(tail, "after reconnect fixture")
+    messages = _messages_with(watcher, "after reconnect fixture")
     message_ids = [message["message_id"] for message in messages]
     assert len(message_ids) == len(set(message_ids)), (
         "a committed message id was delivered more than once across reconnect: "

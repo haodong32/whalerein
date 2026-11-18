@@ -17,9 +17,9 @@ the versioned wire messages are decoded inside `access`, `cache` and `sync` and
 converted at those boundaries, so consumers never construct protocol types. A
 session operation takes an explicit `SessionKey(host_id, session_id)`; there is
 no ambient Host scope on a `Core`.
-Callers resolve a key once with `session_key` (unqualified, rejected when the
-authorized listing cannot prove uniqueness) or `scoped_session_key` (explicit
-Host, checked against the current Access listing), then pass that value to every
+Callers resolve a key once with `operation_session_key`, passing an explicit
+Host where provided. Without one, Core uses the selected ready Host or a single
+eligible Host from a complete listing. Callers pass the resolved key to each
 session operation. An operation re-checks that the key's Host is still locally
 authorized before any I/O, so a stale or substituted key fails closed rather
 than routing a request to another Host. Delivery choices and question phases are
@@ -37,9 +37,8 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
 | `access` | HTTPS and device MQTT, including opaque fragmentation. |
 | `diagnostics` | Bounded redacted operation history and exports. |
-| `profiles` | Local profile registry, selection and cross-process activation. |
-| `account` | Validated account-service descriptors and opaque account binding. |
-| `configuration` | Client-environment TOML, built-in catalog, resolution, typed writes, scoped trust and legacy import. |
+| `account` | Provider device authorization, verified Cloud account scope, and serialized token sessions. |
+| `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
 
 `api/core.rs` owns the client facade. Its unit tests live in `api/core/`,
 while `observation/` owns session observation and `api/watch.rs` keeps only the
@@ -47,143 +46,63 @@ shared key/history helpers and the thin CLI-facing adapter used by existing
 callers. Observation tests live with the module and in `api/tail_tests.rs`. Facade tests are grouped by cache, command recovery, pairing,
 diagnostics and approval/revocation behavior, with shared setup in `test_support.rs`.
 
-### Profiles and activation
+### Client instance
 
-A profile is one local state directory with one device identity and one service
-authority. Standalone profiles keep the historical flat layout in place. Managed
-profiles live under `profiles/<opaque-id>/`, so moving or renaming a profile
-directory is unsupported: the device identity secret is keyed by the canonical
-profile path, and cache provenance binds the database to that directory.
+CLI and mobile each select a configuration path and open Core with
+`Core::open(path, secret_store)`. CLI defaults to
+`~/.whalerein/config.toml`. A native mobile client can create or update
+its sandbox file through `Core::write_config`. Core validates only the file
+it receives. Both platforms use the same versioned TOML contract.
 
-`profiles.json` holds non-secret metadata: schema, revision, activation
-generation, the active profile, and each profile's name, mode, service
-description and optional opaque account binding. It is installed with an
-atomic temp-and-rename write after the previous write is durable. A corrupt,
-unknown-schema or future registry is a hard configuration error; Core never
-resets it. The legacy layout is recognized by the existing config, cache,
-revocation, pending and lock artifacts, and by the profile-scoped identity
-secret; it stays at the data-directory root and is never reinterpreted as
-account-managed.
+```toml
+version = 1
+service = "whalerein_cloud"
+data_dir = "./cloud"
+```
 
-A managed profile whose state directory is missing, symlinked or not a plain
-directory is a hard configuration error. Core refuses to recreate it, because a
-replacement directory would silently mint a new device identity and lose the
-existing pins, cache provenance and pending recovery. Legacy state is likewise
-kept in place and never moved.
+The Cloud service defaults to official production. Developers can select
+`cloud_environment = "local"` or `"staging"`. Cloud API and issuer
+origins use the baked-in service catalog. The local environment requires the
+platform's mkcert root. Standalone uses `service = "standalone"` and learns
+the regional endpoint and Host identity during invitation pairing. A
+Standalone configuration can select a PEM CA through
+`standalone_ca_certificate`. Core resolves relative data and CA paths against
+the selected configuration file's directory.
 
-A fresh directory has no profile. Its ordinary account entry selects official
-production, but invitation pairing remains available and Core constructs no
-account client. Account descriptors are metadata only until the feasibility
-gates pass; official presets cannot override endpoints, and a custom descriptor
-must provide distinct HTTPS (or loopback test) API, issuer and optional Access
-origins plus a public native client identifier.
+An open validates the file and any existing instance manifest without creating
+state. Login and connection initialize a fresh data directory when needed.
+The manifest binds a random instance ID to the service authority. The runtime
+stores regional configuration, Host pins, cached data and operations in the
+instance's `state/` directory. Device identity, transport credentials, cache
+keys, native account tokens and sensitive handshake material use
+instance-scoped SecretStore keys. Different directories create independent
+instances. A directory containing pre-cutover state or incompatible authority
+requires a fresh `data_dir`. Settle outstanding operations with the preceding
+client before switching.
 
-Every open `Core` holds a shared OS activation lock. The shared lease is acquired
-before the active selection is resolved, so an open either observes a switch that
-already completed or holds the lease that prevents a later one; it never opens a
-selection the lease does not cover. A profile switch takes the exclusive form and
-fails with `conflict` while any client process is running, so a long watch or
-in-flight operation stops old traffic before the new selection is published. The
-lock is released on crash; there is no daemon or owner record. A switch preserves
-pending journals and never deletes local profile state. An older binary ignores
-the registry, so managed selections report a rollback warning and downgrade
-requires stopping those clients.
+### Cloud account and pairing
 
-### Client environment configuration
+Cloud account sign-in uses the provider's device authorization flow. Core
+validates the issuer and API resource using the chosen service. The Cloud
+account API verifies the provider-issued token and its native application
+registration and returns the account subject and workspace. Core records that
+binding in the manifest before saving credentials. An instance accepts only
+that verified account and workspace on subsequent sign-in and refresh. Account
+session changes serialize through a local OS-released lock. Logout ends the
+account session. The regional Device grant independently governs regional
+access.
 
-Core owns the complete client-environment configuration contract; CLI and
-adapters pass typed values and never parse TOML. The canonical catalog and
-corpus live in `contracts/client-environment/` and are embedded in the binary
-with `include_str!`; the Host package ships byte-identical generated copies.
-
-Exactly one file is selected: an explicit `--config`/`config_file` path, then
-`WHALEREIN_CONFIG`, then `~/.whalerein/config.toml`. There is no current-directory
-search and no merge. A missing default is initialized atomically on ordinary
-startup only when no legacy state is detected; `show`, `check`, help and import
-preview opens never write. An explicit or environment-selected missing file
-fails as `missing_config`. The revision is `sha256:<hex>` of the exact file
-bytes.
-
-The document is strict version-1 TOML: `version`, optional `environment`, and
-`[environments.<name>]` entries with `label`, `mode`, account fields and `tls`.
-Built-in names `local`, `staging` and `production` come from the catalog and may
-be specialized only by label and trust; any other field is
-`authority_override`. Custom names follow the shared identifier rule. Managed
-route keys, credential-shaped fields and unknown fields fail as `unknown_field`;
-an unknown, missing or future version is rejected without rewriting the file.
-Validation runs in the contract order so Rust and Node report the same first
-stable error.
-
-Resolution is invocation override, then the file default, then `production`.
-The override is ephemeral and never persists; an unknown name fails as
-`unknown_environment` instead of falling back. Each resolution carries its
-selection source (`invocation`, `file`, `default`) and definition source
-(`builtin`, `file`), plus field provenance for `config show/check`. Validation
-is offline; `live_readiness` is always `not_checked`, so a valid file never
-claims connectivity.
-
-Updates use typed patches only: set or clear the default, upsert a custom
-environment, specialize a built-in label/trust, or remove a custom environment.
-Callers supply the expected revision. Core takes `<canonical-config>.lock.sqlite`
-(SQLite `BEGIN IMMEDIATE`, table `whalerein_config_lock`), rechecks the canonical
-target and current revision, applies the patch while preserving untouched
-comments and keys, revalidates, and replaces the file atomically (temp file,
-fsync, rename, directory fsync). A stale revision or retargeted symlink is
-`revision_conflict` with the current revision and the caller draft retained.
-External editors do not take the lock; a change detected before commit is a
-revision conflict, not a transaction.
-
-TLS trust is resolved per selected environment: the platform store, the fixed
-per-user mkcert root (built-in `local` only), or an explicit `ca_file` resolved
-against the configuration parent with one `~` expansion. Resolution returns
-public PEM and a scope; it never installs a certificate, copies a CA key, runs a
-shell helper, or mutates a process-global TLS store.
-
-#### Environment-scoped identities
-
-`profiles.json` records `ProfileRecord.environment`, the stable `authority`
-fingerprint of the definition the identity was created for (labels excluded),
-and `active_by_environment`, which selects one identity inside a named
-environment. The global `active` record remains for legacy and downgrade; a
-configuration file never selects or overrides an identity. A registry without
-these fields infers the environment from the recorded service; an unknown value
-is preserved.
-
-An identity belongs to exactly one environment. Resolving an environment returns
-its selected identity, or `None` without creating one. Explicit creation adds at
-most one deterministic profile and never writes an environment-scoped
-activation. Additional identities use `add_environment_profile`; activation is
-only through `use_profile_in_environment`, which refuses a profile from another
-environment and reuses the existing exclusive activation lease. A recorded
-authority that no longer matches the resolved definition fails as
-`authority_override`; the only rebind path is an explicit new profile. Identity
-state directories, SecretStore keys and cache provenance are never moved or
-rekeyed by configuration changes.
-
-#### Legacy adoption
-
-`detect_legacy` and `preview_import` read legacy state without writing: flat Core
-`config.json`, Core profile registries, evaluated Cordis managed/Standalone
-profiles, and the unmerged generated local-environment prototype. Preview
-returns a deterministic `preview_id`, a status (`ready`, `retain_only`,
-`blocked`, `conflict`), proposed environments and typed retained references
-(state paths, profile ids, credential namespaces, secret slots, pending
-journals, trust files). It never emits literal tokens or secret values.
-
-`commit_import` reuses the same sidecar lock, rechecks source and target
-revisions, validates the rendered TOML before publishing, then advances a 0600
-non-secret journal at `<canonical-config>.import-journal.json` through
-`previewed`/`prepared`/`published`/`activated`/`complete`. `recover_import`
-returns `not_imported`, `imported` or `conflict` and never overwrites a newer
-target. Import never mints identity, moves or rewrites a profile directory,
-writes credentials, or activates a profile; activation stays an explicit
-profile operation. The completed journal is the adoption marker.
-
-The Cloud-generated `environment.json` descriptor is no longer a configuration
-source. `WHALEREIN_LOCAL_ENVIRONMENT`, the `LocalEnvironment` loader and the
-Host descriptor path are removed; built-in `local` authority comes only from
-the catalog. The old document is still recognized read-only by import so
-existing state can be adopted by reference.
+Cloud pairing reserves an operation before requesting its portable
+authorization. Core verifies the returned scope and checks the Host key
+from the Noise handshake against the authorized key. Access authenticates the
+signed grant and waits for Host confirmation. Core saves the regional
+configuration and selected Host after that confirmation. It retains sensitive
+pairing material in SecretStore so recovery can reconstruct the original
+HELLO or repeat the exact FINISH. Recovery requests fresh authorization for
+the same scope and operation ID. Bootstrap authorization expires separately
+from the regional Device grant. The instance retains the authorized regional
+origin and Host pin. During a Cloud outage, Access still enforces the grant
+for that exact target.
 
 ### Session keys
 
@@ -225,25 +144,21 @@ reconciles the source history head and current state every five seconds; a lost
 final notification can therefore recover without subsequent event traffic.
 A cold-cache snapshot is committed locally without being reported as new output;
 only changes after the synchronized cut and later live updates are delivered.
-An explicit `sync` remains the way to read and count committed history, so
-`tail --once` does not exit on the oldest replayed message; it forces a fresh
-snapshot and reports the complete committed count even when the cursor is
-current.
+A one-shot `session watch` forces a fresh snapshot and reports the complete
+committed count even when the cursor is current.
 A reconnect or a `BatchOutcome::Gap` recovers the missed committed messages and
 delivers each unseen message identity exactly once, deduplicated against what
 this viewer already printed. The same dedupe prevents a replayed batch or a
 snapshot that overlaps live output from printing a message twice.
-One device profile owns one active observation. It holds an OS-released profile
-lease, so a second `tail` fails deterministically with `conflict` instead of
-silently replacing the first subscription; `send`, `wait` and other commands do
-not take that lease. Closing or replacing an observation stops its recovery,
-staging and scoped delivery but does not cancel a separate answer command.
+One client instance owns one active observation. The observation holds an
+OS-released lease. A competing watch fails with `conflict` while send and wait
+remain available. Closing or replacing an observation stops its recovery,
+staging and scoped delivery while a separate answer command can continue.
 
 Interrupt follows an accepted stop to its terminal receipt, as send does. An
 accepted stop without terminal confirmation is reported as unknown, and a
 terminal failure as an error; neither claims that the Agent stopped. An
-interrupted attempt end is visible tail output, so `tail --once` reports the
-stop instead of timing out with no output. Fork
+interrupted Attempt end is visible to a one-shot session watcher. Fork
 reports the confirmed child working directory, or an explicit reason why that
 second read failed, while keeping the successful fork identity.
 
@@ -285,27 +200,24 @@ Failure to retain a pending pairing identity cannot be reported as a saved
 snapshot merely because the command snapshot succeeded.
 
 Confirmed global revocation removes any retained pairing FINISH credential after
-saving only its redacted identity. The profile also retains an opaque revocation
+saving only its redacted identity. The instance retains an opaque revocation
 epoch after transient cleanup markers are removed. Pairing captures this epoch
 before HELLO and checks it under admission both before retaining FINISH and before
 installing credentials; a late result from a prior epoch cannot overwrite a newer
-pairing. A pending record bound to the same completed pre-epoch marker is migrated
-under admission; unproven records are not assigned a later epoch. Stop older local
-clients before relying on the epoch: older binaries do not check it.
-
+pairing.
 Before sending pairing FINISH, Core stores the exact confirmed request and Host
 pin in SecretStore. Its locally generated random transport credential is bound by
-hash into the Noise payload. `resume_pairing()` reuses that request after response
-loss or restart, verifies the reply binding and commits local credentials/config.
-It never switches endpoint, Host pin or device key to recover another operation.
-Successful completion removes the pending secret; explicit forget removes it too.
+hash into the Noise payload. `operation recover` reuses the original request after
+response loss or restart, checks the endpoint, Host pin and Device key, and
+commits the verified regional credentials. Core removes the pending material
+after the receipt and selected Host are durable. Explicit forget also removes
+the pending material.
 
 Pairing persists the Noise-authenticated Host fingerprint. Fresh channels check
 that pin after Noise message 2 and before sending the device's message 3. A key
 mismatch keeps pairing, credentials and recovery metadata intact; it never implies
-revocation. Legacy profiles without a pin can inspect diagnostics or revoke, but
-must explicitly revoke and pair again before opening a channel. Core never silently
-replaces a missing or changed pin.
+revocation. Missing or changed pins require verification before Core opens a
+channel.
 
 Before the first control HTTP submission, Core durably records its Access URL,
 Host/device, confirmed Host fingerprint, request ID and command ID as an uncertain
@@ -316,14 +228,10 @@ process restart retain it. `pending_commands()` exposes recovery identities and
 `recover_pending_command(request_id)` reads the outcome over a fresh authenticated
 channel without submitting another control. Recovery refuses a different device
 or Access endpoint/Host fingerprint and rejects mismatched request identities.
-Legacy journal rows lacking routing identity are retained but cannot be
-automatically attributed to a Host.
 
-Pairing creates the cache encryption key under the profile identity lock before
-publishing paired configuration. Legacy first-use key creation uses the same
-profile lock; SQLite schema inspection and migration run in one write transaction
-so concurrent Core instances do not race ALTERs. A per-instance mutex alone is
-not a profile-wide initialization guard.
+Pairing creates the cache encryption key under the instance identity lock
+before publishing regional state. SQLite schema inspection and updates run in
+one write transaction so concurrent Core processes serialize initialization.
 
 Send waits through `received`/`host_accepted` command-result replies until a
 terminal outcome or timeout. An accepted receipt is not confirmed execution.
@@ -360,10 +268,10 @@ Message content, tool parameters, drafts, credentials, invitation tokens and
 private keys are excluded.
 
 
-The storage and wire formats are unchanged by the explicit-key cutover. A
-profile written by the new binary reopens under the previous binary (verified
-with a synthetic post-cutover fixture read through the pre-cutover API), so a
-stopped-client rollback keeps identity, pins, drafts and command intents.
+Use a fresh instance for the cutover. Its identity, pins and operation history
+belong to that instance. Preserve the previous data directory and credentials
+for the preceding release, and recover uncertain operations with the release
+that submitted them.
 
 A cache is rebuildable local state; pairing lives in configuration and the
 `SecretStore`. A missing or replaced cache key and a non-SQLite cache file are

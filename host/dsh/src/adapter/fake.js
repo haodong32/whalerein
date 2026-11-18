@@ -564,9 +564,9 @@ export class FakeDshAdapter extends DshAdapter {
       // a later read can prove which model the source actually used.
       session.lastUsedModel = session.modelSelection ?? { ...this.#defaultModel }
       session.modelSelection = null
-      this.emit(sessionId, { type: 'user/message', kind: 'output', data: { text: message } })
+      this.emit(sessionId, { type: 'user/message', kind: 'output', data: { text: message, messageId } })
       if (this.behavior.emitOutputOnMessage) {
-        this.emit(sessionId, { type: 'assistant/message', kind: 'output', data: { text: message } })
+        this.emit(sessionId, { type: 'assistant/message', kind: 'output', data: { text: message, messageId } })
       }
       if (this.behavior.longRunning) {
         this.emit(sessionId, { type: 'turn/start', kind: 'session_state', data: { running: true } })
@@ -588,6 +588,14 @@ export class FakeDshAdapter extends DshAdapter {
       this.logger?.info('dsh_message_sent', { session: sessionId })
       return { messageId, deliveryId: messageId }
     })
+  }
+
+  async readMessageReply(sessionId, messageId) {
+    const snapshot = await this.getSessionSnapshot(sessionId)
+    const reply = snapshot.events.find(event =>
+      event.type === 'assistant/message' && event.data?.messageId === messageId)
+    if (!reply) return { state: 'MESSAGE_REPLY_PENDING' }
+    return { state: 'MESSAGE_REPLY_COMMITTED', attempt_id: String(reply.dshSeq), text: reply.data.text }
   }
 
   async interrupt(sessionId) {

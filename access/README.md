@@ -114,8 +114,8 @@ Important constraints and indexes:
 - `requests (expires_at)` index for body-clearing cleanup.
 
 Presence remains broker-derived. No users, subscriptions or payment records
-are stored. Only `mode: standalone` is supported; other mode values fail startup.
-External account mode and its public integration protocol are later work.
+are stored. Standalone is the default. External account mode validates signed
+Host and Device authorization against the configured issuer and region.
 
 Cleanup runs every `cleanup.interval`:
 
@@ -144,7 +144,7 @@ Configuration summary:
 
 | Key | Meaning |
 |---|---|
-| `mode` | `standalone` (default); external accounts are not implemented |
+| `mode` | `standalone` (default) or `external` with configured trust and region |
 | `listen` / `internal_listen` | public and internal listener addresses |
 | `public_url` | public Access URL used in pairing URIs |
 | `database_url` | PostgreSQL DSN |
@@ -227,6 +227,9 @@ POST   /v1/requests/{request_id}/heartbeat
 DELETE /v1/devices/{device_id}
 POST   /v1/hosts/{host_id}/devices/{device_id}/revocation
 POST   /v1/enrollments/hosts
+POST   /v1/enrollments/devices/pairing
+GET    /v1/enrollments/hosts/{host_id}/devices/{device_id}
+POST   /v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation
 GET    /v1/enrollments/hosts/{host_id}
 GET    /v1/operations/{operation_id}
 ```
@@ -421,7 +424,7 @@ itself does not terminate client MQTT TLS.
 4. After Host authorization, Access atomically consumes the invitation, writes
    identity/credential/grant state, saves a token-free completion receipt and queues
    generation-bound COMMIT. Only confirmed Host activation completes pairing.
-5. If the response is lost, run `whalerein pair-resume` with the same data directory
+5. If the response is lost, run `whalerein operation recover <id>` with the same data directory
    and SecretStore. It replays the original confirmed FINISH, not a new pairing.
    Access requires the same request and a live, unexpired grant generation.
 

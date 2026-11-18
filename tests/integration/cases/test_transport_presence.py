@@ -128,7 +128,7 @@ def test_broker_reconnect_window_queues_and_recovers(scenario, paired_device):
 
     def submit():
         outcome["send"] = paired_device.invoke(
-            "send", "--session", session, "reconnect window message", success=False
+            'session', 'send', session, "reconnect window message", "--detach", success=False
         )
 
     thread = threading.Thread(target=submit, daemon=True)
@@ -180,7 +180,7 @@ def test_connected_but_unready_host_is_not_online(scenario):
         device = Device(scenario.directory, "unready-client")
         started = time.monotonic()
         code, values = device.invoke(
-            "pair", invitation["pairingUri"], success=False
+            'host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"], success=False
         )
         # The refusal must come from the presence gate, not from waiting for a
         # host that will never answer the forwarded HELLO.
@@ -200,7 +200,7 @@ def test_publish_before_disconnect_is_not_reported_delivered(scenario, paired_de
     before = _effects(scenario)
     _kill(scenario.plugin)
     code, values = paired_device.invoke(
-        "send", "--session", session, "killed host message", success=False
+        'session', 'send', session, "killed host message", "--detach", success=False
     )
     last = values[-1]
     assert not (
@@ -208,7 +208,7 @@ def test_publish_before_disconnect_is_not_reported_delivered(scenario, paired_de
     ), "a command published into a disconnecting host was reported as delivered"
     wait(lambda: paired_device.hosts()[0]["online"] is False, timeout=30)
     code, values = paired_device.invoke(
-        "send", "--session", session, "offline host message", success=False
+        'session', 'send', session, "offline host message", "--detach", success=False
     )
     assert code != 0
     assert values[-1]["error"]["code"] == "host_offline", values[-1]
@@ -219,12 +219,12 @@ def test_publish_before_disconnect_is_not_reported_delivered(scenario, paired_de
     "After the Host MQTT connection drops, the CLI reports the host as offline instead of connected."
 )
 def test_disconnect_state_is_user_visible(scenario, paired_device):
-    assert paired_device.call("hosts")["hosts"][0]["online"] is True
+    assert paired_device.call('host', 'list')["hosts"][0]["online"] is True
     _kill(scenario.plugin)
     wait(lambda: paired_device.hosts()[0]["online"] is False, timeout=30)
     session = scenario.dsh.create_session()
     code, values = paired_device.invoke(
-        "send", "--session", session, "disconnected state", success=False
+        'session', 'send', session, "disconnected state", "--detach", success=False
     )
     assert code != 0
     assert values[-1]["error"]["code"] == "host_offline"
@@ -267,15 +267,16 @@ def test_two_host_presence_fanout_and_scoped_revocation(scenario, paired_device)
         invitation = http(
             "/v1/pairing/invitations", {"hostId": second_host}, scenario.admin
         )
-        paired_device.call("pair", invitation["pairingUri"])
+        paired_device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
         online = {
             row["host_id"]: row["online"] for row in paired_device.hosts()
         }
         assert online.get(scenario.host) is True and online.get(second_host) is True
 
         device_id = paired_device.identity["device_id"]
-        session = _start_probe(["device", device_id, paired_device.transport_token()])
-        assert _read_line(session) == "device ready"
+        with scenario.fixture_bearer(paired_device) as token:
+            session = _start_probe(["device", device_id, token])
+            assert _read_line(session) == "device ready"
         session.communicate(timeout=20)
         assert session.returncode == 0
         wait(
@@ -294,7 +295,7 @@ def test_two_host_presence_fanout_and_scoped_revocation(scenario, paired_device)
         )
         assert paired_device.sessions(second_host) == []
         code, values = paired_device.invoke(
-            "sessions", "--host", scenario.host, success=False
+            'session', 'list', "--host", scenario.host, success=False
         )
         assert code != 0
         assert values[-1]["error"]["code"] in (

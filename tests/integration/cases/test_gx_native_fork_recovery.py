@@ -31,14 +31,14 @@ def test_gx04_native_fork_recovers_without_replay(fault, scenario, paired_device
     else:
         assert scenario.request("gx-drop-next-command-success")["armed"]
     stage("fork")
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     stage("forked", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     assert scenario.request("gx-fork-count")["count"] == before + 1
     after_sessions = {row["session_id"] for row in paired_device.sessions(scenario.host)}
     assert len(after_sessions - before_sessions) == 1
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-        pending = paired_device.call("commands-pending")["commands"]
+        pending = paired_device.call("operation", "list")["pending_commands"]
         assert len(pending) == 1
         request, receipt = pending[0]["request_id"], None
     else:
@@ -47,14 +47,14 @@ def test_gx04_native_fork_recovers_without_replay(fault, scenario, paired_device
         assert receipt["lifecycle_receipt"]["parent_session_id"] == parent
         assert receipt["lifecycle_receipt"]["session_id"] in after_sessions - before_sessions
         request = receipt["request_id"]
-        with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+        with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
             assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (request,)).rowcount == 1
     stage("restart")
     scenario.native.close()
     scenario.start_native()
     assert scenario.request("gx-arm-fork-counter")["armed"]
     assert scenario.request("gx-fork-count")["count"] == before + 1
-    code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+    code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
     if fault == "journal":
         assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
     else:

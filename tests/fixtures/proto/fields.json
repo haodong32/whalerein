@@ -270,6 +270,28 @@
         "number": 4
       }
     ],
+    "MessageReplyState": [
+      {
+        "name": "MESSAGE_REPLY_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "MESSAGE_REPLY_PENDING",
+        "number": 1
+      },
+      {
+        "name": "MESSAGE_REPLY_COMMITTED",
+        "number": 2
+      },
+      {
+        "name": "MESSAGE_REPLY_INPUT_REQUIRED",
+        "number": 3
+      },
+      {
+        "name": "MESSAGE_REPLY_UNCERTAIN",
+        "number": 4
+      }
+    ],
     "MessageRole": [
       {
         "name": "MESSAGE_ROLE_UNSPECIFIED",
@@ -2180,6 +2202,46 @@
         }
       ]
     },
+    "MessageReply": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "messageId",
+          "name": "message_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.MessageReplyState"
+        },
+        {
+          "json_name": "attemptId",
+          "name": "attempt_id",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "MessageUpsert": {
       "fields": [
         {
@@ -3442,6 +3504,24 @@
         }
       ]
     },
+    "ReadMessageReply": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "messageId",
+          "name": "message_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "ReadPendingQueue": {
       "fields": [
         {
@@ -3604,6 +3684,15 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.UnwatchSession"
+        },
+        {
+          "json_name": "readMessageReply",
+          "name": "read_message_reply",
+          "number": 15,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReadMessageReply"
         },
         {
           "json_name": "getHostCapabilities",
@@ -4004,6 +4093,15 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionSummary"
+        },
+        {
+          "json_name": "messageReply",
+          "name": "message_reply",
+          "number": 15,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.MessageReply"
         },
         {
           "json_name": "hostCapabilities",

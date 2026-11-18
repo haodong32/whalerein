@@ -13,15 +13,6 @@ def carry_invitation(scenario, host):
     return http('/v1/pairing/invitations', {'hostId': host}, scenario.admin)['pairingUri']
 
 
-def device_env(device):
-    """The same environment `Device.invoke` uses, for a process we control."""
-    return {
-        **os.environ,
-        'WHALEREIN_SECRET_BACKEND': 'file:' + str(device.directory / 'secrets'),
-        'WHALEREIN_LOG': 'error',
-    }
-
-
 def companion(scenario):
     directory = scenario.directory / 'second-native'
     directory.mkdir()
@@ -100,12 +91,13 @@ def test_interrupted_commit_leaves_original_grant_and_recovers(scenario, paired_
         other.start_native()
         holder = hold_device_fence(schema, device_id)
         try:
-            command = [str(ROOT / 'target/debug/whalerein'), '--json', '--yes',
-                       '--data-dir', str(device.directory / 'client'),
-                       'pair', carry_invitation(scenario, other.host)]
             attempt = subprocess.Popen(
-                command, cwd=ROOT, env=device_env(device),
+                device.args("host", "connect", "--invite-stdin", "--yes"),
+                cwd=ROOT, env=device.env(), stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            attempt.stdin.write(carry_invitation(scenario, other.host))
+            attempt.stdin.close()
+            attempt.stdin = None
             # The commit is parked on the fence, so no second grant can exist yet.
             wait(lambda: attempt.poll() is None, timeout=10)
             assert live_grants(schema, device_id) == 1
@@ -124,12 +116,12 @@ def test_interrupted_commit_leaves_original_grant_and_recovers(scenario, paired_
         # restart. Recovery needs explicit operator revocation and a fresh
         # pairing, which is what the wire guide documents.
         code, envelopes = device.invoke(
-            'pair', carry_invitation(scenario, other.host), success=False)
+            'host', 'connect', '--invite-stdin', '--yes', stdin_text=carry_invitation(scenario, other.host), success=False)
         assert code != 0 and envelopes[-1]['error']['code'] == 'forbidden'
         other.close()
         other.start_native()
         code, envelopes = device.invoke(
-            'pair', carry_invitation(scenario, other.host), success=False)
+            'host', 'connect', '--invite-stdin', '--yes', stdin_text=carry_invitation(scenario, other.host), success=False)
         assert code != 0 and envelopes[-1]['error']['code'] == 'forbidden'
     finally:
         other.close()

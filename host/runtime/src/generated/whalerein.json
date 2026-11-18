@@ -770,6 +770,7 @@
                     "watch_session",
                     "refresh_watches",
                     "unwatch_session",
+                    "read_message_reply",
                     "get_host_capabilities",
                     "list_models",
                     "read_session_model",
@@ -840,6 +841,10 @@
                 "unwatch_session": {
                   "type": "UnwatchSession",
                   "id": 14
+                },
+                "read_message_reply": {
+                  "type": "ReadMessageReply",
+                  "id": 15
                 },
                 "get_host_capabilities": {
                   "type": "GetHostCapabilities",
@@ -917,6 +922,7 @@
                     "watch_ready",
                     "watch_states",
                     "session_info",
+                    "message_reply",
                     "host_capabilities",
                     "model_catalog",
                     "session_model",
@@ -972,6 +978,10 @@
                 "session_info": {
                   "type": "SessionSummary",
                   "id": 14
+                },
+                "message_reply": {
+                  "type": "MessageReply",
+                  "id": 15
                 },
                 "host_capabilities": {
                   "type": "HostCapabilities",
@@ -2453,6 +2463,51 @@
                 },
                 "snapshot": {
                   "type": "bool",
+                  "id": 5
+                }
+              }
+            },
+            "ReadMessageReply": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "message_id": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "MessageReplyState": {
+              "values": {
+                "MESSAGE_REPLY_STATE_UNSPECIFIED": 0,
+                "MESSAGE_REPLY_PENDING": 1,
+                "MESSAGE_REPLY_COMMITTED": 2,
+                "MESSAGE_REPLY_INPUT_REQUIRED": 3,
+                "MESSAGE_REPLY_UNCERTAIN": 4
+              }
+            },
+            "MessageReply": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "message_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "state": {
+                  "type": "MessageReplyState",
+                  "id": 3
+                },
+                "attempt_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "text": {
+                  "type": "string",
                   "id": 5
                 }
               }

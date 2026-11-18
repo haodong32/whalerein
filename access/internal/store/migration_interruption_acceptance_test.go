@@ -85,7 +85,7 @@ func TestMigrationSingleProcessUpgradeAndRepeatedStartup(t *testing.T) {
 	e02ApplyOlderSchema(t, ctx, raw, fixture)
 	older := store.NewWithPool(fixture)
 	e02SeedOlderBusinessState(t, ctx, older)
-	before := e02ReadIdentity(t, ctx, fixture, older)
+	before := e02ReadIdentity(t, ctx, fixture, older, false)
 	e02AssertOlderLedger(t, ctx, fixture)
 
 	opened, err := store.Open(ctx, db.DSN)
@@ -98,7 +98,7 @@ func TestMigrationSingleProcessUpgradeAndRepeatedStartup(t *testing.T) {
 	}
 	e02AssertCompleteLedger(t, ctx, fixture)
 	e02AssertUpgradeObjects(t, ctx, fixture)
-	if after := e02ReadIdentity(t, ctx, fixture, opened); !reflect.DeepEqual(before, after) {
+	if after := e02ReadIdentity(t, ctx, fixture, opened, true); !reflect.DeepEqual(before, after) {
 		t.Fatalf("migration changed business identity:\nbefore=%+v\nafter=%+v", before, after)
 	}
 
@@ -117,7 +117,7 @@ func TestMigrationSingleProcessUpgradeAndRepeatedStartup(t *testing.T) {
 	if rows := e02LedgerRows(t, ctx, fixture); !reflect.DeepEqual(complete, rows) {
 		t.Fatalf("repeated startup changed the migration ledger:\nfirst=%v\nsecond=%v", complete, rows)
 	}
-	if after := e02ReadIdentity(t, ctx, fixture, second); !reflect.DeepEqual(before, after) {
+	if after := e02ReadIdentity(t, ctx, fixture, second, true); !reflect.DeepEqual(before, after) {
 		t.Fatalf("repeated startup changed business identity:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
@@ -133,7 +133,7 @@ func TestMigrationInterruptionPreservesAtomicUpgrade(t *testing.T) {
 	e02ApplyOlderSchema(t, ctx, raw, fixture)
 	older := store.NewWithPool(fixture)
 	e02SeedOlderBusinessState(t, ctx, older)
-	before := e02ReadIdentity(t, ctx, fixture, older)
+	before := e02ReadIdentity(t, ctx, fixture, older, false)
 	e02AssertOlderLedger(t, ctx, fixture)
 	if e02RelationExists(t, ctx, fixture, "host_signature_replays") {
 		t.Fatal("older fixture unexpectedly contains migration 013 state")
@@ -218,13 +218,13 @@ func TestMigrationInterruptionPreservesAtomicUpgrade(t *testing.T) {
 		t.Fatalf("open completed store: %v", err)
 	}
 	defer completed.Close()
-	if after := e02ReadIdentity(t, ctx, fixture, completed); !reflect.DeepEqual(before, after) {
+	if after := e02ReadIdentity(t, ctx, fixture, completed, true); !reflect.DeepEqual(before, after) {
 		t.Fatalf("interrupted upgrade changed business identity:\nbefore=%+v\nafter=%+v", before, after)
 	}
 	if err := completed.Migrate(ctx); err != nil {
 		t.Fatalf("startup after recovered upgrade: %v", err)
 	}
-	if after := e02ReadIdentity(t, ctx, fixture, completed); !reflect.DeepEqual(before, after) {
+	if after := e02ReadIdentity(t, ctx, fixture, completed, true); !reflect.DeepEqual(before, after) {
 		t.Fatalf("startup after recovered upgrade changed business identity:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
@@ -378,7 +378,7 @@ func e02SeedOlderBusinessState(t *testing.T, ctx context.Context, s *store.Store
 	}
 }
 
-func e02ReadIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s *store.Store) e02Identity {
+func e02ReadIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s *store.Store, upgraded bool) e02Identity {
 	t.Helper()
 	host, err := s.GetHost(ctx, e02HostID)
 	if err != nil {
@@ -388,13 +388,32 @@ func e02ReadIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s *s
 	if err != nil {
 		t.Fatalf("read device after migration: %v", err)
 	}
-	credential, err := s.ActiveDeviceByAuthHash(ctx, []byte(e02AuthHash))
-	if err != nil {
-		t.Fatalf("read credential after migration: %v", err)
-	}
-	active, err := s.HasActiveGrant(ctx, e02HostID, e02DeviceID)
-	if err != nil {
-		t.Fatalf("read grant after migration: %v", err)
+	var credentialDevice string
+	var active bool
+	if upgraded {
+		credential, err := s.ActiveDeviceByAuthHash(ctx, []byte(e02AuthHash))
+		if err != nil {
+			t.Fatalf("read credential after migration: %v", err)
+		}
+		credentialDevice = credential.DeviceID
+		active, err = s.HasActiveGrant(ctx, e02HostID, e02DeviceID)
+		if err != nil {
+			t.Fatalf("read grant after migration: %v", err)
+		}
+	} else {
+		// The historical schema has no grant_authority view. Read the same
+		// credential and active-grant facts through its original tables.
+		if err := pool.QueryRow(ctx, `
+			SELECT c.device_id, EXISTS (
+				SELECT 1 FROM grants g
+				WHERE g.host_id = $1 AND g.device_id = c.device_id AND g.revoked_at IS NULL
+			)
+			FROM device_credentials c
+			WHERE c.auth_hash = $2
+			  AND EXISTS (SELECT 1 FROM grants g WHERE g.device_id = c.device_id AND g.revoked_at IS NULL)`,
+			e02HostID, []byte(e02AuthHash)).Scan(&credentialDevice, &active); err != nil {
+			t.Fatalf("read credential and grant before migration: %v", err)
+		}
 	}
 	var requestID, commandID, status string
 	var payloadDigest, resultBody []byte
@@ -410,7 +429,7 @@ func e02ReadIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s *s
 		HostProtocolVersion:    int32(host.ProtocolVersion),
 		DeviceID:               device.DeviceID,
 		DeviceFingerprint:      device.PublicKeyFingerprint,
-		CredentialDevice:       credential.DeviceID,
+		CredentialDevice:       credentialDevice,
 		ActiveGrant:            active,
 		RequestID:              requestID,
 		CommandID:              commandID,

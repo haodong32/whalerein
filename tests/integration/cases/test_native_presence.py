@@ -16,13 +16,7 @@ pytestmark = pytest.mark.__getattr__("native-dsh")
 
 
 def _answer_process(scenario, paired_device, session, batch, answer):
-    return subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
-        "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"],
-        "--input", str(answer), "--command-id", "presence-kill-fixture",
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-                       "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.Popen(paired_device.args("session", 'question', 'answer', "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "presence-kill-fixture"), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def test_native_question_simulated_presence_releases_claim(scenario, paired_device):
@@ -30,7 +24,7 @@ def test_native_question_simulated_presence_releases_claim(scenario, paired_devi
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     scenario.request("question-hold-native-claim")
@@ -52,9 +46,9 @@ def test_native_question_simulated_presence_releases_claim(scenario, paired_devi
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=20, process=scenario.native)
         assert time.monotonic() - started < 25
         assert scenario.request("question-restore-native-claim")["restored"]
-        current = paired_device.call("questions", "--session", session)["batches"][0]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert current["batch_id"] == batch["batch_id"]
-        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+        receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer), "--command-id", "presence-after-kill")
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -74,7 +68,7 @@ def test_native_question_abrupt_kill_releases_by_http_lease(scenario, paired_dev
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     scenario.request("question-hold-native-claim")
@@ -90,9 +84,9 @@ def test_native_question_abrupt_kill_releases_by_http_lease(scenario, paired_dev
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=15, process=scenario.native)
         assert time.monotonic() - started < 15
         assert scenario.request("question-restore-native-claim")["restored"]
-        current = paired_device.call("questions", "--session", session)["batches"][0]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert current["batch_id"] == batch["batch_id"]
-        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+        receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer), "--command-id", "lease-after-kill")
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -109,7 +103,7 @@ def _fixture_batch(scenario, paired_device):
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     return session, batch, answer

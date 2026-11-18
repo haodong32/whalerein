@@ -276,7 +276,8 @@ message PairingClaim {
   PairingPhase phase = 3;
   bytes noise_message = 4;
   string device_id = 5;
-  // Present on AUTHORIZE and COMMIT to identify the staged device key.
+  // On AUTHORIZE and COMMIT, identifies the staged device key. On Cloud HELLO
+  // and FINISH, names the authorized Device Noise key for peer verification.
   bytes device_public_key = 6;
   int64 expires_at_unix_ms = 7;
   // Access-assigned grant incarnation, populated on COMMIT.
@@ -411,6 +412,7 @@ message RequestPayload {
     WatchSession watch_session = 12;
     RefreshWatches refresh_watches = 13;
     UnwatchSession unwatch_session = 14;
+    ReadMessageReply read_message_reply = 15;
     GetHostCapabilities get_host_capabilities = 190;
     ListModels list_models = 200;
     ReadSessionModel read_session_model = 201;
@@ -443,6 +445,7 @@ message ResponsePayload {
     WatchReady watch_ready = 12;
     WatchStates watch_states = 13;
     SessionSummary session_info = 14;
+    MessageReply message_reply = 15;
     HostCapabilities host_capabilities = 190;
     ModelCatalog model_catalog = 200;
     SessionModel session_model = 201;
@@ -795,6 +798,22 @@ message HistoryRead {
 message HistoryPage {
   SessionKey session = 1; HistoryBatch batch = 2;
   string cut_cursor = 3; bool complete = 4; bool snapshot = 5;
+}
+// Resolve committed Source evidence for a single submitted message.
+message ReadMessageReply { string session_id = 1; string message_id = 2; }
+enum MessageReplyState {
+  MESSAGE_REPLY_STATE_UNSPECIFIED = 0;
+  MESSAGE_REPLY_PENDING = 1;
+  MESSAGE_REPLY_COMMITTED = 2;
+  MESSAGE_REPLY_INPUT_REQUIRED = 3;
+  MESSAGE_REPLY_UNCERTAIN = 4;
+}
+message MessageReply {
+  string session_id = 1;
+  string message_id = 2;
+  MessageReplyState state = 3;
+  string attempt_id = 4;
+  string text = 5;
 }
 message AttemptStarted {}
 message AttemptEnded { AttemptOutcome outcome = 1; }

@@ -83,9 +83,7 @@ def test_published_command_survives_offline_retry(scenario, paired_device):
 
     def submit():
         outcome["send"] = paired_device.invoke(
-            "send",
-            "--session",
-            session,
+            "session", "send", session, "--detach",
             "published before disconnect fixture",
             success=False,
         )
@@ -136,7 +134,7 @@ def test_published_command_survives_offline_retry(scenario, paired_device):
     marker.unlink(missing_ok=True)
     scenario.start_plugin()
     wait_online(paired_device, scenario.host)
-    recovered = paired_device.call("command-recover", "--request", request_id)
+    recovered = paired_device.call("operation", "recover", request_id)["receipt"]
     assert recovered["command_id"] == command_id
     assert recovered["status"] == "succeeded"
     assert recovered.get("message_id")
@@ -167,9 +165,7 @@ def test_ambiguous_publish_recovers_authenticated_outcome(scenario, paired_devic
         marker = scenario.directory / "plugin" / "gx-hold-command-results"
         marker.write_text("armed")
         code, values = paired_device.invoke(
-            "send",
-            "--session",
-            session,
+            "session", "send", session, "--detach",
             "ambiguous publish fixture",
             success=False,
         )
@@ -194,7 +190,7 @@ def test_ambiguous_publish_recovers_authenticated_outcome(scenario, paired_devic
 
         proxy.disarm()
         marker.unlink(missing_ok=True)
-        recovered = paired_device.call("command-recover", "--request", request_id)
+        recovered = paired_device.call("operation", "recover", request_id)["receipt"]
         assert recovered["command_id"] == command_id
         assert recovered["status"] == "succeeded"
         assert recovered.get("message_id")
@@ -214,9 +210,7 @@ def test_never_forwarded_request_to_offline_host_has_no_source_effect(scenario, 
     wait(lambda: host_online(paired_device, scenario.host) is False, timeout=40)
     before = effects(scenario, "sendUserMessage")
     code, values = paired_device.invoke(
-        "send",
-        "--session",
-        session,
+        "session", "send", session, "--detach",
         "known offline fixture",
         success=False,
     )

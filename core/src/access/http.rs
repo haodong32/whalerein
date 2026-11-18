@@ -275,6 +275,14 @@ impl AccessClient {
         &self,
         builder: reqwest::RequestBuilder,
     ) -> Result<T, AccessError> {
+        self.send_observing(builder, |_| {}).await
+    }
+
+    async fn send_observing<T: DeserializeOwned>(
+        &self,
+        builder: reqwest::RequestBuilder,
+        observe_headers: impl FnOnce(&reqwest::header::HeaderMap),
+    ) -> Result<T, AccessError> {
         let started = std::time::Instant::now();
         let response = builder.send().await.map_err(|error| {
             tracing::warn!(event = "http_transport_failed", trace_id = %self.trace_id, layer = "access", code = "unavailable");
@@ -287,6 +295,7 @@ impl AccessClient {
             error
         })?;
         let status = response.status().as_u16();
+        observe_headers(response.headers());
         let result = parse_response(response).await;
         if let Some(observation) = &self.transport_observation {
             match &result {
@@ -304,6 +313,19 @@ impl AccessClient {
             .send(self.request(reqwest::Method::GET, url, None))
             .await?;
         Ok(list.hosts)
+    }
+
+    pub(crate) async fn inspect_hosts(&self) -> Result<(Vec<HostInfo>, bool), AccessError> {
+        let url = self.endpoint(&["v1", "hosts"])?;
+        let mut complete = true;
+        let list: HostList = self
+            .send_observing(self.request(reqwest::Method::GET, url, None), |headers| {
+                if let Some(truncated) = headers.get("X-Whalerein-Hosts-Truncated") {
+                    complete = truncated == "false";
+                }
+            })
+            .await?;
+        Ok((list.hosts, complete))
     }
 
     pub async fn submit_request(
@@ -364,6 +386,35 @@ impl AccessClient {
             let builder = self
                 .request_with_auth(reqwest::Method::POST, url.clone(), None, false)
                 .json(claim);
+            match self.send(builder).await {
+                Err(error) if error.is_retryable_transport() && attempt < 2 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+        Err(AccessError::timeout())
+    }
+
+    pub async fn pair_cloud_claim(
+        &self,
+        authorization: &whalerein_proto::ExternalAuthorization,
+        claim: &PairingClaimRequest,
+    ) -> Result<PairingClaimResponse, AccessError> {
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            authorization: &'a whalerein_proto::ExternalAuthorization,
+            claim: &'a PairingClaimRequest,
+        }
+        let url = self.endpoint(&["v1", "enrollments", "devices", "pairing"])?;
+        let request = Request {
+            authorization,
+            claim,
+        };
+        for attempt in 0..3 {
+            let builder = self
+                .request_with_auth(reqwest::Method::POST, url.clone(), None, false)
+                .json(&request);
             match self.send(builder).await {
                 Err(error) if error.is_retryable_transport() && attempt < 2 => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -496,6 +547,30 @@ pub fn status_to_error_code(status: StatusCode) -> Option<ErrorCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn regional_host_list_never_treats_explicit_truncation_as_complete() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (header, expected) in [("true", false), ("false", true), ("invalid", false)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                assert_ne!(stream.read(&mut request).await.unwrap(), 0);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\nX-Whalerein-Hosts-Truncated: {header}\r\n\r\n{{}}"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+            let address = Url::parse(&format!("http://{address}")).unwrap();
+            let client = AccessClient::new(address, None).unwrap();
+            let (_, complete) = client.inspect_hosts().await.unwrap();
+            assert_eq!(complete, expected);
+            server.await.unwrap();
+        }
+    }
 
     #[test]
     fn rejects_invalid_base_urls() {

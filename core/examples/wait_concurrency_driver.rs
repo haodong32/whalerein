@@ -3,23 +3,27 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use whalerein_core::api::KeyringSecretStore;
 use whalerein_core::api::{Cancellation, ObservationInterests, SessionEventPayload};
 use whalerein_core::conversation::ViewUpdate;
-use whalerein_core::{Core, CoreOptions, FileSecretStore};
+use whalerein_core::Core;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 5 {
         std::process::exit(2);
     }
-    let core = Core::new(CoreOptions {
-        data_dir: PathBuf::from(&args[1]),
-        secrets: Arc::new(FileSecretStore::new(PathBuf::from(&args[2]))),
-    })
+    let core = Core::open(
+        &PathBuf::from(&args[1]),
+        Arc::new(KeyringSecretStore::new("whalerein")),
+    )
     .expect("fixture Core");
     let watch_core = core.clone();
-    let watch_key = core.session_key(&args[3]).await.expect("fixture session");
+    let watch_key = core
+        .operation_session_key(None, &args[2])
+        .await
+        .expect("fixture session");
     let first_key = watch_key.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let resets = Arc::new(AtomicUsize::new(0));
@@ -52,12 +56,14 @@ async fn main() {
     let first_core = core.clone();
     let mut first = tokio::spawn(async move { first_core.wait_session(&first_key, 20000).await });
     let second_core = core.clone();
-    let second_session = args[4].clone();
+    let second_session = args[3].clone();
     let mut second = tokio::spawn(async move {
-        let key = second_core.session_key(&second_session).await?;
+        let key = second_core
+            .operation_session_key(None, &second_session)
+            .await?;
         second_core.wait_session(&key, 10000).await
     });
-    let release = PathBuf::from(&args[5]);
+    let release = PathBuf::from(&args[4]);
     let watch_ready = tokio::time::timeout(Duration::from_secs(8), ready_rx)
         .await
         .is_ok_and(|result| result.is_ok());

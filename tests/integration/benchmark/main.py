@@ -14,6 +14,7 @@ import select
 import signal
 import socket
 import subprocess
+import tempfile
 import sys
 import time
 import traceback
@@ -23,7 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, "/workspace/tests/integration")
 
-from environment import ROOT, Process, Scenario, wait
+from client_environment import CutoverClient, isolated_keyring
+from environment import ROOT, Process, Scenario, http, wait
 
 REPORTS = Path("/reports")
 CONFIG = json.loads(os.environ.get("WHALEREIN_BENCHMARK_CONFIG", "{}"))
@@ -409,33 +411,30 @@ def sql(statement):
 
 
 def execute(run, fixture):
-    # Two paired devices, both through the real CLI: the observer holds the live
-    # watch and the sender performs the measured send. A workload that reuses one
-    # device for both would have the send displace the observer's live delivery.
-    observer_device = fixture.scenario.pair()
-    sender_device = pair_device(fixture.scenario, "sender")
-    dsh = fixture.scenario.dsh.process
-    for index in range(WARMUP + ATTEMPTS):
-        phase = "warmup" if index < WARMUP else "measured"
-        attempt = Attempt(len(run.attempts), phase)
-        session = fixture.scenario.dsh.create_session()
-        attempt.session = session
-        observer_device.sync(session)
-        measure(observer_device, sender_device, fixture, dsh, session, attempt)
-        run.attempts.append(attempt.record(fixture.scenario.host))
+    # The observer and sender are independent client instances. Keep the
+    # keyring outside the report directory so credentials are never exported.
+    with tempfile.TemporaryDirectory(prefix="whalerein-bench-keyring-") as directory:
+        with isolated_keyring(Path(directory)) as keyring:
+            observer_device = pair_device(fixture.scenario, "observer", keyring)
+            sender_device = pair_device(fixture.scenario, "sender", keyring)
+            dsh = fixture.scenario.dsh.process
+            for index in range(WARMUP + ATTEMPTS):
+                phase = "warmup" if index < WARMUP else "measured"
+                attempt = Attempt(len(run.attempts), phase)
+                session = fixture.scenario.dsh.create_session()
+                attempt.session = session
+                observer_device.call(
+                    "session", "show", session, "--host", fixture.scenario.host
+                )
+                measure(observer_device, sender_device, fixture, dsh, session, attempt)
+                run.attempts.append(attempt.record(fixture.scenario.host))
 
 
-def pair_device(scenario, name):
-    """Pair an additional device with its own client directory and secret store."""
-    from environment import Device, http
-
-    directory = scenario.directory / name
-    directory.mkdir(exist_ok=True)
-    device = Device(directory)
-    invitation = http(
-        "/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin
-    )
-    device.identity = device.call("pair", invitation["pairingUri"])
+def pair_device(scenario, name, keyring):
+    """Connect one fresh Standalone instance using a stdin invitation."""
+    device = CutoverClient(scenario.directory, name, keyring)
+    invite = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
+    device.call("host", "connect", "--invite-stdin", "--yes", input_text=invite["pairingUri"])
     return device
 
 
@@ -494,30 +493,22 @@ class Observer:
         self.finals = 0
         self.updates = []
         self.content = None
+        self.host = scenario.host
+        self.session = session
+        self.attached = False
         self.process = Process(
-            [
-                str(ROOT / "target/debug/whalerein"),
-                "--json",
-                "--data-dir",
-                str(device.directory / "client"),
-                "tail",
-                "--session",
-                session,
-                "--timeout",
+            device.args(
+                "session", "watch", session, "--host", self.host, "--timeout",
                 str(int(DEADLINE_MS / 1000) + 60),
-            ],
+            ),
             scenario.directory,
-            {
-                "WHALEREIN_SECRET_BACKEND": "file:" + str(device.directory / "secrets"),
-                "WHALEREIN_LOG": "info",
-                "NO_COLOR": "1",
-            },
+            {**device.env, "WHALEREIN_LOG": "error", "NO_COLOR": "1"},
             control=True,
         )
 
     def ready(self):
-        self.process.output.seek(0)
-        return "watch_ready" in self.process.output.read()
+        self.read(0.05)
+        return self.attached
 
     def arm(self):
         self.read(0.05)
@@ -527,21 +518,10 @@ class Observer:
         """Invoke the measured send on its own paired device."""
         self.dispatch_at = time.monotonic()
         self.send = subprocess.Popen(
-            [
-                str(ROOT / "target/debug/whalerein"),
-                "--json",
-                "--yes",
-                "--data-dir",
-                str(device.directory / "client"),
-                "send",
-                "--session",
-                session,
-                SEND_TEXT,
-            ],
+            device.args("session", "send", session, SEND_TEXT, "--detach", "--host", self.host),
             cwd=ROOT,
             env={
-                **os.environ,
-                "WHALEREIN_SECRET_BACKEND": "file:" + str(device.directory / "secrets"),
+                **device.env,
                 "WHALEREIN_LOG": "error",
                 "NO_COLOR": "1",
             },
@@ -576,8 +556,16 @@ class Observer:
                 value = json.loads(line)
             except ValueError:
                 continue
+            if value.get("schema") != "whalerein/client/v1" or value.get("command") != "session.watch":
+                continue
             event = value.get("data", {}).get("event")
-            if isinstance(event, dict):
+            if not isinstance(event, dict) or event.get("session") != {
+                "host_id": self.host, "session_id": self.session
+            }:
+                continue
+            if event.get("type") == "state":
+                self.attached = True
+            elif self.dispatch_at is not None:
                 self.observe(event)
 
     def observe(self, event):
@@ -625,6 +613,7 @@ class Observer:
     def close(self):
         if self.send is not None and self.send.poll() is None:
             self.send.kill()
+            self.send.communicate(timeout=10)
         self.process.close()
 
 

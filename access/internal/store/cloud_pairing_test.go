@@ -1,0 +1,133 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+func TestCloudDeviceGrantStatusDistinguishesAnEmptyAuthorizedScope(t *testing.T) {
+	ready := "ready"
+	for _, tc := range []struct {
+		name     string
+		state    *string
+		database error
+		expected error
+	}{
+		{"enforced grant", &ready, nil, nil},
+		{"scoped absence", nil, nil, ErrCloudGrantMissing},
+		{"unknown host scope", nil, pgx.ErrNoRows, ErrNotFound},
+		{"database unavailable", nil, errStoreUnit, errStoreUnit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeDB{t: t, queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+				if !slices.Equal(args, []any{"workspace", "host", "device"}) {
+					t.Fatal("query lost scope")
+				}
+				return syntheticRow{err: tc.database, fill: func(dest ...any) {
+					*dest[0].(**string) = tc.state
+				}}
+			}}
+			state, err := newStore(db).CloudDeviceGrantStatus(context.Background(), "workspace", "host", "device")
+			if !errors.Is(err, tc.expected) || (tc.state != nil && state != *tc.state) {
+				t.Fatalf("status = %q, error = %v", state, err)
+			}
+		})
+	}
+}
+
+func TestCloudDeviceRevocationRecordsFenceUnderHostLock(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name               string
+		grant              bool
+		begin, lock, scope error
+		record, expected   error
+		committed          bool
+	}{
+		{name: "no grant yet", committed: true},
+		{name: "existing grant", grant: true, committed: true},
+		{name: "unknown scope", scope: pgx.ErrNoRows, expected: ErrNotFound},
+		{name: "database unavailable", begin: errStoreUnit, expected: errStoreUnit},
+		{name: "lock unavailable", lock: errStoreUnit, expected: errStoreUnit},
+		{name: "scope unavailable", scope: errStoreUnit, expected: errStoreUnit},
+		{name: "write unavailable", record: errStoreUnit, expected: errStoreUnit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var locked, checked, recorded bool
+			tx := &scriptedTx{
+				queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+					if !locked || !slices.Equal(args, []any{"workspace", "host", "device"}) {
+						t.Fatal("scope was checked without its Host lock")
+					}
+					checked = true
+					return syntheticRow{err: tc.scope, fill: func(dest ...any) {
+						*dest[0].(*bool) = tc.grant
+					}}
+				},
+				execFn: func(_ context.Context, statement string, args ...any) (pgconn.CommandTag, error) {
+					if strings.Contains(statement, "pg_advisory_xact_lock") {
+						locked = true
+						return pgconn.CommandTag{}, tc.lock
+					}
+					if !checked || !slices.Equal(args, []any{"host", "device", now}) {
+						t.Fatal("revocation record lost its scope or ordering")
+					}
+					recorded = true
+					return pgconn.CommandTag{}, tc.record
+				},
+			}
+			database := &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return tx, tc.begin }}
+			grant, err := newStore(database).BeginCloudDeviceRevocation(context.Background(), "workspace", "host", "device", now)
+			if !errors.Is(err, tc.expected) || tx.committed != tc.committed ||
+				(tc.committed && (!recorded || grant != tc.grant)) {
+				t.Fatalf("grant = %v, error = %v, committed = %v", grant, err, tx.committed)
+			}
+		})
+	}
+	database := &fakeDB{t: t, execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+		if !slices.Equal(args, []any{"host", "device", now}) {
+			t.Fatal("enforcement write lost its exact scope")
+		}
+		return updateTag(1), nil
+	}}
+	if err := newStore(database).CompleteCloudDeviceRevocation(context.Background(), "host", "device", now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloudPairingCommitScopeRejectsRevokedOrSupersededIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		eligible bool
+		database error
+		expected error
+	}{
+		{"current enrollment", true, nil, nil},
+		{"inactive scope", false, nil, ErrPairingFenced},
+		{"database unavailable", false, errStoreUnit, errStoreUnit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &scriptedTx{
+				queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+					if !slices.Equal(args, []any{"host", "device", "workspace", "revision"}) {
+						t.Fatal("commit query lost scope")
+					}
+					return syntheticRow{err: tc.database, fill: func(dest ...any) {
+						*dest[0].(*bool) = tc.eligible
+					}}
+				},
+			}
+			op := &PairingOperation{CloudWorkspaceID: "workspace", CloudEnrollmentRevision: "revision"}
+			if err := verifyCloudPairing(context.Background(), tx, op, "host", "device"); !errors.Is(err, tc.expected) {
+				t.Fatalf("pairing eligibility error %v, want %v", err, tc.expected)
+			}
+		})
+	}
+}

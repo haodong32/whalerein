@@ -72,10 +72,10 @@ fn watch_fatal(error: &CoreError) -> bool {
     )
 }
 
-/// One active observation per device profile, including across processes.
+/// One active observation per client instance, including across processes.
 ///
 /// Two CLI processes share one MQTT client id, so the later connection would
-/// silently replace the earlier subscription. A profile-scoped OS lock makes
+/// silently replace the earlier subscription. An instance-scoped OS lock makes
 /// the conflict deterministic: the second observation fails with `conflict`
 /// while unrelated commands such as `send` keep working. The lock is released
 /// by the OS when the process exits, including after Ctrl-C.
@@ -85,8 +85,8 @@ struct WatchLease {
 }
 
 impl WatchLease {
-    fn acquire(profile: &std::path::Path) -> CoreResult<Self> {
-        let path = profile.join("watch.lock");
+    fn acquire(instance: &std::path::Path) -> CoreResult<Self> {
+        let path = instance.join("watch.lock");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|_| CoreError::Cache("watch lock directory is unavailable".into()))?;
@@ -112,7 +112,7 @@ impl WatchLease {
             // LOCK_EX | LOCK_NB
             if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
                 Err(CoreError::Conflict(
-                    "another watch is active for this device profile; stop it or use a separate device profile".into(),
+                    "another watch is active for this client instance; stop it or use a separate instance".into(),
                 ))
             } else {
                 Ok(Self { _file: Some(file) })
@@ -131,7 +131,7 @@ impl WatchLease {
             match file {
                 Ok(file) => Ok(Self { _file: Some(file) }),
                 Err(error) if error.raw_os_error() == Some(32) => Err(CoreError::Conflict(
-                    "another watch is active for this device profile; stop it or use a separate device profile".into(),
+                    "another watch is active for this client instance; stop it or use a separate instance".into(),
                 )),
                 Err(_) => Err(CoreError::Cache("watch lock is unavailable".into())),
             }

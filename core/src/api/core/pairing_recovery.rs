@@ -27,7 +27,7 @@ pub(super) fn pairing_admission_error(error: std::io::Error) -> CoreError {
 const MAX_PAIRING_HISTORY: usize = 32;
 
 /// Errors that close a retained FINISH: the original invitation can never be
-/// used again, so retrying `pair-resume` would loop forever.
+/// used again, so retrying `operation recover <id>` would loop forever.
 fn pairing_terminal(error: &CoreError) -> bool {
     error.pairing_closed()
         || matches!(
@@ -42,6 +42,9 @@ fn pairing_terminal(error: &CoreError) -> bool {
 impl Core {
     /// Return minimal durable records of pairings that committed but can no longer be recovered.
     pub fn pairing_history(&self) -> CoreResult<Vec<crate::api::PairingHistoryRecord>> {
+        if self.instance.is_some() && !self.options.data_dir.is_dir() {
+            return Ok(Vec::new());
+        }
         let Some(device_id) = crate::security::device::existing_device_id(
             &self.options.secrets,
             &self.options.data_dir,
@@ -329,8 +332,105 @@ impl Core {
         Ok(())
     }
 
+    pub fn pending_standalone_pairing(&self) -> CoreResult<Option<(String, String)>> {
+        if !self.options.data_dir.is_dir() {
+            return Ok(None);
+        }
+        let Some(device_id) = crate::security::device::existing_device_id(
+            &self.options.secrets,
+            &self.options.data_dir,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .load_pending_pairing(&device_id)?
+            .map(|pending| (pending.finish.claim_id, pending.config.host_id)))
+    }
+
+    pub fn has_standalone_pairing_operation(&self, operation_id: &str) -> CoreResult<bool> {
+        if !super::cloud_pairing::valid_operation_id(operation_id)
+            || self
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.cloud.is_some())
+        {
+            return Ok(false);
+        }
+        let pending = self
+            .pending_standalone_pairing()?
+            .is_some_and(|(id, _)| id == operation_id);
+        Ok(pending
+            || self
+                .options
+                .secrets
+                .load(&standalone_receipt(operation_id))?
+                .is_some())
+    }
+
+    /// Recover the exact retained invitation operation without reusing the invitation.
+    pub async fn recover_standalone_pairing(
+        &self,
+        operation_id: &str,
+    ) -> CoreResult<PairingOutcome> {
+        if !self.has_standalone_pairing_operation(operation_id)? {
+            return Err(CoreError::NotFound("Standalone pairing operation".into()));
+        }
+        let guard = self.identity_lock()?;
+        self.refresh_regional_state()?;
+        if let Some(bytes) = self
+            .options
+            .secrets
+            .load(&standalone_receipt(operation_id))?
+        {
+            let receipt: PairingOutcome = serde_json::from_slice(&bytes)
+                .map_err(|_| CoreError::Security("invalid Standalone pairing receipt".into()))?;
+            let config = self.require_config()?;
+            if config.device_id != receipt.device_id
+                || config.access_url != receipt.access_url
+                || receipt.operation_id.as_deref() != Some(operation_id)
+                || !self.inspect_regional_hosts().await?.iter().any(|host| {
+                    host.host_id == receipt.host_id && host.fingerprint == receipt.fingerprint
+                })
+            {
+                return Err(CoreError::Revoked);
+            }
+            if self
+                .pending_standalone_pairing()?
+                .is_some_and(|(id, _)| id == operation_id)
+            {
+                self.complete_standalone_pairing(&receipt)?;
+            }
+            return Ok(receipt);
+        }
+        let identity = self.device_identity_locked(&guard)?;
+        let pending = self
+            .load_pending_pairing(&identity.device_id)?
+            .filter(|pending| pending.finish.claim_id == operation_id)
+            .ok_or_else(|| CoreError::NotFound("Standalone pairing operation".into()))?;
+        self.resume_pending_pairing(pending, &identity).await
+    }
+
+    pub(super) fn complete_standalone_pairing(&self, outcome: &PairingOutcome) -> CoreResult<()> {
+        if self.instance.is_some() {
+            let id = outcome
+                .operation_id
+                .as_deref()
+                .ok_or_else(|| CoreError::Internal("pairing operation ID is unavailable".into()))?;
+            let bytes = serde_json::to_vec(outcome)
+                .map_err(|_| CoreError::Internal("could not encode pairing receipt".into()))?;
+            self.options.secrets.save(&standalone_receipt(id), &bytes)?;
+            self.set_default_host(&outcome.host_id)?;
+            self.options
+                .secrets
+                .delete(&keys::pending_pairing(&outcome.device_id))?;
+        }
+        Ok(())
+    }
+
     /// Resume a previously confirmed pairing after a lost response or restart.
     /// This reuses the original credential and FINISH, never a new device grant.
+    #[cfg(test)]
     pub async fn resume_pairing(&self) -> CoreResult<PairingOutcome> {
         let guard = self.identity_lock()?;
         let identity = self.device_identity_locked(&guard)?;
@@ -383,7 +483,7 @@ impl Core {
                 }
             }
         }
-        let ca = config::ca_pem_from_env();
+        let ca = self.ca_pem();
         let access = AccessClient::with_ca(
             Url::parse(&pending.config.access_url)
                 .map_err(|_| CoreError::Config("invalid pending endpoint".into()))?,
@@ -412,6 +512,7 @@ impl Core {
             ));
         }
         let outcome = PairingOutcome {
+            operation_id: Some(pending.finish.claim_id.clone()),
             host_id: pending.config.host_id.clone(),
             device_id: identity.device_id.clone(),
             fingerprint: pending
@@ -428,6 +529,7 @@ impl Core {
             pending.admission_marker.as_deref(),
             pending.admission_epoch.as_deref(),
         )?;
+        self.complete_standalone_pairing(&outcome)?;
         Ok(outcome)
     }
 
@@ -543,14 +645,21 @@ impl Core {
         let _ = self
             .runtime
             .set_state(&persisted.host_id, ConnectionState::Disconnected);
-        // A failed cleanup leaves an idempotent receipt, not an unpaired client.
-        let _ = self
-            .options
-            .secrets
-            .delete(&keys::pending_pairing(device_id));
+        // Configured instances retain the exact FINISH until the caller
+        // commits the receipt and default selection.
+        if self.instance.is_none() {
+            let _ = self
+                .options
+                .secrets
+                .delete(&keys::pending_pairing(device_id));
+        }
         tracing::info!(trace_id=%self.diagnostic_id(),"pairing completed");
         Ok(())
     }
+}
+
+fn standalone_receipt(operation_id: &str) -> String {
+    format!("standalone-pairing-receipt:{operation_id}")
 }
 
 #[cfg(test)]
@@ -562,6 +671,16 @@ mod tests {
     async fn interrupted_pairing() -> (tempfile::TempDir, Core, MockServer, String) {
         let dir = tempfile::tempdir().unwrap();
         let (core, _) = super::super::test_support::core(dir.path());
+        let (server, uri) = lost_finish_fixture().await;
+        assert!(core
+            .pair(&uri, |_| PairingDecision::approve())
+            .await
+            .is_err());
+        assert!(!core.is_paired());
+        (dir, core, server, uri)
+    }
+
+    async fn lost_finish_fixture() -> (MockServer, String) {
         let host = Arc::new(Mutex::new(FakeHost::new()));
         let receipt = Arc::new(Mutex::new(None::<(Vec<u8>, Vec<u8>)>));
         let server = MockServer::start(Arc::new(move |request| {
@@ -592,12 +711,42 @@ mod tests {
         let encoded: String =
             url::form_urlencoded::byte_serialize(server.url().as_str().as_bytes()).collect();
         let uri = format!("whalerein://pair?v=1&access={encoded}&host=host-1&token=one-time-token");
-        assert!(core
-            .pair(&uri, |_| PairingDecision::approve())
+        (server, uri)
+    }
+
+    #[tokio::test]
+    async fn configured_standalone_recovers_original_pairing_without_the_invitation() {
+        let (_server, uri) = lost_finish_fixture().await;
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("standalone.toml");
+        Core::write_config(
+            &file,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        let secrets = Arc::new(crate::api::MemorySecretStore::new());
+        let client = Core::open(&file, secrets.clone()).unwrap();
+        assert!(client
+            .connect_standalone(&uri, |_| PairingDecision::approve())
             .await
             .is_err());
-        assert!(!core.is_paired());
-        (dir, core, server, uri)
+        let (id, host) = client.pending_standalone_pairing().unwrap().unwrap();
+        assert!(client.default_host().unwrap().is_none());
+        let restored = Core::open(&file, secrets).unwrap();
+        assert!(restored.has_standalone_pairing_operation(&id).unwrap());
+        let outcome = restored.recover_standalone_pairing(&id).await.unwrap();
+        assert_eq!(outcome.host_id, host);
+        assert_eq!(outcome.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            restored.default_host().unwrap().as_deref(),
+            Some(host.as_str())
+        );
+        assert!(restored.pending_standalone_pairing().unwrap().is_none());
+        assert!(restored.has_standalone_pairing_operation(&id).unwrap());
+        assert_eq!(
+            restored.recover_standalone_pairing(&id).await.unwrap(),
+            outcome
+        );
     }
 
     #[tokio::test]

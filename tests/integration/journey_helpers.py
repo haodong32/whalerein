@@ -258,7 +258,7 @@ class SecondHost:
         )
 
     def pair(self, device):
-        device.call("pair", invitation(self.scenario, self.host))
+        device.pair(invitation(self.scenario, self.host))
         return self
 
     def create_session(self, session_id):
@@ -324,7 +324,7 @@ def approval_args(approval):
 
 
 def invoke_approval(device, decision, approval, success=False):
-    return device.invoke(decision, *approval_args(approval), success=success)
+    return device.invoke("session", "approval", decision, *approval_args(approval), success=success)
 
 
 def answer_question(device, session, batch, payload=None):
@@ -336,7 +336,7 @@ def answer_question(device, session, batch, payload=None):
         )
     )
     return device.call(
-        "answer",
+        "session", "question", "answer",
         "--session",
         session,
         "--batch",
@@ -381,16 +381,7 @@ def assistant_texts(values):
 
 
 def pending_commands(device):
-    return device.call("commands-pending")["commands"]
-
-
-def mark_command_unknown(device, request_id):
-    """Model a CLI that died before recording the terminal command outcome."""
-    with sqlite3.connect(device.data_dir / "cache.sqlite3") as cache:
-        changed = cache.execute(
-            "UPDATE commands SET status='unknown' WHERE request_id=?", (request_id,)
-        ).rowcount
-    assert changed == 1, "the local uncertain command record was not stored"
+    return device.call("operation", "list")["pending_commands"]
 
 
 # --- human output -----------------------------------------------------------
@@ -399,7 +390,7 @@ def mark_command_unknown(device, request_id):
 def human_invoke(device, *args, timeout=60):
     """Run one CLI command without `--json` and return its exit/stdout/stderr."""
     result = subprocess.run(
-        [str(CLI), "--data-dir", str(device.data_dir), *args],
+        [str(CLI), "--config", str(device.config_path), *args],
         cwd=ROOT,
         env=device.env(),
         capture_output=True,
@@ -493,7 +484,7 @@ def rotate_tls_certificate(scenario):
 
 def rewrite_config(device, mutate):
     """Rewrite the local pairing config through a mutation function."""
-    path = device.data_dir / "config.json"
+    path = device.data_dir / "regional.json"
     config = json.loads(path.read_text())
     mutate(config)
     path.write_text(json.dumps(config))

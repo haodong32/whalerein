@@ -66,14 +66,17 @@ def test_secondary_finish_cannot_reactivate_after_global_revoke(scenario):
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
         secondary_uri = invitation(other.host)
-        token = device.transport_token()
         armed.set()
-        process = subprocess.Popen([str(ROOT/'target/debug/whalerein'),'--json','--yes','--data-dir',str(device.directory/'client'),'pair',secondary_uri],cwd=ROOT,env={**os.environ,'WHALEREIN_SECRET_BACKEND':'file:'+str(device.directory/'secrets'),'WHALEREIN_LOG':'error'},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        process = subprocess.Popen(device.args("host", "connect", "--invite-stdin", "--yes"), cwd=ROOT, env=device.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process.stdin.write(secondary_uri)
+        process.stdin.close()
+        process.stdin = None
         assert entered.wait(20)
-        request = urllib.request.Request(f'http://127.0.0.1:18080/v1/devices/{device.identity["device_id"]}',headers={'Authorization':'Bearer '+token},method='DELETE')
-        with urllib.request.urlopen(request,timeout=10) as response: assert response.status in (200,204)
+        with scenario.fixture_bearer(device) as token:
+            request = urllib.request.Request(f'http://127.0.0.1:18080/v1/devices/{device.identity["device_id"]}',headers={'Authorization':'Bearer '+token},method='DELETE')
+            with urllib.request.urlopen(request,timeout=10) as response: assert response.status in (200,204)
         assert counts(device) == 0
         release.set()
         process.communicate(timeout=30)

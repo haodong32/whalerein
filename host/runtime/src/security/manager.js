@@ -213,7 +213,17 @@ export class SecurityManager {
   }
 
   #pairingHello({ request, claim, claimId }) {
-    if (this.#pendingPairings.has(claimId) || this.#completedPairings.has(claimId) || this.store.getPendingPeer(claimId)) {
+    const pending = this.#pendingPairings.get(claimId)
+    const approvedKey = claim.device_public_key
+    if (approvedKey?.length && approvedKey.length !== 32) throw new PluginError('invalid_argument', 'approved device key invalid')
+    const helloHash = sha256Bytes(claim.noise_message)
+    if (pending && approvedKey?.length && pending.deviceId === claim.device_id &&
+        (!request.device_id || request.device_id === pending.deviceId) &&
+        pending.tokenHash === claim.token_hash && bytesEqual(pending.helloHash, helloHash) &&
+        bytesEqual(pending.approvedKey, approvedKey)) {
+      return pending.helloResult
+    }
+    if (pending || this.#completedPairings.has(claimId) || this.store.getPendingPeer(claimId)) {
       throw new PluginError('conflict', 'claim already in progress')
     }
     if (this.#pendingPairings.size >= this.maxPending) throw new PluginError('rate_limited', 'too many pairing claims')
@@ -248,9 +258,17 @@ export class SecurityManager {
       },
       host_nonce: randomNonce(),
     })
-    const noiseMessage = noise.writeMessage(reply)
+    const helloResult = {
+      noise_message: noise.writeMessage(reply),
+      host_public_key: this.identity.publicKey,
+      host_fingerprint: this.hostFingerprint,
+      device_id: deviceId,
+    }
     this.#pendingPairings.set(claimId, {
       claimId,
+      approvedKey,
+      helloHash,
+      helloResult,
       tokenHash: claim.token_hash,
       deviceId,
       displayName: sanitizeDisplayName(hello.display_name),
@@ -260,19 +278,15 @@ export class SecurityManager {
       expiresAt: this.now() + this.pendingTtlMs,
     })
     this.logger?.info('pairing_hello', { device: deviceId, phase: 'hello' })
-    return {
-      noise_message: noiseMessage,
-      host_public_key: this.identity.publicKey,
-      host_fingerprint: this.hostFingerprint,
-      device_id: deviceId,
-    }
+    return helloResult
   }
 
   #pairingFinish({ request, claim, claimId }) {
     const staged=this.#completedPairings.get(claimId) ?? this.store.getPendingPeer(claimId)
     if (staged) {
       if (staged.deviceId!==claim.device_id || staged.tokenHash!==claim.token_hash ||
-          !bytesEqual(staged.finishHash,sha256Bytes(claim.noise_message)) || !bytesEqual(staged.authHash,claim.device_auth_hash)) {
+          !bytesEqual(staged.finishHash,sha256Bytes(claim.noise_message)) || !bytesEqual(staged.authHash,claim.device_auth_hash) ||
+          (claim.device_public_key?.length && !bytesEqual(staged.publicKey, claim.device_public_key))) {
         throw new PluginError('unauthorized','pairing retry binding mismatch')
       }
       return {device_id:staged.deviceId,device_public_key:staged.publicKey,device_auth_hash:staged.authHash,
@@ -304,6 +318,11 @@ export class SecurityManager {
     const devicePublicKey = pending.noise.remoteStaticKey
     if (!devicePublicKey || devicePublicKey.length !== 32) throw new PluginError('unauthorized', 'device key missing')
     this.#pendingPairings.delete(claimId)
+    if (pending.approvedKey?.length || claim.device_public_key?.length) {
+      if (!bytesEqual(pending.approvedKey, devicePublicKey) || !bytesEqual(claim.device_public_key, devicePublicKey)) {
+        throw new PluginError('unauthorized', 'device key does not match the approved scope')
+      }
+    }
     this.#completedPairings.set(claimId, {
       deviceId: pending.deviceId,
       displayName: pending.displayName ?? '',

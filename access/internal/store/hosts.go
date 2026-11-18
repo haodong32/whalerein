@@ -112,8 +112,8 @@ func (s *Store) ListAuthorizedHosts(ctx context.Context, deviceID string) ([]Hos
 	rows, err := s.db.Query(ctx, `
 		SELECT h.host_id, h.fingerprint, h.protocol_version, h.created_at, h.updated_at
 		FROM hosts h
-		JOIN grants g ON g.host_id = h.host_id
-		WHERE g.device_id = $1 AND g.revoked_at IS NULL
+		JOIN grant_authority g ON g.host_id = h.host_id
+		WHERE g.device_id = $1 AND g.active
 		ORDER BY h.host_id`, deviceID)
 	if err != nil {
 		return nil, fmt.Errorf("list authorized hosts: %w", err)
@@ -145,8 +145,8 @@ func (s *Store) ListAuthorizedHostsPage(ctx context.Context, deviceID string, li
 	rows, err := s.db.Query(ctx, `
 		SELECT h.host_id, h.fingerprint, h.protocol_version, h.created_at, h.updated_at
 		FROM hosts h
-		JOIN grants g ON g.host_id = h.host_id
-		WHERE g.device_id = $1 AND g.revoked_at IS NULL
+		JOIN grant_authority g ON g.host_id = h.host_id
+		WHERE g.device_id = $1 AND g.active
 		ORDER BY h.host_id
 		LIMIT $2 OFFSET $3`, deviceID, limit, offset)
 	if err != nil {
@@ -188,7 +188,12 @@ func (s *Store) ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (De
 		SELECT d.device_id, d.public_key_fingerprint, c.auth_hash, d.created_at, d.updated_at
         FROM device_credentials c JOIN devices d ON d.device_id=c.device_id
         WHERE c.auth_hash=$1
-		  AND EXISTS (SELECT 1 FROM grants g WHERE g.device_id = d.device_id AND g.revoked_at IS NULL)`,
+		  AND EXISTS (SELECT 1 FROM grant_authority g WHERE g.device_id = d.device_id AND g.active)
+		  AND NOT EXISTS (
+			SELECT 1 FROM pairing_outcomes p
+			WHERE p.device_id=d.device_id AND p.auth_hash=c.auth_hash AND octet_length(p.token_hash)=33
+			AND NOT (p.host_confirmed AND p.host_confirmation_verified AND p.commit_binding_verified)
+		  )`,
 		authHash)
 	return scanDevice(row)
 }
@@ -217,8 +222,8 @@ func (s *Store) HasActiveGrant(ctx context.Context, hostID, deviceID string) (bo
 	var exists bool
 	err := s.db.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM grants
-			WHERE host_id = $1 AND device_id = $2 AND revoked_at IS NULL
+			SELECT 1 FROM grant_authority
+			WHERE host_id = $1 AND device_id = $2 AND active
 		)`, hostID, deviceID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("check grant: %w", err)
@@ -511,9 +516,20 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	cloud := IsCloudPairingHash(tokenHash)
+	if cloud {
+		if err := lockCloudHost(ctx, tx, hostID); err != nil {
+			return false, err
+		}
+	}
 	proceed, err := verifyPairingFences(ctx, tx, operation, hostID, deviceID)
 	if err != nil || !proceed {
 		return false, err
+	}
+	if cloud {
+		if err := verifyCloudPairing(ctx, tx, operation, hostID, deviceID); err != nil {
+			return false, err
+		}
 	}
 
 	command, err := tx.Exec(ctx, `UPDATE pairing_tokens SET used_at=$2,updated_at=$2 WHERE token_hash=$1 AND host_id=$3 AND used_at IS NULL AND expires_at>$2`, tokenHash, at, hostID)
@@ -586,7 +602,7 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 	if applicationNow := time.Now().UTC(); databaseNow.Before(applicationNow) {
 		databaseNow = applicationNow
 	}
-	if !databaseNow.Before(tokenExpiry) {
+	if !databaseNow.Before(tokenExpiry) || (cloud && !databaseNow.Before(operation.CloudAuthorizationExpiry)) {
 		return false, ErrPairingInvitationExpired
 	}
 	if !databaseNow.Before(operationExpiry) || databaseNow.UnixMilli() >= notice.ExpiresAtUnixMs {
@@ -617,9 +633,9 @@ type AdmissionGrant struct {
 // stale cache entry cannot be mistaken for current authority.
 func (s *Store) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (AdmissionGrant, error) {
 	row := s.db.QueryRow(ctx, `
-		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
 		       g.revocation_generation, d.revocation_generation
-		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		WHERE g.host_id = $1 AND g.device_id = $2`, hostID, deviceID)
 	grant, err := scanAdmissionGrant(row)
 	if err != nil {
@@ -632,9 +648,9 @@ func (s *Store) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) 
 // reconciliation. Rows are ordered for deterministic tests.
 func (s *Store) ListAdmissionGrants(ctx context.Context) ([]AdmissionGrant, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
 		       g.revocation_generation, d.revocation_generation
-		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		ORDER BY g.host_id, g.device_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list admission grants: %w", err)
@@ -668,9 +684,9 @@ func scanAdmissionGrant(row interface{ Scan(...any) error }) (AdmissionGrant, er
 // projection uses it when a device connects.
 func (s *Store) ListDeviceGrants(ctx context.Context, deviceID string) ([]AdmissionGrant, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT g.host_id, g.device_id, g.revoked_at IS NULL, g.grant_generation,
+		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
 		       g.revocation_generation, d.revocation_generation
-		FROM grants g JOIN devices d ON d.device_id = g.device_id
+		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		WHERE g.device_id = $1
 		ORDER BY g.host_id`, deviceID)
 	if err != nil {

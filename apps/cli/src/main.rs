@@ -2,12 +2,11 @@
 //! stable output and exit codes only.
 //!
 //! Parsing happens here instead of `Cli::parse()` so a usage error can still
-//! produce the `whalerein/v1` envelope when `--json` appears anywhere in argv.
+//! produce the `whalerein/client/v1` envelope when `--json` appears anywhere in argv.
 //! Plain (non-JSON) invocations keep clap's own help and error text.
 
+mod account;
 mod cli;
-mod config;
-mod env;
 mod output;
 mod run;
 mod signal;
@@ -19,7 +18,7 @@ use clap::error::ErrorKind;
 use clap::Parser;
 use serde_json::json;
 
-use crate::cli::{Cli, Command};
+use crate::cli::Cli;
 use crate::output::CliOutcome;
 
 fn main() -> ExitCode {
@@ -51,18 +50,10 @@ async fn async_main() -> ExitCode {
         Ok(parsed) => parsed,
         Err(error) => {
             init_tracing();
-            return finish_parse_error(error, &args, wants_json);
+            return finish_parse_error(error, wants_json);
         }
     };
-    // Validate every environment-provided value before any command can use it.
-    let env_issue = env::validate().err();
     init_tracing();
-    if let Some(issue) = env_issue {
-        return finish(
-            wants_json,
-            CliOutcome::cli_failure("invalid_configuration", issue.message(), 2),
-        );
-    }
     let json = parsed.json;
     finish(json, run::run(parsed).await)
 }
@@ -127,7 +118,7 @@ fn exit_for(exit: u8, written: &Result<(), stream::WriteFailure>, to_stdout: boo
 
 /// Render a clap parse result. Help and version are successful local output;
 /// every other kind is an `invalid_argument` usage error (exit 2).
-fn finish_parse_error(error: clap::Error, args: &[String], json: bool) -> ExitCode {
+fn finish_parse_error(error: clap::Error, json: bool) -> ExitCode {
     let kind = error.kind();
     let text = error.to_string();
     match kind {
@@ -165,7 +156,7 @@ fn finish_parse_error(error: clap::Error, args: &[String], json: bool) -> ExitCo
             ExitCode::SUCCESS
         }
         _ => {
-            let message = usage_message(&error, args);
+            let message = usage_message(&error);
             if json {
                 return finish(
                     true,
@@ -178,52 +169,17 @@ fn finish_parse_error(error: clap::Error, args: &[String], json: bool) -> ExitCo
     }
 }
 
-/// A `--host` after a session subcommand is rejected by clap with a `-- --host`
-/// suggestion. That suggestion would send the flag as message text, so the
-/// usage error is rewritten to point at the only correct position.
-fn usage_message(error: &clap::Error, args: &[String]) -> String {
-    if misplaced_host(args) {
-        return "place --host before the command: `whalerein --host HOST_ID <command> ...`. \
-A --host placed after the command is not a global option and would otherwise be \
-read as message text."
-            .to_owned();
-    }
+fn usage_message(error: &clap::Error) -> String {
     if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
-        return "a command is required; run `whalerein --help` for usage".to_owned();
+        return "Run `whalerein --help` for usage.".to_owned();
     }
-    error.to_string().trim().to_owned()
-}
-
-fn misplaced_host(args: &[String]) -> bool {
-    let end = args
-        .iter()
-        .position(|argument| argument == "--")
-        .unwrap_or(args.len());
-    let Some((index, name)) = args[..end]
-        .iter()
-        .enumerate()
-        .find_map(|(index, argument)| {
-            Command::known_names()
-                .contains(&argument.as_str())
-                .then_some((index, argument.as_str()))
-        })
-    else {
-        return false;
-    };
-    // These subcommands own a required `--host` of their own.
-    if matches!(name, "sessions" | "models" | "session-create") {
-        return false;
-    }
-    args[index + 1..end]
-        .iter()
-        .any(|argument| argument == "--host")
+    "Invalid command or arguments. Run the command with `--help` for usage.".to_owned()
 }
 
 fn init_tracing() {
-    let filter = env::log_filter().unwrap_or_else(|_| "warn".to_owned());
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn")
         .with_writer(std::io::stderr)
-        .with_target(false);
-    let _ = subscriber.try_init();
+        .with_target(false)
+        .try_init();
 }

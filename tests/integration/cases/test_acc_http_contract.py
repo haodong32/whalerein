@@ -174,17 +174,18 @@ def test_trace_id_is_echoed_only_for_the_bounded_alphabet(scenario):
     "Unsafe or overlong resource identifiers are rejected as invalid_argument at the HTTP boundary instead of reaching SQL and failing as a 500."
 )
 def test_unbounded_resource_ids_are_rejected_at_the_boundary(scenario, paired_device):
-    token = "Bearer " + paired_device.transport_token()
-    overlong = "a" * 129
-    for method, path in [
-        ("GET", "/v1/requests/" + overlong),
-        ("GET", "/v1/requests/bad$id"),
-        ("DELETE", "/v1/devices/" + overlong),
-        ("POST", "/v1/hosts/" + overlong + "/requests"),
-    ]:
-        status, headers, body = _request(method, path, headers={"Authorization": token})
-        body = _error(status, headers, body)
-        assert status == 400 and body["code"] == "invalid_argument", (path, status, body)
+    with scenario.fixture_bearer(paired_device) as bearer:
+        token = "Bearer " + bearer
+        overlong = "a" * 129
+        for method, path in [
+            ("GET", "/v1/requests/" + overlong),
+            ("GET", "/v1/requests/bad$id"),
+            ("DELETE", "/v1/devices/" + overlong),
+            ("POST", "/v1/hosts/" + overlong + "/requests"),
+        ]:
+            status, headers, body = _request(method, path, headers={"Authorization": token})
+            body = _error(status, headers, body)
+            assert status == 400 and body["code"] == "invalid_argument", (path, status, body)
 
-    status, headers, body = _request("GET", "/v1/requests/missing-request", headers={"Authorization": token})
-    assert status == 404, (status, body)
+        status, headers, body = _request("GET", "/v1/requests/missing-request", headers={"Authorization": token})
+        assert status == 404, (status, body)

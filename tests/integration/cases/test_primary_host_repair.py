@@ -65,18 +65,19 @@ def test_primary_host_repair_preserves_other_grant(drop_finish, scenario):
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
-        device.call('pair', invitation(other.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
+        device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host))
         assert scenario.request('gx-revoke-host-grant', deviceId=device.identity['device_id'])['revoked']
         from environment import wait
         wait(lambda: scenario.host not in {row['host_id'] for row in device.hosts()},timeout=20)
         if drop_finish: allow_finish.clear()
-        code, values = device.invoke('pair', invitation(scenario.host), success=False)
+        code, values = device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host), success=False)
         if drop_finish:
             assert lost.is_set() and code != 0
             assert other.host in {row['host_id'] for row in device.hosts()}
             allow_finish.set()
-            outcome = device.call('pair-resume')
+            operation_id, _ = device.call('operation', 'list')['pending_pairing']
+            outcome = device.call('operation', 'recover', operation_id)['connection']
         else:
             assert code == 0
             outcome = values[-1]['data']
