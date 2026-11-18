@@ -691,6 +691,7 @@ def run_platform(context, runner, request, paths):
     with context.phase("execution"):
         scopes, errors = [], []
         interrupted = False
+        timed_out = False
         if parallel == 1:
             results = [containers[0].execute()]
         else:
@@ -716,7 +717,10 @@ def run_platform(context, runner, request, paths):
                 runner.progress = display
         for result, export, shard in zip(results, exports, shards, strict=True):
             interrupted |= result.returncode == 130
-            if result.returncode not in (0, 1):
+            if result.returncode == 124:
+                timed_out = True
+                errors.append("Integration execution exceeded its deadline")
+            elif result.returncode not in (0, 1):
                 errors.append("Integration execution did not finish")
             try:
                 scopes.append(_read_scope(export, shard))
@@ -728,5 +732,7 @@ def run_platform(context, runner, request, paths):
         context.record_scope(combined)
         if interrupted:
             raise KeyboardInterrupt
+        if timed_out:
+            raise VerificationError("deadline-exceeded")
         if combined["exit_code"]:
             raise VerificationError("integration-execution-failed")

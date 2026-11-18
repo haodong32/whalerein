@@ -244,7 +244,7 @@ def test_parallel_has_one_build_and_exact_cover(worktree):
         ("conflict", 1, "docker-ownership-conflict"),
         ("cleanup-failed", 1, "cleanup-failed"),
         ("interrupt", 130, "interrupted"),
-        ("timeout", 1, "integration-execution-failed"),
+        ("timeout", 1, "deadline-exceeded"),
         ("wrong-shard", 1, "integration-execution-failed"),
     ],
 )
@@ -263,6 +263,9 @@ def test_failure_facts_and_owned_cleanup(worktree, mode, expected, status):
         assert not docker.states
     if mode in {"interrupt", "timeout"}:
         assert any(case["id"] == ONE for scope in report["scopes"] for case in scope["tests"])
+    if mode == "timeout":
+        assert report["completeness"] == "incomplete"
+        assert "Integration execution exceeded its deadline" in report["scopes"][0]["errors"]
     if mode == "cleanup-failed":
         assert [case["status"] for case in report["scopes"][0]["tests"]] == ["passed", "passed"]
 
