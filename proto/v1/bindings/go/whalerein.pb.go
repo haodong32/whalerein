@@ -499,6 +499,61 @@ func (ApprovalDecision) EnumDescriptor() ([]byte, []int) {
 	return file_whalerein_proto_rawDescGZIP(), []int{6}
 }
 
+// Questions can be independently unavailable or unsupported while the rest of
+// a session observation keeps working. An absent descriptor is never an empty
+// current collection.
+type QuestionAvailability int32
+
+const (
+	QuestionAvailability_QUESTION_AVAILABILITY_UNSPECIFIED QuestionAvailability = 0
+	QuestionAvailability_QUESTION_AVAILABILITY_UNSUPPORTED QuestionAvailability = 1
+	QuestionAvailability_QUESTION_AVAILABILITY_UNAVAILABLE QuestionAvailability = 2
+	QuestionAvailability_QUESTION_AVAILABILITY_AVAILABLE   QuestionAvailability = 3
+)
+
+// Enum value maps for QuestionAvailability.
+var (
+	QuestionAvailability_name = map[int32]string{
+		0: "QUESTION_AVAILABILITY_UNSPECIFIED",
+		1: "QUESTION_AVAILABILITY_UNSUPPORTED",
+		2: "QUESTION_AVAILABILITY_UNAVAILABLE",
+		3: "QUESTION_AVAILABILITY_AVAILABLE",
+	}
+	QuestionAvailability_value = map[string]int32{
+		"QUESTION_AVAILABILITY_UNSPECIFIED": 0,
+		"QUESTION_AVAILABILITY_UNSUPPORTED": 1,
+		"QUESTION_AVAILABILITY_UNAVAILABLE": 2,
+		"QUESTION_AVAILABILITY_AVAILABLE":   3,
+	}
+)
+
+func (x QuestionAvailability) Enum() *QuestionAvailability {
+	p := new(QuestionAvailability)
+	*p = x
+	return p
+}
+
+func (x QuestionAvailability) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (QuestionAvailability) Descriptor() protoreflect.EnumDescriptor {
+	return file_whalerein_proto_enumTypes[7].Descriptor()
+}
+
+func (QuestionAvailability) Type() protoreflect.EnumType {
+	return &file_whalerein_proto_enumTypes[7]
+}
+
+func (x QuestionAvailability) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use QuestionAvailability.Descriptor instead.
+func (QuestionAvailability) EnumDescriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{7}
+}
+
 type LifecycleDisposition int32
 
 const (
@@ -540,11 +595,11 @@ func (x LifecycleDisposition) String() string {
 }
 
 func (LifecycleDisposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[7].Descriptor()
+	return file_whalerein_proto_enumTypes[8].Descriptor()
 }
 
 func (LifecycleDisposition) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[7]
+	return &file_whalerein_proto_enumTypes[8]
 }
 
 func (x LifecycleDisposition) Number() protoreflect.EnumNumber {
@@ -553,7 +608,7 @@ func (x LifecycleDisposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LifecycleDisposition.Descriptor instead.
 func (LifecycleDisposition) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{7}
+	return file_whalerein_proto_rawDescGZIP(), []int{8}
 }
 
 // Question contents are source-owned and transmitted only within the encrypted
@@ -597,11 +652,11 @@ func (x QuestionPhase) String() string {
 }
 
 func (QuestionPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[8].Descriptor()
+	return file_whalerein_proto_enumTypes[9].Descriptor()
 }
 
 func (QuestionPhase) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[8]
+	return &file_whalerein_proto_enumTypes[9]
 }
 
 func (x QuestionPhase) Number() protoreflect.EnumNumber {
@@ -610,7 +665,7 @@ func (x QuestionPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use QuestionPhase.Descriptor instead.
 func (QuestionPhase) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{8}
+	return file_whalerein_proto_rawDescGZIP(), []int{9}
 }
 
 type DeliveryMode int32
@@ -649,11 +704,11 @@ func (x DeliveryMode) String() string {
 }
 
 func (DeliveryMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[9].Descriptor()
+	return file_whalerein_proto_enumTypes[10].Descriptor()
 }
 
 func (DeliveryMode) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[9]
+	return &file_whalerein_proto_enumTypes[10]
 }
 
 func (x DeliveryMode) Number() protoreflect.EnumNumber {
@@ -662,7 +717,7 @@ func (x DeliveryMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeliveryMode.Descriptor instead.
 func (DeliveryMode) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{9}
+	return file_whalerein_proto_rawDescGZIP(), []int{10}
 }
 
 type MessageRole int32
@@ -704,11 +759,11 @@ func (x MessageRole) String() string {
 }
 
 func (MessageRole) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[10].Descriptor()
+	return file_whalerein_proto_enumTypes[11].Descriptor()
 }
 
 func (MessageRole) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[10]
+	return &file_whalerein_proto_enumTypes[11]
 }
 
 func (x MessageRole) Number() protoreflect.EnumNumber {
@@ -717,7 +772,7 @@ func (x MessageRole) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use MessageRole.Descriptor instead.
 func (MessageRole) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{10}
+	return file_whalerein_proto_rawDescGZIP(), []int{11}
 }
 
 type RunPhase int32
@@ -759,11 +814,11 @@ func (x RunPhase) String() string {
 }
 
 func (RunPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[11].Descriptor()
+	return file_whalerein_proto_enumTypes[12].Descriptor()
 }
 
 func (RunPhase) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[11]
+	return &file_whalerein_proto_enumTypes[12]
 }
 
 func (x RunPhase) Number() protoreflect.EnumNumber {
@@ -772,7 +827,7 @@ func (x RunPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RunPhase.Descriptor instead.
 func (RunPhase) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{11}
+	return file_whalerein_proto_rawDescGZIP(), []int{12}
 }
 
 type AttemptOutcome int32
@@ -814,11 +869,11 @@ func (x AttemptOutcome) String() string {
 }
 
 func (AttemptOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[12].Descriptor()
+	return file_whalerein_proto_enumTypes[13].Descriptor()
 }
 
 func (AttemptOutcome) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[12]
+	return &file_whalerein_proto_enumTypes[13]
 }
 
 func (x AttemptOutcome) Number() protoreflect.EnumNumber {
@@ -827,7 +882,7 @@ func (x AttemptOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AttemptOutcome.Descriptor instead.
 func (AttemptOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{12}
+	return file_whalerein_proto_rawDescGZIP(), []int{13}
 }
 
 type WaitReason int32
@@ -866,11 +921,11 @@ func (x WaitReason) String() string {
 }
 
 func (WaitReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[13].Descriptor()
+	return file_whalerein_proto_enumTypes[14].Descriptor()
 }
 
 func (WaitReason) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[13]
+	return &file_whalerein_proto_enumTypes[14]
 }
 
 func (x WaitReason) Number() protoreflect.EnumNumber {
@@ -879,7 +934,7 @@ func (x WaitReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WaitReason.Descriptor instead.
 func (WaitReason) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{13}
+	return file_whalerein_proto_rawDescGZIP(), []int{14}
 }
 
 type InputKind int32
@@ -918,11 +973,11 @@ func (x InputKind) String() string {
 }
 
 func (InputKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[14].Descriptor()
+	return file_whalerein_proto_enumTypes[15].Descriptor()
 }
 
 func (InputKind) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[14]
+	return &file_whalerein_proto_enumTypes[15]
 }
 
 func (x InputKind) Number() protoreflect.EnumNumber {
@@ -931,7 +986,7 @@ func (x InputKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InputKind.Descriptor instead.
 func (InputKind) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{14}
+	return file_whalerein_proto_rawDescGZIP(), []int{15}
 }
 
 type QueuePlacement int32
@@ -970,11 +1025,11 @@ func (x QueuePlacement) String() string {
 }
 
 func (QueuePlacement) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[15].Descriptor()
+	return file_whalerein_proto_enumTypes[16].Descriptor()
 }
 
 func (QueuePlacement) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[15]
+	return &file_whalerein_proto_enumTypes[16]
 }
 
 func (x QueuePlacement) Number() protoreflect.EnumNumber {
@@ -983,7 +1038,7 @@ func (x QueuePlacement) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use QueuePlacement.Descriptor instead.
 func (QueuePlacement) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{15}
+	return file_whalerein_proto_rawDescGZIP(), []int{16}
 }
 
 type QueueAction int32
@@ -1022,11 +1077,11 @@ func (x QueueAction) String() string {
 }
 
 func (QueueAction) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[16].Descriptor()
+	return file_whalerein_proto_enumTypes[17].Descriptor()
 }
 
 func (QueueAction) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[16]
+	return &file_whalerein_proto_enumTypes[17]
 }
 
 func (x QueueAction) Number() protoreflect.EnumNumber {
@@ -1035,7 +1090,7 @@ func (x QueueAction) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use QueueAction.Descriptor instead.
 func (QueueAction) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{16}
+	return file_whalerein_proto_rawDescGZIP(), []int{17}
 }
 
 type EnrollmentState int32
@@ -1075,11 +1130,11 @@ func (x EnrollmentState) String() string {
 }
 
 func (EnrollmentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[17].Descriptor()
+	return file_whalerein_proto_enumTypes[18].Descriptor()
 }
 
 func (EnrollmentState) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[17]
+	return &file_whalerein_proto_enumTypes[18]
 }
 
 func (x EnrollmentState) Number() protoreflect.EnumNumber {
@@ -1088,7 +1143,7 @@ func (x EnrollmentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EnrollmentState.Descriptor instead.
 func (EnrollmentState) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{17}
+	return file_whalerein_proto_rawDescGZIP(), []int{18}
 }
 
 type OperationState int32
@@ -1130,11 +1185,11 @@ func (x OperationState) String() string {
 }
 
 func (OperationState) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[18].Descriptor()
+	return file_whalerein_proto_enumTypes[19].Descriptor()
 }
 
 func (OperationState) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[18]
+	return &file_whalerein_proto_enumTypes[19]
 }
 
 func (x OperationState) Number() protoreflect.EnumNumber {
@@ -1143,7 +1198,7 @@ func (x OperationState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OperationState.Descriptor instead.
 func (OperationState) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{18}
+	return file_whalerein_proto_rawDescGZIP(), []int{19}
 }
 
 type CapabilitySet struct {
@@ -5581,6 +5636,124 @@ func (x *QuestionAnswerItem) GetCustom() string {
 	return ""
 }
 
+// A source observation epoch plus a monotonic revision of the normalized
+// pending-question inventory. Reading or refreshing unchanged inventory does
+// not advance it. The stamp certifies a collection; it is not answer authority.
+type QuestionStamp struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	ObservationEpoch string                 `protobuf:"bytes,1,opt,name=observation_epoch,json=observationEpoch,proto3" json:"observation_epoch,omitempty"`
+	Revision         uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *QuestionStamp) Reset() {
+	*x = QuestionStamp{}
+	mi := &file_whalerein_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuestionStamp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuestionStamp) ProtoMessage() {}
+
+func (x *QuestionStamp) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuestionStamp.ProtoReflect.Descriptor instead.
+func (*QuestionStamp) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *QuestionStamp) GetObservationEpoch() string {
+	if x != nil {
+		return x.ObservationEpoch
+	}
+	return ""
+}
+
+func (x *QuestionStamp) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+type QuestionDescriptor struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Availability QuestionAvailability   `protobuf:"varint,1,opt,name=availability,proto3,enum=whalerein.v1.QuestionAvailability" json:"availability,omitempty"`
+	// Stable failure code for unavailable/unsupported questions, empty when
+	// available.
+	UnavailableCode string `protobuf:"bytes,2,opt,name=unavailable_code,json=unavailableCode,proto3" json:"unavailable_code,omitempty"`
+	// Present exactly when availability is available.
+	Stamp         *QuestionStamp `protobuf:"bytes,3,opt,name=stamp,proto3" json:"stamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuestionDescriptor) Reset() {
+	*x = QuestionDescriptor{}
+	mi := &file_whalerein_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuestionDescriptor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuestionDescriptor) ProtoMessage() {}
+
+func (x *QuestionDescriptor) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuestionDescriptor.ProtoReflect.Descriptor instead.
+func (*QuestionDescriptor) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *QuestionDescriptor) GetAvailability() QuestionAvailability {
+	if x != nil {
+		return x.Availability
+	}
+	return QuestionAvailability_QUESTION_AVAILABILITY_UNSPECIFIED
+}
+
+func (x *QuestionDescriptor) GetUnavailableCode() string {
+	if x != nil {
+		return x.UnavailableCode
+	}
+	return ""
+}
+
+func (x *QuestionDescriptor) GetStamp() *QuestionStamp {
+	if x != nil {
+		return x.Stamp
+	}
+	return nil
+}
+
 type QuestionBatch struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	SessionId          string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -5598,7 +5771,7 @@ type QuestionBatch struct {
 
 func (x *QuestionBatch) Reset() {
 	*x = QuestionBatch{}
-	mi := &file_whalerein_proto_msgTypes[50]
+	mi := &file_whalerein_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5610,7 +5783,7 @@ func (x *QuestionBatch) String() string {
 func (*QuestionBatch) ProtoMessage() {}
 
 func (x *QuestionBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[50]
+	mi := &file_whalerein_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5623,7 +5796,7 @@ func (x *QuestionBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuestionBatch.ProtoReflect.Descriptor instead.
 func (*QuestionBatch) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{50}
+	return file_whalerein_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *QuestionBatch) GetSessionId() string {
@@ -5699,7 +5872,7 @@ type ListQuestions struct {
 
 func (x *ListQuestions) Reset() {
 	*x = ListQuestions{}
-	mi := &file_whalerein_proto_msgTypes[51]
+	mi := &file_whalerein_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5711,7 +5884,7 @@ func (x *ListQuestions) String() string {
 func (*ListQuestions) ProtoMessage() {}
 
 func (x *ListQuestions) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[51]
+	mi := &file_whalerein_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5724,7 +5897,7 @@ func (x *ListQuestions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListQuestions.ProtoReflect.Descriptor instead.
 func (*ListQuestions) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{51}
+	return file_whalerein_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ListQuestions) GetSessionId() string {
@@ -5751,7 +5924,7 @@ type GetQuestion struct {
 
 func (x *GetQuestion) Reset() {
 	*x = GetQuestion{}
-	mi := &file_whalerein_proto_msgTypes[52]
+	mi := &file_whalerein_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5763,7 +5936,7 @@ func (x *GetQuestion) String() string {
 func (*GetQuestion) ProtoMessage() {}
 
 func (x *GetQuestion) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[52]
+	mi := &file_whalerein_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5776,7 +5949,7 @@ func (x *GetQuestion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQuestion.ProtoReflect.Descriptor instead.
 func (*GetQuestion) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{52}
+	return file_whalerein_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *GetQuestion) GetSessionId() string {
@@ -5794,16 +5967,21 @@ func (x *GetQuestion) GetBatchId() string {
 }
 
 type QuestionPage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Batches       []*QuestionBatch       `protobuf:"bytes,1,rep,name=batches,proto3" json:"batches,omitempty"`
-	NextCursor    string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Batches    []*QuestionBatch       `protobuf:"bytes,1,rep,name=batches,proto3" json:"batches,omitempty"`
+	NextCursor string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	// Stamp of the complete inventory from which this page was derived. Every
+	// page of one observation must carry the identical stamp.
+	Stamp *QuestionStamp `protobuf:"bytes,3,opt,name=stamp,proto3" json:"stamp,omitempty"`
+	// True only on the final page of that same stamped inventory.
+	Complete      bool `protobuf:"varint,4,opt,name=complete,proto3" json:"complete,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QuestionPage) Reset() {
 	*x = QuestionPage{}
-	mi := &file_whalerein_proto_msgTypes[53]
+	mi := &file_whalerein_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5815,7 +5993,7 @@ func (x *QuestionPage) String() string {
 func (*QuestionPage) ProtoMessage() {}
 
 func (x *QuestionPage) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[53]
+	mi := &file_whalerein_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5828,7 +6006,7 @@ func (x *QuestionPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuestionPage.ProtoReflect.Descriptor instead.
 func (*QuestionPage) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{53}
+	return file_whalerein_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *QuestionPage) GetBatches() []*QuestionBatch {
@@ -5843,6 +6021,20 @@ func (x *QuestionPage) GetNextCursor() string {
 		return x.NextCursor
 	}
 	return ""
+}
+
+func (x *QuestionPage) GetStamp() *QuestionStamp {
+	if x != nil {
+		return x.Stamp
+	}
+	return nil
+}
+
+func (x *QuestionPage) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
 }
 
 type AnswerQuestion struct {
@@ -5860,7 +6052,7 @@ type AnswerQuestion struct {
 
 func (x *AnswerQuestion) Reset() {
 	*x = AnswerQuestion{}
-	mi := &file_whalerein_proto_msgTypes[54]
+	mi := &file_whalerein_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5872,7 +6064,7 @@ func (x *AnswerQuestion) String() string {
 func (*AnswerQuestion) ProtoMessage() {}
 
 func (x *AnswerQuestion) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[54]
+	mi := &file_whalerein_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5885,7 +6077,7 @@ func (x *AnswerQuestion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnswerQuestion.ProtoReflect.Descriptor instead.
 func (*AnswerQuestion) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{54}
+	return file_whalerein_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AnswerQuestion) GetSessionId() string {
@@ -5947,7 +6139,7 @@ type QuestionReceipt struct {
 
 func (x *QuestionReceipt) Reset() {
 	*x = QuestionReceipt{}
-	mi := &file_whalerein_proto_msgTypes[55]
+	mi := &file_whalerein_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5959,7 +6151,7 @@ func (x *QuestionReceipt) String() string {
 func (*QuestionReceipt) ProtoMessage() {}
 
 func (x *QuestionReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[55]
+	mi := &file_whalerein_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5972,7 +6164,7 @@ func (x *QuestionReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuestionReceipt.ProtoReflect.Descriptor instead.
 func (*QuestionReceipt) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{55}
+	return file_whalerein_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *QuestionReceipt) GetBatchId() string {
@@ -6001,7 +6193,7 @@ type CancelQuestionAnswer struct {
 
 func (x *CancelQuestionAnswer) Reset() {
 	*x = CancelQuestionAnswer{}
-	mi := &file_whalerein_proto_msgTypes[56]
+	mi := &file_whalerein_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6013,7 +6205,7 @@ func (x *CancelQuestionAnswer) String() string {
 func (*CancelQuestionAnswer) ProtoMessage() {}
 
 func (x *CancelQuestionAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[56]
+	mi := &file_whalerein_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6026,7 +6218,7 @@ func (x *CancelQuestionAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelQuestionAnswer.ProtoReflect.Descriptor instead.
 func (*CancelQuestionAnswer) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{56}
+	return file_whalerein_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *CancelQuestionAnswer) GetSessionId() string {
@@ -6052,7 +6244,7 @@ type QuestionCancelReceipt struct {
 
 func (x *QuestionCancelReceipt) Reset() {
 	*x = QuestionCancelReceipt{}
-	mi := &file_whalerein_proto_msgTypes[57]
+	mi := &file_whalerein_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6064,7 +6256,7 @@ func (x *QuestionCancelReceipt) String() string {
 func (*QuestionCancelReceipt) ProtoMessage() {}
 
 func (x *QuestionCancelReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[57]
+	mi := &file_whalerein_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6077,7 +6269,7 @@ func (x *QuestionCancelReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuestionCancelReceipt.ProtoReflect.Descriptor instead.
 func (*QuestionCancelReceipt) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{57}
+	return file_whalerein_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *QuestionCancelReceipt) GetCancellationRequested() bool {
@@ -6096,7 +6288,7 @@ type GetSession struct {
 
 func (x *GetSession) Reset() {
 	*x = GetSession{}
-	mi := &file_whalerein_proto_msgTypes[58]
+	mi := &file_whalerein_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6108,7 +6300,7 @@ func (x *GetSession) String() string {
 func (*GetSession) ProtoMessage() {}
 
 func (x *GetSession) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[58]
+	mi := &file_whalerein_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6121,7 +6313,7 @@ func (x *GetSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSession.ProtoReflect.Descriptor instead.
 func (*GetSession) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{58}
+	return file_whalerein_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *GetSession) GetSessionId() string {
@@ -6140,7 +6332,7 @@ type GetApproval struct {
 
 func (x *GetApproval) Reset() {
 	*x = GetApproval{}
-	mi := &file_whalerein_proto_msgTypes[59]
+	mi := &file_whalerein_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6152,7 +6344,7 @@ func (x *GetApproval) String() string {
 func (*GetApproval) ProtoMessage() {}
 
 func (x *GetApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[59]
+	mi := &file_whalerein_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6165,7 +6357,7 @@ func (x *GetApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetApproval.ProtoReflect.Descriptor instead.
 func (*GetApproval) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{59}
+	return file_whalerein_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *GetApproval) GetApprovalId() string {
@@ -6186,7 +6378,7 @@ type ListApprovals struct {
 
 func (x *ListApprovals) Reset() {
 	*x = ListApprovals{}
-	mi := &file_whalerein_proto_msgTypes[60]
+	mi := &file_whalerein_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6198,7 +6390,7 @@ func (x *ListApprovals) String() string {
 func (*ListApprovals) ProtoMessage() {}
 
 func (x *ListApprovals) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[60]
+	mi := &file_whalerein_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6211,7 +6403,7 @@ func (x *ListApprovals) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListApprovals.ProtoReflect.Descriptor instead.
 func (*ListApprovals) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{60}
+	return file_whalerein_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ListApprovals) GetSessionId() string {
@@ -6230,7 +6422,7 @@ type ApprovalList struct {
 
 func (x *ApprovalList) Reset() {
 	*x = ApprovalList{}
-	mi := &file_whalerein_proto_msgTypes[61]
+	mi := &file_whalerein_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6242,7 +6434,7 @@ func (x *ApprovalList) String() string {
 func (*ApprovalList) ProtoMessage() {}
 
 func (x *ApprovalList) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[61]
+	mi := &file_whalerein_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6255,7 +6447,7 @@ func (x *ApprovalList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalList.ProtoReflect.Descriptor instead.
 func (*ApprovalList) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{61}
+	return file_whalerein_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ApprovalList) GetApprovals() []*Approval {
@@ -6274,7 +6466,7 @@ type GetCommandResult struct {
 
 func (x *GetCommandResult) Reset() {
 	*x = GetCommandResult{}
-	mi := &file_whalerein_proto_msgTypes[62]
+	mi := &file_whalerein_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6286,7 +6478,7 @@ func (x *GetCommandResult) String() string {
 func (*GetCommandResult) ProtoMessage() {}
 
 func (x *GetCommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[62]
+	mi := &file_whalerein_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6299,7 +6491,7 @@ func (x *GetCommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCommandResult.ProtoReflect.Descriptor instead.
 func (*GetCommandResult) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{62}
+	return file_whalerein_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *GetCommandResult) GetCommandId() string {
@@ -6320,7 +6512,7 @@ type SendMessage struct {
 
 func (x *SendMessage) Reset() {
 	*x = SendMessage{}
-	mi := &file_whalerein_proto_msgTypes[63]
+	mi := &file_whalerein_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6332,7 +6524,7 @@ func (x *SendMessage) String() string {
 func (*SendMessage) ProtoMessage() {}
 
 func (x *SendMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[63]
+	mi := &file_whalerein_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6345,7 +6537,7 @@ func (x *SendMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendMessage.ProtoReflect.Descriptor instead.
 func (*SendMessage) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{63}
+	return file_whalerein_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *SendMessage) GetSessionId() string {
@@ -6378,7 +6570,7 @@ type Interrupt struct {
 
 func (x *Interrupt) Reset() {
 	*x = Interrupt{}
-	mi := &file_whalerein_proto_msgTypes[64]
+	mi := &file_whalerein_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6390,7 +6582,7 @@ func (x *Interrupt) String() string {
 func (*Interrupt) ProtoMessage() {}
 
 func (x *Interrupt) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[64]
+	mi := &file_whalerein_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6403,7 +6595,7 @@ func (x *Interrupt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Interrupt.ProtoReflect.Descriptor instead.
 func (*Interrupt) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{64}
+	return file_whalerein_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *Interrupt) GetSessionId() string {
@@ -6425,7 +6617,7 @@ type ResolveApproval struct {
 
 func (x *ResolveApproval) Reset() {
 	*x = ResolveApproval{}
-	mi := &file_whalerein_proto_msgTypes[65]
+	mi := &file_whalerein_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6437,7 +6629,7 @@ func (x *ResolveApproval) String() string {
 func (*ResolveApproval) ProtoMessage() {}
 
 func (x *ResolveApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[65]
+	mi := &file_whalerein_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6450,7 +6642,7 @@ func (x *ResolveApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveApproval.ProtoReflect.Descriptor instead.
 func (*ResolveApproval) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{65}
+	return file_whalerein_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ResolveApproval) GetApprovalId() string {
@@ -6490,7 +6682,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_whalerein_proto_msgTypes[66]
+	mi := &file_whalerein_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6502,7 +6694,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[66]
+	mi := &file_whalerein_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6515,7 +6707,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{66}
+	return file_whalerein_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *Ping) GetClientTimeUnixMs() int64 {
@@ -6534,7 +6726,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_whalerein_proto_msgTypes[67]
+	mi := &file_whalerein_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6546,7 +6738,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[67]
+	mi := &file_whalerein_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6559,7 +6751,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{67}
+	return file_whalerein_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *Pong) GetHostTimeUnixMs() int64 {
@@ -6590,7 +6782,7 @@ type SessionSummary struct {
 
 func (x *SessionSummary) Reset() {
 	*x = SessionSummary{}
-	mi := &file_whalerein_proto_msgTypes[68]
+	mi := &file_whalerein_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6602,7 +6794,7 @@ func (x *SessionSummary) String() string {
 func (*SessionSummary) ProtoMessage() {}
 
 func (x *SessionSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[68]
+	mi := &file_whalerein_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6615,7 +6807,7 @@ func (x *SessionSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionSummary.ProtoReflect.Descriptor instead.
 func (*SessionSummary) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{68}
+	return file_whalerein_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *SessionSummary) GetSessionId() string {
@@ -6718,7 +6910,7 @@ type SessionList struct {
 
 func (x *SessionList) Reset() {
 	*x = SessionList{}
-	mi := &file_whalerein_proto_msgTypes[69]
+	mi := &file_whalerein_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6730,7 +6922,7 @@ func (x *SessionList) String() string {
 func (*SessionList) ProtoMessage() {}
 
 func (x *SessionList) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[69]
+	mi := &file_whalerein_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6743,7 +6935,7 @@ func (x *SessionList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionList.ProtoReflect.Descriptor instead.
 func (*SessionList) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{69}
+	return file_whalerein_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *SessionList) GetSessions() []*SessionSummary {
@@ -6764,7 +6956,7 @@ type CommandAccepted struct {
 
 func (x *CommandAccepted) Reset() {
 	*x = CommandAccepted{}
-	mi := &file_whalerein_proto_msgTypes[70]
+	mi := &file_whalerein_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6776,7 +6968,7 @@ func (x *CommandAccepted) String() string {
 func (*CommandAccepted) ProtoMessage() {}
 
 func (x *CommandAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[70]
+	mi := &file_whalerein_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6789,7 +6981,7 @@ func (x *CommandAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandAccepted.ProtoReflect.Descriptor instead.
 func (*CommandAccepted) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{70}
+	return file_whalerein_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *CommandAccepted) GetMessageId() string {
@@ -6819,7 +7011,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_whalerein_proto_msgTypes[71]
+	mi := &file_whalerein_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6831,7 +7023,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[71]
+	mi := &file_whalerein_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6844,7 +7036,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{71}
+	return file_whalerein_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *CommandResult) GetFound() bool {
@@ -6894,7 +7086,7 @@ type Approval struct {
 
 func (x *Approval) Reset() {
 	*x = Approval{}
-	mi := &file_whalerein_proto_msgTypes[72]
+	mi := &file_whalerein_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6906,7 +7098,7 @@ func (x *Approval) String() string {
 func (*Approval) ProtoMessage() {}
 
 func (x *Approval) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[72]
+	mi := &file_whalerein_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6919,7 +7111,7 @@ func (x *Approval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Approval.ProtoReflect.Descriptor instead.
 func (*Approval) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{72}
+	return file_whalerein_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *Approval) GetApprovalId() string {
@@ -7007,7 +7199,7 @@ type EventEnvelope struct {
 
 func (x *EventEnvelope) Reset() {
 	*x = EventEnvelope{}
-	mi := &file_whalerein_proto_msgTypes[73]
+	mi := &file_whalerein_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7019,7 +7211,7 @@ func (x *EventEnvelope) String() string {
 func (*EventEnvelope) ProtoMessage() {}
 
 func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[73]
+	mi := &file_whalerein_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7032,7 +7224,7 @@ func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventEnvelope.ProtoReflect.Descriptor instead.
 func (*EventEnvelope) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{73}
+	return file_whalerein_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *EventEnvelope) GetHostId() string {
@@ -7094,7 +7286,7 @@ type EventPayload struct {
 
 func (x *EventPayload) Reset() {
 	*x = EventPayload{}
-	mi := &file_whalerein_proto_msgTypes[74]
+	mi := &file_whalerein_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7106,7 +7298,7 @@ func (x *EventPayload) String() string {
 func (*EventPayload) ProtoMessage() {}
 
 func (x *EventPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[74]
+	mi := &file_whalerein_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7119,7 +7311,7 @@ func (x *EventPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventPayload.ProtoReflect.Descriptor instead.
 func (*EventPayload) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{74}
+	return file_whalerein_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *EventPayload) GetUpdate() *SessionUpdate {
@@ -7153,7 +7345,7 @@ type TransportFrame struct {
 
 func (x *TransportFrame) Reset() {
 	*x = TransportFrame{}
-	mi := &file_whalerein_proto_msgTypes[75]
+	mi := &file_whalerein_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7165,7 +7357,7 @@ func (x *TransportFrame) String() string {
 func (*TransportFrame) ProtoMessage() {}
 
 func (x *TransportFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[75]
+	mi := &file_whalerein_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7178,7 +7370,7 @@ func (x *TransportFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportFrame.ProtoReflect.Descriptor instead.
 func (*TransportFrame) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{75}
+	return file_whalerein_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *TransportFrame) GetVersion() uint32 {
@@ -7270,7 +7462,7 @@ type SessionKey struct {
 
 func (x *SessionKey) Reset() {
 	*x = SessionKey{}
-	mi := &file_whalerein_proto_msgTypes[76]
+	mi := &file_whalerein_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7282,7 +7474,7 @@ func (x *SessionKey) String() string {
 func (*SessionKey) ProtoMessage() {}
 
 func (x *SessionKey) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[76]
+	mi := &file_whalerein_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7295,7 +7487,7 @@ func (x *SessionKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionKey.ProtoReflect.Descriptor instead.
 func (*SessionKey) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{76}
+	return file_whalerein_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *SessionKey) GetHostId() string {
@@ -7335,7 +7527,7 @@ type SourceCapabilities struct {
 
 func (x *SourceCapabilities) Reset() {
 	*x = SourceCapabilities{}
-	mi := &file_whalerein_proto_msgTypes[77]
+	mi := &file_whalerein_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7347,7 +7539,7 @@ func (x *SourceCapabilities) String() string {
 func (*SourceCapabilities) ProtoMessage() {}
 
 func (x *SourceCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[77]
+	mi := &file_whalerein_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7360,7 +7552,7 @@ func (x *SourceCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SourceCapabilities.ProtoReflect.Descriptor instead.
 func (*SourceCapabilities) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{77}
+	return file_whalerein_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *SourceCapabilities) GetHistory() bool {
@@ -7478,7 +7670,7 @@ type AttemptRef struct {
 
 func (x *AttemptRef) Reset() {
 	*x = AttemptRef{}
-	mi := &file_whalerein_proto_msgTypes[78]
+	mi := &file_whalerein_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7490,7 +7682,7 @@ func (x *AttemptRef) String() string {
 func (*AttemptRef) ProtoMessage() {}
 
 func (x *AttemptRef) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[78]
+	mi := &file_whalerein_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7503,7 +7695,7 @@ func (x *AttemptRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttemptRef.ProtoReflect.Descriptor instead.
 func (*AttemptRef) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{78}
+	return file_whalerein_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *AttemptRef) GetLiveEpoch() string {
@@ -7529,7 +7721,7 @@ type TextContent struct {
 
 func (x *TextContent) Reset() {
 	*x = TextContent{}
-	mi := &file_whalerein_proto_msgTypes[79]
+	mi := &file_whalerein_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7541,7 +7733,7 @@ func (x *TextContent) String() string {
 func (*TextContent) ProtoMessage() {}
 
 func (x *TextContent) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[79]
+	mi := &file_whalerein_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7554,7 +7746,7 @@ func (x *TextContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextContent.ProtoReflect.Descriptor instead.
 func (*TextContent) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{79}
+	return file_whalerein_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *TextContent) GetText() string {
@@ -7575,7 +7767,7 @@ type ToolCallContent struct {
 
 func (x *ToolCallContent) Reset() {
 	*x = ToolCallContent{}
-	mi := &file_whalerein_proto_msgTypes[80]
+	mi := &file_whalerein_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7587,7 +7779,7 @@ func (x *ToolCallContent) String() string {
 func (*ToolCallContent) ProtoMessage() {}
 
 func (x *ToolCallContent) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[80]
+	mi := &file_whalerein_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7600,7 +7792,7 @@ func (x *ToolCallContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallContent.ProtoReflect.Descriptor instead.
 func (*ToolCallContent) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{80}
+	return file_whalerein_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *ToolCallContent) GetCallId() string {
@@ -7635,7 +7827,7 @@ type ToolResultContent struct {
 
 func (x *ToolResultContent) Reset() {
 	*x = ToolResultContent{}
-	mi := &file_whalerein_proto_msgTypes[81]
+	mi := &file_whalerein_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7647,7 +7839,7 @@ func (x *ToolResultContent) String() string {
 func (*ToolResultContent) ProtoMessage() {}
 
 func (x *ToolResultContent) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[81]
+	mi := &file_whalerein_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7660,7 +7852,7 @@ func (x *ToolResultContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResultContent.ProtoReflect.Descriptor instead.
 func (*ToolResultContent) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{81}
+	return file_whalerein_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *ToolResultContent) GetCallId() string {
@@ -7694,7 +7886,7 @@ type NoticeContent struct {
 
 func (x *NoticeContent) Reset() {
 	*x = NoticeContent{}
-	mi := &file_whalerein_proto_msgTypes[82]
+	mi := &file_whalerein_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7706,7 +7898,7 @@ func (x *NoticeContent) String() string {
 func (*NoticeContent) ProtoMessage() {}
 
 func (x *NoticeContent) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[82]
+	mi := &file_whalerein_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7719,7 +7911,7 @@ func (x *NoticeContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NoticeContent.ProtoReflect.Descriptor instead.
 func (*NoticeContent) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{82}
+	return file_whalerein_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *NoticeContent) GetCategory() string {
@@ -7748,7 +7940,7 @@ type AttachmentContent struct {
 
 func (x *AttachmentContent) Reset() {
 	*x = AttachmentContent{}
-	mi := &file_whalerein_proto_msgTypes[83]
+	mi := &file_whalerein_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7760,7 +7952,7 @@ func (x *AttachmentContent) String() string {
 func (*AttachmentContent) ProtoMessage() {}
 
 func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[83]
+	mi := &file_whalerein_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7773,7 +7965,7 @@ func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachmentContent.ProtoReflect.Descriptor instead.
 func (*AttachmentContent) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{83}
+	return file_whalerein_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *AttachmentContent) GetMediaType() string {
@@ -7821,7 +8013,7 @@ type ContentBlock struct {
 
 func (x *ContentBlock) Reset() {
 	*x = ContentBlock{}
-	mi := &file_whalerein_proto_msgTypes[84]
+	mi := &file_whalerein_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7833,7 +8025,7 @@ func (x *ContentBlock) String() string {
 func (*ContentBlock) ProtoMessage() {}
 
 func (x *ContentBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[84]
+	mi := &file_whalerein_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7846,7 +8038,7 @@ func (x *ContentBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentBlock.ProtoReflect.Descriptor instead.
 func (*ContentBlock) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{84}
+	return file_whalerein_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *ContentBlock) GetBlockId() string {
@@ -7954,7 +8146,7 @@ type ConversationMessage struct {
 
 func (x *ConversationMessage) Reset() {
 	*x = ConversationMessage{}
-	mi := &file_whalerein_proto_msgTypes[85]
+	mi := &file_whalerein_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7966,7 +8158,7 @@ func (x *ConversationMessage) String() string {
 func (*ConversationMessage) ProtoMessage() {}
 
 func (x *ConversationMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[85]
+	mi := &file_whalerein_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7979,7 +8171,7 @@ func (x *ConversationMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConversationMessage.ProtoReflect.Descriptor instead.
 func (*ConversationMessage) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{85}
+	return file_whalerein_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *ConversationMessage) GetMessageId() string {
@@ -8020,7 +8212,7 @@ type MessageUpsert struct {
 
 func (x *MessageUpsert) Reset() {
 	*x = MessageUpsert{}
-	mi := &file_whalerein_proto_msgTypes[86]
+	mi := &file_whalerein_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8032,7 +8224,7 @@ func (x *MessageUpsert) String() string {
 func (*MessageUpsert) ProtoMessage() {}
 
 func (x *MessageUpsert) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[86]
+	mi := &file_whalerein_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8045,7 +8237,7 @@ func (x *MessageUpsert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageUpsert.ProtoReflect.Descriptor instead.
 func (*MessageUpsert) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{86}
+	return file_whalerein_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *MessageUpsert) GetMessage() *ConversationMessage {
@@ -8074,7 +8266,7 @@ type HistoryBatch struct {
 
 func (x *HistoryBatch) Reset() {
 	*x = HistoryBatch{}
-	mi := &file_whalerein_proto_msgTypes[87]
+	mi := &file_whalerein_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8086,7 +8278,7 @@ func (x *HistoryBatch) String() string {
 func (*HistoryBatch) ProtoMessage() {}
 
 func (x *HistoryBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[87]
+	mi := &file_whalerein_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8099,7 +8291,7 @@ func (x *HistoryBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryBatch.ProtoReflect.Descriptor instead.
 func (*HistoryBatch) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{87}
+	return file_whalerein_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *HistoryBatch) GetFromCursor() string {
@@ -8144,7 +8336,7 @@ type HistoryRead struct {
 
 func (x *HistoryRead) Reset() {
 	*x = HistoryRead{}
-	mi := &file_whalerein_proto_msgTypes[88]
+	mi := &file_whalerein_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8156,7 +8348,7 @@ func (x *HistoryRead) String() string {
 func (*HistoryRead) ProtoMessage() {}
 
 func (x *HistoryRead) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[88]
+	mi := &file_whalerein_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8169,7 +8361,7 @@ func (x *HistoryRead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryRead.ProtoReflect.Descriptor instead.
 func (*HistoryRead) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{88}
+	return file_whalerein_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *HistoryRead) GetSessionId() string {
@@ -8227,7 +8419,7 @@ type HistoryPage struct {
 
 func (x *HistoryPage) Reset() {
 	*x = HistoryPage{}
-	mi := &file_whalerein_proto_msgTypes[89]
+	mi := &file_whalerein_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8239,7 +8431,7 @@ func (x *HistoryPage) String() string {
 func (*HistoryPage) ProtoMessage() {}
 
 func (x *HistoryPage) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[89]
+	mi := &file_whalerein_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8252,7 +8444,7 @@ func (x *HistoryPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPage.ProtoReflect.Descriptor instead.
 func (*HistoryPage) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{89}
+	return file_whalerein_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *HistoryPage) GetSession() *SessionKey {
@@ -8298,7 +8490,7 @@ type AttemptStarted struct {
 
 func (x *AttemptStarted) Reset() {
 	*x = AttemptStarted{}
-	mi := &file_whalerein_proto_msgTypes[90]
+	mi := &file_whalerein_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8310,7 +8502,7 @@ func (x *AttemptStarted) String() string {
 func (*AttemptStarted) ProtoMessage() {}
 
 func (x *AttemptStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[90]
+	mi := &file_whalerein_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8323,7 +8515,7 @@ func (x *AttemptStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttemptStarted.ProtoReflect.Descriptor instead.
 func (*AttemptStarted) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{90}
+	return file_whalerein_proto_rawDescGZIP(), []int{92}
 }
 
 type AttemptEnded struct {
@@ -8335,7 +8527,7 @@ type AttemptEnded struct {
 
 func (x *AttemptEnded) Reset() {
 	*x = AttemptEnded{}
-	mi := &file_whalerein_proto_msgTypes[91]
+	mi := &file_whalerein_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8347,7 +8539,7 @@ func (x *AttemptEnded) String() string {
 func (*AttemptEnded) ProtoMessage() {}
 
 func (x *AttemptEnded) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[91]
+	mi := &file_whalerein_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8360,7 +8552,7 @@ func (x *AttemptEnded) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttemptEnded.ProtoReflect.Descriptor instead.
 func (*AttemptEnded) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{91}
+	return file_whalerein_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *AttemptEnded) GetOutcome() AttemptOutcome {
@@ -8389,7 +8581,7 @@ type LiveFrame struct {
 
 func (x *LiveFrame) Reset() {
 	*x = LiveFrame{}
-	mi := &file_whalerein_proto_msgTypes[92]
+	mi := &file_whalerein_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8401,7 +8593,7 @@ func (x *LiveFrame) String() string {
 func (*LiveFrame) ProtoMessage() {}
 
 func (x *LiveFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[92]
+	mi := &file_whalerein_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8414,7 +8606,7 @@ func (x *LiveFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveFrame.ProtoReflect.Descriptor instead.
 func (*LiveFrame) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{92}
+	return file_whalerein_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *LiveFrame) GetAttempt() *AttemptRef {
@@ -8517,20 +8709,23 @@ func (*LiveFrame_Reset_) isLiveFrame_Payload() {}
 func (*LiveFrame_Ended) isLiveFrame_Payload() {}
 
 type SessionState struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Session       *SessionKey            `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	LiveEpoch     string                 `protobuf:"bytes,2,opt,name=live_epoch,json=liveEpoch,proto3" json:"live_epoch,omitempty"`
-	Revision      uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
-	HistoryHead   string                 `protobuf:"bytes,4,opt,name=history_head,json=historyHead,proto3" json:"history_head,omitempty"`
-	RunPhase      RunPhase               `protobuf:"varint,5,opt,name=run_phase,json=runPhase,proto3,enum=whalerein.v1.RunPhase" json:"run_phase,omitempty"`
-	Approvals     []*Approval            `protobuf:"bytes,6,rep,name=approvals,proto3" json:"approvals,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Session     *SessionKey            `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	LiveEpoch   string                 `protobuf:"bytes,2,opt,name=live_epoch,json=liveEpoch,proto3" json:"live_epoch,omitempty"`
+	Revision    uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	HistoryHead string                 `protobuf:"bytes,4,opt,name=history_head,json=historyHead,proto3" json:"history_head,omitempty"`
+	RunPhase    RunPhase               `protobuf:"varint,5,opt,name=run_phase,json=runPhase,proto3,enum=whalerein.v1.RunPhase" json:"run_phase,omitempty"`
+	Approvals   []*Approval            `protobuf:"bytes,6,rep,name=approvals,proto3" json:"approvals,omitempty"`
+	// Questions readiness is independent of history readiness. A questions-only
+	// observation may omit history_head and run_phase.
+	Questions     *QuestionDescriptor `protobuf:"bytes,7,opt,name=questions,proto3" json:"questions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SessionState) Reset() {
 	*x = SessionState{}
-	mi := &file_whalerein_proto_msgTypes[93]
+	mi := &file_whalerein_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8542,7 +8737,7 @@ func (x *SessionState) String() string {
 func (*SessionState) ProtoMessage() {}
 
 func (x *SessionState) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[93]
+	mi := &file_whalerein_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8555,7 +8750,7 @@ func (x *SessionState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionState.ProtoReflect.Descriptor instead.
 func (*SessionState) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{93}
+	return file_whalerein_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *SessionState) GetSession() *SessionKey {
@@ -8600,6 +8795,13 @@ func (x *SessionState) GetApprovals() []*Approval {
 	return nil
 }
 
+func (x *SessionState) GetQuestions() *QuestionDescriptor {
+	if x != nil {
+		return x.Questions
+	}
+	return nil
+}
+
 type HistoryReset struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
@@ -8609,7 +8811,7 @@ type HistoryReset struct {
 
 func (x *HistoryReset) Reset() {
 	*x = HistoryReset{}
-	mi := &file_whalerein_proto_msgTypes[94]
+	mi := &file_whalerein_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8621,7 +8823,7 @@ func (x *HistoryReset) String() string {
 func (*HistoryReset) ProtoMessage() {}
 
 func (x *HistoryReset) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[94]
+	mi := &file_whalerein_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8634,7 +8836,7 @@ func (x *HistoryReset) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryReset.ProtoReflect.Descriptor instead.
 func (*HistoryReset) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{94}
+	return file_whalerein_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *HistoryReset) GetReason() string {
@@ -8654,6 +8856,7 @@ type SessionUpdate struct {
 	//	*SessionUpdate_Live
 	//	*SessionUpdate_State
 	//	*SessionUpdate_Reset_
+	//	*SessionUpdate_Questions
 	Payload       isSessionUpdate_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8661,7 +8864,7 @@ type SessionUpdate struct {
 
 func (x *SessionUpdate) Reset() {
 	*x = SessionUpdate{}
-	mi := &file_whalerein_proto_msgTypes[95]
+	mi := &file_whalerein_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8673,7 +8876,7 @@ func (x *SessionUpdate) String() string {
 func (*SessionUpdate) ProtoMessage() {}
 
 func (x *SessionUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[95]
+	mi := &file_whalerein_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8686,7 +8889,7 @@ func (x *SessionUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionUpdate.ProtoReflect.Descriptor instead.
 func (*SessionUpdate) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{95}
+	return file_whalerein_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *SessionUpdate) GetWatchId() string {
@@ -8746,6 +8949,15 @@ func (x *SessionUpdate) GetReset_() *HistoryReset {
 	return nil
 }
 
+func (x *SessionUpdate) GetQuestions() *QuestionDescriptor {
+	if x != nil {
+		if x, ok := x.Payload.(*SessionUpdate_Questions); ok {
+			return x.Questions
+		}
+	}
+	return nil
+}
+
 type isSessionUpdate_Payload interface {
 	isSessionUpdate_Payload()
 }
@@ -8766,6 +8978,12 @@ type SessionUpdate_Reset_ struct {
 	Reset_ *HistoryReset `protobuf:"bytes,6,opt,name=reset,proto3,oneof"`
 }
 
+type SessionUpdate_Questions struct {
+	// Independent question invalidations, delivered without waiting for or
+	// replacing conversation state.
+	Questions *QuestionDescriptor `protobuf:"bytes,7,opt,name=questions,proto3,oneof"`
+}
+
 func (*SessionUpdate_History) isSessionUpdate_Payload() {}
 
 func (*SessionUpdate_Live) isSessionUpdate_Payload() {}
@@ -8774,16 +8992,71 @@ func (*SessionUpdate_State) isSessionUpdate_Payload() {}
 
 func (*SessionUpdate_Reset_) isSessionUpdate_Payload() {}
 
+func (*SessionUpdate_Questions) isSessionUpdate_Payload() {}
+
+type ObservationInterests struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Conversation  bool                   `protobuf:"varint,1,opt,name=conversation,proto3" json:"conversation,omitempty"`
+	Questions     bool                   `protobuf:"varint,2,opt,name=questions,proto3" json:"questions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObservationInterests) Reset() {
+	*x = ObservationInterests{}
+	mi := &file_whalerein_proto_msgTypes[98]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObservationInterests) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObservationInterests) ProtoMessage() {}
+
+func (x *ObservationInterests) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[98]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObservationInterests.ProtoReflect.Descriptor instead.
+func (*ObservationInterests) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{98}
+}
+
+func (x *ObservationInterests) GetConversation() bool {
+	if x != nil {
+		return x.Conversation
+	}
+	return false
+}
+
+func (x *ObservationInterests) GetQuestions() bool {
+	if x != nil {
+		return x.Questions
+	}
+	return false
+}
+
 type WatchSession struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Interests     *ObservationInterests  `protobuf:"bytes,2,opt,name=interests,proto3" json:"interests,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchSession) Reset() {
 	*x = WatchSession{}
-	mi := &file_whalerein_proto_msgTypes[96]
+	mi := &file_whalerein_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8795,7 +9068,7 @@ func (x *WatchSession) String() string {
 func (*WatchSession) ProtoMessage() {}
 
 func (x *WatchSession) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[96]
+	mi := &file_whalerein_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8808,7 +9081,7 @@ func (x *WatchSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchSession.ProtoReflect.Descriptor instead.
 func (*WatchSession) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{96}
+	return file_whalerein_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *WatchSession) GetSessionId() string {
@@ -8818,18 +9091,28 @@ func (x *WatchSession) GetSessionId() string {
 	return ""
 }
 
+func (x *WatchSession) GetInterests() *ObservationInterests {
+	if x != nil {
+		return x.Interests
+	}
+	return nil
+}
+
 type WatchReady struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WatchId       string                 `protobuf:"bytes,1,opt,name=watch_id,json=watchId,proto3" json:"watch_id,omitempty"`
-	State         *SessionState          `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	LeaseMs       uint32                 `protobuf:"varint,3,opt,name=lease_ms,json=leaseMs,proto3" json:"lease_ms,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	WatchId string                 `protobuf:"bytes,1,opt,name=watch_id,json=watchId,proto3" json:"watch_id,omitempty"`
+	// Conversation baseline; absent for a questions-only observation.
+	State   *SessionState `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	LeaseMs uint32        `protobuf:"varint,3,opt,name=lease_ms,json=leaseMs,proto3" json:"lease_ms,omitempty"`
+	// Question readiness for this observation. Required for questions interest.
+	Questions     *QuestionDescriptor `protobuf:"bytes,4,opt,name=questions,proto3" json:"questions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchReady) Reset() {
 	*x = WatchReady{}
-	mi := &file_whalerein_proto_msgTypes[97]
+	mi := &file_whalerein_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8841,7 +9124,7 @@ func (x *WatchReady) String() string {
 func (*WatchReady) ProtoMessage() {}
 
 func (x *WatchReady) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[97]
+	mi := &file_whalerein_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8854,7 +9137,7 @@ func (x *WatchReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReady.ProtoReflect.Descriptor instead.
 func (*WatchReady) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{97}
+	return file_whalerein_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *WatchReady) GetWatchId() string {
@@ -8878,6 +9161,13 @@ func (x *WatchReady) GetLeaseMs() uint32 {
 	return 0
 }
 
+func (x *WatchReady) GetQuestions() *QuestionDescriptor {
+	if x != nil {
+		return x.Questions
+	}
+	return nil
+}
+
 type RefreshWatches struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WatchIds      []string               `protobuf:"bytes,1,rep,name=watch_ids,json=watchIds,proto3" json:"watch_ids,omitempty"`
@@ -8887,7 +9177,7 @@ type RefreshWatches struct {
 
 func (x *RefreshWatches) Reset() {
 	*x = RefreshWatches{}
-	mi := &file_whalerein_proto_msgTypes[98]
+	mi := &file_whalerein_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8899,7 +9189,7 @@ func (x *RefreshWatches) String() string {
 func (*RefreshWatches) ProtoMessage() {}
 
 func (x *RefreshWatches) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[98]
+	mi := &file_whalerein_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8912,7 +9202,7 @@ func (x *RefreshWatches) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefreshWatches.ProtoReflect.Descriptor instead.
 func (*RefreshWatches) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{98}
+	return file_whalerein_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *RefreshWatches) GetWatchIds() []string {
@@ -8931,7 +9221,7 @@ type WatchStates struct {
 
 func (x *WatchStates) Reset() {
 	*x = WatchStates{}
-	mi := &file_whalerein_proto_msgTypes[99]
+	mi := &file_whalerein_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8943,7 +9233,7 @@ func (x *WatchStates) String() string {
 func (*WatchStates) ProtoMessage() {}
 
 func (x *WatchStates) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[99]
+	mi := &file_whalerein_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8956,7 +9246,7 @@ func (x *WatchStates) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchStates.ProtoReflect.Descriptor instead.
 func (*WatchStates) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{99}
+	return file_whalerein_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *WatchStates) GetWatches() []*WatchReady {
@@ -8975,7 +9265,7 @@ type UnwatchSession struct {
 
 func (x *UnwatchSession) Reset() {
 	*x = UnwatchSession{}
-	mi := &file_whalerein_proto_msgTypes[100]
+	mi := &file_whalerein_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8987,7 +9277,7 @@ func (x *UnwatchSession) String() string {
 func (*UnwatchSession) ProtoMessage() {}
 
 func (x *UnwatchSession) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[100]
+	mi := &file_whalerein_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9000,7 +9290,7 @@ func (x *UnwatchSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnwatchSession.ProtoReflect.Descriptor instead.
 func (*UnwatchSession) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{100}
+	return file_whalerein_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *UnwatchSession) GetWatchId() string {
@@ -9023,7 +9313,7 @@ type WaitSession struct {
 
 func (x *WaitSession) Reset() {
 	*x = WaitSession{}
-	mi := &file_whalerein_proto_msgTypes[101]
+	mi := &file_whalerein_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9035,7 +9325,7 @@ func (x *WaitSession) String() string {
 func (*WaitSession) ProtoMessage() {}
 
 func (x *WaitSession) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[101]
+	mi := &file_whalerein_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9048,7 +9338,7 @@ func (x *WaitSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WaitSession.ProtoReflect.Descriptor instead.
 func (*WaitSession) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{101}
+	return file_whalerein_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *WaitSession) GetSessionId() string {
@@ -9082,7 +9372,7 @@ type CancelSessionWait struct {
 
 func (x *CancelSessionWait) Reset() {
 	*x = CancelSessionWait{}
-	mi := &file_whalerein_proto_msgTypes[102]
+	mi := &file_whalerein_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9094,7 +9384,7 @@ func (x *CancelSessionWait) String() string {
 func (*CancelSessionWait) ProtoMessage() {}
 
 func (x *CancelSessionWait) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[102]
+	mi := &file_whalerein_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9107,7 +9397,7 @@ func (x *CancelSessionWait) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelSessionWait.ProtoReflect.Descriptor instead.
 func (*CancelSessionWait) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{102}
+	return file_whalerein_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *CancelSessionWait) GetSessionId() string {
@@ -9133,7 +9423,7 @@ type ReadWaitState struct {
 
 func (x *ReadWaitState) Reset() {
 	*x = ReadWaitState{}
-	mi := &file_whalerein_proto_msgTypes[103]
+	mi := &file_whalerein_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9145,7 +9435,7 @@ func (x *ReadWaitState) String() string {
 func (*ReadWaitState) ProtoMessage() {}
 
 func (x *ReadWaitState) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[103]
+	mi := &file_whalerein_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9158,7 +9448,7 @@ func (x *ReadWaitState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadWaitState.ProtoReflect.Descriptor instead.
 func (*ReadWaitState) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{103}
+	return file_whalerein_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *ReadWaitState) GetSessionId() string {
@@ -9180,7 +9470,7 @@ type SessionWaitState struct {
 
 func (x *SessionWaitState) Reset() {
 	*x = SessionWaitState{}
-	mi := &file_whalerein_proto_msgTypes[104]
+	mi := &file_whalerein_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9192,7 +9482,7 @@ func (x *SessionWaitState) String() string {
 func (*SessionWaitState) ProtoMessage() {}
 
 func (x *SessionWaitState) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[104]
+	mi := &file_whalerein_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9205,7 +9495,7 @@ func (x *SessionWaitState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionWaitState.ProtoReflect.Descriptor instead.
 func (*SessionWaitState) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{104}
+	return file_whalerein_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *SessionWaitState) GetActive() bool {
@@ -9248,7 +9538,7 @@ type SessionWaitResult struct {
 
 func (x *SessionWaitResult) Reset() {
 	*x = SessionWaitResult{}
-	mi := &file_whalerein_proto_msgTypes[105]
+	mi := &file_whalerein_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9260,7 +9550,7 @@ func (x *SessionWaitResult) String() string {
 func (*SessionWaitResult) ProtoMessage() {}
 
 func (x *SessionWaitResult) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[105]
+	mi := &file_whalerein_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9273,7 +9563,7 @@ func (x *SessionWaitResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionWaitResult.ProtoReflect.Descriptor instead.
 func (*SessionWaitResult) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{105}
+	return file_whalerein_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *SessionWaitResult) GetSessionId() string {
@@ -9314,7 +9604,7 @@ type SessionWaitStateResult struct {
 
 func (x *SessionWaitStateResult) Reset() {
 	*x = SessionWaitStateResult{}
-	mi := &file_whalerein_proto_msgTypes[106]
+	mi := &file_whalerein_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9326,7 +9616,7 @@ func (x *SessionWaitStateResult) String() string {
 func (*SessionWaitStateResult) ProtoMessage() {}
 
 func (x *SessionWaitStateResult) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[106]
+	mi := &file_whalerein_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9339,7 +9629,7 @@ func (x *SessionWaitStateResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionWaitStateResult.ProtoReflect.Descriptor instead.
 func (*SessionWaitStateResult) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{106}
+	return file_whalerein_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *SessionWaitStateResult) GetSessionId() string {
@@ -9366,7 +9656,7 @@ type ReadPendingQueue struct {
 
 func (x *ReadPendingQueue) Reset() {
 	*x = ReadPendingQueue{}
-	mi := &file_whalerein_proto_msgTypes[107]
+	mi := &file_whalerein_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9378,7 +9668,7 @@ func (x *ReadPendingQueue) String() string {
 func (*ReadPendingQueue) ProtoMessage() {}
 
 func (x *ReadPendingQueue) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[107]
+	mi := &file_whalerein_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9391,7 +9681,7 @@ func (x *ReadPendingQueue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadPendingQueue.ProtoReflect.Descriptor instead.
 func (*ReadPendingQueue) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{107}
+	return file_whalerein_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *ReadPendingQueue) GetSessionId() string {
@@ -9414,7 +9704,7 @@ type PendingQueueItem struct {
 
 func (x *PendingQueueItem) Reset() {
 	*x = PendingQueueItem{}
-	mi := &file_whalerein_proto_msgTypes[108]
+	mi := &file_whalerein_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9426,7 +9716,7 @@ func (x *PendingQueueItem) String() string {
 func (*PendingQueueItem) ProtoMessage() {}
 
 func (x *PendingQueueItem) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[108]
+	mi := &file_whalerein_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9439,7 +9729,7 @@ func (x *PendingQueueItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingQueueItem.ProtoReflect.Descriptor instead.
 func (*PendingQueueItem) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{108}
+	return file_whalerein_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *PendingQueueItem) GetItemId() string {
@@ -9489,7 +9779,7 @@ type PendingQueue struct {
 
 func (x *PendingQueue) Reset() {
 	*x = PendingQueue{}
-	mi := &file_whalerein_proto_msgTypes[109]
+	mi := &file_whalerein_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9501,7 +9791,7 @@ func (x *PendingQueue) String() string {
 func (*PendingQueue) ProtoMessage() {}
 
 func (x *PendingQueue) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[109]
+	mi := &file_whalerein_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9514,7 +9804,7 @@ func (x *PendingQueue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingQueue.ProtoReflect.Descriptor instead.
 func (*PendingQueue) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{109}
+	return file_whalerein_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *PendingQueue) GetSessionId() string {
@@ -9558,7 +9848,7 @@ type UpdatePendingQueue struct {
 
 func (x *UpdatePendingQueue) Reset() {
 	*x = UpdatePendingQueue{}
-	mi := &file_whalerein_proto_msgTypes[110]
+	mi := &file_whalerein_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9570,7 +9860,7 @@ func (x *UpdatePendingQueue) String() string {
 func (*UpdatePendingQueue) ProtoMessage() {}
 
 func (x *UpdatePendingQueue) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[110]
+	mi := &file_whalerein_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9583,7 +9873,7 @@ func (x *UpdatePendingQueue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdatePendingQueue.ProtoReflect.Descriptor instead.
 func (*UpdatePendingQueue) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{110}
+	return file_whalerein_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *UpdatePendingQueue) GetSessionId() string {
@@ -9644,7 +9934,7 @@ type ExternalAuthorization struct {
 
 func (x *ExternalAuthorization) Reset() {
 	*x = ExternalAuthorization{}
-	mi := &file_whalerein_proto_msgTypes[111]
+	mi := &file_whalerein_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9656,7 +9946,7 @@ func (x *ExternalAuthorization) String() string {
 func (*ExternalAuthorization) ProtoMessage() {}
 
 func (x *ExternalAuthorization) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[111]
+	mi := &file_whalerein_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9669,7 +9959,7 @@ func (x *ExternalAuthorization) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalAuthorization.ProtoReflect.Descriptor instead.
 func (*ExternalAuthorization) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{111}
+	return file_whalerein_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *ExternalAuthorization) GetAuthVersion() string {
@@ -9828,7 +10118,7 @@ type HostEnrollmentRequest struct {
 
 func (x *HostEnrollmentRequest) Reset() {
 	*x = HostEnrollmentRequest{}
-	mi := &file_whalerein_proto_msgTypes[112]
+	mi := &file_whalerein_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9840,7 +10130,7 @@ func (x *HostEnrollmentRequest) String() string {
 func (*HostEnrollmentRequest) ProtoMessage() {}
 
 func (x *HostEnrollmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[112]
+	mi := &file_whalerein_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9853,7 +10143,7 @@ func (x *HostEnrollmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentRequest.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentRequest) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{112}
+	return file_whalerein_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *HostEnrollmentRequest) GetAuthorization() *ExternalAuthorization {
@@ -9911,7 +10201,7 @@ type HostCredential struct {
 
 func (x *HostCredential) Reset() {
 	*x = HostCredential{}
-	mi := &file_whalerein_proto_msgTypes[113]
+	mi := &file_whalerein_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9923,7 +10213,7 @@ func (x *HostCredential) String() string {
 func (*HostCredential) ProtoMessage() {}
 
 func (x *HostCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[113]
+	mi := &file_whalerein_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9936,7 +10226,7 @@ func (x *HostCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostCredential.ProtoReflect.Descriptor instead.
 func (*HostCredential) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{113}
+	return file_whalerein_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *HostCredential) GetHostId() string {
@@ -9982,7 +10272,7 @@ type HostEnrollmentStatus struct {
 
 func (x *HostEnrollmentStatus) Reset() {
 	*x = HostEnrollmentStatus{}
-	mi := &file_whalerein_proto_msgTypes[114]
+	mi := &file_whalerein_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9994,7 +10284,7 @@ func (x *HostEnrollmentStatus) String() string {
 func (*HostEnrollmentStatus) ProtoMessage() {}
 
 func (x *HostEnrollmentStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[114]
+	mi := &file_whalerein_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10007,7 +10297,7 @@ func (x *HostEnrollmentStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentStatus.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentStatus) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{114}
+	return file_whalerein_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *HostEnrollmentStatus) GetHostId() string {
@@ -10070,7 +10360,7 @@ type HostEnrollmentResponse struct {
 
 func (x *HostEnrollmentResponse) Reset() {
 	*x = HostEnrollmentResponse{}
-	mi := &file_whalerein_proto_msgTypes[115]
+	mi := &file_whalerein_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10082,7 +10372,7 @@ func (x *HostEnrollmentResponse) String() string {
 func (*HostEnrollmentResponse) ProtoMessage() {}
 
 func (x *HostEnrollmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[115]
+	mi := &file_whalerein_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10095,7 +10385,7 @@ func (x *HostEnrollmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentResponse.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentResponse) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{115}
+	return file_whalerein_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *HostEnrollmentResponse) GetStatus() *HostEnrollmentStatus {
@@ -10129,7 +10419,7 @@ type OperationStatus struct {
 
 func (x *OperationStatus) Reset() {
 	*x = OperationStatus{}
-	mi := &file_whalerein_proto_msgTypes[116]
+	mi := &file_whalerein_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10141,7 +10431,7 @@ func (x *OperationStatus) String() string {
 func (*OperationStatus) ProtoMessage() {}
 
 func (x *OperationStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[116]
+	mi := &file_whalerein_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10154,7 +10444,7 @@ func (x *OperationStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationStatus.ProtoReflect.Descriptor instead.
 func (*OperationStatus) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{116}
+	return file_whalerein_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *OperationStatus) GetOperationId() string {
@@ -10614,7 +10904,14 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bselected\x18\x02 \x03(\tR\bselected\x12\x1b\n" +
 	"\x06custom\x18\x03 \x01(\tH\x00R\x06custom\x88\x01\x01B\t\n" +
-	"\a_custom\"\xdc\x02\n" +
+	"\a_custom\"X\n" +
+	"\rQuestionStamp\x12+\n" +
+	"\x11observation_epoch\x18\x01 \x01(\tR\x10observationEpoch\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\"\xba\x01\n" +
+	"\x12QuestionDescriptor\x12F\n" +
+	"\favailability\x18\x01 \x01(\x0e2\".whalerein.v1.QuestionAvailabilityR\favailability\x12)\n" +
+	"\x10unavailable_code\x18\x02 \x01(\tR\x0funavailableCode\x121\n" +
+	"\x05stamp\x18\x03 \x01(\v2\x1b.whalerein.v1.QuestionStampR\x05stamp\"\xdc\x02\n" +
 	"\rQuestionBatch\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
@@ -10635,11 +10932,13 @@ const file_whalerein_proto_rawDesc = "" +
 	"\vGetQuestion\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
-	"\bbatch_id\x18\x02 \x01(\tR\abatchId\"f\n" +
+	"\bbatch_id\x18\x02 \x01(\tR\abatchId\"\xb5\x01\n" +
 	"\fQuestionPage\x125\n" +
 	"\abatches\x18\x01 \x03(\v2\x1b.whalerein.v1.QuestionBatchR\abatches\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor\"\xc1\x02\n" +
+	"nextCursor\x121\n" +
+	"\x05stamp\x18\x03 \x01(\v2\x1b.whalerein.v1.QuestionStampR\x05stamp\x12\x1a\n" +
+	"\bcomplete\x18\x04 \x01(\bR\bcomplete\"\xc1\x02\n" +
 	"\x0eAnswerQuestion\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
@@ -10863,7 +11162,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x05delta\x18\x06 \x01(\v2\x19.whalerein.v1.TextContentH\x00R\x05delta\x121\n" +
 	"\x05reset\x18\a \x01(\v2\x19.whalerein.v1.TextContentH\x00R\x05reset\x122\n" +
 	"\x05ended\x18\b \x01(\v2\x1a.whalerein.v1.AttemptEndedH\x00R\x05endedB\t\n" +
-	"\apayload\"\x8b\x02\n" +
+	"\apayload\"\xcb\x02\n" +
 	"\fSessionState\x122\n" +
 	"\asession\x18\x01 \x01(\v2\x18.whalerein.v1.SessionKeyR\asession\x12\x1d\n" +
 	"\n" +
@@ -10871,25 +11170,32 @@ const file_whalerein_proto_rawDesc = "" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12!\n" +
 	"\fhistory_head\x18\x04 \x01(\tR\vhistoryHead\x123\n" +
 	"\trun_phase\x18\x05 \x01(\x0e2\x16.whalerein.v1.RunPhaseR\brunPhase\x124\n" +
-	"\tapprovals\x18\x06 \x03(\v2\x16.whalerein.v1.ApprovalR\tapprovals\"&\n" +
+	"\tapprovals\x18\x06 \x03(\v2\x16.whalerein.v1.ApprovalR\tapprovals\x12>\n" +
+	"\tquestions\x18\a \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\"&\n" +
 	"\fHistoryReset\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xb8\x02\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xfa\x02\n" +
 	"\rSessionUpdate\x12\x19\n" +
 	"\bwatch_id\x18\x01 \x01(\tR\awatchId\x122\n" +
 	"\asession\x18\x02 \x01(\v2\x18.whalerein.v1.SessionKeyR\asession\x126\n" +
 	"\ahistory\x18\x03 \x01(\v2\x1a.whalerein.v1.HistoryBatchH\x00R\ahistory\x12-\n" +
 	"\x04live\x18\x04 \x01(\v2\x17.whalerein.v1.LiveFrameH\x00R\x04live\x122\n" +
 	"\x05state\x18\x05 \x01(\v2\x1a.whalerein.v1.SessionStateH\x00R\x05state\x122\n" +
-	"\x05reset\x18\x06 \x01(\v2\x1a.whalerein.v1.HistoryResetH\x00R\x05resetB\t\n" +
-	"\apayload\"-\n" +
+	"\x05reset\x18\x06 \x01(\v2\x1a.whalerein.v1.HistoryResetH\x00R\x05reset\x12@\n" +
+	"\tquestions\x18\a \x01(\v2 .whalerein.v1.QuestionDescriptorH\x00R\tquestionsB\t\n" +
+	"\apayload\"X\n" +
+	"\x14ObservationInterests\x12\"\n" +
+	"\fconversation\x18\x01 \x01(\bR\fconversation\x12\x1c\n" +
+	"\tquestions\x18\x02 \x01(\bR\tquestions\"o\n" +
 	"\fWatchSession\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"t\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12@\n" +
+	"\tinterests\x18\x02 \x01(\v2\".whalerein.v1.ObservationInterestsR\tinterests\"\xb4\x01\n" +
 	"\n" +
 	"WatchReady\x12\x19\n" +
 	"\bwatch_id\x18\x01 \x01(\tR\awatchId\x120\n" +
 	"\x05state\x18\x02 \x01(\v2\x1a.whalerein.v1.SessionStateR\x05state\x12\x19\n" +
-	"\blease_ms\x18\x03 \x01(\rR\aleaseMs\"-\n" +
+	"\blease_ms\x18\x03 \x01(\rR\aleaseMs\x12>\n" +
+	"\tquestions\x18\x04 \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\"-\n" +
 	"\x0eRefreshWatches\x12\x1b\n" +
 	"\twatch_ids\x18\x01 \x03(\tR\bwatchIds\"A\n" +
 	"\vWatchStates\x122\n" +
@@ -11074,7 +11380,12 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x10ApprovalDecision\x12!\n" +
 	"\x1dAPPROVAL_DECISION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19APPROVAL_DECISION_APPROVE\x10\x01\x12\x1c\n" +
-	"\x18APPROVAL_DECISION_REJECT\x10\x02*y\n" +
+	"\x18APPROVAL_DECISION_REJECT\x10\x02*\xb0\x01\n" +
+	"\x14QuestionAvailability\x12%\n" +
+	"!QUESTION_AVAILABILITY_UNSPECIFIED\x10\x00\x12%\n" +
+	"!QUESTION_AVAILABILITY_UNSUPPORTED\x10\x01\x12%\n" +
+	"!QUESTION_AVAILABILITY_UNAVAILABLE\x10\x02\x12#\n" +
+	"\x1fQUESTION_AVAILABILITY_AVAILABLE\x10\x03*y\n" +
 	"\x14LifecycleDisposition\x12%\n" +
 	"!LIFECYCLE_DISPOSITION_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05READY\x10\x01\x12\x16\n" +
@@ -11159,8 +11470,8 @@ func file_whalerein_proto_rawDescGZIP() []byte {
 	return file_whalerein_proto_rawDescData
 }
 
-var file_whalerein_proto_enumTypes = make([]protoimpl.EnumInfo, 19)
-var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 119)
+var file_whalerein_proto_enumTypes = make([]protoimpl.EnumInfo, 20)
+var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 122)
 var file_whalerein_proto_goTypes = []any{
 	(OnlineStatus)(0),                // 0: whalerein.v1.OnlineStatus
 	(RequestKind)(0),                 // 1: whalerein.v1.RequestKind
@@ -11169,137 +11480,141 @@ var file_whalerein_proto_goTypes = []any{
 	(PairingPhase)(0),                // 4: whalerein.v1.PairingPhase
 	(ApprovalState)(0),               // 5: whalerein.v1.ApprovalState
 	(ApprovalDecision)(0),            // 6: whalerein.v1.ApprovalDecision
-	(LifecycleDisposition)(0),        // 7: whalerein.v1.LifecycleDisposition
-	(QuestionPhase)(0),               // 8: whalerein.v1.QuestionPhase
-	(DeliveryMode)(0),                // 9: whalerein.v1.DeliveryMode
-	(MessageRole)(0),                 // 10: whalerein.v1.MessageRole
-	(RunPhase)(0),                    // 11: whalerein.v1.RunPhase
-	(AttemptOutcome)(0),              // 12: whalerein.v1.AttemptOutcome
-	(WaitReason)(0),                  // 13: whalerein.v1.WaitReason
-	(InputKind)(0),                   // 14: whalerein.v1.InputKind
-	(QueuePlacement)(0),              // 15: whalerein.v1.QueuePlacement
-	(QueueAction)(0),                 // 16: whalerein.v1.QueueAction
-	(EnrollmentState)(0),             // 17: whalerein.v1.EnrollmentState
-	(OperationState)(0),              // 18: whalerein.v1.OperationState
-	(*CapabilitySet)(nil),            // 19: whalerein.v1.CapabilitySet
-	(*HostRequest)(nil),              // 20: whalerein.v1.HostRequest
-	(*HostResult)(nil),               // 21: whalerein.v1.HostResult
-	(*ErrorResponse)(nil),            // 22: whalerein.v1.ErrorResponse
-	(*RequestReceipt)(nil),           // 23: whalerein.v1.RequestReceipt
-	(*RequestState)(nil),             // 24: whalerein.v1.RequestState
-	(*HostInfo)(nil),                 // 25: whalerein.v1.HostInfo
-	(*HostList)(nil),                 // 26: whalerein.v1.HostList
-	(*PairingInvitationRequest)(nil), // 27: whalerein.v1.PairingInvitationRequest
-	(*PairingInvitation)(nil),        // 28: whalerein.v1.PairingInvitation
-	(*PairingClaimRequest)(nil),      // 29: whalerein.v1.PairingClaimRequest
-	(*PairingClaimResponse)(nil),     // 30: whalerein.v1.PairingClaimResponse
-	(*PairingClaim)(nil),             // 31: whalerein.v1.PairingClaim
-	(*PairingClaimResult)(nil),       // 32: whalerein.v1.PairingClaimResult
-	(*RevocationNotice)(nil),         // 33: whalerein.v1.RevocationNotice
-	(*RevocationAck)(nil),            // 34: whalerein.v1.RevocationAck
-	(*HostReady)(nil),                // 35: whalerein.v1.HostReady
-	(*HostGrantRevocation)(nil),      // 36: whalerein.v1.HostGrantRevocation
-	(*EncryptedFrame)(nil),           // 37: whalerein.v1.EncryptedFrame
-	(*ChannelHello)(nil),             // 38: whalerein.v1.ChannelHello
-	(*ChannelReady)(nil),             // 39: whalerein.v1.ChannelReady
-	(*PairingHello)(nil),             // 40: whalerein.v1.PairingHello
-	(*PairingHelloReply)(nil),        // 41: whalerein.v1.PairingHelloReply
-	(*PairingFinish)(nil),            // 42: whalerein.v1.PairingFinish
-	(*RequestPayload)(nil),           // 43: whalerein.v1.RequestPayload
-	(*ResponsePayload)(nil),          // 44: whalerein.v1.ResponsePayload
-	(*GetHostCapabilities)(nil),      // 45: whalerein.v1.GetHostCapabilities
-	(*HostCapabilities)(nil),         // 46: whalerein.v1.HostCapabilities
-	(*ListModels)(nil),               // 47: whalerein.v1.ListModels
-	(*ReadSessionModel)(nil),         // 48: whalerein.v1.ReadSessionModel
-	(*ModelChoice)(nil),              // 49: whalerein.v1.ModelChoice
-	(*ModelEffort)(nil),              // 50: whalerein.v1.ModelEffort
-	(*ModelEntry)(nil),               // 51: whalerein.v1.ModelEntry
-	(*ModelProvider)(nil),            // 52: whalerein.v1.ModelProvider
-	(*ModelProviderFailure)(nil),     // 53: whalerein.v1.ModelProviderFailure
-	(*ModelCatalog)(nil),             // 54: whalerein.v1.ModelCatalog
-	(*SessionModel)(nil),             // 55: whalerein.v1.SessionModel
-	(*SelectSessionModel)(nil),       // 56: whalerein.v1.SelectSessionModel
-	(*ModelSelectionReceipt)(nil),    // 57: whalerein.v1.ModelSelectionReceipt
-	(*ForkSession)(nil),              // 58: whalerein.v1.ForkSession
-	(*CreateSession)(nil),            // 59: whalerein.v1.CreateSession
-	(*LifecycleReceipt)(nil),         // 60: whalerein.v1.LifecycleReceipt
-	(*ListSessions)(nil),             // 61: whalerein.v1.ListSessions
-	(*QuestionOption)(nil),           // 62: whalerein.v1.QuestionOption
-	(*QuestionLocalizedText)(nil),    // 63: whalerein.v1.QuestionLocalizedText
-	(*QuestionSubject)(nil),          // 64: whalerein.v1.QuestionSubject
-	(*QuestionDisplay)(nil),          // 65: whalerein.v1.QuestionDisplay
-	(*QuestionIntent)(nil),           // 66: whalerein.v1.QuestionIntent
-	(*QuestionItem)(nil),             // 67: whalerein.v1.QuestionItem
-	(*QuestionAnswerItem)(nil),       // 68: whalerein.v1.QuestionAnswerItem
-	(*QuestionBatch)(nil),            // 69: whalerein.v1.QuestionBatch
-	(*ListQuestions)(nil),            // 70: whalerein.v1.ListQuestions
-	(*GetQuestion)(nil),              // 71: whalerein.v1.GetQuestion
-	(*QuestionPage)(nil),             // 72: whalerein.v1.QuestionPage
-	(*AnswerQuestion)(nil),           // 73: whalerein.v1.AnswerQuestion
-	(*QuestionReceipt)(nil),          // 74: whalerein.v1.QuestionReceipt
-	(*CancelQuestionAnswer)(nil),     // 75: whalerein.v1.CancelQuestionAnswer
-	(*QuestionCancelReceipt)(nil),    // 76: whalerein.v1.QuestionCancelReceipt
-	(*GetSession)(nil),               // 77: whalerein.v1.GetSession
-	(*GetApproval)(nil),              // 78: whalerein.v1.GetApproval
-	(*ListApprovals)(nil),            // 79: whalerein.v1.ListApprovals
-	(*ApprovalList)(nil),             // 80: whalerein.v1.ApprovalList
-	(*GetCommandResult)(nil),         // 81: whalerein.v1.GetCommandResult
-	(*SendMessage)(nil),              // 82: whalerein.v1.SendMessage
-	(*Interrupt)(nil),                // 83: whalerein.v1.Interrupt
-	(*ResolveApproval)(nil),          // 84: whalerein.v1.ResolveApproval
-	(*Ping)(nil),                     // 85: whalerein.v1.Ping
-	(*Pong)(nil),                     // 86: whalerein.v1.Pong
-	(*SessionSummary)(nil),           // 87: whalerein.v1.SessionSummary
-	(*SessionList)(nil),              // 88: whalerein.v1.SessionList
-	(*CommandAccepted)(nil),          // 89: whalerein.v1.CommandAccepted
-	(*CommandResult)(nil),            // 90: whalerein.v1.CommandResult
-	(*Approval)(nil),                 // 91: whalerein.v1.Approval
-	(*EventEnvelope)(nil),            // 92: whalerein.v1.EventEnvelope
-	(*EventPayload)(nil),             // 93: whalerein.v1.EventPayload
-	(*TransportFrame)(nil),           // 94: whalerein.v1.TransportFrame
-	(*SessionKey)(nil),               // 95: whalerein.v1.SessionKey
-	(*SourceCapabilities)(nil),       // 96: whalerein.v1.SourceCapabilities
-	(*AttemptRef)(nil),               // 97: whalerein.v1.AttemptRef
-	(*TextContent)(nil),              // 98: whalerein.v1.TextContent
-	(*ToolCallContent)(nil),          // 99: whalerein.v1.ToolCallContent
-	(*ToolResultContent)(nil),        // 100: whalerein.v1.ToolResultContent
-	(*NoticeContent)(nil),            // 101: whalerein.v1.NoticeContent
-	(*AttachmentContent)(nil),        // 102: whalerein.v1.AttachmentContent
-	(*ContentBlock)(nil),             // 103: whalerein.v1.ContentBlock
-	(*ConversationMessage)(nil),      // 104: whalerein.v1.ConversationMessage
-	(*MessageUpsert)(nil),            // 105: whalerein.v1.MessageUpsert
-	(*HistoryBatch)(nil),             // 106: whalerein.v1.HistoryBatch
-	(*HistoryRead)(nil),              // 107: whalerein.v1.HistoryRead
-	(*HistoryPage)(nil),              // 108: whalerein.v1.HistoryPage
-	(*AttemptStarted)(nil),           // 109: whalerein.v1.AttemptStarted
-	(*AttemptEnded)(nil),             // 110: whalerein.v1.AttemptEnded
-	(*LiveFrame)(nil),                // 111: whalerein.v1.LiveFrame
-	(*SessionState)(nil),             // 112: whalerein.v1.SessionState
-	(*HistoryReset)(nil),             // 113: whalerein.v1.HistoryReset
-	(*SessionUpdate)(nil),            // 114: whalerein.v1.SessionUpdate
-	(*WatchSession)(nil),             // 115: whalerein.v1.WatchSession
-	(*WatchReady)(nil),               // 116: whalerein.v1.WatchReady
-	(*RefreshWatches)(nil),           // 117: whalerein.v1.RefreshWatches
-	(*WatchStates)(nil),              // 118: whalerein.v1.WatchStates
-	(*UnwatchSession)(nil),           // 119: whalerein.v1.UnwatchSession
-	(*WaitSession)(nil),              // 120: whalerein.v1.WaitSession
-	(*CancelSessionWait)(nil),        // 121: whalerein.v1.CancelSessionWait
-	(*ReadWaitState)(nil),            // 122: whalerein.v1.ReadWaitState
-	(*SessionWaitState)(nil),         // 123: whalerein.v1.SessionWaitState
-	(*SessionWaitResult)(nil),        // 124: whalerein.v1.SessionWaitResult
-	(*SessionWaitStateResult)(nil),   // 125: whalerein.v1.SessionWaitStateResult
-	(*ReadPendingQueue)(nil),         // 126: whalerein.v1.ReadPendingQueue
-	(*PendingQueueItem)(nil),         // 127: whalerein.v1.PendingQueueItem
-	(*PendingQueue)(nil),             // 128: whalerein.v1.PendingQueue
-	(*UpdatePendingQueue)(nil),       // 129: whalerein.v1.UpdatePendingQueue
-	(*ExternalAuthorization)(nil),    // 130: whalerein.v1.ExternalAuthorization
-	(*HostEnrollmentRequest)(nil),    // 131: whalerein.v1.HostEnrollmentRequest
-	(*HostCredential)(nil),           // 132: whalerein.v1.HostCredential
-	(*HostEnrollmentStatus)(nil),     // 133: whalerein.v1.HostEnrollmentStatus
-	(*HostEnrollmentResponse)(nil),   // 134: whalerein.v1.HostEnrollmentResponse
-	(*OperationStatus)(nil),          // 135: whalerein.v1.OperationStatus
-	nil,                              // 136: whalerein.v1.RevocationNotice.GrantGenerationsEntry
-	nil,                              // 137: whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	(QuestionAvailability)(0),        // 7: whalerein.v1.QuestionAvailability
+	(LifecycleDisposition)(0),        // 8: whalerein.v1.LifecycleDisposition
+	(QuestionPhase)(0),               // 9: whalerein.v1.QuestionPhase
+	(DeliveryMode)(0),                // 10: whalerein.v1.DeliveryMode
+	(MessageRole)(0),                 // 11: whalerein.v1.MessageRole
+	(RunPhase)(0),                    // 12: whalerein.v1.RunPhase
+	(AttemptOutcome)(0),              // 13: whalerein.v1.AttemptOutcome
+	(WaitReason)(0),                  // 14: whalerein.v1.WaitReason
+	(InputKind)(0),                   // 15: whalerein.v1.InputKind
+	(QueuePlacement)(0),              // 16: whalerein.v1.QueuePlacement
+	(QueueAction)(0),                 // 17: whalerein.v1.QueueAction
+	(EnrollmentState)(0),             // 18: whalerein.v1.EnrollmentState
+	(OperationState)(0),              // 19: whalerein.v1.OperationState
+	(*CapabilitySet)(nil),            // 20: whalerein.v1.CapabilitySet
+	(*HostRequest)(nil),              // 21: whalerein.v1.HostRequest
+	(*HostResult)(nil),               // 22: whalerein.v1.HostResult
+	(*ErrorResponse)(nil),            // 23: whalerein.v1.ErrorResponse
+	(*RequestReceipt)(nil),           // 24: whalerein.v1.RequestReceipt
+	(*RequestState)(nil),             // 25: whalerein.v1.RequestState
+	(*HostInfo)(nil),                 // 26: whalerein.v1.HostInfo
+	(*HostList)(nil),                 // 27: whalerein.v1.HostList
+	(*PairingInvitationRequest)(nil), // 28: whalerein.v1.PairingInvitationRequest
+	(*PairingInvitation)(nil),        // 29: whalerein.v1.PairingInvitation
+	(*PairingClaimRequest)(nil),      // 30: whalerein.v1.PairingClaimRequest
+	(*PairingClaimResponse)(nil),     // 31: whalerein.v1.PairingClaimResponse
+	(*PairingClaim)(nil),             // 32: whalerein.v1.PairingClaim
+	(*PairingClaimResult)(nil),       // 33: whalerein.v1.PairingClaimResult
+	(*RevocationNotice)(nil),         // 34: whalerein.v1.RevocationNotice
+	(*RevocationAck)(nil),            // 35: whalerein.v1.RevocationAck
+	(*HostReady)(nil),                // 36: whalerein.v1.HostReady
+	(*HostGrantRevocation)(nil),      // 37: whalerein.v1.HostGrantRevocation
+	(*EncryptedFrame)(nil),           // 38: whalerein.v1.EncryptedFrame
+	(*ChannelHello)(nil),             // 39: whalerein.v1.ChannelHello
+	(*ChannelReady)(nil),             // 40: whalerein.v1.ChannelReady
+	(*PairingHello)(nil),             // 41: whalerein.v1.PairingHello
+	(*PairingHelloReply)(nil),        // 42: whalerein.v1.PairingHelloReply
+	(*PairingFinish)(nil),            // 43: whalerein.v1.PairingFinish
+	(*RequestPayload)(nil),           // 44: whalerein.v1.RequestPayload
+	(*ResponsePayload)(nil),          // 45: whalerein.v1.ResponsePayload
+	(*GetHostCapabilities)(nil),      // 46: whalerein.v1.GetHostCapabilities
+	(*HostCapabilities)(nil),         // 47: whalerein.v1.HostCapabilities
+	(*ListModels)(nil),               // 48: whalerein.v1.ListModels
+	(*ReadSessionModel)(nil),         // 49: whalerein.v1.ReadSessionModel
+	(*ModelChoice)(nil),              // 50: whalerein.v1.ModelChoice
+	(*ModelEffort)(nil),              // 51: whalerein.v1.ModelEffort
+	(*ModelEntry)(nil),               // 52: whalerein.v1.ModelEntry
+	(*ModelProvider)(nil),            // 53: whalerein.v1.ModelProvider
+	(*ModelProviderFailure)(nil),     // 54: whalerein.v1.ModelProviderFailure
+	(*ModelCatalog)(nil),             // 55: whalerein.v1.ModelCatalog
+	(*SessionModel)(nil),             // 56: whalerein.v1.SessionModel
+	(*SelectSessionModel)(nil),       // 57: whalerein.v1.SelectSessionModel
+	(*ModelSelectionReceipt)(nil),    // 58: whalerein.v1.ModelSelectionReceipt
+	(*ForkSession)(nil),              // 59: whalerein.v1.ForkSession
+	(*CreateSession)(nil),            // 60: whalerein.v1.CreateSession
+	(*LifecycleReceipt)(nil),         // 61: whalerein.v1.LifecycleReceipt
+	(*ListSessions)(nil),             // 62: whalerein.v1.ListSessions
+	(*QuestionOption)(nil),           // 63: whalerein.v1.QuestionOption
+	(*QuestionLocalizedText)(nil),    // 64: whalerein.v1.QuestionLocalizedText
+	(*QuestionSubject)(nil),          // 65: whalerein.v1.QuestionSubject
+	(*QuestionDisplay)(nil),          // 66: whalerein.v1.QuestionDisplay
+	(*QuestionIntent)(nil),           // 67: whalerein.v1.QuestionIntent
+	(*QuestionItem)(nil),             // 68: whalerein.v1.QuestionItem
+	(*QuestionAnswerItem)(nil),       // 69: whalerein.v1.QuestionAnswerItem
+	(*QuestionStamp)(nil),            // 70: whalerein.v1.QuestionStamp
+	(*QuestionDescriptor)(nil),       // 71: whalerein.v1.QuestionDescriptor
+	(*QuestionBatch)(nil),            // 72: whalerein.v1.QuestionBatch
+	(*ListQuestions)(nil),            // 73: whalerein.v1.ListQuestions
+	(*GetQuestion)(nil),              // 74: whalerein.v1.GetQuestion
+	(*QuestionPage)(nil),             // 75: whalerein.v1.QuestionPage
+	(*AnswerQuestion)(nil),           // 76: whalerein.v1.AnswerQuestion
+	(*QuestionReceipt)(nil),          // 77: whalerein.v1.QuestionReceipt
+	(*CancelQuestionAnswer)(nil),     // 78: whalerein.v1.CancelQuestionAnswer
+	(*QuestionCancelReceipt)(nil),    // 79: whalerein.v1.QuestionCancelReceipt
+	(*GetSession)(nil),               // 80: whalerein.v1.GetSession
+	(*GetApproval)(nil),              // 81: whalerein.v1.GetApproval
+	(*ListApprovals)(nil),            // 82: whalerein.v1.ListApprovals
+	(*ApprovalList)(nil),             // 83: whalerein.v1.ApprovalList
+	(*GetCommandResult)(nil),         // 84: whalerein.v1.GetCommandResult
+	(*SendMessage)(nil),              // 85: whalerein.v1.SendMessage
+	(*Interrupt)(nil),                // 86: whalerein.v1.Interrupt
+	(*ResolveApproval)(nil),          // 87: whalerein.v1.ResolveApproval
+	(*Ping)(nil),                     // 88: whalerein.v1.Ping
+	(*Pong)(nil),                     // 89: whalerein.v1.Pong
+	(*SessionSummary)(nil),           // 90: whalerein.v1.SessionSummary
+	(*SessionList)(nil),              // 91: whalerein.v1.SessionList
+	(*CommandAccepted)(nil),          // 92: whalerein.v1.CommandAccepted
+	(*CommandResult)(nil),            // 93: whalerein.v1.CommandResult
+	(*Approval)(nil),                 // 94: whalerein.v1.Approval
+	(*EventEnvelope)(nil),            // 95: whalerein.v1.EventEnvelope
+	(*EventPayload)(nil),             // 96: whalerein.v1.EventPayload
+	(*TransportFrame)(nil),           // 97: whalerein.v1.TransportFrame
+	(*SessionKey)(nil),               // 98: whalerein.v1.SessionKey
+	(*SourceCapabilities)(nil),       // 99: whalerein.v1.SourceCapabilities
+	(*AttemptRef)(nil),               // 100: whalerein.v1.AttemptRef
+	(*TextContent)(nil),              // 101: whalerein.v1.TextContent
+	(*ToolCallContent)(nil),          // 102: whalerein.v1.ToolCallContent
+	(*ToolResultContent)(nil),        // 103: whalerein.v1.ToolResultContent
+	(*NoticeContent)(nil),            // 104: whalerein.v1.NoticeContent
+	(*AttachmentContent)(nil),        // 105: whalerein.v1.AttachmentContent
+	(*ContentBlock)(nil),             // 106: whalerein.v1.ContentBlock
+	(*ConversationMessage)(nil),      // 107: whalerein.v1.ConversationMessage
+	(*MessageUpsert)(nil),            // 108: whalerein.v1.MessageUpsert
+	(*HistoryBatch)(nil),             // 109: whalerein.v1.HistoryBatch
+	(*HistoryRead)(nil),              // 110: whalerein.v1.HistoryRead
+	(*HistoryPage)(nil),              // 111: whalerein.v1.HistoryPage
+	(*AttemptStarted)(nil),           // 112: whalerein.v1.AttemptStarted
+	(*AttemptEnded)(nil),             // 113: whalerein.v1.AttemptEnded
+	(*LiveFrame)(nil),                // 114: whalerein.v1.LiveFrame
+	(*SessionState)(nil),             // 115: whalerein.v1.SessionState
+	(*HistoryReset)(nil),             // 116: whalerein.v1.HistoryReset
+	(*SessionUpdate)(nil),            // 117: whalerein.v1.SessionUpdate
+	(*ObservationInterests)(nil),     // 118: whalerein.v1.ObservationInterests
+	(*WatchSession)(nil),             // 119: whalerein.v1.WatchSession
+	(*WatchReady)(nil),               // 120: whalerein.v1.WatchReady
+	(*RefreshWatches)(nil),           // 121: whalerein.v1.RefreshWatches
+	(*WatchStates)(nil),              // 122: whalerein.v1.WatchStates
+	(*UnwatchSession)(nil),           // 123: whalerein.v1.UnwatchSession
+	(*WaitSession)(nil),              // 124: whalerein.v1.WaitSession
+	(*CancelSessionWait)(nil),        // 125: whalerein.v1.CancelSessionWait
+	(*ReadWaitState)(nil),            // 126: whalerein.v1.ReadWaitState
+	(*SessionWaitState)(nil),         // 127: whalerein.v1.SessionWaitState
+	(*SessionWaitResult)(nil),        // 128: whalerein.v1.SessionWaitResult
+	(*SessionWaitStateResult)(nil),   // 129: whalerein.v1.SessionWaitStateResult
+	(*ReadPendingQueue)(nil),         // 130: whalerein.v1.ReadPendingQueue
+	(*PendingQueueItem)(nil),         // 131: whalerein.v1.PendingQueueItem
+	(*PendingQueue)(nil),             // 132: whalerein.v1.PendingQueue
+	(*UpdatePendingQueue)(nil),       // 133: whalerein.v1.UpdatePendingQueue
+	(*ExternalAuthorization)(nil),    // 134: whalerein.v1.ExternalAuthorization
+	(*HostEnrollmentRequest)(nil),    // 135: whalerein.v1.HostEnrollmentRequest
+	(*HostCredential)(nil),           // 136: whalerein.v1.HostCredential
+	(*HostEnrollmentStatus)(nil),     // 137: whalerein.v1.HostEnrollmentStatus
+	(*HostEnrollmentResponse)(nil),   // 138: whalerein.v1.HostEnrollmentResponse
+	(*OperationStatus)(nil),          // 139: whalerein.v1.OperationStatus
+	nil,                              // 140: whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	nil,                              // 141: whalerein.v1.QuestionLocalizedText.TranslationsEntry
 }
 var file_whalerein_proto_depIdxs = []int32{
 	3,   // 0: whalerein.v1.CapabilitySet.capabilities:type_name -> whalerein.v1.Capability
@@ -11310,150 +11625,157 @@ var file_whalerein_proto_depIdxs = []int32{
 	0,   // 5: whalerein.v1.RequestReceipt.status:type_name -> whalerein.v1.OnlineStatus
 	0,   // 6: whalerein.v1.RequestState.status:type_name -> whalerein.v1.OnlineStatus
 	2,   // 7: whalerein.v1.RequestState.error_code:type_name -> whalerein.v1.ErrorCode
-	25,  // 8: whalerein.v1.HostList.hosts:type_name -> whalerein.v1.HostInfo
+	26,  // 8: whalerein.v1.HostList.hosts:type_name -> whalerein.v1.HostInfo
 	4,   // 9: whalerein.v1.PairingClaimRequest.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 10: whalerein.v1.PairingClaimResponse.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 11: whalerein.v1.PairingClaim.phase:type_name -> whalerein.v1.PairingPhase
-	136, // 12: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
-	19,  // 13: whalerein.v1.ChannelHello.capabilities:type_name -> whalerein.v1.CapabilitySet
-	19,  // 14: whalerein.v1.ChannelReady.capabilities:type_name -> whalerein.v1.CapabilitySet
-	19,  // 15: whalerein.v1.PairingHello.capabilities:type_name -> whalerein.v1.CapabilitySet
-	19,  // 16: whalerein.v1.PairingHelloReply.capabilities:type_name -> whalerein.v1.CapabilitySet
-	61,  // 17: whalerein.v1.RequestPayload.list_sessions:type_name -> whalerein.v1.ListSessions
-	77,  // 18: whalerein.v1.RequestPayload.get_session:type_name -> whalerein.v1.GetSession
-	78,  // 19: whalerein.v1.RequestPayload.get_approval:type_name -> whalerein.v1.GetApproval
-	81,  // 20: whalerein.v1.RequestPayload.get_command_result:type_name -> whalerein.v1.GetCommandResult
-	82,  // 21: whalerein.v1.RequestPayload.send_message:type_name -> whalerein.v1.SendMessage
-	83,  // 22: whalerein.v1.RequestPayload.interrupt:type_name -> whalerein.v1.Interrupt
-	84,  // 23: whalerein.v1.RequestPayload.resolve_approval:type_name -> whalerein.v1.ResolveApproval
-	85,  // 24: whalerein.v1.RequestPayload.ping:type_name -> whalerein.v1.Ping
-	79,  // 25: whalerein.v1.RequestPayload.list_approvals:type_name -> whalerein.v1.ListApprovals
-	107, // 26: whalerein.v1.RequestPayload.read_history:type_name -> whalerein.v1.HistoryRead
-	115, // 27: whalerein.v1.RequestPayload.watch_session:type_name -> whalerein.v1.WatchSession
-	117, // 28: whalerein.v1.RequestPayload.refresh_watches:type_name -> whalerein.v1.RefreshWatches
-	119, // 29: whalerein.v1.RequestPayload.unwatch_session:type_name -> whalerein.v1.UnwatchSession
-	45,  // 30: whalerein.v1.RequestPayload.get_host_capabilities:type_name -> whalerein.v1.GetHostCapabilities
-	47,  // 31: whalerein.v1.RequestPayload.list_models:type_name -> whalerein.v1.ListModels
-	48,  // 32: whalerein.v1.RequestPayload.read_session_model:type_name -> whalerein.v1.ReadSessionModel
-	56,  // 33: whalerein.v1.RequestPayload.select_session_model:type_name -> whalerein.v1.SelectSessionModel
-	120, // 34: whalerein.v1.RequestPayload.wait_session:type_name -> whalerein.v1.WaitSession
-	121, // 35: whalerein.v1.RequestPayload.cancel_session_wait:type_name -> whalerein.v1.CancelSessionWait
-	122, // 36: whalerein.v1.RequestPayload.read_wait_state:type_name -> whalerein.v1.ReadWaitState
-	59,  // 37: whalerein.v1.RequestPayload.create_session:type_name -> whalerein.v1.CreateSession
-	126, // 38: whalerein.v1.RequestPayload.read_pending_queue:type_name -> whalerein.v1.ReadPendingQueue
-	129, // 39: whalerein.v1.RequestPayload.update_pending_queue:type_name -> whalerein.v1.UpdatePendingQueue
-	70,  // 40: whalerein.v1.RequestPayload.list_questions:type_name -> whalerein.v1.ListQuestions
-	71,  // 41: whalerein.v1.RequestPayload.get_question:type_name -> whalerein.v1.GetQuestion
-	73,  // 42: whalerein.v1.RequestPayload.answer_question:type_name -> whalerein.v1.AnswerQuestion
-	75,  // 43: whalerein.v1.RequestPayload.cancel_question_answer:type_name -> whalerein.v1.CancelQuestionAnswer
-	58,  // 44: whalerein.v1.RequestPayload.fork_session:type_name -> whalerein.v1.ForkSession
-	88,  // 45: whalerein.v1.ResponsePayload.session_list:type_name -> whalerein.v1.SessionList
-	91,  // 46: whalerein.v1.ResponsePayload.approval:type_name -> whalerein.v1.Approval
-	89,  // 47: whalerein.v1.ResponsePayload.command_accepted:type_name -> whalerein.v1.CommandAccepted
-	90,  // 48: whalerein.v1.ResponsePayload.command_result:type_name -> whalerein.v1.CommandResult
-	86,  // 49: whalerein.v1.ResponsePayload.pong:type_name -> whalerein.v1.Pong
-	80,  // 50: whalerein.v1.ResponsePayload.approval_list:type_name -> whalerein.v1.ApprovalList
-	108, // 51: whalerein.v1.ResponsePayload.history_page:type_name -> whalerein.v1.HistoryPage
-	116, // 52: whalerein.v1.ResponsePayload.watch_ready:type_name -> whalerein.v1.WatchReady
-	118, // 53: whalerein.v1.ResponsePayload.watch_states:type_name -> whalerein.v1.WatchStates
-	87,  // 54: whalerein.v1.ResponsePayload.session_info:type_name -> whalerein.v1.SessionSummary
-	46,  // 55: whalerein.v1.ResponsePayload.host_capabilities:type_name -> whalerein.v1.HostCapabilities
-	54,  // 56: whalerein.v1.ResponsePayload.model_catalog:type_name -> whalerein.v1.ModelCatalog
-	55,  // 57: whalerein.v1.ResponsePayload.session_model:type_name -> whalerein.v1.SessionModel
-	57,  // 58: whalerein.v1.ResponsePayload.model_selection_receipt:type_name -> whalerein.v1.ModelSelectionReceipt
-	124, // 59: whalerein.v1.ResponsePayload.session_wait_result:type_name -> whalerein.v1.SessionWaitResult
-	125, // 60: whalerein.v1.ResponsePayload.session_wait_state_result:type_name -> whalerein.v1.SessionWaitStateResult
-	60,  // 61: whalerein.v1.ResponsePayload.lifecycle_receipt:type_name -> whalerein.v1.LifecycleReceipt
-	128, // 62: whalerein.v1.ResponsePayload.pending_queue:type_name -> whalerein.v1.PendingQueue
-	72,  // 63: whalerein.v1.ResponsePayload.question_page:type_name -> whalerein.v1.QuestionPage
-	69,  // 64: whalerein.v1.ResponsePayload.question_batch:type_name -> whalerein.v1.QuestionBatch
-	74,  // 65: whalerein.v1.ResponsePayload.question_receipt:type_name -> whalerein.v1.QuestionReceipt
-	76,  // 66: whalerein.v1.ResponsePayload.question_cancel_receipt:type_name -> whalerein.v1.QuestionCancelReceipt
+	140, // 12: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	20,  // 13: whalerein.v1.ChannelHello.capabilities:type_name -> whalerein.v1.CapabilitySet
+	20,  // 14: whalerein.v1.ChannelReady.capabilities:type_name -> whalerein.v1.CapabilitySet
+	20,  // 15: whalerein.v1.PairingHello.capabilities:type_name -> whalerein.v1.CapabilitySet
+	20,  // 16: whalerein.v1.PairingHelloReply.capabilities:type_name -> whalerein.v1.CapabilitySet
+	62,  // 17: whalerein.v1.RequestPayload.list_sessions:type_name -> whalerein.v1.ListSessions
+	80,  // 18: whalerein.v1.RequestPayload.get_session:type_name -> whalerein.v1.GetSession
+	81,  // 19: whalerein.v1.RequestPayload.get_approval:type_name -> whalerein.v1.GetApproval
+	84,  // 20: whalerein.v1.RequestPayload.get_command_result:type_name -> whalerein.v1.GetCommandResult
+	85,  // 21: whalerein.v1.RequestPayload.send_message:type_name -> whalerein.v1.SendMessage
+	86,  // 22: whalerein.v1.RequestPayload.interrupt:type_name -> whalerein.v1.Interrupt
+	87,  // 23: whalerein.v1.RequestPayload.resolve_approval:type_name -> whalerein.v1.ResolveApproval
+	88,  // 24: whalerein.v1.RequestPayload.ping:type_name -> whalerein.v1.Ping
+	82,  // 25: whalerein.v1.RequestPayload.list_approvals:type_name -> whalerein.v1.ListApprovals
+	110, // 26: whalerein.v1.RequestPayload.read_history:type_name -> whalerein.v1.HistoryRead
+	119, // 27: whalerein.v1.RequestPayload.watch_session:type_name -> whalerein.v1.WatchSession
+	121, // 28: whalerein.v1.RequestPayload.refresh_watches:type_name -> whalerein.v1.RefreshWatches
+	123, // 29: whalerein.v1.RequestPayload.unwatch_session:type_name -> whalerein.v1.UnwatchSession
+	46,  // 30: whalerein.v1.RequestPayload.get_host_capabilities:type_name -> whalerein.v1.GetHostCapabilities
+	48,  // 31: whalerein.v1.RequestPayload.list_models:type_name -> whalerein.v1.ListModels
+	49,  // 32: whalerein.v1.RequestPayload.read_session_model:type_name -> whalerein.v1.ReadSessionModel
+	57,  // 33: whalerein.v1.RequestPayload.select_session_model:type_name -> whalerein.v1.SelectSessionModel
+	124, // 34: whalerein.v1.RequestPayload.wait_session:type_name -> whalerein.v1.WaitSession
+	125, // 35: whalerein.v1.RequestPayload.cancel_session_wait:type_name -> whalerein.v1.CancelSessionWait
+	126, // 36: whalerein.v1.RequestPayload.read_wait_state:type_name -> whalerein.v1.ReadWaitState
+	60,  // 37: whalerein.v1.RequestPayload.create_session:type_name -> whalerein.v1.CreateSession
+	130, // 38: whalerein.v1.RequestPayload.read_pending_queue:type_name -> whalerein.v1.ReadPendingQueue
+	133, // 39: whalerein.v1.RequestPayload.update_pending_queue:type_name -> whalerein.v1.UpdatePendingQueue
+	73,  // 40: whalerein.v1.RequestPayload.list_questions:type_name -> whalerein.v1.ListQuestions
+	74,  // 41: whalerein.v1.RequestPayload.get_question:type_name -> whalerein.v1.GetQuestion
+	76,  // 42: whalerein.v1.RequestPayload.answer_question:type_name -> whalerein.v1.AnswerQuestion
+	78,  // 43: whalerein.v1.RequestPayload.cancel_question_answer:type_name -> whalerein.v1.CancelQuestionAnswer
+	59,  // 44: whalerein.v1.RequestPayload.fork_session:type_name -> whalerein.v1.ForkSession
+	91,  // 45: whalerein.v1.ResponsePayload.session_list:type_name -> whalerein.v1.SessionList
+	94,  // 46: whalerein.v1.ResponsePayload.approval:type_name -> whalerein.v1.Approval
+	92,  // 47: whalerein.v1.ResponsePayload.command_accepted:type_name -> whalerein.v1.CommandAccepted
+	93,  // 48: whalerein.v1.ResponsePayload.command_result:type_name -> whalerein.v1.CommandResult
+	89,  // 49: whalerein.v1.ResponsePayload.pong:type_name -> whalerein.v1.Pong
+	83,  // 50: whalerein.v1.ResponsePayload.approval_list:type_name -> whalerein.v1.ApprovalList
+	111, // 51: whalerein.v1.ResponsePayload.history_page:type_name -> whalerein.v1.HistoryPage
+	120, // 52: whalerein.v1.ResponsePayload.watch_ready:type_name -> whalerein.v1.WatchReady
+	122, // 53: whalerein.v1.ResponsePayload.watch_states:type_name -> whalerein.v1.WatchStates
+	90,  // 54: whalerein.v1.ResponsePayload.session_info:type_name -> whalerein.v1.SessionSummary
+	47,  // 55: whalerein.v1.ResponsePayload.host_capabilities:type_name -> whalerein.v1.HostCapabilities
+	55,  // 56: whalerein.v1.ResponsePayload.model_catalog:type_name -> whalerein.v1.ModelCatalog
+	56,  // 57: whalerein.v1.ResponsePayload.session_model:type_name -> whalerein.v1.SessionModel
+	58,  // 58: whalerein.v1.ResponsePayload.model_selection_receipt:type_name -> whalerein.v1.ModelSelectionReceipt
+	128, // 59: whalerein.v1.ResponsePayload.session_wait_result:type_name -> whalerein.v1.SessionWaitResult
+	129, // 60: whalerein.v1.ResponsePayload.session_wait_state_result:type_name -> whalerein.v1.SessionWaitStateResult
+	61,  // 61: whalerein.v1.ResponsePayload.lifecycle_receipt:type_name -> whalerein.v1.LifecycleReceipt
+	132, // 62: whalerein.v1.ResponsePayload.pending_queue:type_name -> whalerein.v1.PendingQueue
+	75,  // 63: whalerein.v1.ResponsePayload.question_page:type_name -> whalerein.v1.QuestionPage
+	72,  // 64: whalerein.v1.ResponsePayload.question_batch:type_name -> whalerein.v1.QuestionBatch
+	77,  // 65: whalerein.v1.ResponsePayload.question_receipt:type_name -> whalerein.v1.QuestionReceipt
+	79,  // 66: whalerein.v1.ResponsePayload.question_cancel_receipt:type_name -> whalerein.v1.QuestionCancelReceipt
 	2,   // 67: whalerein.v1.ResponsePayload.error_code:type_name -> whalerein.v1.ErrorCode
-	50,  // 68: whalerein.v1.ModelEntry.efforts:type_name -> whalerein.v1.ModelEffort
-	51,  // 69: whalerein.v1.ModelProvider.models:type_name -> whalerein.v1.ModelEntry
+	51,  // 68: whalerein.v1.ModelEntry.efforts:type_name -> whalerein.v1.ModelEffort
+	52,  // 69: whalerein.v1.ModelProvider.models:type_name -> whalerein.v1.ModelEntry
 	2,   // 70: whalerein.v1.ModelProviderFailure.code:type_name -> whalerein.v1.ErrorCode
-	49,  // 71: whalerein.v1.ModelCatalog.default_selection:type_name -> whalerein.v1.ModelChoice
-	52,  // 72: whalerein.v1.ModelCatalog.groups:type_name -> whalerein.v1.ModelProvider
-	53,  // 73: whalerein.v1.ModelCatalog.failures:type_name -> whalerein.v1.ModelProviderFailure
-	49,  // 74: whalerein.v1.SessionModel.pending:type_name -> whalerein.v1.ModelChoice
-	49,  // 75: whalerein.v1.SessionModel.last_used:type_name -> whalerein.v1.ModelChoice
-	49,  // 76: whalerein.v1.SessionModel.default_selection:type_name -> whalerein.v1.ModelChoice
-	49,  // 77: whalerein.v1.SessionModel.next:type_name -> whalerein.v1.ModelChoice
-	49,  // 78: whalerein.v1.ModelSelectionReceipt.selected:type_name -> whalerein.v1.ModelChoice
-	7,   // 79: whalerein.v1.LifecycleReceipt.disposition:type_name -> whalerein.v1.LifecycleDisposition
-	137, // 80: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
-	63,  // 81: whalerein.v1.QuestionDisplay.question:type_name -> whalerein.v1.QuestionLocalizedText
-	63,  // 82: whalerein.v1.QuestionDisplay.detail:type_name -> whalerein.v1.QuestionLocalizedText
-	63,  // 83: whalerein.v1.QuestionDisplay.approve:type_name -> whalerein.v1.QuestionLocalizedText
-	64,  // 84: whalerein.v1.QuestionIntent.subject:type_name -> whalerein.v1.QuestionSubject
-	65,  // 85: whalerein.v1.QuestionIntent.display:type_name -> whalerein.v1.QuestionDisplay
-	62,  // 86: whalerein.v1.QuestionItem.options:type_name -> whalerein.v1.QuestionOption
-	66,  // 87: whalerein.v1.QuestionItem.intent:type_name -> whalerein.v1.QuestionIntent
-	8,   // 88: whalerein.v1.QuestionBatch.phase:type_name -> whalerein.v1.QuestionPhase
-	67,  // 89: whalerein.v1.QuestionBatch.questions:type_name -> whalerein.v1.QuestionItem
-	69,  // 90: whalerein.v1.QuestionPage.batches:type_name -> whalerein.v1.QuestionBatch
-	8,   // 91: whalerein.v1.AnswerQuestion.expected_phase:type_name -> whalerein.v1.QuestionPhase
-	68,  // 92: whalerein.v1.AnswerQuestion.answers:type_name -> whalerein.v1.QuestionAnswerItem
-	8,   // 93: whalerein.v1.QuestionReceipt.phase:type_name -> whalerein.v1.QuestionPhase
-	91,  // 94: whalerein.v1.ApprovalList.approvals:type_name -> whalerein.v1.Approval
-	9,   // 95: whalerein.v1.SendMessage.delivery_mode:type_name -> whalerein.v1.DeliveryMode
-	6,   // 96: whalerein.v1.ResolveApproval.decision:type_name -> whalerein.v1.ApprovalDecision
-	96,  // 97: whalerein.v1.SessionSummary.source_capabilities:type_name -> whalerein.v1.SourceCapabilities
-	87,  // 98: whalerein.v1.SessionList.sessions:type_name -> whalerein.v1.SessionSummary
-	0,   // 99: whalerein.v1.CommandResult.status:type_name -> whalerein.v1.OnlineStatus
-	2,   // 100: whalerein.v1.CommandResult.error_code:type_name -> whalerein.v1.ErrorCode
-	5,   // 101: whalerein.v1.Approval.state:type_name -> whalerein.v1.ApprovalState
-	6,   // 102: whalerein.v1.Approval.decision:type_name -> whalerein.v1.ApprovalDecision
-	114, // 103: whalerein.v1.EventPayload.update:type_name -> whalerein.v1.SessionUpdate
-	9,   // 104: whalerein.v1.SourceCapabilities.delivery_modes:type_name -> whalerein.v1.DeliveryMode
-	98,  // 105: whalerein.v1.ContentBlock.text:type_name -> whalerein.v1.TextContent
-	99,  // 106: whalerein.v1.ContentBlock.tool_call:type_name -> whalerein.v1.ToolCallContent
-	100, // 107: whalerein.v1.ContentBlock.tool_result:type_name -> whalerein.v1.ToolResultContent
-	101, // 108: whalerein.v1.ContentBlock.notice:type_name -> whalerein.v1.NoticeContent
-	102, // 109: whalerein.v1.ContentBlock.attachment:type_name -> whalerein.v1.AttachmentContent
-	10,  // 110: whalerein.v1.ConversationMessage.role:type_name -> whalerein.v1.MessageRole
-	103, // 111: whalerein.v1.ConversationMessage.blocks:type_name -> whalerein.v1.ContentBlock
-	104, // 112: whalerein.v1.MessageUpsert.message:type_name -> whalerein.v1.ConversationMessage
-	97,  // 113: whalerein.v1.MessageUpsert.origin:type_name -> whalerein.v1.AttemptRef
-	105, // 114: whalerein.v1.HistoryBatch.changes:type_name -> whalerein.v1.MessageUpsert
-	95,  // 115: whalerein.v1.HistoryPage.session:type_name -> whalerein.v1.SessionKey
-	106, // 116: whalerein.v1.HistoryPage.batch:type_name -> whalerein.v1.HistoryBatch
-	12,  // 117: whalerein.v1.AttemptEnded.outcome:type_name -> whalerein.v1.AttemptOutcome
-	97,  // 118: whalerein.v1.LiveFrame.attempt:type_name -> whalerein.v1.AttemptRef
-	109, // 119: whalerein.v1.LiveFrame.started:type_name -> whalerein.v1.AttemptStarted
-	98,  // 120: whalerein.v1.LiveFrame.delta:type_name -> whalerein.v1.TextContent
-	98,  // 121: whalerein.v1.LiveFrame.reset:type_name -> whalerein.v1.TextContent
-	110, // 122: whalerein.v1.LiveFrame.ended:type_name -> whalerein.v1.AttemptEnded
-	95,  // 123: whalerein.v1.SessionState.session:type_name -> whalerein.v1.SessionKey
-	11,  // 124: whalerein.v1.SessionState.run_phase:type_name -> whalerein.v1.RunPhase
-	91,  // 125: whalerein.v1.SessionState.approvals:type_name -> whalerein.v1.Approval
-	95,  // 126: whalerein.v1.SessionUpdate.session:type_name -> whalerein.v1.SessionKey
-	106, // 127: whalerein.v1.SessionUpdate.history:type_name -> whalerein.v1.HistoryBatch
-	111, // 128: whalerein.v1.SessionUpdate.live:type_name -> whalerein.v1.LiveFrame
-	112, // 129: whalerein.v1.SessionUpdate.state:type_name -> whalerein.v1.SessionState
-	113, // 130: whalerein.v1.SessionUpdate.reset:type_name -> whalerein.v1.HistoryReset
-	112, // 131: whalerein.v1.WatchReady.state:type_name -> whalerein.v1.SessionState
-	116, // 132: whalerein.v1.WatchStates.watches:type_name -> whalerein.v1.WatchReady
-	14,  // 133: whalerein.v1.SessionWaitState.pending_input:type_name -> whalerein.v1.InputKind
-	13,  // 134: whalerein.v1.SessionWaitResult.reason:type_name -> whalerein.v1.WaitReason
-	123, // 135: whalerein.v1.SessionWaitResult.state:type_name -> whalerein.v1.SessionWaitState
-	123, // 136: whalerein.v1.SessionWaitStateResult.state:type_name -> whalerein.v1.SessionWaitState
-	15,  // 137: whalerein.v1.PendingQueueItem.placement:type_name -> whalerein.v1.QueuePlacement
-	103, // 138: whalerein.v1.PendingQueueItem.blocks:type_name -> whalerein.v1.ContentBlock
-	16,  // 139: whalerein.v1.PendingQueueItem.actions:type_name -> whalerein.v1.QueueAction
-	127, // 140: whalerein.v1.PendingQueue.items:type_name -> whalerein.v1.PendingQueueItem
-	16,  // 141: whalerein.v1.UpdatePendingQueue.action:type_name -> whalerein.v1.QueueAction
-	130, // 142: whalerein.v1.HostEnrollmentRequest.authorization:type_name -> whalerein.v1.ExternalAuthorization
-	17,  // 143: whalerein.v1.HostEnrollmentStatus.state:type_name -> whalerein.v1.EnrollmentState
-	133, // 144: whalerein.v1.HostEnrollmentResponse.status:type_name -> whalerein.v1.HostEnrollmentStatus
-	132, // 145: whalerein.v1.HostEnrollmentResponse.credential:type_name -> whalerein.v1.HostCredential
-	18,  // 146: whalerein.v1.OperationStatus.state:type_name -> whalerein.v1.OperationState
-	147, // [147:147] is the sub-list for method output_type
-	147, // [147:147] is the sub-list for method input_type
-	147, // [147:147] is the sub-list for extension type_name
-	147, // [147:147] is the sub-list for extension extendee
-	0,   // [0:147] is the sub-list for field type_name
+	50,  // 71: whalerein.v1.ModelCatalog.default_selection:type_name -> whalerein.v1.ModelChoice
+	53,  // 72: whalerein.v1.ModelCatalog.groups:type_name -> whalerein.v1.ModelProvider
+	54,  // 73: whalerein.v1.ModelCatalog.failures:type_name -> whalerein.v1.ModelProviderFailure
+	50,  // 74: whalerein.v1.SessionModel.pending:type_name -> whalerein.v1.ModelChoice
+	50,  // 75: whalerein.v1.SessionModel.last_used:type_name -> whalerein.v1.ModelChoice
+	50,  // 76: whalerein.v1.SessionModel.default_selection:type_name -> whalerein.v1.ModelChoice
+	50,  // 77: whalerein.v1.SessionModel.next:type_name -> whalerein.v1.ModelChoice
+	50,  // 78: whalerein.v1.ModelSelectionReceipt.selected:type_name -> whalerein.v1.ModelChoice
+	8,   // 79: whalerein.v1.LifecycleReceipt.disposition:type_name -> whalerein.v1.LifecycleDisposition
+	141, // 80: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	64,  // 81: whalerein.v1.QuestionDisplay.question:type_name -> whalerein.v1.QuestionLocalizedText
+	64,  // 82: whalerein.v1.QuestionDisplay.detail:type_name -> whalerein.v1.QuestionLocalizedText
+	64,  // 83: whalerein.v1.QuestionDisplay.approve:type_name -> whalerein.v1.QuestionLocalizedText
+	65,  // 84: whalerein.v1.QuestionIntent.subject:type_name -> whalerein.v1.QuestionSubject
+	66,  // 85: whalerein.v1.QuestionIntent.display:type_name -> whalerein.v1.QuestionDisplay
+	63,  // 86: whalerein.v1.QuestionItem.options:type_name -> whalerein.v1.QuestionOption
+	67,  // 87: whalerein.v1.QuestionItem.intent:type_name -> whalerein.v1.QuestionIntent
+	7,   // 88: whalerein.v1.QuestionDescriptor.availability:type_name -> whalerein.v1.QuestionAvailability
+	70,  // 89: whalerein.v1.QuestionDescriptor.stamp:type_name -> whalerein.v1.QuestionStamp
+	9,   // 90: whalerein.v1.QuestionBatch.phase:type_name -> whalerein.v1.QuestionPhase
+	68,  // 91: whalerein.v1.QuestionBatch.questions:type_name -> whalerein.v1.QuestionItem
+	72,  // 92: whalerein.v1.QuestionPage.batches:type_name -> whalerein.v1.QuestionBatch
+	70,  // 93: whalerein.v1.QuestionPage.stamp:type_name -> whalerein.v1.QuestionStamp
+	9,   // 94: whalerein.v1.AnswerQuestion.expected_phase:type_name -> whalerein.v1.QuestionPhase
+	69,  // 95: whalerein.v1.AnswerQuestion.answers:type_name -> whalerein.v1.QuestionAnswerItem
+	9,   // 96: whalerein.v1.QuestionReceipt.phase:type_name -> whalerein.v1.QuestionPhase
+	94,  // 97: whalerein.v1.ApprovalList.approvals:type_name -> whalerein.v1.Approval
+	10,  // 98: whalerein.v1.SendMessage.delivery_mode:type_name -> whalerein.v1.DeliveryMode
+	6,   // 99: whalerein.v1.ResolveApproval.decision:type_name -> whalerein.v1.ApprovalDecision
+	99,  // 100: whalerein.v1.SessionSummary.source_capabilities:type_name -> whalerein.v1.SourceCapabilities
+	90,  // 101: whalerein.v1.SessionList.sessions:type_name -> whalerein.v1.SessionSummary
+	0,   // 102: whalerein.v1.CommandResult.status:type_name -> whalerein.v1.OnlineStatus
+	2,   // 103: whalerein.v1.CommandResult.error_code:type_name -> whalerein.v1.ErrorCode
+	5,   // 104: whalerein.v1.Approval.state:type_name -> whalerein.v1.ApprovalState
+	6,   // 105: whalerein.v1.Approval.decision:type_name -> whalerein.v1.ApprovalDecision
+	117, // 106: whalerein.v1.EventPayload.update:type_name -> whalerein.v1.SessionUpdate
+	10,  // 107: whalerein.v1.SourceCapabilities.delivery_modes:type_name -> whalerein.v1.DeliveryMode
+	101, // 108: whalerein.v1.ContentBlock.text:type_name -> whalerein.v1.TextContent
+	102, // 109: whalerein.v1.ContentBlock.tool_call:type_name -> whalerein.v1.ToolCallContent
+	103, // 110: whalerein.v1.ContentBlock.tool_result:type_name -> whalerein.v1.ToolResultContent
+	104, // 111: whalerein.v1.ContentBlock.notice:type_name -> whalerein.v1.NoticeContent
+	105, // 112: whalerein.v1.ContentBlock.attachment:type_name -> whalerein.v1.AttachmentContent
+	11,  // 113: whalerein.v1.ConversationMessage.role:type_name -> whalerein.v1.MessageRole
+	106, // 114: whalerein.v1.ConversationMessage.blocks:type_name -> whalerein.v1.ContentBlock
+	107, // 115: whalerein.v1.MessageUpsert.message:type_name -> whalerein.v1.ConversationMessage
+	100, // 116: whalerein.v1.MessageUpsert.origin:type_name -> whalerein.v1.AttemptRef
+	108, // 117: whalerein.v1.HistoryBatch.changes:type_name -> whalerein.v1.MessageUpsert
+	98,  // 118: whalerein.v1.HistoryPage.session:type_name -> whalerein.v1.SessionKey
+	109, // 119: whalerein.v1.HistoryPage.batch:type_name -> whalerein.v1.HistoryBatch
+	13,  // 120: whalerein.v1.AttemptEnded.outcome:type_name -> whalerein.v1.AttemptOutcome
+	100, // 121: whalerein.v1.LiveFrame.attempt:type_name -> whalerein.v1.AttemptRef
+	112, // 122: whalerein.v1.LiveFrame.started:type_name -> whalerein.v1.AttemptStarted
+	101, // 123: whalerein.v1.LiveFrame.delta:type_name -> whalerein.v1.TextContent
+	101, // 124: whalerein.v1.LiveFrame.reset:type_name -> whalerein.v1.TextContent
+	113, // 125: whalerein.v1.LiveFrame.ended:type_name -> whalerein.v1.AttemptEnded
+	98,  // 126: whalerein.v1.SessionState.session:type_name -> whalerein.v1.SessionKey
+	12,  // 127: whalerein.v1.SessionState.run_phase:type_name -> whalerein.v1.RunPhase
+	94,  // 128: whalerein.v1.SessionState.approvals:type_name -> whalerein.v1.Approval
+	71,  // 129: whalerein.v1.SessionState.questions:type_name -> whalerein.v1.QuestionDescriptor
+	98,  // 130: whalerein.v1.SessionUpdate.session:type_name -> whalerein.v1.SessionKey
+	109, // 131: whalerein.v1.SessionUpdate.history:type_name -> whalerein.v1.HistoryBatch
+	114, // 132: whalerein.v1.SessionUpdate.live:type_name -> whalerein.v1.LiveFrame
+	115, // 133: whalerein.v1.SessionUpdate.state:type_name -> whalerein.v1.SessionState
+	116, // 134: whalerein.v1.SessionUpdate.reset:type_name -> whalerein.v1.HistoryReset
+	71,  // 135: whalerein.v1.SessionUpdate.questions:type_name -> whalerein.v1.QuestionDescriptor
+	118, // 136: whalerein.v1.WatchSession.interests:type_name -> whalerein.v1.ObservationInterests
+	115, // 137: whalerein.v1.WatchReady.state:type_name -> whalerein.v1.SessionState
+	71,  // 138: whalerein.v1.WatchReady.questions:type_name -> whalerein.v1.QuestionDescriptor
+	120, // 139: whalerein.v1.WatchStates.watches:type_name -> whalerein.v1.WatchReady
+	15,  // 140: whalerein.v1.SessionWaitState.pending_input:type_name -> whalerein.v1.InputKind
+	14,  // 141: whalerein.v1.SessionWaitResult.reason:type_name -> whalerein.v1.WaitReason
+	127, // 142: whalerein.v1.SessionWaitResult.state:type_name -> whalerein.v1.SessionWaitState
+	127, // 143: whalerein.v1.SessionWaitStateResult.state:type_name -> whalerein.v1.SessionWaitState
+	16,  // 144: whalerein.v1.PendingQueueItem.placement:type_name -> whalerein.v1.QueuePlacement
+	106, // 145: whalerein.v1.PendingQueueItem.blocks:type_name -> whalerein.v1.ContentBlock
+	17,  // 146: whalerein.v1.PendingQueueItem.actions:type_name -> whalerein.v1.QueueAction
+	131, // 147: whalerein.v1.PendingQueue.items:type_name -> whalerein.v1.PendingQueueItem
+	17,  // 148: whalerein.v1.UpdatePendingQueue.action:type_name -> whalerein.v1.QueueAction
+	134, // 149: whalerein.v1.HostEnrollmentRequest.authorization:type_name -> whalerein.v1.ExternalAuthorization
+	18,  // 150: whalerein.v1.HostEnrollmentStatus.state:type_name -> whalerein.v1.EnrollmentState
+	137, // 151: whalerein.v1.HostEnrollmentResponse.status:type_name -> whalerein.v1.HostEnrollmentStatus
+	136, // 152: whalerein.v1.HostEnrollmentResponse.credential:type_name -> whalerein.v1.HostCredential
+	19,  // 153: whalerein.v1.OperationStatus.state:type_name -> whalerein.v1.OperationState
+	154, // [154:154] is the sub-list for method output_type
+	154, // [154:154] is the sub-list for method input_type
+	154, // [154:154] is the sub-list for extension type_name
+	154, // [154:154] is the sub-list for extension extendee
+	0,   // [0:154] is the sub-list for field type_name
 }
 
 func init() { file_whalerein_proto_init() }
@@ -11524,32 +11846,33 @@ func file_whalerein_proto_init() {
 	file_whalerein_proto_msgTypes[47].OneofWrappers = []any{}
 	file_whalerein_proto_msgTypes[48].OneofWrappers = []any{}
 	file_whalerein_proto_msgTypes[49].OneofWrappers = []any{}
-	file_whalerein_proto_msgTypes[84].OneofWrappers = []any{
+	file_whalerein_proto_msgTypes[86].OneofWrappers = []any{
 		(*ContentBlock_Text)(nil),
 		(*ContentBlock_ToolCall)(nil),
 		(*ContentBlock_ToolResult)(nil),
 		(*ContentBlock_Notice)(nil),
 		(*ContentBlock_Attachment)(nil),
 	}
-	file_whalerein_proto_msgTypes[92].OneofWrappers = []any{
+	file_whalerein_proto_msgTypes[94].OneofWrappers = []any{
 		(*LiveFrame_Started)(nil),
 		(*LiveFrame_Delta)(nil),
 		(*LiveFrame_Reset_)(nil),
 		(*LiveFrame_Ended)(nil),
 	}
-	file_whalerein_proto_msgTypes[95].OneofWrappers = []any{
+	file_whalerein_proto_msgTypes[97].OneofWrappers = []any{
 		(*SessionUpdate_History)(nil),
 		(*SessionUpdate_Live)(nil),
 		(*SessionUpdate_State)(nil),
 		(*SessionUpdate_Reset_)(nil),
+		(*SessionUpdate_Questions)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whalerein_proto_rawDesc), len(file_whalerein_proto_rawDesc)),
-			NumEnums:      19,
-			NumMessages:   119,
+			NumEnums:      20,
+			NumMessages:   122,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

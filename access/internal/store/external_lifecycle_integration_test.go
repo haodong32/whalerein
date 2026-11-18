@@ -82,7 +82,7 @@ func TestExternalLifecycleDisableRevokesGrantsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !disabled.DisabledAt.Equal(now) || disabled.Revocations["device-disable"] == 0 {
+	if disabled.DisabledAt.UnixMicro() != now.UnixMicro() || disabled.Revocations["device-disable"] == 0 {
 		t.Fatalf("disable = %+v", disabled)
 	}
 	if active, err := s.HasActiveGrant(ctx, "host-disable", "device-disable"); err != nil || active {
@@ -92,7 +92,7 @@ func TestExternalLifecycleDisableRevokesGrantsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !repeated.DisabledAt.Equal(now) || len(repeated.Revocations) != 0 {
+	if repeated.DisabledAt.UnixMicro() != now.UnixMicro() || len(repeated.Revocations) != 0 {
 		t.Fatalf("repeated disable = %+v", repeated)
 	}
 	if _, err := s.DisableEnrollment(ctx, "host-unknown", now); !errors.Is(err, store.ErrNotFound) {

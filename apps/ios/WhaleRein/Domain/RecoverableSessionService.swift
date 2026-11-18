@@ -117,6 +117,42 @@ final class RecoverableSessionService: SessionService {
         try await current().stop(hostId: hostId, sessionId: sessionId)
     }
 
+    // MARK: - Questions
+
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
+        try await current().listQuestions(hostId: hostId, sessionId: sessionId, cursor: cursor)
+    }
+
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch {
+        try await current().question(hostId: hostId, sessionId: sessionId, batchId: batchId)
+    }
+
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt {
+        try await current().answerQuestion(
+            hostId: hostId,
+            sessionId: sessionId,
+            batch: batch,
+            answers: answers
+        )
+    }
+
+    func cancelQuestionAnswer(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> Bool {
+        try await current().cancelQuestionAnswer(
+            hostId: hostId,
+            sessionId: sessionId,
+            commandId: commandId
+        )
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {

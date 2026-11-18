@@ -198,6 +198,154 @@ struct ApprovalReview: Hashable, Sendable {
     }
 }
 
+// MARK: - Pending questions
+
+/// Readiness of the question facet. Only `current` establishes that no pending
+/// questions exist; every other state is explicitly not an empty collection.
+enum QuestionFreshness: String, Codable, Sendable {
+    case loading
+    case current
+    case stale
+    case unavailable
+    case unsupported
+
+    init(bindingLabel: String) {
+        self = QuestionFreshness(rawValue: bindingLabel.lowercased()) ?? .unavailable
+    }
+}
+
+struct QuestionOption: Identifiable, Hashable, Sendable {
+    let label: String
+    let description: String?
+
+    var id: String { label }
+}
+
+struct QuestionSubject: Hashable, Sendable {
+    let name: String
+    let icon: String?
+}
+
+struct QuestionIntent: Hashable, Sendable {
+    let kind: String
+    let approve: String
+    let reject: String?
+    let always: String?
+    let callID: String?
+    let subject: QuestionSubject?
+    let displayQuestion: [String: String]?
+    let displayDetail: [String: String]?
+    let displayApprove: [String: String]?
+}
+
+struct QuestionItem: Identifiable, Hashable, Sendable {
+    let id: String
+    let question: String
+    let detail: String?
+    let header: String?
+    let options: [QuestionOption]
+    let multiSelect: Bool
+    let intent: QuestionIntent?
+}
+
+/// The exact native guard a submission must revalidate. Observation freshness
+/// never substitutes for these fields.
+struct QuestionGuard: Hashable, Sendable {
+    let sessionID: String
+    let batchID: String
+    let sourceEpoch: String
+    let version: UInt64
+    let digestHex: String
+    let phase: String
+
+    var isAnswerablePhase: Bool {
+        phase == "QUESTION_OPEN" || phase == "QUESTION_CONTINUED"
+    }
+}
+
+struct QuestionBatch: Identifiable, Hashable, Sendable {
+    let sessionID: String
+    let batchID: String
+    let sourceEpoch: String
+    let version: UInt64
+    let digestHex: String
+    let phase: String
+    let questions: [QuestionItem]
+    let answerable: Bool
+    let contentUnavailable: Bool
+    /// True only when the card may offer an answer after explicit review.
+    var canAnswer: Bool {
+        answerable && !contentUnavailable && guardValue.isAnswerablePhase
+    }
+
+    var id: String { batchID }
+
+    var guardValue: QuestionGuard {
+        QuestionGuard(
+            sessionID: sessionID,
+            batchID: batchID,
+            sourceEpoch: sourceEpoch,
+            version: version,
+            digestHex: digestHex,
+            phase: phase
+        )
+    }
+}
+
+struct QuestionStamp: Hashable, Sendable {
+    let observationEpoch: String
+    let revision: UInt64
+}
+
+struct QuestionsState: Hashable, Sendable {
+    var freshness: QuestionFreshness
+    var stamp: QuestionStamp?
+    var batches: [QuestionBatch]
+    var error: String?
+    /// Core view was too large to inline into the event queue; content must be
+    /// loaded on demand. Never interpreted as an empty collection.
+    var truncatedForDisplay: Bool = false
+    /// Authoritative batch count even when content is not inlined.
+    var batchCount: Int = 0
+
+    static let loading = QuestionsState(
+        freshness: .loading,
+        stamp: nil,
+        batches: [],
+        error: nil
+    )
+
+    var isCurrent: Bool { freshness == .current }
+}
+
+struct QuestionPage: Hashable, Sendable {
+    let batches: [QuestionBatch]
+    let nextCursor: String
+    let stamp: QuestionStamp?
+    let complete: Bool
+}
+
+struct QuestionAnswer: Hashable, Sendable {
+    let id: String
+    let selected: [String]
+    let custom: String?
+}
+
+/// Immutable snapshot of the reviewed guard and inputs. Submission compares it
+/// with the currently observed batch and refuses a changed or disappeared one.
+struct QuestionReview: Hashable, Sendable {
+    let guardValue: QuestionGuard
+    let answers: [QuestionAnswer]
+}
+
+enum QuestionAnswerState: Equatable, Sendable {
+    case idle
+    case submitting
+    case submitted(CommandStatus)
+    case uncertain(commandId: String)
+    case failed
+}
+
 // MARK: - Commands
 
 enum DeliveryChoice: String, Codable, CaseIterable, Sendable {
@@ -281,6 +429,7 @@ enum MessageEvent: Sendable {
     case capabilities(SessionCapabilities)
     case approvals([Approval])
     case approvalChanged(Approval)
+    case questions(QuestionsState)
     case commandStatus(CommandReceipt)
     case error(code: AppErrorCode, message: String)
     case watchEnded(reason: String)

@@ -26,7 +26,14 @@ export class SourceAdapter {
   async waitSession() { throw new AdapterError('unsupported_capability') }
   async listApprovals() { throw new AdapterError('unsupported_capability') }
   async getApproval() { throw new AdapterError('unsupported_capability') }
+  // Authoritative pending-question inventory. A successful read resolves
+  // { batches, next_cursor: '', stamp } where `stamp` certifies the complete
+  // normalized collection sampled, not this wire page.
   async listQuestionPage() { throw new AdapterError('unsupported_capability') }
+  // Read the same authoritative inventory stamp without publishing a page.
+  // Unsupported is an explicit result so a Host watch stays usable for
+  // Conversation; it is not an empty available collection.
+  async readQuestionStamp() { return { availability: 'unsupported', code: 'unsupported_capability' } }
   async getQuestion() { throw new AdapterError('unsupported_capability') }
   // Resolve with a confirmed native receipt. Only DefinitiveExecutionError
   // establishes failure; any other exception can follow an executed action.
@@ -38,9 +45,59 @@ export class SourceAdapter {
   async execute() { throw new DefinitiveExecutionError('unsupported_capability') }
 }
 
+const QUESTION_AVAILABILITIES = new Set(['available','unavailable','unsupported'])
+
+// A Source-owned collection stamp. Revisions are opaque positive values; the
+// Host only compares identity, so an exactly representable JavaScript integer
+// or its unsigned decimal string form is accepted.
+export function validateQuestionStamp(stamp) {
+  if (!stamp || typeof stamp !== 'object' || Array.isArray(stamp)) throw new AdapterError('invalid_argument','question stamp missing')
+  if (typeof stamp.observation_epoch !== 'string' || stamp.observation_epoch === '') throw new AdapterError('invalid_argument','question epoch missing')
+  const revision = stamp.revision
+  const valid = typeof revision === 'number'
+    ? Number.isSafeInteger(revision) && revision >= 1
+    : typeof revision === 'string' && /^[1-9][0-9]*$/.test(revision)
+  if (!valid) throw new AdapterError('invalid_argument','question revision invalid')
+  return { observation_epoch: stamp.observation_epoch, revision }
+}
+
+export function validateQuestionDescriptor(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object' || !QUESTION_AVAILABILITIES.has(descriptor.availability)) {
+    throw new AdapterError('invalid_argument','question availability invalid')
+  }
+  if (descriptor.availability === 'available') {
+    return { availability: 'available', stamp: validateQuestionStamp(descriptor.stamp) }
+  }
+  const code = descriptor.code
+  if (code !== undefined && (typeof code !== 'string' || code.length > 64)) throw new AdapterError('invalid_argument','question unavailable code invalid')
+  return { availability: descriptor.availability, ...(code ? { code } : {}) }
+}
+
+const QUESTION_AVAILABILITY_TO_PROTO = Object.freeze({
+  available: 'QUESTION_AVAILABILITY_AVAILABLE',
+  unavailable: 'QUESTION_AVAILABILITY_UNAVAILABLE',
+  unsupported: 'QUESTION_AVAILABILITY_UNSUPPORTED',
+})
+
+/** Wire descriptor; UNSPECIFIED is never emitted. */
+export function questionDescriptorToProto(descriptor) {
+  const normalized = validateQuestionDescriptor(descriptor)
+  return {
+    availability: QUESTION_AVAILABILITY_TO_PROTO[normalized.availability],
+    ...(normalized.code ? { unavailable_code: normalized.code } : {}),
+    ...(normalized.stamp ? { stamp: normalized.stamp } : {}),
+  }
+}
+
+export function sameQuestionDescriptor(left, right) {
+  if (!left || !right || left.availability !== right.availability) return false
+  if (left.availability !== 'available') return (left.code ?? '') === (right.code ?? '')
+  return left.stamp.observation_epoch === right.stamp.observation_epoch && String(left.stamp.revision) === String(right.stamp.revision)
+}
+
 export function validateSessionUpdate(update) {
   if (!update?.session?.session_id || !validateId('session_id', update.session.session_id).ok) throw new AdapterError('invalid_argument','session identity missing')
-  const kinds=['history','live','state','reset'].filter(key=>update[key]!=null)
+  const kinds=['history','live','state','reset','questions'].filter(key=>update[key]!=null)
   if(kinds.length!==1)throw new AdapterError('invalid_argument','exactly one update required')
   if(update.history) {
     const b=update.history
@@ -51,6 +108,7 @@ export function validateSessionUpdate(update) {
       for(const block of message.blocks){requireId('block_id', block.block_id, 'invalid content block identity');if(['text','tool_call','tool_result','notice','attachment'].filter(k=>block[k]!=null).length!==1)throw new AdapterError('invalid_argument','invalid content block')}
     }
   }
+  if(update.questions) validateQuestionDescriptor(update.questions)
   if(update.live) {
     const f=update.live
     if(!f.attempt?.live_epoch||!f.attempt.attempt_id||!Number.isSafeInteger(f.first_seq)||!Number.isSafeInteger(f.last_seq)||f.first_seq<1||f.last_seq<f.first_seq||['started','delta','reset','ended'].filter(k=>f[k]!=null).length!==1)throw new AdapterError('invalid_argument','invalid live interval')

@@ -2,6 +2,7 @@
 // temporary directories, a recording SessionService stub, and async helpers.
 
 import Foundation
+import Testing
 @testable import WhaleRein
 
 func testLaunchOptions(_ extra: [String] = [], approvalState: String? = nil) -> LaunchOptions {
@@ -89,6 +90,75 @@ func pump(_ milliseconds: Int = 20) async {
     try? await Task.sleep(for: .milliseconds(milliseconds))
 }
 
+/// Suspends one service response until the test has observed the in-flight
+/// state, then resumes it deterministically. No polling or sleeping.
+@MainActor
+final class SuspendedResponse<Value: Sendable> {
+    struct AlreadyWaiting: Error, CustomStringConvertible {
+        var description: String {
+            "SuspendedResponse.wait() was called while another wait was pending; "
+                + "the service likely issued a second call instead of being coalesced"
+        }
+    }
+
+    private var response: CheckedContinuation<Value, Error>?
+    private var startWaiters: [CheckedContinuation<Bool, Never>] = []
+    private var started = false
+    private var startTimeoutTask: Task<Void, Never>?
+
+    /// Waits for the service call to reach this gate. A regression that skips
+    /// the call reports a test issue after `timeout` instead of hanging the
+    /// whole plan.
+    func waitUntilStarted(
+        timeout: Duration = .seconds(5),
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        if started { return }
+        let didStart = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            startWaiters.append(continuation)
+            guard startTimeoutTask == nil else { return }
+            startTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: timeout)
+                guard let self, !Task.isCancelled, !self.started else { return }
+                self.startTimeoutTask = nil
+                let waiters = self.startWaiters
+                self.startWaiters.removeAll()
+                for waiter in waiters {
+                    waiter.resume(returning: false)
+                }
+            }
+        }
+        if !didStart {
+            Issue.record(
+                "SuspendedResponse.wait() was not called within \(timeout); the expected service call never reached the gate",
+                sourceLocation: sourceLocation
+            )
+        }
+    }
+
+    /// Throws instead of overwriting a stored continuation, so a duplicate
+    /// service call fails the test at the call site rather than deadlocking.
+    func wait() async throws -> Value {
+        guard response == nil else { throw AlreadyWaiting() }
+        started = true
+        startTimeoutTask?.cancel()
+        startTimeoutTask = nil
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(returning: true)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            response = continuation
+        }
+    }
+
+    func resume(with value: Value) {
+        response?.resume(returning: value)
+        response = nil
+    }
+}
+
 @MainActor
 final class StubSessionService: SessionService {
     var connectionStatus: ConnectionStatus = .online
@@ -107,6 +177,10 @@ final class StubSessionService: SessionService {
     var stopHandler: ((String, String) async throws -> CommandReceipt)?
     var approvalsHandler: ((String, String) async throws -> [Approval])?
     var resolveHandler: ((String, String, String, Int, String, Bool) async throws -> Approval)?
+    var listQuestionsHandler: ((String, String, String) async throws -> QuestionPage)?
+    var questionHandler: ((String, String, String) async throws -> QuestionBatch)?
+    var answerQuestionHandler: ((String, String, QuestionBatch, [QuestionAnswer]) async throws -> CommandReceipt)?
+    var cancelQuestionHandler: ((String, String, String) async throws -> Bool)?
     var diagnosticsHandler: (() async throws -> DiagnosticsReport)?
     var exportHandler: ((URL) async throws -> DiagnosticsReport)?
     var forgetHandler: (() async throws -> Void)?
@@ -128,6 +202,10 @@ final class StubSessionService: SessionService {
     private(set) var sessionsFetchCount = 0
     private(set) var eventStreamCount = 0
     private(set) var terminatedStreamCount = 0
+    private(set) var listQuestionsCalls: [(String, String, String)] = []
+    private(set) var questionCalls: [(String, String, String)] = []
+    private(set) var answerQuestionCalls: [(String, String, QuestionBatch, [QuestionAnswer])] = []
+    private(set) var cancelQuestionCalls: [(String, String, String)] = []
 
     var activeStreamCount: Int { continuations.count }
 
@@ -222,6 +300,48 @@ final class StubSessionService: SessionService {
             return CommandReceipt(commandId: "cmd-stop-1", requestId: "req-stop-1", status: .uncertain, delivery: nil)
         }
         return try await stopHandler(hostId, sessionId)
+    }
+
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
+        listQuestionsCalls.append((hostId, sessionId, cursor))
+        guard let listQuestionsHandler else {
+            return QuestionPage(batches: [], nextCursor: "", stamp: nil, complete: true)
+        }
+        return try await listQuestionsHandler(hostId, sessionId, cursor)
+    }
+
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch {
+        questionCalls.append((hostId, sessionId, batchId))
+        guard let questionHandler else { throw SessionServiceError(.unavailable) }
+        return try await questionHandler(hostId, sessionId, batchId)
+    }
+
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt {
+        answerQuestionCalls.append((hostId, sessionId, batch, answers))
+        guard let answerQuestionHandler else {
+            return CommandReceipt(
+                commandId: "cmd-answer-1",
+                requestId: "req-answer-1",
+                status: .confirmed,
+                delivery: nil
+            )
+        }
+        return try await answerQuestionHandler(hostId, sessionId, batch, answers)
+    }
+
+    func cancelQuestionAnswer(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> Bool {
+        cancelQuestionCalls.append((hostId, sessionId, commandId))
+        guard let cancelQuestionHandler else { return true }
+        return try await cancelQuestionHandler(hostId, sessionId, commandId)
     }
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {

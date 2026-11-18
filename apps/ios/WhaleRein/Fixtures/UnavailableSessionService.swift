@@ -39,6 +39,19 @@ final class UnavailableSessionService: SessionService {
     func stopWatch() {}
     func send(hostId: String, sessionId: String, text: String, delivery: DeliveryChoice) async throws -> CommandReceipt { try fail() }
     func stop(hostId: String, sessionId: String) async throws -> CommandReceipt { try fail() }
+    func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage { try fail() }
+    func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch { try fail() }
+    func answerQuestion(
+        hostId: String,
+        sessionId: String,
+        batch: QuestionBatch,
+        answers: [QuestionAnswer]
+    ) async throws -> CommandReceipt { try fail() }
+    func cancelQuestionAnswer(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> Bool { try fail() }
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] { try fail() }
     func resolveApproval(
         hostId: String,

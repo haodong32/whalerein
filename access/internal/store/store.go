@@ -334,6 +334,17 @@ const (
 	ForwardPublished ForwardState = "published"
 )
 
+// ClientLeaseState is the monotonic exact-request liveness state. Only a live
+// row may renew; expired and closed rows never return to live.
+type ClientLeaseState string
+
+// Client lease states stored in requests.client_lease_state.
+const (
+	ClientLeaseLive    ClientLeaseState = "live"
+	ClientLeaseExpired ClientLeaseState = "expired"
+	ClientLeaseClosed  ClientLeaseState = "closed"
+)
+
 // Request is the Access-side state copy for one HostRequest.
 type Request struct {
 	RequestID              string
@@ -358,6 +369,13 @@ type Request struct {
 	PublishedOnce          bool
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+	// ClientLeaseUntil is the HTTP liveness deadline. NULL means a historical
+	// row whose liveness was never recorded; it is never treated as elapsed.
+	ClientLeaseUntil  *time.Time
+	ClientLeaseState  ClientLeaseState
+	CancelPending     bool
+	CancelPublishedAt *time.Time
+	CancelAttempts    int
 }
 
 // CreateOutcome reports the result of inserting or deduplicating a request.
@@ -392,15 +410,17 @@ type Revocation struct {
 var requestColumns = `request_id, host_id, device_id, command_id, payload_digest, kind,
 	protocol_version, status, request_body, result_body, error_code, error_message,
 	channel_id, trace_id, expires_at, forward_state, forward_after, forward_attempts,
-	published_once, created_at, updated_at, client_transport_version`
+	published_once, created_at, updated_at, client_transport_version,
+	client_lease_until, client_lease_state, cancel_pending, cancel_published_at, cancel_attempts`
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	var (
-		req          Request
-		kind         int32
-		status       string
-		errorCode    int32
-		forwardState string
+		req              Request
+		kind             int32
+		status           string
+		errorCode        int32
+		forwardState     string
+		clientLeaseState string
 	)
 	err := row.Scan(
 		&req.RequestID,
@@ -425,6 +445,11 @@ func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 		&req.CreatedAt,
 		&req.UpdatedAt,
 		&req.ClientTransportVersion,
+		&req.ClientLeaseUntil,
+		&clientLeaseState,
+		&req.CancelPending,
+		&req.CancelPublishedAt,
+		&req.CancelAttempts,
 	)
 	if err != nil {
 		return Request{}, err
@@ -433,6 +458,7 @@ func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	req.Status = parseStatus(status)
 	req.ErrorCode = whalereinv1.ErrorCode(errorCode)
 	req.ForwardState = ForwardState(forwardState)
+	req.ClientLeaseState = ClientLeaseState(clientLeaseState)
 	return req, nil
 }
 

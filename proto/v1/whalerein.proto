@@ -112,6 +112,16 @@ enum ApprovalDecision {
   APPROVAL_DECISION_REJECT = 2;
 }
 
+// Questions can be independently unavailable or unsupported while the rest of
+// a session observation keeps working. An absent descriptor is never an empty
+// current collection.
+enum QuestionAvailability {
+  QUESTION_AVAILABILITY_UNSPECIFIED = 0;
+  QUESTION_AVAILABILITY_UNSUPPORTED = 1;
+  QUESTION_AVAILABILITY_UNAVAILABLE = 2;
+  QUESTION_AVAILABILITY_AVAILABLE = 3;
+}
+
 // ---------------------------------------------------------------------------
 // Host request / result envelopes
 // ---------------------------------------------------------------------------
@@ -544,6 +554,21 @@ message QuestionAnswerItem {
   repeated string selected = 2;
   optional string custom = 3;
 }
+// A source observation epoch plus a monotonic revision of the normalized
+// pending-question inventory. Reading or refreshing unchanged inventory does
+// not advance it. The stamp certifies a collection; it is not answer authority.
+message QuestionStamp {
+  string observation_epoch = 1;
+  uint64 revision = 2;
+}
+message QuestionDescriptor {
+  QuestionAvailability availability = 1;
+  // Stable failure code for unavailable/unsupported questions, empty when
+  // available.
+  string unavailable_code = 2;
+  // Present exactly when availability is available.
+  QuestionStamp stamp = 3;
+}
 message QuestionBatch {
   string session_id = 1;
   string batch_id = 2;
@@ -557,7 +582,15 @@ message QuestionBatch {
 }
 message ListQuestions { string session_id = 1; string cursor = 2; }
 message GetQuestion { string session_id = 1; string batch_id = 2; }
-message QuestionPage { repeated QuestionBatch batches = 1; string next_cursor = 2; }
+message QuestionPage {
+  repeated QuestionBatch batches = 1;
+  string next_cursor = 2;
+  // Stamp of the complete inventory from which this page was derived. Every
+  // page of one observation must carry the identical stamp.
+  QuestionStamp stamp = 3;
+  // True only on the final page of that same stamped inventory.
+  bool complete = 4;
+}
 message AnswerQuestion {
   string session_id = 1;
   string batch_id = 2;
@@ -773,15 +806,29 @@ message LiveFrame {
 message SessionState {
   SessionKey session = 1; string live_epoch = 2; uint64 revision = 3;
   string history_head = 4; RunPhase run_phase = 5; repeated Approval approvals = 6;
+  // Questions readiness is independent of history readiness. A questions-only
+  // observation may omit history_head and run_phase.
+  QuestionDescriptor questions = 7;
 }
 message HistoryReset { string reason = 1; }
 message SessionUpdate {
   string watch_id = 1; SessionKey session = 2;
   oneof payload { HistoryBatch history = 3; LiveFrame live = 4;
-    SessionState state = 5; HistoryReset reset = 6; }
+    SessionState state = 5; HistoryReset reset = 6;
+    // Independent question invalidations, delivered without waiting for or
+    // replacing conversation state.
+    QuestionDescriptor questions = 7; }
 }
-message WatchSession { string session_id = 1; }
-message WatchReady { string watch_id = 1; SessionState state = 2; uint32 lease_ms = 3; }
+message ObservationInterests { bool conversation = 1; bool questions = 2; }
+message WatchSession { string session_id = 1; ObservationInterests interests = 2; }
+message WatchReady {
+  string watch_id = 1;
+  // Conversation baseline; absent for a questions-only observation.
+  SessionState state = 2;
+  uint32 lease_ms = 3;
+  // Question readiness for this observation. Required for questions interest.
+  QuestionDescriptor questions = 4;
+}
 message RefreshWatches { repeated string watch_ids = 1; }
 message WatchStates { repeated WatchReady watches = 1; }
 message UnwatchSession { string watch_id = 1; }

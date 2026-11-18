@@ -14,15 +14,19 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
-use whalerein_core::api::{Core, CoreOptions, PairingDecision, PairingPrompt, SessionKey};
+use whalerein_core::api::{
+    Cancellation, Core, CoreOptions, ObservationInterests, PairingDecision, PairingPrompt,
+    QuestionAnswer, SessionEventPayload, SessionKey,
+};
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
 use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
-    convert_update, message_view, ApprovalView, CommandView, ConversationEvent, DeliveryChoice,
-    DiagnosticsReportView, HostSummary, MessageView, PairingPromptView, SessionCapabilitiesView,
-    SessionSummaryView,
+    convert_update, message_view, question_batch_view, question_guard, question_page_view,
+    questions_view, ApprovalView, CommandView, ConversationEvent, DeliveryChoice,
+    DiagnosticsReportView, HostSummary, MessageView, PairingPromptView, QuestionAnswerView,
+    QuestionBatchView, QuestionPageView, SessionCapabilitiesView, SessionSummaryView,
 };
 
 /// Request/response budget for listing and local operations.
@@ -55,11 +59,86 @@ pub fn core_revision() -> String {
     env!("WHALERIN_MOBILE_REVISION").to_owned()
 }
 
+/// The Host-qualified observation that produced one queued event.
+///
+/// The generation fences in-flight callbacks at replacement time; the explicit
+/// Host and session identity make it impossible for a queued event to be
+/// relabelled as another watch's output even when IDs or queue ordering match.
+/// `observation_id` is Core's producer identity, learned when the observation
+/// starts; it is carried through the queue so a queued event still names the
+/// exact Core observation that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WatchScope {
+    generation: u64,
+    host_id: String,
+    session_id: String,
+    observation_id: Option<String>,
+}
+
+impl WatchScope {
+    /// Scope before Core has assigned an observation identity (the binding's
+    /// own connection notice).
+    fn pending(generation: u64, host_id: String, session_id: String) -> Self {
+        Self {
+            generation,
+            host_id,
+            session_id,
+            observation_id: None,
+        }
+    }
+
+    fn with_observation(&self, observation_id: String) -> Self {
+        Self {
+            generation: self.generation,
+            host_id: self.host_id.clone(),
+            session_id: self.session_id.clone(),
+            observation_id: Some(observation_id),
+        }
+    }
+
+    /// Binding generation plus producer SessionKey decide whether two scopes
+    /// belong to the same watch. Core's observation id is metadata on the
+    /// queued entry, not a second fencing mechanism.
+    fn same_producer(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.host_id == other.host_id
+            && self.session_id == other.session_id
+    }
+}
+
+/// One queued event plus the watch scope that produced it.
+///
+/// `None` marks events that are independent of a watch (pairing, command
+/// status, diagnostics) and therefore survive a watch replacement.
+#[derive(Clone)]
+struct QueuedEvent {
+    scope: Option<WatchScope>,
+    event: ConversationEvent,
+}
+
+impl QueuedEvent {
+    fn unscoped(event: ConversationEvent) -> Self {
+        Self { scope: None, event }
+    }
+
+    fn scoped(scope: WatchScope, event: ConversationEvent) -> Self {
+        Self {
+            scope: Some(scope),
+            event,
+        }
+    }
+}
+
 /// Bounded, drop-oldest event queue with an explicit loss counter.
 ///
 /// A burst larger than the capacity keeps the newest events and reports how
 /// many older ones were discarded on the next poll. Memory never grows past
 /// `EVENT_QUEUE_CAPACITY`.
+///
+/// Watch-scoped entries are only accepted for the active watch. Replacing the
+/// watch removes every entry from the previous one, so a consumer that pauses
+/// across `startWatch` can never observe the old session's events as the new
+/// session's events. Pairing and command events stay queued.
 struct EventQueue {
     shared: Mutex<EventQueueState>,
     ready: Condvar,
@@ -67,8 +146,9 @@ struct EventQueue {
 
 #[derive(Default)]
 struct EventQueueState {
-    events: std::collections::VecDeque<ConversationEvent>,
+    events: std::collections::VecDeque<QueuedEvent>,
     dropped: u64,
+    active_watch: Option<WatchScope>,
 }
 
 impl EventQueue {
@@ -79,15 +159,70 @@ impl EventQueue {
         }
     }
 
+    /// Queue an event that does not belong to a watch. These survive watch
+    /// replacement because they describe independent activity (pairing, a
+    /// command receipt, a bounded-queue loss notice).
     fn push(&self, event: ConversationEvent) {
         let mut state = self.lock();
+        Self::enqueue(&mut state, QueuedEvent::unscoped(event));
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    /// Start a new watch scope, discarding queued output from every replaced
+    /// watch. Unscoped events remain in order.
+    fn begin_watch(&self, scope: &WatchScope) {
+        let mut state = self.lock();
+        state.events.retain(|entry| match &entry.scope {
+            None => true,
+            Some(existing) => existing.same_producer(scope),
+        });
+        state.active_watch = Some(scope.clone());
+    }
+
+    /// Queue output produced by the active watch.
+    ///
+    /// A late callback from a replaced watch is dropped here even if it passed
+    /// its generation check just before replacement.
+    fn push_watch(&self, scope: &WatchScope, event: ConversationEvent) {
+        let mut state = self.lock();
+        if !state
+            .active_watch
+            .as_ref()
+            .is_some_and(|active| active.same_producer(scope))
+        {
+            return;
+        }
+        Self::enqueue(&mut state, QueuedEvent::scoped(scope.clone(), event));
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    /// End a watch and queue its terminal event.
+    ///
+    /// `explicit` marks an app-initiated stop, which is still delivered when
+    /// the watch had already ended on its own. A stale terminal from a
+    /// replaced watch is dropped and never clears the replacement's scope.
+    fn end_watch(&self, scope: &WatchScope, event: ConversationEvent, explicit: bool) {
+        let mut state = self.lock();
+        let stored = match state.active_watch.as_ref() {
+            Some(active) if !active.same_producer(scope) => return,
+            Some(active) => active.clone(),
+            None if !explicit => return,
+            None => scope.clone(),
+        };
+        state.active_watch = None;
+        Self::enqueue(&mut state, QueuedEvent::scoped(stored, event));
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    fn enqueue(state: &mut EventQueueState, entry: QueuedEvent) {
         if state.events.len() >= EVENT_QUEUE_CAPACITY {
             state.events.pop_front();
             state.dropped = state.dropped.saturating_add(1);
         }
-        state.events.push_back(event);
-        drop(state);
-        self.ready.notify_one();
+        state.events.push_back(entry);
     }
 
     fn poll(&self, timeout: Duration) -> Vec<ConversationEvent> {
@@ -114,7 +249,7 @@ impl EventQueue {
             });
             state.dropped = 0;
         }
-        events.extend(state.events.drain(..));
+        events.extend(state.events.drain(..).map(|entry| entry.event));
         events
     }
 
@@ -201,9 +336,26 @@ struct PairingState {
 #[derive(Default)]
 struct WatchState {
     generation: u64,
+    host_id: String,
+    session_id: String,
     active: bool,
     watch: Option<AbortHandle>,
     poller: Option<AbortHandle>,
+    /// Dropped with the watch task. Waiting for disconnect before starting the
+    /// replacement prevents two Core observations from racing the profile
+    /// lease and the one-observation constraint.
+    watch_stopped: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+/// Signals the end of one watch task when the task (or its future) is dropped.
+struct WatchStopSignal(Option<Sender<()>>);
+
+impl Drop for WatchStopSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 /// Swift-facing Core facade. See `README.md` for the exported surface.
@@ -508,9 +660,11 @@ impl MobileCore {
     // Watch and events
     // -----------------------------------------------------------------
 
-    /// Start observing one Host-qualified session.
+    /// Start observing one Host-qualified session with Conversation and
+    /// Questions interests on one Core observation.
     ///
     /// Replaces an existing watch; updates from a replaced watch are dropped.
+    /// Pairing and command events are not scoped to the watch and survive.
     /// Events are delivered through `pollEvents`.
     pub fn start_watch(&self, host_id: String, session_id: String) -> Result<(), MobileError> {
         validate_id(&host_id)?;
@@ -523,8 +677,14 @@ impl MobileCore {
             let mut state = self.lock_watch();
             let generation = self.next_watch_generation();
             state.generation = generation;
+            state.host_id = host_id.clone();
+            state.session_id = session_id.clone();
             state.active = true;
-            let previous = (state.watch.take(), state.poller.take());
+            let previous = (
+                state.watch.take(),
+                state.poller.take(),
+                state.watch_stopped.take(),
+            );
             (generation, previous)
         };
         let (generation, previous) = previous;
@@ -534,40 +694,103 @@ impl MobileCore {
         if let Some(abort) = previous.1 {
             abort.abort();
         }
+        // Wait briefly for the replaced Core observation to release its profile
+        // lease and one-observation slot before attaching the replacement.
+        if let Some(stopped) = previous.2 {
+            let _ = stopped.recv_timeout(Duration::from_secs(2));
+        }
 
-        self.events.push(ConversationEvent::Connection {
-            host_id: host_id.clone(),
-            status: self.core.get_connection_state(&host_id).as_str().to_owned(),
-        });
+        let scope = WatchScope::pending(generation, host_id.clone(), session_id.clone());
+        // Drop every event still queued for a replaced watch before this new
+        // watch can publish anything. Pairing and command events stay queued.
+        self.events.begin_watch(&scope);
+        self.events.push_watch(
+            &scope,
+            ConversationEvent::Connection {
+                host_id: host_id.clone(),
+                status: self.core.get_connection_state(&host_id).as_str().to_owned(),
+            },
+        );
 
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
+        let poller_host_id = host_id.clone();
         let core = self.core.clone();
         let events = self.events.clone();
         let generations = self.watch_generation.clone();
         let watch_state = self.watch.clone();
+        let callback_scope = scope.clone();
+        let task_cancellation = Cancellation::new();
         let task = self.runtime.handle.spawn(async move {
-            let mut seen_approvals = None;
-            let result = core
-                .watch_session(&key, None, |update| {
-                    if generations.load(Ordering::SeqCst) != generation {
-                        return false;
-                    }
-                    for event in convert_update(update, &mut seen_approvals) {
-                        events.push(event);
-                    }
-                    true
-                })
+            let _stopped = WatchStopSignal(Some(stopped_tx));
+            let mut observation = core
+                .observe_session(&key, ObservationInterests::both(), task_cancellation)
                 .await;
+            // A replacement aborts the old task asynchronously. Retry the
+            // attach for a bounded window instead of surfacing a spurious
+            // conflict to the caller.
+            let mut attempts = 0;
+            while matches!(observation, Err(ref error) if error.code() == "conflict")
+                && attempts < 40
+                && generations.load(Ordering::SeqCst) == generation
+            {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                observation = core
+                    .observe_session(&key, ObservationInterests::both(), Cancellation::new())
+                    .await;
+            }
+            let result = match observation {
+                Ok(mut observation) => {
+                    let producer_scope =
+                        callback_scope.with_observation(observation.observation_id().to_owned());
+                    let mut seen_approvals = None;
+                    while generations.load(Ordering::SeqCst) == generation {
+                        let Some(event) = observation.next_event().await else {
+                            break;
+                        };
+                        match event.payload {
+                            SessionEventPayload::Conversation(update) => {
+                                for event in convert_update(&update, &mut seen_approvals) {
+                                    events.push_watch(&producer_scope, event);
+                                }
+                            }
+                            SessionEventPayload::Questions(view) => {
+                                events.push_watch(
+                                    &producer_scope,
+                                    ConversationEvent::Questions {
+                                        view: questions_view(&view),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    observation.close().await;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
             if generations.load(Ordering::SeqCst) != generation {
                 return;
             }
             if let Err(error) = result {
                 let error = MobileError::from(error);
-                events.push(ConversationEvent::Error {
-                    code: error.code().to_owned(),
-                    message: error.message().to_owned(),
-                });
+                events.push_watch(
+                    &callback_scope,
+                    ConversationEvent::Error {
+                        code: error.code().to_owned(),
+                        message: error.message().to_owned(),
+                    },
+                );
+            } else if let Some(error) = terminal_connection_error(&core, &host_id) {
+                events.push_watch(
+                    &callback_scope,
+                    ConversationEvent::Error {
+                        code: error.code().to_owned(),
+                        message: error.message().to_owned(),
+                    },
+                );
             }
-            events.push(ConversationEvent::WatchEnded);
+            events.end_watch(&callback_scope, ConversationEvent::WatchEnded, false);
             let mut state = watch_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -579,20 +802,30 @@ impl MobileCore {
         let core = self.core.clone();
         let events = self.events.clone();
         let generations = self.watch_generation.clone();
+        let poller_scope = scope.clone();
         let poller = self.runtime.handle.spawn(async move {
-            let mut last = core.get_connection_state(&host_id).as_str().to_owned();
+            let mut last = core
+                .get_connection_state(&poller_host_id)
+                .as_str()
+                .to_owned();
             loop {
                 tokio::time::sleep(CONNECTION_POLL_INTERVAL).await;
                 if generations.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                let next = core.get_connection_state(&host_id).as_str().to_owned();
+                let next = core
+                    .get_connection_state(&poller_host_id)
+                    .as_str()
+                    .to_owned();
                 if next != last {
                     last = next.clone();
-                    events.push(ConversationEvent::Connection {
-                        host_id: host_id.clone(),
-                        status: next,
-                    });
+                    events.push_watch(
+                        &poller_scope,
+                        ConversationEvent::Connection {
+                            host_id: poller_host_id.clone(),
+                            status: next,
+                        },
+                    );
                 }
             }
         });
@@ -601,20 +834,26 @@ impl MobileCore {
         if state.generation == generation {
             state.watch = Some(task.abort_handle());
             state.poller = Some(poller.abort_handle());
+            state.watch_stopped = Some(stopped_rx);
         }
         Ok(())
     }
 
     /// Stop observing and emit `watchEnded`.
     pub fn stop_watch(&self) {
-        let abort = {
+        let (scope, abort) = {
             let mut state = self.lock_watch();
             if !state.active {
                 return;
             }
             self.next_watch_generation();
             state.active = false;
-            (state.watch.take(), state.poller.take())
+            let scope = WatchScope::pending(
+                state.generation,
+                state.host_id.clone(),
+                state.session_id.clone(),
+            );
+            (scope, (state.watch.take(), state.poller.take()))
         };
         if let Some(abort) = abort.0 {
             abort.abort();
@@ -622,7 +861,8 @@ impl MobileCore {
         if let Some(abort) = abort.1 {
             abort.abort();
         }
-        self.events.push(ConversationEvent::WatchEnded);
+        self.events
+            .end_watch(&scope, ConversationEvent::WatchEnded, true);
     }
 
     /// Drain queued events, waiting up to `timeoutMs` when the queue is empty.
@@ -719,6 +959,107 @@ impl MobileCore {
             )?
         };
         Ok(CommandView::from(handle))
+    }
+
+    // -----------------------------------------------------------------
+    // Questions
+    // -----------------------------------------------------------------
+
+    /// One authoritative question page through Core's shared reader.
+    ///
+    /// `cursor` is Core's opaque continuation cursor; pass an empty string for
+    /// the first page. Reading never acquires a native answer claim.
+    pub fn list_questions(
+        &self,
+        host_id: String,
+        session_id: String,
+        cursor: String,
+    ) -> Result<QuestionPageView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        if cursor.len() > MAX_TEXT_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let page = self.run(QUERY_TIMEOUT, self.core.read_questions(&key, &cursor))?;
+        Ok(question_page_view(&page))
+    }
+
+    /// One authoritative question batch through the shared reader.
+    pub fn get_question(
+        &self,
+        host_id: String,
+        session_id: String,
+        batch_id: String,
+    ) -> Result<QuestionBatchView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&batch_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let batch = self.run(QUERY_TIMEOUT, self.core.read_question(&key, &batch_id))?;
+        Ok(question_batch_view(&batch))
+    }
+
+    /// Submit exactly the reviewed batch guard and answers.
+    ///
+    /// The binding never reconstructs or "repairs" a guard: Core revalidates
+    /// the session, owner epoch, version, digest, phase and answerability. A
+    /// failed validation returns a typed error without a native submission.
+    pub fn answer_question(
+        &self,
+        host_id: String,
+        session_id: String,
+        batch: QuestionBatchView,
+        answers: Vec<QuestionAnswerView>,
+    ) -> Result<CommandView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&batch.batch_id)?;
+        if batch.session_id != session_id || answers.is_empty() {
+            return Err(MobileError::invalid_input());
+        }
+        let digest = decode_digest(&batch.digest_hex)?;
+        if digest.len() != 32 || batch.source_epoch.is_empty() || batch.version == 0 {
+            return Err(MobileError::invalid_input());
+        }
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let guard = question_guard(&batch);
+        let answers: Vec<QuestionAnswer> = answers.into_iter().map(Into::into).collect();
+        let handle = self.run(
+            COMMAND_TIMEOUT,
+            self.core.answer_question(&key, &guard, answers),
+        )?;
+        Ok(self.publish_command(handle))
+    }
+
+    /// Ask Core to cancel an in-flight open answer by its original command.
+    /// `false` does not establish that no native answer occurred.
+    pub fn cancel_question_answer(
+        &self,
+        host_id: String,
+        session_id: String,
+        command_id: String,
+    ) -> Result<bool, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&command_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        self.run(
+            QUERY_TIMEOUT,
+            self.core.cancel_question_answer(&key, &command_id),
+        )
     }
 
     // -----------------------------------------------------------------
@@ -916,6 +1257,17 @@ impl Drop for MobileCore {
     }
 }
 
+/// Best-effort terminal cause after an observation stream ends. Core's public
+/// observation surface reports the end but not its error value, so the binding
+/// retains the previous watch behavior by sampling the Host connection state.
+fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> {
+    match core.get_connection_state(host_id).as_str() {
+        "revoked" => Some(MobileError::revoked()),
+        "failed" => Some(MobileError::unavailable()),
+        _ => None,
+    }
+}
+
 fn validate_id(value: &str) -> Result<(), MobileError> {
     if value.is_empty()
         || value.len() > MAX_ID_BYTES
@@ -968,16 +1320,20 @@ fn string_array(value: &serde_json::Value, field: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    use crate::BlockView;
+
     fn queue_with(capacity: usize) -> EventQueue {
         // The production capacity is fixed; tests fill it directly.
         let queue = EventQueue::new();
         {
             let mut state = queue.lock();
             for index in 0..capacity {
-                state.events.push_back(ConversationEvent::Connection {
-                    host_id: format!("h{index}"),
-                    status: "connected".into(),
-                });
+                state
+                    .events
+                    .push_back(QueuedEvent::unscoped(ConversationEvent::Connection {
+                        host_id: format!("h{index}"),
+                        status: "connected".into(),
+                    }));
             }
         }
         queue
@@ -1036,6 +1392,187 @@ mod tests {
         let queue = queue_with(EVENT_QUEUE_CAPACITY);
         queue.push(ConversationEvent::WatchEnded);
         assert_eq!(queue.lock().events.len(), EVENT_QUEUE_CAPACITY);
+    }
+
+    fn scope(generation: u64, host_id: &str, session_id: &str) -> WatchScope {
+        WatchScope::pending(generation, host_id.into(), session_id.into())
+    }
+
+    fn message(id: &str, text: &str) -> ConversationEvent {
+        ConversationEvent::Message {
+            message: MessageView {
+                message_id: id.into(),
+                role: "assistant".into(),
+                blocks: vec![BlockView {
+                    block_id: "text".into(),
+                    kind: "text".into(),
+                    text: text.into(),
+                    tool_name: None,
+                }],
+                created_at_unix_ms: 1,
+            },
+        }
+    }
+
+    fn preview(text: &str) -> ConversationEvent {
+        ConversationEvent::Preview {
+            attempt_id: "attempt-old".into(),
+            text: text.into(),
+            replace: false,
+            incomplete: true,
+        }
+    }
+
+    #[test]
+    fn replacement_drops_queued_old_watch_output_but_keeps_independent_events() {
+        let queue = EventQueue::new();
+        let old = scope(1, "host-1", "session-1");
+        queue.begin_watch(&old);
+        queue.push_watch(&old, message("old-message", "old committed text"));
+        queue.push_watch(&old, preview("old preview text"));
+        queue.push(ConversationEvent::PairingFinished {
+            host_id: Some("host-1".into()),
+            code: None,
+        });
+        queue.push(ConversationEvent::CommandStatus {
+            command: CommandView {
+                request_id: "request-1".into(),
+                command_id: "command-1".into(),
+                status: "succeeded".into(),
+                message_id: None,
+                delivery_id: None,
+            },
+        });
+        queue.end_watch(&old, ConversationEvent::WatchEnded, true);
+
+        let new = scope(2, "host-1", "session-2");
+        queue.begin_watch(&new);
+        // A late callback or terminal from the replaced watch must not be
+        // accepted and must not clear the replacement's scope.
+        queue.end_watch(&old, ConversationEvent::WatchEnded, false);
+        queue.end_watch(&old, ConversationEvent::WatchEnded, true);
+        queue.push_watch(&old, message("late-old", "late old text"));
+        queue.push_watch(&new, message("new-message", "new committed text"));
+        queue.push_watch(&new, preview("new preview text"));
+
+        let events = queue.poll(Duration::ZERO);
+        assert!(matches!(
+            events.first(),
+            Some(ConversationEvent::PairingFinished { .. })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::CommandStatus { command } if command.command_id == "command-1"
+        )));
+        assert!(events.iter().any(
+            |event| matches!(event, ConversationEvent::Message { message } if message.message_id == "new-message")
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::Preview { text, .. } if text == "new preview text"
+        )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ConversationEvent::Message { message } if message.message_id == "old-message"
+            )),
+            "queued old-watch message leaked into the new watch: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ConversationEvent::Preview { text, .. } if text == "old preview text"
+            )),
+            "queued old-watch preview leaked into the new watch: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::WatchEnded)),
+            "the replaced watch's pending watchEnded survived"
+        );
+
+        // The new watch keeps working and ends normally.
+        queue.end_watch(&new, ConversationEvent::WatchEnded, false);
+        assert_eq!(
+            queue.poll(Duration::ZERO),
+            vec![ConversationEvent::WatchEnded]
+        );
+        // Nothing from the ended watch is accepted afterwards.
+        queue.push_watch(&new, message("after-end", "after end"));
+        assert!(queue.poll(Duration::ZERO).is_empty());
+    }
+
+    #[test]
+    fn queued_events_retain_producer_session_and_observation_identity() {
+        let queue = EventQueue::new();
+        let pending = scope(7, "host-1", "session-1");
+        queue.begin_watch(&pending);
+        queue.push_watch(
+            &pending,
+            ConversationEvent::Connection {
+                host_id: "host-1".into(),
+                status: "connected".into(),
+            },
+        );
+        let observed = pending.with_observation("obs-42".into());
+        queue.push_watch(&observed, message("m-1", "producer scoped text"));
+        {
+            let state = queue.lock();
+            let scopes: Vec<_> = state
+                .events
+                .iter()
+                .map(|entry| entry.scope.clone().expect("scoped entries"))
+                .collect();
+            assert_eq!(scopes[0].observation_id, None);
+            assert_eq!(scopes[1].observation_id.as_deref(), Some("obs-42"));
+            assert_eq!(scopes[1].host_id, "host-1");
+            assert_eq!(scopes[1].session_id, "session-1");
+            assert_eq!(scopes[1].generation, 7);
+            assert!(scopes[1].same_producer(&pending));
+        }
+        // A different Core observation identity cannot be relabelled as the
+        // active watch; the binding generation is the replacement fence.
+        let stale = scope(8, "host-1", "session-1").with_observation("obs-old".into());
+        queue.push_watch(&stale, preview("relabelled stale output"));
+        let events = queue.poll(Duration::ZERO);
+        assert_eq!(events.len(), 2, "unexpected events: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::Preview { .. })),
+            "an old observation generation leaked: {events:?}"
+        );
+    }
+
+    #[test]
+    fn identical_session_ids_on_two_hosts_keep_their_watch_scopes_distinct() {
+        let queue = EventQueue::new();
+        let host_a = scope(1, "host-a", "session-1");
+        queue.begin_watch(&host_a);
+        queue.push_watch(&host_a, message("message-a", "content from host a"));
+
+        // Same session id, authorized second Host: replacement drops host A's
+        // queued message even though the session id is identical.
+        let host_b = scope(2, "host-b", "session-1");
+        queue.begin_watch(&host_b);
+        queue.push_watch(&host_a, message("late-a", "late content from host a"));
+        // Even a scope with the active generation but another Host is rejected.
+        let forged = scope(2, "host-a", "session-1");
+        queue.push_watch(&forged, message("forged", "forged content"));
+        queue.push_watch(&host_b, message("message-b", "content from host b"));
+
+        let events = queue.poll(Duration::ZERO);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ConversationEvent::Message { message } => Some(message.message_id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["message-b"]
+        );
     }
 
     #[test]

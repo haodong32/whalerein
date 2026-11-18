@@ -126,6 +126,13 @@ export class DshAdapter extends SourceAdapter {
       try{sink(update)}catch{this.logger?.warn('source_observer_failed',{code:'internal'})}
     }
   }
+  // Question discovery is independent of committed history: broker capture or
+  // removal, phase/local resolution and root replacement publish a lightweight
+  // invalidation. The Host reconciles it authoritatively and coalesces bursts.
+  notifyQuestionsChanged(sessionId) {
+    if (!this.opened || typeof sessionId !== 'string' || sessionId === '') return
+    this.#publish(sessionId, { session: { session_id: sessionId }, questions_changed: true })
+  }
   observeApproval(event) {
     const id=event.approval?.sessionId
     if(this.opened&&id)this.#publish(id,{session:{session_id:id},state_changed:true})
@@ -152,7 +159,10 @@ export class DshAdapter extends SourceAdapter {
           if(!this.opened)break
           try{this.#publish(record.sessionId,this.conversation.notification(record))}
           catch{this.#publish(record.sessionId,{session:{session_id:record.sessionId},reset:{reason:'source_projection_failed'}})}
-          if(record.kind==='session_state')this.#publish(record.sessionId,{session:{session_id:record.sessionId},state_changed:true})
+          if(record.kind==='session_state') {
+            this.#publish(record.sessionId,{session:{session_id:record.sessionId},state_changed:true})
+            this.notifyQuestionsChanged(record.sessionId)
+          }
         }
       })
     }

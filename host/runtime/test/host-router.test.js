@@ -703,6 +703,122 @@ test('device_offline presence clears that device channel and cancels its scopes'
 })
 
 
+function startLiveAnswer(ctx, channel, { commandId = 'answer-command', requestId = 'answer-request' } = {}) {
+  const gate = Promise.withResolvers()
+  let entered = false
+  ctx.adapter.getSession = async id => ({ sessionId: id, sourceCapabilities: { questions_answer_continued: true } })
+  ctx.adapter.execute = async () => {
+    entered = true
+    await gate.promise
+    return { question_receipt: { batch_id: 'b', phase: 'QUESTION_REPLY_QUEUED' } }
+  }
+  const request = encryptedQuery({
+    security: ctx.host.security, store: ctx.store, channel, kind: 'REQUEST_KIND_COMMAND', commandId,
+    payload: { answer_question: { session_id: 's1', batch_id: 'b', expected_phase: 'QUESTION_CONTINUED' } },
+    overrides: { request_id: requestId, expires_at_unix_ms: Date.now() + 60_000 },
+  })
+  const pending = ctx.access.handlers.onRequest(request)
+  return { gate, request, pending, entered: () => entered }
+}
+
+test('session-observation/AC-25.device-offline preserves an independently live HTTP answer', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const live = startLiveAnswer(ctx, channel)
+    while (!live.entered()) await new Promise(resolve => setImmediate(resolve))
+    ctx.access.handlers.onPresence({ event: 'device_offline', device_id: 'd1', reason: 'will' })
+    assert.equal(ctx.host.security.listChannels().length, 0)
+    live.gate.resolve()
+    await live.pending
+    // The cleared channel cannot carry the terminal reply, but the admitted
+    // answer still completes and its original command identity is recoverable.
+    assert.equal(ctx.store.getCommand('d1', live.request.command_id).status, 'succeeded')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('session-observation/AC-31.cancellation-before-admission fences the delayed exact request', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.getSession = async id => ({ sessionId: id, sourceCapabilities: { questions_answer_continued: true } })
+    let calls = 0
+    ctx.adapter.execute = async () => { calls++; return { question_receipt: { batch_id: 'b', phase: 'QUESTION_REPLY_QUEUED' } } }
+    const request = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel, kind: 'REQUEST_KIND_COMMAND', commandId: 'fenced-command',
+      payload: { answer_question: { session_id: 's1', batch_id: 'b', expected_phase: 'QUESTION_CONTINUED' } },
+      overrides: { request_id: 'fenced-request', expires_at_unix_ms: Date.now() + 60_000 },
+    })
+    const notice = {
+      event: 'request_stale', request_id: 'fenced-request', host_id: 'host-1', device_id: 'd1',
+      command_id: 'fenced-command', digest: Buffer.from(request.payload_digest).toString('base64'),
+      deadline_unix_ms: request.expires_at_unix_ms, reason: 'client_poll_expired',
+    }
+    ctx.host.notifyPresence(notice)
+    ctx.host.notifyPresence(notice)
+    const fenced = await send(ctx.access, request)
+    assert.equal(fenced.status, 'failed')
+    assert.equal(fenced.error_code, 'unavailable')
+    assert.equal(calls, 0, 'a delayed fenced request never invokes the source')
+    assert.equal(ctx.store.getCommand('d1', 'fenced-command').status, 'failed')
+    // A fresh request identity remains independent.
+    const fresh = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel, kind: 'REQUEST_KIND_COMMAND', commandId: 'fresh-command',
+      payload: { answer_question: { session_id: 's1', batch_id: 'b', expected_phase: 'QUESTION_CONTINUED' } },
+      overrides: { request_id: 'fresh-request', expires_at_unix_ms: Date.now() + 60_000 },
+    })
+    assert.equal((await send(ctx.access, fresh)).status, 'succeeded')
+    assert.equal(calls, 1)
+    // Cancellation after an accepted result cannot overwrite it.
+    ctx.host.notifyPresence({ ...notice, request_id: 'fresh-request', command_id: 'fresh-command',
+      digest: Buffer.from(fresh.payload_digest).toString('base64'), deadline_unix_ms: fresh.expires_at_unix_ms })
+    assert.equal(ctx.store.getCommand('d1', 'fresh-command').status, 'succeeded')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('session-observation/AC-34.spoofed or foreign cancellation is rejected without cancelling the scope', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const live = startLiveAnswer(ctx, channel)
+    while (!live.entered()) await new Promise(resolve => setImmediate(resolve))
+    const valid = {
+      event: 'request_stale', request_id: live.request.request_id, host_id: 'host-1', device_id: 'd1',
+      command_id: live.request.command_id, digest: Buffer.from(live.request.payload_digest).toString('base64'),
+      deadline_unix_ms: live.request.expires_at_unix_ms,
+    }
+    // Foreign Host, unknown device, mismatched command and mismatched digest
+    // are each rejected before the exact scope is touched.
+    ctx.host.notifyPresence({ ...valid, host_id: 'other-host' })
+    ctx.host.notifyPresence({ ...valid, device_id: 'foreign-device' })
+    ctx.host.notifyPresence({ ...valid, command_id: 'other-command' })
+    ctx.host.notifyPresence({ ...valid, digest: Buffer.alloc(32).toString('base64') })
+    live.gate.resolve()
+    await live.pending
+    assert.equal(ctx.access.lastResult().status, 'succeeded', 'rejected notices never abort the valid answer')
+    assert.equal(ctx.store.getCommand('d1', live.request.command_id).status, 'succeeded')
+    // The corresponding exact notice remains effective for a new scope.
+    const other = startLiveAnswer(ctx, channel, { commandId: 'revoked-command', requestId: 'revoked-request' })
+    while (!other.entered()) await new Promise(resolve => setImmediate(resolve))
+    ctx.host.notifyPresence({ event: 'request_stale', request_id: 'revoked-request', host_id: 'host-1', device_id: 'd1',
+      command_id: 'revoked-command', digest: Buffer.from(other.request.payload_digest).toString('base64'),
+      deadline_unix_ms: other.request.expires_at_unix_ms })
+    assert.equal((await other.pending).status, 'unknown')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
 test('an expired duplicate can be rejected after the same command already succeeded', async () => {
   let now = Date.now()
   const ctx = setup(silentLogger, () => now)

@@ -287,6 +287,14 @@ pub struct FakeHost {
     pub history_messages: Vec<whalerein_proto::ConversationMessage>,
     pub history_cut: String,
     pub history_advance: Option<(Vec<whalerein_proto::ConversationMessage>, String)>,
+    /// Authoritative question descriptor served in `WatchReady`/refresh/state.
+    pub question_descriptor: whalerein_proto::QuestionDescriptor,
+    /// When set, these pages are served in order by `ListQuestions`.
+    pub question_pages: std::collections::VecDeque<whalerein_proto::QuestionPage>,
+    pub question_error: Option<ErrorCode>,
+    pub question_reads: usize,
+    pub history_reads: usize,
+    pub heartbeats: Vec<String>,
     pub pending_result_polls: usize,
     pub settled_command_status: OnlineStatus,
     pub settled_error_code: Option<ErrorCode>,
@@ -411,6 +419,12 @@ impl FakeHost {
             history_messages: vec![history_message("message-1", "x")],
             history_cut: "bookmark:committed".into(),
             history_advance: None,
+            question_descriptor: fake_question_descriptor(),
+            question_pages: std::collections::VecDeque::new(),
+            question_error: None,
+            question_reads: 0,
+            history_reads: 0,
+            heartbeats: Vec::new(),
             pending_result_polls: 0,
             settled_command_status: OnlineStatus::Succeeded,
             settled_error_code: None,
@@ -467,6 +481,10 @@ impl FakeHost {
             }
             ("POST", ["v1", "hosts", host_id, "requests"]) => {
                 self.host_request(host_id, &request.body)
+            }
+            ("POST", ["v1", "requests", request_id, "heartbeat"]) => {
+                self.heartbeats.push((*request_id).to_owned());
+                MockResponse::empty(204)
             }
             ("GET", ["v1", "requests", request_id]) => {
                 if self.expire_request_id.as_deref() == Some(*request_id) {
@@ -1044,15 +1062,30 @@ impl FakeHost {
                 )),
                 ..Default::default()
             },
-            Some(Payload::ListQuestions(list)) => ResponsePayload {
-                payload: Some(whalerein_proto::response_payload::Payload::QuestionPage(
+            Some(Payload::ListQuestions(list)) => {
+                self.question_reads += 1;
+                if let Some(code) = self.question_error {
+                    return Err(code);
+                }
+                let page = self.question_pages.pop_front().unwrap_or_else(|| {
                     whalerein_proto::QuestionPage {
                         batches: vec![fake_question(&list.session_id)],
                         next_cursor: String::new(),
-                    },
-                )),
-                ..Default::default()
-            },
+                        stamp: self
+                            .question_descriptor
+                            .stamp
+                            .clone()
+                            .or_else(|| Some(fake_question_stamp())),
+                        complete: true,
+                    }
+                });
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::QuestionPage(
+                        page,
+                    )),
+                    ..Default::default()
+                }
+            }
             Some(Payload::GetQuestion(get)) if get.batch_id != "batch-1" => {
                 return Err(ErrorCode::NotFound);
             }
@@ -1074,6 +1107,7 @@ impl FakeHost {
             },
             Some(Payload::ReadHistory(read)) => {
                 use whalerein_proto::*;
+                self.history_reads += 1;
                 let cut = self.history_cut.clone();
                 let advance = if !read.snapshot && read.after_cursor == cut {
                     self.history_advance.take()
@@ -1120,14 +1154,22 @@ impl FakeHost {
             }
             Some(Payload::WatchSession(watch)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::WatchReady(
-                    fake_watch(&watch.session_id, &self.history_cut),
+                    fake_watch(
+                        &watch.session_id,
+                        &self.history_cut,
+                        self.question_descriptor.clone(),
+                    ),
                 )),
                 ..Default::default()
             },
             Some(Payload::RefreshWatches(_)) => ResponsePayload {
                 payload: Some(whalerein_proto::response_payload::Payload::WatchStates(
                     whalerein_proto::WatchStates {
-                        watches: vec![fake_watch("session-1", &self.history_cut)],
+                        watches: vec![fake_watch(
+                            "session-1",
+                            &self.history_cut,
+                            self.question_descriptor.clone(),
+                        )],
                     },
                 )),
                 ..Default::default()
@@ -1668,10 +1710,30 @@ impl FakeAccess {
     }
 }
 
-fn fake_watch(session: &str, history_head: &str) -> whalerein_proto::WatchReady {
+fn fake_question_stamp() -> whalerein_proto::QuestionStamp {
+    whalerein_proto::QuestionStamp {
+        observation_epoch: "question-epoch-1".into(),
+        revision: 1,
+    }
+}
+
+fn fake_question_descriptor() -> whalerein_proto::QuestionDescriptor {
+    whalerein_proto::QuestionDescriptor {
+        availability: whalerein_proto::QuestionAvailability::Available as i32,
+        unavailable_code: String::new(),
+        stamp: Some(fake_question_stamp()),
+    }
+}
+
+fn fake_watch(
+    session: &str,
+    history_head: &str,
+    question_descriptor: whalerein_proto::QuestionDescriptor,
+) -> whalerein_proto::WatchReady {
     whalerein_proto::WatchReady {
         watch_id: "watch-1".into(),
         lease_ms: 30000,
+        questions: Some(question_descriptor.clone()),
         state: Some(whalerein_proto::SessionState {
             session: Some(whalerein_proto::SessionKey {
                 host_id: "host-1".into(),
@@ -1682,6 +1744,7 @@ fn fake_watch(session: &str, history_head: &str) -> whalerein_proto::WatchReady 
             history_head: history_head.into(),
             run_phase: whalerein_proto::RunPhase::Idle as i32,
             approvals: vec![],
+            questions: Some(question_descriptor),
         }),
     }
 }

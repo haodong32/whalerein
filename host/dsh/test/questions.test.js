@@ -418,6 +418,10 @@ test('fixture held open answer cancels without consuming the question', async ()
   await assert.rejects(pending, { code: 'unavailable' })
   assert.equal(adapter.fixtureQuestionWaiting('s'), false)
   assert.equal((await adapter.listQuestionPage('s')).batches.length, 1)
+  // Releasing the fixture hold lets a recovered answer settle the same batch.
+  adapter.releaseFixtureQuestionHold('s')
+  assert.equal((await adapter.answerOpenQuestion(request)).phase, 'QUESTION_SETTLED')
+  assert.equal((await adapter.listQuestionPage('s')).batches.length, 0)
 })
 
 test('real question provider is registered by default and can be opted out', async () => {
@@ -768,6 +772,79 @@ test('open claims cannot settle after native agent or session replacement', asyn
   }
 })
 
+test('question discovery revalidates a replaced native owner and never exposes its obsolete batch', async () => {
+  const { RealDshAdapter } = await import('../src/adapter/real.js')
+  let session = { seq: 1 }
+  let agent = { id: 's', session }
+  const agents = { get: id => id === 's' ? agent : undefined, roots: () => agent ? [agent] : [] }
+  const sessions = { get: id => id === 's' ? session : undefined }
+  let claims = 0, install
+  const userQuestions = { async *attachWait() {
+    claims++
+    try { yield { remainingMs: 1000 } } finally { claims-- }
+  } }
+  const scope = { agents, userQuestions, on(_name, callback) { install = callback; return () => {} } }
+  const ctx = {
+    agents, sessions, userQuestions,
+    sessionController: { projections: async () => ({ kind: 'sequenced', asOfSeq: 1,
+      values: { userQuestions: { active: [] } } }) },
+    inject(_names, callback) { return callback(scope) },
+  }
+  const adapter = new RealDshAdapter({ ctx })
+  await adapter.open()
+  const capture = (callId, local) => install({ agent, questions, wait: { callId, timed: true } }, () => local.promise)
+  const request = batch => ({ session_id: 's', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] })
+
+  // Positive control: an unchanged original root remains discoverable and answerable.
+  const controlLocal = Promise.withResolvers()
+  const controlNative = capture('control', controlLocal)
+  const control = (await adapter.listQuestionPage('s')).batches[0]
+  assert.equal(control.answerable, true)
+  assert.equal((await adapter.answerOpenQuestion(request(control))).phase, 'QUESTION_SETTLED')
+  assert.deepEqual(await controlNative, { answers: [{ id: 'q', selected: ['A'] }] })
+  controlLocal.resolve({ answers: [{ id: 'q', selected: ['B'] }] })
+
+  // Keep the obsolete provider promise unresolved, then replace the current
+  // native root object with another bearing the same session ID.
+  const staleLocal = Promise.withResolvers()
+  const staleNative = capture('stale', staleLocal)
+  const stale = (await adapter.listQuestionPage('s')).batches[0]
+  assert.equal(stale.answerable, true)
+  agent = { id: 's', session: { seq: 2 } }
+  session = agent.session
+  assert.deepEqual((await adapter.listQuestionPage('s')).batches, [])
+  assert.equal(await adapter.getQuestion('s', stale.batch_id), null)
+
+  // A stale answer cannot settle either root's question.
+  await assert.rejects(adapter.answerOpenQuestion(request(stale)),
+    { code: 'conflict', name: 'DefinitiveExecutionError' })
+  let staleSettled = false
+  staleNative.then(() => { staleSettled = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(staleSettled, false)
+  assert.equal(claims, 0)
+
+  // A genuine supported question on the replacement root is discoverable and
+  // answerable, and discovery does not resurrect the obsolete batch.
+  const freshLocal = Promise.withResolvers()
+  const freshNative = capture('fresh', freshLocal)
+  const page = await adapter.listQuestionPage('s')
+  assert.equal(page.batches.length, 1)
+  assert.notEqual(page.batches[0].batch_id, stale.batch_id)
+  assert.equal(page.batches[0].answerable, true)
+  const fresh = await adapter.getQuestion('s', page.batches[0].batch_id)
+  assert.ok(fresh)
+  assert.equal((await adapter.answerOpenQuestion(request(fresh))).phase, 'QUESTION_SETTLED')
+  assert.deepEqual(await freshNative, { answers: [{ id: 'q', selected: ['A'] }] })
+
+  freshLocal.resolve({ answers: [{ id: 'q', selected: ['B'] }] })
+  staleLocal.resolve({ answers: [] })
+  assert.deepEqual(await staleNative, { answers: [] })
+  await adapter.close()
+})
+
 test('interrupt during an open answer releases the claim so a later answer is not permanently conflicted', async () => {
   const { OpenQuestionBroker } = await import('../src/adapter/questions.js')
   const agent = { id: 's' }, agents = { get: () => agent, roots: () => [agent] }
@@ -878,4 +955,156 @@ test('fake question phases expose only answerable phases as answerable', async (
     assert.equal(batch.phase, phase)
     assert.equal(batch.answerable, answerable)
   }
+})
+
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+test('session-observation/AC-06.unchanged reads keep the stamp while normalized changes advance it once', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'call', state: 'continued', questions })
+  const first = await adapter.readQuestionStamp('s')
+  assert.equal(first.availability, 'available')
+  const page = await adapter.listQuestionPage('s')
+  assert.deepEqual(page.stamp, first.stamp)
+  assert.equal(page.next_cursor, '')
+  // Token output / unrelated source reads never advance the normalized stamp.
+  adapter.output('s', 'token traffic')
+  adapter.setRunning('s', true)
+  assert.deepEqual((await adapter.readQuestionStamp('s')).stamp, first.stamp)
+  assert.deepEqual((await adapter.listQuestionPage('s')).stamp, first.stamp)
+  // Ordered membership, content and phase changes advance only the revision.
+  adapter.appendFixtureQuestion('s', { callId: 'later', state: 'continued', questions })
+  const grown = await adapter.readQuestionStamp('s')
+  assert.equal(grown.stamp.observation_epoch, first.stamp.observation_epoch)
+  assert.ok(grown.stamp.revision > first.stamp.revision)
+  adapter.removeFixtureQuestion('s', 'later')
+  const shrunk = await adapter.readQuestionStamp('s')
+  assert.ok(shrunk.stamp.revision > grown.stamp.revision)
+  assert.deepEqual((await adapter.listQuestionPage('s')).stamp, shrunk.stamp)
+})
+
+test('session-observation/AC-10.fake native owner replacement changes the epoch', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'call', state: 'continued', questions })
+  const before = await adapter.readQuestionStamp('s')
+  adapter.replaceFixtureQuestionOwner('s')
+  const after = await adapter.readQuestionStamp('s')
+  assert.notEqual(after.stamp.observation_epoch, before.stamp.observation_epoch)
+  assert.equal(after.stamp.revision, 1)
+  adapter.resetFixtureQuestionIncarnation()
+  const restarted = await adapter.readQuestionStamp('s')
+  assert.notEqual(restarted.stamp.observation_epoch, after.stamp.observation_epoch)
+})
+
+test('session-observation/AC-04.broker-only questions are discovered, stamped and invalidated without a Message', async () => {
+  const { RealDshAdapter } = await import('../src/adapter/real.js')
+  let agent, session
+  const makeOwner = () => { session = { snapshotEvents: () => [] }; agent = { id: 's', session, inbox: { nextTurn: [], nextStep: [] } } }
+  makeOwner()
+  let provider, cleanup
+  const scope = {
+    agents: { get: id => id === 's' ? agent : undefined, roots: () => [agent] },
+    userQuestions: { answer: () => true },
+    on(name, callback) { assert.equal(name, 'user-questions/request'); provider = callback; return () => {} },
+  }
+  const ctx = {
+    sessionController: { projections: async () => ({ kind: 'sequenced', values: { userQuestions: { active: [] } } }) },
+    sessions: { get: () => session },
+    inject(_names, callback) { cleanup = callback(scope); return { dispose: () => cleanup() } },
+  }
+  const adapter = new RealDshAdapter({ ctx, config: { enableOpenQuestionBroker: true } })
+  await adapter.open()
+  const subscription = adapter.watch('s', () => {})
+  try {
+    const first = await adapter.readQuestionStamp('s')
+    assert.deepEqual((await adapter.listQuestionPage('s')).batches, [])
+    const seen = []
+    subscription.close()
+    adapter.watch('s', update => seen.push(update))
+    const local = Promise.withResolvers()
+    const native = provider({ agent, questions, wait: { callId: 'broker-only', timed: true }, signal: new AbortController().signal }, () => local.promise)
+    await tick()
+    assert.ok(seen.some(update => update.questions_changed === true), 'broker capture emits an invalidation')
+    const page = await adapter.listQuestionPage('s')
+    assert.equal(page.batches.length, 1, 'a question outside committed history is discoverable')
+    assert.equal(page.batches[0].answerable, true)
+    assert.equal(page.stamp.observation_epoch, first.stamp.observation_epoch)
+    assert.ok(page.stamp.revision > first.stamp.revision)
+    assert.deepEqual((await adapter.readQuestionStamp('s')).stamp, page.stamp)
+    // Discovery is not ownership: no native claim was acquired by the reads.
+    assert.deepEqual(adapter.listClaimedQuestions('s'), [])
+    // The exact owner object replacement changes the epoch and clears the old
+    // broker-only handle from the current inventory.
+    const before = page.stamp.observation_epoch
+    makeOwner()
+    const replaced = await adapter.readQuestionStamp('s')
+    assert.notEqual(replaced.stamp.observation_epoch, before)
+    assert.equal(replaced.stamp.revision, 1)
+    assert.deepEqual((await adapter.listQuestionPage('s')).batches, [])
+    local.resolve({ answers: [{ id: 'q', selected: ['A'] }] })
+    await native.catch(() => {})
+  } finally {
+    await adapter.close()
+  }
+})
+
+test('session-observation/AC-20.changed epoch, version, digest or phase rejects a stale submission', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'call', state: 'continued', questions })
+  const batch = (await adapter.listQuestionPage('s')).batches[0]
+  const request = { session_id: 's', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] }
+  for (const stale of [
+    { ...request, source_epoch: 'other-epoch' },
+    { ...request, expected_version: batch.version + 1 },
+    { ...request, expected_digest: new Uint8Array(32) },
+    { ...request, expected_phase: 'QUESTION_OPEN' },
+  ]) await assert.rejects(adapter.answerContinuedQuestion(stale), error => error.code === 'conflict' || error.code === 'unsupported_capability')
+  assert.equal((await adapter.answerContinuedQuestion(request)).phase, 'QUESTION_REPLY_QUEUED')
+  await assert.rejects(adapter.answerContinuedQuestion(request), { code: 'conflict' })
+})
+
+test('session-observation/AC-21.open settles and continued reply-queues with exact native meaning', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true, questionsOpen: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'open-call', state: 'open', questions })
+  const open = (await adapter.listQuestionPage('s')).batches[0]
+  const openRequest = { session_id: 's', batch_id: open.batch_id, source_epoch: open.source_epoch,
+    expected_version: open.version, expected_digest: open.digest, expected_phase: open.phase,
+    answers: [{ id: 'q', selected: ['A', 'B'], custom: '' }] }
+  assert.equal((await adapter.answerOpenQuestion(openRequest)).phase, 'QUESTION_SETTLED')
+  await assert.rejects(adapter.answerOpenQuestion(openRequest), { code: 'conflict' })
+  adapter.setFixtureQuestion('s', { callId: 'continued-call', state: 'continued', questions })
+  const continued = (await adapter.listQuestionPage('s')).batches[0]
+  const continuedRequest = { session_id: 's', batch_id: continued.batch_id, source_epoch: continued.source_epoch,
+    expected_version: continued.version, expected_digest: continued.digest, expected_phase: continued.phase,
+    answers: [{ id: 'q', selected: ['A'] }] }
+  await assert.rejects(adapter.answerContinuedQuestion({ ...continuedRequest, batch_id: 'missing' }), { code: 'conflict' })
+  await assert.rejects(adapter.answerContinuedQuestion({ ...continuedRequest, answers: [{ id: 'q', selected: [1] }] }), { code: 'invalid_argument' })
+  assert.equal((await adapter.answerContinuedQuestion(continuedRequest)).phase, 'QUESTION_REPLY_QUEUED')
+})
+
+test('session-observation/AC-22.cancelled open cleanup releases only its exact attempt and a later answer remains usable', async () => {
+  const { FakeDshAdapter } = await import('../src/adapter/fake.js')
+  const adapter = new FakeDshAdapter({ behavior: { questions: true, questionsOpen: true }, sessions: [{ sessionId: 's' }] })
+  adapter.setFixtureQuestion('s', { callId: 'call', state: 'open', questions })
+  adapter.holdFixtureQuestion('s')
+  const batch = (await adapter.listQuestionPage('s')).batches[0]
+  const request = { session_id: 's', batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+    expected_version: batch.version, expected_digest: batch.digest, expected_phase: batch.phase,
+    answers: [{ id: 'q', selected: ['A'] }] }
+  const controller = new AbortController()
+  const pending = adapter.answerOpenQuestion(request, controller.signal)
+  while (!adapter.fixtureQuestionWaiting('s')) await tick()
+  controller.abort()
+  await assert.rejects(pending, error => error.code === 'unavailable')
+  assert.equal(adapter.fixtureQuestionWaiting('s'), false)
+  assert.equal((await adapter.listQuestionPage('s')).batches.length, 1, 'the exact claim is released without consuming the question')
+  adapter.releaseFixtureQuestionHold('s')
+  assert.equal((await adapter.answerOpenQuestion(request)).phase, 'QUESTION_SETTLED')
+  assert.equal((await adapter.listQuestionPage('s')).batches.length, 0)
 })

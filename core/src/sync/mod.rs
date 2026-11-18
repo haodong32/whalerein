@@ -83,45 +83,50 @@ impl SyncService {
             Err(error) => Err(error.into()),
         }
     }
-    pub fn open_update(
-        &self,
-        channel: &SecureChannel,
-        envelope: &EventEnvelope,
-    ) -> CoreResult<SessionUpdate> {
-        if envelope.device_id != channel.device_id()
-            || envelope.host_id != channel.host_id()
-            || envelope.channel_id != channel.channel_id()
-        {
-            return Err(CoreError::ChannelMismatch);
-        }
-        let aad = EventAad {
-            host_id: &envelope.host_id,
-            device_id: &envelope.device_id,
-            channel_id: &envelope.channel_id,
-            created_at_unix_ms: envelope.created_at_unix_ms,
-        };
-        let frame = whalerein_proto::EncryptedFrame {
-            channel_id: envelope.channel_id.clone(),
-            nonce: envelope.nonce.clone(),
-            ciphertext: envelope.ciphertext.clone(),
-        };
-        let bytes = channel.open_event(&aad, &frame)?;
-        let payload = EventPayload::decode(bytes.as_slice())
-            .map_err(|_| CoreError::Security("invalid typed payload".into()))?;
-        let update = payload
-            .update
-            .ok_or_else(|| CoreError::Security("missing typed update".into()))?;
-        if update
-            .session
-            .as_ref()
-            .is_none_or(|key| key.host_id != channel.host_id() || key.session_id.is_empty())
-            || update.payload.is_none()
-        {
-            return Err(CoreError::Security("invalid typed update scope".into()));
-        }
-        Ok(update)
-    }
 }
+
+/// Decrypt and scope-check one typed event without touching the cache.
+///
+/// Question-only observation uses this path, so a missing or failing local
+/// history cache cannot hide questions.
+pub(crate) fn open_update(
+    channel: &SecureChannel,
+    envelope: &EventEnvelope,
+) -> CoreResult<SessionUpdate> {
+    if envelope.device_id != channel.device_id()
+        || envelope.host_id != channel.host_id()
+        || envelope.channel_id != channel.channel_id()
+    {
+        return Err(CoreError::ChannelMismatch);
+    }
+    let aad = EventAad {
+        host_id: &envelope.host_id,
+        device_id: &envelope.device_id,
+        channel_id: &envelope.channel_id,
+        created_at_unix_ms: envelope.created_at_unix_ms,
+    };
+    let frame = whalerein_proto::EncryptedFrame {
+        channel_id: envelope.channel_id.clone(),
+        nonce: envelope.nonce.clone(),
+        ciphertext: envelope.ciphertext.clone(),
+    };
+    let bytes = channel.open_event(&aad, &frame)?;
+    let payload = EventPayload::decode(bytes.as_slice())
+        .map_err(|_| CoreError::Security("invalid typed payload".into()))?;
+    let update = payload
+        .update
+        .ok_or_else(|| CoreError::Security("missing typed update".into()))?;
+    if update
+        .session
+        .as_ref()
+        .is_none_or(|key| key.host_id != channel.host_id() || key.session_id.is_empty())
+        || update.payload.is_none()
+    {
+        return Err(CoreError::Security("invalid typed update scope".into()));
+    }
+    Ok(update)
+}
+
 fn validate_batch(batch: &HistoryBatch) -> CoreResult<()> {
     if batch.from_cursor.is_empty()
         || batch.to_cursor.is_empty()

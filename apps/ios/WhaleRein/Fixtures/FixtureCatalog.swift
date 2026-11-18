@@ -104,6 +104,43 @@ enum FixtureCatalog {
         )
     }
 
+    static func questionBatch(sessionId: String) -> QuestionBatch {
+        QuestionBatch(
+            sessionID: sessionId,
+            batchID: "question-release-\(sessionId)",
+            sourceEpoch: "fixture-native-epoch",
+            version: 2,
+            digestHex: String(repeating: "a1", count: 32),
+            phase: "QUESTION_CONTINUED",
+            questions: [
+                QuestionItem(
+                    id: "question-channel",
+                    question: "Which release channel should this session publish to?",
+                    detail: "The native request is waiting for an explicit answer.",
+                    header: "Release channel",
+                    options: [
+                        QuestionOption(label: "Stable", description: "Publish to the stable channel."),
+                        QuestionOption(label: "Beta", description: "Publish to the beta channel."),
+                    ],
+                    multiSelect: false,
+                    intent: QuestionIntent(
+                        kind: "ask",
+                        approve: "Answer",
+                        reject: "Skip",
+                        always: nil,
+                        callID: "call-question-1",
+                        subject: nil,
+                        displayQuestion: nil,
+                        displayDetail: nil,
+                        displayApprove: nil
+                    )
+                )
+            ],
+            answerable: true,
+            contentUnavailable: false
+        )
+    }
+
     static func diagnostics(now: Date = Date()) -> DiagnosticsReport {
         let json = """
         {

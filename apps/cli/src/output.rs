@@ -2473,6 +2473,9 @@ mod cli_contract_tests {
         let page = QuestionPageInfo {
             batches: vec![],
             next_cursor: String::new(),
+            stamp: None,
+            complete: true,
+            encoded_bytes: 0,
         };
         let text = render_questions(&page);
         assert!(text.contains("No pending questions"), "{text}");

@@ -16,6 +16,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { AdapterError } from '../errors.js'
 import { MESSAGE_BYTES } from '../access/transport.js'
+import { validateQuestionStamp } from '../contracts/source.js'
 
 const CURSOR_VERSION = 2
 const MAX_INDEX = 1_000_000
@@ -118,42 +119,68 @@ export class QuestionPager {
     // Authenticate the cursor before inspecting the snapshot so a cursor from
     // another device/session is rejected as such, not as a source error.
     const resolved = this.#cursor(cursor, deviceId, sessionId)
-    const ids = new Set(), sizes = [], order = []
+    const ids = new Set(), order = []
     for (const batch of source.batches) {
       if (batch.session_id !== sessionId || !batch.batch_id || ids.has(batch.batch_id)) throw new AdapterError('unavailable')
       ids.add(batch.batch_id)
       order.push(batch.batch_id)
-      sizes.push(this.codec.encode('whalerein.v1.QuestionBatch', batch).length)
     }
+    // Every page of one sampled inventory carries that collection stamp. The
+    // stamp is part of the actual encoded budget, not an unaccounted add-on.
+    const stamp = source.stamp == null ? null : validateQuestionStamp(source.stamp)
     const index = this.#start(resolved, order)
     const chosen = []
     let batchBytes = 0
-    const build = next => {
+    const cursorFor = next => {
+      if (next >= order.length) return ''
       const anchor = chosen.at(-1)?.batch_id ?? ''
-      const nextId = next < order.length ? order[next] : ''
+      const nextId = order[next]
       const body = { v: CURSOR_VERSION, kid: this.#kid, anchor, next_id: nextId, index: next }
-      return { batches: chosen, next_cursor: next < order.length ? this.#token(deviceId, sessionId, body) : '' }
+      return this.#token(deviceId, sessionId, body)
     }
-    const fits = next => {
-      const pageBase = this.codec.encode('whalerein.v1.QuestionPage', { next_cursor: build(next).next_cursor }).length
-      const pageBytes = pageBase + batchBytes
-      return varintBytes(260 * 8 + 2) + varintBytes(pageBytes) + pageBytes <= maxBytes
+    const headerBytes = next => this.codec.encode('whalerein.v1.QuestionPage', {
+      next_cursor: cursorFor(next),
+      ...(stamp ? { stamp } : {}),
+      complete: next >= order.length,
+    }).length
+    const pageBytes = (next, bytes) => headerBytes(next) + bytes
+    const fits = (next, bytes) => {
+      const total = pageBytes(next, bytes)
+      return varintBytes(260 * 8 + 2) + varintBytes(total) + total <= maxBytes
     }
+    // Encode batches lazily: once the current page is full, later batches in
+    // the inventory are not encoded merely to size a page that cannot contain
+    // them. The common first page therefore does not re-encode the whole
+    // inventory.
     for (let i = index; i < source.batches.length; i++) {
       const batch = source.batches[i]
+      const size = this.codec.encode('whalerein.v1.QuestionBatch', batch).length
+      const fieldBytes = 1 + varintBytes(size) + size
+      // Include the candidate before sizing: its identity changes both the
+      // anchor and the next-id recorded in the cursor.
       chosen.push(batch)
-      batchBytes += 1 + varintBytes(sizes[i]) + sizes[i]
-      if (fits(i + 1)) continue
+      batchBytes += fieldBytes
+      if (fits(i + 1, batchBytes)) continue
       chosen.pop()
-      batchBytes -= 1 + varintBytes(sizes[i]) + sizes[i]
+      batchBytes -= fieldBytes
       if (chosen.length) break
-      chosen.push({ session_id: batch.session_id, batch_id: batch.batch_id, source_epoch: batch.source_epoch,
-        version: batch.version, digest: batch.digest, phase: batch.phase, answerable: false, content_unavailable: true })
-      const metadataSize = this.codec.encode('whalerein.v1.QuestionBatch', chosen[0]).length
-      batchBytes = 1 + varintBytes(metadataSize) + metadataSize
-      if (!fits(i + 1)) throw new AdapterError('payload_too_large')
+      // A single batch that cannot fit is represented by bounded metadata
+      // instead of being truncated or dropped.
+      const metadata = { session_id: batch.session_id, batch_id: batch.batch_id, source_epoch: batch.source_epoch,
+        version: batch.version, digest: batch.digest, phase: batch.phase, answerable: false, content_unavailable: true }
+      const metadataSize = this.codec.encode('whalerein.v1.QuestionBatch', metadata).length
+      const metadataBytes = 1 + varintBytes(metadataSize) + metadataSize
+      chosen.push(metadata)
+      batchBytes = metadataBytes
+      if (!fits(i + 1, batchBytes)) throw new AdapterError('payload_too_large')
+      break
     }
-    const result = build(index + chosen.length)
+    const result = {
+      batches: chosen,
+      next_cursor: cursorFor(index + chosen.length),
+      ...(stamp ? { stamp } : {}),
+      complete: index + chosen.length >= order.length,
+    }
     if (this.codec.encode('whalerein.v1.ResponsePayload', { question_page: result }).length > maxBytes) throw new AdapterError('payload_too_large')
     return result
   }

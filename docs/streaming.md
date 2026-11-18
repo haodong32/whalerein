@@ -39,8 +39,16 @@ CLI prints a suffix only when Core reports an exact UTF-8 prefix; otherwise it
 shows the complete corrected Message. GUI consumers replace content by identity.
 JSON output contains normalized block types and correlation, not native paths.
 
-The current Core admits one active Watch per instance. It avoids competing device
-MQTT clients rather than pre-building multi-session multiplexing. A visible preview
+One active session observation per Core instance selects Conversation, Questions
+or both over one Watch and one device MQTT client. Question observation is
+independent of history readiness: a lost or unsupported history facet does not
+hide a readable pending question. The source stamp (observation epoch plus
+monotonic revision) drives a private same-stamp reducer; unchanged inventory and
+token/runtime traffic do not re-read question content. Only a complete collection
+with one stamp replaces the visible view, so mixed, regressed or partial pages
+never become Current. The existing five-second refresh repairs a lost final
+question hint without a client timer. This avoids competing device MQTT clients
+rather than pre-building multi-session multiplexing. A visible preview
 or committed Message can finish `tail --once`; lifecycle/state/reset metadata alone
 cannot, and a marker-only deadline reports timeout.
 

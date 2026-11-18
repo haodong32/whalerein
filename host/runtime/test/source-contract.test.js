@@ -6,6 +6,7 @@ test('a source without optional capabilities rejects operations explicitly and n
  const source=new SourceAdapter(),metadata={get(){return null},set(){}}
  await source.open({metadata});assert.equal(source.metadata,metadata)
  for(const operation of ['listSessions','getSession','readHistory','readState','execute','executeHost','listModels','readSessionModel','readPendingQueue','readWaitState','waitSession','listApprovals','getApproval','listQuestionPage','getQuestion'])await assert.rejects(source[operation](),e=>e.code==='unsupported_capability')
+ assert.deepEqual(await source.readQuestionStamp('s'),{availability:'unsupported',code:'unsupported_capability'})
  assert.deepEqual(await source.describeHostCapabilities(),{})
  assert.throws(()=>source.watch(),e=>e.code==='unsupported_capability')
  assert.equal('getCredential' in source,false);await source.close()
@@ -22,4 +23,20 @@ test('normalized contract validation rejects missing scopes, ambiguous families,
  ])assert.throws(()=>validateSessionUpdate(update),e=>e.code==='invalid_argument')
  const live={attempt:{live_epoch:'e',attempt_id:'a'},block_id:'b',first_seq:1,last_seq:2,delta:{text:'x'}}
  assert.equal(validateSessionUpdate({session,live}).live,live)
+})
+
+test('question updates validate availability, stamps and the single-update rule',()=>{
+ const session={session_id:'s'}
+ const descriptor={availability:'available',stamp:{observation_epoch:'e',revision:2}}
+ assert.equal(validateSessionUpdate({session,questions:descriptor}).questions,descriptor)
+ for(const invalid of [
+  {availability:'QUESTION_AVAILABILITY_UNSPECIFIED',stamp:{observation_epoch:'e',revision:1}},
+  {availability:'available'},
+  {availability:'available',stamp:{observation_epoch:'',revision:1}},
+  {availability:'available',stamp:{observation_epoch:'e',revision:0}},
+  {availability:'available',stamp:{observation_epoch:'e',revision:'0'}},
+  {availability:'unavailable',code:'x'.repeat(65)},
+ ])assert.throws(()=>validateSessionUpdate({session,questions:invalid}),e=>e.code==='invalid_argument')
+ assert.throws(()=>validateSessionUpdate({session,questions:{availability:'unsupported'},history:{from_cursor:'a',to_cursor:'b',batch_id:'b',changes:[]}}),e=>e.code==='invalid_argument')
+ assert.equal(validateSessionUpdate({session,questions:{availability:'unavailable',code:'unavailable'}}).questions.availability,'unavailable')
 })
