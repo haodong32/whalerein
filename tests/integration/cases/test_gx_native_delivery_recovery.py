@@ -42,10 +42,13 @@ def test_gx04_native_delivery_modes_recover_without_replay(delivery, fault, scen
     else:
         assert code == 0
         operation = envelopes[-1]["data"]
-        receipt = operation["receipt"]
         drop_count = scenario.request("gx-drop-status")["count"]
-        stage("notification-receipt", has_delivery=bool(receipt.get("delivery_id")), drops=drop_count)
-        assert receipt["delivery_id"] and drop_count == 1
+        stage("notification-submitted", receipt_status=operation["receipt"]["status"], drops=drop_count)
+        assert drop_count == 1
+        receipt = paired_device.confirm_detached_delivery(
+            operation, session, "synthetic delivery", delivery
+        )
+        stage("notification-receipt", has_delivery=True, drops=drop_count)
         request = operation["operation_id"]
     stage("wait-idle")
     scenario.wait_idle(session)

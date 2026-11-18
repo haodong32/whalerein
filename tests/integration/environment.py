@@ -237,6 +237,35 @@ class Device:
         options = ["--delivery", delivery] if delivery else []
         return self.call("session", "send", session, "--detach", *options, "--", message)
 
+    def confirm_detached_delivery(self, submission, session, text, delivery):
+        """Observe terminal delivery for the exact recorded send intent."""
+        operation = submission["operation_id"]
+        target = submission["target"]
+        assert isinstance(operation, str) and operation.strip() == operation and operation
+        deadline = time.monotonic() + 20
+        while True:
+            assert submission["state"] == "submission"
+            assert submission["operation_id"] == operation and submission["target"] == target
+            receipt = submission["receipt"]
+            status = receipt["status"]
+            if status == "succeeded":
+                identity = receipt.get("delivery_id")
+                assert isinstance(identity, str) and identity and identity.strip() == identity
+                return receipt
+            assert status in {"received", "host_accepted"}, "Delivery did not succeed"
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TimeoutError("Detached delivery did not reach a terminal receipt")
+            time.sleep(0.1)
+            # Core resolves a saved operation ID and checks the original
+            # intent before reading its receipt. Keep detach to avoid waiting
+            # for a model reply while the case holds the active run.
+            submission = self.call(
+                "session", "send", session, "--detach", "--delivery", delivery,
+                "--operation-id", operation, "--timeout", str(max(1, int(remaining))),
+                "--", text,
+            )
+
     def approvals(self, session):
         return self.call("session", "approval", "list", "--session", session)["approvals"]
 

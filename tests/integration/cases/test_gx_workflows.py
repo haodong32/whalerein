@@ -136,7 +136,10 @@ def test_gx03_native_queue_edit_remove_promote_interrupt_and_wait(scenario, pair
         assert scenario.model.started.wait(timeout=15)
         stage("enqueue")
         for _ in range(4):
-            assert paired_device.send(session, "synthetic pending", delivery="enqueue-after-run")["receipt"]["delivery_id"]
+            pending = paired_device.send(session, "synthetic pending", delivery="enqueue-after-run")
+            paired_device.confirm_detached_delivery(
+                pending, session, "synthetic pending", "enqueue-after-run"
+            )
         stage("queue_available")
         assert scenario.request("queue-read", sessionId=session)["available"]
         paired_device.sessions(scenario.host)
@@ -188,7 +191,7 @@ def test_gx03_native_queue_edit_remove_promote_interrupt_and_wait(scenario, pair
     stage("direct_steer")
     scenario.model.plan()
     direct = paired_device.send(session, "synthetic idle steer", delivery="steer")
-    assert direct["receipt"]["status"] == "succeeded" and direct["receipt"]["delivery_id"]
+    paired_device.confirm_detached_delivery(direct, session, "synthetic idle steer", "steer")
     assert paired_device.call('session', 'wait', session, "--timeout", "20")["reason"] == "idle"
 
 
