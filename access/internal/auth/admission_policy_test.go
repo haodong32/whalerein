@@ -63,7 +63,7 @@ func TestRevokeHostGrantFencesAdmissionBeforeWriteAndCallsEnforcerWithGrantScope
 	if err := service.RevokeHostGrant(ctx, "h1", "d1"); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(events, []string{"admission.deny", "store.revoke_grant"}) {
+	if !reflect.DeepEqual(events, []string{"admission.deny", "store.revoke_grant", "admission.finish_grant_revoke"}) {
 		t.Fatalf("events = %v", events)
 	}
 	if len(enforcer.calls) != 1 || enforcer.calls[0] != "grant:h1:d1" {
