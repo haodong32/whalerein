@@ -1211,18 +1211,9 @@ def test_native_fork_proven_concurrent_watches(scenario, paired_device):
     second = Device(second_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
     second.pair(invitation["pairingUri"])
-    parent_tail = scenario.tail(paired_device, parent)
-    child_tail = scenario.tail(second, child)
+    parent_tail = scenario.tail(paired_device, parent, baseline=True)
+    child_tail = scenario.tail(second, child, baseline=True)
     wait(lambda: scenario.request("watches") == 2, timeout=8, process=scenario.native)
-    def baseline_seen(process):
-        for line in Path(process.output.name).read_text().splitlines():
-            try:
-                if json.loads(line).get("data", {}).get("event", {}).get("type") == "reset":
-                    return True
-            except (ValueError, AttributeError):
-                pass
-        return False
-    wait(lambda: baseline_seen(parent_tail) and baseline_seen(child_tail), timeout=8, process=scenario.native)
     scenario.model.plan(hold=True)
     scenario.request("start", sessionId=parent)
     scenario.request("start", sessionId=child)
