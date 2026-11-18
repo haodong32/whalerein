@@ -34,8 +34,19 @@ def test_native_interrupt_releases_an_open_question_claim(scenario, paired_devic
     paired_device.sessions(scenario.host)
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_OPEN"], timeout=15, process=scenario.native)
-    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
+    batch = None
+
+    def capture_open_question():
+        nonlocal batch
+        batches = paired_device.call("session", "question", "list", "--session", session)["batches"]
+        if len(batches) != 1 or batches[0]["phase"] != "QUESTION_OPEN" or not batches[0]["answerable"]:
+            return False
+        if batch is not None and batches[0]["batch_id"] != batch["batch_id"]:
+            return False
+        batch = batches[0]
+        return True
+
+    wait(capture_open_question, timeout=15, process=scenario.native)
     answer = _answer_file(scenario)
     # Hold the native claim so the interrupt lands while the answer is in flight.
     assert scenario.request("gx-hold-question-claim")["armed"]
@@ -51,11 +62,9 @@ def test_native_interrupt_releases_an_open_question_claim(scenario, paired_devic
         # The interrupted answer is definitive (conflict) or unconfirmed; it
         # must never look like the question stayed permanently busy.
         assert process.returncode in (7, 8), (process.returncode, output, error)
-        # The same fixture call id can be answered again: a leaked claim would
-        # make this second registration fail instead of settling.
-        assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-        wait(lambda: any(batch["answerable"] for batch in paired_device.call("session", "question", "list", "--session", session)["batches"]), timeout=15)
-        batch = [item for item in paired_device.call("session", "question", "list", "--session", session)["batches"] if item["answerable"]][-1]
+        # The interrupt releases the claim on the original native question.
+        # Re-read its authoritative guard before answering that same batch.
+        wait(capture_open_question, timeout=15, process=scenario.native)
         receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer))
