@@ -1840,7 +1840,7 @@ test('session-observation/AC-33.exact request cancellation stops only its own an
   const first = answerService(), second = answerService()
   try {
     while (!first.started() || !second.started()) await new Promise(resolve => setImmediate(resolve))
-    first.ctx.service.cancelRequest(first.request.request_id, 'client_poll_expired')
+    first.ctx.service.cancelRequest(first.request.device_id, first.request.request_id, 'client_poll_expired')
     const aborted = await first.pending
     assert.equal(aborted.status, 'unknown')
     second.gate.resolve()

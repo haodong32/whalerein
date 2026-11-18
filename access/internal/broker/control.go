@@ -30,6 +30,7 @@ type ControlReply struct {
 
 // SnapshotClient is one broker connection at the snapshot boundary.
 type SnapshotClient struct {
+	SessionID string
 	ClientID  string
 	Kind      string
 	HostID    string
@@ -204,6 +205,9 @@ func (c *Control) handleReply(payload []byte) {
 		client.Revision, _ = strconv.ParseUint(parts[5], 10, 64)
 		client.Sequence, _ = strconv.ParseUint(parts[7], 10, 64)
 		client.Connected, _ = strconv.ParseInt(parts[8], 10, 64)
+		if len(parts) > 9 && parts[9] != "-" {
+			client.SessionID = parts[9]
+		}
 		if client.HostID == "-" {
 			client.HostID = ""
 		}

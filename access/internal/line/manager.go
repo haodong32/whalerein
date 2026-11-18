@@ -42,14 +42,15 @@ type Config struct {
 
 // Manager owns broker policy projection and reconciliation.
 type Manager struct {
-	store    Store
-	control  *broker.Control
-	applier  Applier
-	presence *broker.Presence
-	cfg      Config
-	metrics  *diagnostics.Metrics
-	masker   *diagnostics.Masker
-	logger   *slog.Logger
+	sessionPolicy func(context.Context, string, string) (policy.Connection, error)
+	store         Store
+	control       *broker.Control
+	applier       Applier
+	presence      *broker.Presence
+	cfg           Config
+	metrics       *diagnostics.Metrics
+	masker        *diagnostics.Masker
+	logger        *slog.Logger
 
 	appliedMu sync.Mutex
 	applied   map[string]uint64
@@ -100,6 +101,11 @@ func New(deps Dependencies) (*Manager, error) {
 	}, nil
 }
 
+// SetSessionPolicy wires managed projection before the broker starts.
+func (m *Manager) SetSessionPolicy(project func(context.Context, string, string) (policy.Connection, error)) {
+	m.sessionPolicy = project
+}
+
 func (m *Manager) request(ctx context.Context, op string, fields ...string) (*broker.ControlReply, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
 	defer cancel()
@@ -114,6 +120,9 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if err != nil {
 		m.metrics.AdmissionReconcileErrors.Inc()
 		return fmt.Errorf("line: broker snapshot: %w", err)
+	}
+	if m.sessionPolicy != nil && snapshot.Fields["session_capability"] != "1" {
+		return errors.New("line: broker does not support managed device sessions")
 	}
 	m.presence.ApplySnapshot(snapshot.Clients, snapshot.Sequence)
 
@@ -138,8 +147,38 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		}
 	}
 	projected := 0
+	renewed := make(map[string]bool)
 	for _, client := range snapshot.Clients {
 		if client.Kind != policy.KindDevice || client.State != "connected" || client.DeviceID == "" {
+			continue
+		}
+		if client.SessionID != "" {
+			if m.sessionPolicy == nil {
+				return errors.New("line: managed connection without a session policy source")
+			}
+			connection, err := m.sessionPolicy(ctx, client.SessionID, client.DeviceID)
+			if err != nil {
+				return fmt.Errorf("line: project managed connection: %w", err)
+			}
+			if connection.SessionID == "" {
+				if _, err := m.request(ctx, "session_absent", "session "+client.SessionID); err != nil {
+					return err
+				}
+				continue
+			}
+			if !renewed[client.SessionID] {
+				if _, err := m.request(ctx, "renew_session", "session "+client.SessionID,
+					fmt.Sprintf("session_revision %d", connection.SessionRevision),
+					fmt.Sprintf("deadline_ms %d", connection.SessionExpiresAt)); err != nil {
+					return err
+				}
+				renewed[client.SessionID] = true
+			}
+			if connection.Revision > client.Revision {
+				if _, err := m.request(ctx, "set", policy.ControlMessages(connection, client.ClientID, int(m.cfg.PolicyTTL.Milliseconds()))...); err != nil && !isNotConnected(err) {
+					return err
+				}
+			}
 			continue
 		}
 		deviceGrants := grouped[client.DeviceID]
@@ -209,6 +248,9 @@ func (m *Manager) forget(deviceID string) {
 // the snapshot reconcile loop is stalled.
 func (m *Manager) Heartbeat(ctx context.Context) error {
 	m.presence.Sweep()
+	if m.sessionPolicy != nil {
+		return m.Reconcile(ctx)
+	}
 	_, err := m.request(ctx, "ping", "ttl "+fmt.Sprint(m.cfg.PolicyTTL.Milliseconds()))
 	return err
 }

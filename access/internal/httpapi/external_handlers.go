@@ -262,6 +262,7 @@ func classifyExternal(err error) error {
 		errors.Is(err, external.ErrEnrollmentDisabled):
 		return errAuthorizationRefused
 	case errors.Is(err, external.ErrOperationConflict),
+		errors.Is(err, store.ErrPairingFenced),
 		errors.Is(err, store.ErrOperationConflict),
 		errors.Is(err, store.ErrConflict),
 		errors.Is(err, external.ErrStaleRevision):

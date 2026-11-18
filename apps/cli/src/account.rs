@@ -28,6 +28,9 @@ pub(crate) async fn run(core: &Core, command: &Command) -> CoreResult<CliOutcome
             let account_state = match status.account_state {
                 AccountState::NotApplicable => "not applicable",
                 AccountState::SignedIn => "signed in",
+                AccountState::SignedOut if status.remote_signout_pending => {
+                    "signed out (remote sign-out pending)"
+                }
                 AccountState::SignedOut => "signed out",
             };
             let device_access = match status.device_access {
@@ -36,12 +39,20 @@ pub(crate) async fn run(core: &Core, command: &Command) -> CoreResult<CliOutcome
                 DeviceAccess::RevocationPending => "revocation pending",
                 DeviceAccess::Revoked => "revoked",
                 DeviceAccess::Unavailable => "unavailable",
+                DeviceAccess::SignInRequired => "sign in to access Hosts",
             };
             let environment_suffix = status
                 .testing_environment
                 .map_or_else(String::new, |value| format!(" ({value}, testing)"));
+            let signout_notice = if status.remote_signout_pending
+                && matches!(status.account_state, AccountState::SignedIn)
+            {
+                "\nPrevious remote sign-out is pending."
+            } else {
+                ""
+            };
             let human = format!(
-                "Configuration: {}\nData directory: {}\nService: {label}{environment_suffix}\nAccount: {account_state}\nDevice access: {device_access}\nDefault Host: {}",
+                "Configuration: {}\nData directory: {}\nService: {label}{environment_suffix}\nAccount: {account_state}\nDevice access: {device_access}\nDefault Host: {}{signout_notice}",
                 status.config.display(),
                 status.data_dir.display(),
                 status.default_host.as_deref().unwrap_or("none"),
@@ -57,9 +68,56 @@ pub(crate) async fn run(core: &Core, command: &Command) -> CoreResult<CliOutcome
                 render_account_hosts(&hosts),
             )
         }
+        Command::AccountSessions => {
+            let sessions = core.cloud_account_sessions().await?;
+            let human = if sessions.is_empty() {
+                "No Cloud sessions.".into()
+            } else {
+                sessions
+                    .iter()
+                    .map(|session| {
+                        format!(
+                            "{}  {}  {}",
+                            session.session_id,
+                            session.instance_id,
+                            session.state.as_str()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            CliOutcome::success(command, json!({"sessions": sessions}), human)
+        }
+        Command::AccountRevokeAllSessions => {
+            let state = core.revoke_all_cloud_account_sessions().await?;
+            let human = if state == whalerein_core::api::AccountSessionState::Revoked {
+                "All Cloud sessions signed out."
+            } else {
+                "Signed out on this device. To confirm sign-out for all apps, check App sign-ins in the console."
+            };
+            CliOutcome::success(command, json!({"state": state}), human)
+        }
+        Command::AccountRevokeSession { id } => {
+            let state = core.revoke_cloud_account_session(id).await?;
+            let human = if state == whalerein_core::api::AccountSessionState::Revoked {
+                "Cloud session signed out."
+            } else {
+                "Remote sign-out is pending."
+            };
+            CliOutcome::success(command, json!({"session_id": id, "state": state}), human)
+        }
         Command::Logout => {
-            core.logout().await?;
-            CliOutcome::success(command, json!({"signed_out": true}), "Signed out.")
+            let complete = core.logout().await?;
+            let message = if complete {
+                "Signed out."
+            } else {
+                "Signed out on this device. Remote sign-out is pending."
+            };
+            CliOutcome::success(
+                command,
+                json!({"signed_out": true, "remote_signout_pending": !complete}),
+                message,
+            )
         }
         _ => unreachable!("only account commands are dispatched here"),
     })

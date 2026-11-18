@@ -347,6 +347,7 @@ const (
 
 // Request is the Access-side state copy for one HostRequest.
 type Request struct {
+	DeviceSessionID        string // Used when admitting a new managed request.
 	RequestID              string
 	HostID                 string
 	DeviceID               string

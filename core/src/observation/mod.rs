@@ -186,11 +186,19 @@ struct ObservationShared {
     stop: AtomicBool,
     terminal: Mutex<Option<CoreError>>,
     last: Mutex<Option<CoreError>>,
+    admission: Mutex<Option<(WatchLease, WatchGuard)>>,
 }
 
 impl ObservationShared {
     fn cancelled(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
+    }
+
+    fn release_admission(&self) {
+        self.admission
+            .lock()
+            .expect("observation admission mutex")
+            .take();
     }
 }
 
@@ -206,10 +214,9 @@ pub struct SessionObservation {
     cancellation: Cancellation,
     events: mpsc::Receiver<SessionEvent>,
     shared: Arc<ObservationShared>,
-    lease: Option<WatchLease>,
-    guard: Option<WatchGuard>,
     tasks: Vec<JoinHandle<()>>,
     closed: bool,
+    access_session: Option<(Core, String)>,
 }
 
 impl std::fmt::Debug for SessionObservation {
@@ -248,7 +255,22 @@ impl SessionObservation {
         let event = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => None,
+            () = wait_for_cloud_session_end(self.access_session.as_ref().map(|(core, id)| (core, id.as_str()))) => None,
             event = self.events.recv() => event,
+        };
+        let event = if self
+            .access_session
+            .as_ref()
+            .is_some_and(|(core, id)| !same_cloud_session(core, id))
+        {
+            *self
+                .shared
+                .terminal
+                .lock()
+                .expect("observation error mutex") = Some(CoreError::AuthenticationRequired);
+            None
+        } else {
+            event
         };
         if event.is_none() {
             self.shutdown().await;
@@ -269,8 +291,7 @@ impl SessionObservation {
         self.shared.stop.store(true, Ordering::SeqCst);
         // Release the profile lease with the tasks so a new observation can
         // attach immediately after close.
-        self.guard.take();
-        self.lease.take();
+        self.shared.release_admission();
         let tasks = std::mem::take(&mut self.tasks);
         for mut task in tasks {
             if tokio::time::timeout(Duration::from_millis(700), &mut task)
@@ -318,6 +339,7 @@ impl Drop for SessionObservation {
         for task in self.tasks.drain(..) {
             task.abort();
         }
+        self.shared.release_admission();
     }
 }
 
@@ -331,6 +353,7 @@ impl Core {
         cancellation: Cancellation,
     ) -> CoreResult<SessionObservation> {
         self.authorized_session(key)?;
+        let cloud_session = self.cloud_session_id()?;
         if interests.is_empty() {
             return Err(CoreError::InvalidInput(
                 "at least one observation interest is required".into(),
@@ -350,7 +373,10 @@ impl Core {
         } else {
             (None, None)
         };
-        let shared = Arc::new(ObservationShared::default());
+        let shared = Arc::new(ObservationShared {
+            admission: Mutex::new(Some((lease, guard))),
+            ..ObservationShared::default()
+        });
         let mut tasks = Vec::new();
         if let (Some(signal_tx), Some(signal_rx)) = (questions_tx.clone(), questions_rx) {
             tasks.push(tokio::spawn(run_questions(
@@ -374,6 +400,7 @@ impl Core {
             shared.clone(),
             cancellation.clone(),
             questions_tx,
+            cloud_session.clone(),
         )));
         Ok(SessionObservation {
             session: key.clone(),
@@ -382,11 +409,23 @@ impl Core {
             cancellation,
             events: events_rx,
             shared,
-            lease: Some(lease),
-            guard: Some(guard),
             tasks,
             closed: false,
+            access_session: cloud_session.map(|id| (self.clone(), id)),
         })
+    }
+}
+
+fn same_cloud_session(core: &Core, expected: &str) -> bool {
+    core.cloud_session_id().ok().flatten().as_deref() == Some(expected)
+}
+
+async fn wait_for_cloud_session_end(session: Option<(&Core, &str)>) {
+    let Some((core, id)) = session else {
+        return std::future::pending().await;
+    };
+    while same_cloud_session(core, id) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -401,6 +440,7 @@ async fn run_owner(
     shared: Arc<ObservationShared>,
     cancellation: Cancellation,
     questions: Option<mpsc::UnboundedSender<QuestionSignal>>,
+    cloud_session: Option<String>,
 ) {
     let mut fresh = false;
     let mut last_watch = None;
@@ -413,7 +453,7 @@ async fn run_owner(
             *shared.terminal.lock().expect("observation error mutex") = Some(CoreError::Revoked);
             break;
         }
-        let result = run_connection(
+        let connection = run_connection(
             &core,
             &key,
             &observation_id,
@@ -425,8 +465,20 @@ async fn run_owner(
             &events,
             &cancellation,
             questions.as_ref(),
-        )
-        .await;
+        );
+        let result = tokio::select! {
+            biased;
+            () = wait_for_cloud_session_end(cloud_session.as_deref().map(|id| (&core, id))) => {
+                Err(CoreError::AuthenticationRequired)
+            }
+            result = connection => result,
+        };
+        if matches!(result, Err(CoreError::AuthenticationRequired)) {
+            *shared.terminal.lock().expect("observation error mutex") =
+                Some(CoreError::AuthenticationRequired);
+            shared.release_admission();
+            break;
+        }
         match result {
             Ok(End::Done) => break,
             Ok(End::Reconnect) => {
@@ -435,7 +487,7 @@ async fn run_owner(
                     .runtime
                     .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
-                tokio::time::sleep(core.runtime.next_reconnect_delay(&key.host_id)).await;
+                wait_to_reconnect(&core, &key, cloud_session.as_deref()).await;
             }
             Err(error) if !watch_fatal(&error) => {
                 signal_lost(questions.as_ref(), error.code());
@@ -447,7 +499,7 @@ async fn run_owner(
                     .runtime
                     .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
-                tokio::time::sleep(core.runtime.next_reconnect_delay(&key.host_id)).await;
+                wait_to_reconnect(&core, &key, cloud_session.as_deref()).await;
             }
             Err(error) => {
                 signal_lost(questions.as_ref(), error.code());
@@ -456,7 +508,11 @@ async fn run_owner(
             }
         }
     }
-    if let Some(watch_id) = last_watch {
+    if let Some(watch_id) = last_watch.filter(|_| {
+        cloud_session
+            .as_deref()
+            .is_none_or(|id| same_cloud_session(&core, id))
+    }) {
         let cleanup = core.query(
             &key.host_id,
             whalerein_proto::RequestPayload {
@@ -466,6 +522,14 @@ async fn run_owner(
             },
         );
         let _ = tokio::time::timeout(Duration::from_millis(250), cleanup).await;
+    }
+}
+
+async fn wait_to_reconnect(core: &Core, key: &SessionKey, session: Option<&str>) {
+    let delay = core.runtime.next_reconnect_delay(&key.host_id);
+    tokio::select! {
+        () = wait_for_cloud_session_end(session.map(|id| (core, id))) => {}
+        () = tokio::time::sleep(delay) => {}
     }
 }
 
@@ -567,8 +631,8 @@ async fn run_connection(
     cancellation: &Cancellation,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
 ) -> CoreResult<End> {
-    let config = core.require_config()?;
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
+    let config = core.require_config()?;
     // The secure channel is only one part of observation. Until the device MQTT
     // subscription and baseline are ready, report reconnecting rather than
     // online, so a broker outage cannot look healthy through HTTPS alone.
@@ -577,15 +641,23 @@ async fn run_connection(
             .runtime
             .set_state(&key.host_id, ConnectionState::Reconnecting);
     }
-    let token =
-        load_device_token(core.secret_store(), &config.device_id)?.ok_or(CoreError::NotPaired)?;
-    let client = DeviceMqttClient::new(
+    let regional = core.cloud_transport().await?;
+    let token = match &regional {
+        Some(session) => session.token.clone(),
+        None => load_device_token(core.secret_store(), &config.device_id)?
+            .ok_or(CoreError::NotPaired)?,
+    };
+    let mut client = DeviceMqttClient::new(
         core.mqtt_settings(&config)?,
         &key.host_id,
         &config.device_id,
         token,
     )
     .with_trace_id(core.diagnostic_id());
+    let session_id = regional.map(|session| session.id);
+    if let Some(id) = &session_id {
+        client = client.with_cloud_session(id.clone());
+    }
     // A snapshot attach can take several pages; buffers must absorb the live
     // frames that arrive meanwhile instead of dropping previews.
     let (tx, rx) = mpsc::channel(1024);
@@ -603,40 +675,71 @@ async fn run_connection(
     let task_error = error.clone();
     let overflow = Arc::new(AtomicBool::new(false));
     let task_overflow = overflow.clone();
+    let transport_core = core.clone();
     let task = tokio::spawn(async move {
-        let result = client
-            .run(
-                || task_stop.load(Ordering::SeqCst) || runtime.is_revoked(),
-                |envelope| {
-                    let bytes = envelope.ciphertext.len();
-                    if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > 32 * 1024 * 1024 {
-                        task_queued.fetch_sub(bytes, Ordering::SeqCst);
-                        task_overflow.store(true, Ordering::SeqCst);
-                        return true;
+        let stop_requested = || {
+            task_stop.load(Ordering::SeqCst)
+                || runtime.is_revoked()
+                || session_id.as_ref().is_some_and(|id| {
+                    transport_core.cloud_session_id().ok().flatten().as_ref() != Some(id)
+                })
+        };
+        let mqtt = client.run(
+            stop_requested,
+            |envelope| {
+                let bytes = envelope.ciphertext.len();
+                if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > 32 * 1024 * 1024 {
+                    task_queued.fetch_sub(bytes, Ordering::SeqCst);
+                    task_overflow.store(true, Ordering::SeqCst);
+                    return true;
+                }
+                if tx.try_send(envelope.clone()).is_err() {
+                    task_queued.fetch_sub(bytes, Ordering::SeqCst);
+                    task_overflow.store(true, Ordering::SeqCst);
+                }
+                true
+            },
+            |state| match state {
+                MqttConnectionEvent::Subscribed => {
+                    if let Some(sender) = ready_tx.take() {
+                        let _ = sender.send(());
                     }
-                    if tx.try_send(envelope.clone()).is_err() {
-                        task_queued.fetch_sub(bytes, Ordering::SeqCst);
-                        task_overflow.store(true, Ordering::SeqCst);
+                }
+                MqttConnectionEvent::Disconnected => {
+                    task_interrupted.store(true, Ordering::SeqCst);
+                    // The transport is down now, not when the reconnect
+                    // loop happens to wake. Publish that immediately so a
+                    // connection poller cannot keep reporting online.
+                    let _ = runtime.set_state(&state_host, ConnectionState::Reconnecting);
+                }
+                _ => {}
+            },
+        );
+        let result = if let Some(id) = &session_id {
+            let renew = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if stop_requested() {
+                        return;
                     }
-                    true
-                },
-                |state| match state {
-                    MqttConnectionEvent::Subscribed => {
-                        if let Some(sender) = ready_tx.take() {
-                            let _ = sender.send(());
-                        }
+                    match transport_core.cloud_transport().await {
+                        Ok(Some(active))
+                            if active.id == *id
+                                && active.permission.as_ref().is_some_and(|permit| {
+                                    permit.access_origin.as_str() == config.access_url
+                                }) => {}
+                        Err(CoreError::Unavailable(_) | CoreError::Timeout) => {}
+                        _ => return,
                     }
-                    MqttConnectionEvent::Disconnected => {
-                        task_interrupted.store(true, Ordering::SeqCst);
-                        // The transport is down now, not when the reconnect
-                        // loop happens to wake. Publish that immediately so a
-                        // connection poller cannot keep reporting online.
-                        let _ = runtime.set_state(&state_host, ConnectionState::Reconnecting);
-                    }
-                    _ => {}
-                },
-            )
-            .await;
+                }
+            };
+            tokio::select! {
+                result = mqtt => result,
+                () = renew => Ok(()),
+            }
+        } else {
+            mqtt.await
+        };
         if let Err(failure) = result {
             *task_error.lock().expect("watch error mutex") = Some(CoreError::from(failure));
         }

@@ -66,15 +66,17 @@ type RequestService interface {
 
 // Dependencies wires the HTTP server.
 type Dependencies struct {
-	Auth          AuthService
-	Pairing       PairingService
-	Requests      RequestService
-	Readiness     *diagnostics.Readiness
-	Metrics       *diagnostics.Metrics
-	Masker        *diagnostics.Masker
-	Logger        *slog.Logger
-	InternalToken string
-	MaxBodyBytes  int64
+	RequireDeviceSession     bool
+	SessionAuthorityRevision string
+	Auth                     AuthService
+	Pairing                  PairingService
+	Requests                 RequestService
+	Readiness                *diagnostics.Readiness
+	Metrics                  *diagnostics.Metrics
+	Masker                   *diagnostics.Masker
+	Logger                   *slog.Logger
+	InternalToken            string
+	MaxBodyBytes             int64
 	// External serves external account mode when it is configured. Standalone
 	// deployments leave it nil and keep the invitation routes only.
 	External ExternalService
@@ -150,6 +152,9 @@ func (s *Server) publicRoutes() []routeSpec {
 	// not enable external account mode answers 501 unsupported_capability, so
 	// a mistyped path (404) stays distinguishable from a disabled mode.
 	return append(routes,
+		routeSpec{method: http.MethodGet, pattern: "/v1/external/hosts/{host_id}/pairings/{operation_id}", handler: s.handleExternalPairingStatus},
+		routeSpec{method: http.MethodPost, pattern: "/v1/external/sessions/{session_id}/permission", handler: s.handleInstallExternalDeviceSession},
+		routeSpec{method: http.MethodPost, pattern: "/v1/external/sessions/{session_id}/revocation", handler: s.handleRevokeExternalDeviceSession},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/devices/pairing", handler: s.handleCloudPairing},
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}", handler: s.handleCloudDeviceStatus},

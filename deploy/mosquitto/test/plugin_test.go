@@ -970,3 +970,73 @@ func TestNativeBrokerPresenceLifecycleAndRevocationScopes(t *testing.T) {
 		}
 	})
 }
+
+func TestNativeBrokerManagedSessionExpiryRenewalAndScopedLogout(t *testing.T) {
+	policy := newAuthPolicy()
+	auth := httptest.NewServer(policy)
+	t.Cleanup(auth.Close)
+	b := startBroker(t, freePort(t), auth.URL+"/internal/broker/connect", 10*time.Second)
+	control := controlClient(t, b)
+	snapshot := sendControl(t, control, "managed-capability", "snapshot", "")
+	if snapshot["session_capability"] != "1" {
+		t.Fatal("broker does not announce the managed session capability")
+	}
+	const ackTopic = "whalerein/v1/h/host1/d/dev1/ack"
+	const eventTopic = "whalerein/v1/h/host1/d/dev1/event"
+	setPolicy := func(session string, deadline time.Time) {
+		policy.set("session:"+session, fmt.Sprintf(
+			"whalerein/1\nok\nkind device\ndevice dev1\nrevision 1\nready 1\nsession %s 1 %d\n"+
+				"acl write 1 host1 %s\nacl subscribe 1 host1 %s\nacl read 1 host1 %s\n",
+			session, deadline.UnixMilli(), ackTopic, eventTopic, eventTopic))
+	}
+	open := func(session string) *client {
+		t.Helper()
+		conn, _, err := dial(t, b.address, "whalerein-session-"+session, "session:"+session, "fixture-token")
+		if err != nil {
+			t.Fatalf("open %s: %v", session, err)
+		}
+		t.Cleanup(conn.close)
+		if err := conn.subscribe(t, eventTopic); err != nil {
+			t.Fatalf("subscribe %s: %v", session, err)
+		}
+		return conn
+	}
+	start := time.Now()
+	initial := start.Add(1200 * time.Millisecond)
+	setPolicy("old-login", initial)
+	setPolicy("new-login", start.Add(8*time.Second))
+	old := open("old-login")
+	current := open("new-login")
+	renewed := start.Add(3500 * time.Millisecond)
+	sendControl(t, control, "managed-renew", "renew_session", fmt.Sprintf(
+		"session old-login\nsession_revision 2\ndeadline_ms %d\n", renewed.UnixMilli()))
+	time.Sleep(time.Until(initial.Add(20 * time.Millisecond)))
+	if err := old.publish(t, ackTopic, []byte("after renewal")); err != nil {
+		t.Fatalf("renewed connection did not survive the first deadline: %v", err)
+	}
+	sendControl(t, control, "managed-revoke", "end_session", "session old-login\n")
+	select {
+	case <-old.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("revocation did not close the live old session")
+	}
+	// A delayed auth response still claims this credential is valid.
+	setPolicy("old-login", start.Add(8*time.Second))
+	if conn, _, err := dial(t, b.address, "whalerein-session-old-login-late", "session:old-login", "fixture-token"); err == nil {
+		conn.close()
+		t.Fatal("deferred CONNECT reopened a fenced session")
+	}
+	if err := current.publish(t, ackTopic, []byte("sibling is live")); err != nil {
+		t.Fatalf("old logout interrupted the new session of the same Device: %v", err)
+	}
+	setPolicy("partitioned", time.Now().Add(time.Second))
+	idle := open("partitioned")
+	select {
+	case <-idle.closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle transport survived without renewal")
+	}
+	if err := current.publish(t, ackTopic, []byte("still live")); err != nil {
+		t.Fatalf("unrelated expiry interrupted the new session: %v", err)
+	}
+}

@@ -550,3 +550,60 @@ the identity; it never revokes an older active grant as compensation.
 
 Access requires negotiated transport-v2 capability before fragment delivery;
 keep it version-aligned with the plugin and clients.
+
+## Managed Device sessions
+
+In External account mode, configure `external.session_environment` and
+`external.session_authority_revision` to match the selected account service.
+Enable `external.require_device_session` after the account service and clients
+support session credentials. Readiness requires the managed-session capability
+from the Mosquitto plugin. The cutover denies legacy Device credentials on HTTP
+and MQTT and disables invitation pairing on that deployment. Standalone
+instances continue to use local invitations and local Device credentials.
+
+The external account service installs a signed `ExternalAuthorization` using
+the Access admin credential on
+`POST /v1/external/sessions/{session_id}/permission`. The authorization uses
+the existing canonical signing input and this field mapping.
+
+| Field | Managed Device session value |
+| --- | --- |
+| `purpose` | `device_session` |
+| `operation_id` | Session ID, equal to the path ID |
+| `precondition` | Configured account environment |
+| `enrollment_revision` | Configured serving authority revision |
+| `expected_revision` | Increasing decimal permission revision |
+| `nonce` | Raw SHA-256 of the UTF-8 regional credential |
+| `device_public_keys` | One 32-byte Device Noise public key |
+| `device_id`, `workspace_id`, `region_id` | Device, workspace and region bound to the permit |
+| `issued_at_unix_ms`, `expires_at_unix_ms` | Permission window, capped at five minutes by Access |
+
+The account service proves possession of the Device key before issuing the
+signed permit. Access checks the fingerprint against the durable grant when
+authorizing Host traffic. HTTP uses the regional bearer. MQTT uses username
+`session:<session_id>` and client ID `whalerein-session-<session_id>`, with the
+usual optional lower-case alphanumeric process suffix. Managed pairing uses the
+same regional bearer and binds the signed pairing authorization's
+`precondition` to the session ID. Existing grants require a verified Host
+activation before they can carry traffic.
+
+An authenticated regional client can use
+`GET /v1/external/hosts/{host_id}/pairings/{operation_id}` to read a known
+pairing outcome under its current Device and workspace. The response contains
+a `state` of `pending`, `ready`, or `terminal`. An unknown operation returns
+`404`. It leaves the outcome unresolved if the original region is unavailable.
+
+`POST /v1/external/sessions/{session_id}/revocation` accepts the admin
+credential and JSON `{"revision": 3}`. Access persists a terminal fence,
+blocks pending admission and forwarding, closes matching live MQTT
+connections, and queues exact cancellation as needed. Acknowledgment covers
+the broker connected to this Access process. Other independently connected
+brokers reconcile against the same regional database and stop live access
+when their local policy window closes. Deployments with multiple independent
+brokers need regional acknowledgment coordination before treating a single
+broker reply as region-wide confirmation.
+
+Advancing the configured serving authority gates old credentials on HTTP and
+MQTT and prevents prior-authority queued work from forwarding. The operator
+must enforce exclusive serving authority and current revocation state before
+promoting a different region or a restored database.

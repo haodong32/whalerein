@@ -65,39 +65,57 @@ impl MockServer {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
+                let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
-                let handler = handler.clone();
-                tokio::spawn(async move {
-                    if let Some(request) = read_request(&mut stream).await {
-                        let response = handler(request);
-                        if response.delay_ms > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms))
-                                .await;
-                        }
-                        // Status zero simulates a persisted request whose HTTP receipt is lost.
-                        if response.status == 0 {
-                            return;
-                        }
-                        let reason = if response.status < 300 { "OK" } else { "Error" };
-                        let header = format!(
-                            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            response.status,
-                            reason,
-                            response.body.len()
-                        );
-                        let _ = stream.write_all(header.as_bytes()).await;
-                        let _ = stream.write_all(&response.body).await;
-                        let _ = stream.shutdown().await;
-                    }
-                });
+                tokio::spawn(serve_mock(stream, handler.clone()));
             }
         });
         Self {
             url: url::Url::parse(&format!("http://{address}")).unwrap(),
             task,
         }
+    }
+
+    #[cfg(test)]
+    pub async fn start_tls(handler: Handler) -> (Self, Vec<u8>) {
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+        use std::net::IpAddr;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress(IpAddr::from([127, 0, 0, 1])));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    if let Ok(stream) = acceptor.accept(stream).await {
+                        serve_mock(stream, handler).await;
+                    }
+                });
+            }
+        });
+        (
+            Self {
+                url: url::Url::parse(&format!("https://{address}")).unwrap(),
+                task,
+            },
+            cert.pem().into_bytes(),
+        )
     }
 
     pub fn url(&self) -> url::Url {
@@ -111,7 +129,31 @@ impl Drop for MockServer {
     }
 }
 
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<MockRequest> {
+async fn serve_mock(
+    mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    handler: Handler,
+) {
+    if let Some(request) = read_request(&mut stream).await {
+        let response = handler(request);
+        if response.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms)).await;
+        }
+        // Status zero simulates a persisted request whose HTTP receipt is lost.
+        if response.status == 0 {
+            return;
+        }
+        let reason = if response.status < 300 { "OK" } else { "Error" };
+        let header = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response.status, reason, response.body.len()
+        );
+        let _ = stream.write_all(header.as_bytes()).await;
+        let _ = stream.write_all(&response.body).await;
+        let _ = stream.shutdown().await;
+    }
+}
+
+async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Option<MockRequest> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
@@ -648,11 +690,23 @@ impl FakeHost {
         if claim.token != self.token {
             return error_response(401, ErrorCode::Unauthorized, "invalid token");
         }
+        self.pairing_claim_with_hash(claim, &sha256_hex(self.token.as_bytes()))
+    }
+
+    #[cfg(test)]
+    pub fn cloud_pair_claim(&mut self, claim: PairingClaimRequest, hash: &str) -> MockResponse {
+        self.pairing_claim_with_hash(claim, hash)
+    }
+
+    fn pairing_claim_with_hash(
+        &mut self,
+        claim: PairingClaimRequest,
+        token_hash: &str,
+    ) -> MockResponse {
         self.device_id = Some(claim.device_id.clone());
         match PairingPhase::try_from(claim.phase).unwrap_or_default() {
             PairingPhase::Hello => {
-                let token_hash = sha256_hex(self.token.as_bytes());
-                let prologue = pairing_prologue(&self.host_id, &token_hash, &claim.claim_id);
+                let prologue = pairing_prologue(&self.host_id, token_hash, &claim.claim_id);
                 let mut noise = match NoiseSession::responder(&self.identity, &prologue) {
                     Ok(noise) => noise,
                     Err(_) => return error_response(500, ErrorCode::Internal, "noise failed"),

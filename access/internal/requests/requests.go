@@ -71,17 +71,24 @@ type Presence interface {
 
 // Config holds forwarding and retention tunables.
 type Config struct {
-	ProtocolVersion uint32
-	MaxTTL          time.Duration
-	ForwardInterval time.Duration
-	Lease           time.Duration
-	RetryInterval   time.Duration
-	MaxAttempts     int
-	BatchSize       int
+	SessionAuthorityRevision string
+	ProtocolVersion          uint32
+	MaxTTL                   time.Duration
+	ForwardInterval          time.Duration
+	Lease                    time.Duration
+	RetryInterval            time.Duration
+	MaxAttempts              int
+	BatchSize                int
 }
 
 // Dependencies wires the request service.
+type DeviceSessionStore interface {
+	PublishDuringDeviceSession(context.Context, string, func() error) error
+	SessionCancellationReason(context.Context, string) (bool, error)
+}
+
 type Dependencies struct {
+	Sessions DeviceSessionStore
 	Store    Store
 	Broker   Broker
 	Presence Presence
@@ -94,6 +101,7 @@ type Dependencies struct {
 
 // Service owns request acceptance, forwarding and result application.
 type Service struct {
+	sessions DeviceSessionStore
 	store    Store
 	broker   Broker
 	presence Presence
@@ -115,9 +123,10 @@ const (
 
 // SubmitInput identifies the authenticated device and the request body.
 type SubmitInput struct {
-	DeviceID string
-	HostID   string
-	Request  *whalereinv1.HostRequest
+	SessionID string
+	DeviceID  string
+	HostID    string
+	Request   *whalereinv1.HostRequest
 }
 
 // New constructs a request service.
@@ -145,6 +154,7 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	return &Service{
 		store:    deps.Store,
+		sessions: deps.Sessions,
 		broker:   deps.Broker,
 		presence: deps.Presence,
 		cfg:      deps.Config,
@@ -159,6 +169,8 @@ func New(deps Dependencies) (*Service, error) {
 // row, then publishes after the insert committed.
 func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request, bool, error) {
 	started := s.now()
+	ctx = store.WithRequestDeviceSession(ctx, input.SessionID)
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	req, validationErr := s.validate(input)
 	if validationErr != nil {
 		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
@@ -186,6 +198,9 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
 		if errors.Is(err, store.ErrConflict) {
 			return store.Request{}, false, fmt.Errorf("%w: duplicate request_id", ErrConflict)
+		}
+		if errors.Is(err, store.ErrDeviceSessionEnded) {
+			return store.Request{}, false, ErrForbidden
 		}
 		return store.Request{}, false, fmt.Errorf("create request: %w", err)
 	}
@@ -264,6 +279,7 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 
 	return store.Request{
 		RequestID:              req.GetRequestId(),
+		DeviceSessionID:        input.SessionID,
 		HostID:                 input.HostID,
 		DeviceID:               input.DeviceID,
 		CommandID:              req.GetCommandId(),
@@ -295,6 +311,7 @@ func leaseDeadline(expiresAt *time.Time, now time.Time, lease time.Duration) *ti
 // ForwardDue leases due rows with FOR UPDATE SKIP LOCKED, publishes outside the
 // lease transaction and records the publish outcome on the same row.
 func (s *Service) ForwardDue(ctx context.Context) error {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	now := s.now()
 	if !s.presence.Available() {
 		// Broker state is not established yet. Leave queued rows untouched so
@@ -352,7 +369,17 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 			ChannelId:              row.ChannelID,
 			Body:                   row.RequestBody,
 		}
-		if err := s.broker.PublishRequest(ctx, row.HostID, envelope); err != nil {
+		publish := func() error { return s.broker.PublishRequest(ctx, row.HostID, envelope) }
+		var err error
+		if s.sessions != nil {
+			err = s.sessions.PublishDuringDeviceSession(ctx, row.RequestID, publish)
+		} else {
+			err = publish()
+		}
+		if errors.Is(err, store.ErrDeviceSessionEnded) || errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
 			if errors.Is(err, broker.ErrPeerTransportUnsupported) || errors.Is(err, broker.ErrMessageBudget) {
 				// Pairing COMMIT is a durable outbox item and must keep retrying
 				// until its deadline, including across transient peer capability.
@@ -442,6 +469,7 @@ type cancellationPayload struct {
 // (including after restart) retries the same exact identity. Publication alone
 // is never reported as native release.
 func (s *Service) SweepClientLeases(ctx context.Context) {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	now := s.now()
 	expired, err := s.store.ExpireClientLeases(ctx, clientSweepBatch)
 	if err != nil {
@@ -491,6 +519,16 @@ func (s *Service) publishCancellation(ctx context.Context, row store.Request, no
 		// reason to drop the retained cancellation.
 		return
 	}
+	reason := "client_poll_expired"
+	if s.sessions != nil {
+		ended, err := s.sessions.SessionCancellationReason(ctx, row.RequestID)
+		if err != nil {
+			return
+		}
+		if ended {
+			reason = "cloud_session_ended"
+		}
+	}
 	payload, err := json.Marshal(cancellationPayload{
 		Event:           "request_stale",
 		RequestID:       row.RequestID,
@@ -499,7 +537,7 @@ func (s *Service) publishCancellation(ctx context.Context, row store.Request, no
 		CommandID:       row.CommandID,
 		Digest:          cancellationDigest(row),
 		ExpiresAtUnixMs: row.ExpiresAt.UnixMilli(),
-		Reason:          "client_poll_expired",
+		Reason:          reason,
 		ObservedAt:      now.UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
@@ -550,6 +588,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 // Get returns the status copy for a request owned by the authenticated device.
 func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Request, error) {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	req, err := s.store.GetRequest(ctx, requestID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -559,6 +598,16 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 	}
 	if req.DeviceID != deviceID {
 		return store.Request{}, ErrNotFound
+	}
+	if !terminalStatus(req.Status) && s.sessions != nil {
+		ended, err := s.sessions.SessionCancellationReason(ctx, req.RequestID)
+		if err != nil {
+			return store.Request{}, err
+		}
+		if ended {
+			req.Status = whalereinv1.OnlineStatus_unknown
+			return req, nil
+		}
 	}
 	if !terminalStatus(req.Status) && !s.now().Before(req.ExpiresAt) {
 		// A request that never reached a terminal state is expired, not still
@@ -572,6 +621,7 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 // HandleHostResult validates a host result against the topic host and updates
 // only the matching request row using the allowed conditional transitions.
 func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result *whalereinv1.HostResult) error {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	if result == nil || topicHost == "" || result.GetRequestId() == "" {
 		return ErrInvalidResult
 	}

@@ -259,7 +259,7 @@ where
                 }
                 if matches!(command, Command::Connect { .. }) {
                     drop(work);
-                    if let Ok(Some((id, host))) = pending_pairing(&core) {
+                    if let Ok(Some((id, host))) = pending_pairing(&core, &command) {
                         return uncertain_pairing(&core, &command, &id, &host);
                     }
                     return CliOutcome::local_failure(&command, "cancelled", "Host connection cancelled.", 2);
@@ -368,9 +368,20 @@ fn fork_directory_sentence(
     }
 }
 
-fn pending_pairing(core: &Core) -> Result<Option<(String, String)>, CoreError> {
+fn pending_pairing(core: &Core, command: &Command) -> Result<Option<(String, String)>, CoreError> {
     match core.client_config().service {
-        ClientService::WhaleReinCloud => core.pending_cloud_pairing(),
+        ClientService::WhaleReinCloud => {
+            let Command::Connect {
+                host: Some(target), ..
+            } = command
+            else {
+                return Ok(None);
+            };
+            Ok(core
+                .pending_cloud_pairings()?
+                .into_iter()
+                .find(|(_, host)| host == target))
+        }
         ClientService::Standalone => core.pending_standalone_pairing(),
     }
 }
@@ -397,7 +408,7 @@ fn finish_core_result(
                         | CoreError::PairingCommittedUnavailable
                 )
             {
-                if let Ok(Some((id, host))) = pending_pairing(core) {
+                if let Ok(Some((id, host))) = pending_pairing(core, command) {
                     return uncertain_pairing(core, command, &id, &host);
                 }
             }
@@ -423,9 +434,12 @@ async fn dispatch(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<CliOutcome, CoreError> {
     let result = match command {
-        Command::Login | Command::AccountStatus | Command::Logout => {
-            crate::account::run(core, command).await
-        }
+        Command::Login
+        | Command::AccountStatus
+        | Command::AccountSessions
+        | Command::AccountRevokeAllSessions
+        | Command::AccountRevokeSession { .. }
+        | Command::Logout => crate::account::run(core, command).await,
         Command::DefaultHost { host } => {
             core.select_default_host(host).await?;
             Ok(CliOutcome::success(
@@ -641,7 +655,12 @@ async fn dispatch(
             } else {
                 Vec::new()
             };
-            let pairing = pending_pairing(core)?;
+            let pairings = match core.client_config().service {
+                ClientService::WhaleReinCloud => core.pending_cloud_pairings()?,
+                ClientService::Standalone => {
+                    core.pending_standalone_pairing()?.into_iter().collect()
+                }
+            };
             let mut human = String::new();
             for send in &sends {
                 human.push_str(&format!(
@@ -662,7 +681,7 @@ async fn dispatch(
                     ));
                 }
             }
-            if let Some((id, host)) = &pairing {
+            for (id, host) in &pairings {
                 human.push_str(&format!("{id}  {host}  pairing\n"));
             }
             let pairing_history = if core.data_dir().is_dir() {
@@ -678,7 +697,7 @@ async fn dispatch(
             }
             Ok(CliOutcome::success(
                 command,
-                json!({"sends": sends, "pending_commands": commands, "pending_pairing": pairing, "pairing_history": pairing_history}),
+                json!({"sends": sends, "pending_commands": commands, "pending_pairing": pairings.first(), "pending_pairings": pairings, "pairing_history": pairing_history}),
                 human,
             ))
         }

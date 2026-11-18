@@ -116,6 +116,14 @@ impl TransportObservation {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CloudPairingState {
+    Pending,
+    Ready,
+    Terminal,
+}
+
 #[derive(Clone)]
 pub struct AccessClient {
     http: Client,
@@ -125,6 +133,7 @@ pub struct AccessClient {
     poll_interval: Duration,
     trace_id: String,
     transport_observation: Option<Arc<TransportObservation>>,
+    cloud_session: Option<(String, Arc<dyn crate::security::SecretStore>)>,
 }
 
 impl std::fmt::Debug for AccessClient {
@@ -187,6 +196,7 @@ impl AccessClient {
             poll_interval: DEFAULT_POLL_INTERVAL,
             trace_id: crate::util::random_id(16),
             transport_observation: None,
+            cloud_session: None,
         })
     }
 
@@ -210,6 +220,65 @@ impl AccessClient {
     ) -> Self {
         self.transport_observation = Some(observation);
         self
+    }
+
+    pub(crate) fn with_cloud_session(
+        mut self,
+        id: String,
+        secrets: Arc<dyn crate::security::SecretStore>,
+    ) -> Self {
+        self.cloud_session = Some((id, secrets));
+        self
+    }
+
+    pub(crate) fn cloud_session_id(&self) -> Option<&str> {
+        self.cloud_session.as_ref().map(|(id, _)| id.as_str())
+    }
+
+    fn matching_cloud_region(
+        &self,
+        device_id: Option<&str>,
+    ) -> crate::api::CoreResult<Option<crate::account::native::RegionalSession>> {
+        let Some((id, secrets)) = &self.cloud_session else {
+            return Ok(None);
+        };
+        let current =
+            crate::account::native::AccountClient::local_regional_session(secrets, device_id)?;
+        Ok(current.filter(|current| current.id == *id && self.has_token(&current.token)))
+    }
+
+    pub(crate) fn cloud_session_current(
+        &self,
+        device_id: Option<&str>,
+    ) -> crate::api::CoreResult<Option<bool>> {
+        self.cloud_session
+            .as_ref()
+            .map(|_| {
+                self.matching_cloud_region(device_id)
+                    .map(|matched| matched.is_some())
+            })
+            .transpose()
+    }
+
+    fn check_cloud_session(&self) -> Result<(), AccessError> {
+        if self.cloud_session.is_none() {
+            return Ok(());
+        }
+        let Ok(Some(current)) = self.matching_cloud_region(None) else {
+            return Err(AccessError {
+                kind: AccessErrorKind::Http,
+                status: Some(401),
+                code: None,
+                message: "Cloud App session ended".into(),
+            });
+        };
+        if current
+            .permission
+            .is_none_or(|permit| permit.access_origin != self.base)
+        {
+            return Err(AccessError::transport("the active regional route changed"));
+        }
+        Ok(())
     }
 
     pub(crate) fn has_token(&self, token: &str) -> bool {
@@ -283,6 +352,7 @@ impl AccessClient {
         builder: reqwest::RequestBuilder,
         observe_headers: impl FnOnce(&reqwest::header::HeaderMap),
     ) -> Result<T, AccessError> {
+        self.check_cloud_session()?;
         let started = std::time::Instant::now();
         let response = builder.send().await.map_err(|error| {
             tracing::warn!(event = "http_transport_failed", trace_id = %self.trace_id, layer = "access", code = "unavailable");
@@ -297,6 +367,7 @@ impl AccessClient {
         let status = response.status().as_u16();
         observe_headers(response.headers());
         let result = parse_response(response).await;
+        self.check_cloud_session()?;
         if let Some(observation) = &self.transport_observation {
             match &result {
                 Err(error) if error.is_retryable_transport() => observation.failed(error),
@@ -396,6 +467,22 @@ impl AccessClient {
         Err(AccessError::timeout())
     }
 
+    pub(crate) async fn cloud_pairing_outcome(
+        &self,
+        host: &str,
+        operation: &str,
+    ) -> Result<CloudPairingState, AccessError> {
+        #[derive(serde::Deserialize)]
+        struct Outcome {
+            state: CloudPairingState,
+        }
+        let url = self.endpoint(&["v1", "external", "hosts", host, "pairings", operation])?;
+        let outcome: Outcome = self
+            .send(self.request(reqwest::Method::GET, url, None))
+            .await?;
+        Ok(outcome.state)
+    }
+
     pub async fn pair_cloud_claim(
         &self,
         authorization: &whalerein_proto::ExternalAuthorization,
@@ -413,7 +500,7 @@ impl AccessClient {
         };
         for attempt in 0..3 {
             let builder = self
-                .request_with_auth(reqwest::Method::POST, url.clone(), None, false)
+                .request(reqwest::Method::POST, url.clone(), None)
                 .json(&request);
             match self.send(builder).await {
                 Err(error) if error.is_retryable_transport() && attempt < 2 => {

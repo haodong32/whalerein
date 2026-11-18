@@ -723,7 +723,7 @@ async fn revoked_admission_fence_rejects_old_cache_and_survives_repair() {
         .unwrap();
     let old_process = Core::new(core.options.clone()).unwrap();
     let channel = old_process.ensure_channel("host-1", false).await.unwrap();
-    let service = old_process.command_service().unwrap();
+    let service = old_process.command_service().await.unwrap();
     let payload = || RequestPayload {
         payload: Some(request_payload::Payload::Interrupt(Interrupt {
             session_id: "session-1".into(),
@@ -830,7 +830,7 @@ async fn pending_admission_rechecks_fence_after_lock_is_released() {
         .await
         .unwrap();
     let channel = core.ensure_channel("host-1", false).await.unwrap();
-    let service = core.command_service().unwrap();
+    let service = core.command_service().await.unwrap();
     let held = crate::security::device::ProfileLock::acquire_admission(dir.path()).unwrap();
     // Publish the revocation fence while the admission lock is held. The
     // worker can only acquire the lock after the release below, so the test
@@ -1013,7 +1013,7 @@ async fn held_profile_lock_does_not_block_executor_and_wait_is_cancellable() {
         .await
         .unwrap();
     let channel = core.ensure_channel("host-1", false).await.unwrap();
-    let service = core.command_service().unwrap();
+    let service = core.command_service().await.unwrap();
     let held = crate::security::device::ProfileLock::acquire_admission(dir.path()).unwrap();
     let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = observed.clone();
