@@ -683,8 +683,7 @@ def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     events = scenario.dsh.snapshot(session)["events"]
     assert all("crashed command fixture" not in json.dumps(event) for event in events)
 
-    sent = paired_device.send(session, "after the crash")["receipt"]
-    assert sent["status"] == "succeeded"
+    paired_device.send_confirmed(session, "after the crash")
     assert effects(scenario, "sendUserMessage") == before + 2
 
 

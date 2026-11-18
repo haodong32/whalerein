@@ -1591,8 +1591,7 @@ def test_native_idle_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan()
-    receipt = paired_device.send(session, "synthetic idle steer", delivery="steer")["receipt"]
-    assert receipt["delivery_id"]
+    paired_device.send_confirmed(session, "synthetic idle steer", delivery="steer")
     scenario.wait_idle(session)
 
 
@@ -2790,7 +2789,10 @@ def test_native_delivery_unknown_after_completion_race(scenario, paired_device):
         finally:
             scenario.request("release-delivery-barrier")
         code, values = pending.result(timeout=20)
-    assert code != 0 and values[-1]["error"]["code"] == "unknown"
+    code, outcome = paired_device.settle_detached_delivery(
+        code, values[-1], session, "synthetic raced unknown", None
+    )
+    assert code != 0 and outcome["error"]["code"] == "unknown"
     scenario.wait_idle(session, assistant_count=2)
     calls = scenario.model.calls
     status, _receipt = scenario.replay_command(paired_device)
