@@ -15,7 +15,10 @@ Core resolves one Host and Session before sending a request. The resolved key
 travels with the request and its observation. A durable send record binds the
 operation ID to the original target and intent before transmission. Recovery
 uses that record's pinned Host identity. The CLI renders typed statuses and
-includes the operation ID when an outcome is uncertain.
+includes the operation ID when an outcome is uncertain. Detached send reports
+the receipt available at submission. Foreground send reads the durable receipt
+after following the reply, including any correlation ID recovered while
+waiting.
 
 The Host adapter translates native attempt evidence into a scoped result.
 Watch output contains normalized conversation events. Finite machine commands

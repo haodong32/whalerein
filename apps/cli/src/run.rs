@@ -1247,6 +1247,8 @@ async fn render_send(
             ))
         }
     };
+    // Following the reply can recover and persist a newer delivery receipt.
+    data["receipt"] = json!(core.send_operation(&operation.operation_id)?.receipt);
     data["reply"] = json!(reply);
     Ok(CliOutcome::success(command, data, human))
 }
@@ -2068,6 +2070,7 @@ mod instance_command_tests {
         )
         .await;
         assert_eq!(read.to_json()["data"]["target"]["host_id"], "host-1");
+        access.host.lock().unwrap().omit_next_command_response_body = true;
         let sent = execute(
             &config,
             secrets.clone(),
@@ -2085,6 +2088,7 @@ mod instance_command_tests {
         let data = sent.to_json()["data"].clone();
         assert_eq!(data["reply"]["state"], "committed");
         assert_eq!(data["reply"]["attempt_id"], "fixture-attempt");
+        assert_eq!(data["receipt"]["message_id"], "message-1");
         let operation = data["operation_id"].as_str().unwrap();
         let commands_seen = access.host.lock().unwrap().commands_seen;
         let recovered = execute(
@@ -2095,6 +2099,7 @@ mod instance_command_tests {
         .await;
         assert_eq!(recovered.exit, 0, "{recovered:?}");
         assert_eq!(recovered.to_json()["data"]["reply"], data["reply"]);
+        assert_eq!(recovered.to_json()["data"]["receipt"], data["receipt"]);
         assert_eq!(access.host.lock().unwrap().commands_seen, commands_seen);
 
         let detached = execute(
