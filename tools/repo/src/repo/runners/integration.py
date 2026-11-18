@@ -696,6 +696,9 @@ def run_platform(context, runner, request, paths):
             results = [containers[0].execute()]
         else:
             display = getattr(runner, "progress", None)
+            if display is not None:
+                description = f"Integration · {len(identities)} cases in {parallel} shards"
+                display.event({"event": "phase", "description": description})
             runner.progress = None
             try:
                 with ThreadPoolExecutor(max_workers=parallel) as executor:

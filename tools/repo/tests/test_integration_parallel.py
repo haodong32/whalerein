@@ -3,6 +3,7 @@
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import FakeRunner, ok
@@ -213,8 +214,13 @@ def test_linux_leaves_are_a_partition_and_require_only_their_products():
 
 def test_parallel_has_one_build_and_exact_cover(worktree):
     docker = Docker()
+    events = []
+    display = SimpleNamespace(event=events.append)
+    docker.progress = display
     code, report = run(worktree, docker, parallel=2)
     assert code == 0, report["verification"]
+    assert events == [{"event": "phase", "description": "Integration · 2 cases in 2 shards"}]
+    assert docker.progress is display
     builds = [args for args, _ in docker.calls if args[1:3] == ("buildx", "build")]
     assert [args[args.index("--target") + 1] for args in builds] == ["vectors", "vectors-builder"]
     creates = [args for args, _ in docker.calls if args[1] == "create"]
