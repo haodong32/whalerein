@@ -80,6 +80,9 @@ type Service struct {
 	mu            sync.RWMutex
 	denies        map[Key]struct{}
 	deviceDenies  map[string]struct{}
+	keyFences     map[Key]uint64
+	deviceFences  map[string]uint64
+	grantRevokes  map[Key]int
 	loadSemaphore chan struct{}
 }
 
@@ -125,6 +128,9 @@ func New(deps Dependencies) (*Service, error) {
 		logger:        deps.Logger,
 		denies:        map[Key]struct{}{},
 		deviceDenies:  map[string]struct{}{},
+		keyFences:     map[Key]uint64{},
+		deviceFences:  map[string]uint64{},
+		grantRevokes:  map[Key]int{},
 		loadSemaphore: make(chan struct{}, deps.Config.MaxBackgroundLoads),
 	}, nil
 }
@@ -282,12 +288,23 @@ func (s *Service) Reconcile(ctx context.Context) error {
 
 // Allow installs a confirmed pairing or repair. The durable grant is re-read so
 // only committed state can clear a denial.
+//
+// A pending revocation can leave the durable row active until it commits.
+// Fence versions also reject a read that overlapped a revocation after it ends.
 func (s *Service) Allow(ctx context.Context, hostID, deviceID string) error {
 	key := Key{HostID: hostID, DeviceID: deviceID}
-	/* Re-read the durable row: a cached revoked revision must not decide
-	 * whether a confirmed pairing is usable. */
+	s.mu.RLock()
+	keyFence := s.keyFences[key]
+	deviceFence := s.deviceFences[key.DeviceID]
+	_, deviceRevoking := s.deviceDenies[key.DeviceID]
+	revoking := s.grantRevokes[key] > 0 || deviceRevoking
+	s.mu.RUnlock()
+	if revoking {
+		return errors.New("admission: pairing completion raced a revocation")
+	}
+	// Read directly so an active row cannot enter the cache before the fence check.
 	s.cache.Invalidate(key)
-	grant, err := s.cache.Get(ctx, key, otter.LoaderFunc[Key, Grant](s.loader))
+	grant, err := s.loader(ctx, key)
 	if err != nil {
 		return fmt.Errorf("admission: reload paired grant: %w", err)
 	}
@@ -295,19 +312,46 @@ func (s *Service) Allow(ctx context.Context, hostID, deviceID string) error {
 		return errors.New("admission: paired grant is not active")
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.keyFences[key] != keyFence || s.deviceFences[key.DeviceID] != deviceFence {
+		return errors.New("admission: pairing completion raced a revocation")
+	}
 	delete(s.denies, key)
-	s.mu.Unlock()
 	s.cache.Set(key, grant)
 	return nil
 }
 
-// Deny fences one Host/device grant immediately, before the durable write.
+// BeginGrantRevoke fences a grant for the duration of a Host-scoped durable
+// write. Finishing the write leaves the denial in place, including on failure.
+func (s *Service) BeginGrantRevoke(hostID, deviceID string) func() {
+	if hostID == "" || deviceID == "" {
+		return func() {}
+	}
+	key := Key{HostID: hostID, DeviceID: deviceID}
+	s.mu.Lock()
+	s.grantRevokes[key]++
+	s.denies[key] = struct{}{}
+	s.keyFences[key]++
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.grantRevokes[key]--
+		if s.grantRevokes[key] == 0 {
+			delete(s.grantRevokes, key)
+		}
+	}
+}
+
+// Deny fences one Host/device grant immediately.
 func (s *Service) Deny(hostID, deviceID string) {
 	if hostID == "" || deviceID == "" {
 		return
 	}
+	key := Key{HostID: hostID, DeviceID: deviceID}
 	s.mu.Lock()
-	s.denies[Key{HostID: hostID, DeviceID: deviceID}] = struct{}{}
+	s.denies[key] = struct{}{}
+	s.keyFences[key]++
 	s.mu.Unlock()
 }
 
@@ -319,6 +363,7 @@ func (s *Service) DenyDevice(deviceID string) {
 	}
 	s.mu.Lock()
 	s.deviceDenies[deviceID] = struct{}{}
+	s.deviceFences[deviceID]++
 	s.mu.Unlock()
 }
 
@@ -327,6 +372,7 @@ func (s *Service) DenyDevice(deviceID string) {
 func (s *Service) CompleteDeviceRevoke(deviceID string) {
 	s.mu.Lock()
 	delete(s.deviceDenies, deviceID)
+	s.deviceFences[deviceID]++
 	s.mu.Unlock()
 }
 

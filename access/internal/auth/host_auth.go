@@ -146,8 +146,10 @@ func (s *Service) RevokeHostGrant(ctx context.Context, hostID, deviceID string) 
 	at := s.now()
 	// Fence realtime admission before the durable write so a concurrent
 	// dispatch cannot use the grant being revoked.
-	s.admission.Deny(hostID, deviceID)
-	if err := s.store.RevokeGrant(ctx, hostID, deviceID, at); err != nil {
+	finishRevoke := s.admission.BeginGrantRevoke(hostID, deviceID)
+	err := s.store.RevokeGrant(ctx, hostID, deviceID, at)
+	finishRevoke()
+	if err != nil {
 		return err
 	}
 	if err := s.enforcer.RevokeGrant(ctx, hostID, deviceID); err != nil {
