@@ -69,7 +69,7 @@ func (f *fakeExternal) RecoverCredential(_ context.Context, hostID string, autho
 }
 
 // newExternalFixture builds a server with external mode enabled.
-func newExternalFixture(t *testing.T, fake *fakeExternal) *Server {
+func newExternalFixture(t *testing.T, fake ExternalService) *Server {
 	t.Helper()
 	server, err := New(Dependencies{
 		Auth:          &fakeAuth{adminToken: "admin-token"},

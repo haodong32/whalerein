@@ -529,7 +529,7 @@ export class HostRuntime {
       status: result.status,
       resultBody: responseBody ?? undefined,
       errorCode: result.errorCode,
-      enforceResponseBudget: Boolean(payload.list_models || payload.read_session_model || payload.read_pending_queue || payload.list_questions || payload.get_question || payload.wait_session || payload.read_wait_state),
+      enforceResponseBudget: Boolean(payload.list_models || payload.read_session_model || payload.read_pending_queue || payload.list_questions || payload.get_question || payload.wait_session || payload.read_wait_state || payload.read_message_reply),
       completedAt,
     })
   }

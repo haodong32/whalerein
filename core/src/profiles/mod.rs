@@ -776,6 +776,14 @@ impl Profiles {
             ));
         }
         let state_dir = self.managed_dir(&record.id);
+        if record.mode == ProfileMode::Account
+            && std::fs::symlink_metadata(&state_dir).is_ok_and(|metadata| metadata.is_dir())
+        {
+            let account_slot = crate::account::native::account_secret_slot(&state_dir)?;
+            if secrets.load(&account_slot)?.is_some() {
+                secrets.delete(&account_slot)?;
+            }
+        }
         self.clean_profile_secrets(&state_dir, secrets)?;
         remove_managed_dir(&self.root, &record.id)?;
         registry.profiles.retain(|profile| profile.id != record.id);
@@ -963,7 +971,7 @@ impl Profiles {
         Ok(())
     }
 
-    fn managed_dir(&self, id: &str) -> PathBuf {
+    pub(crate) fn managed_dir(&self, id: &str) -> PathBuf {
         self.root.join(PROFILES_DIR).join(id)
     }
 }
@@ -999,43 +1007,35 @@ impl Profiles {
         })
     }
 
-    /// Resolve the active identity inside one selected environment.
-    ///
-    /// Environment-scoped selection wins; the legacy global active profile is
-    /// used only when it belongs to the same environment or is a Standalone
-    /// identity (Standalone pairing is not an account-environment selection).
-    /// When no identity exists in the environment the result is an explicit
-    /// no-profile error, never an invented device. A fresh installation with
-    /// no state keeps the historical virtual production default so unpaired
-    /// inspection commands still work.
+    /// Resolve the same environment-scoped identity used by account operations.
+    /// A single profile is usable even before an explicit activation. Legacy
+    /// Standalone state remains available for the historic production default
+    /// and the Standalone environment.
     pub fn resolve_active_in_environment(
         &self,
         environment: &str,
         secrets: &Arc<dyn SecretStore>,
     ) -> CoreResult<ProfileContext> {
         validate_environment_key(environment)?;
+        let accepts_legacy = matches!(environment, "production" | "standalone");
         if let Some(registry) = self.load()? {
-            if let Some(id) = registry.active_by_environment.get(environment) {
-                let profile = registry
-                    .profiles
-                    .iter()
-                    .find(|profile| &profile.id == id)
-                    .ok_or_else(|| {
-                        CoreError::Config(
-                            "environment-scoped active identity is not registered".into(),
-                        )
-                    })?;
+            if let Some((profile, _)) = selected_identity(&registry, environment) {
                 return self.context_for(profile);
             }
-            let active = registry.find_active()?.clone();
-            if active.environment == environment || active.environment == "standalone" {
-                return self.context_for(&active);
+            if environment_has_profiles(&registry, environment) {
+                return Err(CoreError::Conflict(format!(
+                    "multiple identity profiles for environment {environment}; select one with profile use"
+                )));
+            }
+            let active = registry.find_active()?;
+            if accepts_legacy && active.environment == "standalone" {
+                return self.context_for(active);
             }
             return Err(CoreError::NotFound(format!(
                 "no identity profile for environment {environment}; add one with profile add"
             )));
         }
-        if self.has_legacy_state(secrets)? {
+        if accepts_legacy && self.has_legacy_state(secrets)? {
             return Ok(ProfileContext {
                 root: self.root.clone(),
                 state_dir: self.root.clone(),

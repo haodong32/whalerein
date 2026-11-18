@@ -2,6 +2,8 @@
 
 import pytest
 
+from environment import wait
+
 pytestmark = pytest.mark.chain
 
 
@@ -10,7 +12,7 @@ def _session(scenario, name):
 
 
 def _model(scenario, device, session):
-    return device.call("model", "get", "--session", session)
+    return device.call("session", "model", "get", "--session", session)
 
 
 @pytest.mark.description("Re-selecting the effective next model sends no second indistinguishable command.")
@@ -19,14 +21,14 @@ def test_model_reselection_is_a_noop(scenario, paired_device):
     _session(scenario, session)
     paired_device.sessions(scenario.host)
     before = scenario.dsh.process.control("model_counts")["selectSessionModel"]
-    first = paired_device.call("model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
+    first = paired_device.call("session", "model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
     assert first["model_selection"]["selected"]["model"] == "fixture-model-2"
     assert scenario.dsh.process.control("model_counts")["selectSessionModel"] == before + 1
-    second = paired_device.call("model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
+    second = paired_device.call("session", "model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
     assert second["noop"] is True
     assert second["selection"]["model"] == "fixture-model-2"
     # No new pending command and no second native selection.
-    assert paired_device.call("commands-pending")["commands"] == []
+    assert paired_device.call("operation", "list")["pending_commands"] == []
     assert scenario.dsh.process.control("model_counts")["selectSessionModel"] == before + 1
 
 
@@ -37,7 +39,7 @@ def test_model_selection_is_isolated_between_sessions(scenario, paired_device):
     _session(scenario, two)
     paired_device.sessions(scenario.host)
     source_default = _model(scenario, paired_device, two)["default_selection"]["model"]
-    paired_device.call("model", "set", "--session", one, "--provider", "fixture-provider", "--model", "fixture-model-2")
+    paired_device.call("session", "model", "set", "--session", one, "--provider", "fixture-provider", "--model", "fixture-model-2")
     other = _model(scenario, paired_device, two)
     assert other["next"] is None
     assert other["pending"] is None
@@ -53,9 +55,13 @@ def test_model_next_turn_observes_the_selected_model(scenario, paired_device):
     session = "qmq-model-turn"
     _session(scenario, session)
     paired_device.sessions(scenario.host)
-    paired_device.call("model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
-    receipt = paired_device.send(session, "synthetic model turn", delivery="start-if-idle")
-    assert receipt["status"] == "succeeded"
+    paired_device.call("session", "model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model-2")
+    receipt = paired_device.send(session, "synthetic model turn", delivery="start-if-idle")["receipt"]
+    assert receipt["status"] in ("received", "host_accepted", "succeeded")
+    wait(
+        lambda: (_model(scenario, paired_device, session)["last_used"] or {}).get("model")
+        == "fixture-model-2"
+    )
     observed = _model(scenario, paired_device, session)
     assert observed["last_used"]["model"] == "fixture-model-2"
     assert observed["pending"] is None
@@ -66,10 +72,10 @@ def test_model_next_turn_observes_the_selected_model(scenario, paired_device):
 def test_model_get_unknown_session_is_not_found(scenario, paired_device):
     paired_device.sessions(scenario.host)
     before = scenario.dsh.process.control("model_counts")["readSessionModel"]
-    code, values = paired_device.invoke("model", "get", "--session", "qmq-unknown-session", success=False)
+    code, values = paired_device.invoke("session", "model", "get", "--session", "qmq-unknown-session", success=False)
     assert code == 3
     assert values[-1]["error"]["code"] == "not_found"
-    assert values[-1].get("data") is None
+    assert values[-1]["data"] == {"target": {"host_id": scenario.host, "session_id": "qmq-unknown-session"}}
     # The Host answered the read with not_found; the CLI did not invent an
     # empty selection or report an internal failure.
     assert "empty" not in values[-1]["error"]["message"].lower()
@@ -82,11 +88,11 @@ def test_model_incomplete_catalog_set_failure_explains_retry(scenario, paired_de
     _session(scenario, session)
     paired_device.sessions(scenario.host)
     assert scenario.dsh.process.control("set_model_failures", session_id=session, text=["fixture-bad-provider"])
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     assert catalog["complete"] is False
     assert catalog["failures"] == [{"id": "fixture-bad-provider", "name": "fixture-bad-provider", "code": "unavailable"}]
     code, values = paired_device.invoke(
-        "model", "set", "--session", session, "--provider", "fixture-bad-provider", "--model", "fixture-model",
+        "session", "model", "set", "--session", session, "--provider", "fixture-bad-provider", "--model", "fixture-model",
         success=False,
     )
     message = values[-1]["error"]["message"]
@@ -94,13 +100,13 @@ def test_model_incomplete_catalog_set_failure_explains_retry(scenario, paired_de
     assert values[-1]["error"]["code"] == "invalid_argument"
     assert "no change was made" in message
     assert "retry only after" in message
-    assert "whalerein models" in message
+    assert "whalerein session models" in message
     # The rejected selection did not change the session.
     assert _model(scenario, paired_device, session)["next"] is None
     # A successful selection explains that the source default is unconfirmed:
     # confirm with model get instead of resending the command.
     code, values = paired_device.invoke(
-        "model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model",
+        "session", "model", "set", "--session", session, "--provider", "fixture-provider", "--model", "fixture-model",
     )
     assert code == 0
     assert values[-1]["data"]["model_selection"]["default_persistence"] == "unconfirmed"

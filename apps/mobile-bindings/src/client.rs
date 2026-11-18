@@ -6,7 +6,7 @@
 //! and watching publish ordered events into a bounded queue consumed by
 //! `pollEvents`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
-use whalerein_core::api::{Core, CoreOptions, PairingDecision, PairingPrompt, SessionKey};
+use whalerein_core::api::{
+    ClientConfig, ClientService, Core, Environment, PairingDecision, PairingPrompt, SessionKey,
+};
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
@@ -48,6 +50,48 @@ const MAX_APP_VERSION_BYTES: usize = 256;
 
 /// Build-time Core package version, recorded by `build.rs`.
 pub(crate) const CORE_VERSION: &str = env!("WHALERIN_CORE_VERSION");
+
+#[derive(uniffi::Enum)]
+pub enum MobileClientService {
+    WhaleReinCloud,
+    Standalone,
+}
+
+#[derive(uniffi::Enum)]
+pub enum MobileCloudEnvironment {
+    Production,
+    Staging,
+    Local,
+}
+
+#[uniffi::export]
+pub fn write_client_config(
+    config_path: String,
+    service: MobileClientService,
+    data_dir: String,
+    cloud_environment: Option<MobileCloudEnvironment>,
+    standalone_ca_certificate: Option<String>,
+) -> Result<(), MobileError> {
+    if config_path.is_empty()
+        || config_path.len() > MAX_PATH_BYTES
+        || data_dir.is_empty()
+        || data_dir.len() > MAX_PATH_BYTES
+    {
+        return Err(MobileError::invalid_input());
+    }
+    let service = match service {
+        MobileClientService::WhaleReinCloud => ClientService::WhaleReinCloud,
+        MobileClientService::Standalone => ClientService::Standalone,
+    };
+    let mut config = ClientConfig::new(service, data_dir);
+    config.cloud_environment = cloud_environment.map(|environment| match environment {
+        MobileCloudEnvironment::Production => Environment::Production,
+        MobileCloudEnvironment::Staging => Environment::Staging,
+        MobileCloudEnvironment::Local => Environment::Local,
+    });
+    config.standalone_ca_certificate = standalone_ca_certificate.map(Into::into);
+    Core::write_config(Path::new(&config_path), &config).map_err(MobileError::from)
+}
 
 /// Unified Core version plus git provenance for this binding build.
 #[uniffi::export]
@@ -223,26 +267,25 @@ pub struct MobileCore {
 impl MobileCore {
     /// Create a Core instance backed by `secretStore`.
     ///
-    /// `dataDir` is the app's private directory. The Keychain implementation is
-    /// supplied by Swift; secrets never enter this module.
+    /// `configPath` is selected by the app inside its persistent sandbox.
     #[uniffi::constructor]
     pub fn new(
-        data_dir: String,
+        config_path: String,
         secret_store: Arc<dyn SecretStore>,
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
-        if data_dir.is_empty() || data_dir.len() > MAX_PATH_BYTES {
+        if config_path.is_empty() || config_path.len() > MAX_PATH_BYTES {
             return Err(MobileError::invalid_input());
         }
         if app_version.len() > MAX_APP_VERSION_BYTES {
             return Err(MobileError::invalid_input());
         }
         let runtime = RuntimeHost::start()?;
-        let options = CoreOptions {
-            data_dir: PathBuf::from(&data_dir),
-            secrets: Arc::new(SecretStoreAdapter::new(secret_store)),
-        };
-        let core = Core::new(options).map_err(MobileError::from)?;
+        let core = Core::open(
+            Path::new(&config_path),
+            Arc::new(SecretStoreAdapter::new(secret_store)),
+        )
+        .map_err(MobileError::from)?;
         Ok(Arc::new(Self {
             core,
             runtime,
@@ -261,10 +304,10 @@ impl MobileCore {
     /// never written to disk. Production uses `new` with the Keychain store.
     #[uniffi::constructor]
     pub fn new_with_memory_secret_store(
-        data_dir: String,
+        config_path: String,
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
-        Self::new(data_dir, MemorySecretStore::new(), app_version)
+        Self::new(config_path, MemorySecretStore::new(), app_version)
     }
 
     /// Build-time provenance: `<git-sha>[-dirty] core:<version>`.
@@ -325,7 +368,7 @@ impl MobileCore {
                             .unwrap_or_else(|_| PairingDecision::reject())
                     })
                 };
-                let result = core.pair(&invitation, decide).await;
+                let result = core.connect_standalone(&invitation, decide).await;
                 let result = result.map_err(MobileError::from);
                 let current = generations.load(Ordering::SeqCst) == generation;
                 if current {
@@ -652,12 +695,55 @@ impl MobileCore {
             host_id,
             session_id,
         };
-        let handle = self.run(
+        let operation_id = Core::new_command_id();
+        let operation = self.run(
             COMMAND_TIMEOUT,
             self.core
-                .send_message_with_delivery(&key, &text, delivery.to_core()),
+                .submit_message_operation(&operation_id, &key, &text, delivery.to_core()),
         )?;
+        let handle = operation
+            .receipt
+            .ok_or_else(|| MobileError::from(CoreError::UnknownResult))?;
         Ok(self.publish_command(handle))
+    }
+
+    /// Recover a previously started send, with its original Host and Session.
+    pub fn recover_send(
+        &self,
+        operation_id: String,
+        follow: bool,
+    ) -> Result<crate::types::SendOperationView, MobileError> {
+        validate_id(&operation_id)?;
+        let operation = self.run(
+            COMMAND_TIMEOUT,
+            self.core.recover_send_operation(&operation_id),
+        )?;
+        let reply = if follow {
+            Some(
+                self.run(
+                    COMMAND_TIMEOUT,
+                    self.core.follow_send_operation(
+                        operation.clone(),
+                        COMMAND_TIMEOUT - Duration::from_secs(1),
+                    ),
+                )?
+                .into(),
+            )
+        } else {
+            None
+        };
+        Ok(crate::types::SendOperationView {
+            operation_id,
+            host_id: operation.target.host_id,
+            session_id: operation.target.session_id,
+            receipt: operation.receipt.map(Into::into),
+            reply,
+        })
+    }
+
+    /// Inspect selected paths and local service and authorization state.
+    pub fn status(&self) -> Result<crate::types::ClientStatusView, MobileError> {
+        self.run(QUERY_TIMEOUT, self.core.status()).map(Into::into)
     }
 
     /// Interrupt the running turn for a session.

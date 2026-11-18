@@ -14,7 +14,7 @@ pytestmark = pytest.mark.chain
 
 def _resolve(device, approval, decision="approve"):
     return device.invoke(
-        decision,
+        "session", "approval", decision,
         "--request",
         approval["approval_id"],
         "--digest",

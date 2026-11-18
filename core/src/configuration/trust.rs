@@ -43,6 +43,7 @@ impl TrustResolver {
         }
     }
 
+    #[cfg(test)]
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
@@ -172,7 +173,7 @@ pub fn mkcert_ca_path() -> Option<PathBuf> {
     }
 }
 
-fn read_ca(path: &Path) -> Result<Vec<u8>, ConfigurationError> {
+pub(crate) fn read_ca(path: &Path) -> Result<Vec<u8>, ConfigurationError> {
     let bytes = std::fs::read(path).map_err(|error| {
         let message = if error.kind() == std::io::ErrorKind::NotFound {
             "the selected CA certificate was not found; install it or choose a valid ca_file"

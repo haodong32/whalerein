@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from environment import wait
+from environment import http, wait
 
 from journey_helpers import (
     approval_args,
@@ -41,7 +41,7 @@ def _texts(event):
 def test_journey_suspended_client_resumes_native_stream(scenario, paired_device):
     """A background suspension behaves like a warm resume, not a cold start."""
     session = scenario.create()
-    watch = paired_device.start_watch("tail", "--session", session, "--timeout", "90")
+    watch = paired_device.start_watch("session", "watch", session, "--timeout", "90")
     try:
         wait(lambda: scenario.request("watches") > 0, process=scenario.native)
         scenario.model.plan(hold=True)
@@ -98,7 +98,7 @@ def test_journey_interrupt_while_another_operator_holds_the_approval(
     paired_device.send(session, "cross operator interrupt fixture", delivery="start-if-idle")
     wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
     card = second.approvals(session)[0]
-    view = second.start_watch("tail", "--session", session, "--timeout", "60")
+    view = second.start_watch("session", "watch", session, "--timeout", "60")
     try:
         wait(lambda: scenario.request("watches") > 0, process=scenario.native)
         paired_device.interrupt(session)
@@ -107,11 +107,11 @@ def test_journey_interrupt_while_another_operator_holds_the_approval(
             timeout=20,
             process=scenario.native,
         )
-        observation = second.call("wait", "--session", session, "--timeout", "3")
+        observation = second.call("session", "wait", session, "--timeout", "3")
         assert observation["reason"] == "idle"
         assert observation["state"]["pending_input"] == []
 
-        code, values = second.invoke("approve", *approval_args(card), success=False)
+        code, values = second.invoke("session", "approval", "approve", *approval_args(card), success=False)
         assert code != 0 and values[-1].get("data") is None
         assert scenario.request("effects")["count"] == 0
         assert scenario.request("events", sessionId=session)["decisions"] == ["cancelled"]
@@ -141,25 +141,26 @@ def test_journey_lost_device_revoked_from_settings(scenario, paired_device):
     """The settings device list is the recovery source when a device is lost."""
     first = paired_device
     lost = scenario.pair_second()
-    lost._revoked_token = lost.transport_token()
     lost_id = lost.identity["device_id"]
     first_id = first.identity["device_id"]
     assert lost_id != first_id
 
-    reply = browser_journey(
-        scenario,
-        "revoke-device",
-        hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"],
-        revokeDeviceId=lost_id,
-    )
-    observed = " ".join(reply["devices"])
-    assert lost_id in observed and first_id in observed
-    assert len(reply["remaining"]) == 1
-    assert all(lost_id not in row for row in reply["remaining"])
+    with scenario.fixture_bearer(lost) as bearer:
+        reply = browser_journey(
+            scenario,
+            "revoke-device",
+            hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"],
+            revokeDeviceId=lost_id,
+        )
+        observed = " ".join(reply["devices"])
+        assert lost_id in observed and first_id in observed
+        assert len(reply["remaining"]) == 1
+        assert all(lost_id not in row for row in reply["remaining"])
 
-    assert lost.revoked_access_denied()
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            http("/v1/hosts", token=bearer)
     assert host_online(first, scenario.host) is True
     session = scenario.create()
-    sent = first.send(session, "survivor after revoke fixture", delivery="start-if-idle")
+    sent = first.send(session, "survivor after revoke fixture", delivery="start-if-idle")["receipt"]
     assert sent["status"] == "succeeded"
     scenario.wait_idle(session)

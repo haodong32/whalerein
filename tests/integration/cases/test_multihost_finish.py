@@ -61,14 +61,15 @@ def test_secondary_pair_finish_loss_preserves_original_grant_and_resumes(scenari
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
         allow_finish.clear()
-        code, _ = device.invoke('pair', invitation(other.host), success=False)
+        code, _ = device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host), success=False)
         assert lost.is_set() and code != 0
         assert scenario.host in {row['host_id'] for row in device.hosts()}
-        assert device.call('commands-pending')['commands'] == []
+        assert device.call('operation', 'list')['pending_commands'] == []
         allow_finish.set()
-        outcome = device.call('pair-resume')
+        operation_id, _ = device.call('operation', 'list')['pending_pairing']
+        outcome = device.call('operation', 'recover', operation_id)['connection']
         assert outcome['host_id'] == other.host
         assert {scenario.host, other.host} <= {row['host_id'] for row in device.hosts()}
         assert device.sessions(scenario.host) == []

@@ -63,7 +63,7 @@ def test_send_during_unavailable_presence_is_queued_and_delivered(
         scenario.start_access_process()
         wait(_listening, timeout=20, process=scenario.access)
         code, values = paired_device.invoke(
-            "send", "--session", session, "presence-window message", success=False
+            'session', 'send', session, "presence-window message", "--detach", success=False
         )
         # The command cannot be confirmed while the broker is unreachable; it
         # must be reported as retryable (channel unavailable) or unknown, never

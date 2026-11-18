@@ -35,23 +35,41 @@ impl std::fmt::Debug for NoiseSession {
 
 impl NoiseSession {
     pub fn initiator(identity: &StaticIdentity, prologue: &str) -> Result<Self, SecurityError> {
-        Self::build(identity, prologue, NoiseRole::Initiator)
+        Self::build(identity, prologue, NoiseRole::Initiator, None)
     }
 
     #[cfg(any(test, feature = "test-support", feature = "protocol-testing"))]
     pub fn responder(identity: &StaticIdentity, prologue: &str) -> Result<Self, SecurityError> {
-        Self::build(identity, prologue, NoiseRole::Responder)
+        Self::build(identity, prologue, NoiseRole::Responder, None)
+    }
+
+    /// Recover the same Noise transcript using the fresh random ephemeral
+    /// private key retained for this one pairing operation in SecretStore.
+    pub(crate) fn pairing_initiator(
+        identity: &StaticIdentity,
+        prologue: &str,
+        ephemeral: &[u8; 32],
+    ) -> Result<Self, SecurityError> {
+        Self::build(identity, prologue, NoiseRole::Initiator, Some(ephemeral))
     }
 
     fn build(
         identity: &StaticIdentity,
         prologue: &str,
         role: NoiseRole,
+        ephemeral: Option<&[u8; 32]>,
     ) -> Result<Self, SecurityError> {
         let params: NoiseParams = PROTOCOL_NAME.parse().map_err(|_| SecurityError::Crypto)?;
         let builder = Builder::new(params)
             .local_private_key(identity.private_key())
             .prologue(prologue.as_bytes());
+        let builder = if let Some(ephemeral) = ephemeral {
+            // The API names fixed keys for tests; here the key is independently
+            // random and is reused exclusively to resume the same transcript.
+            builder.fixed_ephemeral_key_for_testing_only(ephemeral)
+        } else {
+            builder
+        };
         let state = match role {
             NoiseRole::Initiator => builder.build_initiator(),
             #[cfg(any(test, feature = "test-support", feature = "protocol-testing"))]

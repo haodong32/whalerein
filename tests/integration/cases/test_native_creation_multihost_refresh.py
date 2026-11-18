@@ -26,15 +26,15 @@ def test_native_creation_refresh_failure_preserves_selected_host(scenario, paire
     try:
         other.start_native()
         invitation = http("/v1/pairing/invitations", {"hostId": other.host}, scenario.admin)
-        paired_device.call("pair", invitation["pairingUri"])
+        paired_device.pair(invitation["pairingUri"])
         assert other.request("test-enable-create")["enabled"]
         primary_before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
         secondary_before = {item["session_id"] for item in paired_device.sessions(other.host)}
-        receipt = paired_device.call("session-create", "--host", other.host)["lifecycle_receipt"]
+        receipt = paired_device.call("session", "create", "--host", other.host)["lifecycle_receipt"]
         session = receipt["session_id"]
         assert receipt["disposition"] == "READY" and session
         assert other.request("gx-fail-session-list")["armed"]
-        code, _ = paired_device.invoke("sessions", "--host", other.host, success=False)
+        code, _ = paired_device.invoke("session", "list", "--host", other.host, success=False)
         assert code != 0
         assert {item["session_id"] for item in paired_device.sessions(scenario.host)} == primary_before
         assert other.request("gx-restore-session-list")["restored"]
@@ -51,12 +51,12 @@ def test_native_creation_two_devices_same_workspace(scenario, paired_device):
     assert scenario.request("test-enable-create")["enabled"]
     other = Device(scenario.directory / "creation-second-device")
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    other.identity = other.call("pair", invitation["pairingUri"])
+    other.pair(invitation["pairingUri"])
     assert other.identity["device_id"] != paired_device.identity["device_id"]
     workspace = scenario.request("workspace-id")["workspaceId"]
     before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
-    first = paired_device.call("session-create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
-    second = other.call("session-create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
+    first = paired_device.call("session", "create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
+    second = other.call("session", "create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
     first_id, second_id = first["session_id"], second["session_id"]
     assert first["disposition"] == second["disposition"] == "READY"
     assert first_id and second_id and first_id != second_id
@@ -69,14 +69,14 @@ def test_native_creation_two_devices_same_workspace(scenario, paired_device):
 def test_native_remote_reuse_then_started_fallback(scenario, paired_device):
     """Remote reuse keeps a blank identity and falls back after the original session starts."""
     assert scenario.request("test-enable-create")["enabled"]
-    original = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    original = paired_device.call("session", "create", "--host", scenario.host)["lifecycle_receipt"]
     session = original["session_id"]
-    reused = paired_device.call("session-create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
+    reused = paired_device.call("session", "create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
     assert reused["disposition"] == "READY" and reused["session_id"] == session
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["status"] == "succeeded"
+    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
     scenario.wait_idle(session)
-    fallback = paired_device.call("session-create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
+    fallback = paired_device.call("session", "create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
     assert fallback["disposition"] == "READY" and fallback["session_id"] != session
     assert {session, fallback["session_id"]} <= {item["session_id"] for item in paired_device.sessions(scenario.host)}
     assert scenario.model.calls == 1
@@ -87,7 +87,7 @@ def test_native_remote_uses_host_defaults_not_client_location(scenario, paired_d
     assert scenario.request("test-enable-create")["enabled"]
     assert scenario.work.resolve() != ROOT.resolve()
     native = scenario.request("create-native-default")
-    remote = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    remote = paired_device.call("session", "create", "--host", scenario.host)["lifecycle_receipt"]
     assert remote["disposition"] == "READY"
     assert scenario.request("same-cwd", sessionId=native["sessionId"], config={"childId": remote["session_id"]})["same"]
     assert scenario.request("session-has-default-preset", sessionId=remote["session_id"])["matches"]
@@ -105,13 +105,13 @@ def test_native_creation_rejects_revoked_selected_host(scenario, paired_device):
     try:
         other.start_native()
         invitation = http("/v1/pairing/invitations", {"hostId": other.host}, scenario.admin)
-        paired_device.call("pair", invitation["pairingUri"])
+        paired_device.pair(invitation["pairingUri"])
         assert other.request("test-enable-create")["enabled"]
         primary_count = scenario.request("session-count")["count"]
         secondary_count = other.request("session-count")["count"]
         assert other.request("gx-revoke-host-grant", deviceId=paired_device.identity["device_id"])["revoked"]
         wait(lambda: other.host not in {row["host_id"] for row in paired_device.hosts()}, timeout=20)
-        code, values = paired_device.invoke("session-create", "--host", other.host, success=False)
+        code, values = paired_device.invoke("session", "create", "--host", other.host, success=False)
         assert code != 0
         assert all("lifecycle_receipt" not in value.get("data", {}) for value in values)
         assert other.request("session-count")["count"] == secondary_count
@@ -127,11 +127,9 @@ def test_native_creation_concurrent_command_replay_no_duplicate(scenario, paired
     before = scenario.request("session-count")["count"]
     assert scenario.request("gx-hold-create")["armed"]
     process = subprocess.Popen(
-        [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir",
-         str(paired_device.directory / "client"), "session-create", "--host", scenario.host],
+        paired_device.args("session", 'create', "--host", scenario.host),
         cwd=ROOT,
-        env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-             "WHALEREIN_LOG": "error"},
+        env=paired_device.env(),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     released = False
@@ -176,12 +174,9 @@ def test_native_creation_debug_logs_and_receipt_omit_private_location(scenario, 
     outputs = [scenario.access.output, scenario.native.output]
     positions = {stream.name: Path(stream.name).stat().st_size for stream in outputs}
     result = subprocess.run(
-        [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir",
-         str(paired_device.directory / "client"), "session-create", "--host", scenario.host,
-         "--cwd", str(cwd)],
+        paired_device.args("session", 'create', "--host", scenario.host, "--cwd", str(cwd)),
         cwd=ROOT,
-        env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-             "WHALEREIN_LOG": "debug"},
+        env=paired_device.env(),
         capture_output=True, text=True, timeout=90, check=False,
     )
     assert result.returncode == 0
@@ -202,20 +197,21 @@ def test_native_creation_history_refresh_failure_recovers_without_recreate(scena
     """A failed history read preserves the created identity and recovers without creation replay."""
     assert scenario.request("test-enable-create")["enabled"]
     before = scenario.request("session-count")["count"]
-    receipt = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    receipt = paired_device.call("session", "create", "--host", scenario.host)["lifecycle_receipt"]
     session = receipt["session_id"]
     assert receipt["disposition"] == "READY"
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["status"] == "succeeded"
+    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
     scenario.wait_idle(session)
     cached_before = paired_device.cached_history_state(scenario.host, session)
     assert scenario.request("creation-fail-next-history")["armed"]
-    code, _ = paired_device.invoke("sync", "--session", session, success=False)
+    code, _ = paired_device.invoke("session", "watch", session, "--timeout", "1", success=False)
     assert code != 0
     assert paired_device.cached_history_state(scenario.host, session) == cached_before
     assert scenario.request("session-count")["count"] == before + 1
-    result = paired_device.call("sync", "--session", session)
-    assert result["session_id"] == session and result["events"] >= 2
+    result = paired_device.observe_history(session, scenario.host)
+    assert result["session"]["session_id"] == session
+    assert len(paired_device.cached_history_state(scenario.host, session)[1]) >= 2
     assert scenario.request("session-count")["count"] == before + 1
     assert scenario.model.calls == 1
 
@@ -225,7 +221,7 @@ def test_native_creation_unpaired_has_no_source_effect(scenario, paired_device):
     assert scenario.request("test-enable-create")["enabled"]
     before = scenario.request("session-count")["count"]
     stranger = Device(scenario.directory / "creation-unpaired")
-    code, values = stranger.invoke("session-create", "--host", scenario.host, success=False)
+    code, values = stranger.invoke("session", "create", "--host", scenario.host, success=False)
     assert code != 0
     assert all("lifecycle_receipt" not in value.get("data", {}) for value in values)
     assert scenario.request("session-count")["count"] == before

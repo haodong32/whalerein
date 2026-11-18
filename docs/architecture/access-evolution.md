@@ -319,7 +319,7 @@ recoverable through the existing synchronization/snapshot model.
 Standalone pairing binds a client-generated random credential hash into Noise
 FINISH. Core retains the confirmed request and Host pin in SecretStore before
 sending it. Access persists the exact request digest and a token-free completion
-receipt in the same transaction as the grant and activation outbox. `pair-resume`
+receipt in the same transaction as the grant and activation outbox. `operation recover <id>`
 replays that request after a lost response or restart and requires an unexpired,
 active grant generation. Host staging retains its verified FINISH replay binding.
 An operation ID or invitation alone cannot substitute another device or credential.

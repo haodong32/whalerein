@@ -310,6 +310,77 @@ impl From<whalerein_core::api::CommandHandle> for CommandView {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SendOperationView {
+    pub operation_id: String,
+    pub host_id: String,
+    pub session_id: String,
+    pub receipt: Option<CommandView>,
+    pub reply: Option<MessageReplyView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum MessageReplyView {
+    Committed { attempt_id: String, text: String },
+    InputRequired,
+    Uncertain,
+}
+
+impl From<whalerein_core::api::MessageReply> for MessageReplyView {
+    fn from(value: whalerein_core::api::MessageReply) -> Self {
+        use whalerein_core::api::MessageReply;
+        match value {
+            MessageReply::Committed { attempt_id, text } => Self::Committed { attempt_id, text },
+            MessageReply::InputRequired => Self::InputRequired,
+            MessageReply::Uncertain => Self::Uncertain,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ClientStatusView {
+    pub config_path: String,
+    pub data_dir: String,
+    pub service: String,
+    pub testing_environment: Option<String>,
+    pub instance_id: Option<String>,
+    pub account_state: String,
+    pub default_host: Option<String>,
+    pub device_access: String,
+}
+
+impl From<whalerein_core::api::ClientStatus> for ClientStatusView {
+    fn from(value: whalerein_core::api::ClientStatus) -> Self {
+        use whalerein_core::api::{AccountState, ClientService, DeviceAccess};
+        Self {
+            config_path: value.config.to_string_lossy().into_owned(),
+            data_dir: value.data_dir.to_string_lossy().into_owned(),
+            service: match value.service {
+                ClientService::WhaleReinCloud => "whalerein_cloud",
+                ClientService::Standalone => "standalone",
+            }
+            .into(),
+            testing_environment: value.testing_environment.map(str::to_owned),
+            instance_id: value.instance_id,
+            account_state: match value.account_state {
+                AccountState::NotApplicable => "not_applicable",
+                AccountState::SignedIn => "signed_in",
+                AccountState::SignedOut => "signed_out",
+            }
+            .into(),
+            default_host: value.default_host,
+            device_access: match value.device_access {
+                DeviceAccess::Unpaired => "unpaired",
+                DeviceAccess::Ready => "ready",
+                DeviceAccess::RevocationPending => "revocation_pending",
+                DeviceAccess::Revoked => "revoked",
+                DeviceAccess::Unavailable => "unavailable",
+            }
+            .into(),
+        }
+    }
+}
+
 /// Redacted diagnostics shown before/after an explicit share.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct DiagnosticsReportView {

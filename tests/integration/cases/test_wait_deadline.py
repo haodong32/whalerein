@@ -1,7 +1,6 @@
 """Controlled encrypted wait deadline and transport-failure acceptance."""
 
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -13,11 +12,10 @@ pytestmark = pytest.mark.chain
 
 
 def start_wait(device, session, seconds=8):
-    return subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(device.directory / "client"),
-        "wait", "--session", session, "--timeout", str(seconds),
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(device.directory / "secrets"), "WHALEREIN_LOG": "error"},
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.Popen(
+        device.args("session", "wait", session, "--timeout", str(seconds)),
+        cwd=ROOT, env=device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
 
 
 def read_records(path):
@@ -79,7 +77,7 @@ def test_wait_deadline_transport_expiry_after_valid_slice_is_error(scenario, pai
             "code": result.get("error", {}).get("code"), "has_data": "data" in result,
         }))
         assert not fault.exists()
-        assert process.returncode == 7 and result["error"]["code"] == "expired" and "data" not in result
+        assert process.returncode == 7 and result["error"]["code"] == "expired" and result["data"]["target"]["session_id"] == session_id
         assert elapsed < 7
         assert not any(event["type"] == "session/interrupted" for event in scenario.dsh.snapshot(session_id)["events"])
     finally:
@@ -107,7 +105,7 @@ def test_wait_deadline_access_loss_after_valid_slice_is_error(scenario, paired_d
             "elapsed_seconds": round(elapsed, 3), "exit": process.returncode,
             "code": result.get("error", {}).get("code"), "reason": result.get("data", {}).get("reason"),
         }))
-        assert process.returncode != 0 and "error" in result and "data" not in result
+        assert process.returncode != 0 and "error" in result and result["data"]["target"]["session_id"] == session_id
         assert not any(event["type"] == "session/interrupted" for event in scenario.dsh.snapshot(session_id)["events"])
     finally:
         if process.poll() is None:

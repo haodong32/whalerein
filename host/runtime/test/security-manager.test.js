@@ -67,7 +67,7 @@ function helloClaim(start, overrides = {}) {
   }
 }
 
-function finishPairing({ security, start, request = {}, fingerprintOverride = null }) {
+function finishPairing({ security, start, request = {}, fingerprintOverride = null, approvedKey }) {
   const finish = codec.encode('whalerein.v1.PairingFinish', {
     device_id: start.deviceId,
     host_id: hostId,
@@ -81,6 +81,7 @@ function finishPairing({ security, start, request = {}, fingerprintOverride = nu
       claim_id: start.claimId,
       token_hash: start.tokenHash,
       phase: 'PAIRING_PHASE_FINISH',
+      device_public_key: approvedKey,
       device_auth_hash: new Uint8Array(32).fill(7),
       noise_message: msg3,
       device_id: start.deviceId,
@@ -126,6 +127,38 @@ test('when HELLO/FINISH learns a device key, it remains transient until AUTHORIZ
   assert.equal(stored.fingerprint, fingerprint(start.identity.publicKey))
   assert.equal(stored.displayName, 'device')
   assert.equal(stored.os, 'linux')
+})
+
+test('when Cloud approves a Device key, the Host repeats the exact HELLO and verifies the Noise peer', () => {
+  const { security, store } = makeSecurity()
+  const start = pairingStart()
+  const request = { device_id: start.deviceId, protocol_version: 1 }
+  const approvedKey = start.identity.publicKey
+  const claim = helloClaim(start, { device_public_key: approvedKey })
+  const reply = security.handlePairingClaim({ request, claim })
+  assert.deepEqual(security.handlePairingClaim({ request, claim }), reply)
+  assert.throws(() => security.handlePairingClaim({
+    request,
+    claim: { ...claim, device_public_key: generateKeypair().publicKey },
+  }), { code: 'conflict' })
+  start.noise.readMessage(reply.noise_message)
+  finishPairing({ security, start, approvedKey })
+  assert.deepEqual(store.getPendingPeer(start.claimId).publicKey, Buffer.from(approvedKey))
+
+  const mismatched = pairingStart({ claimId: 'wrong-key' })
+  const mismatchedKey = generateKeypair().publicKey
+  const otherRequest = { device_id: mismatched.deviceId, protocol_version: 1 }
+  const otherReply = security.handlePairingClaim({
+    request: otherRequest,
+    claim: helloClaim(mismatched, { device_public_key: mismatchedKey }),
+  })
+  mismatched.noise.readMessage(otherReply.noise_message)
+  assert.throws(() => finishPairing({
+    security,
+    start: mismatched,
+    approvedKey: mismatchedKey,
+  }), { code: 'unauthorized' })
+  assert.equal(store.getPendingPeer(mismatched.claimId), null)
 })
 
 test('when a pairing token, claim, version, fingerprint, or step order is invalid, pairing is rejected', () => {

@@ -29,16 +29,16 @@ def _delete(device_id, token=None):
 def test_device_revocation_is_idempotent_for_admin_and_device_callers(scenario):
     device = scenario.pair()
     device_id = device.identity["device_id"]
-    token = device.transport_token()
 
-    # The owning device revokes itself.
-    status, body = _delete(device_id, token)
-    assert status == 204, (status, body)
-    # Its credential is gone after revocation. The retry is deterministic:
-    # 401 unauthorized, never an ambiguous 403 or a 500.
-    status, body = _delete(device_id, token)
-    assert status == 401, (status, body)
-    assert body and body.get("code") == "unauthorized", body
+    with scenario.fixture_bearer(device) as token:
+        # The owning device revokes itself.
+        status, body = _delete(device_id, token)
+        assert status == 204, (status, body)
+        # Its credential is gone after revocation. The retry is deterministic:
+        # 401 unauthorized, never an ambiguous 403 or a 500.
+        status, body = _delete(device_id, token)
+        assert status == 401, (status, body)
+        assert body and body.get("code") == "unauthorized", body
 
     # A repeated admin revoke reaches the same end state: 204 every time.
     for attempt in range(2):
@@ -47,7 +47,8 @@ def test_device_revocation_is_idempotent_for_admin_and_device_callers(scenario):
 
     # A different valid device token is forbidden, never unauthorized.
     other = scenario.pair_second()
-    status, body = _delete(device_id, other.transport_token())
+    with scenario.fixture_bearer(other) as token:
+        status, body = _delete(device_id, token)
     assert status == 403, (status, body)
     assert body and body.get("code") == "forbidden", body
 

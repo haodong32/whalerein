@@ -24,10 +24,7 @@ def test_gx04_native_stale_wait_does_not_complete_new_channel(scenario, paired_d
     scenario.request("start", sessionId=session)
     assert scenario.model.started.wait(timeout=15)
     assert scenario.request("gx-arm-stale-wait")["armed"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "wait", "--session", session, "--timeout", "12",
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND":"file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", 'wait', session, "--timeout", "12"), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     started = time.monotonic()
     try:
         stage("await-entry")

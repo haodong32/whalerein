@@ -28,10 +28,10 @@ def test_pending_queue_disabled_rejects_every_queue_subcommand(scenario, subcomm
     session = _queue_session(scenario)
     device.sessions(scenario.host)
     args = {
-        "list": ["queue", "list", "--session", session],
-        "edit": ["queue", "edit", "--session", session, "--item", "queue-fixture", "replacement"],
-        "remove": ["queue", "remove", "--session", session, "--item", "queue-fixture"],
-        "steer": ["queue", "steer", "--session", session, "--item", "queue-fixture"],
+        "list": ["session", "queue", "list", "--session", session],
+        "edit": ["session", "queue", "edit", "--session", session, "--item", "queue-fixture", "replacement"],
+        "remove": ["session", "queue", "remove", "--session", session, "--item", "queue-fixture"],
+        "steer": ["session", "queue", "steer", "--session", session, "--item", "queue-fixture"],
     }[subcommand]
     code, values = device.invoke(*args, success=False)
     assert code == 9

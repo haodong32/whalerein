@@ -62,25 +62,24 @@ def test_global_revoke_redacts_pending_secondary_pairing(scenario):
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
         allow_finish.clear()
-        code, _ = device.invoke('pair', invitation(other.host), success=False)
+        code, _ = device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host), success=False)
         assert lost.is_set() and code != 0
-        pending_key = 'whalerein:v1:pending-pairing:' + device.identity['device_id']
-        token_key = 'whalerein:v1:device-token:' + device.identity['device_id']
-        pending_path = device.directory / 'secrets' / pending_key.encode().hex()
-        token_path = device.directory / 'secrets' / token_key.encode().hex()
-        assert pending_path.exists() and token_path.exists()
-        pending = json.loads(pending_path.read_text())
-        secret = pending['finish']['deviceToken']
-        claim = pending['finish']['claimId']
-        revoked = device.call('revoke')
-        assert revoked['revoked'] and not revoked['revoked_retention_unverified']
-        assert not pending_path.exists() and not token_path.exists()
-        history = device.call('pairing-history')['pairings']
-        assert len(history) == 1 and history[0]['claim_id'] == claim
-        assert history[0]['host_id'] == other.host and history[0]['status'] == 'unconfirmed_revoked'
-        assert secret not in json.dumps(history)
+        assert device.has_secret("pending-pairing") and device.has_secret("device-token")
+        claim, pending_host = device.call("operation", "list")["pending_pairing"]
+        assert pending_host == other.host
+        revoked = device.call("device", "revoke", "--yes")
+        assert revoked["revoked"] and not revoked["revoked_retention_unverified"]
+        assert not device.has_secret("pending-pairing") and not device.has_secret("device-token")
+        operations = device.call("operation", "list")
+        assert operations["pending_pairing"] is None
+        history = operations["pairing_history"]
+        assert len(history) == 1
+        assert history[0]["claim_id"] == claim
+        assert history[0]["host_id"] == other.host
+        assert history[0]["status"] == "unconfirmed_revoked"
+        assert set(history[0]) == {"claim_id", "host_id", "fingerprint", "status"}
     finally:
         other.close()
         proxy.shutdown()

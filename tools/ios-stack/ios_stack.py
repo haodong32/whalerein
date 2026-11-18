@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import hmac
 import json
 import os
@@ -58,10 +59,12 @@ POSTGRES_IMAGE = "postgres:18-alpine"
 MOSQUITTO_IMAGE = "whalerein-mosquitto:local"
 MOSQUITTO_DOCKERFILE = ROOT / "deploy" / "docker" / "mosquitto.Dockerfile"
 
-POSTGRES_CONTAINER = "whalerein-ios-stack-pg"
-MOSQUITTO_CONTAINER = "whalerein-ios-stack-mqtt"
+WORKTREE_ID = hashlib.sha256(os.fsencode(ROOT)).hexdigest()[:12]
+POSTGRES_CONTAINER = f"whalerein-ios-stack-{WORKTREE_ID}-pg"
+MOSQUITTO_CONTAINER = f"whalerein-ios-stack-{WORKTREE_ID}-mqtt"
 LABEL_STACK = "com.whalerein.ios-stack"
 LABEL_RUN = "com.whalerein.ios-stack.run"
+LABEL_WORKTREE = "com.whalerein.ios-stack.worktree"
 
 SCHEMA = "whalerein/ios-stack/v1"
 DATABASE_NAME = "whalerein_ios"
@@ -209,7 +212,10 @@ def remove_owned_container(name: str) -> bool:
     info = container_info(name)
     if info is None:
         return False
-    if info["labels"].get(LABEL_STACK) != "1":
+    if (
+        info["labels"].get(LABEL_STACK) != "1"
+        or info["labels"].get(LABEL_WORKTREE) != WORKTREE_ID
+    ):
         raise StackError(
             "container_conflict",
             f"Docker container {name} exists but is not owned by tools/ios-stack; "
@@ -477,6 +483,8 @@ plugin_opt_policy_ttl_ms 15000
             "--label",
             f"{LABEL_STACK}=1",
             "--label",
+            f"{LABEL_WORKTREE}={WORKTREE_ID}",
+            "--label",
             f"{LABEL_RUN}={self.run_id}",
             "-e",
             "POSTGRES_USER=postgres",
@@ -531,6 +539,8 @@ plugin_opt_policy_ttl_ms 15000
                 MOSQUITTO_CONTAINER,
                 "--label",
                 f"{LABEL_STACK}=1",
+                "--label",
+                f"{LABEL_WORKTREE}={WORKTREE_ID}",
                 "--label",
                 f"{LABEL_RUN}={self.run_id}",
                 "--add-host",
@@ -797,8 +807,12 @@ plugin_opt_policy_ttl_ms 15000
 
     def _contract(self) -> dict:
         state_path = self.directory / "state.json"
-        client_data = self.directory / "client"
-        client_secrets = self.directory / "client-secrets"
+        client_config = self.directory / "client.toml"
+        if not client_config.exists():
+            atomic_write(
+                client_config,
+                'version = 1\nservice = "standalone"\ndata_dir = "./client"\n',
+            )
         expected = [
             {"role": "assistant", "text": text, "source": "seed"} for text in self.expected
         ]
@@ -835,15 +849,7 @@ plugin_opt_policy_ttl_ms 15000
                 "--state",
                 str(state_path),
             ],
-            "cli": {
-                "data_dir": str(client_data),
-                "secret_backend": f"file:{client_secrets}",
-                "env": {
-                    "WHALEREIN_DATA_DIR": str(client_data),
-                    "WHALEREIN_SECRET_BACKEND": f"file:{client_secrets}",
-                    "WHALEREIN_LOG": "error",
-                },
-            },
+            "cli": {"config": str(client_config)},
             "containers": {
                 "postgres": POSTGRES_CONTAINER,
                 "broker": MOSQUITTO_CONTAINER,

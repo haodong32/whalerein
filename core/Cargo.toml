@@ -16,7 +16,6 @@ protocol-testing = []
 
 [dependencies]
 whalerein-proto = { workspace = true }
-anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 chacha20poly1305 = { workspace = true }
@@ -33,11 +32,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 snow = { workspace = true }
-toml_edit = "0.25"
+toml_edit = { version = "0.25", features = ["serde"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-url = "2"
+url = { version = "2", features = ["serde"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # MQTT 5 is built directly on the rustls version used by rumqttc.
@@ -64,18 +63,14 @@ rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true }
 
-[[test]]
-name = "baseline_profile"
-required-features = ["test-support"]
-
-[[test]]
-name = "rollback_writer"
-required-features = ["test-support"]
-
 [[example]]
 name = "mqtt_transport_driver"
 required-features = ["protocol-testing"]
 
 [[example]]
 name = "delivery_budget_driver"
+required-features = ["protocol-testing"]
+
+[[example]]
+name = "wait_concurrency_driver"
 required-features = ["protocol-testing"]

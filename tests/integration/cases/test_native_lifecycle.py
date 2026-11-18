@@ -13,7 +13,7 @@ def receipt_of(envelope):
 
 def test_native_lifecycle_create_ready_reports_operation_contract(scenario, paired_device):
     """A successful native create returns READY with identity and a coarse phase."""
-    created = paired_device.call("session-create", "--host", scenario.host)
+    created = paired_device.call("session", "create", "--host", scenario.host)
     receipt = created["lifecycle_receipt"]
     assert receipt["operation"] == "create"
     assert receipt["disposition"] == "READY"
@@ -28,7 +28,7 @@ def test_native_lifecycle_missing_workspace_fails_before_native_call(scenario, p
     """A missing workspace is a definitive PREFLIGHT failure with no created identity."""
     before = len(paired_device.sessions(scenario.host))
     exit_code, envelopes = paired_device.invoke(
-        "session-create", "--host", scenario.host, "--workspace", "fixture-no-such-workspace", success=False
+        "session", "create", "--host", scenario.host, "--workspace", "fixture-no-such-workspace", success=False
     )
     assert exit_code == 3
     receipt = receipt_of(envelopes[-1])
@@ -46,7 +46,7 @@ def test_native_lifecycle_missing_preset_fails_before_native_call(scenario, pair
     """A missing preset is a definitive PREFLIGHT failure with no created identity."""
     before = len(paired_device.sessions(scenario.host))
     exit_code, envelopes = paired_device.invoke(
-        "session-create", "--host", scenario.host, "--preset", "fixture-nonexistent-preset", success=False
+        "session", "create", "--host", scenario.host, "--preset", "fixture-nonexistent-preset", success=False
     )
     assert exit_code == 3
     receipt = receipt_of(envelopes[-1])
@@ -61,7 +61,7 @@ def test_native_lifecycle_attach_failure_keeps_identity_with_warning(scenario, p
     workspace = scenario.request("workspace-id")["workspaceId"]
     before = len(paired_device.sessions(scenario.host))
     assert scenario.request("test-fail-next-attachment")["armed"]
-    created = paired_device.call("session-create", "--host", scenario.host, "--workspace", workspace)
+    created = paired_device.call("session", "create", "--host", scenario.host, "--workspace", workspace)
     receipt = created["lifecycle_receipt"]
     assert receipt["disposition"] == "READY_WITH_WARNING"
     assert receipt["warning_code"] == "workspace_attach_failed"
@@ -76,7 +76,7 @@ def test_native_lifecycle_empty_fork_source_fails_before_native_call(scenario, p
     parent = scenario.create()
     before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
     assert scenario.request("test-enable-fork")["enabled"]
-    exit_code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    exit_code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     assert exit_code == 8
     receipt = receipt_of(envelopes[-1])
     assert receipt["disposition"] == "FAILED"
@@ -95,7 +95,7 @@ def test_native_lifecycle_fork_attach_failure_keeps_child_identity(scenario, pai
     assert scenario.request("test-enable-fork")["enabled"]
     assert scenario.request("arm-fork-attach-fault", sessionId=parent)["armed"]
     before = {item["session_id"] for item in paired_device.sessions(scenario.host)}
-    forked = paired_device.call("session-fork", "--session", parent)
+    forked = paired_device.call("session", "fork", parent)
     receipt = forked["lifecycle_receipt"]
     assert receipt["disposition"] == "READY_WITH_WARNING"
     assert receipt["warning_code"] == "workspace_attach_failed"

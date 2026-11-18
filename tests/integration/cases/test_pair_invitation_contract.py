@@ -38,5 +38,5 @@ def test_invitation_uri_matches_the_cross_component_contract(scenario):
 
     # The emitted URI is directly usable, so the contract is not cosmetic.
     device = Device(scenario.directory, "client")
-    device.identity = device.call("pair", invitation["pairingUri"])
+    device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     assert scenario.host in {host["host_id"] for host in device.hosts()}

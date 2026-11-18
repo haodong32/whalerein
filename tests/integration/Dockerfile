@@ -58,7 +58,7 @@ RUN --mount=type=cache,id=whalerein-cargo-registry-${TARGETARCH},target=/usr/loc
     cargo build --locked --workspace --features whalerein-core/protocol-testing && \
     cargo build --locked --example mqtt_transport_driver -p whalerein-core --features protocol-testing && \
     cargo build --locked --example delivery_budget_driver -p whalerein-core --features protocol-testing && \
-    cargo build --locked --example wait_concurrency_driver -p whalerein-core && \
+    cargo build --locked --example wait_concurrency_driver -p whalerein-core --features protocol-testing && \
     cargo build --locked --manifest-path tests/integration/drivers/noise/rust-peer/Cargo.toml && \
     cargo build --locked --manifest-path tests/integration/drivers/protobuf/rust-peer/Cargo.toml && \
     mkdir -p /out && \
@@ -119,7 +119,7 @@ FROM postgres AS runtime
 USER root
 COPY --from=python /usr/local /usr/local
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bin:$PATH LD_LIBRARY_PATH=/usr/local/lib WHALEREIN_INTEGRATION_CONTAINER=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 chromium libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 chromium libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 dbus-daemon dbus-bin gnome-keyring libsecret-tools && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir pytest==9.2.0
 COPY --from=rust-build /usr/local/bin/protoc /usr/local/bin/protoc
 COPY --from=rust-build /usr/local/include/google /usr/local/include/google

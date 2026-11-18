@@ -342,7 +342,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			return err
 		}
 		externalService = external.New(trust, db, cfg.External.MQTTURL,
-			external.WithHostEnforcer(authService))
+			external.WithHostEnforcer(authService),
+			external.WithDeviceGrants(pairingService, db, authService))
 		logger.Info("external account mode enabled", "issuer", trust.Issuer, "region", trust.Region)
 	}
 

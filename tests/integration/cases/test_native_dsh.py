@@ -91,11 +91,11 @@ def test_native_wait_output_failure_over_encrypted_chain(scenario, paired_device
     paired_device.sessions(scenario.host)
     assert scenario.request("gx-arm-wait-capability")["enabled"]
     assert scenario.request("arm-native-wait-output-failure")["armed"]
-    code, envelopes = paired_device.invoke("wait", "--session", session, "--timeout", "3", success=False)
+    code, envelopes = paired_device.invoke("session", "wait", session, "--timeout", "3", success=False)
     assert code != 0
-    assert envelopes[-1].get("data") is None
+    assert envelopes[-1]["data"] == {"target": {"host_id": scenario.host, "session_id": session}}
     assert "synthetic-private-output-marker" not in json.dumps(envelopes)
-    assert paired_device.call("wait", "--session", session, "--timeout", "3")["reason"] == "idle"
+    assert paired_device.call("session", "wait", session, "--timeout", "3")["reason"] == "idle"
 
 
 def native_wait_remote_question_over_encrypted_chain(outcome, scenario, paired_device):
@@ -109,14 +109,14 @@ def native_wait_remote_question_over_encrypted_chain(outcome, scenario, paired_d
     pending = scenario.request("wait-remote-question-start", sessionId=session, config={"timed": outcome == "expire"})
     try:
         assert pending["pending"] > 0
-        result = paired_device.call("wait", "--session", session, "--timeout", "3")
+        result = paired_device.call("session", "wait", session, "--timeout", "3")
         assert result["reason"] == "input_required"
         assert "question" in result["state"]["pending_input"]
         assert scenario.request("state", sessionId=session)["running"]
         settled = scenario.request("wait-remote-question-settle" if outcome == "settle" else "wait-remote-question-expired")
         assert settled["pending"] == 0
         assert settled["answered" if outcome == "settle" else "expired"]
-        result = paired_device.call("wait", "--session", session, "--timeout", "1")
+        result = paired_device.call("session", "wait", session, "--timeout", "1")
         assert result["reason"] == "timeout" and result["state"]["pending_input"] == []
     finally:
         scenario.request("wait-remote-question-stop")
@@ -141,7 +141,7 @@ def native_wait_after_intermediate_slices(outcome, scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     paired_device.sessions(scenario.host)
     assert scenario.request("gx-arm-short-native-wait")["enabled"]
-    process = subprocess.Popen([str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), "wait", "--session", session, "--timeout", "10"], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND":"file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", 'wait', session, "--timeout", "10"), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     remote = False
     try:
         wait(lambda: scenario.request("gx-native-wait-timeouts")["count"] >= 2, timeout=8, process=scenario.native)
@@ -247,34 +247,34 @@ def test_native_cli_production_entry_points(scenario, paired_device):
     """Open capability advertisement is reachable through the CLI without test-only switches."""
     session = scenario.create()
     paired_device.sessions(scenario.host)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     assert catalog["groups"], "Native model catalog is empty"
-    model = paired_device.call("model", "get", "--session", session)
+    model = paired_device.call("session", "model", "get", "--session", session)
     assert model["default_selection"] is not None
-    assert paired_device.call("wait", "--session", session, "--timeout", "1")["reason"] in ("idle", "timeout", "input-required")
-    queue_state = paired_device.call("queue", "list", "--session", session)
+    assert paired_device.call("session", "wait", session, "--timeout", "1")["reason"] in ("idle", "timeout", "input-required")
+    queue_state = paired_device.call("session", "queue", "list", "--session", session)
     assert "available" in queue_state
-    created = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    created = paired_device.call("session", "create", "--host", scenario.host)["lifecycle_receipt"]
     assert created["disposition"] == "READY"
     child_source = created["session_id"]
     scenario.model.plan()
     paired_device.send(child_source, "synthetic production entry", delivery="start-if-idle")
     scenario.wait_idle(child_source)
-    forked = paired_device.call("session-fork", "--session", child_source)["lifecycle_receipt"]
+    forked = paired_device.call("session", "fork", child_source)["lifecycle_receipt"]
     assert forked["operation"] == "fork" and forked["session_id"] != child_source
 
 
 def test_native_remote_session_create_and_reuse(scenario, paired_device):
     """An isolated CLI creates and reuses a native session, then sends a distinct first prompt."""
     assert scenario.request("test-enable-create")["enabled"]
-    created = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    created = paired_device.call("session", "create", "--host", scenario.host)["lifecycle_receipt"]
     session = created["session_id"]
     assert created["disposition"] == "READY" and scenario.model.calls == 0
-    reused = paired_device.call("session-create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
+    reused = paired_device.call("session", "create", "--host", scenario.host, "--session-id", session)["lifecycle_receipt"]
     assert reused["session_id"] == session
     assert any(item["session_id"] == session for item in paired_device.sessions(scenario.host))
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")['status'] == 'succeeded'
+    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]['status'] == 'succeeded'
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -283,7 +283,7 @@ def test_native_remote_workspace_creation(scenario, paired_device):
     """An isolated CLI creates a native session attached to the requested workspace."""
     assert scenario.request("test-enable-create")["enabled"]
     workspace = scenario.request("workspace-id")["workspaceId"]
-    created = paired_device.call("session-create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
+    created = paired_device.call("session", "create", "--host", scenario.host, "--workspace", workspace)["lifecycle_receipt"]
     assert created["disposition"] == "READY"
     assert scenario.request("workspace-has-session", sessionId=created["session_id"])["attached"]
     assert scenario.model.calls == 0
@@ -326,7 +326,7 @@ def test_native_remote_workspace_attachment_unknown(scenario, paired_device):
     workspace = scenario.request("workspace-id")["workspaceId"]
     before = len(paired_device.sessions(scenario.host))
     assert scenario.request("test-fail-next-attachment")["armed"]
-    exit_code, envelopes = paired_device.invoke("session-create", "--host", scenario.host, "--workspace", workspace, success=False)
+    exit_code, envelopes = paired_device.invoke("session", "create", "--host", scenario.host, "--workspace", workspace, success=False)
     assert len(paired_device.sessions(scenario.host)) == before + 1
     receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt")
     if receipt:
@@ -346,8 +346,8 @@ def test_native_remote_workspace_with_preset_and_independent_creations(scenario,
     workspace = scenario.request("workspace-id")["workspaceId"]
     preset = scenario.request("default-preset-info")
     assert preset["available"]
-    first = paired_device.call("session-create", "--host", scenario.host, "--workspace", workspace, "--preset", preset["presetId"])["lifecycle_receipt"]
-    second = paired_device.call("session-create", "--host", scenario.host, "--workspace", workspace, "--preset", preset["presetId"])["lifecycle_receipt"]
+    first = paired_device.call("session", "create", "--host", scenario.host, "--workspace", workspace, "--preset", preset["presetId"])["lifecycle_receipt"]
+    second = paired_device.call("session", "create", "--host", scenario.host, "--workspace", workspace, "--preset", preset["presetId"])["lifecycle_receipt"]
     assert first["session_id"] != second["session_id"]
     for receipt in (first, second):
         assert receipt["disposition"] == "READY"
@@ -414,12 +414,12 @@ def test_native_question_remote_open(scenario, paired_device):
     session = scenario.create()
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    batches = paired_device.call("questions", "--session", session)["batches"]
+    batches = paired_device.call("session", "question", "list", "--session", session)["batches"]
     assert len(batches) == 1 and batches[0]["answerable"] and batches[0]["phase"] == "QUESTION_OPEN"
     batch = batches[0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
-    receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+    receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer), "--command-id", "native-open-fixture")
     assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -431,12 +431,12 @@ def test_native_question_reconnect_keeps_live_handle(scenario, paired_device):
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    first = paired_device.call("questions", "--session", session)["batches"][0]
-    second = paired_device.call("questions", "--session", session)["batches"][0]
+    first = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
+    second = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert (first["batch_id"], first["source_epoch"], first["digest"]) == (second["batch_id"], second["source_epoch"], second["digest"])
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
-    receipt = paired_device.call("answer", "--session", session, "--batch", second["batch_id"], "--epoch", second["source_epoch"],
+    receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", second["batch_id"], "--epoch", second["source_epoch"],
         "--version", str(second["version"]), "--digest", second["digest"], "--phase", second["phase"], "--input", str(answer))
     assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
     assert scenario.request("question-result-remote-fixture", sessionId=session)["selected"] == "Yes"
@@ -447,14 +447,14 @@ def test_native_question_restart_does_not_recreate_handle(scenario, paired_devic
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     scenario.native.close()
     scenario.start_native()
     scenario.request("question-enable-remote-fixture")
-    assert paired_device.call("questions", "--session", session)["batches"] == []
+    assert paired_device.call("session", "question", "list", "--session", session)["batches"] == []
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
-    code, result = paired_device.invoke("answer", "--session", session, "--batch", batch["batch_id"],
+    code, result = paired_device.invoke("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer), success=False)
     assert code != 0 and result[-1]["error"]["code"] == "conflict"
@@ -465,12 +465,12 @@ def test_native_question_adapter_reload_does_not_recreate_handle(scenario, paire
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert scenario.request("question-reload-adapter-fixture")["reloaded"]
-    assert paired_device.call("questions", "--session", session)["batches"] == []
+    assert paired_device.call("session", "question", "list", "--session", session)["batches"] == []
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
-    code, result = paired_device.invoke("answer", "--session", session, "--batch", batch["batch_id"],
+    code, result = paired_device.invoke("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer), success=False)
     assert code != 0 and result[-1]["error"]["code"] == "conflict"
@@ -481,18 +481,12 @@ def test_native_question_remote_cancel_releases_claim(scenario, paired_device):
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     scenario.request("question-hold-native-claim")
     command_id = "native-open-cancel-fixture"
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
-        "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"],
-        "--input", str(answer), "--command-id", command_id,
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-                       "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", 'question', 'answer', "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", command_id), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 1, timeout=15, process=scenario.native)
         process.send_signal(signal.SIGINT)
@@ -502,9 +496,9 @@ def test_native_question_remote_cancel_releases_claim(scenario, paired_device):
         assert command_id in result["error"]["message"]
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=5, process=scenario.native)
         assert scenario.request("question-restore-native-claim")["restored"]
-        current = paired_device.call("questions", "--session", session)["batches"][0]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert current["batch_id"] == batch["batch_id"]
-        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+        receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer))
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -521,42 +515,36 @@ def test_native_question_cancel_scopes_cancellation_to_the_owner(scenario, paire
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     second = Device(scenario.directory / "cancel-second-device")
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    second.identity = second.call("pair", invitation["pairingUri"])
+    second.pair(invitation["pairingUri"])
     assert second.identity["device_id"] != paired_device.identity["device_id"]
-    assert second.call("hosts")["hosts"]
+    assert second.call("host", "list")["hosts"]
     scenario.request("question-hold-native-claim")
     command_id = "native-cancel-command-fixture"
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
-        "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"],
-        "--input", str(answer), "--command-id", command_id,
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-                       "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", 'question', 'answer', "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", command_id), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 1, timeout=15, process=scenario.native)
-        assert second.call("question-cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
+        assert second.call("session", "question", "cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
         assert scenario.request("question-native-claim-status")["held"] == 1
         # A second process for the owning device opens a new channel, and the
         # Host replaces the answering channel before it dispatches the cancel
         # payload. The claim is released either way; the reported boolean races
         # with that replacement, so it is deliberately not asserted here.
-        paired_device.call("question-cancel", "--session", session, "--command", command_id)
+        paired_device.call("session", "question", "cancel", "--session", session, "--command", command_id)
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=15, process=scenario.native)
         output, _ = process.communicate(timeout=30)
         # The exact failure code depends on how the source surfaces the abort;
         # what must hold is that the cancelled answer never settled the question.
         assert process.returncode != 0 and "QUESTION_SETTLED" not in output
-        assert paired_device.call("question-cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
+        assert paired_device.call("session", "question", "cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
         assert scenario.request("question-restore-native-claim")["restored"]
-        current = paired_device.call("questions", "--session", session)["batches"][0]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert current["batch_id"] == batch["batch_id"]
-        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+        receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer), "--command-id", "native-cancel-after")
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -571,17 +559,11 @@ def test_native_question_abrupt_client_exit_releases_by_request_expiry(scenario,
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     scenario.request("question-hold-native-claim")
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
-        "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"],
-        "--input", str(answer), "--command-id", "native-killed-fixture",
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-                       "WHALEREIN_LOG": "error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", 'question', 'answer', "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "native-killed-fixture"), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 1, timeout=15, process=scenario.native)
         process.kill(); process.communicate(timeout=5)
@@ -763,10 +745,10 @@ def test_native_question_remote_answer_shape_roundtrip(scenario, paired_device, 
     session = scenario.create()
     scenario.request("question-enable-remote-fixture")
     scenario.request("question-start-remote-fixture", sessionId=session)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": selected, "custom": custom}]}))
-    receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+    receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer))
     assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -782,18 +764,18 @@ def test_native_question_continued_replaced_root(scenario, paired_device):
     scenario.request("start", sessionId=session)
     wait(lambda: scenario.model.calls >= 2, timeout=15, process=scenario.native)
     wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=5, process=scenario.native)
-    old = paired_device.call("questions", "--session", session)["batches"][0]
-    reread = paired_device.call("questions", "--session", session)["batches"][0]
+    old = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
+    reread = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert old["digest"] == reread["digest"] and old["version"] == reread["version"]
     scenario.model.release.set()
     wait(lambda: scenario.request("state", sessionId=session).get("running") is False, timeout=15, process=scenario.native)
     assert scenario.request("question-managed-root-replace", sessionId=session)["replaced"]
-    new = paired_device.call("questions", "--session", session)["batches"][0]
+    new = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert new["answerable"] and new["digest"] != old["digest"] and new["version"] > old["version"]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     def args(batch):
-        return ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+        return ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
                 "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
     code, result = paired_device.invoke(*args(old), success=False)
     assert code == 8 and result[-1]["error"]["code"] == "conflict"
@@ -809,21 +791,21 @@ def test_native_question_continued_remote_without_projection_override(scenario, 
     scenario.request("start", sessionId=session)
     wait(lambda: scenario.model.calls >= 2, timeout=15, process=scenario.native)
     wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=5, process=scenario.native)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert batch["phase"] == "QUESTION_CONTINUED" and batch["answerable"]
     answer = scenario.directory / "answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
-    args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+    args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
         "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
     assert paired_device.call(*args)["question_receipt"]["phase"] == "QUESTION_REPLY_QUEUED"
-    queued = paired_device.call("questions", "--session", session)["batches"][0]
+    queued = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert queued["phase"] == "QUESTION_REPLY_QUEUED" and not queued["answerable"]
     assert queued["version"] > batch["version"] and queued["digest"] != batch["digest"]
     code, result = paired_device.invoke(*args, success=False)
     assert code == 8 and result[-1]["error"]["code"] == "conflict"
     assert scenario.request("question-continued-duplicate", sessionId=session)["code"] == "REPLY_QUEUED"
     scenario.model.release.set()
-    wait(lambda: paired_device.call("questions", "--session", session)["batches"] == [], timeout=15, process=scenario.native)
+    wait(lambda: paired_device.call("session", "question", "list", "--session", session)["batches"] == [], timeout=15, process=scenario.native)
 
 
 def test_native_adapter_fork_completed_turn(scenario, paired_device):
@@ -933,7 +915,7 @@ def test_native_remote_fork_running_queue_replay_and_recovery(scenario, paired_d
     wait(lambda: scenario.request("state", sessionId=parent)["queueCount"] == 1, process=scenario.native)
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
-    result = paired_device.call("session-fork", "--session", parent)
+    result = paired_device.call("session", "fork", parent)
     receipt = result["lifecycle_receipt"]
     child = receipt["session_id"]
     assert receipt["parent_session_id"] == parent and child not in before
@@ -948,11 +930,11 @@ def test_native_remote_fork_running_queue_replay_and_recovery(scenario, paired_d
     scenario.model.release.set()
     scenario.wait_idle(parent, assistant_count=3)
     # Simulate a client that durably recorded the intent but lost its terminal projection.
-    with sqlite3.connect(paired_device.directory / "client/cache.sqlite3") as db:
+    with sqlite3.connect(paired_device.data_dir / "cache.sqlite3") as db:
         assert db.execute("UPDATE commands SET status='unknown' WHERE request_id=?", (result["request_id"],)).rowcount == 1
     scenario.native.close()
     scenario.start_native()
-    recovered = paired_device.call("command-recover", "--request", result["request_id"])
+    recovered = paired_device.call("operation", "recover", result["request_id"])
     assert recovered["lifecycle_receipt"]["session_id"] == child
     assert recovered["lifecycle_receipt"]["parent_session_id"] == parent
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == identities
@@ -967,7 +949,7 @@ def test_native_remote_fork_safety_workspace_unknown(scenario, paired_device):
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-attach-fault", sessionId=parent)["armed"]
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert len(after - before) == 1
     receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
@@ -986,9 +968,9 @@ def test_native_remote_fork_journal_fault_stays_unknown(scenario, paired_device)
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-journal-fault")["armed"]
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
-    pending = paired_device.call("commands-pending")["commands"]
+    pending = paired_device.call("operation", "list")["pending_commands"]
     assert len(pending) == 1
     request = pending[0]["request_id"]
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
@@ -998,7 +980,7 @@ def test_native_remote_fork_journal_fault_stays_unknown(scenario, paired_device)
     # The native fork already produced one child and its Host operation record
     # survived the terminal-write fault, so recovery reports that proven
     # outcome without forking again.
-    code, envelopes = paired_device.invoke("command-recover", "--request", request, success=False)
+    code, envelopes = paired_device.invoke("operation", "recover", request, success=False)
     # The native child exists but the Host could not persist its terminal
     # receipt, so recovery must stay conservative and never fork again.
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
@@ -1011,20 +993,20 @@ def test_native_remote_fork_parent_child_histories_independent(scenario, paired_
     scenario.model.plan()
     paired_device.send(parent, "synthetic parent turn", delivery="start-if-idle")
     scenario.wait_idle(parent)
-    paired_device.sync(parent)
+    paired_device.observe_history(parent)
     before = scenario.cached(paired_device, parent)
     assert before[0] and before[1]
     assert scenario.request("test-enable-fork")["enabled"]
-    receipt = paired_device.call("session-fork", "--session", parent)["lifecycle_receipt"]
+    receipt = paired_device.call("session", "fork", parent)["lifecycle_receipt"]
     child = receipt["session_id"]
-    paired_device.sync(child)
+    paired_device.observe_history(child)
     child_before = scenario.cached(paired_device, child)
     assert child_before[0] and child_before[1]
     assert scenario.cached(paired_device, parent) == before
     scenario.model.plan()
     paired_device.send(child, "synthetic child turn", delivery="start-if-idle")
     scenario.wait_idle(child, assistant_count=2)
-    paired_device.sync(child)
+    paired_device.observe_history(child)
     child_after = scenario.cached(paired_device, child)
     assert child_after != child_before
     assert scenario.cached(paired_device, parent) == before
@@ -1035,7 +1017,7 @@ def test_native_remote_fork_open_empty_source_unknown(scenario, paired_device):
     """An open fork entry rejects an empty source conservatively without adding sessions."""
     parent = scenario.create()
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     assert code != 0
     receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
     assert receipt.get("disposition") == "FAILED" and not receipt.get("session_id")
@@ -1051,8 +1033,8 @@ def test_native_remote_fork_new_distinct_commands(scenario, paired_device):
     calls = scenario.model.calls
     assert scenario.request("test-enable-fork")["enabled"]
     assert scenario.request("mark-working-directory")["marked"]
-    first = paired_device.call("session-fork", "--session", parent)["lifecycle_receipt"]
-    second = paired_device.call("session-fork", "--session", parent)["lifecycle_receipt"]
+    first = paired_device.call("session", "fork", parent)["lifecycle_receipt"]
+    second = paired_device.call("session", "fork", parent)["lifecycle_receipt"]
     first_id, second_id = first["session_id"], second["session_id"]
     assert len({parent, first_id, second_id}) == 3
     assert first["parent_session_id"] == second["parent_session_id"] == parent
@@ -1068,7 +1050,7 @@ def test_native_remote_fork_new_missing_source(scenario, paired_device):
     """A missing source returns not found without creating a new native session."""
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
-    code, envelopes = paired_device.invoke("session-fork", "--session", "fixture-missing-session", success=False)
+    code, envelopes = paired_device.invoke("session", "fork", "fixture-missing-session", success=False)
     # A missing source is a proven preflight failure: FAILED with
     # SOURCE_NOT_FOUND and no native child, never a fabricated identity.
     assert code != 0
@@ -1087,7 +1069,7 @@ def test_native_remote_fork_new_postchange_fault(scenario, paired_device):
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-postchange-fault")["armed"]
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     # The throwing fixture returns no native facts, so the Host keeps the
     # conservative UNKNOWN outcome and never claims a child identity.
     assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
@@ -1095,7 +1077,7 @@ def test_native_remote_fork_new_postchange_fault(scenario, paired_device):
     assert receipt.get("disposition") == "UNKNOWN"
     assert not receipt.get("session_id")
     assert receipt.get("reconcile_mode") == "PARENT_SESSION_ID" and receipt.get("reconcile_key") == parent
-    pending = paired_device.call("commands-pending")["commands"]
+    pending = paired_device.call("operation", "list")["pending_commands"]
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     # A terminal UNKNOWN receipt settles the command; one child exists.
     assert pending == [] and len(after - before) == 1
@@ -1103,7 +1085,7 @@ def test_native_remote_fork_new_postchange_fault(scenario, paired_device):
     # recovery has no pending identity to re-execute and must not fork again.
     scenario.native.close()
     scenario.start_native()
-    assert paired_device.call("commands-pending")["commands"] == []
+    assert paired_device.call("operation", "list")["pending_commands"] == []
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == after
 
 
@@ -1117,7 +1099,7 @@ def test_native_remote_fork_safety_nested_warning_spoof(scenario, paired_device)
     assert scenario.request("test-enable-fork")["enabled"]
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     assert scenario.request("arm-fork-preset-spoof", config={"victimId": victim})["armed"]
-    code, envelopes = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, envelopes = paired_device.invoke("session", "fork", parent, success=False)
     after = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     receipt = envelopes[-1].get("data", {}).get("lifecycle_receipt") or {}
     # The spoofed victim id must never be reported as the fork child.
@@ -1135,12 +1117,14 @@ def test_native_remote_fork_boundaries_authorization_revoked(scenario, paired_de
     paired_device.send(parent, "synthetic parent turn", delivery="start-if-idle")
     scenario.wait_idle(parent)
     assert scenario.request("test-enable-fork")["enabled"]
-    receipt = paired_device.call("session-fork", "--session", parent)
+    receipt = paired_device.call("session", "fork", parent)
     before = scenario.request("session-count")["count"]
-    paired_device.revoke()
-    assert paired_device.revoked_access_denied()
-    with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
-        scenario.replay_command(paired_device, token_override=paired_device._revoked_token)
+    with scenario.fixture_bearer(paired_device) as bearer:
+        paired_device.revoke()
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            http("/v1/hosts", token=bearer)
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            scenario.replay_command(paired_device, token_override=bearer)
     assert scenario.request("session-count")["count"] == before
     assert receipt["lifecycle_receipt"]["parent_session_id"] == parent
 
@@ -1155,7 +1139,7 @@ def test_native_remote_fork_boundaries_offline_no_deferred_action(scenario, pair
     before = {s["session_id"] for s in paired_device.sessions(scenario.host)}
     scenario.native.close()
     wait(lambda: not next((h["online"] for h in paired_device.hosts() if h["host_id"] == scenario.host), True), timeout=30)
-    code, _ = paired_device.invoke("session-fork", "--session", parent, success=False)
+    code, _ = paired_device.invoke("session", "fork", parent, success=False)
     assert code != 0
     scenario.start_native()
     assert {s["session_id"] for s in paired_device.sessions(scenario.host)} == before
@@ -1204,7 +1188,7 @@ def test_native_fork_proven_wrong_host_route(scenario, paired_device):
     paired_device.send(parent, "synthetic complete turn", delivery="start-if-idle")
     scenario.wait_idle(parent)
     assert scenario.request("test-enable-fork")["enabled"]
-    paired_device.call("session-fork", "--session", parent)
+    paired_device.call("session", "fork", parent)
     before = scenario.request("session-count")["count"]
     with pytest.raises(RuntimeError, match=r"HTTP (400|401|403|404)"):
         scenario.replay_command(paired_device, route_host_override="fixture-wrong-host")
@@ -1222,7 +1206,7 @@ def test_native_fork_proven_concurrent_watches(scenario, paired_device):
     second_dir.mkdir()
     second = Device(second_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    second.identity = second.call("pair", invitation["pairingUri"])
+    second.pair(invitation["pairingUri"])
     parent_tail = scenario.tail(paired_device, parent)
     child_tail = scenario.tail(second, child)
     wait(lambda: scenario.request("watches") == 2, timeout=8, process=scenario.native)
@@ -1262,7 +1246,7 @@ def test_native_fork_start_while_watch_baselines_inflight(scenario, paired_devic
     second_dir.mkdir()
     second = Device(second_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    second.identity = second.call("pair", invitation["pairingUri"])
+    second.pair(invitation["pairingUri"])
     scenario.request("arm-watch-baseline-barrier")
     parent_tail = scenario.tail(paired_device, parent)
     child_tail = scenario.tail(second, child)
@@ -1301,8 +1285,10 @@ def test_native_pair_send_revoke(scenario, paired_device):
         )
         == 1
     )
-    paired_device.revoke()
-    assert paired_device.revoked_access_denied()
+    with scenario.fixture_bearer(paired_device) as bearer:
+        paired_device.revoke()
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            http("/v1/hosts", token=bearer)
 
 
 def test_native_stream_prefix_and_fixed_cut(scenario, paired_device):
@@ -1366,18 +1352,18 @@ def test_native_cold_restart(scenario, paired_device):
     scenario.model.plan()
     paired_device.send(session, "native restart fixture", delivery="start-if-idle")
     scenario.wait_idle(session)
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     before = scenario.cached(paired_device, session)
     calls = scenario.model.calls
     scenario.native.close()
     scenario.start_native()
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     assert scenario.cached(paired_device, session) == before
     assert scenario.model.calls == calls
     scenario.model.plan()
     paired_device.send(session, "native post-restart continuation fixture", delivery="start-if-idle")
     scenario.wait_idle(session, assistant_count=2)
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     after = scenario.cached(paired_device, session)
     assert after[0] != before[0] and after[1][: len(before[1])] == before[1]
     assert len(after[1]) == len(set(after[1])) > len(before[1])
@@ -1421,7 +1407,7 @@ def test_native_approval(scenario, paired_device, decision, expected, effects):
     assert scenario.request("events", sessionId=session)["decisions"] == [expected]
     assert scenario.request("effects")["count"] == effects
     code, _ = paired_device.invoke(
-        "approve",
+        "session", "approval", "approve",
         "--request",
         approval["approval_id"],
         "--digest",
@@ -1445,7 +1431,7 @@ def test_native_approval_refuses_a_stale_guard(scenario, paired_device):
         (approval["digest"], approval["version"] + 1),
     ):
         code, values = paired_device.invoke(
-            "approve", "--request", approval["approval_id"], "--digest", digest,
+            "session", "approval", "approve", "--request", approval["approval_id"], "--digest", digest,
             "--version", str(version), success=False)
         # The Host rejects an admission guard before journaling the command, so
         # the client receives no authenticated result and reports the outcome as
@@ -1469,7 +1455,7 @@ def test_native_approval_refuses_an_expired_guard(scenario, paired_device):
     # This case shortens the approval lifetime to three seconds.
     time.sleep(3.5)
     code, values = paired_device.invoke(
-        "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
+        "session", "approval", "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
         "--version", str(approval["version"]), success=False)
     assert code == 7 and values[-1]["error"]["code"] == "unknown"
     assert values[-1].get("data") is None
@@ -1489,7 +1475,7 @@ def test_native_interrupt_cancels_approval(scenario, paired_device):
         process=scenario.native,
     )
     code, _ = paired_device.invoke(
-        "approve",
+        "session", "approval", "approve",
         "--request",
         approval["approval_id"],
         "--digest",
@@ -1533,12 +1519,13 @@ def test_native_browser_invitation_and_revoke(scenario):
         hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"],
     )
     device = Device(scenario.directory)
-    device.identity = device.call("pair", invitation.read_text())
-    device._revoked_token = device.transport_token()
-    scenario.browser(
-        "revoke", hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"]
-    )
-    assert device.revoked_access_denied()
+    device.pair(invitation.read_text())
+    with scenario.fixture_bearer(device) as bearer:
+        scenario.browser(
+            "revoke", hostToken=scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"]
+        )
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            http("/v1/hosts", token=bearer)
 
 
 def test_native_browser_claim_ownership(scenario, paired_device):
@@ -1559,7 +1546,7 @@ def test_native_interrupt_stream(scenario, paired_device):
     )
     calls = scenario.model.calls
     scenario.model.release.set()
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     assert scenario.model.calls == calls == 1
 
 
@@ -1577,20 +1564,20 @@ def test_native_delivery_queue_and_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan(hold=True)
-    first = paired_device.send(session, "synthetic initial", delivery="start-if-idle")
+    first = paired_device.send(session, "synthetic initial", delivery="start-if-idle")["receipt"]
     assert first["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")
+    queued = paired_device.send(session, "synthetic queued")["receipt"]
     assert queued["delivery_id"] and queued["delivery_id"] != first["delivery_id"]
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
     )
-    steered = paired_device.send(session, "synthetic steer", delivery="steer")
+    steered = paired_device.send(session, "synthetic steer", delivery="steer")["receipt"]
     assert steered["delivery_id"] not in (first["delivery_id"], queued["delivery_id"])
     scenario.model.release.set()
     scenario.wait_idle(session, assistant_count=2)
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     _, message_ids = scenario.cached(paired_device, session)
     assert message_ids
     assert all(receipt["delivery_id"] not in message_ids for receipt in (first, queued, steered))
@@ -1602,7 +1589,7 @@ def test_native_idle_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan()
-    receipt = paired_device.send(session, "synthetic idle steer", delivery="steer")
+    receipt = paired_device.send(session, "synthetic idle steer", delivery="steer")["receipt"]
     assert receipt["delivery_id"]
     scenario.wait_idle(session)
 
@@ -1614,7 +1601,7 @@ def test_native_start_if_idle_busy(scenario, paired_device):
     paired_device.send(session, "synthetic initial", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
     code, values = paired_device.invoke(
-        "send", "--session", session, "--delivery", "start-if-idle", "synthetic busy",
+        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic busy",
         success=False,
     )
     assert code == 8
@@ -1631,7 +1618,7 @@ def test_native_interrupt_keeps_queued_delivery(scenario, paired_device):
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")
+    queued = paired_device.send(session, "synthetic queued")["receipt"]
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
@@ -1654,7 +1641,7 @@ def test_native_steer_after_interrupt(scenario, paired_device):
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
     paired_device.interrupt(session)
-    receipt = paired_device.send(session, "synthetic after interrupt", delivery="steer")
+    receipt = paired_device.send(session, "synthetic after interrupt", delivery="steer")["receipt"]
     assert receipt["delivery_id"]
     scenario.model.release.set()
     wait(
@@ -1670,7 +1657,7 @@ def test_native_start_if_idle_after_local_start_race(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("arm-start-if-idle-race")
-    receipt = paired_device.send(session, "synthetic remote race", delivery="start-if-idle")
+    receipt = paired_device.send(session, "synthetic remote race", delivery="start-if-idle")["receipt"]
     assert receipt["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
     wait(
@@ -1743,13 +1730,13 @@ def test_native_pending_queue_remote(scenario, paired_device):
     # This fixture-only toggle is not part of the production configuration.
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    initial = paired_device.call("queue", "list", "--session", session)
+    initial = paired_device.call("session", "queue", "list", "--session", session)
     assert initial["available"] and len(initial["items"]) == 1
     identity = initial["items"][0]["item_id"]
-    edited = paired_device.call("queue", "edit", "--session", session, "--item", identity, "replacement fixture")
+    edited = paired_device.call("session", "queue", "edit", "--session", session, "--item", identity, "replacement fixture")
     assert edited["command"]["status"] == "succeeded" and edited["refresh"] == "current"
     assert scenario.request("queue-read", sessionId=session)["items"][0]["fixtureText"]
-    removed = paired_device.call("queue", "remove", "--session", session, "--item", identity)
+    removed = paired_device.call("session", "queue", "remove", "--session", session, "--item", identity)
     assert removed["command"]["status"] == "succeeded"
     assert not scenario.request("queue-read", sessionId=session)["items"]
     scenario.model.release.set()
@@ -1787,7 +1774,7 @@ def test_native_pending_queue_concurrent_mutations(scenario, paired_device):
     other_dir.mkdir()
     other = Device(other_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    other.identity = other.call("pair", invitation["pairingUri"])
+    other.pair(invitation["pairingUri"])
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("start", sessionId=session)
@@ -1796,19 +1783,19 @@ def test_native_pending_queue_concurrent_mutations(scenario, paired_device):
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
     other.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
         edits = [executor.submit(device.invoke, "queue", "edit", "--session", session, "--item", item, value, success=False) for device, value in ((paired_device, "edit first fixture"), (other, "edit second fixture"))]
         results = [future.result() for future in edits]
     assert all(code == 0 for code, _ in results)
-    current = paired_device.call("queue", "list", "--session", session)
+    current = paired_device.call("session", "queue", "list", "--session", session)
     assert len(current["items"]) == 1 and current["items"][0]["item_id"] == item
     final_text = current["items"][0]["blocks"][0]["text"]
     assert final_text in ("edit first fixture", "edit second fixture")
-    assert paired_device.call("queue", "remove", "--session", session, "--item", item)["command"]["status"] == "succeeded"
-    code, results = paired_device.invoke("queue", "edit", "--session", session, "--item", item, "late fixture", success=False)
+    assert paired_device.call("session", "queue", "remove", "--session", session, "--item", item)["command"]["status"] == "succeeded"
+    code, results = paired_device.invoke("session", "queue", "edit", "--session", session, "--item", item, "late fixture", success=False)
     assert code != 0 and results[-1]["error"]["code"] == "not_found"
-    assert paired_device.call("queue", "list", "--session", session)["items"] == []
+    assert paired_device.call("session", "queue", "list", "--session", session)["items"] == []
     scenario.model.release.set()
 
 
@@ -1823,14 +1810,14 @@ def test_native_pending_queue_local_remote_race(scenario, paired_device):
     scenario.request("queue-add", sessionId=session)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
         local = executor.submit(scenario.request, "queue-remove-direct", sessionId=session, itemId=item)
         remote = executor.submit(paired_device.invoke, "queue", "edit", "--session", session, "--item", item, "race fixture", success=False)
         assert local.result()["accepted"]
         code, envelope = remote.result()
     assert code == 0 or envelope[-1]["error"]["code"] in ("not_found", "unknown")
-    assert paired_device.call("queue", "list", "--session", session)["items"] == []
+    assert paired_device.call("session", "queue", "list", "--session", session)["items"] == []
     scenario.model.release.set()
 
 def test_native_model_selection_running_and_queued(scenario, paired_device):
@@ -1905,10 +1892,10 @@ def test_native_remote_model_catalog_only(scenario, paired_device):
     session = scenario.create()
     assert scenario.request("test-model-catalog-only")["enabled"]
     paired_device.sessions(scenario.host)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     group = next(group for group in catalog["groups"] if group["models"])
-    for args in [("model", "get", "--session", session),
-                 ("model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"])]:
+    for args in [("session", "model", "get", "--session", session),
+                 ("session", "model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"])]:
         code, envelopes = paired_device.invoke(*args, success=False)
         assert code != 0 and envelopes[-1]["error"]["code"] == "unsupported_capability"
     assert scenario.request("test-model-catalog-only-counts") == {"read": 0, "select": 0}
@@ -1918,7 +1905,7 @@ def test_native_remote_model_catalog_provider_failure_is_redacted(scenario, pair
     """A remote catalog preserves healthy native providers and hides an injected provider diagnostic."""
     assert scenario.request("test-enable-gx")["enabled"]
     assert scenario.request("test-model-provider-failure-arm")["armed"]
-    code, envelopes = paired_device.invoke("models", "--host", scenario.host, success=False)
+    code, envelopes = paired_device.invoke("session", "models", "--host", scenario.host, success=False)
     assert code == 0
     catalog = envelopes[-1]["data"]
     assert any(group["models"] for group in catalog["groups"])
@@ -1933,22 +1920,23 @@ def test_native_remote_model_revoked_device_cannot_reach_source(scenario, paired
     assert scenario.request("test-enable-gx")["enabled"]
     assert scenario.request("test-model-counts-enable")["enabled"]
     paired_device.sessions(scenario.host)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     group = next(group for group in catalog["groups"] if group["models"])
     before = scenario.request("test-model-counts")
-    attempts = [("models", "--host", scenario.host), ("model", "get", "--session", session),
-                ("model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"])]
+    attempts = [("session", "models", "--host", scenario.host), ("session", "model", "get", "--session", session),
+                ("session", "model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"])]
     stale_devices = []
     for index in range(len(attempts)):
         directory = scenario.directory / f"stale-native-model-{index}"
         directory.mkdir()
-        shutil.copytree(paired_device.directory / "client", directory / "client")
-        shutil.copytree(paired_device.directory / "secrets", directory / "secrets")
         stale = Device(directory)
+        shutil.copytree(paired_device.instance_dir, stale.instance_dir)
         stale.identity = paired_device.identity
         stale_devices.append(stale)
-    paired_device.revoke()
-    assert paired_device.revoked_access_denied()
+    with scenario.fixture_bearer(paired_device) as bearer:
+        paired_device.revoke()
+        with pytest.raises(RuntimeError, match=r"HTTP (401|403)"):
+            http("/v1/hosts", token=bearer)
     for stale, args in zip(stale_devices, attempts, strict=True):
         code, _ = stale.invoke(*args, success=False)
         assert code != 0
@@ -1962,21 +1950,21 @@ def test_native_remote_model_selection_preserves_open_question(scenario, paired_
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
     paired_device.sessions(scenario.host)
-    before = paired_device.call("questions", "--session", session)["batches"]
+    before = paired_device.call("session", "question", "list", "--session", session)["batches"]
     assert len(before) == 1 and before[0]["phase"] == "QUESTION_OPEN"
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     group = next(group for group in catalog["groups"] if group["models"])
-    receipt = paired_device.call("model", "set", "--session", session,
+    receipt = paired_device.call("session", "model", "set", "--session", session,
                                  "--provider", group["id"], "--model", group["models"][0]["id"])
     assert receipt["status"] == "succeeded"
-    after = paired_device.call("questions", "--session", session)["batches"]
+    after = paired_device.call("session", "question", "list", "--session", session)["batches"]
     assert len(after) == 1
     assert (after[0]["batch_id"], after[0]["source_epoch"], after[0]["digest"], after[0]["phase"]) == (
         before[0]["batch_id"], before[0]["source_epoch"], before[0]["digest"], before[0]["phase"])
     answer = scenario.directory / "model-question-answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     batch = after[0]
-    settled = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+    settled = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer))
     assert settled["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -1992,9 +1980,9 @@ def test_native_remote_model_selection_preserves_pending_approval(scenario, pair
     wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
     approval = paired_device.approvals(session)[0]
     before = scenario.request("state", sessionId=session)
-    catalog = paired_device.call("models", "--host", scenario.host)
+    catalog = paired_device.call("session", "models", "--host", scenario.host)
     group = next(group for group in catalog["groups"] if group["models"])
-    receipt = paired_device.call("model", "set", "--session", session,
+    receipt = paired_device.call("session", "model", "set", "--session", session,
                                  "--provider", group["id"], "--model", group["models"][0]["id"])
     assert receipt["status"] == "succeeded"
     after = scenario.request("state", sessionId=session)
@@ -2017,9 +2005,9 @@ def test_native_remote_model_selection_preserves_gateway_pending_input(scenario,
              timeout=15, process=scenario.native)
         before = scenario.request("state", sessionId=session)
         assert scenario.request("test-model-gateway-pending", sessionId=session)["events"] == ["user-questions/request"]
-        catalog = paired_device.call("models", "--host", scenario.host)
+        catalog = paired_device.call("session", "models", "--host", scenario.host)
         group = next(group for group in catalog["groups"] if group["models"])
-        receipt = paired_device.call("model", "set", "--session", session,
+        receipt = paired_device.call("session", "model", "set", "--session", session,
                                      "--provider", group["id"], "--model", group["models"][0]["id"])
         assert receipt["status"] == "succeeded"
         after = scenario.request("state", sessionId=session)
@@ -2091,8 +2079,8 @@ def test_native_queue_replay_and_digest(scenario, paired_device):
     scenario.request("queue-add", sessionId=session)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
-    receipt = paired_device.call("queue", "edit", "--session", session, "--item", item, "replacement fixture")
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
+    receipt = paired_device.call("session", "queue", "edit", "--session", session, "--item", item, "replacement fixture")
     assert receipt["command"]["status"] == "succeeded"
     assert scenario.request("queue-edit-direct", sessionId=session, itemId=item)["accepted"]
     status, replay = scenario.replay_command(paired_device)
@@ -2115,10 +2103,10 @@ def test_native_queue_revocation(scenario, paired_device):
     assert native["available"] and len(native["items"]) == 1
     item = native["items"][0]["id"]
     paired_device.sessions(scenario.host)
-    assert paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"] == item
+    assert paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"] == item
     paired_device.revoke()
-    read_code, _ = paired_device.invoke("queue", "list", "--session", session, success=False)
-    edit_code, _ = paired_device.invoke("queue", "remove", "--session", session, "--item", item, success=False)
+    read_code, _ = paired_device.invoke("session", "queue", "list", "--session", session, success=False)
+    edit_code, _ = paired_device.invoke("session", "queue", "remove", "--session", session, "--item", item, success=False)
     assert read_code != 0 and edit_code != 0
     assert scenario.request("queue-read", sessionId=session)["items"][0]["id"] == item
     scenario.model.release.set()
@@ -2138,12 +2126,12 @@ def test_native_queue_consumed_item_cannot_return(scenario, paired_device):
     scenario.wait_idle(session, assistant_count=2)
     before = scenario.request("events", sessionId=session)["types"].count("user/message")
     assert before >= 2
-    code, result = paired_device.invoke("queue", "edit", "--session", session, "--item", item, "late fixture", success=False)
+    code, result = paired_device.invoke("session", "queue", "edit", "--session", session, "--item", item, "late fixture", success=False)
     assert code != 0 and result[-1]["error"]["code"] == "not_found"
-    code, result = paired_device.invoke("queue", "remove", "--session", session, "--item", item, success=False)
+    code, result = paired_device.invoke("session", "queue", "remove", "--session", session, "--item", item, success=False)
     assert code != 0 and result[-1]["error"]["code"] == "not_found"
     assert scenario.request("events", sessionId=session)["types"].count("user/message") == before
-    assert paired_device.call("queue", "list", "--session", session)["items"] == []
+    assert paired_device.call("session", "queue", "list", "--session", session)["items"] == []
 
 
 def test_native_queue_interrupt_retention(scenario, paired_device):
@@ -2159,7 +2147,7 @@ def test_native_queue_interrupt_retention(scenario, paired_device):
     def wait_succeeded(receipt):
         assert receipt["status"] in ("succeeded", "host_accepted")
         if receipt["status"] == "host_accepted":
-            wait(lambda: paired_device.call("command-recover", "--request", receipt["request_id"])["status"] == "succeeded", timeout=15)
+            wait(lambda: paired_device.call("operation", "recover", receipt["request_id"])["status"] == "succeeded", timeout=15)
 
     wait_succeeded(paired_device.interrupt(session))
     # The source may consume the retained item as soon as the interrupt settles.
@@ -2169,12 +2157,12 @@ def test_native_queue_interrupt_retention(scenario, paired_device):
         return item in observed["committed"] or (observed["available"] and item in observed["queued"])
 
     wait(retained_or_committed, timeout=15)
-    current = paired_device.call("queue", "list", "--session", session)
+    current = paired_device.call("session", "queue", "list", "--session", session)
     if current["available"] and any(entry["item_id"] == item for entry in current["items"]):
-        code, values = paired_device.invoke("queue", "remove", "--session", session, "--item", item, success=False)
+        code, values = paired_device.invoke("session", "queue", "remove", "--session", session, "--item", item, success=False)
         if code == 0:
             wait_succeeded(values[-1]["data"]["command"])
-            assert all(entry["item_id"] != item for entry in paired_device.call("queue", "list", "--session", session)["items"])
+            assert all(entry["item_id"] != item for entry in paired_device.call("session", "queue", "list", "--session", session)["items"])
         else:
             assert values[-1]["error"]["code"] == "not_found"
             wait(lambda: item in scenario.request("queue-retention-evidence", sessionId=session)["committed"], timeout=15)
@@ -2196,18 +2184,18 @@ def test_native_queue_order_and_promotion_guard(scenario, paired_device):
     source_ids = [item["id"] for item in source["items"]]
     assert len(set(source_ids)) == 2
     paired_device.sessions(scenario.host)
-    remote = paired_device.call("queue", "list", "--session", session)
+    remote = paired_device.call("session", "queue", "list", "--session", session)
     assert [item["item_id"] for item in remote["items"]] == source_ids
     assert all(item["placement"] == "QUEUED" for item in remote["items"])
     assert set(remote) == {"session_id", "available", "running", "items"}
     assert all(set(item) == {"item_id", "placement", "delivery_id", "blocks", "actions"} for item in remote["items"])
     assert scenario.request("queue-promote", sessionId=session)["id"] == source_ids[0]
-    promoted = paired_device.call("queue","list","--session",session)
+    promoted = paired_device.call("session", "queue","list","--session",session)
     by_id = {item["item_id"]:item for item in promoted["items"]}
     assert by_id[source_ids[0]]["placement"] == "STEERING"
     assert by_id[source_ids[1]]["placement"] == "QUEUED"
     assert "PROMOTE" not in by_id[source_ids[0]]["actions"]
-    code, outcome = paired_device.invoke("queue", "steer", "--session", session, "--item", source_ids[0], success=False)
+    code, outcome = paired_device.invoke("session", "queue", "steer", "--session", session, "--item", source_ids[0], success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "conflict"
     after = scenario.request("queue-read", sessionId=session)
     assert len(after["items"]) == 2 and len({item["id"] for item in after["items"]}) == 2
@@ -2228,7 +2216,7 @@ def test_native_queue_idle_promotion_guard(scenario, paired_device):
     wait(lambda: not scenario.request("state", sessionId=session)["running"], timeout=15, process=scenario.native)
     after = scenario.request("queue-read", sessionId=session)
     assert any(entry["id"] == item for entry in after["items"])
-    code, outcome = paired_device.invoke("queue", "steer", "--session", session, "--item", item, success=False)
+    code, outcome = paired_device.invoke("session", "queue", "steer", "--session", session, "--item", item, success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "conflict"
     assert any(entry["id"] == item for entry in scenario.request("queue-read", sessionId=session)["items"])
     scenario.model.release.set()
@@ -2248,10 +2236,10 @@ def test_native_queue_wrong_session_scope(scenario, paired_device):
     scenario.request("queue-read", sessionId=second)
     item = first_queue["items"][0]["id"]
     paired_device.sessions(scenario.host)
-    code, outcome = paired_device.invoke("queue", "remove", "--session", second, "--item", item, success=False)
+    code, outcome = paired_device.invoke("session", "queue", "remove", "--session", second, "--item", item, success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "not_found"
     assert scenario.request("queue-read", sessionId=first)["items"][0]["id"] == item
-    assert paired_device.call("queue", "list", "--session", second)["items"] == []
+    assert paired_device.call("session", "queue", "list", "--session", second)["items"] == []
     scenario.model.release.set()
 
 
@@ -2299,7 +2287,7 @@ def test_native_queue_cold_reconnect_and_receipt_recovery(scenario, paired_devic
     source = scenario.request("queue-read", sessionId=session)
     item = source["items"][0]["id"]
     paired_device.sessions(scenario.host)
-    receipt = paired_device.call("queue", "edit", "--session", session, "--item", item, "replacement fixture")
+    receipt = paired_device.call("session", "queue", "edit", "--session", session, "--item", item, "replacement fixture")
     assert receipt["command"]["status"] == "succeeded"
     calls = scenario.model.calls
     scenario.native.close()
@@ -2307,7 +2295,7 @@ def test_native_queue_cold_reconnect_and_receipt_recovery(scenario, paired_devic
     source = scenario.request("queue-read", sessionId=session)
     assert not source["available"]
     paired_device.sessions(scenario.host)
-    current = paired_device.call("queue", "list", "--session", session)
+    current = paired_device.call("session", "queue", "list", "--session", session)
     assert not current["available"] and current["items"] == []
     status, replay = scenario.replay_command(paired_device)
     assert status in (200, 202) and replay["commandId"] == receipt["command"]["command_id"]
@@ -2326,7 +2314,7 @@ def test_native_queue_invalid_edit_preserves_item(scenario, paired_device):
     source = scenario.request("queue-read", sessionId=session)
     item = source["items"][0]["id"]
     paired_device.sessions(scenario.host)
-    code, outcome = paired_device.invoke("queue", "edit", "--session", session, "--item", item, "  ", success=False)
+    code, outcome = paired_device.invoke("session", "queue", "edit", "--session", session, "--item", item, "  ", success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "invalid_argument"
     assert scenario.request("queue-invalid-nontext", sessionId=session, itemId=item)["rejected"]
     after = scenario.request("queue-read", sessionId=session)
@@ -2344,13 +2332,13 @@ def test_native_queue_capability_open_by_default(scenario, paired_device):
     ids = scenario.request("queue-native-ids", sessionId=session)["ids"]
     assert len(ids) == 1
     paired_device.sessions(scenario.host)
-    listed = paired_device.call("queue", "list", "--session", session)
+    listed = paired_device.call("session", "queue", "list", "--session", session)
     assert listed["available"] and listed["items"][0]["item_id"] == ids[0]
-    edited = paired_device.call("queue", "edit", "--session", session, "--item", ids[0], "replacement fixture")
+    edited = paired_device.call("session", "queue", "edit", "--session", session, "--item", ids[0], "replacement fixture")
     assert edited["command"]["status"] == "succeeded"
     after_edit = scenario.request("queue-native-ids", sessionId=session)["ids"]
     assert after_edit == ids
-    removed = paired_device.call("queue", "remove", "--session", session, "--item", ids[0])
+    removed = paired_device.call("session", "queue", "remove", "--session", session, "--item", ids[0])
     assert removed["command"]["status"] == "succeeded"
     assert scenario.request("queue-native-ids", sessionId=session)["ids"] == []
     scenario.model.release.set()
@@ -2367,7 +2355,7 @@ def test_native_queue_promote_after_remove_failure_is_unknown(scenario, paired_d
     item=source["items"][0]["id"]
     paired_device.sessions(scenario.host)
     assert scenario.request("arm-queue-steer-failure",sessionId=session)["armed"]
-    code, outcome = paired_device.invoke("queue", "steer", "--session", session, "--item", item, success=False)
+    code, outcome = paired_device.invoke("session", "queue", "steer", "--session", session, "--item", item, success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "unknown"
     assert all(entry["id"] != item for entry in scenario.request("queue-read",sessionId=session)["items"])
     status, _ = scenario.replay_command(paired_device)
@@ -2408,7 +2396,7 @@ def test_native_queue_unknown_survives_restart(scenario, paired_device):
     item=source["items"][0]["id"]
     paired_device.sessions(scenario.host)
     scenario.request("arm-queue-receipt-loss")
-    code, outcome = paired_device.invoke("queue", "edit", "--session", session, "--item", item, "replacement fixture", success=False)
+    code, outcome = paired_device.invoke("session", "queue", "edit", "--session", session, "--item", item, "replacement fixture", success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "unknown"
     assert scenario.request("queue-read", sessionId=session)["items"][0]["fixtureText"]
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
@@ -2441,14 +2429,14 @@ def test_native_queue_privileged_next_turn_is_readonly(scenario, paired_device):
     entry=next(value for value in observed["items"] if value["id"]==item)
     assert entry["placement"] == "QUEUED" and entry["actions"] == []
     paired_device.sessions(scenario.host)
-    queue=paired_device.call("queue","list","--session",session)
+    queue=paired_device.call("session", "queue","list","--session",session)
     remote=next(value for value in queue["items"] if value["item_id"]==item)
     assert remote["actions"] == [] and remote["delivery_id"] is None
     assert "synthetic privileged content" not in str(remote)
     for action in ("remove","steer"):
-        code, values=paired_device.invoke("queue",action,"--session",session,"--item",item,success=False)
+        code, values=paired_device.invoke("session", "queue",action,"--session",session,"--item",item,success=False)
         assert code != 0 and values[-1]["error"]["code"] == "conflict"
-    code, values=paired_device.invoke("queue","edit","--session",session,"--item",item,"replacement fixture",success=False)
+    code, values=paired_device.invoke("session", "queue","edit","--session",session,"--item",item,"replacement fixture",success=False)
     assert code != 0 and values[-1]["error"]["code"] == "conflict"
     assert any(value["id"]==item for value in scenario.request("queue-read",sessionId=session)["items"])
     scenario.model.release.set()
@@ -2468,18 +2456,18 @@ def test_native_queue_interrupt_retains_all_pending(scenario, paired_device):
     receipt=paired_device.interrupt(session)
     assert receipt["status"] in ("succeeded","host_accepted")
     if receipt["status"]=="host_accepted":
-        wait(lambda: paired_device.call("command-recover","--request",receipt["request_id"])["status"]=="succeeded",timeout=15)
+        wait(lambda: paired_device.call("operation", "recover",receipt["request_id"])["status"]=="succeeded",timeout=15)
     observation=scenario.request("queue-retention-evidence",sessionId=session)
     assert observation["available"]
     assert ids.issubset(set(observation["queued"])|set(observation["committed"]))
     remaining=ids.intersection(observation["queued"])
     assert remaining
     target=next(iter(remaining))
-    removed=paired_device.call("queue","remove","--session",session,"--item",target)
+    removed=paired_device.call("session", "queue","remove","--session",session,"--item",target)
     command=removed["command"]
     assert command["status"] in ("succeeded","host_accepted")
     if command["status"] == "host_accepted":
-        wait(lambda: paired_device.call("command-recover","--request",command["request_id"])["status"] == "succeeded",timeout=15)
+        wait(lambda: paired_device.call("operation", "recover",command["request_id"])["status"] == "succeeded",timeout=15)
     after=scenario.request("queue-retention-evidence",sessionId=session)
     assert target not in after["queued"]
     assert (ids-{target}).issubset(set(after["queued"])|set(after["committed"]))
@@ -2502,7 +2490,7 @@ def test_native_pending_queue_attachment_remote_replacement(scenario, paired_dev
     metadata = scenario.request("queue-native-meta", sessionId=session)["items"][0]
     assert metadata["id"] == identity and metadata["rpcId"]
     paired_device.sessions(scenario.host)
-    result=paired_device.call("queue","edit","--session",session,"--item",identity,"replacement fixture")
+    result=paired_device.call("session", "queue","edit","--session",session,"--item",identity,"replacement fixture")
     assert result["command"]["status"] == "succeeded"
     after = scenario.request("queue-read", sessionId=session)
     assert after["items"][0]["id"] == identity and after["items"][0]["fixtureText"]
@@ -2522,10 +2510,10 @@ def test_native_queue_refresh_failure_keeps_receipt(scenario, paired_device):
     item=source["items"][0]["id"]
     paired_device.sessions(scenario.host)
     assert scenario.request("arm-queue-refresh-failure")["armed"]
-    result=paired_device.call("queue","edit","--session",session,"--item",item,"replacement fixture")
+    result=paired_device.call("session", "queue","edit","--session",session,"--item",item,"replacement fixture")
     assert result["command"]["status"] == "succeeded" and result["refresh"] == "unavailable"
     assert "replacement fixture" not in str(result)
-    current=paired_device.call("queue","list","--session",session)
+    current=paired_device.call("session", "queue","list","--session",session)
     assert current["available"] and current["items"][0]["item_id"] == item
     assert scenario.request("queue-read",sessionId=session)["items"][0]["fixtureText"]
     scenario.model.release.set()
@@ -2542,7 +2530,7 @@ def test_native_queue_live_empty_and_cold_passive(scenario, paired_device):
     queue=scenario.request("queue-read",sessionId=session)
     assert queue["available"] and queue["items"] == []
     paired_device.sessions(scenario.host)
-    remote=paired_device.call("queue","list","--session",session)
+    remote=paired_device.call("session", "queue","list","--session",session)
     assert remote["available"] and remote["items"] == []
     scenario.model.release.set()
     scenario.wait_idle(session)
@@ -2553,7 +2541,7 @@ def test_native_queue_live_empty_and_cold_passive(scenario, paired_device):
     queue=scenario.request("queue-read",sessionId=session)
     assert not queue["available"] and queue["items"] == []
     paired_device.sessions(scenario.host)
-    remote=paired_device.call("queue","list","--session",session)
+    remote=paired_device.call("session", "queue","list","--session",session)
     assert not remote["available"] and remote["items"] == []
     assert not scenario.request("state",sessionId=session)["active"]
     assert scenario.model.calls == calls
@@ -2570,11 +2558,11 @@ def test_native_queue_context_rejects_every_mutation(scenario, paired_device):
     assert source["items"][0]["id"] == context and source["items"][0]["placement"] == "CONTEXT"
     assert source["items"][0]["actions"] == []
     paired_device.sessions(scenario.host)
-    visible = paired_device.call("queue", "list", "--session", session)
+    visible = paired_device.call("session", "queue", "list", "--session", session)
     assert visible["items"][0]["item_id"] == context and visible["items"][0]["actions"] == []
     assert "synthetic hidden context" not in str(visible)
     for action in ("edit", "remove", "steer"):
-        args=["queue",action,"--session",session,"--item",context]
+        args=["session", "queue",action,"--session",session,"--item",context]
         if action == "edit": args.append("replacement fixture")
         code, outcome = paired_device.invoke(*args,success=False)
         assert code != 0 and outcome[-1]["error"]["code"] == "conflict"
@@ -2593,10 +2581,10 @@ def test_native_queue_context_is_readonly(scenario, paired_device):
     assert source["items"][0]["id"] == context and source["items"][0]["placement"] == "CONTEXT"
     assert source["items"][0]["actions"] == []
     paired_device.sessions(scenario.host)
-    visible = paired_device.call("queue", "list", "--session", session)
+    visible = paired_device.call("session", "queue", "list", "--session", session)
     assert visible["items"][0]["item_id"] == context and visible["items"][0]["actions"] == []
     assert "synthetic hidden context" not in str(visible)
-    code, outcome = paired_device.invoke("queue", "remove", "--session", session, "--item", context, success=False)
+    code, outcome = paired_device.invoke("session", "queue", "remove", "--session", session, "--item", context, success=False)
     assert code != 0 and outcome[-1]["error"]["code"] == "conflict"
     assert scenario.request("queue-read", sessionId=session)["items"][0]["id"] == context
     scenario.model.release.set()
@@ -2616,15 +2604,15 @@ def test_native_queue_targeted_removal(scenario, paired_device):
     committed = [kind for kind in scenario.request("events", sessionId=session)["types"] if kind in ("user/message", "assistant/message")]
     fingerprint = scenario.request("queue-history-fingerprint", sessionId=session)
     paired_device.sessions(scenario.host)
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     message_ids = scenario.cached(paired_device, session)[1]
     assert message_ids
-    result = paired_device.call("queue", "remove", "--session", session, "--item", identities[0])
+    result = paired_device.call("session", "queue", "remove", "--session", session, "--item", identities[0])
     assert result["command"]["status"] == "succeeded"
     after = scenario.request("queue-read", sessionId=session)
     assert [item["id"] for item in after["items"]] == identities[1:]
     assert [kind for kind in scenario.request("events", sessionId=session)["types"] if kind in ("user/message", "assistant/message")] == committed
-    paired_device.sync(session)
+    paired_device.observe_history(session)
     assert scenario.cached(paired_device, session)[1] == message_ids
     assert scenario.request("queue-history-fingerprint", sessionId=session) == fingerprint
     scenario.model.release.set()
@@ -2635,7 +2623,7 @@ def test_native_steer_during_abort_targets_next_turn(scenario, paired_device):
     from environment import Device, http
     other = Device(scenario.directory / "interrupt-device")
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    other.identity = other.call("pair", invitation["pairingUri"])
+    other.pair(invitation["pairingUri"])
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     other.sessions(scenario.host)
@@ -2668,7 +2656,7 @@ def test_native_delivery_unknown_survives_restart(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan()
     scenario.request("arm-delivery-receipt-loss")
-    code, values = paired_device.invoke("send", "--session", session, "synthetic lost reply", success=False)
+    code, values = paired_device.invoke("session", "send", "--detach", session, "synthetic lost reply", success=False)
     assert code != 0
     assert values[-1]["error"]["code"] == "unknown"
     scenario.wait_idle(session)
@@ -2696,7 +2684,7 @@ def test_native_delivery_receipt_identity_after_restart(scenario, paired_device)
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic initial")
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queue")
+    queued = paired_device.send(session, "synthetic queue")["receipt"]
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
@@ -2729,13 +2717,13 @@ def test_native_queue_real_receipt_correlation(scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    receipt=paired_device.send(session,"synthetic queued",delivery="enqueue-after-run")
+    receipt=paired_device.send(session,"synthetic queued",delivery="enqueue-after-run")["receipt"]
     assert receipt["status"] == "succeeded" and receipt["delivery_id"]
-    queue=paired_device.call("queue","list","--session",session)
+    queue=paired_device.call("session", "queue","list","--session",session)
     assert len(queue["items"]) == 1 and queue["items"][0]["delivery_id"] == receipt["delivery_id"]
     assert queue["items"][0]["item_id"] != receipt["delivery_id"]
     external=scenario.request("queue-add-external",sessionId=session)
-    queue=paired_device.call("queue","list","--session",session)
+    queue=paired_device.call("session", "queue","list","--session",session)
     assert len(queue["items"]) == 2 and queue["items"][1]["delivery_id"] == external["deliveryId"]
     scenario.model.release.set()
 
@@ -2755,7 +2743,7 @@ def test_native_start_if_idle_rejects_local_start_before_observation(scenario, p
     scenario.model.plan(hold=True)
     scenario.request("arm-precheck-running-race")
     code, output = paired_device.invoke(
-        "send", "--session", session, "--delivery", "start-if-idle", "synthetic remote attempt", success=False,
+        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic remote attempt", success=False,
     )
     assert code == 8 and output[-1]["error"]["code"] == "conflict"
     assert scenario.model.started.wait(timeout=15)
@@ -2775,7 +2763,7 @@ def test_native_delivery_unknown_after_completion_race(scenario, paired_device):
     scenario.request("arm-delivery-barrier")
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
-            paired_device.invoke, "send", "--session", session, "synthetic raced unknown", success=False,
+            paired_device.invoke, "session", "send", "--detach", session, "synthetic raced unknown", success=False,
         )
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=10, process=scenario.native)
@@ -2867,7 +2855,7 @@ def _native_queue_revocation_barrier(scenario, paired_device, phase):
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
         row=db.execute("SELECT command_id,status FROM commands ORDER BY created_at DESC LIMIT 1").fetchone()
     assert row and row[1] == "unknown"
-    pending=paired_device.call("commands-pending")["commands"]
+    pending=paired_device.call("operation", "list")["pending_commands"]
     assert len(pending) == 1 and pending[0]["command_id"] == row[0] and pending[0]["request_id"]
     scenario.model.release.set()
 
@@ -2895,7 +2883,7 @@ def test_native_queue_unknown_nested_block_is_redacted(scenario, paired_device):
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
     assert scenario.request("queue-inject-unknown-block", sessionId=session, config={"marker": marker})["armed"]
-    result = paired_device.call("queue", "list", "--session", session)
+    result = paired_device.call("session", "queue", "list", "--session", session)
     assert len(result["items"]) == 1
     assert [block.get("type") for block in result["items"][0]["blocks"]] == ["text", "unavailable"]
     assert marker not in str(result)
@@ -2912,7 +2900,7 @@ def test_native_queue_unknown_receipt_is_bound_to_origin_device(scenario, paired
     other_dir.mkdir()
     other = Device(other_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    other.identity = other.call("pair", invitation["pairingUri"])
+    other.pair(invitation["pairingUri"])
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("start", sessionId=session)
@@ -2921,24 +2909,25 @@ def test_native_queue_unknown_receipt_is_bound_to_origin_device(scenario, paired
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
     other.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     assert scenario.request("count-queue-mutations")["armed"]
     assert scenario.request("arm-queue-receipt-loss")["armed"]
-    code, result = paired_device.invoke("queue", "edit", "--session", session, "--item", item, "replacement fixture", success=False)
+    code, result = paired_device.invoke("session", "queue", "edit", "--session", session, "--item", item, "replacement fixture", success=False)
     assert code != 0 and result[-1]["error"]["code"] == "unknown"
-    pending = paired_device.call("commands-pending")["commands"]
+    pending = paired_device.call("operation", "list")["pending_commands"]
     assert len(pending) == 1
     request_id = pending[0]["request_id"]
     assert scenario.request("queue-mutation-count")["calls"] == 1
-    with pytest.raises(RuntimeError, match="HTTP (403|404)"):
-        http("/v1/requests/" + request_id, token=other.transport_token())
-    with pytest.raises(RuntimeError, match="HTTP (401|403|404)"):
-        scenario.replay_command(paired_device, token_override=other.transport_token())
-    other_code, other_result = other.invoke("command-recover", "--request", request_id, success=False)
+    with scenario.fixture_bearer(other) as bearer:
+        with pytest.raises(RuntimeError, match="HTTP (403|404)"):
+            http("/v1/requests/" + request_id, token=bearer)
+        with pytest.raises(RuntimeError, match="HTTP (401|403|404)"):
+            scenario.replay_command(paired_device, token_override=bearer)
+    other_code, other_result = other.invoke("operation", "recover", request_id, success=False)
     assert other_code != 0
     assert other_result[-1]["error"]["code"] in ("not_found", "unauthorized", "forbidden")
-    assert other.call("commands-pending")["commands"] == []
-    assert paired_device.call("commands-pending")["commands"][0]["request_id"] == request_id
+    assert other.call("operation", "list")["pending_commands"] == []
+    assert paired_device.call("operation", "list")["pending_commands"][0]["request_id"] == request_id
     assert scenario.request("queue-mutation-count")["calls"] == 1
     assert scenario.request("queue-read", sessionId=session)["items"][0]["fixtureText"]
     scenario.model.release.set()
@@ -2957,7 +2946,7 @@ def test_native_queue_unpaired_and_revoked_wire_do_not_reach_source(scenario, pa
     scenario.request("queue-add", sessionId=session)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     query = f"""SELECT json_build_object(
       'requestId',request_id,'hostId',host_id,'deviceId',device_id,'commandId',command_id,
       'kind',kind,'protocolVersion',protocol_version,'channelId',channel_id,
@@ -2970,19 +2959,21 @@ def test_native_queue_unpaired_and_revoked_wire_do_not_reach_source(scenario, pa
         saved[field] = base64.b64encode(base64.b64decode(saved[field] or "")).decode()
     saved["requestId"] = uuid.uuid4().hex
     saved["expiresAtUnixMs"] = str(int((time.time() + 60) * 1000))
-    assert paired_device.call("queue", "edit", "--session", session, "--item", item, "replacement fixture")["command"]["status"] == "succeeded"
+    assert paired_device.call("session", "queue", "edit", "--session", session, "--item", item, "replacement fixture")["command"]["status"] == "succeeded"
     assert scenario.request("count-queue-reads")["armed"]
     assert scenario.request("count-queue-mutations")["armed"]
-    paired_device.revoke()
+    with scenario.fixture_bearer(paired_device) as bearer:
+        assert any(host["hostId"] == scenario.host for host in http("/v1/hosts", token=bearer)["hosts"])
+        paired_device.revoke()
 
-    stranger = Device(scenario.directory / "unpaired-native-queue")
-    for args in (("queue", "list", "--session", session), ("queue", "remove", "--session", session, "--item", item)):
-        code, _ = stranger.invoke(*args, success=False)
-        assert code != 0
-    with pytest.raises(RuntimeError, match="HTTP (401|403)"):
-        http("/v1/hosts/" + scenario.host + "/requests", saved, paired_device._revoked_token)
-    with pytest.raises(RuntimeError, match="HTTP (401|403)"):
-        scenario.replay_command(paired_device, token_override=paired_device._revoked_token)
+        stranger = Device(scenario.directory / "unpaired-native-queue")
+        for args in (("session", "queue", "list", "--session", session), ("session", "queue", "remove", "--session", session, "--item", item)):
+            code, _ = stranger.invoke(*args, success=False)
+            assert code != 0
+        with pytest.raises(RuntimeError, match="HTTP (401|403)"):
+            http("/v1/hosts/" + scenario.host + "/requests", saved, bearer)
+        with pytest.raises(RuntimeError, match="HTTP (401|403)"):
+            scenario.replay_command(paired_device, token_override=bearer)
     assert scenario.request("queue-read-count")["calls"] == 0
     assert scenario.request("queue-mutation-count")["calls"] == 0
     scenario.model.release.set()
@@ -3003,7 +2994,7 @@ def test_native_queue_concurrent_replays_and_private_receipts(scenario, paired_d
     scenario.request("queue-add", sessionId=session)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    item = paired_device.call("queue", "list", "--session", session)["items"][0]["item_id"]
+    item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     assert scenario.request("count-queue-mutations")["armed"]
     assert scenario.request("arm-channel-queue-barrier", config={"phase":"pre-native"})["armed"]
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -3019,7 +3010,7 @@ def test_native_queue_concurrent_replays_and_private_receipts(scenario, paired_d
         code, result = original.result(timeout=25)
     assert code == 0 and result[-1]["data"]["command"]["status"] == "succeeded"
     assert scenario.request("queue-mutation-count")["calls"] == 1
-    assert paired_device.call("queue", "list", "--session", session)["items"][0]["blocks"][0]["text"] == marker
+    assert paired_device.call("session", "queue", "list", "--session", session)["items"][0]["blocks"][0]["text"] == marker
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
         receipt = db.execute("SELECT result_payload FROM commands WHERE command_id=?", (outcomes[0][1]["commandId"],)).fetchone()
     assert receipt and marker.encode() not in (receipt[0] or b"")
@@ -3049,9 +3040,8 @@ def test_native_remote_fork_privacy_in_cli_access_dsh_logs(scenario, paired_devi
     outputs = [scenario.access.output, scenario.native.output]
     positions = {stream.name: Path(stream.name).stat().st_size for stream in outputs}
     result = subprocess.run(
-        [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir",
-         str(paired_device.directory / "client"), "session-fork", "--session", parent],
-        cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG": "error"},
+        paired_device.args("session", 'fork', parent),
+        cwd=ROOT, env=paired_device.env(),
         capture_output=True, text=True, timeout=90, check=False,
     )
     assert result.returncode == 0
@@ -3085,11 +3075,9 @@ def test_native_delivery_privacy_in_receipt_or_diagnostics(scenario, paired_devi
     scenario.model.plan()
     marker = "synthetic-private-" + uuid.uuid4().hex
     result = subprocess.run(
-        [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir",
-         str(paired_device.directory / "client"), "send", "--session", session, marker],
+        paired_device.args("session", 'send', '--detach', session, marker),
         cwd=ROOT,
-        env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"),
-             "WHALEREIN_LOG": "error"},
+        env=paired_device.env(),
         capture_output=True, text=True, timeout=90, check=False,
     )
     assert result.returncode == 0
@@ -3151,25 +3139,24 @@ def test_native_question_two_remote_providers_and_reused_call(scenario, paired_d
     directory.mkdir()
     second = Device(directory)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    second.identity = second.call("pair", invitation["pairingUri"])
+    second.pair(invitation["pairingUri"])
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     session = scenario.create()
     paired_device.sessions(scenario.host)
     second.sessions(scenario.host)
     assert scenario.request("question-race-encrypted-start", sessionId=session)["started"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
-    other_batch = second.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
+    other_batch = second.call("session", "question", "list", "--session", session)["batches"][0]
     assert other_batch["batch_id"] == batch["batch_id"] and other_batch["digest"] == batch["digest"]
     answer = scenario.directory / "remote-race-answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     def args(b):
-        return ["answer", "--session", session, "--batch", b["batch_id"], "--epoch", b["source_epoch"],
+        return ["session", "question", "answer", "--session", session, "--batch", b["batch_id"], "--epoch", b["source_epoch"],
                 "--version", str(b["version"]), "--digest", b["digest"], "--phase", b["phase"], "--input", str(answer)]
     processes = []
     for device in (paired_device, second):
-        process = subprocess.Popen([str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir",
-            str(device.directory / "client"), *args(batch)], cwd=ROOT,
-            env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(device.directory / "secrets"), "WHALEREIN_LOG": "error"},
+        process = subprocess.Popen(device.args("--yes", *args(batch)), cwd=ROOT,
+            env=device.env(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(process)
     results = []
@@ -3187,7 +3174,7 @@ def test_native_question_two_remote_providers_and_reused_call(scenario, paired_d
     assert actual == {
         "selected": "Yes", "pending": False}
     assert scenario.request("question-race-encrypted-start", sessionId=session)["started"]
-    fresh = paired_device.call("questions", "--session", session)["batches"][0]
+    fresh = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert fresh["batch_id"] != batch["batch_id"]
     code, stale = paired_device.invoke(*args(batch), success=False)
     assert code != 0 and stale[-1]["error"]["code"] in ("conflict", "not_found")
@@ -3201,16 +3188,16 @@ def test_native_question_invalid_remote_answers_do_not_settle(scenario, paired_d
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     session = scenario.create()
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "invalid-question-answer.json"
-    args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+    args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
             "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
     for answers in [[], [{"id": "other", "selected": []}], [{"id": "q1", "selected": []}, {"id": "q1", "selected": []}],
                     [{"id": "q1", "selected": [123]}], [{"id": "q1", "selected": [], "custom": 123}]]:
         answer.write_text(json.dumps({"answers": answers}))
         code, result = paired_device.invoke(*args, success=False)
         assert code != 0 and result[-1]["error"]["code"] == "invalid_argument"
-        current = paired_device.call("questions", "--session", session)["batches"]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"]
         assert len(current) == 1 and current[0]["batch_id"] == batch["batch_id"] and current[0]["answerable"]
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     assert paired_device.call(*args)["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -3222,17 +3209,17 @@ def test_native_question_stale_remote_guards_do_not_settle(scenario, paired_devi
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     session = scenario.create()
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = scenario.directory / "stale-question-answer.json"
     answer.write_text(json.dumps({"answers": [{"id": "q1", "selected": ["Yes"]}]}))
     def args(b):
-        return ["answer", "--session", session, "--batch", b["batch_id"], "--epoch", b["source_epoch"],
+        return ["session", "question", "answer", "--session", session, "--batch", b["batch_id"], "--epoch", b["source_epoch"],
                 "--version", str(b["version"]), "--digest", b["digest"], "--phase", b["phase"], "--input", str(answer)]
     bad_digest = ("0" if batch["digest"][0] != "0" else "1") + batch["digest"][1:]
     for changes in [{"source_epoch": "stale-epoch"}, {"version": batch["version"] + 1}, {"digest": bad_digest}]:
         code, result = paired_device.invoke(*args({**batch, **changes}), success=False)
         assert code != 0 and result[-1]["error"]["code"] == "conflict"
-        current = paired_device.call("questions", "--session", session)["batches"]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"]
         assert len(current) == 1 and current[0]["batch_id"] == batch["batch_id"] and current[0]["answerable"]
     assert paired_device.call(*args(batch))["question_receipt"]["phase"] == "QUESTION_SETTLED"
     assert scenario.request("question-result-remote-fixture", sessionId=session) == {"selected": "Yes", "pending": False}
@@ -3244,10 +3231,10 @@ def test_native_question_multiple_answers_are_atomic_and_preserve_labels(scenari
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     session = scenario.create()
     assert scenario.request("question-multiple-native-start", sessionId=session)["started"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert [(q["id"], q["multi_select"]) for q in batch["questions"]] == [("q1", True), ("q2", False)]
     answer = scenario.directory / "multiple-native-answer.json"
-    args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+    args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
             "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
     for values in [[{"id": "q1", "selected": ["A", "C"]}],
                    [{"id": "q1", "selected": []}, {"id": "q1", "selected": []}],
@@ -3255,7 +3242,7 @@ def test_native_question_multiple_answers_are_atomic_and_preserve_labels(scenari
         answer.write_text(json.dumps({"answers": values}))
         code, result = paired_device.invoke(*args, success=False)
         assert code != 0 and result[-1]["error"]["code"] == "invalid_argument"
-        current = paired_device.call("questions", "--session", session)["batches"]
+        current = paired_device.call("session", "question", "list", "--session", session)["batches"]
         assert len(current) == 1 and current[0]["batch_id"] == batch["batch_id"] and current[0]["answerable"]
     values = [{"id": "q2", "selected": ["No"], "custom": "Fixture custom"}, {"id": "q1", "selected": ["C", "A"]}]
     answer.write_text(json.dumps({"answers": values}))
@@ -3275,10 +3262,10 @@ def test_native_question_multiple_continued_answers_are_atomic(scenario, paired_
     try:
         wait(lambda: scenario.model.calls >= 2, timeout=15, process=scenario.native)
         wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=5, process=scenario.native)
-        batch = paired_device.call("questions", "--session", session)["batches"][0]
+        batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
         assert [(q["id"], q["multi_select"]) for q in batch["questions"]] == [("q1", True), ("q2", False)]
         answer = scenario.directory / "multiple-continued-answer.json"
-        args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
+        args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"],
                 "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
         for values in [[{"id": "q1", "selected": ["A"]}],
                        [{"id": "q1", "selected": []}, {"id": "q1", "selected": []}],

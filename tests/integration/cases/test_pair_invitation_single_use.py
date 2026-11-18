@@ -40,11 +40,11 @@ def test_second_device_cannot_reuse_a_consumed_invitation(scenario):
         "/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin
     )
     first = Device(scenario.directory, "client")
-    first.identity = first.call("pair", invitation["pairingUri"])
+    first.identity = first.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     first_device_id = first.identity["device_id"]
 
     second = Device(scenario.directory, "client-2")
-    code, envelopes = second.invoke("pair", invitation["pairingUri"], success=False)
+    code, envelopes = second.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"], success=False)
     assert code == 8, "a consumed invitation must report a deterministic conflict"
     error = envelopes[-1]["error"]
     assert error["code"] == "conflict"

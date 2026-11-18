@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -120,53 +121,70 @@ def http(path, body=None, token=None, *, return_status=False, include_conflict_c
         raise RuntimeError(f"Access returned HTTP {error.code}") from None
 
 
+device_keyring = ContextVar("device_keyring", default=None)
+
+
 class Device:
-    """One independently paired CLI identity rooted below a case directory.
+    """One selected Standalone configuration in a private test keyring."""
 
-    `namespace` separates the data directory, secret store and cache for a
-    second physical device. The default keeps every existing case on the
-    original `client`/`secrets` paths.
-    """
-
-    def __init__(self, directory, namespace="client"):
+    def __init__(self, directory, namespace="client", *, ca_certificate=None):
+        if not namespace or Path(namespace).name != namespace or namespace in {".", ".."}:
+            raise ValueError("Device fixture namespace must name one directory")
         self.directory = directory
         self.namespace = namespace
+        self.config_path = directory / f"{namespace}.toml"
         self.identity = None
         self.extra_env = {}
+        self._keyring = device_keyring.get()
+        directory.mkdir(parents=True, exist_ok=True)
+        if not self.config_path.exists():
+            self.configure_tls(ca_certificate)
 
     @property
-    def data_dir(self):
+    def instance_dir(self):
         return self.directory / self.namespace
 
     @property
-    def secret_dir(self):
-        return self.directory / (
-            "secrets" if self.namespace == "client" else self.namespace + "-secrets"
+    def data_dir(self):
+        """The runtime state directory below the instance manifest."""
+        return self.instance_dir / "state"
+
+    def configure_tls(self, ca_certificate):
+        """Write the selected fixture TOML with optional Standalone CA trust."""
+        data = (
+            'version = 1\nservice = "standalone"\n'
+            f'data_dir = {json.dumps(self.namespace, ensure_ascii=False)}\n'
         )
+        if ca_certificate is not None:
+            data += f'standalone_ca_certificate = {json.dumps(str(ca_certificate), ensure_ascii=False)}\n'
+        self.config_path.write_text(data, encoding="utf-8")
+
+    def args(self, *commands):
+        return [
+            str(ROOT / "target/debug/whalerein"),
+            "--config", str(self.config_path),
+            "--json",
+            *commands,
+        ]
+
+    def keyring_env(self):
+        if self._keyring is None:
+            raise RuntimeError("Device requires a private integration keyring")
+        return {**os.environ, **self._keyring()}
 
     def env(self, **overrides):
-        return {
-            **os.environ,
-            "WHALEREIN_SECRET_BACKEND": "file:" + str(self.secret_dir),
-            "WHALEREIN_LOG": "error",
-            **self.extra_env,
-            **overrides,
-        }
+        return {**self.keyring_env(), **self.extra_env, **overrides}
 
-    def invoke(self, *args, success=True, stdin_text=None, env=None):
-        # `stdin_text` is an explicit pipe: passing nothing must not inherit the
-        # terminal, and an empty string must still close the stream.
-        streams = {} if stdin_text is None else {"input": stdin_text}
+    def has_secret(self, role):
+        from client_environment import fixture_has_secret
+
+        return fixture_has_secret(self, role)
+
+    def invoke(self, *commands, success=True, stdin_text=None, env=None):
+        streams = {"stdin": subprocess.DEVNULL} if stdin_text is None else {"input": stdin_text}
         try:
             result = subprocess.run(
-                [
-                    str(ROOT / "target/debug/whalerein"),
-                    "--json",
-                    "--yes",
-                    "--data-dir",
-                    str(self.data_dir),
-                    *args,
-                ],
+                self.args(*commands),
                 cwd=ROOT,
                 env=self.env(**(env or {})),
                 capture_output=True,
@@ -177,35 +195,42 @@ class Device:
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError("CLI operation timed out") from None
-        if success and result.returncode != 0:
-            raise AssertionError(f"CLI {args[0]} failed with exit {result.returncode}")
         values = [
             json.loads(line) for line in result.stdout.splitlines() if line.strip()
         ]
-        assert values and all(v.get("schema") == "whalerein/v1" for v in values), (
-            "Missing CLI envelope"
+        assert values and all(v.get("schema") == "whalerein/client/v1" for v in values), (
+            "Missing selected-client CLI envelope"
         )
+        if success and result.returncode != 0:
+            code = values[-1].get("error", {}).get("code", "unknown")
+            raise AssertionError(f"CLI {commands[:2]} failed with exit {result.returncode} ({code})")
         return result.returncode, values
 
-    def call(self, *args):
-        return self.invoke(*args)[1][-1].get("data", {})
+    def call(self, *commands, **kwargs):
+        return self.invoke(*commands, **kwargs)[1][-1].get("data", {})
+
+    def pair(self, invitation, *options):
+        self.identity = self.call(
+            "host", "connect", "--invite-stdin", "--yes", *options, stdin_text=invitation
+        )
+        return self.identity
 
     def hosts(self):
-        return self.call("hosts")["hosts"]
+        return self.call("host", "list")["hosts"]
 
     def sessions(self, host):
-        return self.call("sessions", "--host", host)["sessions"]
+        return self.call("session", "list", "--host", host)["sessions"]
 
     def send(self, session, message, delivery=None):
         options = ["--delivery", delivery] if delivery else []
-        return self.call("send", "--session", session, *options, message)
+        return self.call("session", "send", session, "--detach", *options, "--", message)
 
     def approvals(self, session):
-        return self.call("approvals", "--session", session)["approvals"]
+        return self.call("session", "approval", "list", "--session", session)["approvals"]
 
     def resolve(self, decision, approval):
         return self.call(
-            decision,
+            "session", "approval", decision,
             "--request",
             approval["approval_id"],
             "--digest",
@@ -215,16 +240,36 @@ class Device:
         )
 
     def interrupt(self, session):
-        return self.call("interrupt", "--session", session)
+        return self.call("session", "interrupt", session)
 
-    def sync(self, session):
-        return self.call("sync", "--session", session)
+    def observe_history(self, session, host=None):
+        """Wait for the selected watch to finish syncing its committed baseline."""
+        scope = ["--host", host] if host is not None else []
+        watcher = self.start_watch("session", "watch", session, "--timeout", "20", *scope)
+        try:
+            def is_scoped_state(value):
+                event = value.get("data", {}).get("event", {})
+                target = event.get("session", {})
+                return (
+                    event.get("type") == "state"
+                    and target.get("session_id") == session
+                    and bool(target.get("host_id"))
+                    and (host is None or target["host_id"] == host)
+                )
+
+            return watcher.wait(is_scoped_state, timeout=20)["data"]["event"]
+        finally:
+            watcher.close()
 
     def cached_history_state(self, host, session):
-        """Read committed identity/cursor metadata without decrypting or exporting payloads."""
+        """Read committed identity/cursor metadata without decrypting payloads."""
         import sqlite3
+        from contextlib import closing
 
-        with sqlite3.connect(self.data_dir / "cache.sqlite3") as cache:
+        path = self.data_dir / "cache.sqlite3"
+        if not path.is_file():
+            return None, ()
+        with closing(sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)) as cache:
             row = cache.execute(
                 "SELECT cursor FROM conversation_views WHERE host_id=? AND session_id=?",
                 (host, session),
@@ -237,22 +282,16 @@ class Device:
         return (row[0] if row else None, tuple(row[0] for row in messages))
 
     def revoke(self):
-        self._revoked_token = self.transport_token()
-        return self.call("revoke")
+        return self.call("device", "revoke", "--yes")
 
-    def transport_token(self):
-        key = "whalerein:v1:device-token:" + self.identity["device_id"]
-        return (self.secret_dir / key.encode().hex()).read_text()
-
-    def revoked_access_denied(self):
-        try:
-            http("/v1/hosts", token=self._revoked_token)
-        except RuntimeError as error:
-            return any(f"HTTP {status}" in str(error) for status in (401, 403))
-        return False
+    def cli_access_denied(self):
+        exit_code, values = self.invoke("host", "list", success=False)
+        return exit_code == 4 and values[-1].get("error", {}).get("code") in {
+            "revoked", "not_paired", "unauthorized", "forbidden",
+        }
 
     def events(self, session):
-        _, values = self.invoke("tail", "--session", session, "--timeout", "3")
+        _, values = self.invoke("session", "watch", session, "--timeout", "3")
         return [
             value["data"]["event"]
             for value in values
@@ -261,15 +300,15 @@ class Device:
 
     def send_exit(self, session):
         return self.invoke(
-            "send", "--session", session, "fixture message", success=False
+            "session", "send", session, "fixture message", "--detach", success=False
         )[0]
 
     def sessions_exit(self, host):
-        return self.invoke("sessions", "--host", host, success=False)[0]
+        return self.invoke("session", "list", "--host", host, success=False)[0]
 
-    def start_watch(self, *args, env=None):
-        """Start a long-running command whose NDJSON output is observed live."""
-        return Watcher(self, *args, env=env)
+    def start_watch(self, *commands, env=None):
+        """Start a command whose NDJSON output is observed live."""
+        return Watcher(self.args(*commands), self.env(**(env or {})))
 
 
 class Watcher:
@@ -280,22 +319,14 @@ class Watcher:
     observation behind command completion.
     """
 
-    def __init__(self, device, *args, env=None):
-        self.device = device
+    def __init__(self, argv, env):
         self.values = []
         self._lines = queue.Queue()
         self.stderr = []
         self.process = subprocess.Popen(
-            [
-                str(ROOT / "target/debug/whalerein"),
-                "--json",
-                "--yes",
-                "--data-dir",
-                str(device.data_dir),
-                *args,
-            ],
+            argv,
             cwd=ROOT,
-            env=device.env(**(env or {})),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -344,7 +375,10 @@ class Watcher:
         raise TimeoutError("Expected CLI watcher event was not observed")
 
     def wait_exit(self, timeout=15):
-        return self.process.wait(timeout=timeout)
+        code = self.process.wait(timeout=timeout)
+        for reader in self._threads:
+            reader.join(timeout=1)
+        return code
 
     def close(self):
         if self.process.poll() is None:
@@ -565,11 +599,9 @@ log:
         )
 
     def pair(self, namespace="client"):
-        device = Device(self.directory, namespace)
-        if getattr(self, "tls_ca", None):
-            device.extra_env = {"WHALEREIN_CA_FILE": self.tls_ca}
+        device = Device(self.directory, namespace, ca_certificate=getattr(self, "tls_ca", None))
         invitation = http("/v1/pairing/invitations", {"hostId": self.host}, self.admin)
-        device.identity = device.call("pair", invitation["pairingUri"])
+        device.pair(invitation["pairingUri"])
         return device
 
     def pair_second(self):
@@ -582,7 +614,6 @@ log:
             return connection.execute("SELECT 1 FROM peer_keys WHERE device_id=?", (device_id,)).fetchone() is not None
 
     def revoke_from_host(self, device):
-        device._revoked_token = device.transport_token()
         result = subprocess.run(
             ["node", str(ROOT / "tests/integration/drivers/transport/host-revoke.mjs")],
             cwd=ROOT, env={**os.environ,"WHALEREIN_DSH_SOCKET":str(self.socket),
@@ -590,6 +621,38 @@ log:
             capture_output=True,text=True,timeout=20,check=False)
         if result.returncode != 0 or result.stdout.strip() != "host-revoke-ok":
             raise AssertionError("Signed host revocation failed")
+
+    def fixture_bearer(self, device):
+        """Issue a synthetic HTTP credential in this case's isolated database."""
+        import hashlib
+        import re
+        from contextlib import contextmanager
+
+        device_id = device.identity["device_id"]
+        if not re.fullmatch(r"case_[0-9a-f]{32}", self.schema):
+            raise ValueError("Invalid fixture schema")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", device_id):
+            raise ValueError("Invalid fixture Device identity")
+
+        def sql(statement):
+            subprocess.run(
+                ["psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
+                 "-d", "whalerein_test", "-v", "ON_ERROR_STOP=1", "-c", statement],
+                check=True, capture_output=True, timeout=5,
+            )
+
+        @contextmanager
+        def credential():
+            token = uuid.uuid4().hex + uuid.uuid4().hex
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            table = self.schema + ".device_credentials"
+            sql(f"INSERT INTO {table}(auth_hash,device_id) VALUES (decode('{digest}','hex'),'{device_id}')")
+            try:
+                yield token
+            finally:
+                sql(f"DELETE FROM {table} WHERE auth_hash = decode('{digest}','hex')")
+
+        return credential()
 
     def replay_command(self, device, changed=False, token_override=None, route_host_override=None, include_conflict_code=False):
         import base64
@@ -633,19 +696,24 @@ log:
             payload["payloadDigest"] = base64.b64encode(
                 hashlib.sha256(body).digest()
             ).decode()
-        token = token_override if token_override is not None else device.transport_token()
-        try:
-            return http(
-                "/v1/hosts/" + (route_host_override or self.host) + "/requests",
-                payload,
-                token,
-                return_status=True,
-                include_conflict_code=include_conflict_code,
-            )
-        except RuntimeError as error:
-            if "HTTP 409" in str(error):
-                return 409, {}
-            raise
+        from contextlib import nullcontext
+
+        credential = (
+            nullcontext(token_override) if token_override is not None else self.fixture_bearer(device)
+        )
+        with credential as token:
+            try:
+                return http(
+                    "/v1/hosts/" + (route_host_override or self.host) + "/requests",
+                    payload,
+                    token,
+                    return_status=True,
+                    include_conflict_code=include_conflict_code,
+                )
+            except RuntimeError as error:
+                if "HTTP 409" in str(error):
+                    return 409, {}
+                raise
 
     def close(self):
         errors = []

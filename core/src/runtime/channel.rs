@@ -272,6 +272,7 @@ pub fn required_capability(payload: &RequestPayload) -> Option<Capability> {
         Payload::WaitSession(_) | Payload::CancelSessionWait(_) | Payload::ReadWaitState(_) => {
             Some(Capability::Sync)
         }
+        Payload::ReadMessageReply(_) => None,
         Payload::Ping(_) | Payload::GetHostCapabilities(_) => None,
     }
 }

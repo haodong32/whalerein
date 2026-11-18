@@ -15,17 +15,17 @@ def test_gx05_native_default_open_capabilities_preserve_existing_operations(scen
     """Default production advertisement exposes the optional capabilities without weakening send or the local question provider."""
     session = scenario.create()
     paired_device.sessions(scenario.host)
-    created = paired_device.call("session-create", "--host", scenario.host)["lifecycle_receipt"]
+    created = paired_device.call('session', 'create', "--host", scenario.host)["lifecycle_receipt"]
     assert created["disposition"] == "READY"
-    assert paired_device.call("models", "--host", scenario.host)["groups"]
-    assert "available" in paired_device.call("queue", "list", "--session", session)
-    assert "batches" in paired_device.call("questions", "--session", session)
-    assert paired_device.call("wait", "--session", session, "--timeout", "2")["reason"] in ("idle", "timeout", "input-required")
-    code, values = paired_device.invoke("session-fork", "--session", session, success=False)
+    assert paired_device.call('session', 'models', "--host", scenario.host)["groups"]
+    assert "available" in paired_device.call('session', 'queue', "list", "--session", session)
+    assert "batches" in paired_device.call('session', 'question', 'list', "--session", session)
+    assert paired_device.call('session', 'wait', session, "--timeout", "2")["reason"] in ("idle", "timeout", "input-required")
+    code, values = paired_device.invoke('session', 'fork', session, success=False)
     assert code != 0 and values[-1]["error"]["code"] != "unsupported_capability"
     assert scenario.request("question-root-probe", sessionId=session)["answered"]
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic baseline", delivery="start-if-idle")["status"] == "succeeded"
+    assert paired_device.send(session, "synthetic baseline", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -40,10 +40,7 @@ def test_gx05_native_disable_keeps_existing_wait_scoped(scenario, paired_device)
     scenario.request("start", sessionId=session)
     assert scenario.model.started.wait(timeout=15)
     assert scenario.request("gx-arm-wait-capability")["enabled"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "wait", "--session", session, "--timeout", "15",
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", "wait", session, "--timeout", "15"), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         stage("await-active")
         wait(lambda: scenario.request("gx-wait-active")["active"] == 1, timeout=10)
@@ -57,7 +54,7 @@ def test_gx05_native_disable_keeps_existing_wait_scoped(scenario, paired_device)
         stage("cleanup")
         assert scenario.request("gx-wait-active")["active"] == 0
         stage("new-wait")
-        code, values = paired_device.invoke("wait", "--session", session, "--timeout", "2", success=False)
+        code, values = paired_device.invoke('session', 'wait', session, "--timeout", "2", success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
     finally:
         scenario.model.release.set()
@@ -71,10 +68,7 @@ def test_gx05_native_disable_preserves_accepted_create(scenario, paired_device):
     assert scenario.request("test-enable-gx")["enabled"]
     before = {row["session_id"] for row in paired_device.sessions(scenario.host)}
     assert scenario.request("gx-hold-create")["armed"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"),
-        "session-create", "--host", scenario.host,
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args("session", "create", "--host", scenario.host), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     released = False
     try:
         wait(lambda: scenario.request("gx-held-create-status")["entered"], timeout=10)
@@ -87,7 +81,7 @@ def test_gx05_native_disable_preserves_accepted_create(scenario, paired_device):
         identity = result["data"]["lifecycle_receipt"]["session_id"]
         after = {row["session_id"] for row in paired_device.sessions(scenario.host)}
         assert after - before == {identity}
-        code, values = paired_device.invoke("session-create", "--host", scenario.host, success=False)
+        code, values = paired_device.invoke('session', 'create', "--host", scenario.host, success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
         assert {row["session_id"] for row in paired_device.sessions(scenario.host)} == after
     finally:
@@ -130,28 +124,26 @@ def test_gx05_native_disable_one_inflight_mutation(operation, scenario, paired_d
         scenario.request("queue-add", sessionId=session)
         assert scenario.request("queue-read", sessionId=session)["available"]
         paired_device.sessions(scenario.host)
-        queue = paired_device.call("queue", "list", "--session", session)
+        queue = paired_device.call('session', 'queue', "list", "--session", session)
         item = queue["items"][0]["item_id"]
         independent_item = queue["items"][1]["item_id"]
     elif operation in ("send", "steer"):
         scenario.model.plan()
     if operation == "model":
-        catalog = paired_device.call("models", "--host", scenario.host)
+        catalog = paired_device.call('session', 'models', "--host", scenario.host)
         group = next(group for group in catalog["groups"] if group["models"])
-        selection = ["model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"]]
+        selection = ["session", "model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"]]
     args = {
-        "send": ["send", "--session", session, "--delivery", "enqueue-after-run", "synthetic turn"],
-        "steer": ["send", "--session", session, "--delivery", "steer", "synthetic turn"],
+        "send": ["session", "send", session, "--detach", "--delivery", "enqueue-after-run", "synthetic turn"],
+        "steer": ["session", "send", session, "--detach", "--delivery", "steer", "synthetic turn"],
         "model": selection if operation == "model" else [],
-        "fork": ["session-fork", "--session", session],
+        "fork": ["session", "fork", session],
     }
     if operation.startswith("queue_"):
         action = {"queue_edit":"edit", "queue_remove":"remove", "queue_promote":"steer"}[operation]
-        args[operation] = ["queue", action, "--session", session, "--item", item] + (["synthetic replacement"] if action == "edit" else [])
+        args[operation] = ["session", "queue", action, "--session", session, "--item", item] + (["synthetic replacement"] if action == "edit" else [])
     assert scenario.request("gx-hold-native-operation", config={"operation":operation})["armed"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), *args[operation],
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND":"file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args(*args[operation]), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     released = False
     try:
         stage("await-entry")
@@ -166,7 +158,12 @@ def test_gx05_native_disable_one_inflight_mutation(operation, scenario, paired_d
         stage("accepted-result", exit=process.returncode, error_code=result.get("error",{}).get("code"))
         assert process.returncode == 0
         data = result["data"]
-        original = data["command"] if operation.startswith("queue_") else data
+        if operation.startswith("queue_"):
+            original = data["command"]
+        elif operation in ("send", "steer"):
+            original = data["receipt"]
+        else:
+            original = data
         assert original["status"] == "succeeded"
         assert scenario.request("gx-held-native-status")["calls"] == 1
         paired_device.sessions(scenario.host)
@@ -176,18 +173,18 @@ def test_gx05_native_disable_one_inflight_mutation(operation, scenario, paired_d
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
         assert scenario.request("gx-held-native-status")["calls"] == 1
         # An independently enabled operation remains usable after withdrawal.
-        assert paired_device.call("models", "--host", scenario.host)["groups"]
+        assert paired_device.call('session', 'models', "--host", scenario.host)["groups"]
         if operation in ("send", "steer"):
             alternative = "steer" if operation == "send" else "enqueue-after-run"
-            assert paired_device.send(session, "synthetic independent", delivery=alternative)["status"] == "succeeded"
+            assert paired_device.send(session, "synthetic independent", delivery=alternative)["receipt"]["status"] == "succeeded"
         elif operation.startswith("queue_"):
             if operation == "queue_remove":
-                independent = paired_device.call("queue", "edit", "--session", session, "--item", independent_item, "synthetic independent")
+                independent = paired_device.call('session', 'queue', "edit", "--session", session, "--item", independent_item, "synthetic independent")
             else:
-                independent = paired_device.call("queue", "remove", "--session", session, "--item", independent_item)
+                independent = paired_device.call('session', 'queue', "remove", "--session", session, "--item", independent_item)
             assert independent["command"]["status"] == "succeeded"
         else:
-            assert paired_device.send(session, "synthetic independent", delivery="start-if-idle")["status"] == "succeeded"
+            assert paired_device.send(session, "synthetic independent", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
         assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
         stage("done")
     finally:
@@ -208,15 +205,13 @@ def test_gx05_native_disable_open_answer_during_claim(scenario, paired_device):
     session = scenario.create()
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call('session', 'question', 'list', "--session", session)["batches"][0]
     assert batch["phase"] == "QUESTION_OPEN" and batch["answerable"]
     answer = scenario.directory / "gx-open-answer.json"
     answer.write_text(json.dumps({"answers":[{"id":"q1", "selected":["Yes"]}]}))
-    args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-open-answer"]
+    args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-open-answer"]
     assert scenario.request("gx-hold-question-claim")["armed"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), *args,
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND":"file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args(*args), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     released = False
     try:
         wait(lambda: scenario.request("gx-held-question-status")["entered"], timeout=15)
@@ -230,8 +225,8 @@ def test_gx05_native_disable_open_answer_during_claim(scenario, paired_device):
         # The broker remains active here; this case exercises admission and an
         # existing claim, not complete disable/teardown of the local provider.
         assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-        next_batch = paired_device.call("questions", "--session", session)["batches"][0]
-        next_args = ["answer", "--session", session, "--batch", next_batch["batch_id"], "--epoch", next_batch["source_epoch"], "--version", str(next_batch["version"]), "--digest", next_batch["digest"], "--phase", next_batch["phase"], "--input", str(answer)]
+        next_batch = paired_device.call('session', 'question', 'list', "--session", session)["batches"][0]
+        next_args = ["session", "question", "answer", session, "--batch", next_batch["batch_id"], "--epoch", next_batch["source_epoch"], "--version", str(next_batch["version"]), "--digest", next_batch["digest"], "--phase", next_batch["phase"], "--input", str(answer)]
         code, values = paired_device.invoke(*next_args, success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
     finally:
@@ -250,24 +245,22 @@ def test_gx05_native_disable_continued_answer_during_admission(scenario, paired_
     paired_device.sessions(scenario.host)
     other = Device(scenario.directory / "gx-other-device")
     invitation = http("/v1/pairing/invitations", {"hostId":scenario.host}, scenario.admin)
-    other.identity = other.call("pair", invitation["pairingUri"])
+    other.identity = other.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     other.sessions(scenario.host)
     scenario.model.plan("question", hold=True)
     paired_device.send(session, "synthetic question", delivery="enqueue-after-run")
     wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=15, process=scenario.native)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call('session', 'question', 'list', "--session", session)["batches"][0]
     assert batch["phase"] == "QUESTION_CONTINUED" and batch["answerable"]
     answer = scenario.directory / "gx-continued-answer.json"
     answer.write_text(json.dumps({"answers":[{"id":"q1", "selected":["Yes"]}]}))
-    args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-continued-answer"]
+    args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-continued-answer"]
     assert scenario.request("gx-hold-continued-answer")["armed"]
-    process = subprocess.Popen([
-        str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), *args,
-    ], cwd=ROOT, env={**os.environ, "WHALEREIN_SECRET_BACKEND":"file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG":"error"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(paired_device.args(*args), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: scenario.request("gx-held-continued-status")["entered"], timeout=15)
         assert scenario.request("gx-disable-one-capability", config={"operation":"question_continued"})["disabled"]
-        next_args = ["answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
+        next_args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
         code, values = other.invoke(*next_args, success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
         assert scenario.request("gx-held-continued-status")["calls"] == 0

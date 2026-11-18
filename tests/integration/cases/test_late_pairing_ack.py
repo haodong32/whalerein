@@ -30,7 +30,10 @@ def test_late_pairing_ack_recovers_after_cleanup_without_client_retry(scenario, 
         other.start_native()
         invite=http('/v1/pairing/invitations',{'hostId':other.host},scenario.admin)['pairingUri']
         assert other.request('gx-hold-pair-commit-result')['armed']
-        process=subprocess.Popen([str(ROOT/'target/debug/whalerein'),'--json','--yes','--data-dir',str(paired_device.directory/'client'),'pair',invite],cwd=ROOT,env={**os.environ,'WHALEREIN_SECRET_BACKEND':'file:'+str(paired_device.directory/'secrets'),'WHALEREIN_LOG':'error'},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        process = subprocess.Popen(paired_device.args("host", "connect", "--invite-stdin", "--yes"), cwd=ROOT, env=paired_device.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process.stdin.write(invite)
+        process.stdin.close()
+        process.stdin = None
         wait(lambda:other.request('gx-held-pair-commit-result')['entered'],timeout=20)
         Path('/reports/late-stage').write_text('held')
         output,_=process.communicate(timeout=40)
@@ -42,10 +45,11 @@ def test_late_pairing_ack_recovers_after_cleanup_without_client_retry(scenario, 
         Path('/reports/late-stage').write_text('ack-stored')
         sql("DELETE FROM pairing_operations WHERE host_id='host-integration-2'; DELETE FROM pairing_tokens WHERE host_id='host-integration-2'; UPDATE requests SET request_body=''::bytea,result_body=''::bytea WHERE host_id='host-integration-2' AND request_id LIKE 'pair-commit-%'")
         Path('/reports/late-stage').write_text('cleaned')
-        code,values=paired_device.invoke('pair-resume',success=False)
+        operation_id, _ = paired_device.call('operation', 'list')['pending_pairing']
+        code,values=paired_device.invoke('operation', 'recover', operation_id,success=False)
         Path('/reports/late-stage').write_text(f"resume-exit={code} code={values[-1].get('error',{}).get('code')}")
         assert code==0
-        recovered=values[-1]['data']
+        recovered=values[-1]['data']['connection']
         assert recovered['host_id']==other.host
         assert {scenario.host,other.host}<={row['host_id'] for row in paired_device.hosts()}
     finally:

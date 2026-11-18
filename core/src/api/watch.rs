@@ -149,6 +149,7 @@ impl Pump {
 }
 
 /// Bounded, secret-free candidate list for an ambiguous session resolution.
+#[cfg(test)]
 fn bounded_host_candidates(hosts: &[String]) -> String {
     const MAX_HOSTS: usize = 8;
     const MAX_HOST_CHARS: usize = 48;
@@ -167,6 +168,7 @@ fn bounded_host_candidates(hosts: &[String]) -> String {
 impl Core {
     /// Resolve an explicit Host and session once, verifying that the Host is
     /// still advertised by the current Access listing.
+    #[cfg(test)]
     pub async fn scoped_session_key(
         &self,
         host_id: &str,
@@ -189,6 +191,7 @@ impl Core {
 
     /// Resolve an unqualified session against a fresh authorized Host listing.
     /// A partial discovery cannot prove uniqueness.
+    #[cfg(test)]
     pub async fn session_key(&self, session_id: &str) -> CoreResult<SessionKey> {
         if session_id.is_empty() {
             return Err(CoreError::InvalidInput("session identity missing".into()));

@@ -157,6 +157,9 @@ FixtureAdapter.prototype.updatePendingQueue = function(sessionId, command, conte
 }
 FixtureAdapter.prototype.answerContinuedQuestion = function(request, context = {}) { return this.callScoped('answerContinuedQuestion', [request, {expiresAt:context?.expiresAt ?? 0}], context?.signal) }
 FixtureAdapter.prototype.resolveApproval = function(id, decision, digest, version, context = {}) { return this.callScoped('resolveApproval', [id, decision, digest, version, {expiresAt:context?.expiresAt ?? 0}], context?.signal) }
+FixtureAdapter.prototype.readMessageReply = function(sessionId, messageId, signal) {
+  return this.callScoped('readMessageReply', [sessionId, messageId], signal)
+}
 for(const method of ['nativeHead','getSessionSnapshot','listApprovals','sendUserMessage','interrupt','getApproval','selectSessionModel','forkSession']) {
   FixtureAdapter.prototype[method]=function(...args){return this.call(method,...args)}
 }

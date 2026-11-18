@@ -1600,14 +1600,14 @@ test('duplicate clicks start one managed connection and browser blocking leaves 
   try {
     globalThis.window = { ...originalWindow, open: (...args) => { opened.push(args); return null } }
     let finish
-    runtime.remote.whalerein.startConnect = (request) => {
-      runtime.calls.push(['startConnect', request])
+    runtime.remote.whalerein.startConnect = (...args) => {
+      runtime.calls.push(['startConnect', ...args])
       return new Promise((resolve) => { finish = resolve })
     }
     const connect = managedButton(runtime, '连接到 WhaleRein Cloud')
     const first = connect.props.onClick()
     const second = connect.props.onClick()
-    assert.equal(runtime.calls.length, 1, 'a second click while requesting must not create another intent')
+    assert.deepEqual(runtime.calls, [['startConnect']], 'the gateway action has no client-supplied arguments and starts only once')
     runtime.setCloudState('awaiting_approval', { approvalUrl: 'https://app.example/approve/request-1' })
     finish({ ok: true, value: { approvalUrl: 'https://app.example/approve/request-1' } })
     await Promise.all([first, second])

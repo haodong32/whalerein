@@ -62,12 +62,11 @@ acceptance claim.
   scoped directory, membership enforcement or capacity model, and its regional
   client still uses a deployment admin bearer rather than a scoped service
   identity.
-- **Account authentication is deferred.** The official client does not ship a
-  Bearer account session: device-bound credentials remain required, and the
-  pinned provider does not yet support DPoP. When a maintained provider
-  officially supports DPoP, re-run the native feasibility gate before
-  implementing login, refresh, directory, device registration or pairing
-  authorization. Do not add a Bearer fallback in the meantime.
+- **CLI account authentication and the read-only Host directory** use
+  provider-issued bearer access tokens addressed to the Cloud CLI API.
+  Credentials are scoped to a local profile and stored in its SecretStore.
+  Device registration and account-authorized regional pairing remain separate
+  from the CLI account session.
 
 ### Host ownership proof (v1)
 

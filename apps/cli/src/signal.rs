@@ -109,7 +109,7 @@ pub fn interruption_outcome(
         .map(|pending| format!("{} (request {})", pending.command_id, pending.request_id))
         .collect();
     let hint = format!(
-        "Interrupted after submission; command {} may have been accepted. Inspect retained identities with `whalerein commands-pending`, then read the result with `whalerein command-recover --request <request-id>`. Do not resend.",
+        "Interrupted after submission; command {} may have been accepted. Inspect retained identities with `whalerein operation list`, then read the result with `whalerein operation recover <request-id>`. Do not resend.",
         described.join(", ")
     );
     let mut outcome =
@@ -146,7 +146,7 @@ mod tests {
         };
         let outcome = interruption_outcome(&command, &[], &[], "trace");
         assert_eq!(outcome.exit, 2);
-        assert_eq!(outcome.command, "wait");
+        assert_eq!(outcome.command, "session.wait");
         assert_eq!(outcome.to_json()["error"]["code"], "cancelled");
         let error = outcome.error.as_ref().unwrap();
         assert_eq!(error.code, "cancelled");
@@ -160,6 +160,9 @@ mod tests {
             session: "session-1".to_owned(),
             text: "hello".to_owned(),
             delivery: crate::cli::Delivery::EnqueueAfterRun,
+            detach: false,
+            timeout: None,
+            operation_id: None,
         };
         let before = [pending("request-old")];
         let after = [pending("request-old"), pending("request-new")];
@@ -179,8 +182,8 @@ mod tests {
         let error = outcome.error.unwrap();
         assert!(error.message.contains("command-request-new"));
         assert!(error.message.contains("request-new"));
-        assert!(error.message.contains("commands-pending"));
-        assert!(error.message.contains("command-recover --request"));
+        assert!(error.message.contains("operation list"));
+        assert!(error.message.contains("operation recover"));
         assert!(error.message.contains("Do not resend"));
         assert!(!error.message.contains("hello"));
         assert!(!error.message.contains("request-old"));

@@ -57,38 +57,36 @@ def _start_second_host(scenario):
 
 
 @pytest.mark.description(
-    "With two authorized Hosts an approval decision without --host names both candidate Hosts and fails closed, and --host routes only to the named Host."
+    "With two authorized Hosts an approval decision uses the selected default Host or an explicit override and cannot cross Host scope."
 )
-def test_multihost_approval_requires_and_honours_explicit_host(scenario, paired_device):
+def test_multihost_approval_uses_default_and_honours_explicit_host(scenario, paired_device):
     second_host = _start_second_host(scenario)
     invitation = http("/v1/pairing/invitations", {"hostId": second_host}, scenario.admin)
-    paired_device.call("pair", invitation["pairingUri"])
+    paired_device.pair(invitation["pairingUri"])
     device = paired_device
     session = scenario.dsh.create_session()
     device.sessions(scenario.host)
-    device.call("sessions", "--host", second_host)
+    device.call("session", "list", "--host", second_host)
     pending = scenario.dsh.request_approval(session)
-    card = device.approvals(session)[0]
+    assert device.call("status")["default_host"] == second_host
+    card = device.call("session", "approval", "list", "--session", session, "--host", scenario.host)["approvals"][0]
     before = scenario.dsh.process.control("gx_effect_counts")["resolveApproval"]
 
-    code, values = device.invoke("approve", *_resolve_args(card), success=False)
+    code, values = device.invoke("session", "approval", "approve", *_resolve_args(card), success=False)
     assert code == 8
-    assert values[-1]["error"]["code"] == "conflict"
-    message = values[-1]["error"]["message"]
-    assert scenario.host in message and second_host in message
-    assert "--host" in message
+    assert values[-1]["error"]["code"] == "approval_unavailable"
     assert scenario.dsh.process.control("gx_effect_counts")["resolveApproval"] == before
     assert scenario.dsh.approval(pending["approval_id"])["state"] == "pending"
 
     # An authorized but wrong Host cannot resolve another Host's approval.
     code, values = device.invoke(
-        "--host", second_host, "approve", *_resolve_args(card), success=False
+        "session", "approval", "approve", "--host", second_host, *_resolve_args(card), success=False
     )
     assert code == 8
     assert values[-1]["error"]["code"] == "approval_unavailable"
     assert scenario.dsh.approval(pending["approval_id"])["state"] == "pending"
 
-    resolved = device.call("--host", scenario.host, "approve", *_resolve_args(card))
+    resolved = device.call("session", "approval", "approve", "--host", scenario.host, *_resolve_args(card))
     assert resolved["status"] in {"host_accepted", "succeeded"}
     assert scenario.dsh.process.control("gx_effect_counts")["resolveApproval"] == before + 1
     assert scenario.dsh.approval(pending["approval_id"])["state"] == "approved"

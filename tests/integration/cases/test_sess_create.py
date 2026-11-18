@@ -12,28 +12,28 @@ pytestmark = pytest.mark.chain
     "args",
     [
         pytest.param(
-            ["session-create", "--host", "{host}", "--cwd", ""],
+            ["session", "create", "--host", "{host}", "--cwd", ""],
             id="empty-cwd",
             marks=pytest.mark.description(
                 "When session-create receives an empty working directory, the CLI rejects it with invalid input exit 2 and invokes no source creation."
             ),
         ),
         pytest.param(
-            ["session-create", "--host", "{host}", "--cwd", "relative/worktree"],
+            ["session", "create", "--host", "{host}", "--cwd", "relative/worktree"],
             id="relative-cwd",
             marks=pytest.mark.description(
                 "When session-create receives a relative working directory, the CLI rejects it with invalid input exit 2 before submission."
             ),
         ),
         pytest.param(
-            ["session-create", "--host", "{host}", "--preset", "   "],
+            ["session", "create", "--host", "{host}", "--preset", "   "],
             id="blank-preset",
             marks=pytest.mark.description(
                 "When session-create receives a blank agent preset, the CLI rejects it with invalid input exit 2 before submission."
             ),
         ),
         pytest.param(
-            ["session-create", "--host", "{host}", "--session-id", ""],
+            ["session", "create", "--host", "{host}", "--session-id", ""],
             id="empty-session-id",
             marks=pytest.mark.description(
                 "When session-create receives an empty preferred session id, the CLI rejects it with invalid input exit 2 before submission."
@@ -50,7 +50,7 @@ def test_create_rejects_invalid_local_input(args, scenario, paired_device):
     assert code == 2, f"expected invalid-input exit, got {code}: {values[-1:]}"
     assert values[-1]["error"]["code"] == "invalid_argument"
     assert scenario.dsh.process.control("gx_effect_counts")["executeHost"] == before
-    assert paired_device.invoke("commands-pending")[1][-1]["data"]["commands"] == []
+    assert paired_device.invoke('operation', 'list')[1][-1]["data"]["pending_commands"] == []
 
 
 @pytest.mark.description(
@@ -60,7 +60,7 @@ def test_fork_reports_the_child_working_directory(scenario, paired_device, sessi
     """A confirmed child exposes the directory it shares with its parent."""
     paired_device.send(session_id, "synthetic fork parent")
     parent = scenario.dsh.snapshot(session_id)["summary"]
-    result = paired_device.call("session-fork", "--session", session_id)
+    result = paired_device.call('session', 'fork', session_id)
     receipt = result["lifecycle_receipt"]
     assert receipt["operation"] == "fork"
     assert receipt["parent_session_id"] == session_id
@@ -85,7 +85,7 @@ def test_fork_reports_the_child_working_directory(scenario, paired_device, sessi
 def test_fork_without_a_completed_turn_is_a_proven_failure(scenario, paired_device, session_id):
     """FAILED is distinguishable from UNKNOWN so an automatic retry stays unsafe."""
     before = {row["session_id"] for row in paired_device.sessions(scenario.host)}
-    code, values = paired_device.invoke("session-fork", "--session", session_id, success=False)
+    code, values = paired_device.invoke('session', 'fork', session_id, success=False)
     assert code != 0
     receipt = values[-1]["data"]["lifecycle_receipt"]
     assert receipt["operation"] == "fork"
@@ -110,7 +110,7 @@ def test_two_devices_fork_the_same_parent_concurrently(scenario, paired_device, 
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(device.call, "session-fork", "--session", session_id)
+            pool.submit(device.call, "session", "fork", session_id)
             for device in (paired_device, second)
         ]
         results = [future.result() for future in futures]

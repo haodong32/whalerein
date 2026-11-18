@@ -82,7 +82,7 @@ let budgetAccepted=0
 for(const [method,event] of [['subscribeEvents','events'],['subscribeApprovals','approvals']]) {
   adapter[method](value=>{for(const socket of sockets)socket.write(encode({event,value})+'\n')})
 }
-const methods=new Set(['executeHost','getCredential','setCredential','nativeHead','listSessions','getSessionSnapshot','listApprovals','sendUserMessage','interrupt','getApproval','resolveApproval','listModels','readSessionModel','selectSessionModel','readPendingQueue','updatePendingQueue','forkSession','listQuestionPage','getQuestion','answerContinuedQuestion','answerOpenQuestion','cancelOpenQuestion'])
+const methods=new Set(['executeHost','getCredential','setCredential','nativeHead','listSessions','getSessionSnapshot','listApprovals','sendUserMessage','readMessageReply','interrupt','getApproval','resolveApproval','listModels','readSessionModel','selectSessionModel','readPendingQueue','updatePendingQueue','forkSession','listQuestionPage','getQuestion','answerContinuedQuestion','answerOpenQuestion','cancelOpenQuestion'])
 net.createServer(socket=>{
   sockets.add(socket); socket.on('close',()=>sockets.delete(socket))
   createInterface({input:socket}).on('line',async line=>{

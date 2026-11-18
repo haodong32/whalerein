@@ -8,8 +8,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,18 +17,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/config"
+	storeerrors "github.com/whalerein/whalerein/access/internal/store"
 	"github.com/whalerein/whalerein/access/internal/store/storetest"
 )
 
 // When the CLI pairs, exact large encrypted Messages arrive; revocation removes access,
 // while explicit re-pairing retains key identity without duplicate grants or peers.
 func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("This isolated Secret Service fixture requires Linux D-Bus.")
+	}
 	brokerURL := os.Getenv("WHALEREIN_TEST_MQTT_URL")
 	if brokerURL == "" {
 		brokerURL = "mqtt://127.0.0.1:1884"
@@ -144,16 +149,22 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 		t.Fatal("host identity not registered")
 	}
 	data := t.TempDir()
-	secrets := t.TempDir()
+	selected := filepath.Join(data, "client.toml")
+	state := filepath.Join(data, "instance", "state")
+	if err := os.WriteFile(selected, []byte("version = 1\nservice = \"standalone\"\ndata_dir = \"instance\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyringEnv := nativeFixtureKeyring(t, root)
 	binary := filepath.Join(root, "target/debug/whalerein")
-	invoke := func(args ...string) []byte {
-		command := exec.CommandContext(ctx, binary, append([]string{"--json", "--yes", "--data-dir", data}, args...)...)
-		command.Env = append(os.Environ(), "WHALEREIN_SECRET_BACKEND=file:"+secrets, "WHALEREIN_LOG=error")
-		var stdout, stderr bytes.Buffer
+	invoke := func(input string, args ...string) []byte {
+		command := exec.CommandContext(ctx, binary, append([]string{"--json", "--config", selected}, args...)...)
+		command.Env = keyringEnv
+		command.Stdin = strings.NewReader(input)
+		var stdout bytes.Buffer
 		command.Stdout = &stdout
-		command.Stderr = &stderr
+		command.Stderr = io.Discard
 		if err := command.Run(); err != nil {
-			t.Fatalf("isolated CLI %s failed: code=%s stderr=%s", args[0], cliErrorCode(stdout.Bytes()), bounded(stderr.String()))
+			t.Fatalf("isolated CLI %s failed: code=%s", args[0], cliErrorCode(stdout.Bytes()))
 		}
 		return stdout.Bytes()
 	}
@@ -183,7 +194,7 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 				DeviceID string `json:"device_id"`
 			}
 		}
-		if json.Unmarshal(invoke("pair", invite()), &result) != nil || result.Data.DeviceID == "" {
+		if json.Unmarshal(invoke(invite(), "host", "connect", "--invite-stdin", "--yes"), &result) != nil || result.Data.DeviceID == "" {
 			t.Fatal("pairing outcome missing identity")
 		}
 		return result.Data.DeviceID
@@ -234,47 +245,44 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 		}
 		return id
 	}
-	// Snapshot history is installed by an explicit sync (a watch attach is not
-	// replayed as new output). This still exercises 2 MiB snapshot decryption
-	// and cache staging; the live tail below proves delivery of the new turn.
-	sync := invoke("sync", "--session", "session-flow")
-	var syncOutcome struct {
-		Data struct {
-			Events int `json:"events"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(sync, &syncOutcome) != nil || syncOutcome.Data.Events == 0 {
-		t.Fatal("large encrypted snapshot was not synchronized")
-	}
-	live := exec.CommandContext(ctx, binary, "--json", "--data-dir", data, "tail", "--session", "session-flow", "--once", "--timeout", "15")
-	live.Env = append(os.Environ(), "WHALEREIN_SECRET_BACKEND=file:"+secrets, "WHALEREIN_LOG=info")
-	var liveOutput bytes.Buffer
-	live.Stdout = &liveOutput
-	liveError, err := live.StderrPipe()
+	// The scoped state arrives after the watch synchronizes the encrypted baseline.
+	live := exec.CommandContext(ctx, binary, "--json", "--config", selected,
+		"session", "watch", "session-flow", "--once", "--timeout", "15")
+	live.Env = keyringEnv
+	live.Stderr = io.Discard
+	liveStream, err := live.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := live.Start(); err != nil {
 		t.Fatal(err)
 	}
-	liveScan := bufio.NewScanner(liveError)
-	subscribed := false
-	for liveScan.Scan() {
-		if strings.Contains(liveScan.Text(), "watch_ready") {
-			subscribed = true
+	defer func() { _ = live.Process.Kill(); _ = live.Wait() }()
+	var liveOutput bytes.Buffer
+	stream := bufio.NewReader(liveStream)
+	for {
+		line, err := stream.ReadBytes('\n')
+		if err != nil {
+			_ = live.Wait()
+			t.Fatal("live CLI subscription unavailable")
+		}
+		liveOutput.Write(line)
+		var outcome struct {
+			Data struct {
+				Event struct {
+					Type string `json:"type"`
+				} `json:"event"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(line, &outcome) == nil && outcome.Data.Event.Type == "state" {
 			break
 		}
 	}
-	if !subscribed {
-		_ = live.Process.Kill()
-		_ = live.Wait()
-		t.Fatal("live CLI subscription unavailable")
-	}
-	go func() { _, _ = io.Copy(io.Discard, liveError) }()
 	if _, err := io.WriteString(input, "emit\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := live.Wait(); err != nil || liveOutput.Len() < 128*1024 {
+	_, readErr := io.Copy(&liveOutput, stream)
+	if err := live.Wait(); err != nil || readErr != nil || liveOutput.Len() < 128*1024 {
 		code := ""
 		for _, line := range bytes.Split(liveOutput.Bytes(), []byte("\n")) {
 			var outcome struct {
@@ -293,40 +301,22 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	if err != nil {
 		t.Fatal("paired device missing before revocation")
 	}
-	tokenPath := filepath.Join(secrets, hex.EncodeToString([]byte("whalerein:v1:device-token:"+original)))
-	oldToken, err := os.ReadFile(tokenPath)
-	if err != nil {
-		t.Fatal("paired transport credential unavailable")
-	}
 	assertOldTokenDenied := func() {
 		t.Helper()
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/hosts", nil)
-		if err != nil {
-			t.Fatal("revocation probe could not be constructed")
-		}
-		request.Header.Set("Authorization", "Bearer "+string(oldToken))
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatal("revocation probe could not reach Access")
-		}
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden {
+		if _, err := store.ActiveDeviceByAuthHash(ctx, beforeRevoke.AuthHash); !errors.Is(err, storeerrors.ErrNotFound) {
 			t.Fatal("old transport credential retained access")
 		}
 	}
-	invoke("revoke")
+	invoke("", "device", "revoke", "--yes")
 	assertOldTokenDenied()
 	if count, err := store.CountActiveGrants(ctx, original); err != nil || count != 0 {
 		t.Fatal("revocation retained an active grant")
 	}
-	if _, err := os.Stat(filepath.Join(data, "config.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(state, "regional.json")); !os.IsNotExist(err) {
 		t.Fatal("revocation retained local pairing configuration")
 	}
-	if _, err := os.Stat(filepath.Join(data, "cache.sqlite3")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(state, "cache.sqlite3")); !os.IsNotExist(err) {
 		t.Fatal("revocation retained the local session cache")
-	}
-	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
-		t.Fatal("revocation retained the local transport token")
 	}
 	if err := waitFor(t, 3*time.Second, func() bool {
 		if _, err := io.WriteString(input, "count\n"); err != nil {
@@ -344,7 +334,7 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	if err != nil || beforeRevoke.PublicKeyFingerprint != afterRepair.PublicKeyFingerprint || bytes.Equal(beforeRevoke.AuthHash, afterRepair.AuthHash) {
 		t.Fatal("re-pairing changed key identity or reused revoked credentials")
 	}
-	if err := os.Remove(filepath.Join(data, "config.json")); err != nil {
+	if err := os.Remove(filepath.Join(state, "regional.json")); err != nil {
 		t.Fatal(err)
 	}
 	if pair() != original {
@@ -359,11 +349,49 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 	if count, err := store.CountActiveGrants(ctx, original); err != nil || count != 1 {
 		t.Fatal("recovery duplicated or lost its grant")
 	}
-	invoke("revoke")
-	invoke("forget")
-	if entries, err := os.ReadDir(secrets); err != nil || len(entries) != 0 {
-		t.Fatal("explicit forget left identity credentials")
+	invoke("", "device", "revoke", "--yes")
+	invoke("", "device", "forget", "--yes")
+	if pair() == original {
+		t.Fatal("explicit forget retained the previous device identity")
 	}
+	invoke("", "device", "revoke", "--yes")
+	invoke("", "device", "forget", "--yes")
+}
+
+func nativeFixtureKeyring(t *testing.T, root string) []string {
+	t.Helper()
+	const fixture = `import json, sys
+from pathlib import Path
+from client_environment import isolated_keyring
+with isolated_keyring(Path(sys.argv[1])) as env:
+    print(json.dumps(env), flush=True)
+    sys.stdin.read()
+`
+	child := exec.Command("python3", "-c", fixture, t.TempDir())
+	child.Dir = filepath.Join(root, "tests", "integration")
+	child.Stderr = io.Discard
+	hold, err := child.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hold.Close(); _ = child.Wait() })
+	var values map[string]string
+	if err := json.NewDecoder(output).Decode(&values); err != nil ||
+		!strings.HasPrefix(values["DBUS_SESSION_BUS_ADDRESS"], "unix:abstract=whalerein-") {
+		t.Fatal("isolated Secret Service unavailable")
+	}
+	env := os.Environ()
+	for key, value := range values {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 // cliErrorCode extracts only the bounded error code from CLI JSON output.
@@ -382,9 +410,3 @@ func cliErrorCode(output []byte) string {
 }
 
 // bounded keeps a diagnostic stderr excerpt free of long payloads.
-func bounded(value string) string {
-	if len(value) > 2000 {
-		return value[len(value)-2000:]
-	}
-	return value
-}

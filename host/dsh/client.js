@@ -1324,7 +1324,7 @@ window.__ModuleLoader__.load({
         // Reserve the tab during the explicit click, before awaiting the RPC.
         const tab = reserveBrowserTab()
         try {
-          const result = await connection.invoke('startConnect', { source: 'settings' })
+          const result = await connection.invoke('startConnect')
           await status.refresh?.()
           if (!isCurrentTarget()) {
             try { tab?.close?.() } catch { /* already closed */ }
@@ -1775,16 +1775,13 @@ window.__ModuleLoader__.load({
       }
     }
 
-    const jsonCodec = (typeSymbol) => ({
-      mode: 'strict', typeSymbol: `whalerein-dsh#${typeSymbol}`, create: () => ({ parse: (value) => value }),
-    })
     // Method names must avoid DSH's RemoteNamespaceService fields and prototype
     // members (ctx, empty, name, methods, namespace, has, install, installDirect,
     // installScoped, remove): the gateway rejects the whole mount on a collision.
     // `remove` is reserved, so the computer-removal action is `removeComputer`.
     const MANAGER_REMOTE_DESCRIPTORS = [
       ['details', [], 'WhaleReinConnectionDetails'],
-      ['startConnect', [{ name: 'request', wire: 'request', source: 'json', codec: jsonCodec('ConnectionStartRequest') }], 'WhaleReinConnectionSnapshot'],
+      ['startConnect', [], 'WhaleReinConnectionSnapshot'],
       ['cancel', [], 'WhaleReinConnectionSnapshot'],
       ['retry', [], 'WhaleReinConnectionSnapshot'],
       ['disconnect', [], 'WhaleReinConnectionSnapshot'],

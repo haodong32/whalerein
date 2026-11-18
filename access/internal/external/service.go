@@ -59,11 +59,14 @@ func WithHostEnforcer(enforcer HostEnforcer) Option {
 
 // Service implements external account mode.
 type Service struct {
-	trust    Trust
-	store    Store
-	mqttURL  string
-	enforcer HostEnforcer
-	now      func() time.Time
+	trust          Trust
+	store          Store
+	mqttURL        string
+	enforcer       HostEnforcer
+	now            func() time.Time
+	devicePairing  DevicePairing
+	deviceGrants   DeviceGrantStore
+	deviceEnforcer DeviceGrantEnforcer
 }
 
 // New constructs the service.

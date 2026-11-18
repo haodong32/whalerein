@@ -166,7 +166,7 @@ final class LiveCase {
         )
     }
 
-    /// Drops the current Core instance (releasing its profile lock), then
+    /// Drops the current Core instance (releasing its instance lock), then
     /// creates a new one over the same data directory and Keychain namespace.
     func recreate() async throws {
         service = nil
@@ -992,10 +992,20 @@ extension IntegrationTestCase {
             sessionId: environment.sessionId,
             text: draft
         )
+        let configPath = live.dataDirectory.appendingPathComponent("config.toml")
+        let manifestPath = live.dataDirectory.appendingPathComponent("instance/instance.json")
+        let selectedConfig = try Data(contentsOf: configPath)
+        let instanceIdentity = try Data(contentsOf: manifestPath)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: live.dataDirectory.appendingPathComponent("core").path
+        ))
         let identityItems = try live.keychain.itemCount()
         XCTAssertGreaterThan(identityItems, 0, "the device identity was not stored in Keychain")
 
         try await live.recreate()
+        XCTAssertEqual(try Data(contentsOf: configPath), selectedConfig)
+        XCTAssertEqual(try Data(contentsOf: manifestPath), instanceIdentity)
+        XCTAssertEqual(try live.keychain.itemCount(), identityItems)
         let hosts = try await live.waitForHost()
         XCTAssertTrue(hosts.contains { $0.hostId == environment.hostId })
         let restored = try await live.service.loadDraft(

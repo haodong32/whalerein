@@ -42,11 +42,9 @@ final class LiveSessionService: SessionService {
 
     /// Test initializer with an explicit data directory and secret store.
     init(dataDirectory: URL, secretStore: any SecretStore, appVersion: String) throws {
-        let coreDirectory = dataDirectory.appendingPathComponent("core", isDirectory: true)
-        try FileManager.default.createDirectory(at: coreDirectory, withIntermediateDirectories: true)
         do {
             self.core = try MobileCore(
-                dataDir: coreDirectory.path,
+                configPath: try Self.configurationPath(in: dataDirectory),
                 secretStore: secretStore,
                 appVersion: appVersion
             )
@@ -59,18 +57,31 @@ final class LiveSessionService: SessionService {
 
     /// Isolated Simulator/test initializer: process-local secrets, no Keychain.
     static func memory(dataDirectory: URL, appVersion: String) throws -> LiveSessionService {
-        let coreDirectory = dataDirectory.appendingPathComponent("core", isDirectory: true)
-        try FileManager.default.createDirectory(at: coreDirectory, withIntermediateDirectories: true)
         let core: MobileCore
         do {
             core = try MobileCore.newWithMemorySecretStore(
-                dataDir: coreDirectory.path,
+                configPath: try Self.configurationPath(in: dataDirectory),
                 appVersion: appVersion
             )
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
         return LiveSessionService(core: core, appVersion: appVersion)
+    }
+
+    private static func configurationPath(in dataDirectory: URL) throws -> String {
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        let path = dataDirectory.appendingPathComponent("config.toml").path
+        if !FileManager.default.fileExists(atPath: path) {
+            try WhaleReinMobile.writeClientConfig(
+                configPath: path,
+                service: .standalone,
+                dataDir: "instance",
+                cloudEnvironment: nil,
+                standaloneCaCertificate: nil
+            )
+        }
+        return path
     }
 
     private init(core: MobileCore, appVersion: String) {

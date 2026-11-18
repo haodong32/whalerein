@@ -313,6 +313,13 @@ fn sanitize_display_name(value: &str) -> String {
         .to_owned()
 }
 
+pub(crate) struct PairingReplay<'a> {
+    pub claim_id: &'a str,
+    pub ephemeral: &'a [u8; 32],
+    pub device_nonce: &'a str,
+    pub device_token: &'a str,
+}
+
 impl PairingInitiator {
     /// Start the flow and produce the HELLO claim.
     #[cfg(test)]
@@ -333,18 +340,61 @@ impl PairingInitiator {
         capabilities: CapabilitySet,
         display_name: impl AsRef<str>,
     ) -> Result<(Self, PairingClaimRequest), PairingError> {
-        let device_id = device_id.into();
-        let claim_id = random_id(16);
+        Self::start_inner(
+            uri,
+            device_id.into(),
+            identity,
+            capabilities,
+            display_name.as_ref(),
+            None,
+        )
+    }
+
+    pub(crate) fn start_replayable(
+        uri: &PairingUri,
+        device_id: &str,
+        identity: &StaticIdentity,
+        replay: PairingReplay<'_>,
+    ) -> Result<(Self, PairingClaimRequest), PairingError> {
+        Self::start_inner(
+            uri,
+            device_id.to_owned(),
+            identity,
+            default_capabilities(),
+            "",
+            Some(replay),
+        )
+    }
+
+    fn start_inner(
+        uri: &PairingUri,
+        device_id: String,
+        identity: &StaticIdentity,
+        capabilities: CapabilitySet,
+        display_name: &str,
+        replay: Option<PairingReplay<'_>>,
+    ) -> Result<(Self, PairingClaimRequest), PairingError> {
+        let claim_id = replay
+            .as_ref()
+            .map(|value| value.claim_id.to_owned())
+            .unwrap_or_else(|| random_id(16));
         let prologue = pairing_prologue(&uri.host_id, &uri.token_hash_hex, &claim_id);
-        let mut session = NoiseSession::initiator(identity, &prologue)?;
+        let mut session = if let Some(replay) = &replay {
+            NoiseSession::pairing_initiator(identity, &prologue, replay.ephemeral)?
+        } else {
+            NoiseSession::initiator(identity, &prologue)?
+        };
 
         let hello = PairingHello {
             device_id: device_id.clone(),
             host_id: uri.host_id.clone(),
             protocol_version: PROTOCOL_VERSION,
             capabilities: Some(capabilities),
-            device_nonce: random_id(16),
-            display_name: sanitize_display_name(display_name.as_ref()),
+            device_nonce: replay
+                .as_ref()
+                .map(|value| value.device_nonce.to_owned())
+                .unwrap_or_else(|| random_id(16)),
+            display_name: sanitize_display_name(display_name),
             os: sanitize_os(std::env::consts::OS),
         };
         let noise_message = session.write(&hello.encode_to_vec())?;
@@ -367,8 +417,12 @@ impl PairingInitiator {
                 device_id,
                 claim_id,
                 token: uri.token.clone(),
-                device_token: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(crate::util::random_bytes(32)),
+                device_token: replay
+                    .map(|value| value.device_token.to_owned())
+                    .unwrap_or_else(|| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(crate::util::random_bytes(32))
+                    }),
                 access_url: uri.access_url.to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 fingerprint: None,

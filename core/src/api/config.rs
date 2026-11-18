@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{CoreError, CoreResult};
 
+const REGIONAL_SCHEMA: &str = "whalerein/v1/regional-state";
+#[cfg(test)]
 pub const CONFIG_SCHEMA: &str = "whalerein/v1/config";
+#[cfg(test)]
 pub const CONFIG_FILE: &str = "config.json";
+const REGIONAL_STATE_FILE: &str = "regional.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PersistedConfig {
     pub schema: String,
     pub access_url: String,
@@ -36,7 +41,7 @@ impl PersistedConfig {
         device_id: String,
     ) -> Self {
         Self {
-            schema: CONFIG_SCHEMA.into(),
+            schema: REGIONAL_SCHEMA.into(),
             access_url,
             host_fingerprint: None,
             host_fingerprints: std::collections::BTreeMap::new(),
@@ -48,8 +53,13 @@ impl PersistedConfig {
     }
 
     pub fn validate(&self) -> CoreResult<()> {
-        if self.schema != CONFIG_SCHEMA {
-            return Err(CoreError::Config("unsupported configuration schema".into()));
+        let supported = self.schema == REGIONAL_SCHEMA;
+        #[cfg(test)]
+        let supported = supported || self.schema == CONFIG_SCHEMA;
+        if !supported {
+            return Err(CoreError::Config(
+                "unsupported regional state schema".into(),
+            ));
         }
         if self
             .host_fingerprint
@@ -94,13 +104,29 @@ impl PersistedConfig {
 
 pub struct ConfigStore {
     path: PathBuf,
+    schema: &'static str,
 }
 
 impl ConfigStore {
+    #[cfg(test)]
     pub fn new(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join(CONFIG_FILE),
+            schema: CONFIG_SCHEMA,
         }
+    }
+
+    pub(crate) fn for_instance(data_dir: &Path) -> Self {
+        Self {
+            path: data_dir.join(REGIONAL_STATE_FILE),
+            schema: REGIONAL_SCHEMA,
+        }
+    }
+
+    pub(crate) fn file_name(&self) -> &std::ffi::OsStr {
+        self.path
+            .file_name()
+            .expect("configuration path has a file name")
     }
 
     #[cfg(all(test, unix))]
@@ -116,19 +142,36 @@ impl ConfigStore {
         };
         let config: PersistedConfig = serde_json::from_slice(&bytes)
             .map_err(|_| CoreError::Config("configuration is not valid JSON".into()))?;
+        if config.schema != self.schema {
+            return Err(CoreError::Config(
+                "unsupported regional state schema".into(),
+            ));
+        }
         config.validate()?;
         Ok(Some(config))
     }
 
     pub fn save(&self, config: &PersistedConfig) -> CoreResult<()> {
         config.validate()?;
+        let mut config = config.clone();
+        config.schema = self.schema.into();
+        let bytes = serde_json::to_vec_pretty(&config)
+            .map_err(|_| CoreError::Config("configuration could not encode".into()))?;
+        #[cfg(test)]
+        if self.schema == CONFIG_SCHEMA {
+            return self.save_profile_fixture(&bytes);
+        }
+        crate::configuration::writer::write_atomically(&self.path, &bytes)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn save_profile_fixture(&self, bytes: &[u8]) -> CoreResult<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|_| CoreError::Config("data directory could not be created".into()))?;
         }
         let temporary = self.path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(config)
-            .map_err(|_| CoreError::Config("configuration could not encode".into()))?;
         std::fs::write(&temporary, bytes)
             .map_err(|_| CoreError::Config("configuration could not be written".into()))?;
         set_private_permissions(&temporary)?;
@@ -160,6 +203,7 @@ pub fn set_private_permissions(_path: &Path) -> CoreResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn default_data_dir() -> PathBuf {
     if let Ok(value) = std::env::var("WHALEREIN_DATA_DIR") {
         if !value.is_empty() {
@@ -171,6 +215,7 @@ pub fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".whalerein"))
 }
 
+#[cfg(test)]
 pub fn ca_pem_from_env() -> Option<Vec<u8>> {
     let path = std::env::var("WHALEREIN_CA_FILE").ok()?;
     if path.is_empty() {
@@ -179,6 +224,7 @@ pub fn ca_pem_from_env() -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+#[cfg(test)]
 pub fn mqtt_url_from_env() -> Option<String> {
     std::env::var("WHALEREIN_MQTT_URL")
         .ok()

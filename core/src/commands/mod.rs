@@ -33,6 +33,7 @@ struct SubmitFailure {
 }
 
 struct Admission {
+    config: crate::api::config::ConfigStore,
     profile: std::path::PathBuf,
     secrets: std::sync::Arc<dyn crate::security::SecretStore>,
 }
@@ -56,10 +57,15 @@ impl CommandService {
 
     pub(crate) fn with_admission(
         mut self,
+        config: crate::api::config::ConfigStore,
         profile: std::path::PathBuf,
         secrets: std::sync::Arc<dyn crate::security::SecretStore>,
     ) -> Self {
-        self.admission = Some(Admission { profile, secrets });
+        self.admission = Some(Admission {
+            config,
+            profile,
+            secrets,
+        });
         self
     }
 
@@ -240,6 +246,19 @@ impl CommandService {
         payload: RequestPayload,
         supplied_id: Option<&str>,
     ) -> CoreResult<CommandHandle> {
+        self.control_with_identity(host_id, device_id, channel, payload, supplied_id, None)
+            .await
+    }
+
+    pub async fn control_with_identity(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        channel: &SecureChannel,
+        payload: RequestPayload,
+        supplied_id: Option<&str>,
+        supplied_request_id: Option<&str>,
+    ) -> CoreResult<CommandHandle> {
         let (command_kind, command_parent_session_id) = match &payload.payload {
             Some(whalerein_proto::request_payload::Payload::CreateSession(_)) => ("create", ""),
             Some(whalerein_proto::request_payload::Payload::ForkSession(request)) => {
@@ -256,7 +275,7 @@ impl CommandService {
             Some(value) => value.to_owned(),
             None => random_id(16),
         };
-        let request_id = random_id(16);
+        let request_id = supplied_request_id.map_or_else(|| random_id(16), str::to_owned);
         let expires_at = now_unix_ms() + REQUEST_TTL_MS;
         let aad = RequestAad {
             request_id: &request_id,
@@ -302,9 +321,7 @@ impl CommandService {
                     "request expired before admission".into(),
                 ));
             }
-            let config = crate::api::config::ConfigStore::new(&admission.profile)
-                .load()?
-                .ok_or(CoreError::NotPaired)?;
+            let config = admission.config.load()?.ok_or(CoreError::NotPaired)?;
             let token = crate::security::load_device_token(&admission.secrets, device_id)?
                 .ok_or(CoreError::NotPaired)?;
             let key = admission

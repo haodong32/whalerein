@@ -1,4 +1,4 @@
-//! Stable CLI output: the `whalerein/v1` JSON envelope and human rendering.
+//! Stable CLI output: the `whalerein/client/v1` JSON envelope and human rendering.
 
 use serde_json::{json, Value};
 use whalerein_core::api::{
@@ -226,7 +226,7 @@ impl CliOutcome {
         let mut value = match &self.error {
             Some(error) => {
                 let mut value = json!({
-                    "schema": "whalerein/v1",
+                    "schema": "whalerein/client/v1",
                     "command": self.command,
                     "error": {
                         "code": error.code,
@@ -239,7 +239,7 @@ impl CliOutcome {
                 value
             }
             None => json!({
-                "schema": "whalerein/v1",
+                "schema": "whalerein/client/v1",
                 "command": self.command,
                 "data": self.data,
             }),
@@ -356,12 +356,17 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
     // message names the side to upgrade and never suggests retrying the same
     // request.
     let message = match (code.as_str(), command) {
+        ("authentication_required", _) => "Cloud sign-in must be refreshed. Run `whalerein login`.".into(),
+        ("authorization_expired", _) => "The pairing authorization expired. Run `whalerein login` and recover the original operation.".into(),
+        ("unauthorized", Command::Hosts | Command::Connect { .. }) => {
+            "Cloud authorization is required. Run `whalerein login` and check that the account can access the Host.".into()
+        }
         ("not_paired", _) => format!(
-            "{}; run `whalerein pair <pairing-uri>` to pair this device (or `whalerein forget --local-only --yes` to discard a lost local identity)",
+            "{}. Run `whalerein host list` and `whalerein host connect HOST` for Cloud, or `whalerein host connect --invite-stdin` for Standalone.",
             error
         ),
         ("host_fingerprint_mismatch", _) => format!(
-            "{}; verify the Host fingerprint out of band first. Only after confirming the Host identity, run `whalerein forget --local-only --yes` (or `whalerein revoke --yes` while the old authorization is still valid) and pair again with `whalerein pair <pairing-uri>`. Do not re-pair against an unverified fingerprint",
+            "{}; verify the Host fingerprint out of band first. Only after confirming the Host identity, run `whalerein device forget --local-only --yes` (or `whalerein device revoke --yes` while the old authorization is still valid) and pair again with `whalerein host connect --invite-stdin`. Do not re-pair against an unverified fingerprint",
             error
         ),
         ("unsupported_capability", Command::Send { .. }) => format!(
@@ -378,7 +383,7 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
                 action: ModelAction::Set { .. },
             },
         ) => format!(
-            "{}; the Host rejected this provider/model and no change was made — run `whalerein models --host <host>`, then retry only after that provider is advertised and healthy",
+            "{}; the Host rejected this provider/model and no change was made — run `whalerein session models --host <host>`, then retry only after that provider is advertised and healthy",
             error
         ),
         (
@@ -387,7 +392,7 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
                 action: ModelAction::Set { .. },
             },
         ) => format!(
-            "{}; no change is confirmed. If `whalerein models` lists the provider as failed, retry only after the provider recovers; if the Host is offline, retry when it reconnects",
+            "{}; no change is confirmed. If `whalerein session models` lists the provider as failed, retry only after the provider recovers; if the Host is offline, retry when it reconnects",
             error
         ),
         (
@@ -396,15 +401,15 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
                 action: ModelAction::Set { .. },
             },
         ) => format!(
-            "{}; nothing changed — verify the session with `whalerein sessions --host <host>` and the selection with `whalerein models --host <host>`",
+            "{}; nothing changed — verify the session with `whalerein session list --host <host>` and the selection with `whalerein session models --host <host>`",
             error
         ),
         ("unknown", Command::Model { .. }) => format!(
-            "{}; the selection may or may not have been applied — do not resend it; recover the command or run `whalerein model get --session <session-id>` to confirm",
+            "{}; the selection may or may not have been applied — do not resend it; recover the command or run `whalerein session model get --session <session-id>` to confirm",
             error
         ),
         ("snapshot_required", Command::Questions { .. }) => format!(
-            "{}; question pagination state changed across a restart — re-run `whalerein questions --session <session-id>` without --cursor",
+            "{}; question pagination state changed across a restart — re-run `whalerein session question list --session <session-id>` without --cursor",
             error
         ),
         ("protocol_version_incompatible", _) => format!(
@@ -412,11 +417,11 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
             error
         ),
         ("authority_override", _) => format!(
-            "{}; built-in environment names cannot be removed or have their authority replaced. Define a different service with a new custom name (`whalerein config set environment <name> ...`)",
+            "{}; built-in environment names cannot be removed or have their authority replaced. Choose a supported official environment or Standalone in the selected configuration",
             error
         ),
         ("security_error", _) => format!(
-            "{}; if the Host identity or credentials were rebuilt, revoke this device and pair again (`whalerein revoke --yes`, or `whalerein forget --local-only --yes` when local keys are lost), then run `whalerein pair <new-invitation>`",
+            "{}; if the Host identity or credentials were rebuilt, revoke this device and pair again (`whalerein device revoke --yes`, or `whalerein device forget --local-only --yes` when local keys are lost), then run `whalerein host connect --invite-stdin`",
             error
         ),
         _ => error.to_string(),
@@ -512,9 +517,10 @@ pub fn pad_cell(value: &str, width: usize) -> String {
 
 pub fn render_hosts(hosts: &[HostInfo]) -> String {
     if hosts.is_empty() {
-        return "No authorized hosts. Pair one with `whalerein pair <pairing-uri>`.\n".into();
+        return "No authorized hosts. Pair one with `whalerein host connect --invite-stdin`.\n"
+            .into();
     }
-    let mut out = String::from("HOST\tONLINE\tPROTOCOL\tFINGERPRINT\n");
+    let mut out = String::from("HOST ID\tONLINE\tPROTOCOL\tFINGERPRINT\n");
     for host in hosts {
         out.push_str(&format!(
             "{}\t{}\tv{}\t{}\n",
@@ -527,6 +533,35 @@ pub fn render_hosts(hosts: &[HostInfo]) -> String {
     out
 }
 
+pub fn render_account_hosts(hosts: &[whalerein_core::api::AccountHost]) -> String {
+    if hosts.is_empty() {
+        return "No computers registered to this Cloud workspace.\n".into();
+    }
+    let mut out = String::from("HOST ID\tNAME\tHOST STATUS\tDEVICE ACCESS\n");
+    for host in hosts {
+        let status = match (host.observation.as_str(), host.enrollment_state.as_str()) {
+            ("missing", _) => "not enrolled",
+            ("known", "enrollment_pending") => "enrollment pending",
+            ("known", "enrollment_disabled") => "disabled",
+            ("known", _) if host.enrolled && host.online => "online",
+            ("known", _) if host.enrolled => "offline",
+            _ => "status unavailable",
+        };
+        let access = if host.device_access.is_empty() {
+            "unavailable"
+        } else {
+            &host.device_access
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{status}\t{}\n",
+            sanitize_field(&host.host_id),
+            sanitize_field(&host.display_name),
+            sanitize_field(access),
+        ));
+    }
+    out
+}
+
 pub fn hosts_data(hosts: &[HostInfo]) -> Value {
     json!({ "hosts": hosts })
 }
@@ -534,7 +569,7 @@ pub fn hosts_data(hosts: &[HostInfo]) -> Value {
 pub fn render_sessions(list: &SessionList) -> String {
     if list.sessions.is_empty() {
         return format!(
-            "No sessions on {}. Start one with `whalerein session-create --host <host-id>`.\n",
+            "No sessions on {}. Start one with `whalerein session create --host <host-id>`.\n",
             sanitize_field(&list.source)
         );
     }
@@ -604,7 +639,7 @@ pub fn render_command(handle: &CommandHandle) -> String {
         // QMQ-15: the source default is unconfirmed on purpose. Tell the user
         // whether a retry is meaningful instead of leaving them to guess.
         out.push_str(
-            "The session records this selection. Source-default persistence is unconfirmed: do not resend the command; verify with `whalerein model get --session <session-id>` after the next turn. If `whalerein models` lists a provider failure, retry only after that provider recovers.\n",
+            "The session records this selection. Source-default persistence is unconfirmed: do not resend the command; verify with `whalerein session model get --session <session-id>` after the next turn. If `whalerein session models` lists a provider failure, retry only after that provider recovers.\n",
         );
     }
     if let Some(delivery_id) = &handle.delivery_id {
@@ -710,7 +745,7 @@ pub fn render_lifecycle_outcome(handle: &CommandHandle) -> Option<String> {
                 text.push('\n');
             }
             text.push_str(&format!(
-                "Reconcile with: whalerein command-recover --request {}\n",
+                "Reconcile with: whalerein operation recover {}\n",
                 sanitize_field(&handle.request_id)
             ));
             Some(text)
@@ -795,15 +830,6 @@ pub fn render_doctor(report: &DoctorReport) -> String {
         sanitize_field(report.address.as_deref().unwrap_or("(not paired)")),
         report.commands.non_terminal,
         report.commands.unknown
-    )
-}
-
-/// Extra line for a recovered corrupt configuration. The original file is
-/// renamed, never deleted, so the user can inspect or restore it.
-pub fn render_quarantine(path: &std::path::Path) -> String {
-    format!(
-        "Local configuration was corrupt and has been quarantined as {}\nPair again if the pairing is no longer available.\n",
-        sanitize_field(&path.display().to_string())
     )
 }
 
@@ -915,7 +941,7 @@ pub fn render_session_model(model: &SessionModel) -> String {
         out.push_str(&render_model_choice("pending", &model.pending));
     }
     if !model.pending_known && model.pending.is_none() && model.next.is_none() {
-        out.push_str("Select one with `whalerein model set --session <session-id> --provider <provider> --model <model>`.\n");
+        out.push_str("Select one with `whalerein session model set --session <session-id> --provider <provider> --model <model>`.\n");
     }
     out
 }
@@ -984,7 +1010,7 @@ pub fn render_queue(queue: &PendingQueue) -> String {
 pub fn render_questions(page: &QuestionPageInfo) -> String {
     if page.batches.is_empty() {
         let mut out = String::from(
-            "No pending questions. Re-run `whalerein questions --session <session-id>` after the Agent asks one.\n",
+            "No pending questions. Re-run `whalerein session question list --session <session-id>` after the Agent asks one.\n",
         );
         if !page.next_cursor.is_empty() {
             out.push_str(&format!(
@@ -1032,7 +1058,7 @@ pub fn render_questions(page: &QuestionPageInfo) -> String {
 /// Human pairing history. Redacted identities only; no token is ever shown.
 pub fn render_pairing_history(records: &[PairingHistoryRecord]) -> String {
     if records.is_empty() {
-        return "No retained pairing records. There is nothing to review here; pair with `whalerein pair <pairing-uri>`.\n".into();
+        return "No retained pairing records. There is nothing to review here; pair with `whalerein host connect --invite-stdin`.\n".into();
     }
     let mut out = String::from("CLAIM\tHOST\tSTATUS\tFINGERPRINT\n");
     for record in records {
@@ -1082,7 +1108,7 @@ pub fn tail_event_json(update: &ViewUpdate) -> Value {
         }
         ViewUpdate::Reset => json!({"type":"reset"}),
     };
-    json!({"schema":"whalerein/v1","command":"tail","data":{"event":event}})
+    json!({"schema":"whalerein/client/v1","command":"session.watch","data":{"event":event}})
 }
 
 /// Formatting owns terminal boundaries only; Core owns preview ordering and completion.
@@ -1332,7 +1358,7 @@ mod tests {
 
     fn report() -> DoctorReport {
         DoctorReport {
-            schema: "whalerein/v1".into(),
+            schema: "whalerein/client/v1".into(),
             address: Some("https://access.test".into()),
             commands: CommandDiagnostics {
                 non_terminal: 1,
@@ -1345,8 +1371,8 @@ mod tests {
     fn emits_stable_json_schema_for_successful_outcomes() {
         let outcome = CliOutcome::success(&command(), json!({"hosts": []}), "none\n");
         let value = outcome.to_json();
-        assert_eq!(value["schema"], "whalerein/v1");
-        assert_eq!(value["command"], "hosts");
+        assert_eq!(value["schema"], "whalerein/client/v1");
+        assert_eq!(value["command"], "host.list");
         assert!(value.get("data").is_some());
         assert!(value.get("error").is_none());
     }
@@ -1355,7 +1381,7 @@ mod tests {
     fn emits_stable_json_error_shape_for_failed_outcomes() {
         let outcome = CliOutcome::failure(&command(), CliError::new("unauthorized", "no"));
         let value = outcome.to_json();
-        assert_eq!(value["schema"], "whalerein/v1");
+        assert_eq!(value["schema"], "whalerein/client/v1");
         assert_eq!(value["error"]["code"], "unauthorized");
         assert_eq!(value["error"]["message"], "no");
         assert_eq!(outcome.exit, 4);
@@ -1383,7 +1409,7 @@ mod tests {
     #[test]
     fn maps_core_error_to_cli_error_outcome() {
         let outcome = core_error_outcome(&command(), whalerein_core::CoreError::HostOffline);
-        assert_eq!(outcome.command, "hosts");
+        assert_eq!(outcome.command, "host.list");
         assert_eq!(outcome.error.unwrap().code, "host_offline");
         assert_eq!(outcome.exit, 5);
     }
@@ -1393,6 +1419,9 @@ mod tests {
         let command = Command::Send {
             session: "fixture".into(),
             delivery: crate::cli::Delivery::EnqueueAfterRun,
+            detach: false,
+            timeout: None,
+            operation_id: None,
             text: "synthetic".into(),
         };
         let outcome = core_error_outcome(&command, whalerein_core::CoreError::Unsupported);
@@ -1401,6 +1430,32 @@ mod tests {
         assert_eq!(outcome.exit, 9);
         assert!(error.message.contains("runtime compatibility"));
         assert!(!error.message.contains("synthetic"));
+    }
+
+    #[test]
+    fn cloud_hosts_show_the_command_id_and_distinguish_unavailable_enrollment() {
+        let cloud: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-id-1", "displayName":"Computer", "online":false, "enrolled":false, "observation":"unavailable"},
+            {"hostId":"host-id-2", "displayName":"Computer", "online":false, "enrolled":false, "observation":"missing"},
+            {"hostId":"host-id-3", "displayName":"Other", "online":true, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"},
+            {"hostId":"host-id-4", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_pending"},
+            {"hostId":"host-id-5", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_disabled"},
+            {"hostId":"host-id-6", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"}
+        ])).unwrap();
+        assert_eq!(
+            render_account_hosts(&cloud),
+            concat!(
+                "HOST ID\tNAME\tHOST STATUS\tDEVICE ACCESS\n",
+                "host-id-1\tComputer\tstatus unavailable\tunavailable\n",
+                "host-id-2\tComputer\tnot enrolled\tunavailable\n",
+                "host-id-3\tOther\tonline\tunavailable\n",
+                "host-id-4\tOther\tenrollment pending\tunavailable\n",
+                "host-id-5\tOther\tdisabled\tunavailable\n",
+                "host-id-6\tOther\toffline\tunavailable\n",
+            )
+        );
+        assert_eq!(json!(cloud)[0]["host_id"], "host-id-1");
+        assert!(render_account_hosts(&[]).starts_with("No computers"));
     }
 
     #[test]
@@ -1504,7 +1559,7 @@ mod tests {
     #[test]
     fn manifest_lists_fields_and_redactions() {
         let manifest = ExportManifest {
-            schema: "whalerein/v1".into(),
+            schema: "whalerein/client/v1".into(),
             path: "out.json".into(),
             fields: vec!["address".into()],
             redactions: vec!["private keys".into()],
@@ -1539,7 +1594,7 @@ mod tests {
         assert!(unknown.contains("may have happened"));
         assert!(unknown.contains("operation id: op-1"));
         assert!(unknown.contains("reconcile: OPERATION_ID op-1"));
-        assert!(unknown.contains("command-recover --request r-1"));
+        assert!(unknown.contains("operation recover r-1"));
         assert!(!unknown.contains("was created"));
         assert!(!unknown.contains("not created"));
         assert!(!render_command(&lifecycle_handle("UNKNOWN")).contains("session:"));
@@ -1827,6 +1882,7 @@ mod typed_output_tests {
     #[test]
     fn pairing_and_approval_formatting_reveal_only_the_requested_public_details() {
         let pair = whalerein_core::api::PairingOutcome {
+            operation_id: None,
             host_id: "h".into(),
             device_id: "d".into(),
             fingerprint: "fixture".into(),
@@ -2063,7 +2119,7 @@ mod cli_contract_tests {
         let message = value["error"]["message"].as_str().unwrap();
         assert!(message.contains("revoke --yes"), "{message}");
         assert!(message.contains("forget --local-only --yes"), "{message}");
-        assert!(message.contains("pair <new-invitation>"), "{message}");
+        assert!(message.contains("host connect --invite-stdin"), "{message}");
     }
 
     #[test]
@@ -2400,7 +2456,10 @@ mod cli_contract_tests {
     fn pairing_history_human_output_is_a_stable_table() {
         let empty = render_pairing_history(&[]);
         assert!(empty.contains("No retained pairing records"), "{empty}");
-        assert!(empty.contains("whalerein pair <pairing-uri>"), "{empty}");
+        assert!(
+            empty.contains("whalerein host connect --invite-stdin"),
+            "{empty}"
+        );
         let records = vec![
             PairingHistoryRecord {
                 claim_id: "claim-1".into(),
@@ -2476,7 +2535,7 @@ mod cli_contract_tests {
         };
         let text = render_questions(&page);
         assert!(text.contains("No pending questions"), "{text}");
-        assert!(text.contains("whalerein questions"));
+        assert!(text.contains("whalerein session question list"));
         let mut page = page;
         page.next_cursor = "cursor-2".into();
         page.batches.push(whalerein_core::api::QuestionBatchInfo {
@@ -2510,7 +2569,7 @@ mod cli_contract_tests {
         };
         let text = render_sessions(&list);
         assert!(text.contains("No sessions on dsh"));
-        assert!(text.contains("session-create"));
+        assert!(text.contains("session create"));
         assert!(!text.contains("[]"));
     }
 
@@ -2570,6 +2629,7 @@ mod cli_contract_tests {
                 provider: "provider".into(),
                 model: "model".into(),
                 effort: None,
+                host: None,
             },
         }
     }
@@ -2584,7 +2644,7 @@ mod cli_contract_tests {
         let message = outcome.error.unwrap().message;
         assert!(message.contains("no change was made"), "{message}");
         assert!(message.contains("retry only after"), "{message}");
-        assert!(message.contains("whalerein models"), "{message}");
+        assert!(message.contains("whalerein session models"), "{message}");
 
         let outcome = core_error_outcome(
             &model_set_command(),

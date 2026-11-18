@@ -31,6 +31,10 @@ type PairingOperation struct {
 	HostGeneration   int64
 	AuthHash         []byte
 	Active           bool
+
+	CloudWorkspaceID         string
+	CloudEnrollmentRevision  string
+	CloudAuthorizationExpiry time.Time
 }
 
 // DeviceGeneration captures a revocation fence before any asynchronous HELLO work.

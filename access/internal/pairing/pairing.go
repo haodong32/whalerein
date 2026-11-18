@@ -112,6 +112,7 @@ type Dependencies struct {
 
 type completedClaim struct {
 	response *whalereinv1.PairingClaimResponse
+	cloud    bool
 	commit   *whalereinv1.HostRequest
 	ready    bool
 }
@@ -223,10 +224,14 @@ func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalere
 // Claim runs one public pairing step. The token is revalidated before every
 // step and any failure consumes one unit of the token's failure budget.
 func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRequest) (*whalereinv1.PairingClaimResponse, error) {
+	return s.claim(ctx, request, nil)
+}
+
+func (s *Service) claim(ctx context.Context, request *whalereinv1.PairingClaimRequest, scope *CloudScope) (*whalereinv1.PairingClaimResponse, error) {
 	if request == nil {
 		return nil, ErrInvalidClaim
 	}
-	if request.GetToken() == "" || len(request.Token) > 4096 || request.GetClaimId() == "" || len(request.ClaimId) > 128 || request.GetDeviceId() == "" || len(request.DeviceId) > 128 || len(request.NoiseMessage) > 64*1024 {
+	if (scope == nil && request.GetToken() == "") || len(request.Token) > 4096 || request.GetClaimId() == "" || len(request.ClaimId) > 128 || request.GetDeviceId() == "" || len(request.DeviceId) > 128 || len(request.NoiseMessage) > 64*1024 {
 		return nil, ErrInvalidClaim
 	}
 	if request.GetProtocolVersion() != s.cfg.ProtocolVersion {
@@ -249,11 +254,26 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 		return nil, fmt.Errorf("%w: fingerprint confirmation is required", ErrInvalidClaim)
 	}
 
-	hash := sha256.Sum256([]byte(request.GetToken()))
+	digest := sha256.Sum256([]byte(request.GetToken()))
+	hash := digest[:]
+	if scope != nil {
+		hash = scope.tokenHash()
+	}
+	if scope != nil {
+		now := s.now()
+		if !now.Before(scope.ExpiresAt) {
+			return nil, ErrTokenExpired
+		}
+		if phase == whalereinv1.PairingPhase_PAIRING_PHASE_HELLO {
+			if err := s.prepareCloudClaim(ctx, scope, hash, now); err != nil {
+				return nil, err
+			}
+		}
+	}
 	var deviceGeneration, hostGeneration int64
 	if phase == whalereinv1.PairingPhase_PAIRING_PHASE_HELLO {
 		var err error
-		deviceGeneration, hostGeneration, err = s.store.PairingGenerations(ctx, hash[:], request.DeviceId)
+		deviceGeneration, hostGeneration, err = s.store.PairingGenerations(ctx, hash, request.DeviceId)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, ErrUnauthorized
 		}
@@ -261,13 +281,10 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			return nil, ErrInternal
 		}
 	}
-	hashHex := hex.EncodeToString(hash[:])
 
-	// One invitation is serialized in-process, but contention must not hold a
-	// public claim past the deadline the caller can still observe. Fail
-	// retryably instead of completing after the waiting period.
+	// Capture the revocation generations before waiting for another claim.
 	waitCtx, cancelWait := context.WithTimeout(ctx, s.cfg.ClaimTimeout)
-	unlock, lockErr := s.lockToken(waitCtx, hashHex)
+	unlock, lockErr := s.lockToken(waitCtx, hex.EncodeToString(hash))
 	cancelWait()
 	if lockErr != nil {
 		if ctx.Err() != nil {
@@ -277,6 +294,9 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 	}
 	defer unlock()
 	now := s.now()
+	if scope != nil && !now.Before(scope.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
 
 	op, opErr := s.store.PairingOperation(ctx, request.ClaimId)
 	if opErr != nil && !errors.Is(opErr, store.ErrNotFound) {
@@ -292,7 +312,10 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 		}
 	}
 	if opErr == nil {
-		if !bytes.Equal(op.TokenHash, hash[:]) || op.DeviceID != request.DeviceId {
+		if !bytes.Equal(op.TokenHash, hash) || op.DeviceID != request.DeviceId {
+			if scope != nil {
+				return nil, store.ErrOperationConflict
+			}
 			return nil, ErrClaimRequired
 		}
 		if phase == whalereinv1.PairingPhase_PAIRING_PHASE_FINISH && len(op.FinishHash) == 0 {
@@ -374,7 +397,7 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			var storedCommit whalereinv1.PairingClaimResult
 			ready := notice.Status == whalereinv1.OnlineStatus_succeeded && proto.Unmarshal(notice.ResultBody, &storedCommit) == nil && storedCommit.Authorized && storedCommit.DeviceId == request.DeviceId
-			done := &completedClaim{ready: ready, response: &response, commit: &whalereinv1.HostRequest{
+			done := &completedClaim{ready: ready, cloud: scope != nil, response: &response, commit: &whalereinv1.HostRequest{
 				RequestId: notice.RequestID, HostId: notice.HostID, DeviceId: notice.DeviceID, Kind: notice.Kind,
 				ProtocolVersion: notice.ProtocolVersion, Body: notice.RequestBody, ExpiresAtUnixMs: notice.ExpiresAt.UnixMilli()}}
 			response.DeviceToken = request.DeviceToken
@@ -411,12 +434,12 @@ func (s *Service) Claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			return &reply, nil
 		}
-		return s.hello(ctx, request, token, hashHex, now, deviceGeneration, hostGeneration)
+		return s.hello(ctx, request, token, pairingPrologueHash(hash), now, deviceGeneration, hostGeneration, scope)
 	}
 	if opErr != nil {
 		return nil, ErrClaimRequired
 	}
-	return s.finish(ctx, request, token, op, now)
+	return s.finish(ctx, request, token, op, now, scope)
 }
 
 // committedOutcome recovers only an exact authenticated FINISH and separately
@@ -441,12 +464,17 @@ func (s *Service) committedOutcome(ctx context.Context, request *whalereinv1.Pai
 	if !outcome.HostConfirmed || len(outcome.DevicePublicKey) != 32 || outcome.ProtocolVersion != request.ProtocolVersion {
 		return nil, ErrPairingCommittedUnconfirmed
 	}
+	if store.IsCloudPairingHash(tokenHash) {
+		if err := s.policy.ApplyPairing(ctx, outcome.HostID, outcome.DeviceID); err != nil {
+			return nil, ErrHostUnavailable
+		}
+	}
 	return &whalereinv1.PairingClaimResponse{ClaimId: outcome.ClaimID, HostId: outcome.HostID, DeviceId: outcome.DeviceID,
 		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: outcome.DevicePublicKey,
 		DeviceToken: request.DeviceToken, ProtocolVersion: outcome.ProtocolVersion}, nil
 }
 
-func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time, deviceGeneration, hostGeneration int64) (*whalereinv1.PairingClaimResponse, error) {
+func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time, deviceGeneration, hostGeneration int64, scope *CloudScope) (*whalereinv1.PairingClaimResponse, error) {
 
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
 		return nil, ErrHostOffline
@@ -459,13 +487,16 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 		DeviceId:        request.GetDeviceId(),
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 	}
+	if scope != nil {
+		claim.DevicePublicKey = scope.DeviceKey
+	}
 	result, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM, claim, now)
 	if err != nil {
 		s.recordProofFailure(ctx, token.TokenHash, now, err)
 		return nil, err
 	}
 	claimResult, err := decodePairingResult(result)
-	if err != nil || len(claimResult.GetNoiseMessage()) == 0 {
+	if err != nil || len(claimResult.GetNoiseMessage()) == 0 || !scope.matchesHost(claimResult.GetHostPublicKey()) {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
 	}
@@ -518,12 +549,12 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 
 }
 
-func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, operationState store.PairingOperation, now time.Time) (*whalereinv1.PairingClaimResponse, error) {
+func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, operationState store.PairingOperation, now time.Time, scope *CloudScope) (*whalereinv1.PairingClaimResponse, error) {
 	var helloReply whalereinv1.PairingClaimResponse
 	if proto.Unmarshal(operationState.HelloResponse, &helloReply) != nil {
 		return nil, ErrInternal
 	}
-	hashHex := hex.EncodeToString(token.TokenHash)
+	hashHex := pairingPrologueHash(token.TokenHash)
 	if !s.presence.IsHostOnline(ctx, token.HostID) {
 		return nil, ErrHostOffline
 	}
@@ -538,6 +569,9 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	}
 	authHash := sha256.Sum256([]byte(request.DeviceToken))
 	claim.DeviceAuthHash = authHash[:]
+	if scope != nil {
+		claim.DevicePublicKey = scope.DeviceKey
+	}
 	result, err := s.forward(ctx, token.HostID, whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM, claim, now)
 	if err != nil {
 		s.recordProofFailure(ctx, token.TokenHash, now, err)
@@ -552,7 +586,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
 	}
-	if len(claimResult.GetDevicePublicKey()) != 32 {
+	if len(claimResult.GetDevicePublicKey()) != 32 || !scope.matchesDevice(claimResult.GetDevicePublicKey()) || !scope.matchesHost(claimResult.GetHostPublicKey()) {
 		s.recordFailure(ctx, token.TokenHash, now)
 		return nil, ErrHostRejected
 	}
@@ -604,6 +638,14 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		DevicePublicKey: claimResult.DevicePublicKey, ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(), ProtocolVersion: request.ProtocolVersion}
 	encodedResponse, _ := proto.Marshal(durableResponse)
 	operation := &store.PairingOperation{ClaimID: request.ClaimId, FinishHash: claimDigest(request), FinishResponse: encodedResponse}
+	if scope != nil {
+		if !commitAt.Before(scope.ExpiresAt) {
+			return nil, ErrTokenExpired
+		}
+		operation.CloudWorkspaceID = scope.WorkspaceID
+		operation.CloudEnrollmentRevision = scope.Revision
+		operation.CloudAuthorizationExpiry = scope.ExpiresAt
+	}
 	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash[:], commitAt, notice, operation)
 	if err != nil {
 		if errors.Is(err, store.ErrPairingFenced) {
@@ -621,14 +663,23 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		return nil, fmt.Errorf("%w: commit pairing", ErrInternal)
 	}
 	if !used {
+		if scope != nil {
+			reply, err := s.committedOutcome(ctx, request, token.TokenHash)
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, ErrPairingCommittedUnconfirmed
+			}
+			return reply, err
+		}
 		return nil, ErrTokenUsed
 	}
 	// The pairing is usable only after Access admission and broker policy are
 	// ready for this exact grant.
-	if err := s.policy.ApplyPairing(ctx, token.HostID, request.GetDeviceId()); err != nil {
-		s.logger.Warn("pairing policy application failed",
-			"host", s.masker.Host(token.HostID), "device", s.masker.Device(request.GetDeviceId()), "error", err.Error())
-		return nil, ErrInternal
+	if scope == nil {
+		if err := s.policy.ApplyPairing(ctx, token.HostID, request.GetDeviceId()); err != nil {
+			s.logger.Warn("pairing policy application failed",
+				"host", s.masker.Host(token.HostID), "device", s.masker.Device(request.GetDeviceId()), "error", err.Error())
+			return nil, ErrInternal
+		}
 	}
 
 	if helloReply.HostFingerprint != "" {
@@ -648,7 +699,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 		ProtocolVersion: request.GetProtocolVersion(),
 	}
-	done := &completedClaim{response: response, commit: notice}
+	done := &completedClaim{response: response, commit: notice, cloud: scope != nil}
 
 	return s.completeClaim(ctx, done)
 
@@ -678,6 +729,11 @@ func (s *Service) completeClaim(ctx context.Context, done *completedClaim) (*wha
 	}
 	if !confirmed {
 		return nil, ErrPairingCommittedUnavailable
+	}
+	if done.cloud {
+		if err := s.policy.ApplyPairing(ctx, done.response.HostId, done.response.DeviceId); err != nil {
+			return nil, ErrHostUnavailable
+		}
 	}
 	return proto.Clone(done.response).(*whalereinv1.PairingClaimResponse), nil
 }

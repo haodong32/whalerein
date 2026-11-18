@@ -210,10 +210,13 @@ Host and plugin against FakeDSH. It is opt-in and never runs as part of
 The observation surface is **CLI stdout**, recorded by one monotonic clock in
 the driver process. Each attempt:
 
-1. creates a fresh session and syncs it,
-2. starts `whalerein --json tail` and waits for the watch-ready marker,
-3. arms the fixture's scripted reply, then invokes `whalerein send`,
-4. reads tail output and records milestones.
+1. creates a fresh session and loads it with `whalerein session show`,
+2. starts `whalerein --json session watch` and waits for its initial session state,
+3. arms the fixture's scripted reply and invokes `whalerein session send --detach`,
+4. reads watch output and records milestones.
+
+Each benchmark device starts from a selected Standalone TOML and pairs with an
+invitation passed on standard input.
 
 Dispatch is taken immediately before the send process starts, so first-text and
 final latency include send start-up. The fixture drives its reply schedule from

@@ -19,7 +19,7 @@ def test_sessions_unknown_host_is_not_found(scenario, paired_device, session_id)
     """An unpaired Host is a lookup failure, not a reason to pair again."""
     paired_device.sessions(scenario.host)
     code, values = paired_device.invoke(
-        "sessions", "--host", "host-not-paired-" + scenario.schema[-8:], success=False
+        'session', 'list', "--host", "host-not-paired-" + scenario.schema[-8:], success=False
     )
     assert code == 3, f"expected not-found exit, got {code}: {values[-1:]}"
     error = values[-1]["error"]
@@ -28,7 +28,7 @@ def test_sessions_unknown_host_is_not_found(scenario, paired_device, session_id)
     assert "pair" not in error["message"].lower()
 
     # The authorized Host still lists normally afterwards.
-    assert paired_device.call("hosts")["hosts"], "authorized Host listing disappeared"
+    assert paired_device.call('host', 'list')["hosts"], "authorized Host listing disappeared"
 
 
 @pytest.mark.description(
@@ -36,7 +36,7 @@ def test_sessions_unknown_host_is_not_found(scenario, paired_device, session_id)
 )
 def test_hosts_offline_presence_and_cached_sessions(scenario, paired_device, session_id):
     """Offline discovery and the non-empty cache fallback are both explicit."""
-    assert paired_device.call("hosts")["hosts"][0]["online"] is True
+    assert paired_device.call('host', 'list')["hosts"][0]["online"] is True
     online = paired_device.sessions(scenario.host)
     assert online, "the online listing must contain the fixture session"
 
@@ -48,11 +48,11 @@ def test_hosts_offline_presence_and_cached_sessions(scenario, paired_device, ses
         ),
         timeout=30,
     )
-    host = paired_device.call("hosts")["hosts"][0]
+    host = paired_device.call('host', 'list')["hosts"][0]
     assert host["host_id"] == scenario.host
     assert host["online"] is False
 
-    code, values = paired_device.invoke("sessions", "--host", scenario.host)
+    code, values = paired_device.invoke('session', 'list', "--host", scenario.host)
     assert code == 0
     data = values[-1]["data"]
     assert data["source"] == "cache"
@@ -76,7 +76,7 @@ def test_sessions_offline_with_an_empty_cache_reports_offline(scenario, paired_d
         ),
         timeout=30,
     )
-    code, values = second.invoke("sessions", "--host", scenario.host, success=False)
+    code, values = second.invoke('session', 'list', "--host", scenario.host, success=False)
     assert code == 5, f"expected host-offline exit, got {code}: {values[-1:]}"
     assert values[-1]["error"]["code"] in ("host_offline", "unavailable")
 
@@ -104,24 +104,17 @@ def test_sessions_offline_order_matches_the_online_order(scenario, paired_device
 
 
 @pytest.mark.description(
-    "When global --host and sessions --host disagree, the CLI reports a conflict exit 8 and does not query either Host."
+    "Session list accepts a single command-local Host and rejects repeated Host arguments."
 )
-def test_sessions_host_scope_must_agree(scenario, paired_device, session_id):
-    """Two explicit Host scopes must not silently select one of them."""
+def test_sessions_reject_repeated_host_scope(scenario, paired_device, session_id):
+    """An invalid pair of Host arguments cannot select a target."""
     before = paired_device.sessions(scenario.host)
     code, values = paired_device.invoke(
-        "--host",
-        scenario.host,
-        "sessions",
-        "--host",
-        "host-other-" + scenario.schema[-6:],
+        "session", "list", "--host", "fixture-other-host", "--host", scenario.host,
         success=False,
     )
-    assert code == 8, f"expected conflict exit, got {code}: {values[-1:]}"
-    assert values[-1]["error"]["code"] == "conflict"
-    assert "--host" in values[-1]["error"]["message"]
-
-    matching = paired_device.call("--host", scenario.host, "sessions", "--host", scenario.host)
-    assert [row["session_id"] for row in matching["sessions"]] == [
+    assert code == 2
+    assert values[-1]["error"]["code"] == "invalid_argument"
+    assert [row["session_id"] for row in paired_device.sessions(scenario.host)] == [
         row["session_id"] for row in before
     ]

@@ -13,9 +13,9 @@ pytestmark = pytest.mark.__getattr__("native-dsh")
 
 def _cli(paired_device, *args):
     return subprocess.Popen(
-        [str(ROOT / "target/debug/whalerein"), "--json", "--yes", "--data-dir", str(paired_device.directory / "client"), *args],
+        paired_device.args("--yes", *args),
         cwd=ROOT,
-        env={**os.environ, "WHALEREIN_SECRET_BACKEND": "file:" + str(paired_device.directory / "secrets"), "WHALEREIN_LOG": "error"},
+        env=paired_device.env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -35,11 +35,11 @@ def test_native_interrupt_releases_an_open_question_claim(scenario, paired_devic
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
     wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_OPEN"], timeout=15, process=scenario.native)
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     answer = _answer_file(scenario)
     # Hold the native claim so the interrupt lands while the answer is in flight.
     assert scenario.request("gx-hold-question-claim")["armed"]
-    process = _cli(paired_device, "answer", "--session", session, "--batch", batch["batch_id"],
+    process = _cli(paired_device, "session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
         "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
         "--phase", batch["phase"], "--input", str(answer))
     try:
@@ -54,9 +54,9 @@ def test_native_interrupt_releases_an_open_question_claim(scenario, paired_devic
         # The same fixture call id can be answered again: a leaked claim would
         # make this second registration fail instead of settling.
         assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-        wait(lambda: any(batch["answerable"] for batch in paired_device.call("questions", "--session", session)["batches"]), timeout=15)
-        batch = [item for item in paired_device.call("questions", "--session", session)["batches"] if item["answerable"]][-1]
-        receipt = paired_device.call("answer", "--session", session, "--batch", batch["batch_id"],
+        wait(lambda: any(batch["answerable"] for batch in paired_device.call("session", "question", "list", "--session", session)["batches"]), timeout=15)
+        batch = [item for item in paired_device.call("session", "question", "list", "--session", session)["batches"] if item["answerable"]][-1]
+        receipt = paired_device.call("session", "question", "answer", "--session", session, "--batch", batch["batch_id"],
             "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"],
             "--phase", batch["phase"], "--input", str(answer))
         assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
@@ -75,9 +75,9 @@ def test_native_model_set_is_used_by_the_next_turn(scenario, paired_device):
     catalog = scenario.request("model-catalog")
     group = next(group for group in catalog["groups"] if len(group.get("models", [])) >= 2)
     selected = group["models"][1]
-    paired_device.call("model", "set", "--session", session, "--provider", group["id"], "--model", selected["id"])
+    paired_device.call("session", "model", "set", "--session", session, "--provider", group["id"], "--model", selected["id"])
     scenario.model.plan()
-    receipt = paired_device.send(session, "synthetic model turn", delivery="start-if-idle")
+    receipt = paired_device.send(session, "synthetic model turn", delivery="start-if-idle")["receipt"]
     assert receipt["status"] == "succeeded"
     scenario.wait_idle(session)
     observed = scenario.request("model-read", sessionId=session)
@@ -96,7 +96,7 @@ def test_native_queue_promotion_state_race_is_observable(scenario, paired_device
     scenario.request("queue-add", sessionId=session)
     item = scenario.request("queue-read", sessionId=session)["items"][0]["id"]
     assert scenario.request("gx-hold-native-operation", config={"operation": "queue_promote"})["armed"]
-    process = _cli(paired_device, "queue", "steer", "--session", session, "--item", item)
+    process = _cli(paired_device, "session", "queue", "steer", "--session", session, "--item", item)
     try:
         # The adapter observed a running session and reached the native update.
         wait(lambda: scenario.request("gx-held-native-status")["entered"], timeout=15, process=scenario.native)
@@ -109,7 +109,7 @@ def test_native_queue_promotion_state_race_is_observable(scenario, paired_device
         code = process.returncode
         result = json.loads(output) if output.strip() else {}
         assert code in (0, 7, 8), (code, output, error)
-        items = paired_device.call("queue", "list", "--session", session)["items"]
+        items = paired_device.call("session", "queue", "list", "--session", session)["items"]
         placement = items[0]["placement"] if items else ""
         if code == 0:
             assert result["data"]["command"]["status"] == "succeeded"

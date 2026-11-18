@@ -15,7 +15,7 @@ pytestmark = pytest.mark.chain
 
 def _resolve(device, approval, decision="approve", digest=None, version=None):
     return device.invoke(
-        decision,
+        "session", "approval", decision,
         "--request",
         approval["approval_id"],
         "--digest",
@@ -52,7 +52,8 @@ def test_two_devices_decide_one_approval_once(scenario):
         second_card["version"],
     )
     before = _resolve_count(scenario)
-    assert second.resolve("approve", second_card)["status"] == "succeeded"
+    assert second.resolve("approve", second_card)["status"] in {"host_accepted", "succeeded"}
+    wait(lambda: scenario.dsh.approval(pending["approval_id"])["state"] == "approved")
     code, values = _resolve(first, first_card)
     assert code == 8
     assert values[-1]["error"]["code"] == "approval_already_resolved"
@@ -80,7 +81,8 @@ def test_stale_approval_guards_surface_approval_codes(scenario):
     assert values[-1]["error"]["code"] == "approval_version_mismatch"
     assert _resolve_count(scenario) == before
     assert _cards(device, session)[0]["approval_id"] == card["approval_id"]
-    assert device.resolve("approve", card)["status"] == "succeeded"
+    assert device.resolve("approve", card)["status"] in {"host_accepted", "succeeded"}
+    wait(lambda: scenario.dsh.approval(card["approval_id"])["state"] == "approved")
     code, values = _resolve(device, card)
     assert code == 8
     assert values[-1]["error"]["code"] == "approval_already_resolved"
@@ -105,7 +107,7 @@ def test_ttl_expiry_returns_idle_and_next_approval_works(scenario):
     scenario.dsh.request_approval(session, ttl_ms=1000)
     expired_card = _cards(device, session)[0]
     wait(lambda: not _cards(device, session), timeout=20)
-    assert device.call("wait", "--session", session, "--timeout", "5")["reason"] == "idle"
+    assert device.call("session", "wait", session, "--timeout", "5")["reason"] == "idle"
 
     device.send(session, "fixture follow-up turn")
     scenario.dsh.request_approval(session, ttl_ms=30000)
@@ -132,7 +134,7 @@ def test_concurrent_approvals_keep_independent_ttls_and_stable_order(scenario):
     device = scenario.pair()
     session = scenario.dsh.create_session()
     device.sessions(scenario.host)
-    first = scenario.dsh.request_approval(session, ttl_ms=1500)
+    first = scenario.dsh.request_approval(session, ttl_ms=7000)
     second = scenario.dsh.request_approval(session, ttl_ms=30000)
     assert second["version"] > first["version"]
     for _ in range(3):
@@ -145,7 +147,8 @@ def test_concurrent_approvals_keep_independent_ttls_and_stable_order(scenario):
         == [second["approval_id"]],
         timeout=20,
     )
-    assert device.resolve("approve", second)["status"] == "succeeded"
+    assert device.resolve("approve", second)["status"] in {"host_accepted", "succeeded"}
+    wait(lambda: scenario.dsh.approval(second["approval_id"])["state"] == "approved")
     assert scenario.dsh.approval(first["approval_id"])["state"] == "expired"
 
 

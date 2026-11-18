@@ -111,6 +111,65 @@ function eventKind(type) {
   return 'output'
 }
 
+// The native controller persists the submission identity as user source.rpcId.
+// Agent-loop step boundaries associate a consumed user message with the
+// resulting assistant attempt. Missing boundaries never prove a match.
+export function messageReplyEvidence(events, messageId) {
+  let step = null
+  let continuedTurn = null
+  let admitted = false
+  let ambiguous = false
+  for (const event of events) {
+    const data = event.data ?? {}
+    if (event.type === 'step/start') {
+      step = Number.isSafeInteger(data.turn) && Number.isSafeInteger(data.step)
+        ? { turn: data.turn, number: data.step, owned: false, other: false, reply: null }
+        : null
+    } else if (event.type === 'user/message' && data.source?.kind === 'user') {
+      if (data.source.rpcId === messageId) {
+        if (!step) return { state: 'MESSAGE_REPLY_UNCERTAIN' }
+        step.owned = true
+        admitted = true
+      } else if (step) {
+        step.other = true
+      }
+      if (step?.owned && step.other) ambiguous = true
+    } else if (event.type === 'assistant/message' && step && !step.other &&
+        (step.owned || continuedTurn === step.turn) &&
+        data.turn === step.turn && data.step === step.number && !data.interrupted &&
+        Number.isSafeInteger(event.dshSeq)) {
+      const content = Array.isArray(data.message?.content) ? data.message.content : []
+      const toolCall = content.some(block => block?.type === 'tool-call' || block?.type === 'toolCall')
+      const text = content.filter(block => block?.type === 'text' && typeof block.text === 'string')
+        .map(block => block.text).join('')
+      if (!toolCall && text) {
+        step.reply = {
+          state: 'MESSAGE_REPLY_COMMITTED',
+          attempt_id: String(event.dshSeq),
+          text: Array.from(text).slice(0, 32 * 1024).join(''),
+        }
+      }
+    } else if (event.type === 'step/end') {
+      if (step && data.turn === step.turn && data.step === step.number) {
+        if (!ambiguous && step.reply) return step.reply
+        continuedTurn = !step.other && (step.owned || continuedTurn === step.turn) ? step.turn : null
+      } else {
+        continuedTurn = null
+      }
+      step = null
+    } else if (event.type === 'turn/end') {
+      step = null
+      continuedTurn = null
+    }
+  }
+  if (ambiguous) return { state: 'MESSAGE_REPLY_UNCERTAIN' }
+  if (step && !step.other && (step.owned || continuedTurn === step.turn)) {
+    return { state: 'MESSAGE_REPLY_PENDING', active: true }
+  }
+  const waitingForNextStep = continuedTurn !== null
+  return { state: admitted && !waitingForNextStep ? 'MESSAGE_REPLY_UNCERTAIN' : 'MESSAGE_REPLY_PENDING' }
+}
+
 export class RealDshAdapter extends DshAdapter {
   #disposers = []
   #streamEpochs = new WeakMap()
@@ -837,6 +896,20 @@ export class RealDshAdapter extends DshAdapter {
     return { active: Boolean(state.active), running: Boolean(state.running),
       queueAvailable: Array.isArray(state.queue), pendingInput: [...new Set([...pending].map(kind =>
         kind === 'approval' || kind === 'question' ? kind : 'other'))] }
+  }
+
+  async readMessageReply(sessionId, messageId, signal) {
+    const snapshot = await this.getSessionSnapshot(sessionId, { signal })
+    const { active, ...reply } = messageReplyEvidence(snapshot.events, messageId)
+    if (active) {
+      const state = await this.readWaitState(sessionId, signal)
+      if (state.pendingInput.length) {
+        // The active attempt may have moved during the asynchronous input read.
+        const after = await this.getSessionSnapshot(sessionId, { signal })
+        if (after.cursor === snapshot.cursor) return { state: 'MESSAGE_REPLY_INPUT_REQUIRED' }
+      }
+    }
+    return reply
   }
 
   async readWaitState(sessionId, signal) {

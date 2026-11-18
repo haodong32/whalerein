@@ -61,17 +61,17 @@ def test_committed_secondary_revoked_history_and_new_pair(scenario):
     try:
         other.start_native()
         device = Device(scenario.directory)
-        device.identity = device.call('pair', invitation(scenario.host))
+        device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(scenario.host))
         allow_finish.clear()
-        code, _ = device.invoke('pair', invitation(other.host), success=False)
+        code, _ = device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host), success=False)
         assert lost.is_set() and code != 0
         assert other.request('gx-revoke-host-grant', deviceId=device.identity['device_id'])['revoked']
         from environment import wait
         wait(lambda: other.host not in {row['host_id'] for row in device.hosts()},timeout=20)
         allow_finish.set()
-        outcome = device.call('pair', invitation(other.host))
+        outcome = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(other.host))
         assert outcome['host_id'] == other.host
-        history = device.call('pairing-history')['pairings']
+        history = device.call('operation', 'list')['pairing_history']
         assert len(history) == 1 and history[0]['host_id'] == other.host
         assert history[0]['status'] == 'committed_unavailable' and history[0]['claim_id']
         assert {scenario.host, other.host} <= {row['host_id'] for row in device.hosts()}

@@ -75,21 +75,18 @@ message text, digests, or control tokens.
 `up` prints the JSON contract on stdout and progress on stderr. It is
 idempotent: while the stack is healthy it prints the existing contract again.
 Use `up --fresh` to replace a running stack. `down` stops the processes, removes
-only the two labelled `whalerein-ios-stack-*` containers, verifies the result,
+only the two labelled `whalerein-ios-stack-*` containers for this worktree, verifies the result,
 and removes `.data/ios-stack/current`.
 
-A ready-to-use CLI profile is part of the contract. For example:
+The stack emits the file path for a selected Standalone CLI instance.
 
 ```bash
 STATE=.data/ios-stack/current/state.json
-export WHALEREIN_DATA_DIR="$(jq -r .cli.data_dir "$STATE")"
-export WHALEREIN_SECRET_BACKEND="$(jq -r .cli.secret_backend "$STATE")"
-export WHALEREIN_LOG=error
-INVITATION=$(python3 tools/ios-stack/ios_stack.py invitation --refresh)
-target/debug/whalerein --json --yes pair "$INVITATION"
-target/debug/whalerein --json --yes hosts
-target/debug/whalerein --json --yes sessions --host "$(jq -r .host_id "$STATE")"
-target/debug/whalerein --json --yes sync --session "$(jq -r .session_id "$STATE")"
+CLIENT_CONFIG="$(jq -r .cli.config "$STATE")"
+python3 tools/ios-stack/ios_stack.py invitation --refresh \
+  | target/debug/whalerein --config "$CLIENT_CONFIG" --yes host connect --invite-stdin
+target/debug/whalerein --config "$CLIENT_CONFIG" --json host list
+target/debug/whalerein --config "$CLIENT_CONFIG" --json session list
 ```
 
 ## State contract
@@ -104,7 +101,7 @@ All runtime state is under `.data/ios-stack/`, which is Git-ignored.
 | `current/secrets/` | Access/admin/broker/callback/control tokens, mode 0600 |
 | `current/access.yaml`, `current/mosquitto.conf` | Generated per-run configuration |
 | `current/logs` (`supervisor.log`, `access.log`, `dsh.log`, `plugin.log`) | Diagnostics, mode 0600; no secrets or payload contents |
-| `current/client/`, `current/client-secrets/` | CLI data dir and file SecretStore |
+| `current/client.toml`, `current/client/` | Selected CLI config and private instance data |
 | `current/control.sock` | Supervisor control socket for the host CLI |
 | `current/run.marker` | `teardown_marker` file; gone after a verified `down` |
 
@@ -193,12 +190,12 @@ test exercise steer/queue delivery; `seed-event idle` clears runtime state.
 The CLI validates the same path:
 
 ```bash
-whalerein send --session "$SESSION" --delivery start-if-idle "..."  # idle
-whalerein send --session "$SESSION" --delivery steer "..."          # running
-whalerein send --session "$SESSION" --delivery enqueue-after-run "..."
-whalerein approvals --session "$SESSION"
-whalerein approve --request ID --digest HEX --version N
-whalerein interrupt --session "$SESSION"
+whalerein session send "$SESSION" --detach --delivery start-if-idle "..."  # idle
+whalerein session send "$SESSION" --detach --delivery steer "..."          # running
+whalerein session send "$SESSION" --detach --delivery enqueue-after-run "..."
+whalerein session approval list --session "$SESSION"
+whalerein session approval approve --request ID --digest HEX --version N
+whalerein session interrupt "$SESSION"
 ```
 
 `start-if-idle` is a sampled check, not an atomic operation; while the fixture

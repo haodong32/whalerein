@@ -4,6 +4,7 @@ import pty
 import select
 import signal
 import subprocess
+import termios
 import time
 
 import pytest
@@ -43,15 +44,11 @@ def interactive_pair(device, uri, action, timeout=30):
     Returns the process exit code after asserting the prompt was actually shown.
     """
     master, slave = pty.openpty()
+    settings = termios.tcgetattr(slave)
+    settings[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, settings)
     process = subprocess.Popen(
-        [
-            str(ROOT / "target/debug/whalerein"),
-            "--json",
-            "--data-dir",
-            str(device.data_dir),
-            "pair",
-            uri,
-        ],
+        device.args("host", "connect", "--invite-stdin"),
         cwd=ROOT,
         env=device.env(),
         stdin=slave,
@@ -60,6 +57,7 @@ def interactive_pair(device, uri, action, timeout=30):
         start_new_session=True,
     )
     os.close(slave)
+    os.write(master, uri.encode() + b"\n\x04")
     output = bytearray()
     try:
         deadline = time.monotonic() + timeout
@@ -125,9 +123,9 @@ def test_fingerprint_prompt_ctrl_c_then_retry_creates_one_grant(scenario):
     code = interactive_pair(device, invitation["pairingUri"], "sigint")
     assert code != 0
     assert fields(scenario) == ("0", "0"), "Ctrl-C sent a FINISH or created a grant"
-    assert not (device.data_dir / "config.json").exists()
+    assert not (device.data_dir / "regional.json").exists()
 
-    device.identity = device.call("pair", invitation["pairingUri"])
+    device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     assert fields(scenario) == ("1", "1")
     assert scenario.host in {host["host_id"] for host in device.hosts()}
     assert (
@@ -155,6 +153,6 @@ def test_fingerprint_prompt_refusals_send_no_finish(scenario):
             f"refusal {action!r} sent a FINISH or created a grant"
         )
 
-    device.identity = device.call("pair", invitation["pairingUri"])
+    device.identity = device.call('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation["pairingUri"])
     assert fields(scenario) == ("1", "1")
     assert device.sessions(scenario.host) == []

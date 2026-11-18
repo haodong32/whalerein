@@ -3,7 +3,9 @@
 import os
 import socket
 import subprocess
+import threading
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from environment import (
     ROOT,
     Process,
     Scenario,
+    device_keyring,
     start_connect_policy_stub,
     wait,
 )
@@ -302,7 +305,7 @@ def broker(broker_control, shared_broker):
 
 
 @pytest.fixture
-def scenario(tmp_path, postgres, broker_control, shared_broker, request, monkeypatch):
+def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     schema = "case_" + uuid.uuid4().hex
     command = [
         "psql",
@@ -328,11 +331,6 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request, monkeyp
     if native:
         from native_environment import NativeScenario
 
-        # The CLI owns its configuration. DSH must not initialize its shared
-        # file as a side effect of installing or starting the Host plugin.
-        cli_config = tmp_path / "cli-config.toml"
-        cli_config.write_text('version = 1\nenvironment = "production"\n')
-        monkeypatch.setenv("WHALEREIN_CONFIG", str(cli_config))
         value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
     else:
         value = Scenario(tmp_path, schema)
@@ -399,9 +397,50 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request, monkeyp
             )
 
 
+@pytest.fixture(autouse=True)
+def device_keyring_scope(tmp_path_factory):
+    """Give Device instances a lazy, case-owned Linux Secret Service."""
+    from client_environment import isolated_keyring
+
+    with ExitStack() as resources:
+        lock = threading.Lock()
+        environment = None
+
+        def keyring():
+            nonlocal environment
+            with lock:
+                if environment is None:
+                    directory = tmp_path_factory.mktemp("device-keyring")
+                    environment = resources.enter_context(isolated_keyring(directory))
+                return environment
+
+        token = device_keyring.set(keyring)
+        try:
+            yield
+        finally:
+            device_keyring.reset(token)
+
+
 @pytest.fixture
 def paired_device(scenario):
     return scenario.pair()
+
+
+@pytest.fixture
+def paired_client(scenario):
+    """Connect a fresh CLI instance through the selected Standalone TOML."""
+    from client_environment import CutoverClient, isolated_keyring
+    from environment import http
+
+    with isolated_keyring(scenario.directory) as keyring:
+        client = CutoverClient(scenario.directory, "selected-client", keyring)
+        invitation = http(
+            "/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin
+        )["pairingUri"]
+        client.identity = client.call(
+            "host", "connect", "--invite-stdin", "--yes", input_text=invitation
+        )
+        yield client
 
 
 @pytest.fixture

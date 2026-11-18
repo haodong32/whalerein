@@ -14,7 +14,7 @@ pytestmark = pytest.mark.__getattr__("native-dsh")
 def test_gx01_native_creation_placement_open_workflow(placement, scenario, paired_device):
     """Carry an actual native session identity through all enabled GX-01 open-answer stages."""
     enable(scenario)
-    args = ["session-create", "--host", scenario.host]
+    args = ["session", "create", "--host", scenario.host]
     previous = None
     if placement == "cwd":
         directory = scenario.work / "gx-explicit-directory"
@@ -40,16 +40,16 @@ def test_gx01_native_creation_placement_open_workflow(placement, scenario, paire
     assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
     select_model(paired_device, scenario.host, session)
     scenario.model.plan()
-    sent = paired_device.send(session, "synthetic gx variant", delivery="enqueue-after-run")
+    sent = paired_device.send(session, "synthetic gx variant", delivery="enqueue-after-run")["receipt"]
     assert sent["status"] == "succeeded" and sent["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
-    observation = paired_device.call("wait", "--session", session, "--timeout", "3")
+    observation = paired_device.call("session", "wait", session, "--timeout", "3")
     assert observation["reason"] == "input_required" and "question" in observation["state"]["pending_input"]
-    batch = paired_device.call("questions", "--session", session)["batches"][0]
+    batch = paired_device.call("session", "question", "list", "--session", session)["batches"][0]
     assert batch["phase"] == "QUESTION_OPEN" and batch["answerable"]
     receipt = answer(paired_device, scenario.directory, session, batch)
     assert receipt["question_receipt"]["phase"] == "QUESTION_SETTLED"
     assert scenario.request("question-result-remote-fixture", sessionId=session) == {"selected":"Yes", "pending":False}
-    assert paired_device.call("wait", "--session", session, "--timeout", "3")["reason"] == "idle"
+    assert paired_device.call("session", "wait", session, "--timeout", "3")["reason"] == "idle"

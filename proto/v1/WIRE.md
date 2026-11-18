@@ -207,7 +207,7 @@ Access commits the grant before it forwards COMMIT, and it persists the exact
 FINISH digest with the grant in that same transaction. The sequence is
 therefore: Access transaction commits, then COMMIT reaches the Host, then the
 Host ACK is stored. A lost FINISH response, a lost COMMIT ACK, or an Access
-restart between those steps leaves an outcome that `pair-resume` can still
+restart between those steps leaves an outcome that `operation recover <id>` can still
 classify as committed, unconfirmed, or unavailable.
 
 An exact FINISH retry after restart recovers the same receipt and COMMIT, subject
@@ -218,7 +218,8 @@ new grant. Revocation and grant replacement invalidate old completion receipts.
 A FINISH that fails before the commit consumes the invitation, so the same
 Device can only retry with a new invitation; nothing about the earlier Device's
 grants has changed.
-The client command `pair-resume` reloads the request from SecretStore; it never
+Use `operation list` to find the retained pairing ID. The client command
+`operation recover <id>` reloads the request from SecretStore; it never
 reconstructs a credential from the operation ID. A lost SecretStore requires
 explicit operator revocation and a fresh enrollment.
 
@@ -393,6 +394,15 @@ authenticated connection is observed.
 `GET /v1/enrollments/hosts/{host_id}` and `GET /v1/operations/{operation_id}`
 report state, bindings and revisions. Neither ever returns a credential.
 
+### Correlated message reply
+
+The encrypted `ReadMessageReply` query uses the session ID and the message ID
+from the authenticated submission receipt. A `MessageReply` echoes that scope.
+A committed result carries a source attempt identity and bounded visible text.
+Pending, input-required and uncertain results carry no text. An adapter reports
+uncertainty when source evidence cannot bind the submitted message to an
+attempt. A query does not admit a new message.
+
 ## HTTP surface
 
 ```http
@@ -405,6 +415,9 @@ POST   /v1/requests/{request_id}/heartbeat  device bearer token
 DELETE /v1/devices/{device_id}          device bearer token (self) or admin
 POST   /v1/hosts/{host_id}/devices/{device_id}/revocation  host signature
 POST   /v1/enrollments/hosts           portable authorization + Host proof
+POST   /v1/enrollments/devices/pairing  Cloud authorization and Noise proof
+GET    /v1/enrollments/hosts/{host_id}/devices/{device_id}  admin bearer
+POST   /v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation  admin bearer
 GET    /v1/enrollments/hosts/{host_id} admin bearer (device/Host proof pending)
 GET    /v1/operations/{operation_id}   admin bearer (original-endpoint proof pending)
 GET    /healthz

@@ -122,10 +122,36 @@ Host result under the device fence. The retained COMMIT-binding proof is derived
 from the database transaction, not an independent signature. A legacy active
 outcome without verifiable COMMIT evidence remains unconfirmed; observation
 does not delete its credential or rewrite the historical confirmation flag.
-`pair-resume` reuses the original FINISH and credential after client/Access restart.
-Recovery checks the exact request, expiry and active grant generation; it cannot
+`operation recover` reuses the original FINISH and credential after client or
+Access restart. Recovery checks the exact request, expiry and active grant generation; it cannot
 revive a revoked or superseded grant. Restarting a pre-FINISH Noise exchange may
 require a new attempt; no Noise private state is stored by Access.
+
+Cloud Device pairing uses `POST /v1/enrollments/devices/pairing` with
+`authorization` and `claim` objects. The signed authorization binds the issuer,
+regional audience, workspace, region, enrollment revision, Host keys, Device
+Noise key, and operation ID. The claim ID equals that operation ID. Account
+bearer credentials do not authorize Access operations. The Cloud Noise prologue
+uses the lowercase hex SHA-256 of these newline-delimited values in order:
+`whalerein/v1/cloud-pairing`, issuer, audience, workspace ID, region ID,
+enrollment revision, Host ID, Device ID, operation ID, lowercase hex Host Noise
+key, and lowercase hex Device Noise key.
+
+Cloud and Standalone pairing records have separate hash namespaces. Access and
+the Host match the Device key against the Noise transcript. Cloud grant
+admission remains closed until the persisted COMMIT has an authenticated Host
+acknowledgement. Recovery presents the same FINISH and current authorization
+for the same scope. A conflicting operation does not replace an existing grant.
+
+Cloud reads one grant with an Access admin credential at
+`GET /v1/enrollments/hosts/{host_id}/devices/{device_id}?workspaceId=...`.
+A known workspace and Host with no grant returns HTTP 404 with
+`{"state":"missing_grant"}`. Pending activation and pending revocation return
+`pending`, and confirmed states return `ready` or `revoked`.
+The corresponding `POST .../revocation?workspaceId=...` records a durable
+fence before enforcing denial. It returns HTTP 204 after regional enforcement.
+The fence persists when revocation races an authorization that has yet to
+produce a grant.
 
 Global device revocation removes all device credential hashes and commits all
 affected grants, disconnects the device,

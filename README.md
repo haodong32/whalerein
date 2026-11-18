@@ -140,20 +140,22 @@ pnpm install --frozen-lockfile
 # 4. In another terminal, start the plugin against real DSH.
 (cd host/dsh && pnpm start)
 
-# 5. Pair the CLI with the host, then inspect and drive it.
-./target/debug/whalerein pair
-./target/debug/whalerein hosts
-./target/debug/whalerein sessions --host <host-id>
-./target/debug/whalerein tail --session <session-id>
-./target/debug/whalerein send --session <session-id> <text>
-./target/debug/whalerein doctor
-./target/debug/whalerein revoke --yes
+# 5. Create the CLI's selected Standalone instance configuration.
+cat > client.toml <<'TOML'
+version = 1
+service = "standalone"
+data_dir = "./client-instance"
+TOML
+
+# 6. Read a Host invitation from a private file, then send to a Session.
+./target/debug/whalerein --config client.toml host connect --invite-stdin < invitation.txt
+./target/debug/whalerein --config client.toml session list
+./target/debug/whalerein --config client.toml session send <session-id> <text>
+./target/debug/whalerein --config client.toml doctor
 ```
 
-`--json` may be placed before or after the command, `--timeout` is always in
-seconds, and `revoke`, `forget` and `doctor --export` require `--yes` without a
-terminal. See [apps/cli/README.md](apps/cli/README.md) for the full command list,
-the JSON/exit-code contract and `--` for hyphen-leading message text.
+See the [CLI guide](apps/cli/README.md) for configuration, Cloud sign-in,
+command help, machine output, and recovery.
 
 See [deploy/README.md](deploy/README.md) for the Compose layout and smoke tests.
 

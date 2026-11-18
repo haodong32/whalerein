@@ -1,82 +1,40 @@
-//! Core-only configuration consumer test.
-//!
-//! This integration test imports only `whalerein_core::api`; it never imports
-//! the CLI, constructs an account client, or uses a desktop-home default. Sandbox
-//! paths are explicit and moving the configuration file leaves identity state
-//! untouched.
+//! A native caller supplies its selected configuration and SecretStore to Core.
 
-use std::path::Path;
+use std::sync::Arc;
 
-use whalerein_core::api::{
-    ConfigOpenOptions, ConfigPatch, Configuration, DefinitionSource, SelectionSource,
-};
-
-fn write_config(path: &Path) {
-    std::fs::write(
-        path,
-        "version = 1\nenvironment = \"company\"\n\n[environments.company]\n\
-         label = \"Company Cloud\"\nmode = \"account\"\n\
-         api_origin = \"https://cloud.example.com\"\n\
-         issuer = \"https://auth.example.com/oidc\"\n\
-         native_client_id = \"whalerein-cli\"\n",
-    )
-    .unwrap();
-}
+use whalerein_core::api::{ClientConfig, ClientService, Core, MemorySecretStore};
 
 #[test]
-fn config_env_ac_18_core_consumer_uses_sandbox_paths_and_keeps_state_on_move() {
-    let state = tempfile::tempdir().unwrap();
-    std::fs::write(state.path().join("existing-identity"), b"synthetic").unwrap();
-    let before: Vec<_> = std::fs::read_dir(state.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
+fn selected_configuration_can_move_without_retargeting_an_absolute_instance() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let directory = sandbox.path().join("instance");
+    let old = sandbox.path().join("old-instance");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("config.json"), b"old-state-fixture").unwrap();
 
-    let first_dir = tempfile::tempdir().unwrap();
-    let first = first_dir.path().join("device.toml");
-    write_config(&first);
-    let configuration = Configuration::open(&ConfigOpenOptions {
-        explicit_path: Some(&first),
-        ..ConfigOpenOptions::default()
-    })
-    .unwrap();
-    let resolution = configuration.resolve(None).unwrap();
-    assert_eq!(resolution.environment, "company");
-    assert_eq!(resolution.selection_source, SelectionSource::File);
-    assert_eq!(resolution.definition_source, DefinitionSource::File);
+    let first = sandbox.path().join("selected.toml");
+    let options = ClientConfig::new(ClientService::Standalone, &directory);
+    Core::write_config(&first, &options).unwrap();
+    let secrets = Arc::new(MemorySecretStore::new());
+    let client = Core::open(&first, secrets.clone()).unwrap();
+    assert_eq!(client.client_config().service, ClientService::Standalone);
     assert_eq!(
-        configuration.source().path,
-        std::fs::canonicalize(&first).unwrap()
+        client.configured_data_dir(),
+        sandbox.path().canonicalize().unwrap().join("instance")
     );
+    assert!(client.instance_id().unwrap().is_none());
+    assert!(!directory.exists());
 
-    let patch = ConfigPatch::SetDefaultEnvironment {
-        environment: Some("production".into()),
-    };
-    let updated = configuration
-        .update(&patch, configuration.revision())
-        .unwrap();
-    assert_eq!(updated.resolve(None).unwrap().environment, "production");
-
-    let second_dir = tempfile::tempdir().unwrap();
-    let moved = second_dir.path().join("moved.toml");
-    std::fs::rename(&first, &moved).unwrap();
-    let reopened = Configuration::open(&ConfigOpenOptions {
-        explicit_path: Some(&moved),
-        ..ConfigOpenOptions::default()
-    })
-    .unwrap();
-    assert_eq!(reopened.resolve(None).unwrap().environment, "production");
+    let subdir = sandbox.path().join("configuration");
+    std::fs::create_dir(&subdir).unwrap();
+    let moved = subdir.join("selected.toml");
+    std::fs::rename(first, &moved).unwrap();
+    let reopened = Core::open(&moved, secrets).unwrap();
+    assert_eq!(reopened.configured_data_dir(), client.configured_data_dir());
+    assert_eq!(reopened.config_path(), moved.canonicalize().unwrap());
     assert_eq!(
-        reopened.resolve(Some("company")).unwrap().environment,
-        "company"
+        std::fs::read(old.join("config.json")).unwrap(),
+        b"old-state-fixture"
     );
-
-    let after: Vec<_> = std::fs::read_dir(state.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(before, after);
-    assert!(state.path().join("existing-identity").exists());
-    assert!(!state.path().join("profiles.json").exists());
-    assert!(!state.path().join("config.json").exists());
+    assert!(!directory.exists());
 }
