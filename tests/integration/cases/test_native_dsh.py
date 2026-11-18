@@ -1791,7 +1791,7 @@ def test_native_pending_queue_concurrent_mutations(scenario, paired_device):
     other.sessions(scenario.host)
     item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        edits = [executor.submit(device.invoke, "queue", "edit", "--session", session, "--item", item, value, success=False) for device, value in ((paired_device, "edit first fixture"), (other, "edit second fixture"))]
+        edits = [executor.submit(device.invoke, "session", "queue", "edit", "--session", session, "--item", item, value, success=False) for device, value in ((paired_device, "edit first fixture"), (other, "edit second fixture"))]
         results = [future.result() for future in edits]
     assert all(code == 0 for code, _ in results)
     current = paired_device.call("session", "queue", "list", "--session", session)
@@ -1819,7 +1819,7 @@ def test_native_pending_queue_local_remote_race(scenario, paired_device):
     item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
         local = executor.submit(scenario.request, "queue-remove-direct", sessionId=session, itemId=item)
-        remote = executor.submit(paired_device.invoke, "queue", "edit", "--session", session, "--item", item, "race fixture", success=False)
+        remote = executor.submit(paired_device.invoke, "session", "queue", "edit", "--session", session, "--item", item, "race fixture", success=False)
         assert local.result()["accepted"]
         code, envelope = remote.result()
     assert code == 0 or envelope[-1]["error"]["code"] in ("not_found", "unknown")
@@ -2269,7 +2269,7 @@ def test_native_delivery_completion_race(scenario, paired_device, mode):
     assert scenario.model.started.wait(timeout=15)
     scenario.request("arm-delivery-barrier")
     with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(paired_device.send, session, "synthetic raced delivery", mode)
+        pending = executor.submit(paired_device.send_confirmed, session, "synthetic raced delivery", mode)
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=10, process=scenario.native)
             scenario.model.release.set()
