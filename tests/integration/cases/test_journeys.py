@@ -728,7 +728,7 @@ def test_journey_pairing_interrupted_after_commit_resumes(scenario, paired_devic
         drop_at="finish", listen_port=18080, upstream_port=upstream_port
     )
     try:
-        scenario.start_access()
+        scenario.start_access(listener_port=upstream_port)
         code, values = paired_device.invoke("host", "connect", "--invite-stdin", "--yes", stdin_text=proxy.route(link), success=False)
         assert code != 0 and proxy.lost.is_set()
         assert live_grants(scenario.schema, paired_device.identity["device_id"]) == 2

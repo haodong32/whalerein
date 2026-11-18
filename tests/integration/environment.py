@@ -613,19 +613,19 @@ log:
         )
         self.processes.append(self.access)
 
-    def wait_access_ready(self):
+    def wait_access_ready(self, *, listener_port=18080):
         binary = ROOT / ".verification/bin/whalerein-access"
         executable = Path(f"/proc/{self.access.child.pid}/exe")
         wait(
             lambda: executable.samefile(binary)
-            and owns_listener(self.access, 18080)
+            and owns_listener(self.access, listener_port)
             and http("/readyz"),
             process=self.access,
         )
 
-    def start_access(self):
+    def start_access(self, *, listener_port=18080):
         self.start_access_process()
-        self.wait_access_ready()
+        self.wait_access_ready(listener_port=listener_port)
 
     def start_plugin(self, extra_env=None):
         self.plugin = Process(
