@@ -6,13 +6,6 @@ from environment import wait
 pytestmark = pytest.mark.__getattr__("native-dsh")
 
 
-def confirmed_delivery(paired_device, session, text, delivery=None):
-    submission = paired_device.send(session, text, delivery=delivery)
-    return paired_device.confirm_detached_delivery(
-        submission, session, text, delivery
-    )
-
-
 def test_native_delivery_production_construction_queue_and_steer(scenario, paired_device):
     """Without test enablement, default native queue and running steer return acceptance receipts."""
     session = scenario.create()
@@ -20,11 +13,11 @@ def test_native_delivery_production_construction_queue_and_steer(scenario, paire
     selected = next(item for item in sessions if item["session_id"] == session)
     assert selected["source_capabilities"]["delivery_modes"] == ["START_IF_IDLE", "ENQUEUE_AFTER_RUN", "STEER"]
     scenario.model.plan(hold=True)
-    first = confirmed_delivery(paired_device, session, "synthetic initial")
+    first = paired_device.send_confirmed(session, "synthetic initial")
     assert first["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
-    queued = confirmed_delivery(paired_device, session, "synthetic queued")
-    steered = confirmed_delivery(paired_device, session, "synthetic steer", "steer")
+    queued = paired_device.send_confirmed(session, "synthetic queued")
+    steered = paired_device.send_confirmed(session, "synthetic steer", "steer")
     assert len({first["delivery_id"], queued["delivery_id"], steered["delivery_id"]}) == 3
     wait(lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"], process=scenario.native)
     scenario.model.release.set()
@@ -36,7 +29,7 @@ def test_native_delivery_production_construction_idle_steer(scenario, paired_dev
     session = scenario.create()
     paired_device.sessions(scenario.host)
     scenario.model.plan()
-    receipt = confirmed_delivery(paired_device, session, "synthetic idle steer", "steer")
+    receipt = paired_device.send_confirmed(session, "synthetic idle steer", "steer")
     assert receipt["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
@@ -93,7 +86,7 @@ def test_native_delivery_nonstandard_launcher_open(scenario, paired_device):
     selected = next(item for item in paired_device.sessions(scenario.host) if item["session_id"] == session)
     assert selected["source_capabilities"]["delivery_modes"] == ["START_IF_IDLE", "ENQUEUE_AFTER_RUN", "STEER"]
     scenario.model.plan()
-    assert confirmed_delivery(paired_device, session, "synthetic queued fixture")["delivery_id"]
+    assert paired_device.send_confirmed(session, "synthetic queued fixture")["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -106,7 +99,7 @@ def test_native_delivery_external_official_symlink(scenario, paired_device):
     selected = next(item for item in paired_device.sessions(scenario.host) if item["session_id"] == session)
     assert selected["source_capabilities"]["delivery_modes"] == ["START_IF_IDLE", "ENQUEUE_AFTER_RUN", "STEER"]
     scenario.model.plan()
-    receipt = confirmed_delivery(paired_device, session, "synthetic external symlink")
+    receipt = paired_device.send_confirmed(session, "synthetic external symlink")
     assert receipt["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
@@ -212,9 +205,9 @@ def test_native_delivery_controller_lifecycle_reconnect(scenario, paired_device)
     wait(lambda: scenario.request("ready").get("connected"), timeout=45, process=scenario.native)
     wait(lambda: any(item["session_id"] == session and "ENQUEUE_AFTER_RUN" in item["source_capabilities"]["delivery_modes"] for item in paired_device.sessions(scenario.host)), timeout=45, process=scenario.native)
     scenario.model.plan(hold=True)
-    assert confirmed_delivery(paired_device, session, "synthetic after controller lifecycle")["delivery_id"]
+    assert paired_device.send_confirmed(session, "synthetic after controller lifecycle")["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
-    queued = confirmed_delivery(paired_device, session, "synthetic queue after controller lifecycle")
+    queued = paired_device.send_confirmed(session, "synthetic queue after controller lifecycle")
     wait(lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"], process=scenario.native)
     scenario.model.release.set()
     scenario.wait_idle(session, assistant_count=2)

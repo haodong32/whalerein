@@ -1437,10 +1437,8 @@ def test_native_approval_refuses_a_stale_guard(scenario, paired_device):
         code, values = paired_device.invoke(
             "session", "approval", "approve", "--request", approval["approval_id"], "--digest", digest,
             "--version", str(version), success=False)
-        # The Host rejects an admission guard before journaling the command, so
-        # the client receives no authenticated result and reports the outcome as
-        # unknown. The definitive approval codes remain the adapter contract.
-        assert code == 7 and values[-1]["error"]["code"] == "unknown"
+        # The Host journals a definitive rejection before authorizing the approval.
+        assert code == 8 and values[-1]["error"]["code"] == "approval_version_mismatch"
         assert values[-1].get("data") is None
     assert scenario.request("effects")["count"] == 0
     paired_device.resolve("approve", approval)
@@ -1461,7 +1459,7 @@ def test_native_approval_refuses_an_expired_guard(scenario, paired_device):
     code, values = paired_device.invoke(
         "session", "approval", "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
         "--version", str(approval["version"]), success=False)
-    assert code == 7 and values[-1]["error"]["code"] == "unknown"
+    assert code == 8 and values[-1]["error"]["code"] == "approval_expired"
     assert values[-1].get("data") is None
     assert scenario.request("effects")["count"] == 0
 
@@ -1568,16 +1566,16 @@ def test_native_delivery_queue_and_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan(hold=True)
-    first = paired_device.send(session, "synthetic initial", delivery="start-if-idle")["receipt"]
+    first = paired_device.send_confirmed(session, "synthetic initial", delivery="start-if-idle")
     assert first["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")["receipt"]
+    queued = paired_device.send_confirmed(session, "synthetic queued")
     assert queued["delivery_id"] and queued["delivery_id"] != first["delivery_id"]
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
     )
-    steered = paired_device.send(session, "synthetic steer", delivery="steer")["receipt"]
+    steered = paired_device.send_confirmed(session, "synthetic steer", delivery="steer")
     assert steered["delivery_id"] not in (first["delivery_id"], queued["delivery_id"])
     scenario.model.release.set()
     scenario.wait_idle(session, assistant_count=2)
@@ -1604,12 +1602,16 @@ def test_native_start_if_idle_busy(scenario, paired_device):
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic initial", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
+    text = "synthetic busy"
     code, values = paired_device.invoke(
-        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic busy",
+        "session", "send", session, "--detach", "--delivery", "start-if-idle", "--", text,
         success=False,
     )
+    code, result = paired_device.settle_detached_delivery(
+        code, values[-1], session, text, "start-if-idle"
+    )
     assert code == 8
-    assert values[-1]["error"]["code"] == "conflict"
+    assert result["error"]["code"] == "conflict"
     assert scenario.model.calls == 1
     scenario.model.release.set()
     scenario.wait_idle(session)
@@ -1645,7 +1647,7 @@ def test_native_steer_after_interrupt(scenario, paired_device):
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
     paired_device.interrupt(session)
-    receipt = paired_device.send(session, "synthetic after interrupt", delivery="steer")["receipt"]
+    receipt = paired_device.send_confirmed(session, "synthetic after interrupt", delivery="steer")
     assert receipt["delivery_id"]
     scenario.model.release.set()
     wait(

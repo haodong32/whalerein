@@ -237,6 +237,11 @@ class Device:
         options = ["--delivery", delivery] if delivery else []
         return self.call("session", "send", session, "--detach", *options, "--", message)
 
+    def send_confirmed(self, session, message, delivery=None):
+        """Wait for a terminal acceptance from the original detached send."""
+        submission = self.send(session, message, delivery=delivery)
+        return self.confirm_detached_delivery(submission, session, message, delivery)
+
     def settle_detached_delivery(self, code, envelope, session, text, delivery):
         """Read the exact recorded send's terminal effect without waiting for a reply."""
         if code != 0:
