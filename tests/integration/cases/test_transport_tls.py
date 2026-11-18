@@ -223,7 +223,7 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
             lambda: paired_device.call('host', 'list')["hosts"][0]["online"] is True,
             timeout=30,
         )
-        assert paired_device.send(identity, "after leaf rotation")["receipt"]["status"] == "succeeded"
+        paired_device.send_confirmed(identity, "after leaf rotation")
 
         # 2. New authority that Access does not trust: fail closed, not offline.
         rotated_leaf.close()
@@ -250,10 +250,7 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
         )
         try:
             watch.wait(lambda value: _event(value).get("type") == "reset", timeout=20)
-            assert (
-                paired_device.send(identity, "after CA rotation")["receipt"]["status"]
-                == "succeeded"
-            )
+            paired_device.send_confirmed(identity, "after CA rotation")
             watch.wait(
                 lambda value: _event(value).get("type") == "message", timeout=25
             )

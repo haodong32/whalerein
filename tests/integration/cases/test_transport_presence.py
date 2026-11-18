@@ -154,8 +154,7 @@ def test_broker_reconnect_window_queues_and_recovers(scenario, paired_device):
     scenario.plugin.close()
     scenario.start_plugin()
     wait(lambda: paired_device.hosts()[0]["online"] is True, timeout=30)
-    sent = paired_device.send(session, "after reconnect")
-    assert sent["status"] == "succeeded"
+    paired_device.send_confirmed(session, "after reconnect")
     wait(lambda: _effects(scenario) >= before + 1, timeout=30)
 
 
