@@ -25,8 +25,14 @@ def test_native_delivery_unconfirmed_receipt_stays_unknown_after_restart(scenari
     baseline = scenario.request("gx-user-delivery-count", sessionId=session)["count"]
     scenario.model.plan()
     assert scenario.request("arm-native-unconfirmed-delivery", config={"kind": kind})["armed"]
-    code, values = paired_device.invoke("session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic delivery", success=False)
-    assert code != 0 and values[-1]["error"]["code"] == "unknown"
+    text = "synthetic delivery"
+    code, values = paired_device.invoke(
+        "session", "send", "--detach", session, "--delivery", "start-if-idle", text, success=False
+    )
+    code, outcome = paired_device.settle_detached_delivery(
+        code, values[-1], session, text, "start-if-idle"
+    )
+    assert code != 0 and outcome["error"]["code"] == "unknown"
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
     assert scenario.request("gx-user-delivery-count", sessionId=session)["count"] == baseline + 1

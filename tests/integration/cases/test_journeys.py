@@ -178,8 +178,7 @@ def test_journey_network_path_change_rebuilds_the_channel(scenario, paired_devic
             )
         except Exception as error:  # noqa: BLE001 - observation then re-raise
             raise
-        later = paired_device.send(session, "after path change")["receipt"]
-        assert later["status"] == "succeeded"
+        paired_device.send_confirmed(session, "after path change")
         watch.wait(
             lambda value: any("after path change" in text for text in _texts(_event(value))),
             timeout=30,
