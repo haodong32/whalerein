@@ -30,7 +30,7 @@ def test_gx04_native_question_answers_recover_without_replay(phase, fault, scena
             assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
         else:
             scenario.model.plan("question", hold=True)
-            paired_device.send(session, "synthetic question", delivery="enqueue-after-run")
+            paired_device.send_confirmed(session, "synthetic question", delivery="enqueue-after-run")
             wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=15, process=scenario.native)
         batches = paired_device.call("session", "question", "list", "--session", session)["batches"]
         assert len(batches) == 1 and batches[0]["answerable"]

@@ -38,8 +38,8 @@ def test_gx01_native_default_create_model_queue_open_answer(scenario, paired_dev
     assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
     select_model(paired_device, scenario.host, session)
     scenario.model.plan()
-    sent = paired_device.send(session, "synthetic gx turn", delivery="enqueue-after-run")
-    assert sent["receipt"]["status"] == "succeeded" and sent["receipt"]["delivery_id"]
+    sent = paired_device.send_confirmed(session, "synthetic gx turn", delivery="enqueue-after-run")
+    assert sent["status"] == "succeeded" and sent["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
