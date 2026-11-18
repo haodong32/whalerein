@@ -194,6 +194,12 @@ outputs and required native inventories are published into the run directory
 and included in its artifact manifest. Each shard mounts the source and artifacts
 read-only and keeps mutable runtime state in its own temporary space.
 
-The launcher uses BuildKit directly. Inspect disk use with `docker system df`
+The launcher uses BuildKit directly and reuses local Docker image tags
+identified by the platform context's literal file allowlist, target and CPU
+architecture. It verifies the input label and records the loaded image ID.
+Changes to product and test source do not change platform tags. Update
+`Dockerfile.dockerignore` when the platform requires a new input file.
+
+Inspect disk use with `docker system df`
 and `docker buildx du`. The launcher does not prune user images, containers,
 or caches.

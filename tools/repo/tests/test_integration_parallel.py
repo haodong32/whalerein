@@ -45,6 +45,7 @@ class Docker(FakeRunner):
         self.shard_cases = shard_cases if shard_cases is not None else [[ONE], [TWO]]
         self.images = images or {"vectors": IMAGE, "vectors-builder": "sha256:" + "b" * 64}
         self.states = {}
+        self.tags = {}
         self.sequence = 0
         self.started = []
         self.removed = []
@@ -59,13 +60,21 @@ class Docker(FakeRunner):
                     return ok(returncode=1)
                 target = args[args.index("--target") + 1]
                 result = self.images[target] if "invalid-image" not in self.modes else "invalid"
-                Path(args[args.index("--iidfile") + 1]).write_text(result)
+                tag = args[args.index("--tag") + 1]
+                key = args[args.index("--label") + 1].split("=", 1)[1]
+                platform = args[args.index("--platform") + 1]
+                assert platform == "linux/arm64"
+                if "wrong-platform-arch" in self.modes:
+                    platform = "linux/amd64"
+                label = key if "wrong-platform-label" not in self.modes else "other"
+                self.tags[tag] = f"{platform} {result} {label}"
             return ok()
         if op == "info":
-            return ok(stdout="aarch64")
+            return ok(stdout="linux/aarch64")
         if op == "image":
-            return ok(stdout=args[-1])
+            return ok(stdout=self.tags[args[-1]]) if args[-1] in self.tags else ok(returncode=1)
         if op == "create":
+            assert kwargs.get("env") == {"DOCKER_DEFAULT_PLATFORM": ""}
             image_pos = next(
                 index for index, value in enumerate(args) if value in self.images.values()
             )
@@ -150,13 +159,18 @@ def worktree(tmp_path, monkeypatch):
     for name in (
         *collection_paths("integration"),
         "tests/integration/Dockerfile",
+        "tests/integration/Dockerfile.dockerignore",
         "tools/repo/linux-rust-packages.txt",
         "tools/repo/protoc-linux.sh",
         ".gitignore",
     ):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(".data/\n" if name == ".gitignore" else "fixture")
+        text = {
+            ".gitignore": ".data/\n",
+            "tests/integration/Dockerfile.dockerignore": "**\n!tests/integration/Dockerfile\n",
+        }
+        path.write_text(text.get(name, "fixture"))
     subprocess.run(["git", "-C", root, "add", "."], check=True)
     subprocess.run(
         [
@@ -176,9 +190,9 @@ def worktree(tmp_path, monkeypatch):
     return root
 
 
-def run(root, runner, **options):
+def run(root, runner, *, name="run", **options):
     request = testing.TestRequest(suite="integration", group="protocol-vectors", **options)
-    result = integration.collect(root, runner, request, root / ".data/run")
+    result = integration.collect(root, runner, request, root / ".data" / name)
     return result.exit_code, json.loads((result.report_directory / "report.json").read_text())
 
 
@@ -223,6 +237,8 @@ def test_parallel_has_one_build_and_exact_cover(worktree):
     [
         ("build-failed", 1, "linux-platform-build-failed"),
         ("invalid-image", 1, "invalid-image-identity"),
+        ("wrong-platform-label", 1, "platform-image-input-mismatch"),
+        ("wrong-platform-arch", 1, "platform-image-native-mismatch"),
         ("unmatched", 2, "invalid-integration-selection"),
         ("missing", 1, "integration-execution-failed"),
         ("conflict", 1, "docker-ownership-conflict"),
@@ -274,3 +290,21 @@ def test_listing_never_starts_assertion_container(worktree):
     assert code == 0
     assert [case["status"] for case in report["scopes"][0]["tests"]] == ["todo", "todo"]
     assert not any(name.startswith("wr-verify-test") for name in docker.started)
+
+
+def test_reuses_tagged_platform_for_test_edit_and_rebuilds_for_platform_edit(worktree):
+    docker = Docker()
+    _, first = run(worktree, docker)
+    test = worktree / "tests/integration/cases/test_observation_artifact.py"
+    test.write_text("changed test source")
+    _, second = run(worktree, docker, name="second")
+    before = first["verification"]["artifacts"]["platform-vectors"]
+    after = second["verification"]["artifacts"]["platform-vectors"]
+    assert before["reused"] is False
+    assert after == {**before, "reused": True}
+    assert len([args for args, _ in docker.calls if args[1:3] == ("buildx", "build")]) == 2
+    (worktree / "tests/integration/Dockerfile").write_text("changed platform source")
+    _, third = run(worktree, docker, name="third")
+    final = third["verification"]["artifacts"]["platform-vectors"]
+    assert final["inputs"] != after["inputs"]
+    assert final["reused"] is False

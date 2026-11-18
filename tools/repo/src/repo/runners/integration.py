@@ -26,6 +26,7 @@ from ..verification import Invocation, VerificationError, run_suite
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 7200
 OWNER_LABEL = "org.whalerein.verification.run"
+PLATFORM_LABEL = "org.whalerein.verification.platform-inputs"
 
 
 def collect(root, runner, request, directory):
@@ -66,50 +67,107 @@ def _mount(host, guest, *, readonly=False):
     return ["--mount", f"type=bind,src={host},dst={guest}" + (",readonly" if readonly else "")]
 
 
-def _command(context, runner, argv, cwd, code, *, blocked=False):
-    result = context.run(runner, argv, cwd)
+def _command(context, runner, argv, cwd, code, *, blocked=False, env=None):
+    result = context.run(runner, argv, cwd, env=env)
     if not result.ok:
         # Command output can include product data; keep stable failure codes.
         raise VerificationError(code, 3 if blocked else 1)
     return result.stdout.strip()
 
 
-def _build_target(context, runner, source, target):
-    image_file = context.run_directory / f"{target}.image"
-    _command(
-        context,
+def _platform_key(source, target, platform):
+    # Docker receives only the literal allowlist in this file. Product and
+    # test edits are deliberately absent from the key.
+    dockerignore = source / "tests/integration/Dockerfile.dockerignore"
+    manifest = dockerignore.read_bytes()
+    lines = manifest.decode().splitlines()
+    if not lines or lines[0] != "**":
+        raise VerificationError("invalid-platform-context")
+    digest = hashlib.sha256(f"whalerein-platform-v1:{target}:{platform}".encode())
+    digest.update(manifest)
+    for line in lines[1:]:
+        if not line or line.startswith("#"):
+            continue
+        path = Path(line.removeprefix("!"))
+        if (
+            not line.startswith("!")
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(character in str(path) for character in "*?[]\\")
+        ):
+            raise VerificationError("invalid-platform-context")
+        file = source / path
+        if file.is_symlink() or not file.is_file():
+            raise VerificationError("missing-platform-input")
+        digest.update(hashlib.sha256(file.read_bytes()).digest())
+        digest.update(bytes([file.stat().st_mode & 0o111]))
+    return digest.hexdigest()
+
+
+def _inspect_platform(context, runner, source, tag, key, platform):
+    result = context.run(
         runner,
         [
             "docker",
-            "buildx",
-            "build",
-            "--load",
-            "--progress=plain",
-            "--target",
-            target,
-            "-f",
-            str(source / "tests/integration/Dockerfile"),
-            "--iidfile",
-            str(image_file),
-            str(source),
+            "image",
+            "inspect",
+            "--format",
+            '{{.Os}}/{{.Architecture}} {{.Id}} {{index .Config.Labels "' + PLATFORM_LABEL + '"}}',
+            tag,
         ],
         source,
-        "linux-platform-build-failed",
     )
-    image = image_file.read_text().strip()
+    if not result.ok:
+        return None
+    actual, _, facts = result.stdout.strip().partition(" ")
+    if actual != platform:
+        raise VerificationError("platform-image-native-mismatch")
+    image, _, label = facts.partition(" ")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise VerificationError("invalid-image-identity")
-    loaded = _command(
-        context,
-        runner,
-        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
-        source,
-        "linux-platform-image-unavailable",
+    if label != key:
+        raise VerificationError("platform-image-input-mismatch")
+    return image
+
+
+def _build_target(context, runner, source, target, platform):
+    key = _platform_key(source, target, platform)
+    tag = f"whalerein-verification-platform:{target}-{key}"
+    image = _inspect_platform(context, runner, source, tag, key, platform)
+    reused = image is not None
+    if image is None:
+        _command(
+            context,
+            runner,
+            [
+                "docker",
+                "buildx",
+                "build",
+                "--load",
+                "--progress=plain",
+                "--platform",
+                platform,
+                "--target",
+                target,
+                "--label",
+                f"{PLATFORM_LABEL}={key}",
+                "--tag",
+                tag,
+                "-f",
+                str(source / "tests/integration/Dockerfile"),
+                str(source),
+            ],
+            source,
+            "linux-platform-build-failed",
+        )
+        image = _inspect_platform(context, runner, source, tag, key, platform)
+        if image is None:
+            raise VerificationError("linux-platform-image-unavailable")
+    context.record_artifact(
+        f"platform-{target}",
+        {"digest": image, "image_id": image, "inputs": key, "platform": platform, "reused": reused},
     )
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", loaded):
-        raise VerificationError("invalid-image-identity")
-    context.record_artifact(f"platform-{target}", {"digest": image, "image_id": loaded})
-    return loaded
+    return image
 
 
 @dataclass
@@ -146,6 +204,9 @@ class _Container:
             ],
             self.cwd,
             "docker-container-create-failed",
+            # An ambient client override cannot select another platform for
+            # the already proven native image ID.
+            env={"DOCKER_DEFAULT_PLATFORM": ""},
         )
         if not re.fullmatch(r"[0-9a-f]{64}", identity):
             raise VerificationError("invalid-container-identity")
@@ -439,16 +500,19 @@ def prepare(context, runner, target):
         architecture = _command(
             context,
             runner,
-            ["docker", "info", "--format", "{{.Architecture}}"],
+            ["docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"],
             source.root,
             "docker-unavailable",
             blocked=True,
         )
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", architecture):
-            raise VerificationError("invalid-docker-architecture")
-        image = _build_target(context, runner, source.root, runtime)
+        system, _, architecture = architecture.partition("/")
+        native_arch = {"aarch64": "arm64", "x86_64": "amd64"}.get(architecture, architecture)
+        if system != "linux" or native_arch not in {"arm64", "amd64"}:
+            raise VerificationError("unsupported-docker-platform", 3)
+        platform = f"linux/{native_arch}"
+        image = _build_target(context, runner, source.root, runtime, platform)
         builder_target = "services-builder" if "access" in artifacts else "vectors-builder"
-        builder = _build_target(context, runner, source.root, builder_target)
+        builder = _build_target(context, runner, source.root, builder_target, platform)
     _compile(context, runner, source.root, worktree, builder, architecture, artifacts, products)
     with context.phase("artifact-publication"):
         manifest = _product_manifest(products)
