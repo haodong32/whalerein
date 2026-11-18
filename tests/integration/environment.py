@@ -246,6 +246,7 @@ class Device:
         target = submission["target"]
         assert isinstance(operation, str) and operation.strip() == operation and operation
         deadline = time.monotonic() + 20
+        delivery_args = () if delivery is None else ("--delivery", delivery)
         while True:
             submission = envelope["data"]
             assert submission["state"] == "submission"
@@ -260,7 +261,7 @@ class Device:
             # intent before reading its receipt. Detach avoids waiting for
             # a model reply while the case holds the active run.
             code, envelopes = self.invoke(
-                "session", "send", session, "--detach", "--delivery", delivery,
+                "session", "send", session, "--detach", *delivery_args,
                 "--operation-id", operation, "--timeout", str(int(remaining)),
                 "--", text, success=False,
             )
