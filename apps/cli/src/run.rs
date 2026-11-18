@@ -1495,7 +1495,10 @@ async fn tail(
         let _ = crate::stream::to_stdout(tail.as_bytes());
     }
     if !finished && emitted == 0 {
-        return Err(CoreError::Timeout);
+        return Err(observation
+            .take_terminal_error()
+            .or_else(|| observation.take_last_error())
+            .unwrap_or(CoreError::Timeout));
     }
     if finished && !stopped {
         // Core owns reconnect. An observation that ends before the caller's
@@ -2032,6 +2035,45 @@ mod instance_command_tests {
         )
         .unwrap();
         Box::pin(run_with_signal(cli, secrets, std::future::pending())).await
+    }
+
+    #[tokio::test]
+    async fn bounded_watch_reports_host_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("client.toml");
+        Core::write_config(
+            &config,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let access = FakeAccess::start().await;
+        let core = Core::open(&config, secrets.clone()).unwrap();
+        core.connect_standalone(&access.pairing_uri(), |_| PairingDecision::approve())
+            .await
+            .unwrap();
+
+        access.host.lock().unwrap().host_online = false;
+        let watch = execute(
+            &config,
+            secrets,
+            &[
+                "session",
+                "watch",
+                "session-1",
+                "--host",
+                "host-1",
+                "--once",
+                "--timeout",
+                "3",
+            ],
+        )
+        .await;
+        assert_eq!(
+            watch.to_json()["error"]["code"],
+            "host_offline",
+            "{watch:?}"
+        );
     }
 
     #[tokio::test]
