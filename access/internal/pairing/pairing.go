@@ -111,6 +111,7 @@ type Dependencies struct {
 }
 
 type completedClaim struct {
+	managed  bool
 	response *whalereinv1.PairingClaimResponse
 	cloud    bool
 	commit   *whalereinv1.HostRequest
@@ -397,7 +398,7 @@ func (s *Service) claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			var storedCommit whalereinv1.PairingClaimResult
 			ready := notice.Status == whalereinv1.OnlineStatus_succeeded && proto.Unmarshal(notice.ResultBody, &storedCommit) == nil && storedCommit.Authorized && storedCommit.DeviceId == request.DeviceId
-			done := &completedClaim{ready: ready, cloud: scope != nil, response: &response, commit: &whalereinv1.HostRequest{
+			done := &completedClaim{ready: ready, cloud: scope != nil, managed: scope != nil && scope.SessionID != "", response: &response, commit: &whalereinv1.HostRequest{
 				RequestId: notice.RequestID, HostId: notice.HostID, DeviceId: notice.DeviceID, Kind: notice.Kind,
 				ProtocolVersion: notice.ProtocolVersion, Body: notice.RequestBody, ExpiresAtUnixMs: notice.ExpiresAt.UnixMilli()}}
 			response.DeviceToken = request.DeviceToken
@@ -532,8 +533,14 @@ func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRe
 		return nil, ErrInternal
 	}
 	digest := sha256.Sum256(request.NoiseMessage)
-	if err := s.store.SavePairingOperation(ctx, store.PairingOperation{ClaimID: request.ClaimId, TokenHash: token.TokenHash,
-		HostID: token.HostID, DeviceID: request.DeviceId, DeviceGeneration: deviceGeneration, HostGeneration: hostGeneration, HelloHash: digest[:], HelloResponse: encoded, ExpiresAt: now.Add(s.cfg.ClaimTTL)}); err != nil {
+	operation := store.PairingOperation{ClaimID: request.ClaimId, TokenHash: token.TokenHash,
+		HostID: token.HostID, DeviceID: request.DeviceId, DeviceGeneration: deviceGeneration,
+		HostGeneration: hostGeneration, HelloHash: digest[:], HelloResponse: encoded, ExpiresAt: now.Add(s.cfg.ClaimTTL)}
+	if scope != nil {
+		operation.CloudSessionID = scope.SessionID
+		operation.CloudWorkspaceID = scope.WorkspaceID
+	}
+	if err := s.store.SavePairingOperation(ctx, operation); err != nil {
 		if errors.Is(err, store.ErrPairingFenced) {
 			return nil, ErrPairingFenced
 		}
@@ -645,6 +652,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		operation.CloudWorkspaceID = scope.WorkspaceID
 		operation.CloudEnrollmentRevision = scope.Revision
 		operation.CloudAuthorizationExpiry = scope.ExpiresAt
+		operation.CloudSessionID = scope.SessionID
 	}
 	used, err := s.store.CommitPairing(ctx, token.TokenHash, token.HostID, request.GetDeviceId(), fingerprintText, authHash[:], commitAt, notice, operation)
 	if err != nil {
@@ -699,7 +707,7 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 		ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(),
 		ProtocolVersion: request.GetProtocolVersion(),
 	}
-	done := &completedClaim{response: response, commit: notice, cloud: scope != nil}
+	done := &completedClaim{response: response, commit: notice, cloud: scope != nil, managed: operation.CloudSessionID != ""}
 
 	return s.completeClaim(ctx, done)
 
@@ -712,7 +720,24 @@ func sha256SumCommit(host, device, claim string) []byte {
 
 func (s *Service) completeClaim(ctx context.Context, done *completedClaim) (*whalereinv1.PairingClaimResponse, error) {
 	if !done.ready {
-		result, err := s.transport.PublishAndAwait(ctx, done.response.HostId, done.commit, s.cfg.ClaimTimeout)
+		var result *whalereinv1.HostResult
+		publish := func() error {
+			var err error
+			result, err = s.transport.PublishAndAwait(ctx, done.response.HostId, done.commit, s.cfg.ClaimTimeout)
+			return err
+		}
+		var err error
+		if done.managed {
+			sessions, ok := s.store.(interface {
+				PublishDuringDeviceSession(context.Context, string, func() error) error
+			})
+			if !ok {
+				return nil, ErrInternal
+			}
+			err = sessions.PublishDuringDeviceSession(ctx, done.commit.RequestId, publish)
+		} else {
+			err = publish()
+		}
 		if err != nil {
 			return nil, ErrHostUnavailable
 		}

@@ -42,7 +42,7 @@ func TestSessionObservationAC29RenewIsAnExactConditionalUpdate(t *testing.T) {
 						t.Fatalf("renewal SQL lost %q: %s", fragment, sql)
 					}
 				}
-				if len(args) != 3 || args[0] != "r1" || args[1] != "d1" || args[2] != 10*time.Second {
+				if len(args) != 4 || args[0] != "r1" || args[1] != "d1" || args[2] != 10*time.Second || args[3] != "" {
 					t.Fatalf("renewal args = %#v", args)
 				}
 				return updateTag(tc.rows), tc.execErr
@@ -92,7 +92,7 @@ func TestSessionObservationAC30ExpiryAndReplayAreBoundedQueries(t *testing.T) {
 			!strings.Contains(sql, "cancel_pending = true") {
 			t.Fatalf("expiry SQL = %s", sql)
 		}
-		if len(args) != 1 || args[0] != 7 {
+		if len(args) != 2 || args[0] != 7 || args[1] != "" {
 			t.Fatalf("expiry limit args = %#v", args)
 		}
 		return rows, nil

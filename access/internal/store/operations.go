@@ -32,6 +32,7 @@ type PairingOperation struct {
 	AuthHash         []byte
 	Active           bool
 
+	CloudSessionID           string
 	CloudWorkspaceID         string
 	CloudEnrollmentRevision  string
 	CloudAuthorizationExpiry time.Time
@@ -120,6 +121,23 @@ func savePairingOperation(ctx context.Context, begin func(context.Context) (pgx.
 	}
 	if !databaseNow.Before(op.ExpiresAt) {
 		return ErrPairingIntentExpired
+	}
+	if op.CloudSessionID != "" {
+		if err := lockActiveDeviceSession(ctx, tx, op.CloudSessionID, op.DeviceID, op.CloudWorkspaceID, servingDeviceSessionAuthority(ctx)); err != nil {
+			if errors.Is(err, ErrDeviceSessionEnded) {
+				return ErrPairingFenced
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO pairing_device_sessions
+			(claim_id,session_id,workspace_id,host_id,device_id,expires_at,authority_revision)
+			VALUES ($1,$2,$3,$4,$5,$6,(SELECT authority_revision FROM device_sessions WHERE session_id=$2))`, op.ClaimID, op.CloudSessionID, op.CloudWorkspaceID,
+			op.HostID, op.DeviceID, op.ExpiresAt); err != nil {
+			if isUniqueViolation(err) {
+				return ErrPairingFenced
+			}
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -528,6 +546,9 @@ func confirmPairingHost(ctx context.Context, begin func(context.Context) (pgx.Tx
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, deviceID); err != nil {
+		return false, err
+	}
+	if err := applyDeviceSessionAuthority(ctx, tx); err != nil {
 		return false, err
 	}
 	confirmed, err := confirmPairingHostTx(ctx, tx, claimID, hostID, deviceID, requestID, at, true)

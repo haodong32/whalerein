@@ -363,8 +363,15 @@ impl CommandService {
                 ));
             }
             let config = admission.config.load()?.ok_or(CoreError::NotPaired)?;
-            let token = crate::security::load_device_token(&admission.secrets, device_id)?
-                .ok_or(CoreError::NotPaired)?;
+            let current = match self.access.cloud_session_current(Some(device_id))? {
+                Some(true) => true,
+                Some(false) => return Err(CoreError::AuthenticationRequired),
+                None => {
+                    let token = crate::security::load_device_token(&admission.secrets, device_id)?
+                        .ok_or(CoreError::NotPaired)?;
+                    self.access.has_token(&token)
+                }
+            };
             let key = admission
                 .secrets
                 .load(&crate::security::keys::cache_key(device_id))?
@@ -380,7 +387,7 @@ impl CommandService {
             }
             if config.device_id != device_id
                 || url::Url::parse(&config.access_url).ok().as_ref() != Some(self.access.base_url())
-                || !self.access.has_token(&token)
+                || !current
                 || !self.cache.has_key(&key)
             {
                 return Err(CoreError::Revoked);

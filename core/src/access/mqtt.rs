@@ -148,7 +148,7 @@ impl MqttSettings {
 
     #[cfg(test)]
     fn options(&self, device_id: &str, token: &str) -> Result<MqttOptions, AccessError> {
-        self.options_with_client(device_id, token, &device_client_id(device_id))
+        self.options_with_client(device_id, token, &device_client_id(device_id), None)
     }
 
     fn options_with_client(
@@ -156,14 +156,19 @@ impl MqttSettings {
         device_id: &str,
         token: &str,
         client_id: &str,
+        session_id: Option<&str>,
     ) -> Result<MqttOptions, AccessError> {
         let mut options = MqttOptions::new(client_id, self.host.clone(), self.port);
+        let username =
+            session_id.map_or_else(|| device_username(device_id), |id| format!("session:{id}"));
+        if session_id.is_none() {
+            options.set_last_will(device_last_will(device_id));
+        }
         options
-            .set_credentials(device_username(device_id), token)
+            .set_credentials(username, token)
             .set_keep_alive(self.keep_alive)
             .set_clean_start(true)
-            .set_max_packet_size(Some(MAX_MQTT_PACKET_BYTES))
-            .set_last_will(device_last_will(device_id));
+            .set_max_packet_size(Some(MAX_MQTT_PACKET_BYTES));
         if self.tls {
             options.set_transport(Transport::Tls(TlsConfiguration::Rustls(self.tls_config()?)));
         } else {
@@ -256,6 +261,7 @@ pub struct DeviceMqttClient {
     /// replace each other's broker session; the device id still scopes topics,
     /// credentials and presence.
     client_id: String,
+    session_id: Option<String>,
 }
 
 impl DeviceMqttClient {
@@ -276,8 +282,15 @@ impl DeviceMqttClient {
             ),
             device_id,
             token: token.into(),
+            session_id: None,
             trace_id: crate::util::random_id(16),
         }
+    }
+
+    pub(crate) fn with_cloud_session(mut self, id: String) -> Self {
+        self.client_id = format!("whalerein-session-{id}-{}", crate::util::random_id(6));
+        self.session_id = Some(id);
+        self
     }
 
     pub fn with_trace_id(mut self, trace_id: &str) -> Self {
@@ -300,9 +313,12 @@ impl DeviceMqttClient {
         F: FnMut(&EventEnvelope) -> bool,
         G: FnMut(MqttConnectionEvent),
     {
-        let options =
-            self.settings
-                .options_with_client(&self.device_id, &self.token, &self.client_id)?;
+        let options = self.settings.options_with_client(
+            &self.device_id,
+            &self.token,
+            &self.client_id,
+            self.session_id.as_deref(),
+        )?;
         let (client, mut eventloop) = AsyncClient::new(options, 32);
         let topic = self.topic();
         let mut attempt = 0u32;

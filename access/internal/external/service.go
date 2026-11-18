@@ -59,6 +59,10 @@ func WithHostEnforcer(enforcer HostEnforcer) Option {
 
 // Service implements external account mode.
 type Service struct {
+	deviceSessions       DeviceSessionStore
+	sessionEnforcer      DeviceSessionEnforcer
+	requireDeviceSession bool
+
 	trust          Trust
 	store          Store
 	mqttURL        string

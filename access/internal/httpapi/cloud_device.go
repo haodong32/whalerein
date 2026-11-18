@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
@@ -40,7 +41,11 @@ func (s *Server) handleCloudPairing(w http.ResponseWriter, r *http.Request, _ ma
 		s.writeError(w, r, errInvalidBody)
 		return
 	}
-	response, err := service.PairDevice(r.Context(), &authorization, &claim)
+	ctx := r.Context()
+	if token, err := bearerToken(r); err == nil {
+		ctx = external.WithDeviceSessionCredential(ctx, token)
+	}
+	response, err := service.PairDevice(ctx, &authorization, &claim)
 	if err != nil {
 		s.writeError(w, r, classifyExternal(err))
 		return

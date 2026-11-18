@@ -52,7 +52,8 @@ fn fresh_cloud_status_only_reads_selected_file() {
     assert_eq!(value["command"], "status");
     assert_eq!(value["data"]["service"], "whalerein_cloud");
     assert_eq!(value["data"]["account_state"], "signed_out");
-    assert_eq!(value["data"]["device_access"], "unpaired");
+    assert_eq!(value["data"]["device_access"], "sign_in_required");
+    assert_eq!(value["data"]["remote_signout_pending"], false);
     assert!(value["data"]["testing_environment"].is_null());
     assert!(value["data"]["instance_id"].is_null());
     assert_eq!(

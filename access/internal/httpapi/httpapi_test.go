@@ -468,6 +468,17 @@ func TestDiagnosticsRoutesReportHealthReadinessAndMetrics(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("ready = %d body=%s", recorder.Code, recorder.Body.String())
 	}
+	const authorityHeader = "WhaleRein-Session-Authority-Revision"
+	f.server.deps.SessionAuthorityRevision = "42"
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/readyz", nil, nil)
+	if got := recorder.Header().Get(authorityHeader); got != "" {
+		t.Fatalf("unmanaged readiness advertised authority: %q", got)
+	}
+	f.server.deps.RequireDeviceSession = true
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/readyz", nil, nil)
+	if got := recorder.Header().Get(authorityHeader); got != "42" {
+		t.Fatalf("managed readiness authority: %q", got)
+	}
 	f.ready.Add("broker", func(context.Context) error { return errors.New("down") })
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/readyz", nil, nil)
 	if recorder.Code != http.StatusServiceUnavailable {

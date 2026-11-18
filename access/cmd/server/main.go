@@ -141,10 +141,12 @@ func defaultStartupStoreOps() startupStoreOps {
 // trust the external service uses.
 func externalTrust(cfg config.Config) (external.Trust, error) {
 	trust := external.Trust{
-		Issuer:          cfg.External.Issuer,
-		ServiceIdentity: cfg.External.ServiceIdentity,
-		Region:          cfg.External.Region,
-		ClockSkew:       cfg.External.ClockSkew.D(),
+		Issuer:                   cfg.External.Issuer,
+		ServiceIdentity:          cfg.External.ServiceIdentity,
+		Region:                   cfg.External.Region,
+		SessionEnvironment:       cfg.External.SessionEnvironment,
+		SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
+		ClockSkew:                cfg.External.ClockSkew.D(),
 	}
 	for _, key := range cfg.External.VerificationKeys {
 		material, err := base64.RawURLEncoding.DecodeString(key.PublicKey)
@@ -243,7 +245,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return err
 	}
 
-	authService, err := auth.New(auth.Dependencies{
+	authDeps := auth.Dependencies{
 		Store:     db,
 		Admission: admissionService,
 		Enforcer:  lineManager,
@@ -254,36 +256,47 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Masker:    masker,
 		Logger:    logger,
 		Config: auth.Config{
-			AdminToken:            cfg.AdminToken,
-			HostProvisioningToken: cfg.HostProvisioningToken,
-			AccessUsername:        cfg.Broker.Username,
-			AccessPassword:        cfg.Broker.Password,
-			ProtocolVersion:       cfg.Protocol.Version,
-			RevocationAckTimeout:  cfg.Revocation.AckTimeout.D(),
-			RequireHostEnrollment: cfg.Mode == "external",
+			AdminToken:               cfg.AdminToken,
+			HostProvisioningToken:    cfg.HostProvisioningToken,
+			AccessUsername:           cfg.Broker.Username,
+			AccessPassword:           cfg.Broker.Password,
+			ProtocolVersion:          cfg.Protocol.Version,
+			RevocationAckTimeout:     cfg.Revocation.AckTimeout.D(),
+			RequireHostEnrollment:    cfg.Mode == "external",
+			RequireDeviceSession:     cfg.Mode == "external" && cfg.External.RequireDeviceSession,
+			SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
 		},
-	})
+	}
+	if cfg.Mode == "external" {
+		authDeps.Sessions = db
+	}
+	authService, err := auth.New(authDeps)
 	if err != nil {
 		return err
 	}
 
-	requestService, err := requests.New(requests.Dependencies{
+	requestDeps := requests.Dependencies{
 		Store:    db,
 		Broker:   service,
 		Presence: service,
 		Config: requests.Config{
-			ProtocolVersion: cfg.Protocol.Version,
-			MaxTTL:          cfg.Requests.MaxTTL.D(),
-			ForwardInterval: cfg.Requests.ForwardInterval.D(),
-			Lease:           cfg.Requests.Lease.D(),
-			RetryInterval:   cfg.Requests.RetryInterval.D(),
-			MaxAttempts:     cfg.Requests.MaxAttempts,
-			BatchSize:       cfg.Requests.BatchSize,
+			SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
+			ProtocolVersion:          cfg.Protocol.Version,
+			MaxTTL:                   cfg.Requests.MaxTTL.D(),
+			ForwardInterval:          cfg.Requests.ForwardInterval.D(),
+			Lease:                    cfg.Requests.Lease.D(),
+			RetryInterval:            cfg.Requests.RetryInterval.D(),
+			MaxAttempts:              cfg.Requests.MaxAttempts,
+			BatchSize:                cfg.Requests.BatchSize,
 		},
 		Metrics: metrics,
 		Masker:  masker,
 		Logger:  logger,
-	})
+	}
+	if cfg.Mode == "external" {
+		requestDeps.Sessions = db
+	}
+	requestService, err := requests.New(requestDeps)
 	if err != nil {
 		return err
 	}
@@ -335,6 +348,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return nil
 	})
 
+	if cfg.Mode == "external" && cfg.External.SessionAuthorityRevision != "" {
+		lineManager.SetSessionPolicy(authService.ManagedBrokerPolicy)
+	}
 	var externalService *external.Service
 	if cfg.Mode == "external" {
 		trust, err := externalTrust(cfg)
@@ -343,7 +359,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		}
 		externalService = external.New(trust, db, cfg.External.MQTTURL,
 			external.WithHostEnforcer(authService),
-			external.WithDeviceGrants(pairingService, db, authService))
+			external.WithDeviceGrants(pairingService, db, authService),
+			external.WithDeviceSessions(db, service, cfg.External.RequireDeviceSession))
 		logger.Info("external account mode enabled", "issuer", trust.Issuer, "region", trust.Region)
 	}
 
@@ -359,15 +376,17 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	})
 
 	dependencies := httpapi.Dependencies{
-		Auth:          authService,
-		Pairing:       pairingService,
-		Requests:      requestService,
-		Readiness:     readiness,
-		Metrics:       metrics,
-		Masker:        masker,
-		Logger:        logger,
-		InternalToken: cfg.Internal.CallbackToken,
-		MaxBodyBytes:  cfg.HTTP.MaxBodyBytes,
+		SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
+		RequireDeviceSession:     cfg.Mode == "external" && cfg.External.RequireDeviceSession,
+		Auth:                     authService,
+		Pairing:                  pairingService,
+		Requests:                 requestService,
+		Readiness:                readiness,
+		Metrics:                  metrics,
+		Masker:                   masker,
+		Logger:                   logger,
+		InternalToken:            cfg.Internal.CallbackToken,
+		MaxBodyBytes:             cfg.HTTP.MaxBodyBytes,
 	}
 	// Assign through the interface only when external mode is configured. A
 	// typed nil *external.Service would make the interface non-nil and turn the

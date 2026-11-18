@@ -26,7 +26,33 @@ func prefixColumns(columns, prefix string) string {
 // CreateRequest inserts a request row or returns the existing row for the same
 // (host, device, command_id). A different digest is reported without writing.
 func (s *Store) CreateRequest(ctx context.Context, req Request) (CreateOutcome, error) {
-	return createRequest(ctx, s.poolQueryRow, req)
+	if req.DeviceSessionID == "" {
+		return createRequest(ctx, s.poolQueryRow, req)
+	}
+	tx, err := s.poolBegin(ctx)
+	if err != nil {
+		return CreateOutcome{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveDeviceSession(ctx, tx, req.DeviceSessionID, req.DeviceID, "", servingDeviceSessionAuthority(ctx)); err != nil {
+		return CreateOutcome{}, err
+	}
+	outcome, err := createRequest(ctx, tx.QueryRow, req)
+	if err != nil {
+		return CreateOutcome{}, err
+	}
+	if outcome.Created {
+		if _, err := tx.Exec(ctx, `UPDATE requests SET device_session_id=$2,
+				device_session_authority=(SELECT authority_revision FROM device_sessions WHERE session_id=$2)
+				WHERE request_id=$1`,
+			req.RequestID, req.DeviceSessionID); err != nil {
+			return CreateOutcome{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CreateOutcome{}, err
+	}
+	return outcome, nil
 }
 
 func createRequest(ctx context.Context, queryRow func(context.Context, string, ...any) pgx.Row, req Request) (CreateOutcome, error) {
@@ -179,6 +205,7 @@ func (s *Store) RenewClientLease(ctx context.Context, deviceID, requestID string
 	if deviceID == "" || requestID == "" || lease <= 0 {
 		return false, errors.New("renew client lease: invalid scope")
 	}
+	id, _ := ctx.Value(requestSessionKey{}).(string)
 	cmd, err := s.db.Exec(ctx, `
 		UPDATE requests
 		SET client_lease_until = LEAST(expires_at,
@@ -188,8 +215,11 @@ func (s *Store) RenewClientLease(ctx context.Context, deviceID, requestID string
 		  AND client_lease_state = 'live'
 		  AND status IN (`+nonTerminalStatuses+`)
 		  AND expires_at > clock_timestamp()
-		  AND (client_lease_until IS NULL OR client_lease_until > clock_timestamp())`,
-		requestID, deviceID, lease)
+		  AND (client_lease_until IS NULL OR client_lease_until > clock_timestamp())
+		  AND ((device_session_id IS NULL AND $4='') OR (device_session_id=$4 AND EXISTS (
+			SELECT 1 FROM device_sessions s WHERE s.session_id=$4 AND NOT s.revoked AND s.expires_at>clock_timestamp()
+			AND s.authority_revision=device_session_authority)))`,
+		requestID, deviceID, lease, id)
 	if err != nil {
 		return false, fmt.Errorf("renew client lease: %w", err)
 	}
@@ -211,8 +241,11 @@ func (s *Store) ExpireClientLeases(ctx context.Context, limit int) ([]Request, e
 		WITH due AS (
 			SELECT request_id FROM requests
 			WHERE client_lease_state = 'live'
-			  AND client_lease_until IS NOT NULL
-			  AND client_lease_until <= clock_timestamp()
+			  AND ((client_lease_until IS NOT NULL AND client_lease_until <= clock_timestamp())
+			    OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.session_id=requests.device_session_id
+					AND (s.revoked OR s.expires_at<=clock_timestamp()
+						OR s.authority_revision IS DISTINCT FROM requests.device_session_authority
+						OR ($2<>'' AND s.authority_revision<>$2))))
 			  AND status IN (`+nonTerminalStatuses+`)
 			ORDER BY client_lease_until, request_id
 			LIMIT $1
@@ -228,10 +261,13 @@ func (s *Store) ExpireClientLeases(ctx context.Context, limit int) ([]Request, e
 		FROM due
 		WHERE r.request_id = due.request_id
 		  AND r.client_lease_state = 'live'
-		  AND r.client_lease_until IS NOT NULL
-		  AND r.client_lease_until <= clock_timestamp()
+		  AND ((r.client_lease_until IS NOT NULL AND r.client_lease_until <= clock_timestamp())
+		    OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.session_id=r.device_session_id
+				AND (s.revoked OR s.expires_at<=clock_timestamp()
+					OR s.authority_revision IS DISTINCT FROM r.device_session_authority
+					OR ($2<>'' AND s.authority_revision<>$2))))
 		  AND r.status IN (`+nonTerminalStatuses+`)
-		RETURNING `+requestColumnsR, limit)
+		RETURNING `+requestColumnsR, limit, servingDeviceSessionAuthority(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("expire client leases: %w", err)
 	}
@@ -562,6 +598,9 @@ func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, e
 		err = tx.QueryRow(ctx, `SELECT o.claim_id FROM pairing_outcomes o JOIN requests r ON r.request_id=o.commit_request_id
           WHERE o.commit_request_id=$1 AND o.host_id=$2 AND o.device_id=$3 AND r.kind=$4 AND r.expires_at>$5`, update.RequestID, update.HostID, update.DeviceID, int32(whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE), update.At).Scan(&claimID)
 		if err == nil {
+			if err := applyDeviceSessionAuthority(ctx, tx); err != nil {
+				return false, err
+			}
 			if _, err = confirmPairingHostTx(ctx, tx, claimID, update.HostID, update.DeviceID, update.RequestID, update.At, true); err != nil {
 				return false, err
 			}

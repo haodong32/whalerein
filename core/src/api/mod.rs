@@ -39,7 +39,8 @@ pub mod test_support;
 mod types;
 
 pub use crate::account::native::{
-    AccountHost, AccountIdentity, AccountLoginPrompt, AccountWorkspace, SignedInAccount,
+    AccountHost, AccountIdentity, AccountLoginPrompt, AccountSessionInfo, AccountSessionState,
+    AccountWorkspace, SignedInAccount,
 };
 pub use crate::account::Environment;
 #[cfg(test)]

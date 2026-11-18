@@ -16,7 +16,7 @@ import (
 // CloudScope is a verified account authorization for one exact Noise exchange.
 type CloudScope struct {
 	Issuer, Audience, WorkspaceID, RegionID, Revision string
-	HostID, DeviceID, OperationID                     string
+	HostID, DeviceID, OperationID, SessionID          string
 	HostKey, DeviceKey                                []byte
 	ExpiresAt                                         time.Time
 }

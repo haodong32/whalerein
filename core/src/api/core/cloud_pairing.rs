@@ -1,5 +1,7 @@
 //! Explicit Cloud pairing with a recoverable operation and authenticated peer.
 
+use std::collections::BTreeMap;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use whalerein_proto::{ExternalAuthorization, PairingClaimRequest, PairingPhase};
@@ -12,11 +14,15 @@ use crate::{
 };
 
 const ACTIVE_PAIRING: &str = "cloud-pairing-active";
+const LEGACY_HOST_PAIRINGS: &str = "cloud-host-pairings";
+const HOST_PAIRING_INDEX: &str = "cloud-pending-pairings.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct CloudPairing {
     id: String,
     host: String,
+    #[serde(default)]
+    session_id: Option<String>,
     device: String,
     device_public_key: [u8; 32],
     ephemeral: [u8; 32],
@@ -28,7 +34,7 @@ struct CloudPairing {
     finish: Option<PairingClaimRequest>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PairingRoute {
     access: Url,
     prologue_hash: String,
@@ -74,10 +80,120 @@ pub struct CloudRevocationOutcome {
 }
 
 impl Core {
+    fn legacy_cloud_pairings(&self) -> CoreResult<BTreeMap<String, CloudPairing>> {
+        if let Some(pairings) = self.load_cloud_pairing(LEGACY_HOST_PAIRINGS)? {
+            return Ok(pairings);
+        }
+        let mut pairings = BTreeMap::new();
+        if let Some(legacy) = self.load_cloud_pairing::<CloudPairing>(ACTIVE_PAIRING)? {
+            pairings.insert(legacy.host.clone(), legacy);
+        }
+        Ok(pairings)
+    }
+
+    fn read_cloud_pairing_index(&self) -> CoreResult<Option<BTreeMap<String, String>>> {
+        match std::fs::read(self.data_dir().join(HOST_PAIRING_INDEX)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|_| CoreError::Security("Cloud pairing index is invalid".into())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(CoreError::Config(
+                "Cloud pairing index is unavailable".into(),
+            )),
+        }
+    }
+
+    fn write_cloud_pairing_index(&self, index: &BTreeMap<String, String>) -> CoreResult<()> {
+        let bytes = serde_json::to_vec(index)
+            .map_err(|_| CoreError::Internal("could not encode Cloud pairing index".into()))?;
+        crate::configuration::writer::write_atomically(
+            &self.data_dir().join(HOST_PAIRING_INDEX),
+            &bytes,
+        )?;
+        Ok(())
+    }
+
+    // Migrate under the Device lock. Individual entries keep each pending
+    // FINISH below the native keyring's per-item size limit.
+    fn ensure_cloud_pairing_index(&self) -> CoreResult<BTreeMap<String, String>> {
+        if let Some(index) = self.read_cloud_pairing_index()? {
+            return Ok(index);
+        }
+        let mut index = BTreeMap::new();
+        for (host, pending) in self.legacy_cloud_pairings()? {
+            self.save_cloud_pairing(&pending_pairing_secret(&pending.id), &pending)?;
+            index.insert(host, pending.id);
+        }
+        self.write_cloud_pairing_index(&index)?;
+        self.options.secrets.delete(ACTIVE_PAIRING)?;
+        self.options.secrets.delete(LEGACY_HOST_PAIRINGS)?;
+        Ok(index)
+    }
+
+    fn load_pending_cloud_pairing(&self, host: &str) -> CoreResult<Option<CloudPairing>> {
+        let Some(index) = self.read_cloud_pairing_index()? else {
+            return Ok(self.legacy_cloud_pairings()?.remove(host));
+        };
+        let Some(id) = index.get(host) else {
+            return Ok(None);
+        };
+        let pending = self
+            .load_cloud_pairing::<CloudPairing>(&pending_pairing_secret(id))?
+            .filter(|pending| pending.id == *id && pending.host == host)
+            .ok_or_else(|| {
+                CoreError::Security("Indexed Cloud pairing material is unavailable".into())
+            })?;
+        Ok(Some(pending))
+    }
+
+    fn save_pending_cloud_pairing(&self, operation: &CloudPairing) -> CoreResult<()> {
+        let mut index = self.ensure_cloud_pairing_index()?;
+        if index.contains_key(&operation.host) {
+            return Err(CoreError::Conflict(
+                "a connection attempt already exists for this Host".into(),
+            ));
+        }
+        self.save_cloud_pairing(&pending_pairing_secret(&operation.id), operation)?;
+        index.insert(operation.host.clone(), operation.id.clone());
+        self.write_cloud_pairing_index(&index)
+    }
+
+    fn update_pending_cloud_pairing(&self, operation: &CloudPairing) -> CoreResult<()> {
+        let _guard = self.identity_lock()?;
+        let index = self.ensure_cloud_pairing_index()?;
+        if index.get(&operation.host) != Some(&operation.id) {
+            return Err(CoreError::PairingFenced);
+        }
+        self.save_cloud_pairing(&pending_pairing_secret(&operation.id), operation)
+    }
+
+    fn cloud_pairing_lock(&self, host: &str) -> CoreResult<crate::security::device::ProfileLock> {
+        crate::security::device::ProfileLock::acquire_cloud_pairing(self.data_dir(), host)
+            .map_err(pairing_recovery::pairing_admission_error)
+    }
+
+    fn clear_pending_cloud_pairing(&self, host: &str) -> CoreResult<()> {
+        let mut index = self.ensure_cloud_pairing_index()?;
+        if let Some(id) = index.remove(host) {
+            self.write_cloud_pairing_index(&index)?;
+            self.options.secrets.delete(&pending_pairing_secret(&id))?;
+        }
+        Ok(())
+    }
+
     pub fn pending_cloud_pairing(&self) -> CoreResult<Option<(String, String)>> {
+        Ok(self.pending_cloud_pairings()?.into_iter().next())
+    }
+
+    pub fn pending_cloud_pairings(&self) -> CoreResult<Vec<(String, String)>> {
+        if let Some(index) = self.read_cloud_pairing_index()? {
+            return Ok(index.into_iter().map(|(host, id)| (id, host)).collect());
+        }
         Ok(self
-            .load_cloud_pairing::<CloudPairing>(ACTIVE_PAIRING)?
-            .map(|operation| (operation.id, operation.host)))
+            .legacy_cloud_pairings()?
+            .into_values()
+            .map(|operation| (operation.id, operation.host))
+            .collect())
     }
 
     pub fn has_cloud_pairing_operation(&self, operation_id: &str) -> CoreResult<bool> {
@@ -90,8 +206,9 @@ impl Core {
             return Ok(false);
         }
         let pending = self
-            .pending_cloud_pairing()?
-            .is_some_and(|(id, _)| id == operation_id);
+            .pending_cloud_pairings()?
+            .iter()
+            .any(|(id, _)| id == operation_id);
         Ok(pending
             || self
                 .options
@@ -107,17 +224,23 @@ impl Core {
         }
         self.require_cloud_account()?;
         self.ensure_instance_state()?;
-        let guard = self.identity_lock()?;
-        self.refresh_regional_state()?;
-        let identity = self.device_identity_locked(&guard)?;
-        let client = self.account_client(false).await?;
-        if let Some(operation) = self.load_cloud_pairing::<CloudPairing>(ACTIVE_PAIRING)? {
-            if operation.host != host_id {
-                return Err(CoreError::Conflict(
-                    "recover the pending Host connection before connecting another Host".into(),
-                ));
+        let _host = self.cloud_pairing_lock(host_id)?;
+        let (identity, existing) = {
+            let guard = self.identity_lock()?;
+            self.refresh_regional_state()?;
+            (
+                self.device_identity_locked(&guard)?,
+                self.load_pending_cloud_pairing(host_id)?,
+            )
+        };
+        if let Some(operation) = existing {
+            let client = self.account_client(false).await?;
+            let result = self.run_cloud_pairing(&client, &identity, operation).await;
+            if !matches!(result, Err(CoreError::PairingFenced))
+                || self.load_pending_cloud_pairing(host_id)?.is_some()
+            {
+                return result;
             }
-            return self.run_cloud_pairing(&client, &identity, operation).await;
         }
 
         if let Some(outcome) = self.reuse_cloud_grant(host_id).await? {
@@ -125,6 +248,10 @@ impl Core {
             return Ok(outcome);
         }
 
+        let guard = self.identity_lock()?;
+        if self.device_identity_locked(&guard)?.device_id != identity.device_id {
+            return Err(CoreError::PairingFenced);
+        }
         let admission =
             crate::security::device::ProfileLock::acquire_admission_waiting(self.data_dir())
                 .map_err(pairing_recovery::pairing_admission_error)?;
@@ -140,10 +267,22 @@ impl Core {
                 return Err(CoreError::Revoked);
             }
         }
-        let existing_token = load_device_token(&self.options.secrets, &identity.device_id)?;
+        let mut existing_token = load_device_token(&self.options.secrets, &identity.device_id)?;
+        if existing_token.is_none() {
+            for (_, host) in self.pending_cloud_pairings()? {
+                if let Some(pending) = self
+                    .load_pending_cloud_pairing(&host)?
+                    .filter(|pending| pending.device == identity.device_id)
+                {
+                    existing_token = Some(pending.device_token);
+                    break;
+                }
+            }
+        }
         let operation = CloudPairing {
             id: Self::new_command_id(),
             host: host_id.to_owned(),
+            session_id: self.cloud_session_id()?,
             device: identity.device_id.clone(),
             device_public_key: *identity.key.public_key(),
             ephemeral: crate::util::random_bytes(32)
@@ -157,7 +296,9 @@ impl Core {
             route: None,
             finish: None,
         };
-        self.save_cloud_pairing(ACTIVE_PAIRING, &operation)?;
+        self.save_pending_cloud_pairing(&operation)?;
+        drop(guard);
+        let client = self.account_client(false).await?;
         self.run_cloud_pairing(&client, &identity, operation).await
     }
 
@@ -172,26 +313,36 @@ impl Core {
             return Err(CoreError::NotFound("pairing operation".into()));
         }
         self.require_cloud_account()?;
-        let guard = self.identity_lock()?;
+        let host =
+            match self.load_cloud_pairing::<PairingOutcome>(&pairing_receipt(operation_id))? {
+                Some(receipt) => receipt.host_id,
+                None => self
+                    .pending_cloud_pairings()?
+                    .into_iter()
+                    .find_map(|(id, host)| (id == operation_id).then_some(host))
+                    .ok_or_else(|| CoreError::NotFound("pairing operation".into()))?,
+            };
+        let _host = self.cloud_pairing_lock(&host)?;
         self.refresh_regional_state()?;
-        let client = self.account_client(false).await?;
         if let Some(outcome) =
             self.load_cloud_pairing::<PairingOutcome>(&pairing_receipt(operation_id))?
         {
             self.verify_cloud_receipt(&outcome).await?;
+            let _identity = self.identity_lock()?;
             if self
-                .pending_cloud_pairing()?
-                .is_some_and(|(id, _)| id == operation_id)
+                .load_pending_cloud_pairing(&host)?
+                .is_some_and(|operation| operation.id == operation_id)
             {
                 self.finish_cloud_receipt(&outcome)?;
             }
             return Ok(outcome);
         }
-        let operation: CloudPairing = self
-            .load_cloud_pairing(ACTIVE_PAIRING)?
-            .filter(|operation: &CloudPairing| operation.id == operation_id)
+        let operation = self
+            .load_pending_cloud_pairing(&host)?
+            .filter(|operation| operation.id == operation_id)
             .ok_or_else(|| CoreError::NotFound("pairing operation".into()))?;
-        let identity = self.device_identity_locked(&guard)?;
+        let identity = self.device_identity()?;
+        let client = self.account_client(false).await?;
         self.run_cloud_pairing(&client, &identity, operation).await
     }
 
@@ -302,7 +453,20 @@ impl Core {
             .as_ref()
             .is_some_and(|instance| instance.cloud.is_some())
         {
+            for (id, _) in self.pending_cloud_pairings()? {
+                self.options.secrets.delete(&pending_pairing_secret(&id))?;
+            }
             self.options.secrets.delete(ACTIVE_PAIRING)?;
+            self.options.secrets.delete(LEGACY_HOST_PAIRINGS)?;
+            match std::fs::remove_file(self.data_dir().join(HOST_PAIRING_INDEX)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(CoreError::Config(
+                        "could not remove Cloud pairing index".into(),
+                    ))
+                }
+            }
         }
         Ok(())
     }
@@ -327,13 +491,48 @@ impl Core {
         let Some(config) = self.current_config() else {
             return Ok(None);
         };
+        if !(config.host_id == host_id && config.host_fingerprint.is_some())
+            && !config.host_fingerprints.contains_key(host_id)
+        {
+            return Ok(None);
+        }
+        let region = self.cloud_transport().await?;
+        self.reuse_cloud_grant_with_region(host_id, region).await
+    }
+
+    async fn reuse_cloud_grant_with_region(
+        &self,
+        host_id: &str,
+        region: Option<crate::account::native::RegionalSession>,
+    ) -> CoreResult<Option<PairingOutcome>> {
+        let Some(config) = self.current_config() else {
+            return Ok(None);
+        };
         let pin = if config.host_id == host_id {
             config.host_fingerprint.as_ref()
         } else {
             config.host_fingerprints.get(host_id)
         };
         let Some(pin) = pin else { return Ok(None) };
-        let access = self.access_client()?;
+        let base = Url::parse(&config.access_url).map_err(|_| CoreError::ProtocolIncompatible)?;
+        let access = if let Some(region) = region {
+            let origin = region
+                .permission
+                .as_ref()
+                .ok_or(CoreError::AuthenticationRequired)?
+                .access_origin
+                .clone();
+            let id = region.id.clone();
+            let access = self.regional_access(origin.clone(), region)?;
+            if origin != base {
+                self.adopt_cloud_route(&access, &config, Some(host_id))
+                    .await?;
+                self.runtime.bind_cloud_session(&id);
+            }
+            access
+        } else {
+            self.access_client().await?
+        };
         let hosts = self
             .settle(access.list_hosts().await.map_err(CoreError::from))
             .await?;
@@ -351,7 +550,7 @@ impl Core {
             host_id: host_id.into(),
             device_id: config.device_id,
             fingerprint: pin.clone(),
-            access_url: config.access_url,
+            access_url: access.base_url().to_string(),
         }))
     }
 
@@ -371,52 +570,75 @@ impl Core {
         if let Some(outcome) =
             self.load_cloud_pairing::<PairingOutcome>(&pairing_receipt(&operation.id))?
         {
-            self.verify_cloud_receipt(&outcome).await?;
+            let region = client.regional_session(identity).await?;
+            self.verify_cloud_receipt_with_region(&outcome, Some(region))
+                .await?;
+            let _identity = self.identity_lock()?;
             self.finish_cloud_receipt(&outcome)?;
             return Ok(outcome);
         }
 
+        let current_session = self.cloud_session_id()?;
+        if operation.session_id != current_session {
+            return self
+                .reconcile_cloud_pairing(client, identity, &operation)
+                .await;
+        }
+
+        let region = client.regional_session(identity).await?;
+        if operation.session_id.as_deref() != Some(&region.id) {
+            return Err(CoreError::AuthenticationRequired);
+        }
         let authorization: AuthorizedPairing = match client
-            .post_scoped(
+            .post_scoped_for_session(
                 &["hosts", &operation.host, "pairing"],
                 &AuthorizePairing {
                     operation_id: &operation.id,
                     device_id: &operation.device,
                     device_noise_key: URL_SAFE_NO_PAD.encode(operation.device_public_key),
                 },
+                operation.session_id.as_deref(),
             )
             .await
         {
             Ok(authorization) => authorization,
             Err(error) => {
-                if operation.route.is_none()
-                    && matches!(
-                        error,
-                        CoreError::Unauthorized
-                            | CoreError::AuthenticationRequired
-                            | CoreError::Revoked
-                            | CoreError::NotFound(_)
-                            | CoreError::InvalidInput(_)
-                            | CoreError::Conflict(_)
-                    )
+                if matches!(error, CoreError::NotFound(_))
+                    || operation.route.is_none()
+                        && matches!(
+                            error,
+                            CoreError::Unauthorized
+                                | CoreError::AuthenticationRequired
+                                | CoreError::Revoked
+                                | CoreError::NotFound(_)
+                                | CoreError::InvalidInput(_)
+                                | CoreError::Conflict(_)
+                        )
                 {
                     // An explicit denial before any regional request cannot have
                     // created a grant. It must not block an unrelated selection.
-                    self.options.secrets.delete(ACTIVE_PAIRING)?;
+                    let _identity = self.identity_lock()?;
+                    self.clear_pending_cloud_pairing(&operation.host)?;
                 }
                 return Err(error);
             }
         };
         let route = self.validate_cloud_pairing(&operation, &authorization)?;
-        let access = AccessClient::with_ca(route.access.clone(), None, self.ca_pem().as_deref())?
-            .with_trace_id(self.diagnostic_id());
+        if region.permission.as_ref().is_none_or(|permit| {
+            permit.access_origin != route.access || permit.region != authorization.route.region
+        }) {
+            return Err(CoreError::Security(
+                "Cloud permission and pairing route differ".into(),
+            ));
+        }
+        let access = self.regional_access(route.access.clone(), region)?;
         let expected_fingerprint = route.host_fingerprint.clone();
         let access_url = route.access.to_string();
 
         if operation.finish.is_none() {
             if operation.route.is_none() {
                 operation.route = Some(route);
-                self.save_cloud_pairing(ACTIVE_PAIRING, &operation)?;
+                self.update_pending_cloud_pairing(&operation)?;
             }
             let route = operation.route.as_ref().expect("validated pairing route");
             let uri = PairingUri {
@@ -452,7 +674,7 @@ impl Core {
                 expected_fingerprint: Some(expected_fingerprint.clone()),
             })?;
             operation.finish = Some(session.write_finish()?);
-            self.save_cloud_pairing(ACTIVE_PAIRING, &operation)?;
+            self.update_pending_cloud_pairing(&operation)?;
         }
 
         let finish = operation.finish.as_ref().expect("retained pairing FINISH");
@@ -472,6 +694,88 @@ impl Core {
                 "Cloud pairing completion scope mismatch".into(),
             ));
         }
+        self.commit_cloud_pairing(
+            &operation,
+            expected_fingerprint,
+            access_url,
+            access.cloud_session_id(),
+        )
+    }
+
+    async fn reconcile_cloud_pairing(
+        &self,
+        client: &AccountClient,
+        identity: &DeviceIdentity,
+        operation: &CloudPairing,
+    ) -> CoreResult<PairingOutcome> {
+        let Some(route) = &operation.route else {
+            // No request can be sent before persisting the authorized route.
+            let _identity = self.identity_lock()?;
+            self.clear_pending_cloud_pairing(&operation.host)?;
+            return Err(CoreError::PairingFenced);
+        };
+        let region = client.regional_session(identity).await?;
+        if region
+            .permission
+            .as_ref()
+            .is_none_or(|permit| permit.access_origin != route.access)
+        {
+            return Err(CoreError::Conflict(
+                "Previous connection outcome is uncertain in a different region".into(),
+            ));
+        }
+        let access = self.regional_access(route.access.clone(), region)?;
+        match access
+            .cloud_pairing_outcome(&operation.host, &operation.id)
+            .await?
+        {
+            crate::access::http::CloudPairingState::Pending => Err(CoreError::Conflict(
+                "Previous connection attempt is still being reconciled".into(),
+            )),
+            crate::access::http::CloudPairingState::Terminal => {
+                let _identity = self.identity_lock()?;
+                self.clear_pending_cloud_pairing(&operation.host)?;
+                Err(CoreError::PairingFenced)
+            }
+            crate::access::http::CloudPairingState::Ready => {
+                let hosts = access.list_hosts().await?;
+                if !hosts.iter().any(|host| {
+                    host.host_id == operation.host && host.fingerprint == route.host_fingerprint
+                }) {
+                    return Err(CoreError::Security(
+                        "Recovered Host grant identity could not be confirmed".into(),
+                    ));
+                }
+                self.commit_cloud_pairing(
+                    operation,
+                    route.host_fingerprint.clone(),
+                    route.access.to_string(),
+                    access.cloud_session_id(),
+                )
+            }
+        }
+    }
+
+    fn commit_cloud_pairing(
+        &self,
+        operation: &CloudPairing,
+        expected_fingerprint: String,
+        access_url: String,
+        expected_session: Option<&str>,
+    ) -> CoreResult<PairingOutcome> {
+        let _identity = self.identity_lock()?;
+        if self.cloud_session_id()?.as_deref() != expected_session {
+            return Err(CoreError::AuthenticationRequired);
+        }
+        if self
+            .load_pending_cloud_pairing(&operation.host)?
+            .is_none_or(|pending| pending.id != operation.id)
+        {
+            return Err(CoreError::PairingFenced);
+        }
+        let finish = operation.finish.as_ref().ok_or_else(|| {
+            CoreError::Security("Pairing completion has no retained FINISH".into())
+        })?;
         let mut persisted = PersistedConfig::new(
             access_url.clone(),
             None,
@@ -487,8 +791,8 @@ impl Core {
         )?;
         let outcome = PairingOutcome {
             operation_id: Some(operation.id.clone()),
-            host_id: operation.host,
-            device_id: operation.device,
+            host_id: operation.host.clone(),
+            device_id: operation.device.clone(),
             fingerprint: expected_fingerprint,
             access_url,
         };
@@ -497,11 +801,23 @@ impl Core {
     }
 
     async fn verify_cloud_receipt(&self, receipt: &PairingOutcome) -> CoreResult<()> {
-        let current = self.reuse_cloud_grant(&receipt.host_id).await?;
+        let region = self.cloud_transport().await?;
+        self.verify_cloud_receipt_with_region(receipt, region).await
+    }
+
+    async fn verify_cloud_receipt_with_region(
+        &self,
+        receipt: &PairingOutcome,
+        region: Option<crate::account::native::RegionalSession>,
+    ) -> CoreResult<()> {
+        let current = self
+            .reuse_cloud_grant_with_region(&receipt.host_id, region)
+            .await?;
         if current.is_none_or(|current| {
             current.device_id != receipt.device_id
                 || current.fingerprint != receipt.fingerprint
-                || current.access_url != receipt.access_url
+                || (self.cloud_session_id().ok().flatten().is_none()
+                    && current.access_url != receipt.access_url)
         }) {
             return Err(CoreError::Revoked);
         }
@@ -515,7 +831,7 @@ impl Core {
             .ok_or_else(|| CoreError::Internal("pairing operation ID is unavailable".into()))?;
         self.save_cloud_pairing(&pairing_receipt(id), outcome)?;
         self.set_default_host(&outcome.host_id)?;
-        self.options.secrets.delete(ACTIVE_PAIRING)?;
+        self.clear_pending_cloud_pairing(&outcome.host_id)?;
         Ok(())
     }
 
@@ -628,6 +944,10 @@ impl Core {
         self.options.secrets.save(key, &bytes)?;
         Ok(())
     }
+}
+
+fn pending_pairing_secret(operation_id: &str) -> String {
+    format!("cloud-pairing-pending:{operation_id}")
 }
 
 fn pairing_receipt(operation_id: &str) -> String {
@@ -753,6 +1073,7 @@ mod tests {
             CloudPairing {
                 id: Core::new_command_id(),
                 host: "pending-fixture-host".into(),
+                session_id: None,
                 device: identity.device_id.clone(),
                 device_public_key: *identity.key.public_key(),
                 ephemeral: crate::util::random_bytes(32).try_into().unwrap(),
@@ -765,6 +1086,20 @@ mod tests {
             }
         };
         core.save_cloud_pairing(ACTIVE_PAIRING, &operation).unwrap();
+        let first_host_lock = core.cloud_pairing_lock("pending-fixture-host").unwrap();
+        let second_host_lock = core.cloud_pairing_lock("second-fixture-host").unwrap();
+        assert!(core.cloud_pairing_lock("pending-fixture-host").is_err());
+        drop(first_host_lock);
+        drop(second_host_lock);
+        let other = CloudPairing {
+            id: Core::new_command_id(),
+            host: "second-fixture-host".into(),
+            ..operation.clone()
+        };
+        {
+            let _guard = core.identity_lock().unwrap();
+            core.save_pending_cloud_pairing(&other).unwrap();
+        }
         drop(core);
 
         let core = Core::open(&path, backend).unwrap();
@@ -777,8 +1112,21 @@ mod tests {
             Err(CoreError::Unauthorized)
         ));
         assert_eq!(
-            core.pending_cloud_pairing().unwrap(),
-            Some((operation.id, operation.host))
+            core.pending_cloud_pairings().unwrap(),
+            vec![
+                (operation.id.clone(), operation.host.clone()),
+                (other.id.clone(), other.host.clone())
+            ],
+        );
+        assert!(core.has_cloud_pairing_operation(&other.id).unwrap());
+        {
+            let _guard = core.identity_lock().unwrap();
+            core.clear_pending_cloud_pairing(&operation.host).unwrap();
+        }
+        assert!(!core.has_cloud_pairing_operation(&operation.id).unwrap());
+        assert_eq!(
+            core.pending_cloud_pairings().unwrap(),
+            vec![(other.id, other.host)]
         );
         assert_eq!(
             core.default_host().unwrap().as_deref(),
@@ -815,6 +1163,7 @@ mod tests {
         let operation = CloudPairing {
             id: Core::new_command_id(),
             host: "host-fixture".into(),
+            session_id: None,
             device: identity.device_id.clone(),
             device_public_key: *identity.key.public_key(),
             ephemeral: crate::util::random_bytes(32).try_into().unwrap(),

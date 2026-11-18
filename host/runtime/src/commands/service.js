@@ -239,17 +239,17 @@ export class CommandService {
     }
   }
 
-  /** Abort one request after Access observed its HTTP client stop polling. */
-  cancelRequest(requestId, reason = 'client_poll_expired') {
-    if (!requestId) return
+  /** Abort one request within the authenticated Device scope. */
+  cancelRequest(deviceId, requestId, reason) {
+    if (!deviceId || !requestId) return
     for (const entry of this.requests) {
-      if (entry.requestId === requestId) entry.controller.abort('unavailable')
+      if (entry.requestId === requestId && entry.deviceId === deviceId) entry.controller.abort('unavailable')
     }
     for (const entry of this.questionAnswers.values()) {
-      if (entry.requestId === requestId) entry.controller.abort('unavailable')
+      if (entry.requestId === requestId && entry.deviceId === deviceId) entry.controller.abort('unavailable')
     }
     for (const wait of this.waits.values()) {
-      if (wait.requestId === requestId) {
+      if (wait.requestId === requestId && wait.deviceId === deviceId) {
         wait.reason = reason
         wait.controller.abort()
       }

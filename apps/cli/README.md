@@ -48,7 +48,13 @@ Session IDs belong to the selected Host.
 ## Commands
 
 - `status` inspects selected paths, service, sign-in and Device access.
-- `logout` clears Cloud sign-in. `device revoke` applies Device revocation.
+- `logout` signs this instance out immediately and reports a pending remote
+  sign-out when Cloud or Access cannot yet confirm it. Run `status` or
+  `logout` again to retry pending remote sign-out.
+- `account sessions` lists Cloud App sessions. `account revoke-session ID`
+  signs out an individual App session, and `account revoke-all-sessions`
+  signs out all App sessions in the selected Cloud environment.
+- `device revoke` applies Device revocation.
   `device forget` clears local pairing identity. Review prompts or supply
   `--yes` for non-interactive destructive commands.
 - `session show <id>`, `session fork <id>`, `session watch <id>`,

@@ -564,6 +564,14 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 		if err != nil {
 			return false, err
 		}
+		if operation.CloudSessionID != "" {
+			if _, err = tx.Exec(ctx, `UPDATE requests SET device_session_id=$2,
+				device_session_authority=(SELECT authority_revision FROM device_sessions WHERE session_id=$2)
+				WHERE request_id=$1`,
+				notice.RequestId, operation.CloudSessionID); err != nil {
+				return false, err
+			}
+		}
 	}
 	if operation != nil {
 		op := operation

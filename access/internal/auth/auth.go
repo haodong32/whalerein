@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,14 +50,16 @@ var probeHostID = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 // Identity is an HTTP- or MQTT-authenticated device.
 type Identity struct {
-	DeviceID string
+	DeviceID  string
+	SessionID string
 }
 
 // BrokerIdentity is an authenticated broker principal.
 type BrokerIdentity struct {
-	Kind     PrincipalKind
-	HostID   string
-	DeviceID string
+	Kind      PrincipalKind
+	HostID    string
+	DeviceID  string
+	SessionID string
 }
 
 // HostView is the device-visible host record plus broker presence.
@@ -136,12 +139,15 @@ type Config struct {
 	// RequireHostEnrollment is set in external account mode. It removes the
 	// Standalone shared-token fallback so an unenrolled Host principal is
 	// denied instead of being projected from a deployment-wide secret.
-	RequireHostEnrollment bool
+	RequireHostEnrollment    bool
+	RequireDeviceSession     bool
+	SessionAuthorityRevision string
 }
 
 // Dependencies wires the auth service.
 type Dependencies struct {
 	Store     Store
+	Sessions  DeviceSessionStore
 	Admission Admission
 	Enforcer  LineEnforcer
 	Observer  PolicyObserver
@@ -157,6 +163,7 @@ type Dependencies struct {
 // Service implements transport authorization and revocation.
 type Service struct {
 	store     Store
+	sessions  DeviceSessionStore
 	admission Admission
 	enforcer  LineEnforcer
 	observer  PolicyObserver
@@ -203,6 +210,7 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	return &Service{
 		store:     deps.Store,
+		sessions:  deps.Sessions,
 		admission: deps.Admission,
 		enforcer:  deps.Enforcer,
 		observer:  deps.Observer,
@@ -244,6 +252,21 @@ func (s *Service) AuthenticateDeviceToken(ctx context.Context, token string) (Id
 	if strings.TrimSpace(token) == "" {
 		return Identity{}, ErrUnauthorized
 	}
+	if s.sessions != nil {
+		permission, err := s.sessions.DeviceSessionByCredential(ctx, HashToken(token), s.now())
+		if err == nil {
+			if permission.AuthorityRevision != s.cfg.SessionAuthorityRevision {
+				return Identity{}, ErrUnauthorized
+			}
+			return Identity{DeviceID: permission.DeviceID, SessionID: permission.ID}, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return Identity{}, err
+		}
+	}
+	if s.cfg.RequireDeviceSession {
+		return Identity{}, ErrUnauthorized
+	}
 	device, err := s.store.ActiveDeviceByAuthHash(ctx, HashToken(token))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -257,6 +280,15 @@ func (s *Service) AuthenticateDeviceToken(ctx context.Context, token string) (Id
 // AuthorizeHost requires a live grant from the device to the host. Warmed
 // decisions read only local admission state.
 func (s *Service) AuthorizeHost(ctx context.Context, identity Identity, hostID string) error {
+	if identity.SessionID != "" {
+		_, hosts, err := s.sessionHosts(ctx, identity)
+		if err != nil {
+			return err
+		}
+		if !hosts[hostID] {
+			return ErrForbidden
+		}
+	}
 	active, err := s.admission.Authorize(ctx, hostID, identity.DeviceID)
 	if err != nil {
 		return fmt.Errorf("authorize host: %w", err)
@@ -284,8 +316,18 @@ func (s *Service) ListHosts(ctx context.Context, identity Identity, limit, offse
 	if truncated {
 		hosts = hosts[:limit]
 	}
+	var scoped map[string]bool
+	if identity.SessionID != "" {
+		_, scoped, err = s.sessionHosts(ctx, identity)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	views := make([]HostView, 0, len(hosts))
 	for _, host := range hosts {
+		if scoped != nil && !scoped[host.HostID] {
+			continue
+		}
 		views = append(views, HostView{
 			HostID:          host.HostID,
 			Fingerprint:     host.Fingerprint,
@@ -329,6 +371,14 @@ func (s *Service) IdentityFromCredentials(clientID, username string) (BrokerIden
 			return BrokerIdentity{}, ErrBadRequest
 		}
 		return BrokerIdentity{Kind: KindHost, HostID: hostID}, nil
+	case strings.HasPrefix(username, "session:"):
+		sessionID := strings.TrimPrefix(username, "session:")
+		prefix := "whalerein-session-" + sessionID
+		validClient := clientID == prefix || (strings.HasPrefix(clientID, prefix+"-") && validDeviceClientSuffix(clientID[len(prefix)+1:]))
+		if s.sessions == nil || !managedSessionID.MatchString(sessionID) || !validClient {
+			return BrokerIdentity{}, ErrBadRequest
+		}
+		return BrokerIdentity{Kind: KindDevice, SessionID: sessionID}, nil
 	case strings.HasPrefix(username, "device:"):
 		deviceID := strings.TrimPrefix(username, "device:")
 		prefix := "whalerein-device-" + deviceID
@@ -398,6 +448,17 @@ func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, pa
 		}
 		return identity, nil
 	case KindDevice:
+		if identity.SessionID != "" {
+			signedIn, err := s.AuthenticateDeviceToken(ctx, password)
+			if err != nil || signedIn.SessionID != identity.SessionID {
+				return BrokerIdentity{}, ErrUnauthorized
+			}
+			identity.DeviceID = signedIn.DeviceID
+			return identity, nil
+		}
+		if s.cfg.RequireDeviceSession {
+			return BrokerIdentity{}, ErrUnauthorized
+		}
 		device, err := s.store.ActiveDeviceByAuthHash(ctx, HashToken(password))
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -424,6 +485,28 @@ func (s *Service) BrokerPolicy(ctx context.Context, identity BrokerIdentity) (po
 	grants, err := s.store.ListDeviceGrants(ctx, identity.DeviceID)
 	if err != nil {
 		return policy.Connection{}, fmt.Errorf("broker policy: %w", err)
+	}
+	if identity.SessionID != "" {
+		permission, hosts, err := s.sessionHosts(ctx, Identity{DeviceID: identity.DeviceID, SessionID: identity.SessionID})
+		if err != nil {
+			return policy.Connection{}, err
+		}
+		scoped := make([]store.AdmissionGrant, 0, len(hosts))
+		for _, grant := range grants {
+			if hosts[grant.HostID] {
+				scoped = append(scoped, grant)
+			}
+		}
+		connection := policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, scoped)
+		connection.SessionID = identity.SessionID
+		connection.SessionRevision = permission.Revision
+		connection.SessionExpiresAt = permission.ExpiresAt.UnixMilli()
+		// A managed session never sends a Device-wide offline event.
+		connection.Will = ""
+		connection.Entries = slices.DeleteFunc(connection.Entries, func(entry policy.Entry) bool {
+			return entry.HostID == ""
+		})
+		return connection, nil
 	}
 	connection := policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, grants)
 	if s.observer != nil {

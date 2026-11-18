@@ -23,6 +23,7 @@ directories = { workspace = true }
 fs4 = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
+hmac = "0.12"
 hkdf = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
@@ -62,6 +63,7 @@ keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"], 
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [[example]]
 name = "mqtt_transport_driver"

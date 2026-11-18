@@ -37,12 +37,15 @@ type Entry struct {
 
 // Connection is the complete policy installed for one MQTT connection.
 type Connection struct {
-	Kind     string
-	HostID   string
-	DeviceID string
-	Revision uint64
-	Will     string
-	Entries  []Entry
+	SessionID        string
+	SessionRevision  int64
+	SessionExpiresAt int64
+	Kind             string
+	HostID           string
+	DeviceID         string
+	Revision         uint64
+	Will             string
+	Entries          []Entry
 }
 
 // Revision packs the durable generation counters into one monotonic value per
@@ -133,6 +136,9 @@ func Format(c Connection) []byte {
 		fmt.Fprintf(&builder, "device %s\n", c.DeviceID)
 	}
 	fmt.Fprintf(&builder, "revision %d\nready 1\n", c.Revision)
+	if c.SessionID != "" {
+		fmt.Fprintf(&builder, "session %s %d %d\n", c.SessionID, c.SessionRevision, c.SessionExpiresAt)
+	}
 	if c.Will != "" {
 		fmt.Fprintf(&builder, "will %s\n", c.Will)
 	}

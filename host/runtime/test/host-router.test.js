@@ -803,6 +803,8 @@ test('session-observation/AC-34.spoofed or foreign cancellation is rejected with
     ctx.host.notifyPresence({ ...valid, device_id: 'foreign-device' })
     ctx.host.notifyPresence({ ...valid, command_id: 'other-command' })
     ctx.host.notifyPresence({ ...valid, digest: Buffer.alloc(32).toString('base64') })
+    ctx.host.notifyPresence({ ...valid, reason: 'cloud_session_ended', host_id: undefined })
+    ctx.host.notifyPresence({ ...valid, reason: 'cloud_session_ended', device_id: undefined })
     live.gate.resolve()
     await live.pending
     assert.equal(ctx.access.lastResult().status, 'succeeded', 'rejected notices never abort the valid answer')
@@ -810,10 +812,11 @@ test('session-observation/AC-34.spoofed or foreign cancellation is rejected with
     // The corresponding exact notice remains effective for a new scope.
     const other = startLiveAnswer(ctx, channel, { commandId: 'revoked-command', requestId: 'revoked-request' })
     while (!other.entered()) await new Promise(resolve => setImmediate(resolve))
-    ctx.host.notifyPresence({ event: 'request_stale', request_id: 'revoked-request', host_id: 'host-1', device_id: 'd1',
+    ctx.host.notifyPresence({ event: 'request_stale', reason: 'cloud_session_ended', request_id: 'revoked-request', host_id: 'host-1', device_id: 'd1',
       command_id: 'revoked-command', digest: Buffer.from(other.request.payload_digest).toString('base64'),
       deadline_unix_ms: other.request.expires_at_unix_ms })
     assert.equal((await other.pending).status, 'unknown')
+    assert.equal(ctx.host.security.listChannels().length, 1, 'session cancellation leaves Device channels open')
   } finally {
     await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
   }

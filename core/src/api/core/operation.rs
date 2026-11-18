@@ -250,10 +250,11 @@ impl Core {
 
     pub async fn recover_send_operation(&self, id: &str) -> CoreResult<SendOperation> {
         let mut record = self.read_send_record(id)?;
+        let managed = self.cloud_session_id()?.is_some();
         let config = self.require_config()?;
         let host = &record.outcome.target.host_id;
         if config.device_id != record.device_id
-            || config.access_url != record.access_url
+            || (!managed && config.access_url != record.access_url)
             || self.confirmed_host_fingerprint(host)? != record.host_fingerprint
         {
             return Err(CoreError::Conflict(
@@ -266,6 +267,21 @@ impl Core {
             .as_ref()
             .is_some_and(|receipt| receipt.status.is_terminal())
         {
+            if managed {
+                // A saved result is still private to a currently authorized
+                // Host and Device, even after a session or route changes.
+                let access = self.access_client().await?;
+                let listed = self
+                    .settle(access.list_hosts().await.map_err(CoreError::from))
+                    .await?;
+                if !listed.iter().any(|listed| {
+                    listed.host_id == *host && listed.fingerprint == record.host_fingerprint
+                }) {
+                    return Err(CoreError::NotFound(
+                        "Host grant could not be confirmed".into(),
+                    ));
+                }
+            }
             return Ok(record.outcome);
         }
         let receipt = self.recover_command(host, id, id).await?;
@@ -377,6 +393,7 @@ pub struct ClientStatus {
     pub testing_environment: Option<&'static str>,
     pub instance_id: Option<String>,
     pub account_state: AccountState,
+    pub remote_signout_pending: bool,
     pub default_host: Option<String>,
     pub device_access: DeviceAccess,
 }
@@ -397,6 +414,7 @@ pub enum DeviceAccess {
     RevocationPending,
     Revoked,
     Unavailable,
+    SignInRequired,
 }
 
 impl Core {
@@ -405,14 +423,36 @@ impl Core {
         let account_state = match client.service {
             ClientService::Standalone => AccountState::NotApplicable,
             ClientService::WhaleReinCloud if self.account_status()?.is_some() => {
-                AccountState::SignedIn
+                let remote = tokio::time::timeout(Duration::from_secs(5), async {
+                    self.account_client(false).await?.status().await
+                })
+                .await;
+                if matches!(remote, Ok(Err(CoreError::AuthenticationRequired))) {
+                    self.runtime.disconnect_cloud_session();
+                    AccountState::SignedOut
+                } else {
+                    AccountState::SignedIn
+                }
             }
             ClientService::WhaleReinCloud => AccountState::SignedOut,
         };
-        let default_host = self.default_host()?;
-        let device_access = match self.local_revocation_state()? {
-            Some("revoked") => DeviceAccess::Revoked,
-            Some("revocation_pending") => DeviceAccess::RevocationPending,
+        if matches!(account_state, AccountState::SignedOut) {
+            if let Ok(client) = self.account_client(false).await {
+                client.retry_remote_signout().await?;
+            }
+        }
+        let remote_signout_pending = matches!(client.service, ClientService::WhaleReinCloud)
+            && crate::account::native::AccountClient::local_logout_pending(&self.options.secrets)?;
+        let signed_out = matches!(account_state, AccountState::SignedOut);
+        let default_host = if signed_out {
+            None
+        } else {
+            self.default_host()?
+        };
+        let device_access = match (signed_out, self.local_revocation_state()?) {
+            (true, _) => DeviceAccess::SignInRequired,
+            (_, Some("revoked")) => DeviceAccess::Revoked,
+            (_, Some("revocation_pending")) => DeviceAccess::RevocationPending,
             _ if !self.is_paired() => DeviceAccess::Unpaired,
             _ => match tokio::time::timeout(Duration::from_secs(5), self.inspect_regional_hosts())
                 .await
@@ -425,10 +465,11 @@ impl Core {
                     DeviceAccess::Ready
                 }
                 Ok(Err(error))
-                    if matches!(
-                        error,
-                        CoreError::Revoked | CoreError::RevokedRetentionUnverified
-                    ) || error.device_authorization_lost() =>
+                    if matches!(account_state, AccountState::NotApplicable)
+                        && (matches!(
+                            error,
+                            CoreError::Revoked | CoreError::RevokedRetentionUnverified
+                        ) || error.device_authorization_lost()) =>
                 {
                     DeviceAccess::Revoked
                 }
@@ -446,6 +487,7 @@ impl Core {
             },
             instance_id: self.instance_id()?,
             account_state,
+            remote_signout_pending,
             default_host,
             device_access,
         })
@@ -453,7 +495,7 @@ impl Core {
 
     /// Read the regional Host directory without modifying cached or local authorization state.
     pub async fn inspect_regional_hosts(&self) -> CoreResult<Vec<HostInfo>> {
-        let access = self.access_client()?;
+        let access = self.access_client().await?;
         let (hosts, complete) = access.inspect_hosts().await?;
         if !complete {
             return Err(CoreError::Unavailable(

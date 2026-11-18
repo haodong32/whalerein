@@ -311,10 +311,17 @@ impl Core {
         self.account_client(true).await?.login(present).await
     }
 
-    pub async fn logout(&self) -> CoreResult<()> {
+    /// End this App session. A false result means remote sign-out is pending.
+    pub async fn logout(&self) -> CoreResult<bool> {
+        let expected = self.cloud_session_id().ok().flatten();
         match self.account_client(false).await {
-            Ok(client) => client.logout().await,
-            Err(CoreError::Unauthorized) => Ok(()),
+            Ok(client) => {
+                let complete = client.logout().await?;
+                self.runtime
+                    .disconnect_cloud_session_if(expected.as_deref());
+                Ok(complete)
+            }
+            Err(CoreError::Unauthorized) => Ok(true),
             Err(error) => Err(error),
         }
     }
@@ -325,6 +332,42 @@ impl Core {
             return Ok(None);
         };
         crate::account::native::AccountClient::local_status(instance, &self.options.secrets)
+    }
+
+    pub async fn cloud_account_sessions(&self) -> CoreResult<Vec<crate::api::AccountSessionInfo>> {
+        self.account_client(false).await?.sessions().await
+    }
+
+    pub async fn revoke_cloud_account_session(
+        &self,
+        id: &str,
+    ) -> CoreResult<crate::api::AccountSessionState> {
+        let current = self.cloud_session_id()?;
+        let state = self.account_client(false).await?.revoke_session(id).await?;
+        if current.as_deref() == Some(id) {
+            self.runtime.disconnect_cloud_session_if(current.as_deref());
+        }
+        Ok(state)
+    }
+
+    pub async fn revoke_all_cloud_account_sessions(
+        &self,
+    ) -> CoreResult<crate::api::AccountSessionState> {
+        let expected = self.cloud_session_id()?;
+        let result = self
+            .account_client(false)
+            .await?
+            .revoke_all_sessions()
+            .await;
+        match self.cloud_session_id() {
+            Ok(current) if current == expected => {}
+            Ok(_) | Err(CoreError::AuthenticationRequired) => {
+                self.runtime
+                    .disconnect_cloud_session_if(expected.as_deref());
+            }
+            Err(error) => return Err(error),
+        }
+        result
     }
 
     pub async fn account_hosts(&self) -> CoreResult<Vec<crate::api::AccountHost>> {
@@ -613,27 +656,137 @@ impl Core {
         Ok(())
     }
 
-    fn access_client(&self) -> CoreResult<AccessClient> {
+    pub(crate) fn cloud_session_id(&self) -> CoreResult<Option<String>> {
+        let Some(instance) = self
+            .instance
+            .as_ref()
+            .filter(|instance| instance.cloud.is_some())
+        else {
+            return Ok(None);
+        };
+        crate::account::native::AccountClient::local_session_id(instance, &self.options.secrets)
+            .and_then(|id| id.map(Some).ok_or(CoreError::AuthenticationRequired))
+    }
+
+    pub(crate) async fn cloud_transport(
+        &self,
+    ) -> CoreResult<Option<crate::account::native::RegionalSession>> {
+        if self.cloud_session_id()?.is_none() {
+            return Ok(None);
+        }
+        let identity = self.device_identity()?;
+        let region = self
+            .account_client(false)
+            .await?
+            .regional_session(&identity)
+            .await?;
+        if self.cloud_session_id()?.as_deref() != Some(&region.id) {
+            return Err(CoreError::AuthenticationRequired);
+        }
+        self.runtime.bind_cloud_session(&region.id);
+        Ok(Some(region))
+    }
+
+    fn regional_access(
+        &self,
+        base: Url,
+        region: crate::account::native::RegionalSession,
+    ) -> CoreResult<AccessClient> {
+        Ok(
+            AccessClient::with_ca(base, Some(region.token), self.ca_pem().as_deref())?
+                .with_cloud_session(region.id, self.options.secrets.clone())
+                .with_trace_id(self.diagnostic_id()),
+        )
+    }
+
+    async fn access_client(&self) -> CoreResult<AccessClient> {
         let config = self.require_config()?;
-        let token = load_device_token(&self.options.secrets, &config.device_id)?
-            .ok_or(CoreError::NotPaired)?;
         let base = Url::parse(&config.access_url)
             .map_err(|_| CoreError::Config("invalid Access URL".into()))?;
+        if let Some(region) = self.cloud_transport().await? {
+            let origin = region
+                .permission
+                .as_ref()
+                .ok_or(CoreError::AuthenticationRequired)?
+                .access_origin
+                .clone();
+            let access = self.regional_access(origin.clone(), region)?;
+            if origin != base {
+                self.adopt_cloud_route(&access, &config, None).await?;
+                if let Some(id) = self.cloud_session_id()? {
+                    self.runtime.bind_cloud_session(&id);
+                }
+            }
+            return Ok(access);
+        }
+        let token = load_device_token(&self.options.secrets, &config.device_id)?
+            .ok_or(CoreError::NotPaired)?;
         let ca = self.ca_pem();
         AccessClient::with_ca(base, Some(token), ca.as_deref())
             .map(|access| access.with_trace_id(self.diagnostic_id()))
             .map_err(Into::into)
     }
 
+    async fn adopt_cloud_route(
+        &self,
+        access: &AccessClient,
+        expected: &PersistedConfig,
+        target: Option<&str>,
+    ) -> CoreResult<()> {
+        let hosts = access.list_hosts().await?;
+        let confirmed = hosts.iter().any(|host| {
+            target.is_none_or(|target| host.host_id == target)
+                && (if host.host_id == expected.host_id {
+                    expected.host_fingerprint.as_ref()
+                } else {
+                    expected.host_fingerprints.get(&host.host_id)
+                }) == Some(&host.fingerprint)
+        });
+        if !confirmed {
+            return Err(CoreError::Unavailable(
+                "No pinned Host grant is available on the current route".into(),
+            ));
+        }
+        let _admission = crate::security::device::ProfileLock::acquire_admission_async(
+            &self.options.data_dir,
+            std::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .map_err(|_| CoreError::Unavailable("profile admission lock unavailable".into()))?;
+        if access.cloud_session_current(Some(&expected.device_id))? != Some(true) {
+            return Err(CoreError::AuthenticationRequired);
+        }
+        let mut latest = self.config_store().load()?.ok_or(CoreError::NotPaired)?;
+        let origin = access.base_url().as_str();
+        if latest == *expected {
+            latest.access_url = origin.into();
+            latest.mqtt_url = None;
+            self.config_store().save(&latest)?;
+        } else if latest.device_id != expected.device_id || latest.access_url != origin {
+            return Err(CoreError::Conflict(
+                "the active regional route changed".into(),
+            ));
+        }
+        *self.config.write().expect("config lock") = Some(latest);
+        self.runtime.disconnect_cloud_session();
+        Ok(())
+    }
+
     fn verify_access_generation(&self, access: &AccessClient) -> CoreResult<()> {
         let config = self.config_store().load()?.ok_or(CoreError::NotPaired)?;
-        let token = load_device_token(&self.options.secrets, &config.device_id)?
-            .ok_or(CoreError::NotPaired)?;
+        let current = match access.cloud_session_current(Some(&config.device_id))? {
+            Some(current) => current,
+            None => {
+                let token = load_device_token(&self.options.secrets, &config.device_id)?
+                    .ok_or(CoreError::NotPaired)?;
+                access.has_token(&token)
+            }
+        };
         if self
             .current_config()
             .as_ref()
             .is_none_or(|original| original.device_id != config.device_id)
-            || !access.has_token(&token)
+            || !current
             || url::Url::parse(&config.access_url).ok().as_ref() != Some(access.base_url())
         {
             return Err(CoreError::Conflict(
@@ -913,8 +1066,20 @@ impl Core {
         Ok(SyncService::new(self.cache()?))
     }
 
-    fn command_service(&self) -> CoreResult<CommandService> {
-        let access = Arc::new(self.access_client()?);
+    #[cfg(test)]
+    async fn command_service(&self) -> CoreResult<CommandService> {
+        self.command_service_for_session(self.cloud_session_id()?.as_deref())
+            .await
+    }
+
+    async fn command_service_for_session(
+        &self,
+        expected: Option<&str>,
+    ) -> CoreResult<CommandService> {
+        let access = Arc::new(self.access_client().await?);
+        if access.cloud_session_id() != expected {
+            return Err(CoreError::AuthenticationRequired);
+        }
         Ok(CommandService::new(access, self.cache()?).with_admission(
             self.config_store(),
             self.options.data_dir.clone(),
@@ -1017,7 +1182,7 @@ impl Core {
         let opened = async {
             let config = self.require_config()?;
             let identity = self.device_identity()?;
-            let access = self.access_client()?;
+            let access = self.access_client().await?;
             let access = if let Some(transport) = transport {
                 access.with_transport_observation(transport)
             } else {
@@ -1070,11 +1235,14 @@ impl Core {
         host_id: &str,
         payload: RequestPayload,
     ) -> CoreResult<ResponsePayload> {
+        let expected_session = self.cloud_session_id()?;
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
             require_payload_capability(&self.runtime, host_id, &payload)?;
-            let commands = self.command_service()?;
+            let commands = self
+                .command_service_for_session(expected_session.as_deref())
+                .await?;
             match commands
                 .query(host_id, &config.device_id, &channel, payload.clone())
                 .await
@@ -1141,12 +1309,14 @@ impl Core {
         command_id: Option<&str>,
         request_id: Option<&str>,
     ) -> CoreResult<CommandHandle> {
+        let expected_session = self.cloud_session_id()?;
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
             require_payload_capability(&self.runtime, host_id, &payload)?;
             let commands = self
-                .command_service()?
+                .command_service_for_session(expected_session.as_deref())
+                .await?
                 .with_host_fingerprint(Some(self.confirmed_host_fingerprint(host_id)?));
             let submitted = match (command_id, request_id) {
                 (None, None) => {
@@ -1197,6 +1367,7 @@ impl Core {
     /// Recover a previously submitted control without submitting it again.
     /// This also works after cancellation or reopening the same device profile.
     pub async fn recover_pending_command(&self, request_id: &str) -> CoreResult<CommandHandle> {
+        let managed = self.cloud_session_id()?.is_some();
         let config = self.require_config()?;
         let pending = match self
             .pending_commands()?
@@ -1208,7 +1379,7 @@ impl Core {
         };
         if pending.host_id.is_empty()
             || pending.device_id != config.device_id
-            || pending.access_url != config.access_url
+            || (!managed && pending.access_url != config.access_url)
         {
             return Err(CoreError::Conflict(
                 "command recovery identity is unavailable for this profile".into(),
@@ -1219,7 +1390,12 @@ impl Core {
                 "command belongs to a different confirmed Host identity".into(),
             ));
         }
-        match self.access_client()?.get_request(&pending.request_id).await {
+        match self
+            .access_client()
+            .await?
+            .get_request(&pending.request_id)
+            .await
+        {
             Ok(state) => {
                 if state.request_id != pending.request_id
                     || state.host_id != pending.host_id
@@ -1321,6 +1497,7 @@ impl Core {
         request_id: &str,
         command_id: &str,
     ) -> CoreResult<CommandHandle> {
+        let expected_session = self.cloud_session_id()?;
         self.journal
             .record("host", "command_result_recovery", "started", "none");
         let config = self.require_config()?;
@@ -1328,7 +1505,9 @@ impl Core {
             .ensure_channel(host_id, true)
             .await
             .map_err(|error| self.uncertain_recovery_error(error))?;
-        let commands = self.command_service()?;
+        let commands = self
+            .command_service_for_session(expected_session.as_deref())
+            .await?;
         for attempt in 0..10u32 {
             match commands
                 .get_command_result(host_id, &config.device_id, &channel, command_id)
@@ -1593,7 +1772,7 @@ impl Core {
     // -----------------------------------------------------------------
 
     pub async fn hosts(&self) -> CoreResult<Vec<HostInfo>> {
-        let access = self.access_client()?;
+        let access = self.access_client().await?;
         let prior = revoked_commands::marker(&self.options.data_dir)?;
         let listed = access.list_hosts().await.map_err(CoreError::from);
         if listed.is_ok()
@@ -2377,12 +2556,15 @@ impl Core {
         host_id: &str,
         handle: CommandHandle,
     ) -> CoreResult<CommandHandle> {
+        let expected_session = self.cloud_session_id()?;
         let config = self.require_config()?;
         let channel = self
             .ensure_channel(host_id, false)
             .await
             .map_err(|error| self.uncertain_recovery_error(error))?;
-        let commands = self.command_service()?;
+        let commands = self
+            .command_service_for_session(expected_session.as_deref())
+            .await?;
         // Renewal of the original request R lives in commands, together with
         // the result polling it protects.
         let result = commands
@@ -2842,7 +3024,7 @@ impl Core {
     pub async fn revoke(&self) -> CoreResult<RevocationOutcome> {
         let config = self.require_config()?;
         let device_id = config.device_id.clone();
-        let access = self.access_client()?;
+        let access = self.access_client().await?;
         let revocation_intent = {
             let _admission = crate::security::device::ProfileLock::acquire_admission_async(
                 &self.options.data_dir,
@@ -2957,7 +3139,20 @@ impl Core {
         if !error.device_authorization_lost() {
             return Err(error);
         }
-        let access = self.access_client()?;
+        if self.cloud_session_id()?.is_some() {
+            // A managed credential rejection does not establish Device removal.
+            let session = tokio::time::timeout(Duration::from_secs(3), async {
+                self.account_client(false).await?.status().await
+            })
+            .await;
+            if matches!(session, Ok(Err(CoreError::AuthenticationRequired))) {
+                return Err(CoreError::AuthenticationRequired);
+            }
+            return Err(CoreError::Unavailable(
+                "Host access could not be confirmed for the current Cloud session".into(),
+            ));
+        }
+        let access = self.access_client().await?;
         let (observed_intent, observed_marker) = {
             let _admission = crate::security::device::ProfileLock::acquire_admission_async(
                 &self.options.data_dir,
@@ -3792,6 +3987,8 @@ impl Core {
     }
 }
 
+#[cfg(test)]
+mod cloud_session_tests;
 #[cfg(test)]
 mod test_support;
 

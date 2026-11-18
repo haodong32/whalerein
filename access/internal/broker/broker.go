@@ -18,6 +18,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/proto"
 )
@@ -682,5 +683,22 @@ func (s *Service) DisconnectDevice(ctx context.Context, deviceID string) error {
 		return errors.New("device id is required")
 	}
 	_, err := s.control.Request(ctx, "kick", []string{"username device:" + deviceID})
+	return err
+}
+
+// EndDeviceSession fences admissions and closes exactly this Cloud session.
+func (s *Service) EndDeviceSession(ctx context.Context, id string) error {
+	_, err := s.control.Request(ctx, "end_session", []string{"session " + id})
+	return err
+}
+
+// RenewDeviceSession advances the deadline on transports already connected to
+// this broker. Reconciliation also repairs missed updates after a reconnect.
+func (s *Service) RenewDeviceSession(ctx context.Context, permission store.DeviceSession) error {
+	_, err := s.control.Request(ctx, "renew_session", []string{
+		"session " + permission.ID,
+		fmt.Sprintf("session_revision %d", permission.Revision),
+		fmt.Sprintf("deadline_ms %d", permission.ExpiresAt.UnixMilli()),
+	})
 	return err
 }
