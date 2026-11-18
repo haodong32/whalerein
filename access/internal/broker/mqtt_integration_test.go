@@ -28,10 +28,8 @@ import (
 )
 
 const (
-	integrationBrokerPassword = "integration-broker-password"
 	integrationHostPassword   = "host-pass"
 	integrationDevicePassword = "device-pass"
-	integrationInternalToken  = "compose-internal-token"
 )
 
 // This native driver runs only through the container-owned pytest transport case.
@@ -42,7 +40,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 	if mqttURL == "" {
 		mqttURL = "tcp://127.0.0.1:1883"
 	}
-	accessPassword := integrationBrokerPassword
+	accessPassword := integrationCredential(t, "WHALEREIN_TEST_ACCESS_PASSWORD")
 	hostPassword := integrationHostPassword
 	startIntegrationCallback(t)
 
@@ -241,20 +239,32 @@ func waitForHostRequest(t *testing.T, received <-chan *paho.Publish, requestID s
 	}
 }
 
+func integrationCredential(t *testing.T, name string) string {
+	t.Helper()
+	value := os.Getenv(name)
+	if value == "" {
+		t.Fatalf("missing broker fixture environment %s", name)
+	}
+	return value
+}
+
 func startIntegrationCallback(t *testing.T) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:18081")
 	if err != nil {
 		t.Fatal("isolated broker callback listener is unavailable")
 	}
-	callback := httptest.NewUnstartedServer(http.HandlerFunc(integrationCallback))
+	token := integrationCredential(t, "WHALEREIN_TEST_INTERNAL_TOKEN")
+	callback := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		integrationCallback(w, r, token)
+	}))
 	callback.Listener.Close()
 	callback.Listener = listener
 	callback.Start()
 	t.Cleanup(callback.Close)
 }
 
-func integrationCallback(w http.ResponseWriter, r *http.Request) {
+func integrationCallback(w http.ResponseWriter, r *http.Request, token string) {
 	if r.URL.Path != "/internal/broker/connect" {
 		http.NotFound(w, r)
 		return
@@ -263,7 +273,7 @@ func integrationCallback(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if r.Header.Get("X-WhaleRein-Internal-Token") != integrationInternalToken {
+	if r.Header.Get("X-WhaleRein-Internal-Token") != token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -395,7 +405,7 @@ func TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust(t *testing
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	presence := NewPresence(time.Minute, nil, logger)
 	var service *Service
-	cfg := config.BrokerConfig{URL: mqttURL, ClientID: "transport-access-probe", Username: "access", Password: integrationBrokerPassword, ConnectTimeout: config.Duration(5 * time.Second), PublishTimeout: config.Duration(10 * time.Second), KeepAlive: config.Duration(10 * time.Second)}
+	cfg := config.BrokerConfig{URL: mqttURL, ClientID: "transport-access-probe", Username: "access", Password: integrationCredential(t, "WHALEREIN_TEST_ACCESS_PASSWORD"), ConnectTimeout: config.Duration(5 * time.Second), PublishTimeout: config.Duration(10 * time.Second), KeepAlive: config.Duration(10 * time.Second)}
 	connector, err := NewPahoConnector(cfg, func(topic string, payload []byte) { service.HandleMessage(topic, payload) }, logger)
 	if err != nil {
 		t.Fatal(err)

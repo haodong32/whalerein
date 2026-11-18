@@ -49,7 +49,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"device_credentials", "devices", "external_enrollments", "external_operations", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
+	want := []string{"device_credentials", "devices", "external_device_revocations", "external_enrollments", "external_operations", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}
@@ -1516,11 +1516,12 @@ func TestPairingRevocationFenceMigrationFencesLegacyPendingClaims(t *testing.T) 
 	if err := s.CreatePairingToken(ctx, hash, "migration-host", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Pool().Exec(ctx, `ALTER TABLE pairing_operations DROP COLUMN device_generation;
+	_, err := s.Pool().Exec(ctx, `DROP VIEW grant_authority;
+      ALTER TABLE pairing_operations DROP COLUMN device_generation;
       ALTER TABLE pairing_operations DROP COLUMN host_generation;
       ALTER TABLE grants DROP COLUMN revocation_generation;
       ALTER TABLE devices DROP COLUMN revocation_generation;
-      DELETE FROM schema_migrations WHERE name='008_device_revocation_fence.sql'`)
+      DELETE FROM schema_migrations WHERE name IN ('008_device_revocation_fence.sql','016_external_device_revocations.sql')`)
 	if err != nil {
 		t.Fatal(err)
 	}

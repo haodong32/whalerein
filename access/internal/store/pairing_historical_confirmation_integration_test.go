@@ -357,7 +357,10 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 				}
 			}
 			// Recreate the 009 schema in this disposable test database only.
-			if _, err := s.Pool().Exec(ctx, `ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified; ALTER TABLE requests DROP COLUMN bodies_cleared; DELETE FROM schema_migrations WHERE name='010_pairing_commit_binding.sql'`); err != nil {
+			if _, err := s.Pool().Exec(ctx, `DROP VIEW grant_authority;
+                ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified;
+                ALTER TABLE requests DROP COLUMN bodies_cleared;
+                DELETE FROM schema_migrations WHERE name IN ('010_pairing_commit_binding.sql','016_external_device_revocations.sql')`); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Migrate(ctx); err != nil {
