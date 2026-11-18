@@ -86,8 +86,7 @@ def test_native_model_set_is_used_by_the_next_turn(scenario, paired_device):
     selected = group["models"][1]
     paired_device.call("session", "model", "set", "--session", session, "--provider", group["id"], "--model", selected["id"])
     scenario.model.plan()
-    receipt = paired_device.send(session, "synthetic model turn", delivery="start-if-idle")["receipt"]
-    assert receipt["status"] == "succeeded"
+    paired_device.send_confirmed(session, "synthetic model turn", delivery="start-if-idle")
     scenario.wait_idle(session)
     observed = scenario.request("model-read", sessionId=session)
     assert observed["last_used"]["model"] == selected["id"]

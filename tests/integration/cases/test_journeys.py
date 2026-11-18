@@ -96,8 +96,7 @@ def test_journey_first_self_hosted_message(scenario):
     watch = device.start_watch("session", "watch", session, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
-        sent = device.send(session, "first self-hosted message")["receipt"]
-        assert sent["status"] == "succeeded" and sent["delivery_id"]
+        device.send_confirmed(session, "first self-hosted message")
         watch.wait(
             lambda value: any(
                 "first self-hosted message" in text for text in _texts(_event(value))
@@ -481,8 +480,7 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     # Releasing the hung command requires a Host restart; afterwards a new send works once.
     restart_plugin(scenario)
     wait_online(device, scenario.host)
-    after = device.send(session, "after the Access upgrade")["receipt"]
-    assert after["status"] == "succeeded"
+    device.send_confirmed(session, "after the Access upgrade")
     assert effects(scenario, "sendUserMessage") == before + 2
 
 
@@ -608,8 +606,7 @@ def test_journey_overnight_disconnect_and_both_restarts(scenario, paired_device)
     assert effects(scenario, "resolveApproval") == 1
 
     scenario.dsh.process.control("idle", session_id=session)
-    after = paired_device.send(session, "after the gap")["receipt"]
-    assert after["status"] == "succeeded"
+    paired_device.send_confirmed(session, "after the gap")
     events = scenario.dsh.snapshot(session)["events"]
     for text in ("before the overnight gap", "after the gap"):
         assert sum(

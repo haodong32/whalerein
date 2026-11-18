@@ -161,6 +161,5 @@ def test_journey_lost_device_revoked_from_settings(scenario, paired_device):
             http("/v1/hosts", token=bearer)
     assert host_online(first, scenario.host) is True
     session = scenario.create()
-    sent = first.send(session, "survivor after revoke fixture", delivery="start-if-idle")["receipt"]
-    assert sent["status"] == "succeeded"
+    first.send_confirmed(session, "survivor after revoke fixture", delivery="start-if-idle")
     scenario.wait_idle(session)
