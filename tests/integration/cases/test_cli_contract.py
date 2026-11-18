@@ -64,7 +64,11 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
             "session", "send", session_id, "channel replacement fixture", "--detach"
         )
         assert sent["state"] == "submission"
-        assert sent["receipt"]["message_id"]
+        assert sent["operation_id"]
+        assert sent["target"] == {
+            "host_id": paired_client.identity["host_id"],
+            "session_id": session_id,
+        }
         first.wait(
             lambda value: any(
                 "channel replacement fixture" in text for text in _texts(_event(value))
@@ -75,6 +79,12 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
         assert first.wait_exit(timeout=10) == 2
         assert first.values[-1]["error"]["code"] == "cancelled"
         _assert_no_panic(first)
+
+        recovered = paired_client.call("operation", "recover", sent["operation_id"])
+        assert recovered["operation_id"] == sent["operation_id"]
+        assert recovered["target"] == sent["target"]
+        assert recovered["receipt"]["status"] == "succeeded"
+        assert recovered["receipt"]["message_id"]
     finally:
         first.close()
 
