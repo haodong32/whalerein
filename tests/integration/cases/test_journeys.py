@@ -241,7 +241,7 @@ def test_journey_stale_approval_card_after_a_second_operator(scenario, paired_de
     stale_card = second.approvals(session)[0]
     assert stale_card["approval_id"] == first_card["approval_id"]
 
-    while_running = second.send(session, "operator B send fixture")["receipt"]
+    while_running = second.send_confirmed(session, "operator B send fixture")
     assert while_running["status"] == "succeeded"
     decision = paired_device.resolve("approve", first_card)
     assert decision["status"] in {"host_accepted", "succeeded"}
@@ -779,7 +779,7 @@ def test_journey_token_and_certificate_rotation_keeps_grants(scenario, paired_de
     watch = paired_device.start_watch("session", "watch", session, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
-        sent = paired_device.send(session, "after rotation")["receipt"]
+        sent = paired_device.send_confirmed(session, "after rotation")
         assert sent["status"] == "succeeded"
         watch.wait(
             lambda value: any("after rotation" in text for text in _texts(_event(value))),
