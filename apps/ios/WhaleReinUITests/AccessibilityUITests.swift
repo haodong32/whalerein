@@ -20,7 +20,6 @@ final class AccessibilityUITests: WhaleReinUITestCase {
 
     func testLargeTextDarkAppearanceAndVoiceOverLabels() {
         launchAndOpenConversation(["-ui-large-text", "-AppleInterfaceStyle", "Dark"])
-        openConversation()
 
         let send = waitFor("composer.send")
         XCTAssertEqual(send.label, "Send")
