@@ -68,6 +68,19 @@ adapter.listSessions = async options => {
 }
 
 const host = createHost(config, { adapter, credentials: { getCredential: (...args) => adapter.call('getCredential', ...args), setCredential: (...args) => adapter.call('setCredential', ...args) } })
+// The resolved Host configuration is the shared attachment policy seam. The
+// profile does not expose these test-only overrides, so the harness injects the
+// validated values before start; production defaults remain untouched.
+const attachmentPolicy = {}
+const attachmentTotal = Number(process.env.WHALEREIN_ATTACHMENT_MAX_TOTAL_BYTES || '')
+if (process.env.WHALEREIN_ATTACHMENT_MAX_TOTAL_BYTES && Number.isSafeInteger(attachmentTotal) && attachmentTotal >= 0) {
+  attachmentPolicy.max_total_bytes = attachmentTotal
+}
+const attachmentChunk = Number(process.env.WHALEREIN_ATTACHMENT_MAX_CHUNK_BYTES || '')
+if (process.env.WHALEREIN_ATTACHMENT_MAX_CHUNK_BYTES && Number.isSafeInteger(attachmentChunk) && attachmentChunk > 0) {
+  attachmentPolicy.max_chunk_bytes = attachmentChunk
+}
+if (Object.keys(attachmentPolicy).length > 0) host.config.attachmentPolicy = attachmentPolicy
 const waitSession = adapter.waitSession.bind(adapter)
 adapter.waitSession = (...args) => {
   // The wait is the newest channel in the isolated fault-injection cases.

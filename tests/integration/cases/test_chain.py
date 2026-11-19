@@ -1,5 +1,6 @@
 """Independent CLI journeys through the real Linux product stack."""
 
+import hashlib
 import json
 import os
 import re
@@ -1294,3 +1295,228 @@ def test_question_foreign_session_batch_does_not_settle(scenario, paired_device,
     assert len(current) == 1 and current[0]["batch_id"] == batch["batch_id"]
     assert paired_device.call(*args(session_id))["question_receipt"]["phase"] == "QUESTION_SETTLED"
     assert scenario.dsh.process.control("question_answer_calls") >= before + 1
+
+
+# Attachment fixture helpers. The authority and this module share one
+# deterministic byte rule; the expected file is rebuilt locally rather than
+# trusting the relay's digest alone.
+def _fixture_attachment_bytes(size, seed):
+    return bytes(
+        (seed * 131 + index * 17 + ((index >> 8) * 7)) & 0xFF
+        for index in range(size)
+    )
+
+
+def _download_and_verify(device, reference, directory, session_id, host, expected, name, media_type):
+    directory.mkdir()
+    code, values, stderr = device.download(reference, directory, session_id, host=host)
+    assert code == 0, "verified attachment download failed"
+    assert len(values) == 1, "download must keep exactly one stdout envelope"
+    data = values[-1]["data"]
+    path = Path(data["path"])
+    assert path.parent == directory and path.name == name
+    assert data["name"] == name and data["media_type"] == media_type
+    assert data["bytes"] == len(expected)
+    assert data["sha256"] == hashlib.sha256(expected).hexdigest()
+    assert data["verified"] is True
+    assert path.read_bytes() == expected
+    progress = [json.loads(line) for line in stderr.splitlines() if line.strip()]
+    assert progress, "download must report progress on stderr"
+    assert all(event.get("event") == "download_progress" for event in progress)
+    assert progress[-1]["received"] == len(expected) == progress[-1]["total"]
+    return data
+
+
+def _attachment_row(history, name):
+    rows = [row for row in history["attachments"] if row["name"] == name]
+    assert len(rows) == 1, "history must expose exactly one attachment occurrence"
+    return rows[0]
+
+
+def test_attachment_history_and_verified_download(scenario, paired_device, session_id):
+    """A committed tool-result file and user image are discoverable in history and save exact verified bytes."""
+    file_bytes = _fixture_attachment_bytes(2 * 1024 * 1024 + 12345, 7)
+    file_ref = scenario.dsh.save_attachment(
+        kind="file", size=len(file_bytes), seed=7,
+        media_type="application/octet-stream", name="fixture-report.bin",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, file_ref["attachment"], kind="file", role="tool",
+        text="fixture tool produced a report",
+    )
+    image_bytes = _fixture_attachment_bytes(96 * 1024, 11)
+    image_ref = scenario.dsh.save_attachment(
+        kind="image", size=len(image_bytes), seed=11,
+        media_type="image/png", name="fixture-image.png",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, image_ref["attachment"], kind="image", role="user",
+        text="fixture image",
+    )
+    assert file_ref["sha256"] == hashlib.sha256(file_bytes).hexdigest()
+    assert image_ref["sha256"] == hashlib.sha256(image_bytes).hexdigest()
+
+    history = paired_device.history(session_id)
+    file_row = _attachment_row(history, "fixture-report.bin")
+    image_row = _attachment_row(history, "fixture-image.png")
+    assert file_row["name"] == "fixture-report.bin" and file_row["size"] == len(file_bytes)
+    assert image_row["name"] == "fixture-image.png" and image_row["size"] == len(image_bytes)
+    for row in (file_row, image_row):
+        assert row["available"] is True
+        assert row["save_command"].startswith("whalerein session download ")
+        assert f"--host {scenario.host}" in row["save_command"]
+        assert f"--session {session_id}" in row["save_command"]
+        assert row["reference"] in row["save_command"]
+
+    _download_and_verify(
+        paired_device, file_row["reference"], scenario.directory / "file-download",
+        session_id, scenario.host, file_bytes, "fixture-report.bin", "application/octet-stream",
+    )
+    _download_and_verify(
+        paired_device, image_row["reference"], scenario.directory / "image-download",
+        session_id, scenario.host, image_bytes, "fixture-image.png", "image/png",
+    )
+
+
+def test_attachment_foreign_scope_and_wrong_reference_fail_closed(scenario, paired_device, session_id):
+    """A second device in another session, a wrong occurrence reference and a foreign host all fail without a file."""
+    data = _fixture_attachment_bytes(256 * 1024, 3)
+    stored = scenario.dsh.save_attachment(
+        kind="file", size=len(data), seed=3,
+        media_type="application/octet-stream", name="scoped-fixture.bin",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, stored["attachment"], kind="file", role="tool",
+        text="scoped fixture",
+    )
+    reference = _attachment_row(paired_device.history(session_id), "scoped-fixture.bin")["reference"]
+    second = scenario.pair_second()
+    other = scenario.dsh.create_session()
+    foreign_dir = scenario.directory / "foreign-download"
+    foreign_dir.mkdir()
+    code, values, _ = second.download(
+        reference, foreign_dir, other,
+        host=scenario.host, success=False,
+    )
+    assert code == 3 and values[-1]["error"]["code"] == "not_found"
+    assert list(foreign_dir.iterdir()) == []
+
+    wrong_ref_dir = scenario.directory / "wrong-ref-download"
+    wrong_ref_dir.mkdir()
+    code, values, _ = paired_device.download(
+        "0" * 64, wrong_ref_dir, session_id,
+        host=scenario.host, success=False,
+    )
+    assert code == 3 and values[-1]["error"]["code"] == "not_found"
+    assert list(wrong_ref_dir.iterdir()) == []
+
+    wrong_host_dir = scenario.directory / "wrong-host-download"
+    wrong_host_dir.mkdir()
+    code, values, _ = paired_device.download(
+        reference, wrong_host_dir, session_id,
+        host="host-foreign-scope", success=False,
+    )
+    assert code != 0
+    assert values[-1]["error"]["code"] in {
+        "not_paired", "not_found", "unavailable", "unauthorized",
+    }
+    assert list(wrong_host_dir.iterdir()) == []
+
+
+def test_attachment_revocation_fences_in_flight_download_then_regrant_succeeds(scenario, paired_device, session_id):
+    """Revoking during a held read fences its result, and a fresh grant can save the same occurrence."""
+    data = _fixture_attachment_bytes(512 * 1024, 5)
+    stored = scenario.dsh.save_attachment(
+        kind="file", size=len(data), seed=5,
+        media_type="application/octet-stream", name="fenced-fixture.bin",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, stored["attachment"], kind="file", role="tool",
+        text="fenced fixture",
+    )
+    reference = _attachment_row(paired_device.history(session_id), "fenced-fixture.bin")["reference"]
+    destination = scenario.directory / "fenced-download"
+    destination.mkdir()
+    scenario.dsh.set_attachment_pull_hold(True)
+    process = None
+    try:
+        process = subprocess.Popen(
+            [*paired_device.args(), "session", "download",
+             reference, "--to", str(destination),
+             "--host", scenario.host, "--session", session_id],
+            cwd=ROOT, env=paired_device.env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        wait(lambda: scenario.dsh.attachment_pull_state()["waiting"], timeout=30)
+        scenario.revoke_from_host(paired_device)
+        scenario.dsh.release_attachment_pull()
+        stdout, _ = process.communicate(timeout=60)
+        assert process.returncode != 0, "revoked transfer reported success"
+        values = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        assert values and values[-1].get("error"), "revoked transfer must fail explicitly"
+        assert values[-1]["error"]["code"] in {
+            "revoked", "unauthorized", "forbidden", "not_paired",
+            "unavailable", "expired", "channel_replaced",
+        }
+        assert list(destination.iterdir()) == [], "revoked transfer left a file"
+    finally:
+        scenario.dsh.set_attachment_pull_hold(False)
+        scenario.dsh.release_attachment_pull()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+    fresh = scenario.pair(namespace="client-regrant")
+    _download_and_verify(
+        fresh, reference, scenario.directory / "regrant-download",
+        session_id, scenario.host, data, "fenced-fixture.bin", "application/octet-stream",
+    )
+
+
+@pytest.mark.attachment_policy(total=64 * 1024)
+def test_attachment_total_budget_rejects_before_save(scenario, paired_device, session_id):
+    """An attachment above the configured total budget fails explicitly and creates no file."""
+    data = _fixture_attachment_bytes(128 * 1024, 2)
+    stored = scenario.dsh.save_attachment(
+        kind="file", size=len(data), seed=2,
+        media_type="application/octet-stream", name="oversize-fixture.bin",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, stored["attachment"], kind="file", role="tool",
+        text="oversize fixture",
+    )
+    row = _attachment_row(paired_device.history(session_id), "oversize-fixture.bin")
+    assert row["size"] == len(data)
+    destination = scenario.directory / "oversize-download"
+    destination.mkdir()
+    code, values, _ = paired_device.download(
+        row["reference"], destination, session_id,
+        host=scenario.host, success=False,
+    )
+    assert code == 5, "oversize download must use the explicit payload error exit"
+    assert values[-1]["error"]["code"] == "payload_too_large"
+    assert list(destination.iterdir()) == []
+
+
+@pytest.mark.attachment_policy(chunk=8192)
+def test_attachment_configured_chunk_budget_transfers_multipart(scenario, paired_device, session_id):
+    """An attachment larger than one configured chunk completes over bounded parts with exact bytes."""
+    size = 96 * 1024 + 77
+    data = _fixture_attachment_bytes(size, 9)
+    stored = scenario.dsh.save_attachment(
+        kind="file", size=size, seed=9,
+        media_type="application/octet-stream", name="multipart-fixture.bin",
+    )
+    scenario.dsh.commit_attachment(
+        session_id, stored["attachment"], kind="file", role="tool",
+        text="multipart fixture",
+    )
+    reference = _attachment_row(paired_device.history(session_id), "multipart-fixture.bin")["reference"]
+    scenario.dsh.reset_attachment_stats()
+    _download_and_verify(
+        paired_device, reference, scenario.directory / "multipart-download",
+        session_id, scenario.host, data, "multipart-fixture.bin", "application/octet-stream",
+    )
+    stats = scenario.dsh.attachment_pull_state()
+    assert stats["pulls"] >= 12, "configured chunk budget did not bound the transfer"
+    assert stats["bytes"] == size

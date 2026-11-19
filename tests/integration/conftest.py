@@ -344,6 +344,9 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         config = value.config.read_text()
         assert config.count("log:\n  level: error") == 1
         value.config.write_text(config.replace("log:\n  level: error", "log:\n  level: info", 1))
+    policy = request.node.get_closest_marker("attachment_policy")
+    if policy is not None and not native:
+        value.attachment_policy = dict(policy.kwargs)
     try:
         from integration_report import progress
 
