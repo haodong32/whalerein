@@ -283,6 +283,22 @@ func (p *Presence) Expire(now time.Time) int {
 	return expired
 }
 
+// readyHandshakeTolerance bounds the unavoidable ordering gap between the
+// broker's CONNECT observation and the HostReady publication.
+//
+// Mosquitto hands the client its CONNACK before the login plugin's connect
+// notification reaches Access, and the Host subscribes and publishes HostReady
+// as soon as the connection is usable. The proof's timestamp is therefore a
+// few milliseconds *earlier* than the connect timestamp Access recorded, even
+// though it belongs to the current connection. A strict timestamp comparison
+// would reject every real readiness proof and report a connected Host offline.
+//
+// A proof older than this window cannot belong to the current connection: a
+// superseded connection's proof is delayed by at least a full reconnect, and
+// the accepted window stays far below a reconnect cycle. The window is not a
+// clock-skew allowance; both timestamps come from the same host.
+const readyHandshakeTolerance = 2 * time.Second
+
 // MarkHostReady treats a ready host result as broker presence. HostReady is
 // published only after the Host subscribed to its request topic, so it is the
 // readiness confirmation a bare broker CONNECT lacks. at is the HostReady
@@ -296,7 +312,7 @@ func (p *Presence) MarkHostReady(hostID string, at time.Time) {
 	now := p.now()
 	p.mu.Lock()
 	previous, exists := p.hosts[hostID]
-	if exists && at.Before(previous.at) {
+	if exists && at.Before(previous.at.Add(-readyHandshakeTolerance)) {
 		p.logger.Debug("stale host readiness proof ignored", "conn", previous.connID)
 		p.mu.Unlock()
 		return
