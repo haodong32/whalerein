@@ -19,8 +19,7 @@ final class AccessibilityUITests: WhaleReinUITestCase {
     }
 
     func testLargeTextDarkAppearanceAndVoiceOverLabels() {
-        launchApp(["-ui-large-text", "-AppleInterfaceStyle", "Dark"])
-        completePairing()
+        launchAndOpenConversation(["-ui-large-text", "-AppleInterfaceStyle", "Dark"])
         openConversation()
 
         let send = waitFor("composer.send")
@@ -38,8 +37,7 @@ final class AccessibilityUITests: WhaleReinUITestCase {
     }
 
     func testVoiceOverGroupingOnHostAndSessionRows() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         openSwitcher()
 
         let picker = waitFor("host.picker")
@@ -56,8 +54,7 @@ final class AccessibilityUITests: WhaleReinUITestCase {
     }
 
     func testSettingsExposesVersionsAndLanguageNote() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         tap(waitFor("conversation.settings"))
 
         let revision = waitFor("settings.coreRevision")

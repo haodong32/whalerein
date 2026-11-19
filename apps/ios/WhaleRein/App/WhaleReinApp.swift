@@ -20,9 +20,7 @@ struct WhaleReinApp: App {
         }
 
         let preferences = PreferencesStore(directory: dataDirectory)
-        if options.keychainLocked {
-            // Deterministic UI state: a previously paired device whose Keychain
-            // cannot be read yet.
+        if options.keychainLocked || options.seedPairedFixture {
             preferences.update {
                 $0.paired = true
                 if $0.lastHostId == nil { $0.lastHostId = LaunchOptions.fixtureInvitationHostId }

@@ -6,8 +6,7 @@ import XCTest
 
 final class AdaptiveLayoutUITests: WhaleReinUITestCase {
     func testLandscapeShowsSidebarAndSwitchesConversation() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         waitFor("composer.field")
 
         XCUIDevice.shared.orientation = .landscapeLeft

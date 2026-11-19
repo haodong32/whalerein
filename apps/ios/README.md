@@ -178,6 +178,7 @@ approvals/approvalChanged/commandStatus/error/watchEnded).
 | --- | --- |
 | `-ui-fixtures` | Select the deterministic fixture service |
 | `-ui-test-reset` | Wipe `Application Support/WhaleRein` before launch |
+| `-ui-fixture-paired` | Seed a paired fixture Device and restore the default conversation. Applies when both `-ui-fixtures` and `-ui-test-reset` are present. |
 | `-integration-fixtures` | Select `LiveSessionService` (the default without `-ui-fixtures`) |
 | `-ui-large-text` | Force Dynamic Type `.accessibility1` for UI tests |
 | `-ui-stream-on-open` | Start a scripted live preview stream when a conversation opens |

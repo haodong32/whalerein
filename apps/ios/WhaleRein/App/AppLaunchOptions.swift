@@ -26,6 +26,7 @@ enum ServiceMode: Sendable {
 struct LaunchOptions: Sendable {
     var serviceMode: ServiceMode
     var resetState: Bool
+    var seedPairedFixture: Bool
     var largeText: Bool
     var streamOnOpen: Bool
     var lateEventLeak: Bool
@@ -70,6 +71,11 @@ struct LaunchOptions: Sendable {
             serviceMode = .live
         }
         resetState = flags.contains("-ui-test-reset")
+        if case .fixtures = serviceMode {
+            seedPairedFixture = resetState && flags.contains("-ui-fixture-paired")
+        } else {
+            seedPairedFixture = false
+        }
         largeText = flags.contains("-ui-large-text")
         streamOnOpen = flags.contains("-ui-stream-on-open")
         lateEventLeak = flags.contains("-ui-late-event")
