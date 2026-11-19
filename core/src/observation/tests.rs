@@ -781,3 +781,18 @@ async fn session_observation_ac_25_mqtt_loss_reports_reconnecting() {
     observation.close().await;
     peer.abort();
 }
+
+#[test]
+fn a_scope_denial_ends_a_watch_instead_of_reconnecting() {
+    // Access answers 401/403 when the grant or enrollment is gone. Retrying
+    // that answer cannot recover the watch, so it must become the terminal
+    // result before the caller's deadline.
+    assert!(watch_fatal(&CoreError::Api {
+        code: Some(whalerein_proto::ErrorCode::Forbidden),
+        message: "forbidden".into(),
+    }));
+    assert!(watch_fatal(&CoreError::Unauthorized));
+    // A transport-shaped failure remains reconnectable.
+    assert!(!watch_fatal(&CoreError::Unavailable("mqtt down".into())));
+    assert!(!watch_fatal(&CoreError::Timeout));
+}

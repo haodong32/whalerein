@@ -49,7 +49,13 @@ pub(crate) enum QuestionSignal {
 fn watch_fatal(error: &CoreError) -> bool {
     if matches!(
         error.code(),
-        "unsupported_capability" | "protocol_version_incompatible"
+        // A scope denial is an authoritative answer, not a transport problem.
+        // Reconnecting would only repeat the same 401/403 until the deadline,
+        // hiding the revocation from a bounded caller.
+        "unsupported_capability"
+            | "protocol_version_incompatible"
+            | "unauthorized"
+            | "forbidden"
     ) {
         return true;
     }
