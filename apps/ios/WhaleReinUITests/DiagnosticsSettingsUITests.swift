@@ -4,8 +4,7 @@ import XCTest
 
 final class DiagnosticsSettingsUITests: WhaleReinUITestCase {
     func testDiagnosticsShowsStagesAndCancelDoesNotExport() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         tap(waitFor("conversation.diagnostics"))
 
         let preview = waitFor("diagnostics.preview")
@@ -30,8 +29,7 @@ final class DiagnosticsSettingsUITests: WhaleReinUITestCase {
     }
 
     func testForgetDeviceReturnsToInvitation() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         tap(waitFor("conversation.settings"))
         XCTAssertTrue(waitFor("settings.coreRevision").exists)
 
@@ -49,8 +47,7 @@ final class DiagnosticsSettingsUITests: WhaleReinUITestCase {
     }
 
     func testSettingsShowsStagingOnlyWhenRequested() {
-        launchApp(["-ui-staging"])
-        completePairing()
+        launchAndOpenConversation(["-ui-staging"])
         tap(waitFor("conversation.settings"))
         XCTAssertTrue(waitFor("settings.staging").exists)
     }
