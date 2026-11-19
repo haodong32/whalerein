@@ -211,14 +211,4 @@ export async function ensureRecoverySecret(store, random = randomBytes) {
   return secret
 }
 
-export function signingPublicKeyFromPrivate(privateKey) {
-  if (!(privateKey instanceof Uint8Array) || privateKey.length !== 32) throw new PluginError('internal', 'signing key is invalid')
-  return ed25519.getPublicKey(privateKey)
-}
-
-export function noisePublicKeyFromPrivate(privateKey) {
-  if (!(privateKey instanceof Uint8Array) || privateKey.length !== 32) throw new PluginError('internal', 'Noise key is invalid')
-  return x25519.getPublicKey(privateKey)
-}
-
 export { decodeBase64Url, encode }

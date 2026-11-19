@@ -302,16 +302,6 @@ type Device struct {
 	UpdatedAt            time.Time
 }
 
-// Grant is one device's access to one host. A nil RevokedAt means active.
-type Grant struct {
-	HostID     string
-	DeviceID   string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	RevokedAt  *time.Time
-	ReplayedAt *time.Time
-}
-
 // PairingToken is a one-time invitation. Only the hash is stored.
 type PairingToken struct {
 	TokenHash     []byte

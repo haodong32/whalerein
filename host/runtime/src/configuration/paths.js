@@ -1,7 +1,7 @@
 // One-file path resolution and one shared home-expansion rule.
-import { existsSync, realpathSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { configError } from './errors.js'
 
 export const DEFAULT_CONFIG_DIR = '.whalerein'
@@ -53,19 +53,4 @@ export function canonicalTarget(path) {
   } catch {
     return resolve(path)
   }
-}
-
-export function configDirectory(snapshot) {
-  if (!snapshot || typeof snapshot.path !== 'string') throw configError('invalid_tls', 'configuration path is unavailable')
-  return dirname(snapshot.path)
-}
-
-export function relativeToConfig(value, snapshot) {
-  const expanded = expandHome(value, snapshot?.homeDir)
-  if (isAbsolute(expanded)) return expanded
-  return resolve(configDirectory(snapshot), expanded)
-}
-
-export function exists(path) {
-  return existsSync(path)
 }

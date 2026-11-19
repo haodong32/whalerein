@@ -7,7 +7,7 @@
 // maintained packages; see package.json.
 import { parse } from 'smol-toml'
 import { parseForESLint } from 'toml-eslint-parser'
-import { BUILTIN_SET, isBuiltinEnvironment } from './catalog.js'
+import { isBuiltinEnvironment } from './catalog.js'
 import { configError } from './errors.js'
 
 export const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -261,9 +261,4 @@ export function parseConfiguration(text) {
 
 export function emptyConfiguration() {
   return { version: 1, environment: null, environments: {} }
-}
-
-/** True when the name is a reserved built-in and may only be specialized. */
-export function isBuiltin(name) {
-  return BUILTIN_SET.has(name)
 }

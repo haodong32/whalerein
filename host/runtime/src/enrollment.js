@@ -9,7 +9,6 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { ed25519 } from '@noble/curves/ed25519.js'
-import { PluginError } from './errors.js'
 import { CREDENTIAL_PURPOSES } from './credentials.js'
 import { atomicWriteJson } from './registry.js'
 import {

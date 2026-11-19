@@ -332,18 +332,6 @@ func enrollmentKeyPair(t *testing.T) ([]byte, ed25519.PrivateKey, error) {
 	return noise, private, err
 }
 
-// signProof signs the enrollment proof input for a changed request.
-func signProof(t *testing.T, original *whalereinv1.HostEnrollmentRequest, auth *whalereinv1.ExternalAuthorization, changed *whalereinv1.HostEnrollmentRequest) []byte {
-	t.Helper()
-	// The fixture keeps the signing private key out of the request, so the
-	// test signs with a freshly generated key and asserts the refusal instead.
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ed25519.Sign(private, []byte(ProofInput(auth, changed.GetOperationId(), changed.GetHostSigningPublicKey())))
-}
-
 func TestVerifyTreatsAnOmittedBoundAsOpen(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

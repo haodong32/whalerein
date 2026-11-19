@@ -278,10 +278,6 @@ export class FakeDshAdapter extends DshAdapter {
     return this.summaryOf(session)
   }
 
-  hasSession(sessionId) {
-    return this.#sessions.has(sessionId)
-  }
-
   #changed(sessionId) { this.notifyQuestionsChanged(sessionId) }
 
   // Deterministic incarnation/owner hooks for tests. A replacement changes the

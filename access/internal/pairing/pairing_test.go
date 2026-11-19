@@ -913,15 +913,6 @@ func TestFinishReturnsOfflineAndTransportErrorsWithoutGrant(t *testing.T) {
 	}
 }
 
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
 func TestRandomIDEncodesAllEighteenRandomBytesAndRejectsShortReads(t *testing.T) {
 	id, err := randomID(bytes.NewReader(bytes.Repeat([]byte{1}, 18)))
 	if err != nil || len(id) != 24 {
