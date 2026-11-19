@@ -64,6 +64,24 @@ if [ -z "$NEW_IMAGE" ]; then
   NEW_IMAGE="whalerein-rolling-upgrade-new:$$"
 fi
 
+# Each image consumes the configuration that shipped with its own revision.
+# The hard cut adds a transport block the older binary must not be asked to
+# parse while it is proving the schema path.
+config_for() {
+  local ref="$1" dir
+  # Keep the bind-mount source under the repository tree; Docker Desktop only
+  # shares selected host paths, and a directory mount here would hide the file.
+  mkdir -p "$ROOT_DIR/.data"
+  dir="$(mktemp -d "$ROOT_DIR/.data/rolling-upgrade-config.XXXXXX")"
+  TEMP_DIRS+=("$dir")
+  git -C "$ROOT_DIR" show "$ref:deploy/compose/access.yaml" > "$dir/access.yaml"
+  printf '%s\n' "$dir/access.yaml"
+}
+NEW_CONFIG="$ROOT_DIR/deploy/compose/access.yaml"
+if [ -z "${OLD_CONFIG:-}" ]; then
+  OLD_CONFIG="$(config_for "$OLD_REF")"
+fi
+
 docker run -d --rm --name "$PG_NAME" \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=whalerein_dev \
@@ -80,14 +98,14 @@ done
 docker exec "$PG_NAME" pg_isready -U postgres -d whalerein_dev >/dev/null
 
 migrate() {
-  local image="$1"
+  local image="$1" config="${2:-$NEW_CONFIG}"
   docker run --rm --network host \
     -e WHALEREIN_DATABASE_URL="postgres://postgres@127.0.0.1:${PORT}/whalerein_dev?sslmode=disable" \
     -e WHALEREIN_ADMIN_TOKEN=rolling-upgrade-admin \
     -e WHALEREIN_HOST_PROVISIONING_TOKEN=rolling-upgrade-host \
     -e WHALEREIN_BROKER_PASSWORD=rolling-upgrade-broker \
     -e WHALEREIN_INTERNAL_TOKEN=rolling-upgrade-internal \
-    -v "$ROOT_DIR/deploy/compose/access.yaml:/etc/whalerein/access.yaml:ro" \
+    -v "$config:/etc/whalerein/access.yaml:ro" \
     "$image" --migrate-only --config /etc/whalerein/access.yaml
 }
 
@@ -105,7 +123,7 @@ check_config() {
 }
 
 echo "==> standalone preflight: rendered transport limits"
-rendered="$(check_config "$NEW_IMAGE" "$ROOT_DIR/deploy/compose/access.yaml")"
+rendered="$(check_config "$NEW_IMAGE" "$NEW_CONFIG")"
 for expected in   "profile=default" \
   "packet_bytes=65536" \
   "fragment_payload_bytes=61440" \
@@ -121,7 +139,7 @@ for expected in   "profile=default" \
     exit 1
   fi
 done
-roomy="$(WHALEREIN_TRANSPORT_PROFILE=roomy check_config "$NEW_IMAGE" "$ROOT_DIR/deploy/compose/access.yaml")"
+roomy="$(WHALEREIN_TRANSPORT_PROFILE=roomy check_config "$NEW_IMAGE" "$NEW_CONFIG")"
 for expected in "profile=roomy" "envelope_bytes=33554432" "bulk_concurrency=8" "http_max_body_bytes=47185920"; do
   if ! grep -q "$expected" <<<"$roomy"; then
     echo "rendered alternate transport limit missing: $expected" >&2
@@ -155,13 +173,13 @@ if check_config "$NEW_IMAGE" "$invalid_dir/invalid-relation.yaml" >/dev/null 2>&
 fi
 
 echo "==> migrate with old image: $OLD_IMAGE"
-migrate "$OLD_IMAGE"
+migrate "$OLD_IMAGE" "$OLD_CONFIG"
 echo "==> migrate forward with new image: $NEW_IMAGE"
 migrate "$NEW_IMAGE"
 
 echo "==> old image must reject the newer schema"
 set +e
-output="$(migrate "$OLD_IMAGE" 2>&1)"
+output="$(migrate "$OLD_IMAGE" "$OLD_CONFIG" 2>&1)"
 status=$?
 set -e
 if [ "$status" -eq 0 ]; then
