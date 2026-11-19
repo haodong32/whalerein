@@ -1,5 +1,6 @@
 use super::{run_with_signal, Cli, CliOutcome};
 use clap::Parser;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -8,7 +9,7 @@ use whalerein_core::api::{
     ClientConfig, ClientService, MemorySecretStore, PairingDecision, SecretStore,
 };
 use whalerein_core::Core;
-use whalerein_proto::{Approval, ApprovalDecision, ApprovalState, ErrorCode};
+use whalerein_proto::{Approval, ApprovalDecision, ApprovalState, ErrorCode, MessageReplyState};
 
 pub(super) struct Fixture {
     pub(super) directory: TempDir,
@@ -388,7 +389,10 @@ async fn grouped_wait_signal_cancels_observation_without_a_write_receipt() {
 #[tokio::test]
 async fn grouped_send_signal_retains_uncertain_operation_without_echoing_message() {
     let f = Fixture::paired().await;
-    f.access.host.lock().unwrap().pending_result_polls = usize::MAX;
+    // Keep the foreground send waiting even after it receives a message ID.
+    f.access.host.lock().unwrap().message_reply_state =
+        Some(MessageReplyState::MessageReplyPending);
+    let signalled = Cell::new(false);
     let operation = "7".repeat(32);
     let message = "synthetic message for interrupted operation";
     let cancelled = f
@@ -403,10 +407,12 @@ async fn grouped_send_signal_retains_uncertain_operation_without_echoing_message
             ],
             async {
                 observe_fixture(|| f.access.host.lock().unwrap().commands_seen > 0).await;
+                signalled.set(true);
             },
         )
         .await;
-    assert_eq!(cancelled.exit, 7, "{cancelled:?}");
+    assert!(signalled.get(), "send finished before the interruption");
+    assert_eq!(cancelled.exit, 7);
     let value = cancelled.to_json();
     assert_eq!(value["error"]["code"], "unknown");
     assert_eq!(value["data"]["operation_id"], operation);
