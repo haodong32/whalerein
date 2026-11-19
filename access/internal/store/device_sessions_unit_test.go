@@ -93,6 +93,31 @@ func TestDeviceSessionStoreReportsFencedAndCurrentPermission(t *testing.T) {
 	}
 }
 
+func TestDeviceSessionHostsFailsClosedOnQueryAndScanErrors(t *testing.T) {
+	ctx := context.Background()
+	queryErr := errors.New("query failed")
+	scanErr := errors.New("scan failed")
+	rows := &fakeRowSet{rows: []pgx.Row{
+		syntheticRow{fill: func(dest ...any) { *dest[0].(*string) = "host" }},
+		syntheticRow{err: scanErr},
+	}}
+	db := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+		return nil, queryErr
+	}}
+	s := newStore(db)
+	permission := DeviceSession{DeviceID: "device", WorkspaceID: "workspace", KeyFingerprint: "fingerprint"}
+	if hosts, err := s.DeviceSessionHosts(ctx, permission); hosts != nil || !errors.Is(err, queryErr) {
+		t.Fatalf("query failure returned hosts=%v err=%v", hosts, err)
+	}
+	db.queryFn = func(context.Context, string, ...any) (pgx.Rows, error) { return rows, nil }
+	if hosts, err := s.DeviceSessionHosts(ctx, permission); hosts != nil || !errors.Is(err, scanErr) {
+		t.Fatalf("scan failure returned hosts=%v err=%v", hosts, err)
+	}
+	if rows.closed != 1 {
+		t.Fatal("failed scan did not close rows")
+	}
+}
+
 // Forwarding checks the authority that originally admitted the request and
 // serializes the actual publish with regional revocation.
 func TestDeviceSessionStoreFencesQueuedForwardingAndPairing(t *testing.T) {

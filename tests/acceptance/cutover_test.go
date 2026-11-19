@@ -114,11 +114,10 @@ func startCutoverPostgres(t *testing.T, s *stack) string {
 	// keeps the case correct on a native Linux Docker host. The fallback runs
 	// pg_dump inside the disposable container against the configured URL (the
 	// Docker Desktop path used by local acceptance).
-	sourceDB := databaseNameFromAcceptanceURL(t)
 	running := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", s.postgresContainer)
 	state, stateErr := running.Output()
 	if stateErr == nil && strings.TrimSpace(string(state)) == "true" {
-		dump := exec.Command("docker", "exec", s.postgresContainer, "pg_dump", "-U", "postgres", "-Fc", sourceDB)
+		dump := exec.Command("docker", "exec", s.postgresContainer, "pg_dump", "-U", "postgres", "-Fc", s.db.Config().ConnConfig.Database)
 		payload, dumpErr := dump.Output()
 		if dumpErr != nil {
 			t.Fatalf("dump retained installation from %s: %v", s.postgresContainer, dumpErr)

@@ -442,7 +442,7 @@ def test_combined_coverage_has_one_native_execution(tmp_path, out, kind, mode):
 )
 def test_rust_coverage_requires_native_success(tmp_path, probe, output, code):
     project = Project("sample", "rust", tmp_path, tmp_path / "Cargo.toml", tmp_path, "sample")
-    runner = FakeRunner(responses=[ok(returncode=probe), ok(), ok(output, returncode=code)])
+    runner = FakeRunner(responses=[ok(returncode=probe), ok(output, returncode=code)])
     if probe == 127:
         from conftest import missing
 
@@ -450,8 +450,10 @@ def test_rust_coverage_requires_native_success(tmp_path, probe, output, code):
     measured = rust.measure(project, runner)
     assert measured.ok == (probe == 0 and code == 0 and output != "invalid")
     if probe == 0:
-        assert "--profraw-only" in runner.calls[1][0]
-        assert "--no-clean" in runner.calls[2][0]
+        command = runner.calls[1][0]
+        assert command[:4] == ("cargo", "llvm-cov", "--package", "sample")
+        assert "--no-clean" not in command
+        assert command[-2:] == ("--", "--test-threads=1")
 
 
 def test_coverage_exception_retains_successful_cases(registry, monkeypatch, out):
@@ -676,7 +678,7 @@ def test_rust_coverage_failure_reports_failed_test_without_exposing_output(
     failure = "test run::tests::connect_profile ... FAILED\nmessage_content=synthetic-private\n"
     stdout = failure if failure_stream == "stdout" else ""
     stderr = failure + "x" * 1200 if failure_stream == "stderr" else "x" * 1200
-    runner = FakeRunner(responses=[ok(), ok(), ok(stdout, returncode=101, stderr=stderr)])
+    runner = FakeRunner(responses=[ok(), ok(stdout, returncode=101, stderr=stderr)])
     measured = rust.measure(project, runner)
     assert not measured.ok
     assert "run::tests::connect_profile" in measured.error
@@ -685,9 +687,7 @@ def test_rust_coverage_failure_reports_failed_test_without_exposing_output(
 
 def test_rust_coverage_failure_fallback_suppresses_captured_output(tmp_path):
     project = Project("sample", "rust", tmp_path, tmp_path / "Cargo.toml", tmp_path, "sample")
-    runner = FakeRunner(
-        responses=[ok(), ok(), ok("message_content=synthetic-private\n", returncode=101)]
-    )
+    runner = FakeRunner(responses=[ok(), ok("message_content=synthetic-private\n", returncode=101)])
     measured = rust.measure(project, runner)
     assert not measured.ok
     assert "101" in measured.error

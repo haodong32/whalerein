@@ -196,26 +196,18 @@ def measure(project, runner):
     if not probe.ok:
         result.error = "cargo llvm-cov is unavailable: " + (probe.tail(300) or "unknown error")
         return result
-    # Drop execution counts between packages/runs, but retain instrumented
-    # compilation outputs. --no-clean prevents llvm-cov from discarding them again.
-    cleaned = runner.run(
-        ["cargo", "llvm-cov", "clean", "--workspace", "--profraw-only"],
-        project.root,
-        timeout=60,
-        quiet=True,
-    )
-    if not cleaned.ok:
-        result.error = "Could not reset stale Rust coverage artifacts: " + cleaned.tail(500)
-        return result
+    # Keep llvm-cov's package cleanup enabled so it measures only current binaries.
+    # Match the ordinary Rust runner's serial test execution.
     run = runner.run(
         [
             "cargo",
             "llvm-cov",
-            "--no-clean",
             "--package",
             project.name,
             "--json",
             "--summary-only",
+            "--",
+            "--test-threads=1",
         ],
         project.root,
         timeout=1800,

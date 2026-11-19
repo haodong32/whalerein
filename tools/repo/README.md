@@ -433,10 +433,9 @@ For Go projects, use `go tool cover -func=<profile>` or `go tool cover
 -html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
 to inspect the measured code blocks.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
-cargo-llvm-cov execution after clearing stale workspace profile counts while
-retaining instrumented compilation outputs,
-explicitly labeled `separate_measurement`; it does not
-add cases to execution totals.
+serial cargo-llvm-cov execution with its package cleanup enabled so cached
+binaries and profile counts do not enter the measurement. The report labels
+it `separate_measurement` and excludes those cases from execution totals.
 
 Reports distinguish selection, inventory completeness, observed outcomes,
 execution errors and coverage. Build/service failures are errors, not invented
