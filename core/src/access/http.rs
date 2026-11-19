@@ -386,6 +386,21 @@ impl AccessClient {
         result
     }
 
+    /// Renew one observation lease. 204 means the Device's grant, session and
+    /// Host enrollment are still current; a typed reason means authority ended.
+    pub async fn host_authority(&self, host_id: &str) -> Result<(), AccessError> {
+        let url = self.endpoint(&["v1", "hosts", host_id, "authority"])?;
+        let response = self
+            .request(reqwest::Method::GET, url, None)
+            .send()
+            .await
+            .map_err(|_| AccessError::transport("Access authority check failed"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(parse_error_response(response).await)
+    }
+
     pub async fn list_hosts(&self) -> Result<Vec<HostInfo>, AccessError> {
         let url = self.endpoint(&["v1", "hosts"])?;
         let list: HostList = self

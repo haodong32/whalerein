@@ -43,7 +43,7 @@ func (d *AuthorityDenial) Error() string {
 // Is keeps a denial a forbidden/unauthorized condition for callers that only
 // care that the request must stop.
 func (d *AuthorityDenial) Is(target error) bool {
-	return target == ErrForbidden || target == ErrUnauthorized
+	return target == ErrForbidden
 }
 
 func denialReason(err error) string {

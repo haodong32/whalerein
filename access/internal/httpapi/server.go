@@ -164,6 +164,7 @@ func (s *Server) publicRoutes() []routeSpec {
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/clients", handler: s.handleHostClients},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/disable", handler: s.handleDisableHostEnrollment},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/credential", handler: s.handleCredentialReplacement},
+		routeSpec{method: http.MethodGet, pattern: "/v1/hosts/{host_id}/authority", handler: s.handleHostAuthority},
 		routeSpec{method: http.MethodGet, pattern: "/v1/hosts/{host_id}/enrollment", handler: s.handleHostEnrollmentProofStatus},
 		routeSpec{method: http.MethodGet, pattern: "/v1/operations/{operation_id}", handler: s.handleOperationStatus},
 	)

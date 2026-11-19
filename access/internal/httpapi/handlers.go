@@ -342,6 +342,31 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, para
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleHostAuthority renews one observation lease. It returns 204 while the
+// Device's grant, session and Host enrollment are all current, and a typed
+// authority reason when any of them ended. A client treats that reason as
+// terminal; the encrypted observation stream cannot carry an Access-authored
+// close, so this lease check is how authority termination is observed even
+// while the stream is idle.
+func (s *Server) handleHostAuthority(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	identity, err := s.requireDevice(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	hostID := params["host_id"]
+	if !validResourceID(hostID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	if err := s.deps.Auth.AuthorizeHost(r.Context(), identity, hostID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[string]string) {
 	diagnostics.HealthHandler().ServeHTTP(w, r)
 }

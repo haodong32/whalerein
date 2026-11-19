@@ -970,6 +970,14 @@ async fn conversation_loop(
                 }
             }
             _ = interval.tick() => {
+                // The encrypted stream cannot carry an Access-authored close,
+                // and a removed grant can leave it idle. Renew the authority
+                // lease over HTTP; a typed reason is terminal immediately.
+                if let Err(authority) = core.check_host_authority(&key.host_id).await {
+                    if matches!(authority, CoreError::AuthorityClosed(_)) {
+                        return Err(authority);
+                    }
+                }
                 let failure = error.lock().expect("watch error mutex").take();
                     if let Some(failure) = failure {
                     return Err(failure);
