@@ -2,6 +2,7 @@
 
 import json
 import re
+import tempfile
 import tomllib
 
 from ..diagnostics import sanitize
@@ -196,22 +197,27 @@ def measure(project, runner):
     if not probe.ok:
         result.error = "cargo llvm-cov is unavailable: " + (probe.tail(300) or "unknown error")
         return result
-    # Keep llvm-cov's package cleanup enabled so it measures only current binaries.
-    # Match the ordinary Rust runner's serial test execution.
-    run = runner.run(
-        [
-            "cargo",
-            "llvm-cov",
-            "--package",
-            project.name,
-            "--json",
-            "--summary-only",
-            "--",
-            "--test-threads=1",
-        ],
-        project.root,
-        timeout=1800,
-    )
+    # llvm-cov scans its build directory for executables. A fresh directory
+    # keeps cached binaries and other Cargo configurations out of the report.
+    with tempfile.TemporaryDirectory(prefix="whalerein-rust-cover-") as target:
+        run = runner.run(
+            [
+                "cargo",
+                "llvm-cov",
+                "--package",
+                project.name,
+                "--json",
+                "--summary-only",
+                "--",
+                "--test-threads=1",
+            ],
+            project.root,
+            env={
+                "CARGO_LLVM_COV_TARGET_DIR": target,
+                "CARGO_LLVM_COV_BUILD_DIR": target,
+            },
+            timeout=1800,
+        )
     if not run.ok:
         failures = sorted(
             set(

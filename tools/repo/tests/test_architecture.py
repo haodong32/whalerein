@@ -418,6 +418,29 @@ def test_combined_coverage_has_one_native_execution(tmp_path, out, kind, mode):
     assert result["coverage"][0].get("phase", "test_execution") == "test_execution"
 
 
+def test_rust_coverage_uses_an_empty_build_directory(tmp_path):
+    project = Project("sample", "rust", tmp_path, tmp_path / "Cargo.toml", tmp_path, "sample")
+    targets = []
+
+    class CoverageRunner(FakeRunner):
+        def run(self, argv, cwd, *, env=None, **kwargs):
+            if argv[-1] != "--version":
+                target = Path(env["CARGO_LLVM_COV_TARGET_DIR"])
+                assert env["CARGO_LLVM_COV_BUILD_DIR"] == str(target)
+                assert list(target.iterdir()) == []
+                (target / "instrumented-binary").touch()
+                targets.append(target)
+            return super().run(argv, cwd, env=env, **kwargs)
+
+    runner = CoverageRunner(default_returncode=0, default_stdout='{"data":[{"totals":{}}]}')
+    for _ in range(2):
+        assert rust.measure(project, runner).ok
+    first, second = targets
+    assert first != second
+    assert not first.exists()
+    assert not second.exists()
+
+
 @pytest.mark.parametrize(
     "probe,output,code",
     [

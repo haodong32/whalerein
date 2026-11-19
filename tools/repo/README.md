@@ -433,7 +433,7 @@ For Go projects, use `go tool cover -func=<profile>` or `go tool cover
 -html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
 to inspect the measured code blocks.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
-serial cargo-llvm-cov execution with its package cleanup enabled so cached
+serial cargo-llvm-cov execution in a temporary build directory so cached
 binaries and profile counts do not enter the measurement. The report labels
 it `separate_measurement` and excludes those cases from execution totals.
 
