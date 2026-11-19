@@ -3566,8 +3566,10 @@ def test_w8_fixed_cut_history_beyond_former_tail(scenario, paired_device):
     materialized = scenario.request("history-materialization", sessionId=session)
     assert materialized["calls"] == 1
     assert materialized["materialized"] == materialized["totalEvents"] == total
-    assert materialized["complete"] is False
-    assert materialized["normalized"] == 5000
+    # The adapter no longer truncates the snapshot to the former 5,000-event
+    # tail; it stages the complete passive pages at one pinned cut.
+    assert materialized["complete"] is True
+    assert materialized["normalized"] == total
     for start in (0, 4990, total - 10):
         window = scenario.request(
             "native-range", sessionId=session, fromSeq=start, toSeq=start + 10
