@@ -288,10 +288,14 @@ request: whalerein/v1/request|{request_id}|{host_id}|{device_id}|{kind}|{command
 event:   whalerein/v1/event|{host_id}|{device_id}|{channel_id}|{created_at_unix_ms}
 ```
 
-A wrong channel, failed MAC or failed AAD rejects the message without side
-effects. Old-channel messages are rejected because only the current
-`channel_id` maps to a key. Replays are handled by `request_id`/`command_id`
-dedupe, typed history intervals and live Attempt sequences. None is a nonce.
+A Host can keep multiple channels for the same Device. Each channel has its
+own keys and observation state. A new handshake leaves other channels active.
+The Host bounds live channels per Device and globally and reclaims channels
+after an idle interval. An authenticated in-flight request retains its channel
+through the response. Revoking a grant closes all channels for that grant.
+A wrong or closed channel, failed MAC or failed AAD rejects the message without
+side effects. Replays are handled by `request_id`/`command_id` dedupe, typed
+history intervals and live Attempt sequences. None is a nonce.
 
 ## Requests and results
 

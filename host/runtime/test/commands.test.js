@@ -1808,9 +1808,8 @@ function answerService(phase = 'QUESTION_CONTINUED') {
   return { ctx, request, pending, gate, started: () => started }
 }
 
-test('session-observation/AC-25.device-offline and channel replacement do not abort a live HTTP answer', async () => {
+test('session-observation/AC-25.channel closure does not abort a live HTTP answer', async () => {
   for (const cancel of [
-    harness => harness.ctx.service.cancelDevice(harness.request.device_id, 'device_offline'),
     harness => harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id, 'channel_replaced'),
     harness => harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id),
   ]) {
@@ -1829,7 +1828,7 @@ test('session-observation/AC-33.revocation remains authoritative for a live HTTP
   const harness = answerService()
   try {
     while (!harness.started()) await new Promise(resolve => setImmediate(resolve))
-    harness.ctx.service.cancelChannel(harness.request.device_id, harness.request.channel_id, 'revoked')
+    harness.ctx.service.revokeDevice(harness.request.device_id)
     const result = await harness.pending
     assert.equal(result.status, 'unknown')
     assert.equal(harness.started(), 1)

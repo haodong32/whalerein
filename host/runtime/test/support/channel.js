@@ -43,14 +43,14 @@ export function establishChannel({
     capabilities: { capabilities: ['sessions', 'events'], protocol_version: 1 },
     client_nonce: 'client-nonce',
   })
-  const first = security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: deviceId, protocol_version: 1 },
-    message: noise.writeMessage(hello),
+  const reply = security.handleChannelHandshake({
+    channel_id: channelId, device_id: deviceId, protocol_version: 1,
+    body: noise.writeMessage(hello),
   })
-  const ready = codec.decode('whalerein.v1.ChannelReady', noise.readMessage(first.noiseMessage))
-  const second = security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: deviceId, protocol_version: 1 },
-    message: noise.writeMessage(new Uint8Array(0)),
+  const ready = codec.decode('whalerein.v1.ChannelReady', noise.readMessage(reply))
+  security.handleChannelHandshake({
+    channel_id: channelId, device_id: deviceId, protocol_version: 1,
+    body: noise.writeMessage(new Uint8Array(0)),
   })
   const derived = deriveChannelKeys(noise.handshakeHash, prologue)
   return {
@@ -59,8 +59,6 @@ export function establishChannel({
     identity,
     prologue,
     ready,
-    first,
-    second,
     c2h: derived.c2h,
     h2c: derived.h2c,
     noise,

@@ -106,7 +106,7 @@ net.createServer(socket=>{
 }).listen(process.env.WHALEREIN_DSH_SOCKET)
 createInterface({input:process.stdin}).on('line',async line=>{
   try {
-    const {id,method,method_name,ttl_ms,approval_id,session_id,size,count,attempt_id,index,text,duplicate,stream_id,updates,gap_ms,start_ms,final_ms,delay_ms,duplicate_after_ms,fault,reason,tool_name}=JSON.parse(line)
+    const {id,method,method_name,ttl_ms,approval_id,session_id,message_id,size,count,attempt_id,index,text,duplicate,stream_id,updates,gap_ms,start_ms,final_ms,delay_ms,duplicate_after_ms,fault,reason,tool_name}=JSON.parse(line)
     let value
     if(method==='fail_next_session_refresh') { adapter.failNext('listSessions'); value=true }
     else if(method==='queue_read_count') value=queueReadCount
@@ -144,14 +144,19 @@ createInterface({input:process.stdin}).on('line',async line=>{
     else if(method==='idle'){adapter.setRunning(session_id,false);value=true}
     else if(method==='preview_start' || method==='preview_chunk') {
       const start=method==='preview_start'
+      const chunkIndex=index??0
       adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:start
         ? {stream_id:'fixture-attempt',revision:1,phase:'start',reply_id:'1:1',block_id:'text-0'}
-        : {stream_id:'fixture-attempt',revision:2,phase:'chunk',index:0,block_id:'text-0',text:'x'}})
+        : {stream_id:'fixture-attempt',revision:2+chunkIndex,phase:'chunk',index:chunkIndex,block_id:'text-0',text:text??'x'}})
       value=true
     }
     else if(method==='preview_final') {
-      const event=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{reply_id:'1:1',message:{content:[{type:'text',text:'xy'}]}}})
-      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:3,phase:'end',block_id:'text-0',outcome:'committed',committed_seq:event.seq}})
+      const reply=text??'xy'
+      const event=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{
+        reply_id:'1:1',message:{content:[{type:'text',text:reply}]},
+        ...(message_id ? {messageId:message_id,text:reply} : {}),
+      }})
+      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:2+(count??1),phase:'end',block_id:'text-0',outcome:'committed',committed_seq:event.seq}})
       value=true
     }
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})

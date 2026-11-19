@@ -233,8 +233,10 @@ test('a revoked Device watch ends before its lease and leaves the other Device o
     await ctx.host.start()
     ctx.host.security.setRevocationsPending(false)
     const first = establishChannel({ hostId: 'host-1', deviceId: 'd1', security: ctx.host.security, store: ctx.store })
+    const sibling = establishChannel({ hostId: 'host-1', deviceId: 'd1', identity: first.identity, security: ctx.host.security, store: ctx.store })
     const second = establishChannel({ hostId: 'host-1', deviceId: 'd2', security: ctx.host.security, store: ctx.store })
     const watch = await ctx.host.events.watch('d1', first.channelId, 's1', undefined, { conversation: true, questions: false })
+    const siblingWatch = await ctx.host.events.watch('d1', sibling.channelId, 's1', undefined, { conversation: true, questions: false })
     await ctx.host.events.watch('d2', second.channelId, 's1', undefined, { conversation: true, questions: false })
     assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d1', 'd2'])
 
@@ -254,6 +256,9 @@ test('a revoked Device watch ends before its lease and leaves the other Device o
     assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d2'], 'revocation ends only the revoked watch')
     await assert.rejects(ctx.host.events.refresh('d1', first.channelId, [watch.watch_id]),
       (error) => error.code === 'expired', 'the revoked watch is already ended')
+    await assert.rejects(ctx.host.events.refresh('d1', sibling.channelId, [siblingWatch.watch_id]),
+      (error) => error.code === 'expired', 'revocation also ends the sibling watch')
+    assert.equal(ctx.host.security.getChannel(sibling.channelId), null)
     await assert.rejects(ctx.host.events.watch('d1', first.channelId, 's1', undefined, { conversation: true, questions: false }),
       (error) => error.code === 'unauthorized', 'a revoked channel cannot observe again')
   } finally {
@@ -750,16 +755,61 @@ test('disconnect releases a stalled model query and discards its late result', a
 })
 
 
-test('device_offline presence clears that device channel and cancels its scopes', async () => {
+test('idle channel cleanup preserves a sibling channel with an authenticated request in flight', async (t) => {
+  let now = Date.now()
+  const ctx = setup(silentLogger, () => now)
+  const gate = Promise.withResolvers()
+  t.after(async () => {
+    gate.resolve({ groups: [] })
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  })
+  await ctx.host.start()
+  ctx.host.security.setRevocationsPending(false)
+  const options = {
+    security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', identity: generateKeypair(), codec: proto,
+  }
+  const idle = establishChannel(options)
+  const busy = establishChannel(options)
+  for (const { channelId } of [idle, busy]) {
+    ctx.store.addOutbox({ deviceId: 'd1', channelId, payload: new Uint8Array([1]) })
+  }
+  const entered = Promise.withResolvers()
+  ctx.adapter.describeHostCapabilities = async () => ({ model_catalog: true })
+  ctx.adapter.listModels = () => { entered.resolve(); return gate.promise }
+  const request = encryptedQuery({
+    ...options, channel: busy, payload: { list_models: {} }, overrides: { expires_at_unix_ms: now + 180_000 },
+  })
+  const pending = send(ctx.access, request)
+  await entered.promise
+  now += 120_000
+  ctx.host.security.pruneIdleChannels()
+  assert.equal(ctx.host.security.getChannel(idle.channelId), null)
+  assert.ok(ctx.host.security.getChannel(busy.channelId))
+  assert.deepEqual(ctx.store.listOutbox().map(row => row.channelId), [busy.channelId])
+  gate.resolve({ groups: [] })
+  assert.equal((await pending).status, 'succeeded')
+  assert.ok(ctx.host.security.getChannel(busy.channelId))
+})
+
+test('device_offline ends the Watch while independent HTTP channels stay usable', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
     ctx.host.security.setRevocationsPending(false)
     const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
-    assert.equal(ctx.host.security.listChannels().length, 1)
+    const sender = establishChannel({
+      security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', identity: channel.identity, codec: proto,
+    })
+    const watch = await ctx.host.events.watch('d1', channel.channelId, 's1', undefined, { conversation: true, questions: false })
+    assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d1'])
     ctx.access.handlers.onPresence({ event: 'device_offline', device_id: 'd1', reason: 'will' })
-    assert.equal(ctx.host.security.listChannels().length, 0)
-    assert.equal(ctx.host.security.getChannel(channel.channelId), null)
+    assert.deepEqual(ctx.host.events.observingDeviceIds(), [])
+    await assert.rejects(ctx.host.events.refresh('d1', channel.channelId, [watch.watch_id]), error => error.code === 'expired')
+    assert.equal(ctx.host.security.listChannels().length, 2)
+    const ping = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel: sender, payload: { ping: {} } })
+    assert.equal((await send(ctx.access, ping)).status, 'succeeded')
   } finally {
     await ctx.host.stop()
     ctx.store.close()
@@ -795,11 +845,10 @@ test('session-observation/AC-25.device-offline preserves an independently live H
     const live = startLiveAnswer(ctx, channel)
     while (!live.entered()) await new Promise(resolve => setImmediate(resolve))
     ctx.access.handlers.onPresence({ event: 'device_offline', device_id: 'd1', reason: 'will' })
-    assert.equal(ctx.host.security.listChannels().length, 0)
+    assert.equal(ctx.host.security.listChannels().length, 1)
     live.gate.resolve()
     await live.pending
-    // The cleared channel cannot carry the terminal reply, but the admitted
-    // answer still completes and its original command identity is recoverable.
+    assert.equal(ctx.access.lastResult().status, 'succeeded')
     assert.equal(ctx.store.getCommand('d1', live.request.command_id).status, 'succeeded')
   } finally {
     await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })

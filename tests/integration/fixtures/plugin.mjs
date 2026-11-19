@@ -53,7 +53,13 @@ const capabilityOverrides = {
   pending_queue_steer: config.pending_queue_enabled !== false,
 }
 const listSessions = adapter.listSessions.bind(adapter)
+const closeWaitChannel = path.join(config.state_dir, 'test-wait-close-channel')
+let waitChannelId
 adapter.listSessions = async options => {
+  if (waitChannelId && fs.existsSync(closeWaitChannel)) {
+    fs.unlinkSync(closeWaitChannel)
+    host.security.closeChannel(waitChannelId)
+  }
   const sessions = await listSessions(options)
   for (const session of sessions) {
     if (session?.sourceCapabilities) Object.assign(session.sourceCapabilities, capabilityOverrides)
@@ -62,6 +68,12 @@ adapter.listSessions = async options => {
 }
 
 const host = createHost(config, { adapter, credentials: { getCredential: (...args) => adapter.call('getCredential', ...args), setCredential: (...args) => adapter.call('setCredential', ...args) } })
+const waitSession = adapter.waitSession.bind(adapter)
+adapter.waitSession = (...args) => {
+  // The wait is the newest channel in the isolated fault-injection cases.
+  waitChannelId = host.security.listChannels().at(-1)?.channelId
+  return waitSession(...args)
+}
 // Keep the process alive while waiting for the first broker connection; the
 // wait timer itself is unref'd.
 const keepAlive = setInterval(() => {}, 1 << 30)

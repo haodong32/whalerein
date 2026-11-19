@@ -434,6 +434,7 @@ let channelQueueBarrier = null
             controller.wait = async function(request, nativeSignal) {
               state.calls++
               if (state.calls > 1) return original.call(controller,request,nativeSignal)
+              state.channelId = host().security.listChannels().at(-1)?.channelId
               state.entered = true
               nativeSignal.addEventListener('abort', () => { state.aborted = true }, {once:true})
               if (nativeSignal.aborted) state.aborted = true
@@ -444,6 +445,11 @@ let channelQueueBarrier = null
             return {armed:true}
           }
           if (method === 'gx-stale-wait-status') return {entered:gxStaleWait?.entered === true, aborted:gxStaleWait?.aborted === true, lateReturned:gxStaleWait?.lateReturned === true, calls:gxStaleWait?.calls ?? 0}
+          if (method === 'gx-close-stale-wait-channel') {
+            if (!gxStaleWait?.channelId) throw new Error('stale wait channel missing')
+            host().security.closeChannel(gxStaleWait.channelId)
+            return {closed:true}
+          }
           if (method === 'gx-release-stale-wait') {
             if (!gxStaleWait) throw new Error('stale wait not armed')
             gxStaleWait.release.resolve()

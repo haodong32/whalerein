@@ -43,7 +43,7 @@ test('connected devices require a current observation and are deduplicated by De
   assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
   ctx.advance(first.lease_ms - 100)
   assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
-  ctx.events.onChannelReplaced('second', other.channelId)
+  ctx.events.onChannelsCleared([{ deviceId: 'second', channelId: other.channelId }])
   assert.deepEqual(ctx.events.observingDeviceIds(), [])
 })
 
@@ -111,7 +111,7 @@ test('a stalled preview does not block committed updates, and a changed channel 
  await settle()
  assert.equal(calls,2)
  assert.equal(ctx.store.countOutbox(),0)
- ctx.events.onChannelReplaced('d',ctx.channel.channelId)
+ ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
  assert.equal(ctx.events.describe().watches,0)
  release();await ctx.events.stop()
 })
@@ -199,7 +199,7 @@ test('when channel replacement cancels watch installation, its eventual handle c
  const ctx=fixture()
  try {
   const pending=ctx.events.watch('d',ctx.channel.channelId,'s',undefined,CONV)
-  ctx.events.onChannelReplaced('d',ctx.channel.channelId)
+  ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
   await assert.rejects(pending,error=>error.code==='expired')
   assert.equal(ctx.source.closed,1)
   assert.equal(ctx.events.describe().sessions,0)
@@ -237,9 +237,9 @@ test('channel lifecycle stops shared watch refresh only after the last recipient
  ctx.source.readState=async(id,{signal}={})=>{seenSignal=signal;entered();await barrier;return original(id)}
  ctx.source.sinks.get('s')({session:{session_id:'s'},state_changed:true})
  await started
- ctx.events.onChannelReplaced('d',ctx.channel.channelId)
+ ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
  assert.equal(seenSignal.aborted,false)
- ctx.events.onChannelReplaced('second',other.channelId)
+ ctx.events.onChannelsCleared([{ deviceId: 'second', channelId: other.channelId }])
  assert.equal(seenSignal.aborted,true)
  release()
  await settle()

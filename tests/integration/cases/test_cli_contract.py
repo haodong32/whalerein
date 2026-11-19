@@ -4,6 +4,7 @@ import signal
 import subprocess
 
 import pytest
+from environment import wait
 
 pytestmark = pytest.mark.chain
 
@@ -61,7 +62,7 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
             second.close()
 
         sent = paired_client.call(
-            "session", "send", session_id, "channel replacement fixture", "--detach"
+            "session", "send", session_id, "concurrent send fixture", "--detach"
         )
         assert sent["state"] == "submission"
         assert sent["operation_id"]
@@ -71,7 +72,7 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
         }
         first.wait(
             lambda value: any(
-                "channel replacement fixture" in text for text in _texts(_event(value))
+                "concurrent send fixture" in text for text in _texts(_event(value))
             ),
             timeout=30,
         )
@@ -87,6 +88,44 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
         assert recovered["receipt"]["message_id"]
     finally:
         first.close()
+
+
+def test_watch_streams_while_same_device_send_follows_reply(scenario, paired_client, session_id):
+    """An attached watch receives two live deltas before an ordinary send can finish."""
+    fixture = scenario.dsh.process
+    fixture.control("bench_schedule", session_id=session_id, fault="silent")
+    watcher = paired_client.watch("session", "watch", session_id, "--timeout", "40")
+    try:
+        _attached(watcher)
+        resets_before_send = sum(_event(value).get("type") == "reset" for value in watcher.values)
+        sender = paired_client.watch("session", "send", session_id, "fixture", "--timeout", "30")
+        try:
+            def admitted_message():
+                for event in scenario.dsh.snapshot(session_id)["events"]:
+                    if event["type"] == "user/message" and event["data"].get("messageId"):
+                        return event["data"]["messageId"]
+                return None
+
+            wait(admitted_message, timeout=10)
+            message_id = admitted_message()
+            assert message_id
+            fixture.control("preview_start", session_id=session_id)
+            for index, text in enumerate(("x", "y")):
+                fixture.control("preview_chunk", session_id=session_id, index=index, text=text)
+                watcher.wait(
+                    lambda value: _event(value).get("type") == "preview" and _event(value).get("text") == text,
+                    timeout=8,
+                )
+                assert sender.process.poll() is None
+
+            assert sum(_event(value).get("type") == "reset" for value in watcher.values) == resets_before_send
+            fixture.control("preview_final", session_id=session_id, message_id=message_id, count=2)
+            assert sender.wait_exit(timeout=10) == 0
+            assert sender.values[-1]["data"]["reply"]["state"] == "committed"
+        finally:
+            sender.close()
+    finally:
+        watcher.close()
 
 
 @pytest.mark.description(

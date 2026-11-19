@@ -161,7 +161,9 @@ this viewer already printed. The same dedupe prevents a replayed batch or a
 snapshot that overlaps live output from printing a message twice.
 One client instance owns one active observation. The observation holds an
 OS-released lease. A competing watch fails with `conflict` while send and wait
-remain available. Closing or replacing an observation stops its recovery,
+remain available. CLI processes using the same Device can hold independent
+Host channels, so a send or its reply polling can coexist with a live watch.
+Closing or replacing an observation stops its recovery,
 staging and scoped delivery while a separate answer command can continue.
 
 Interrupt follows an accepted stop to its terminal receipt, as send does. An

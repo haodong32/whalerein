@@ -326,7 +326,7 @@ test('a restart-invalidated record reopens when the native source still proves p
   assert.ok(store.getApprovalRecord(approval.approvalId).revision >= 3)
 })
 
-test('device_offline aborts an in-flight decision without approving and releases the claim for retry', async () => {
+test('Device revocation aborts an in-flight decision without approving and releases the claim for retry', async () => {
   const { service, adapter, store } = makeService()
   const approval = adapter.requestApproval({ sessionId: 's1', ttlMs: 60_000 })
   adapter.frozen = true
@@ -334,7 +334,7 @@ test('device_offline aborts an in-flight decision without approving and releases
   const inFlight = decide(service, approval, 'device-1')
   for (let i = 0; i < 200 && adapter.entered === 0; i++) await new Promise((resolve) => setImmediate(resolve))
   assert.equal(adapter.entered, 1)
-  service.cancelDevice('device-1', 'device_offline')
+  service.revokeDevice('device-1')
   const aborted = await inFlight
   assert.equal(aborted.result.status, 'unknown')
   assert.notEqual(aborted.result.status, 'succeeded')

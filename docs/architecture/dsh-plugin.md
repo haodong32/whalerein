@@ -131,10 +131,10 @@ verified behavior on every environment.
 
 Access resolves a device last will or `$SYS` disconnect into a host-scoped
 `whalerein/v1/h/<host_id>/presence` event. Host subscribes only to its exact
-presence topic; on `device_offline` it clears that device's live channel and its
-observation scopes. Transport loss alone no longer aborts a separately live HTTP
-answer: an admitted answer keeps its exact request authority until its own
-cancellation, lease expiry or the hard request deadline. Applicable grant/device
+presence topic. On `device_offline` it clears that Device's MQTT observations.
+Concurrent HTTP channels and requests keep their own lifetimes. An admitted
+answer keeps its exact request authority until cancellation, lease expiry or
+the hard request deadline. Applicable grant/device
 revocation remains stronger and fences both observation and execution. The
 adapter's existing `finally` releases the native question `attachWait`; there is
 no separate claim registry, lease, token or protocol claim field. TTL remains the
