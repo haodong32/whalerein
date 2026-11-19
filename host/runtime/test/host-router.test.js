@@ -227,6 +227,42 @@ test('the Host reports observation, not a cached channel, for an internal client
   assert.deepEqual(proto.decode('whalerein.v1.HostClients', ended.result_body ?? new Uint8Array()).observing_device_ids ?? [], [])
 })
 
+test('a revoked Device watch ends before its lease and leaves the other Device observing', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const first = establishChannel({ hostId: 'host-1', deviceId: 'd1', security: ctx.host.security, store: ctx.store })
+    const second = establishChannel({ hostId: 'host-1', deviceId: 'd2', security: ctx.host.security, store: ctx.store })
+    const watch = await ctx.host.events.watch('d1', first.channelId, 's1', undefined, { conversation: true, questions: false })
+    await ctx.host.events.watch('d2', second.channelId, 's1', undefined, { conversation: true, questions: false })
+    assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d1', 'd2'])
+
+    const revoked = await send(ctx.access, baseRequest({
+      request_id: 'rev-watch',
+      kind: 'REQUEST_KIND_REVOCATION',
+      body: proto.encode('whalerein.v1.RevocationNotice', {
+        replay_id: 'replay-watch',
+        device_ids: ['d1'],
+        final: true,
+        revoked_at_unix_ms: 5,
+      }),
+    }))
+    assert.equal(revoked.status, 'succeeded')
+    assert.equal(ctx.store.getPeerKey('d1'), null)
+    assert.equal(ctx.store.getPeerKey('d2') !== null, true, 'the sibling Device keeps its grant')
+    assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d2'], 'revocation ends only the revoked watch')
+    await assert.rejects(ctx.host.events.refresh('d1', first.channelId, [watch.watch_id]),
+      (error) => error.code === 'expired', 'the revoked watch is already ended')
+    await assert.rejects(ctx.host.events.watch('d1', first.channelId, 's1', undefined, { conversation: true, questions: false }),
+      (error) => error.code === 'unauthorized', 'a revoked channel cannot observe again')
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
 test('when the host router receives an encrypted query, it maps adapter errors and seals the response', async () => {
   const ctx = setup()
   try {

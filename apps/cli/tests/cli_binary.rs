@@ -65,6 +65,18 @@ fn fresh_cloud_status_only_reads_selected_file() {
 }
 
 #[test]
+fn a_cloud_host_list_never_falls_back_to_a_standalone_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = selected(temp.path(), "whalerein_cloud");
+    let result = invocation(&config).arg("host").arg("list").output().unwrap();
+    let value = outcome(&result, 4);
+    assert_eq!(value["command"], "host.list");
+    assert_eq!(value["error"]["code"], "unauthorized");
+    assert!(value["data"].is_null(), "no Standalone host list is fabricated");
+    assert!(!temp.path().join("instance").exists());
+}
+
+#[test]
 fn default_path_uses_the_platform_home() {
     let home = tempfile::tempdir().unwrap();
     let directory = home.path().join(".whalerein");

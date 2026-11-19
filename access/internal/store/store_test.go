@@ -75,10 +75,12 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 		indexes[name] = def
 	}
 	for _, required := range []string{
-		"device_credentials_pkey", "requests_pkey", "requests_command_unique",
-		"requests_forward_due_idx", "grants_pending_revocation_idx",
+		"device_credentials_pkey", "device_sessions_pkey", "requests_pkey", "requests_command_unique",
+		"requests_forward_due_idx", "requests_device_session_live", "grants_pending_revocation_idx",
 		"external_enrollments_workspace", "external_operations_authorization_id_key",
-		"host_proof_nonces_created_at", "requests_device_session_live",
+		"host_proof_nonces_created_at", "external_device_revocations_pkey",
+		"cloud_pairing_outcomes_grant_idx", "cloud_pairing_outcomes_auth_idx",
+		"pairing_device_sessions_pkey",
 	} {
 		if _, ok := indexes[required]; !ok {
 			t.Errorf("missing index %s; have %v", required, indexes)
@@ -1503,7 +1505,9 @@ func TestPairingRevocationFenceRollsBackWithFailedRevoke(t *testing.T) {
 
 // Migration fences pre-existing unfinished claims while preserving the active grant.
 func TestPairingRevocationFenceMigrationFencesLegacyPendingClaims(t *testing.T) {
-	s, _ := storetest.New(t)
+	// Start from the real pre-008 schema so the upgrade runs the production
+	// migration path instead of dropping columns from a current database.
+	s := openStoreAtMigration(t, "007_query_retention.sql")
 	ctx := context.Background()
 	now := time.Now().UTC()
 	if _, err := s.EnsureHost(ctx, "migration-host"); err != nil {

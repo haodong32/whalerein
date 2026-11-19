@@ -391,3 +391,22 @@ func TestNewExternalRoutesReportAnExplicitCapabilityErrorWithoutTheMode(t *testi
 		map[string]string{HostProofHeader: hostProofHeader(t, "host-1")})
 	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
 }
+
+// A supported older deployment without a broker-presence projection keeps the
+// ready enrollment and reports unknown live presence instead of offline.
+func TestEnrollmentStatusWithoutObservationSourceReportsUnknownPresence(t *testing.T) {
+	fake := &fakeExternal{statusResponse: &whalereinv1.HostEnrollmentStatus{
+		HostId: "host-1", State: whalereinv1.EnrollmentState_enrollment_ready,
+	}}
+	server := newExternalFixture(t, fake)
+	recorder := doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/enrollments/hosts/host-1", nil,
+		map[string]string{adminHeaderName: "Bearer admin-token"})
+	var status whalereinv1.HostEnrollmentStatus
+	if recorder.Code != http.StatusOK || protojson.Unmarshal(recorder.Body.Bytes(), &status) != nil ||
+		status.GetState() != whalereinv1.EnrollmentState_enrollment_ready {
+		t.Fatalf("enrollment changed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("WhaleRein-Host-Presence"); got != "unavailable" {
+		t.Fatalf("presence = %q, want unavailable", got)
+	}
+}

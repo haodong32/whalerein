@@ -47,6 +47,24 @@ test('connected devices require a current observation and are deduplicated by De
   assert.deepEqual(ctx.events.observingDeviceIds(), [])
 })
 
+test('an abrupt watcher exit expires only its lease while the Host and another watcher stay connected', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.advance(100)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  assert.equal(ctx.access.connected, true, 'the Host transport stays connected')
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  // The first CLI exits without unwatch. Only its lease lapses.
+  ctx.advance(29_900)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
+  assert.equal(ctx.access.connected, true, 'lease expiry does not disconnect the Host')
+  assert.equal(ctx.events.describe().watches, 1, 'the other watcher still holds an active observation')
+  ctx.advance(200)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'every expired lease leaves no active observation')
+})
+
 function deferred() {
   const value = {}
   value.promise = new Promise((resolve, reject) => { value.resolve = resolve; value.reject = reject })

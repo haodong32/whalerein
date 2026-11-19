@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -64,6 +65,34 @@ func TestHostClientsUsesOnlyMatchingConfirmedGrantsAndCurrentHostEvidence(t *tes
 			answer.HostId = "other-host"
 			return answer, nil
 		}, false},
+		{"mismatched request id", "unavailable", true, true, func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+			answer := result(req)
+			answer.RequestId = "other-request"
+			return answer, nil
+		}, false},
+		{"malformed payload", "unavailable", true, true, func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+			answer := result(req)
+			answer.ResultBody = []byte{0xff}
+			return answer, nil
+		}, false},
+		{"over-limit observation", "unavailable", true, true, func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+			ids := make([]string, 513)
+			for index := range ids {
+				ids[index] = "device-" + strconv.Itoa(index)
+			}
+			oversized, err := proto.Marshal(&whalereinv1.HostClients{ObservingDeviceIds: ids})
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer := result(req)
+			answer.ResultBody = oversized
+			return answer, nil
+		}, false},
+		{"failed status", "unavailable", true, true, func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+			answer := result(req)
+			answer.Status = whalereinv1.OnlineStatus_failed
+			return answer, nil
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &hostClientsFixture{ids: []string{"device-1", "device-2"}, online: tc.online, known: tc.known, observe: tc.observe}
@@ -86,5 +115,38 @@ func TestHostClientsUsesOnlyMatchingConfirmedGrantsAndCurrentHostEvidence(t *tes
 	got, err := s.HostClients(context.Background(), "workspace-1", "host-1", "3")
 	if err != nil || got.Devices == nil || len(got.Devices) != 0 || got.Presence != "known" || f.calls != 0 {
 		t.Fatalf("empty grant list = %+v, err=%v, probe calls=%d", got, err, f.calls)
+	}
+}
+
+// An older Host that cannot report active client observations still yields the
+// confirmed paired rows, but never fabricates a connected Device.
+func TestHostClientsOlderHostWithoutObservationsKeepsPairedRowsUnconnected(t *testing.T) {
+	f := &hostClientsFixture{
+		ids: []string{"device-1", "device-2"}, online: true, known: true,
+		observe: func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+			return &whalereinv1.HostResult{
+				RequestId: req.GetRequestId(), HostId: req.GetHostId(),
+				Status: whalereinv1.OnlineStatus_succeeded,
+			}, nil
+		},
+	}
+	s := New(Trust{}, nil, "", WithHostClients(f, f, f))
+	got, err := s.HostClients(context.Background(), "workspace", "host", "1")
+	want := HostClientList{Presence: "known", Devices: []HostClient{
+		{DeviceID: "device-1"}, {DeviceID: "device-2"},
+	}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("older Host observation = %+v, err=%v", got, err)
+	}
+}
+
+// A missing presence source (supported older Access wiring) withholds the live
+// observation instead of presenting the paired rows as connected.
+func TestHostClientsWithoutPresenceSourceReportsUnavailable(t *testing.T) {
+	f := &hostClientsFixture{ids: []string{"device-1"}}
+	s := New(Trust{}, nil, "", WithHostClients(f, f, nil))
+	got, err := s.HostClients(context.Background(), "workspace", "host", "1")
+	if err != nil || got.Presence != "unavailable" || len(got.Devices) != 1 || got.Devices[0].Connected {
+		t.Fatalf("missing presence source = %+v, err=%v", got, err)
 	}
 }

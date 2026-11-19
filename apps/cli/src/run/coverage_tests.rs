@@ -331,6 +331,26 @@ async fn grouped_diagnostics_retains_failure_identity_and_redacts_bundle() {
 }
 
 #[tokio::test]
+async fn a_write_to_an_offline_host_reports_host_offline_without_submitting() {
+    let f = Fixture::paired().await;
+    f.access.host.lock().unwrap().host_online = false;
+    let submitted = f.access.host.lock().unwrap().commands_seen;
+    let outcome = f
+        .run(&[
+            "session",
+            "send",
+            "session-1",
+            "hello",
+            "--host",
+            "host-1",
+        ])
+        .await;
+    assert_eq!(outcome.exit, 5, "{outcome:?}");
+    assert_eq!(outcome.to_json()["error"]["code"], "host_offline");
+    assert_eq!(f.access.host.lock().unwrap().commands_seen, submitted);
+}
+
+#[tokio::test]
 async fn grouped_device_revoke_and_forget_distinguish_remote_and_local_state() {
     let f = Fixture::paired().await;
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {

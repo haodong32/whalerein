@@ -1670,6 +1670,33 @@ test('every managed lifecycle state has actionable localized text and no false c
   }
 })
 
+test('denied and expired approvals show terminal outcomes and retry through the manager action', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    for (const state of ['denied', 'expired']) {
+      runtime.setCloudState(state, { available: true, connected: false })
+      await runtime.refresh()
+      const tree = runtime.render()
+      const rendered = text(tree)
+      assert.match(rendered, new RegExp(runtime.locales.dictionaries.zh[`state_${state}`]), state)
+      assert.doesNotMatch(rendered, /打开浏览器/, `${state} has no live approval link`)
+      assert.equal(managedButton(runtime, '取消'), undefined)
+      let retries = 0
+      runtime.remote.whalerein.retry = () => {
+        retries += 1
+        return Promise.resolve({ ok: true, value: {} })
+      }
+      const retry = managedButton(runtime, '重试')
+      assert.ok(retry, `${state} offers a retry`)
+      await retry.props.onClick()
+      await runtime.settle()
+      assert.equal(retries, 1, `${state} retry requests exactly one fresh attempt`)
+    }
+  } finally {
+    await runtime.dispose()
+  }
+})
+
 test('action-required explains a known service error and falls back for unknown codes', async () => {
   const runtime = await createManagedRuntime()
   try {

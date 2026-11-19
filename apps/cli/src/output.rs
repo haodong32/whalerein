@@ -1462,6 +1462,39 @@ mod tests {
     }
 
     #[test]
+    fn explicit_unavailable_presence_stays_distinct_from_known_offline_and_old_cloud() {
+        let explicit: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-unavailable", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready", "presence":"unavailable"},
+            {"hostId":"host-offline", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready", "presence":"offline"}
+        ])).unwrap();
+        let unavailable = serde_json::to_value(&explicit[0]).unwrap();
+        let offline = serde_json::to_value(&explicit[1]).unwrap();
+        assert_eq!(unavailable["presence"], "unavailable");
+        assert_eq!(offline["presence"], "offline");
+        assert_ne!(unavailable["presence"], offline["presence"]);
+        let human = render_account_hosts(&explicit);
+        assert!(human.contains("host-unavailable\tComputer\tstatus unavailable"), "{human}");
+        assert!(human.contains("host-offline\tComputer\toffline"), "{human}");
+
+        // An older Cloud omits presence. Absence is not an explicit
+        // "unavailable": a known online/offline observation still renders.
+        let legacy: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-legacy-online", "displayName":"Computer", "enrolled":true, "online":true,
+             "observation":"known", "enrollmentState":"enrollment_ready"},
+            {"hostId":"host-legacy-offline", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready"}
+        ])).unwrap();
+        assert_eq!(legacy[0].presence, "");
+        let legacy_value = serde_json::to_value(&legacy[0]).unwrap();
+        assert!(legacy_value.get("presence").is_none(), "an omitted older-Cloud field stays omitted");
+        let legacy_human = render_account_hosts(&legacy);
+        assert!(legacy_human.contains("host-legacy-online\tComputer\tonline"), "{legacy_human}");
+        assert!(legacy_human.contains("host-legacy-offline\tComputer\toffline"), "{legacy_human}");
+    }
+
+    #[test]
     fn renders_host_presence_and_session_summaries() {
         let hosts = vec![HostInfo {
             host_id: "h-1".into(),

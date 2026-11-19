@@ -1172,8 +1172,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_device_flow_denial_and_cancellation_leave_no_active_session() {
-        for cancel in [false, true] {
+    async fn account_device_flow_denial_expiry_and_cancellation_leave_no_active_session() {
+        for outcome in ["denied", "expired", "cancelled"] {
+            let cancel = outcome == "cancelled";
+            let status = if outcome == "expired" { 410 } else { 401 };
             let server = MockServer::start(Arc::new(move |request| {
                 let origin = format!("http://{}", request.headers["host"]);
                 match (request.method.as_str(), request.path.as_str()) {
@@ -1184,7 +1186,7 @@ mod tests {
                             "expiresAt": unix_now() + 60, "intervalSeconds": 1,
                         }),
                     ),
-                    ("POST", "/api/v1/client/login/poll") => MockResponse::empty(401),
+                    ("POST", "/api/v1/client/login/poll") => MockResponse::empty(status),
                     _ => MockResponse::empty(404),
                 }
             }))
@@ -1201,15 +1203,74 @@ mod tests {
             if cancel {
                 login.abort();
                 assert!(matches!(login.await, Err(error) if error.is_cancelled()));
+            } else if outcome == "expired" {
+                assert!(matches!(login.await.unwrap(), Err(CoreError::Timeout)));
             } else {
                 assert!(matches!(login.await.unwrap(), Err(CoreError::Unauthorized)));
             }
-            assert!(AccountClient::local_status(&instance, &secrets)
-                .unwrap()
-                .is_none());
+            assert!(
+                AccountClient::local_status(&instance, &secrets)
+                    .unwrap()
+                    .is_none(),
+                "{outcome} issues no usable App session"
+            );
             assert!(instance.manifest().unwrap().unwrap().account.is_none());
             assert_eq!(load_state(&secrets).unwrap().attempt.is_some(), cancel);
+            assert!(AccountClient::local_logout_pending(&secrets).unwrap() == false);
+
         }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_approved_device_flow_succeeds_after_a_denied_attempt() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = polls.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            let origin = format!("http://{}", request.headers["host"]);
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/login") => MockResponse::json(
+                    200,
+                    &json!({
+                        "verificationUri": format!("{origin}/device"), "userCode": "ABCD",
+                        "expiresAt": unix_now() + 60, "intervalSeconds": 1,
+                    }),
+                ),
+                ("POST", "/api/v1/client/login/poll") => {
+                    if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        MockResponse::empty(401)
+                    } else {
+                        MockResponse::json(200, &json!({
+                            "state": "active", "sessionId": "fresh-session", "expiresAt": unix_now() + 600,
+                            "account": {"id":"acct","email":"","issuer":"https://login.whalerein.com/oidc","subject":"subject"},
+                            "workspace": {"id":"ws"},
+                        }))
+                    }
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(directory.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        assert!(matches!(
+            client.login(|_| {}).await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
+        // The same local instance and its device material survive and a fresh
+        // authorized attempt succeeds.
+        client.login(|_| {}).await.unwrap();
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("fresh-session")
+        );
+        assert!(instance.manifest().unwrap().unwrap().account.is_some());
+        assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
     }
 
     #[tokio::test]
@@ -1604,6 +1665,100 @@ mod tests {
         assert!(AccountClient::local_logout_pending(&secrets).unwrap());
         client.retry_remote_signout().await.unwrap();
         assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
+    }
+
+    #[tokio::test]
+    async fn account_sessions_list_and_revoke_exactly_the_intended_app_session() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorded = calls.clone();
+        let revocations = Arc::new(AtomicUsize::new(0));
+        let counted = revocations.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            recorded
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", request.method, request.path));
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/api/v1/client/sessions") => MockResponse::json(
+                    200,
+                    &json!({"sessions": [
+                        {"sessionId":"target-session","instanceId":"other-instance","expiresAt":unix_now() + 600,"state":"active"},
+                        {"sessionId":"other-session","instanceId":"third-instance","expiresAt":unix_now() + 600,"state":"active"}
+                    ]}),
+                ),
+                ("POST", "/api/v1/client/sessions/target-session/revoke") => {
+                    match counted.fetch_add(1, Ordering::SeqCst) {
+                        0 => MockResponse::json(202, &json!({"state":"pending"})),
+                        _ => MockResponse::json(200, &json!({"state":"revoked"})),
+                    }
+                }
+                ("POST", "/api/v1/client/sessions/current-session/revoke") => {
+                    MockResponse::json(200, &json!({"state":"revoked"}))
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(directory.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        client
+            .save(&AccountState {
+                active: Some(seed_session(&client, "current-session")),
+                ..AccountState::default()
+            })
+            .unwrap();
+
+        let sessions = client.sessions().await.unwrap();
+        let ids: Vec<&str> = sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["target-session", "other-session"]);
+        assert_eq!(sessions[0].state, AccountSessionState::Active);
+        assert_eq!(sessions[0].instance_id, "other-instance");
+
+        assert_eq!(
+            client.revoke_session("target-session").await.unwrap(),
+            AccountSessionState::Pending,
+            "a pending regional revocation is reported as pending"
+        );
+        // The caller's own session is untouched and remains usable.
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("current-session")
+        );
+        assert_eq!(
+            client.revoke_session("target-session").await.unwrap(),
+            AccountSessionState::Revoked,
+            "the enforced acknowledgement is distinguishable from pending"
+        );
+        assert_eq!(
+            client.revoke_session("current-session").await.unwrap(),
+            AccountSessionState::Revoked
+        );
+        assert!(AccountClient::local_session_id(&instance, &secrets)
+            .unwrap()
+            .is_none());
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.contains("target-session"))
+                .count(),
+            2,
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| !call.contains("other-session")),
+            "an unrelated App session is never revoked: {calls:?}"
+        );
+        assert!(matches!(
+            client.revoke_session("bad/id").await,
+            Err(CoreError::InvalidInput(_))
+        ));
     }
 
     #[test]

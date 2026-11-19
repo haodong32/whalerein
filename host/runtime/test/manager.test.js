@@ -1208,6 +1208,172 @@ test('credential recovery uses a fresh recovery authorization without re-enrolli
   }
 })
 
+test('an expired approval becomes terminal and retry creates a fresh intent without enrolling the old one', async () => {
+  const created = []
+  let polls = 0
+  const approval = (request, body) => ({
+    id: request,
+    state: 'approved',
+    authorization: {
+      authVersion: 'whalerein/v1/ext-auth-v1',
+      authorizationId: `auth-${request}`,
+      issuer: 'https://issuer.example',
+      audience: 'https://access.example',
+      purpose: 'host_enrollment',
+      workspaceId: 'ws-1',
+      regionId: 'r1',
+      operationId: `op-${request}`,
+      enrollmentRevision: '1',
+      hostId: body.hostId,
+      hostPublicKeys: [body.signingKey, body.noiseKey],
+      issuedAtUnixMs: NOW - 1000,
+      expiresAtUnixMs: NOW + 300_000,
+      nonce: b64(Buffer.alloc(16, 1)),
+      keyId: 'key-1',
+      signature: b64(Buffer.alloc(64, 1)),
+    },
+    route: { region: 'r1', accessOrigin: 'https://access.example', expiresAt: new Date(NOW + 300_000).toISOString() },
+  })
+  const f = fixture({
+    fetchOptions: {
+      onCreate: (body) => {
+        created.push({ request: `request-${created.length + 1}`, intentId: body.intentId })
+        const request = created.at(-1).request
+        return json(201, {
+          id: request,
+          state: 'pending',
+          approveUrl: `https://app.whalerein.com/approve/${request}`,
+          pollToken: `poll-${request}`,
+          expiresAt: new Date(NOW + 300_000).toISOString(),
+          pollAfterMs: 100,
+          service: 'official-production',
+          environment: 'production',
+          fingerprint: 'FP',
+          displayFingerprint: 'FP-DISPLAY',
+        })
+      },
+      onPoll: (body) => {
+        polls += 1
+        if (created.length === 1) return json(200, { id: created[0].request, state: 'expired' })
+        return json(200, approval(created.at(-1).request, body))
+      },
+    },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'expired')
+    assert.equal(f.manager.snapshot().error.code, 'expired')
+    assert.equal(created.length, 1)
+    assert.equal(polls, 1)
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/v1/enrollments/hosts')).length, 0,
+      'an expired authorization is never used for enrollment')
+
+    const retried = await f.manager.retry()
+    assert.equal(retried.state, 'awaiting_approval')
+    assert.equal(created.length, 2)
+    assert.notEqual(created[1].intentId, created[0].intentId, 'retry must mint a new intent')
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const enrollments = f.network.calls.filter((call) => call.url.endsWith('/v1/enrollments/hosts'))
+    assert.equal(enrollments.length, 1)
+    const body = JSON.parse(enrollments[0].options.body)
+    assert.equal(body.authorization.authorizationId, 'auth-request-2')
+    assert.equal(body.authorization.operationId, 'op-request-2')
+    assert.equal(f.manager.details().hostId, f.network.intent().hostId)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('pending and completed Host removal fence credential recovery', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    const hostId = registry.get(profileId).bindings.hostId
+    const authorization = {
+      authVersion: 'whalerein/v1/ext-auth-v1',
+      authorizationId: 'recovery-1',
+      issuer: 'https://issuer.example',
+      audience: 'https://access.example',
+      purpose: 'host_credential_recovery',
+      hostId,
+      issuedAtUnixMs: NOW - 1000,
+      expiresAtUnixMs: NOW + 60_000,
+      nonce: Buffer.alloc(16, 1).toString('base64url'),
+    }
+    for (const removal of ['removing', 'removed']) {
+      registry.setPending(profileId, { removal })
+      await assert.rejects(f.manager.recoverCredential({ authorization }),
+        (error) => error.code === 'removal_pending', removal)
+    }
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/credential')).length, 0,
+      'a fenced recovery sends no credential request')
+    registry.setPending(profileId, { removal: null })
+    const recovered = await f.manager.recoverCredential({ authorization })
+    assert.equal(recovered.state, 'connected')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('re-adding a removed Host uses fresh approval and does not restore the old grant', async () => {
+  let enrollments = 0
+  const f = fixture({
+    removalStatus: async () => ({ state: 'removed' }),
+    fetchOptions: {
+      onEnroll: (body) => {
+        enrollments += 1
+        return json(200, {
+          status: {
+            hostId: body.hostId,
+            enrollmentRevision: String(enrollments),
+            state: 'enrollment_pending',
+            hostSigningPublicKey: body.signingKey,
+            hostNoisePublicKey: body.noiseKey,
+          },
+          credential: {
+            hostId: body.hostId,
+            mqttUrl: 'mqtts://broker.example:8883',
+            username: `host:${body.hostId}`,
+            password: `credential-${enrollments}`,
+          },
+        })
+      },
+    },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const profileId = f.manager.snapshot().profileId
+    const oldHostId = f.manager.details().hostId
+    const oldToken = f.mqtts.at(-1).options.token
+    assert.equal(oldToken, 'credential-1')
+    await f.manager.remove()
+    await f.manager.reconcileRemoval()
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    assert.equal(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null)
+
+    const creates = f.network.calls.filter((call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')).length
+    const readd = await f.manager.startConnect()
+    assert.equal(readd.state, 'awaiting_approval')
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    assert.equal(f.network.calls.filter((call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')).length, creates + 1,
+      're-add requests a fresh approval instead of replaying the old intent')
+    assert.equal(enrollments, 2, 're-add enrolls once under the fresh approval')
+    assert.equal(f.mqtts.at(-1).options.token, 'credential-2')
+    assert.notEqual(f.mqtts.at(-1).options.token, oldToken, 'the replaced credential is not the old grant')
+    assert.equal(f.manager.details().hostId, oldHostId)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
 test('live transport disconnects and readiness are reflected in manager state', async () => {
   let handlers = null
   const access = {

@@ -47,6 +47,11 @@ type presenceEntry struct {
 	// yet, so publishing then would be acknowledged by the broker but never
 	// delivered.
 	ready bool
+	// seq is the broker notification sequence that established this entry. A
+	// snapshot reconciles at a boundary; an entry observed after that boundary
+	// describes newer broker state and must not be rolled back by a snapshot
+	// taken before it.
+	seq uint64
 }
 
 // Presence is the broker-derived online registry. It is seeded by ordered
@@ -159,7 +164,7 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 // SetDeviceOnline updates broker-derived device presence. An online -> offline
 // transition invokes the registered device-offline handler exactly once.
 func (p *Presence) SetDeviceOnline(deviceID string, online bool, at time.Time) {
-	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0, true)
+	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0, true, 0)
 }
 
 // SetDeviceOfflineHandler installs the callback for accepted device-offline
@@ -179,7 +184,7 @@ func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
 // cache currently holds is gone; a delayed will from a superseded connection
 // must never mark a newer connection offline. Lost disconnect notifications are
 // repaired by the next snapshot or by cache_ttl expiry instead.
-func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64, allowOnlineOverride bool) {
+func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64, allowOnlineOverride bool, seq uint64) {
 	if deviceID == "" {
 		return
 	}
@@ -215,7 +220,7 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			duplicate = true
 		}
 	}
-	next := presenceEntry{online: online, at: at, seenAt: now, connID: previous.connID}
+	next := presenceEntry{online: online, at: at, seenAt: now, connID: previous.connID, seq: seq}
 	if connID != 0 {
 		next.connID = connID
 	}
@@ -252,14 +257,14 @@ func (p *Presence) Expire(now time.Time) int {
 	expired := 0
 	for hostID, entry := range p.hosts {
 		if entry.online && p.stale(entry, now) {
-			p.hosts[hostID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID}
+			p.hosts[hostID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID, ready: entry.ready, seq: entry.seq}
 			expired++
 		}
 	}
 	var devices []string
 	for deviceID, entry := range p.devices {
 		if entry.online && p.stale(entry, now) {
-			p.devices[deviceID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID}
+			p.devices[deviceID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID, seq: entry.seq}
 			devices = append(devices, deviceID)
 			expired++
 		}
@@ -280,15 +285,28 @@ func (p *Presence) Expire(now time.Time) int {
 
 // MarkHostReady treats a ready host result as broker presence. HostReady is
 // published only after the Host subscribed to its request topic, so it is the
-// readiness confirmation a bare broker CONNECT lacks.
+// readiness confirmation a bare broker CONNECT lacks. at is the HostReady
+// publication timestamp. A delayed readiness proof from a superseded
+// connection predates the current connection observation and cannot confirm
+// the replacement; the replacement needs its own HostReady.
 func (p *Presence) MarkHostReady(hostID string, at time.Time) {
 	if hostID == "" {
 		return
 	}
 	now := p.now()
 	p.mu.Lock()
-	previous := p.hosts[hostID]
-	p.hosts[hostID] = presenceEntry{online: true, at: at, seenAt: now, connID: previous.connID, ready: true}
+	previous, exists := p.hosts[hostID]
+	if exists && at.Before(previous.at) {
+		p.logger.Debug("stale host readiness proof ignored", "conn", previous.connID)
+		p.mu.Unlock()
+		return
+	}
+	if exists {
+		p.hosts[hostID] = presenceEntry{online: true, at: previous.at, seenAt: now,
+			connID: previous.connID, ready: true, seq: previous.seq}
+	} else {
+		p.hosts[hostID] = presenceEntry{online: true, at: at, seenAt: now, ready: true}
+	}
 	p.mu.Unlock()
 	p.publishCounts()
 }
@@ -327,7 +345,7 @@ func (p *Presence) HandleNotification(notification *Notification) {
 				}
 				p.hosts[notification.HostID] = presenceEntry{
 					online: online, at: at, seenAt: p.now(),
-					connID: notification.ConnID, ready: ready,
+					connID: notification.ConnID, ready: ready, seq: notification.Sequence,
 				}
 			}
 		}
@@ -335,7 +353,7 @@ func (p *Presence) HandleNotification(notification *Notification) {
 		if notification.DeviceID != "" {
 			connID := notification.ConnID
 			p.mu.Unlock()
-			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true)
+			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true, notification.Sequence)
 			return
 		}
 	}
@@ -347,6 +365,14 @@ func (p *Presence) HandleNotification(notification *Notification) {
 // the returned sequence boundary. An online device that is absent or offline in
 // the snapshot lost its offline edge (a missed or startup-window notification)
 // and is emitted as offline here; this is the sequence-boundary self-heal.
+//
+// A live CONNECT notification can be applied before its reconciliation reply.
+// Such an entry carries a sequence after the snapshot boundary and describes
+// newer broker state than the snapshot, so it is retained instead of being
+// rolled back to the older connection. A replacement connection first seen in
+// a snapshot stays unready until its own HostReady: only the initial snapshot
+// of an Access session recovers readiness for connections that were already
+// established.
 func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 	p.mu.Lock()
 	hosts := make(map[string]presenceEntry, len(p.hosts))
@@ -363,24 +389,54 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		switch client.Kind {
 		case "host":
 			if client.HostID != "" {
-				// Initial snapshots recover established connections. Later
-				// reconciliation preserves readiness already known for an
-				// observed live connection that may still be subscribing.
-				ready := true
-				if previous, exists := p.hosts[client.HostID]; exists && previous.online && previous.connID == client.ConnID {
-					ready = previous.ready
+				previous, exists := p.hosts[client.HostID]
+				if exists && previous.seq > boundary {
+					previous.seenAt = now
+					hosts[client.HostID] = previous
+					continue
 				}
-				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: ready}
+				// Initial snapshots recover connections established before this
+				// Access session started. Any later replacement connection
+				// observed first in a snapshot must still prove subscription
+				// readiness with its own HostReady.
+				ready := true
+				if exists {
+					ready = previous.ready && (previous.connID == client.ConnID || previous.connID == 0)
+				}
+				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: ready, seq: boundary}
 			}
 		case "device":
 			if client.DeviceID != "" {
-				devices[client.DeviceID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID}
+				previous, exists := p.devices[client.DeviceID]
+				if exists && previous.seq > boundary {
+					previous.seenAt = now
+					devices[client.DeviceID] = previous
+					continue
+				}
+				devices[client.DeviceID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, seq: boundary}
 			}
 		}
+	}
+	// A newer live event may not have reached the snapshot yet. Keep it instead
+	// of treating the older snapshot as authoritative.
+	for hostID, previous := range p.hosts {
+		if previous.seq <= boundary {
+			continue
+		}
+		if _, ok := hosts[hostID]; ok {
+			continue
+		}
+		previous.seenAt = now
+		hosts[hostID] = previous
 	}
 	var recovered []string
 	for deviceID, previous := range p.devices {
 		if !previous.online {
+			continue
+		}
+		if previous.seq > boundary {
+			previous.seenAt = now
+			devices[deviceID] = previous
 			continue
 		}
 		next, ok := devices[deviceID]
@@ -444,7 +500,7 @@ func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
 		}
 		return
 	}
-	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0, false)
+	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0, false, 0)
 }
 
 // ConnectedCounts returns the last broker-derived online counts, excluding

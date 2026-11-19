@@ -77,6 +77,11 @@ test('service metadata validation accepts the frozen document and rejects redire
   assert.throws(() => validateServiceMetadata({ ...metadata, protocol: { version: 2, capabilities: ['host-enrollment-v1'] } }), (error) => error.code === 'protocol_version_incompatible')
   assert.throws(() => validateServiceMetadata({ ...metadata, protocol: { version: 1, capabilities: [] } }), (error) => error.code === 'unsupported_capability')
   assert.throws(() => validateServiceMetadata({ ...metadata, protocol: { version: 1, capabilities: 'x' } }), (error) => error.code === 'protocol_version_incompatible')
+  assert.throws(() => validateServiceMetadata({ ...metadata, protocol: { version: 0, capabilities: ['host-enrollment-v1'] } }), (error) => error.code === 'protocol_version_incompatible')
+  // An older Host reads a newer descriptor that advertises additional
+  // capabilities. Unknown extras are retained, not treated as a failure.
+  const extended = validateServiceMetadata({ ...metadata, protocol: { version: 1, capabilities: ['host-enrollment-v1', 'host-status', 'future-capability'] } })
+  assert.deepEqual(extended.capabilities, ['host-enrollment-v1', 'host-status', 'future-capability'])
   assert.throws(() => validateServiceMetadata({ ...metadata, approval: null }), (error) => error.code === 'protocol_version_incompatible')
   assert.throws(() => validateServiceMetadata({ ...metadata, approval: { ...metadata.approval, path: 'approve' } }), (error) => error.code === 'protocol_version_incompatible')
   assert.throws(() => validateServiceMetadata({ ...metadata, enrollment: {} }), (error) => error.code === 'protocol_version_incompatible')
