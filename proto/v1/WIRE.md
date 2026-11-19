@@ -482,6 +482,13 @@ constants, never free text:
 | `authority_advanced` | The authority revision moved; re-authorization is required. |
 | `authority_unavailable` | Authority could not be proven; the observation is closed rather than extended on stale state. |
 
+A Host-authored terminal close uses `EventPayload.watch_closed` with
+`{watch_id, session, reason}`. The reason is stable (`session_deleted`,
+`session_expired`, `unauthorized`). The client treats it exactly like an Access
+authority reason: terminal, no reconnect. The Host also writes the close to the
+device outbox so a disconnected client receives it on reconnect; a stale
+`watch_id` is ignored by a later observation.
+
 `GET /v1/hosts/{host_id}/authority` is the observation lease renewal. A live
 grant, session and enrollment answer `204`; an ended authority answers the
 documented `403`/`503` with `reason`. The encrypted observation stream is

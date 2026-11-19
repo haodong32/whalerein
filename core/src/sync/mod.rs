@@ -89,10 +89,17 @@ impl SyncService {
 ///
 /// Question-only observation uses this path, so a missing or failing local
 /// history cache cannot hide questions.
-pub(crate) fn open_update(
+/// One decrypted event is either a content update or a Host-authored terminal
+/// close for one observation.
+pub(crate) enum OpenedEvent {
+    Update(SessionUpdate),
+    Closed(whalerein_proto::WatchClosed),
+}
+
+pub(crate) fn open_event(
     channel: &SecureChannel,
     envelope: &EventEnvelope,
-) -> CoreResult<SessionUpdate> {
+) -> CoreResult<OpenedEvent> {
     if envelope.device_id != channel.device_id()
         || envelope.host_id != channel.host_id()
         || envelope.channel_id != channel.channel_id()
@@ -113,6 +120,18 @@ pub(crate) fn open_update(
     let bytes = channel.open_event(&aad, &frame)?;
     let payload = EventPayload::decode(bytes.as_slice())
         .map_err(|_| CoreError::Security("invalid typed payload".into()))?;
+    if let Some(closed) = payload.watch_closed {
+        if closed.watch_id.is_empty()
+            || closed.reason.is_empty()
+            || closed
+                .session
+                .as_ref()
+                .is_none_or(|key| key.host_id != channel.host_id() || key.session_id.is_empty())
+        {
+            return Err(CoreError::Security("invalid watch close scope".into()));
+        }
+        return Ok(OpenedEvent::Closed(closed));
+    }
     let update = payload
         .update
         .ok_or_else(|| CoreError::Security("missing typed update".into()))?;
@@ -124,7 +143,7 @@ pub(crate) fn open_update(
     {
         return Err(CoreError::Security("invalid typed update scope".into()));
     }
-    Ok(update)
+    Ok(OpenedEvent::Update(update))
 }
 
 fn validate_batch(batch: &HistoryBatch) -> CoreResult<()> {

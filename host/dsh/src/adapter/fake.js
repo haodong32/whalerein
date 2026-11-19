@@ -85,6 +85,20 @@ export class FakeDshAdapter extends DshAdapter {
     this.#questionOwners.clear()
   }
 
+  /** Test-only: remove a session so authoritative reads return not_found. */
+  deleteSession(sessionId) {
+    this.#sessions.delete(sessionId)
+  }
+
+  async readState(sessionId, options) {
+    if (!this.#sessions.has(sessionId)) {
+      const error = new Error('session not found')
+      error.code = 'not_found'
+      throw error
+    }
+    return super.readState(sessionId, options)
+  }
+
   describe() {
     return {
       mode: 'fake',

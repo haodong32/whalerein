@@ -565,3 +565,23 @@ test('session-observation/AC-08.a failed reconciliation is explicit and later co
   const refreshed=await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
   assert.deepEqual(refreshed.watches[0].questions.stamp,{observation_epoch:'epoch-one',revision:2})
 })
+
+test('a source that no longer has the session closes the watch with a terminal event', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const watch = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.access.published.length = 0
+  ctx.source.readState = async () => {
+    const error = new Error('session gone')
+    error.code = 'not_found'
+    throw error
+  }
+  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]))
+  assert.equal(ctx.access.published.length, 1, 'the terminal close must be delivered')
+  const outer = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
+  const payload = openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+  assert.equal(payload.watch_closed.watch_id, watch.watch_id)
+  assert.equal(payload.watch_closed.reason, 'session_deleted')
+  assert.deepEqual(payload.watch_closed.session, { host_id: 'h', session_id: 's' })
+  assert.deepEqual(ctx.events.observingDeviceIds(), [])
+})

@@ -15,6 +15,16 @@ const LEASE = 30000
 // A questions facet failure is contained unless it disproves authority over the
 // whole session. These codes stop every selected facet.
 const QUESTION_FATAL_CODES = new Set(['forbidden', 'unauthorized', 'not_found', 'expired', 'invalid_argument', 'protocol_version_incompatible'])
+// A source error that proves the session is gone ends every observation of it
+// with an explicit Host-authored close instead of leaving the client to time
+// out. Transient source failures stay warnings and are retried.
+const SESSION_FATAL_CODES = new Set(['forbidden', 'unauthorized', 'not_found', 'expired'])
+
+function sessionCloseReason(code) {
+  if (code === 'not_found') return 'session_deleted'
+  if (code === 'expired') return 'session_expired'
+  return 'unauthorized'
+}
 
 function validInterests(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -65,6 +75,49 @@ export class WatchedEvents {
       this.#sources.delete(watch.sessionId)
     }
   }
+  // End every observation of one Source with a Host-authored terminal event.
+  // The event is always written to the outbox and also published live when
+  // possible, so a disconnected client receives it on reconnect. A stale
+  // watch_id is ignored by a new observation.
+  #closeSession(sessionId, reason) {
+    const source = this.#sources.get(sessionId)
+    if (!source) return
+    for (const id of [...source.recipients]) {
+      const watch = this.#watches.get(id)
+      if (watch) this.#enqueueClosed(watch, reason)
+    }
+  }
+
+  #enqueueClosed(watch, reason) {
+    const channel = this.security.getChannel(watch.channelId)
+    if (!channel) return
+    const plaintext = this.codec.encode('whalerein.v1.EventPayload', {
+      watch_closed: {
+        watch_id: watch.id,
+        session: { host_id: this.hostId, session_id: watch.sessionId },
+        reason,
+      },
+    })
+    const at = this.now()
+    const sealed = this.security.sealEvent({
+      deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at,
+    })
+    if (!sealed) return
+    const envelope = this.codec.encode('whalerein.v1.EventEnvelope', {
+      host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId,
+      nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at,
+    })
+    // The durable copy is the delivery guarantee; the live copy is latency.
+    const row = this.store.addOutbox({
+      deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at,
+      perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100,
+      totalLimit: this.config.outboxTotalLimit ?? 1000,
+    })
+    if (row?.overflow) this.outboxSnapshotRequired.add(watch.deviceId)
+    if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
+    this.#remove(watch.id)
+  }
+
   #owned(deviceId, channelId, id) {
     this.#expire(); const watch = this.#watches.get(id)
     if (!watch || watch.deviceId !== deviceId || watch.channelId !== channelId) throw new PluginError('expired', 'watch unavailable')
@@ -178,6 +231,16 @@ export class WatchedEvents {
         if (signal?.aborted) throw new PluginError('unavailable')
         if (state.session?.session_id !== watch.sessionId || !state.history_head || !state.live_epoch) throw new PluginError('unavailable', 'source state unavailable')
         return state
+      }).catch(error => {
+        const code = errorCode(error)
+        if (SESSION_FATAL_CODES.has(code)) {
+          // An authoritative read proved the session is gone. Close every
+          // observation of it with a Host-authored event before the client's
+          // own lease or timeout hides the reason.
+          this.#closeSession(watch.sessionId, sessionCloseReason(code))
+          throw new PluginError('expired', 'session ended')
+        }
+        throw error
       })
       : null
     const questionsRead = interests.questions ? this.#readQuestionDescriptor(watch.sessionId, signal) : null
@@ -230,7 +293,12 @@ export class WatchedEvents {
         try { descriptor = await this.#readQuestionDescriptor(sessionId, source.controller.signal) }
         catch (error) {
           if (source.controller.signal.aborted || this.#sources.get(sessionId) !== source) return
-          descriptor = { availability: 'unavailable', code: errorCode(error) }
+          const code = errorCode(error)
+          if (SESSION_FATAL_CODES.has(code)) {
+            this.#closeSession(sessionId, sessionCloseReason(code))
+            return
+          }
+          descriptor = { availability: 'unavailable', code }
         }
         if (this.#sources.get(sessionId) !== source || source.controller.signal.aborted) return
         // A late old read can never regress the accepted observation.
@@ -271,7 +339,11 @@ export class WatchedEvents {
           if (state.session?.session_id !== sessionId) throw new PluginError('invalid_argument')
           state.session = { host_id: this.hostId, session_id: sessionId }
           this.#receive(sessionId, { session: { session_id: sessionId }, state })
-        }).catch(() => this.logger?.warn('source_state_unavailable', { code: 'unavailable' })).finally(() => { source.stateTask = null })
+        }).catch((error) => {
+          const code = errorCode(error)
+          if (SESSION_FATAL_CODES.has(code)) this.#closeSession(sessionId, sessionCloseReason(code))
+          else this.logger?.warn('source_state_unavailable', { code })
+        }).finally(() => { source.stateTask = null })
       }
       return
     }

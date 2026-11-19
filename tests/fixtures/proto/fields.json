@@ -1193,6 +1193,14 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionUpdate"
+        },
+        {
+          "json_name": "watchClosed",
+          "name": "watch_closed",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchClosed"
         }
       ]
     },
@@ -5053,6 +5061,32 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "WatchClosed": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },

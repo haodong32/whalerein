@@ -737,6 +737,18 @@ message EventEnvelope {
 // Encrypted event plaintext.
 message EventPayload {
   SessionUpdate update = 1;
+  // A Host-authored terminal end of one observation. Access cannot author this
+  // frame because the stream is end-to-end encrypted; the Host sends it when
+  // the source no longer has the session.
+  WatchClosed watch_closed = 2;
+}
+
+// Host-side terminal close. reason is a stable string; a client treats every
+// non-empty reason as terminal and never reconnects.
+message WatchClosed {
+  string watch_id = 1;
+  SessionKey session = 2;
+  string reason = 3;
 }
 
 // Opaque MQTT fragmentation. A packet starts with ASCII WRMQTT2 followed by

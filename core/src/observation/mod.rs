@@ -933,7 +933,17 @@ async fn conversation_loop(
                     return Ok(End::Reconnect);
                 };
                 queued.fetch_sub(envelope.ciphertext.len(), Ordering::SeqCst);
-                let update = crate::sync::open_update(&channel, &envelope)?;
+                let update = match crate::sync::open_event(&channel, &envelope)? {
+                    crate::sync::OpenedEvent::Update(update) => update,
+                    crate::sync::OpenedEvent::Closed(closed) => {
+                        if closed.watch_id == watch_id && closed.session.as_ref() == Some(&wire_key) {
+                            // A Host-authored terminal close is authoritative,
+                            // like an Access authority reason: never reconnect.
+                            return Err(CoreError::AuthorityClosed(closed.reason));
+                        }
+                        continue;
+                    }
+                };
                 if update.session.as_ref() != Some(&wire_key) || update.watch_id != watch_id {
                     continue;
                 }

@@ -2080,6 +2080,26 @@
                 "update": {
                   "type": "SessionUpdate",
                   "id": 1
+                },
+                "watch_closed": {
+                  "type": "WatchClosed",
+                  "id": 2
+                }
+              }
+            },
+            "WatchClosed": {
+              "fields": {
+                "watch_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "session": {
+                  "type": "SessionKey",
+                  "id": 2
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 3
                 }
               }
             },
