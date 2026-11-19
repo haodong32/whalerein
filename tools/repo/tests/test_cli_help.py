@@ -76,6 +76,10 @@ def test_test_help_describes_real_targets_and_prerequisites(capsys):
         ["test", "core", "--simulator", "target"],
         ["test", "protocol-http", "--coverage"],
         ["test", "ios-integration", "--parallel", "2"],
+        ["test", "ios-unit", "--shard", "1/4"],
+        ["test", "ios-ui", "--shard", "5/4"],
+        ["test", "ios-ui", "--shard", "1/1"],
+        ["test", "ios-ui", "--shard", "1/4", "--only", "case"],
         ["test", "host", "--list"],
         ["check", "protocol-vectors"],
         ["check", "--coverage"],
@@ -211,7 +215,8 @@ def test_ios_cli_preserves_target_selector_simulator_and_blocked_result(
     from repo.runners import ios
     from repo.verification import Invocation, VerificationError, run_suite
 
-    def ios_run(runner, root, target, *, case_filter, output, simulator, list_only):
+    def ios_run(runner, root, target, *, case_filter, output, simulator, list_only, shard):
+        assert shard is None
         assert (target, case_filter, output, simulator) == (
             "ios-ui",
             "case",

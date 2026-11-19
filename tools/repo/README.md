@@ -356,6 +356,10 @@ for the CI smoke selection. Bare test selects registered unit targets only.
 | `--parallel N` | Linux integration targets | 1–8 independent hash shards, default 1; incompatible with `--list`. |
 | `--integration-timeout SECONDS` | Linux integration targets | Positive run deadline covering preparation through execution, defaults to 7200 seconds. |
 | `--simulator UDID` | iOS targets | Exact Simulator device UDID. |
+| `--shard INDEX/COUNT` | `ios-ui` | Run a 1-based shard of the sorted XCTest inventory, with 2–8 shards. Incompatible with `--only`. |
+
+Run different iOS shards on separate simulators or runners. Cover all shards of
+one revision and one test plan to verify the full UI suite.
 
 `--parallel N` preserves the selected case set and distributes cases by a stable
 CRC32 of each pytest node ID. Each shard has its own runtime and result export.

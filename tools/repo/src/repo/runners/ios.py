@@ -287,7 +287,10 @@ def _build(ctx, runner, root, captured, plan, destination):
                 runner,
                 ["bash", "apps/mobile-bindings/scripts/build-xcframework.sh"],
                 source,
-                env={"WHALEREIN_MOBILE_SOURCE": captured.fingerprint},
+                env={
+                    "WHALEREIN_MOBILE_SOURCE": captured.fingerprint,
+                    "WHALEREIN_MOBILE_SIMULATOR_ONLY": "1",
+                },
             )
             if not binding.ok:
                 raise VerificationError("mobile-bindings-build-failed")
@@ -342,7 +345,7 @@ def _build(ctx, runner, root, captured, plan, destination):
     return pristine, revision
 
 
-def _run_platform(ctx, runner, root, target, simulator):
+def _run_platform(ctx, runner, root, target, simulator, shard):
     if sys.platform != "darwin":
         raise VerificationError("requires-macos", 3)
     plan = PLANS[target]
@@ -400,6 +403,18 @@ def _run_platform(ctx, runner, root, target, simulator):
             ]
             if len(selected) != len(SMOKE_CASES):
                 raise VerificationError("incomplete-ios-smoke-inventory")
+        if shard is not None:
+            ctx.record_artifact(
+                "xctest-inventory",
+                {
+                    "count": len(inventory),
+                    "sha256": hashlib.sha256("\n".join(sorted(inventory)).encode()).hexdigest(),
+                },
+            )
+            index, count = shard
+            selected = selected[index - 1 :: count]
+            if not selected:
+                raise VerificationError("empty-ios-ui-shard", 2)
         if not selected:
             if inventory:
                 raise VerificationError("unmatched-case-filter", 2)
@@ -451,7 +466,7 @@ def _run_platform(ctx, runner, root, target, simulator):
     bundle = ctx.run_directory / "native.xcresult"
     only_cases = (
         [f"-only-testing:{identifier}" for identifier in selected]
-        if ctx.invocation.case_filter or target == "ios-ui-smoke"
+        if ctx.invocation.case_filter or target == "ios-ui-smoke" or shard is not None
         else []
     )
     with ctx.phase("execution"):
@@ -535,6 +550,7 @@ def run_ios(
     simulator=None,
     *,
     list_only=False,
+    shard=None,
 ):
     ci = os.environ.get("GITHUB_ACTIONS") == "true"
     return run_suite(
@@ -545,9 +561,9 @@ def run_ios(
             case_filter=case_filter,
             output=output,
             timeout=3600,
-            configuration={"list_only": list_only},
+            configuration={"list_only": list_only, "shard": shard},
         ),
-        lambda ctx: _run_platform(ctx, runner, root, target, simulator),
+        lambda ctx: _run_platform(ctx, runner, root, target, simulator, shard),
     )
 
 

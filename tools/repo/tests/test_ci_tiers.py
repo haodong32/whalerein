@@ -1,5 +1,6 @@
 """Execute workflow decision scripts to guard timing tiers and failure gates."""
 
+import json
 import os
 import re
 import shutil
@@ -50,7 +51,7 @@ def test_ordinary_pr_never_checks_out_or_builds_ios(tmp_path, action, label):
         LABEL=label,
     )
     assert code == 0
-    assert outputs == {"build": "false"}
+    assert outputs == {"build": "false", "matrix": '{"include":[]}'}
 
 
 def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
@@ -70,6 +71,30 @@ def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
     )
     assert code == 0
     assert outputs["build"] == "true"
+    jobs = json.loads(outputs["matrix"])["include"]
+    assert [(job["target"], job["shard"]) for job in jobs] == [
+        ("ios-unit", ""),
+        ("ios-ui", "1/4"),
+        ("ios-ui", "2/4"),
+        ("ios-ui", "3/4"),
+        ("ios-ui", "4/4"),
+    ]
+    assert len({job["name"] for job in jobs}) == len(jobs)
+
+
+@pytest.mark.parametrize(
+    ("suite", "targets"), [("unit", ["ios-unit"]), ("smoke", ["ios-unit", "ios-ui-smoke"])]
+)
+def test_ios_dispatch_respects_selected_suite(tmp_path, suite, targets):
+    code, outputs = execute(
+        tmp_path,
+        "ios.yml",
+        "Compare the tested revision",
+        EVENT="workflow_dispatch",
+        SUITE=suite,
+    )
+    assert code == 0
+    assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == targets
 
 
 @pytest.mark.parametrize("label,expected", [("run-integration", "true"), ("run-full-ci", "false")])
