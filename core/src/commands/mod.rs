@@ -232,8 +232,11 @@ impl CommandService {
             encode_frame(&frame),
         );
         request.trace_id = self.access.trace_id().to_owned();
+        // This field is the encoded HTTPS result bound, not the raw logical
+        // envelope; Access converts it back to a raw ciphertext allowance.
         request.transport = Some(RequestTransportMetadata {
-            result_max_bytes: self.transport.envelope_bytes,
+            result_max_bytes: crate::access::http::https_body_limit(self.transport.envelope_bytes)
+                as u64,
             grant_generation: 0,
             revocation_generation: 0,
         });
@@ -368,8 +371,11 @@ impl CommandService {
             body,
         );
         request.trace_id = self.access.trace_id().to_owned();
+        // This field is the encoded HTTPS result bound, not the raw logical
+        // envelope; Access converts it back to a raw ciphertext allowance.
         request.transport = Some(RequestTransportMetadata {
-            result_max_bytes: self.transport.envelope_bytes,
+            result_max_bytes: crate::access::http::https_body_limit(self.transport.envelope_bytes)
+                as u64,
             grant_generation: 0,
             revocation_generation: 0,
         });
@@ -2420,9 +2426,13 @@ mod host_tests {
         assert_eq!(requests.len(), MAX_SUBMIT_ATTEMPTS as usize);
         assert!(!requests[0].command_id.is_empty());
         for request in requests.iter() {
+            // The wire field is the encoded HTTPS result bound, not the raw
+            // logical envelope. Access converts it back to a raw allowance.
             assert_eq!(
                 request.transport.as_ref().unwrap().result_max_bytes,
-                crate::access::transport::TransportBudget::default().envelope_bytes
+                crate::access::http::https_body_limit(
+                    crate::access::transport::TransportBudget::default().envelope_bytes
+                ) as u64
             );
             assert_eq!(request.transport.as_ref().unwrap().grant_generation, 0);
             assert!(
