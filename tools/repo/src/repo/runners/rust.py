@@ -2,6 +2,7 @@
 
 import json
 import re
+import tempfile
 import tomllib
 
 from ..diagnostics import sanitize
@@ -196,30 +197,27 @@ def measure(project, runner):
     if not probe.ok:
         result.error = "cargo llvm-cov is unavailable: " + (probe.tail(300) or "unknown error")
         return result
-    # Drop execution counts between packages/runs, but retain instrumented
-    # compilation outputs. --no-clean prevents llvm-cov from discarding them again.
-    cleaned = runner.run(
-        ["cargo", "llvm-cov", "clean", "--workspace", "--profraw-only"],
-        project.root,
-        timeout=60,
-        quiet=True,
-    )
-    if not cleaned.ok:
-        result.error = "Could not reset stale Rust coverage artifacts: " + cleaned.tail(500)
-        return result
-    run = runner.run(
-        [
-            "cargo",
-            "llvm-cov",
-            "--no-clean",
-            "--package",
-            project.name,
-            "--json",
-            "--summary-only",
-        ],
-        project.root,
-        timeout=1800,
-    )
+    # llvm-cov scans its build directory for executables. A fresh directory
+    # keeps cached binaries and other Cargo configurations out of the report.
+    with tempfile.TemporaryDirectory(prefix="whalerein-rust-cover-") as target:
+        run = runner.run(
+            [
+                "cargo",
+                "llvm-cov",
+                "--package",
+                project.name,
+                "--json",
+                "--summary-only",
+                "--",
+                "--test-threads=1",
+            ],
+            project.root,
+            env={
+                "CARGO_LLVM_COV_TARGET_DIR": target,
+                "CARGO_LLVM_COV_BUILD_DIR": target,
+            },
+            timeout=1800,
+        )
     if not run.ok:
         failures = sorted(
             set(

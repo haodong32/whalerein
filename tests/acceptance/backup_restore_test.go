@@ -47,34 +47,8 @@ func TestBackupRestoreCannotResurrectGrantOrDuplicateCommand(t *testing.T) {
 		_, _ = s.db.Exec(context.Background(), "DELETE FROM requests WHERE request_id IN ($1,$2)", commandRequest, inFlightRequest)
 	})
 
-	scratch := strings.ReplaceAll(uniqueID("whalerein_restore"), "-", "_")
-	create := exec.Command("docker", "exec", s.postgresContainer, "createdb", "-U", "postgres", scratch)
-	if output, err := create.CombinedOutput(); err != nil {
-		t.Fatalf("create scratch database: %v (%s)", err, output)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("docker", "exec", s.postgresContainer, "dropdb", "-U", "postgres", "--force", scratch).Run()
-	})
-
-	dump, err := exec.Command("docker", "exec", s.postgresContainer, "pg_dump", "-U", "postgres", "-Fc", "whalerein_dev").Output()
-	if err != nil {
-		t.Fatalf("pg_dump: %v", err)
-	}
-	if len(dump) == 0 {
-		t.Fatal("pg_dump produced no bytes")
-	}
-	restore := exec.Command("docker", "exec", "-i", s.postgresContainer, "pg_restore", "-U", "postgres", "-d", scratch, "--no-owner", "--no-privileges")
-	restore.Stdin = bytes.NewReader(dump)
-	if output, err := restore.CombinedOutput(); err != nil {
-		t.Fatalf("pg_restore: %v (%s)", err, output)
-	}
-
+	restored, _ := scratchRestore(t, s)
 	ctx := context.Background()
-	restored, err := pgxpool.New(ctx, databaseURLFor(scratch))
-	if err != nil {
-		t.Fatalf("open restored database: %v", err)
-	}
-	t.Cleanup(restored.Close)
 
 	// The hazard: an untouched restore still authorizes the old device and
 	// still contains the completed command record.
@@ -143,4 +117,37 @@ func TestBackupRestoreCannotResurrectGrantOrDuplicateCommand(t *testing.T) {
 		uniqueID("accept-restore-duplicate"), s.hostID, s.devices[0], commandID); err == nil {
 		t.Fatal("restored command record allowed a duplicate command id")
 	}
+}
+
+func scratchRestore(t *testing.T, s *stack) (*pgxpool.Pool, string) {
+	t.Helper()
+	scratch := strings.ReplaceAll(uniqueID("whalerein_restore"), "-", "_")
+	create := exec.Command("docker", "exec", s.postgresContainer, "createdb", "-U", "postgres", scratch)
+	if output, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("create scratch database: %v (%s)", err, output)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "exec", s.postgresContainer, "dropdb", "-U", "postgres", "--force", scratch).Run()
+	})
+
+	dump, err := exec.Command("docker", "exec", s.postgresContainer, "pg_dump", "-U", "postgres", "-Fc", s.db.Config().ConnConfig.Database).Output()
+	if err != nil {
+		t.Fatalf("pg_dump: %v", err)
+	}
+	if len(dump) == 0 {
+		t.Fatal("pg_dump produced no bytes")
+	}
+	restore := exec.Command("docker", "exec", "-i", s.postgresContainer, "pg_restore", "-U", "postgres", "-d", scratch, "--no-owner", "--no-privileges")
+	restore.Stdin = bytes.NewReader(dump)
+	if output, err := restore.CombinedOutput(); err != nil {
+		t.Fatalf("pg_restore: %v (%s)", err, output)
+	}
+
+	ctx := context.Background()
+	restored, err := pgxpool.New(ctx, databaseURLFor(scratch))
+	if err != nil {
+		t.Fatalf("open restored database: %v", err)
+	}
+	t.Cleanup(restored.Close)
+	return restored, scratch
 }
