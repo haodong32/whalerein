@@ -40,6 +40,9 @@ pub struct AccessError {
     pub code: Option<ErrorCode>,
     /// Sanitized message. Never contains request bodies.
     pub message: String,
+    /// Stable authority reason from Access. A non-empty reason is terminal for
+    /// a long-lived observation; an empty reason keeps the ErrorCode behavior.
+    pub reason: String,
 }
 
 impl AccessError {
@@ -49,6 +52,7 @@ impl AccessError {
             status: None,
             code: None,
             message: message.into(),
+            reason: String::new(),
         }
     }
 
@@ -58,6 +62,7 @@ impl AccessError {
             status: None,
             code: None,
             message: "Access connection failed".into(),
+            reason: String::new(),
         }
     }
 
@@ -71,6 +76,7 @@ impl AccessError {
             status: None,
             code: None,
             message: message.into(),
+            reason: String::new(),
         }
     }
 
@@ -80,6 +86,7 @@ impl AccessError {
             status: None,
             code: None,
             message: "request timed out".into(),
+            reason: String::new(),
         }
     }
 
@@ -270,6 +277,7 @@ impl AccessClient {
                 status: Some(401),
                 code: None,
                 message: "Cloud App session ended".into(),
+                reason: "session_revoked".into(),
             });
         };
         if current
@@ -586,18 +594,20 @@ async fn parse_error_response(response: reqwest::Response) -> AccessError {
     let status = response.status();
     let bytes = response.bytes().await.unwrap_or_default();
     let parsed = serde_json::from_slice::<ErrorResponse>(&bytes).ok();
-    let (code, message) = match parsed {
+    let (code, message, reason) = match parsed {
         Some(error) => (
             ErrorCode::try_from(error.code).ok(),
             sanitize_message(error.message),
+            error.reason,
         ),
-        None => (None, default_status_message(status)),
+        None => (None, default_status_message(status), String::new()),
     };
     AccessError {
         kind: AccessErrorKind::Http,
         status: Some(status.as_u16()),
         code: code.or_else(|| status_to_error_code(status)),
         message,
+        reason,
     }
 }
 
@@ -1026,7 +1036,8 @@ mod transport_tests {
             kind: AccessErrorKind::Http,
             status: Some(500),
             code: None,
-            message: "x".into()
+            message: "x".into(),
+            reason: String::new()
         }
         .is_retryable_transport());
     }

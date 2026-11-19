@@ -792,6 +792,8 @@ fn a_scope_denial_ends_a_watch_instead_of_reconnecting() {
         message: "forbidden".into(),
     }));
     assert!(watch_fatal(&CoreError::Unauthorized));
+    // An explicit authority close is terminal even when the transport is up.
+    assert!(watch_fatal(&CoreError::AuthorityClosed("host_removed".into())));
     // A transport-shaped failure remains reconnectable.
     assert!(!watch_fatal(&CoreError::Unavailable("mqtt down".into())));
     assert!(!watch_fatal(&CoreError::Timeout));

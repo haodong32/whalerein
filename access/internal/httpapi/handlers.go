@@ -492,6 +492,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		Message:   info.message,
 		TraceId:   trace,
 		RequestId: requestID,
+		Reason:    info.reason,
 	})
 }
 

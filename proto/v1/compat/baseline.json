@@ -1121,6 +1121,13 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },

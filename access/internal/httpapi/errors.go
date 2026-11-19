@@ -28,6 +28,7 @@ type errorInfo struct {
 	status  int
 	code    whalereinv1.ErrorCode
 	message string
+	reason  string
 }
 
 func classify(err error) errorInfo {
@@ -36,79 +37,86 @@ func classify(err error) errorInfo {
 		// The field name is schema-defined. The submitted enum name or value is
 		// client input and is deliberately not echoed.
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible,
-			"protocol version incompatible: unsupported value for " + enumErr.Field}
+			"protocol version incompatible: unsupported value for " + enumErr.Field, ""}
 	}
 	switch {
 	case err == nil:
 		return errorInfo{status: http.StatusOK, code: whalereinv1.ErrorCode_error_code_unspecified}
 	case errors.Is(err, errRouteNotFound):
-		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "route not found"}
+		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "route not found", ""}
 	case errors.Is(err, errMethod):
-		return errorInfo{http.StatusMethodNotAllowed, whalereinv1.ErrorCode_invalid_argument, "method not allowed"}
+		return errorInfo{http.StatusMethodNotAllowed, whalereinv1.ErrorCode_invalid_argument, "method not allowed", ""}
 	case errors.Is(err, errBodyTooLarge):
-		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "request body too large"}
+		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "request body too large", ""}
 	case errors.Is(err, errUnsupportedMediaType):
-		return errorInfo{http.StatusUnsupportedMediaType, whalereinv1.ErrorCode_invalid_argument, "content type must be application/json"}
+		return errorInfo{http.StatusUnsupportedMediaType, whalereinv1.ErrorCode_invalid_argument, "content type must be application/json", ""}
 	case errors.Is(err, errInvalidPagination):
-		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid pagination parameters; limit is 1-500 and offset is 0-1000000"}
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid pagination parameters; limit is 1-500 and offset is 0-1000000", ""}
 	case errors.Is(err, errInvalidBody):
-		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "request body is not valid JSON for this endpoint"}
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "request body is not valid JSON for this endpoint", ""}
 	case errors.Is(err, errMissingAuth), errors.Is(err, auth.ErrUnauthorized), errors.Is(err, pairing.ErrUnauthorized), errors.Is(err, errInternalToken):
-		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized"}
+		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized", ""}
+	case authorityDenial(err) != nil:
+		denial := authorityDenial(err)
+		code := whalereinv1.ErrorCode_forbidden
+		if denial.StatusCode == http.StatusServiceUnavailable {
+			code = whalereinv1.ErrorCode_unavailable
+		}
+		return errorInfo{denial.StatusCode, code, "forbidden", denial.Reason}
 	case errors.Is(err, auth.ErrForbidden), errors.Is(err, pairing.ErrHostRejected):
-		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden"}
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden", ""}
 	case errors.Is(err, errAuthorizationExpired):
-		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "authorization expired"}
+		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "authorization expired", ""}
 	case errors.Is(err, errExternalNotConfigured):
 		// The route exists in every build, so a deployment that did not enable
 		// external account mode answers with an explicit capability error
 		// instead of a 404 that looks like a mistyped path.
 		return errorInfo{http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability,
-			"external account mode is not configured on this Access deployment"}
+			"external account mode is not configured on this Access deployment", ""}
 	case errors.Is(err, errAuthorizationRefused):
-		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization refused"}
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization refused", ""}
 	case errors.Is(err, errOperationConflict):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "operation conflict"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "operation conflict", ""}
 	case errors.Is(err, auth.ErrBadRequest), errors.Is(err, pairing.ErrInvalidClaim), errors.Is(err, requests.ErrInvalidRequest):
-		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid argument"}
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid argument", ""}
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, pairing.ErrHostNotFound), errors.Is(err, requests.ErrNotFound), errors.Is(err, store.ErrNotFound):
-		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "not found"}
+		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "not found", ""}
 	case errors.Is(err, pairing.ErrPairingCommittedUnconfirmed):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unconfirmed, "committed pairing Host confirmation unknown"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unconfirmed, "committed pairing Host confirmation unknown", ""}
 	case errors.Is(err, pairing.ErrPairingCommittedUnavailable):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unavailable, "committed pairing is no longer available"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_committed_unavailable, "committed pairing is no longer available", ""}
 	case errors.Is(err, pairing.ErrPairingFenced):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_fenced, "pairing intent invalidated"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_pairing_fenced, "pairing intent invalidated", ""}
 	case errors.Is(err, pairing.ErrTokenUsed):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing token already used"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing token already used", ""}
 	case errors.Is(err, pairing.ErrTokenExpired):
-		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "pairing token expired"}
+		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "pairing token expired", ""}
 	case errors.Is(err, pairing.ErrFailureBudget):
-		return errorInfo{http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited, "pairing token failure budget exhausted"}
+		return errorInfo{http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited, "pairing token failure budget exhausted", ""}
 	case errors.Is(err, pairing.ErrHostOffline), errors.Is(err, pairing.ErrHostUnavailable), errors.Is(err, auth.ErrUnavailable), errors.Is(err, requests.ErrUnavailable):
-		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "service unavailable"}
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "service unavailable", ""}
 	case errors.Is(err, pairing.ErrClaimRequired):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing HELLO is required before FINISH"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "pairing HELLO is required before FINISH", ""}
 	case errors.Is(err, pairing.ErrClaimBusy):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "another claim on this invitation is in progress"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "another claim on this invitation is in progress", ""}
 	case errors.Is(err, pairing.ErrProtocolVersion), errors.Is(err, requests.ErrProtocolVersion):
-		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible, "protocol version incompatible"}
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible, "protocol version incompatible", ""}
 	case errors.Is(err, requests.ErrDigestMismatch):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_payload_digest_mismatch, "payload digest mismatch"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_payload_digest_mismatch, "payload digest mismatch", ""}
 	case errors.Is(err, requests.ErrConflict), errors.Is(err, store.ErrConflict):
-		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "conflict"}
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "conflict", ""}
 	case errors.Is(err, requests.ErrExpired), errors.Is(err, auth.ErrSignatureExpired):
-		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "request expired"}
+		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "request expired", ""}
 	case errors.Is(err, requests.ErrForbidden), errors.Is(err, requests.ErrResultMismatch), errors.Is(err, requests.ErrInvalidResult):
-		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden"}
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden", ""}
 	case errors.Is(err, context.Canceled):
-		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "request canceled"}
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "request canceled", ""}
 	case errors.Is(err, context.DeadlineExceeded):
-		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "request timed out"}
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "request timed out", ""}
 	case errors.Is(err, pairing.ErrInternal):
-		return errorInfo{http.StatusInternalServerError, whalereinv1.ErrorCode_internal, "internal error"}
+		return errorInfo{http.StatusInternalServerError, whalereinv1.ErrorCode_internal, "internal error", ""}
 	default:
-		return errorInfo{http.StatusInternalServerError, whalereinv1.ErrorCode_internal, "internal error"}
+		return errorInfo{http.StatusInternalServerError, whalereinv1.ErrorCode_internal, "internal error", ""}
 	}
 }
 
@@ -117,4 +125,14 @@ func codeName(code whalereinv1.ErrorCode) string {
 		return name
 	}
 	return "internal"
+}
+
+// authorityDenial extracts the specific reason for an ended authority. A
+// generic forbidden condition keeps an empty reason and its old mapping.
+func authorityDenial(err error) *auth.AuthorityDenial {
+	var denial *auth.AuthorityDenial
+	if errors.As(err, &denial) {
+		return denial
+	}
+	return nil
 }

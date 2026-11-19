@@ -247,6 +247,10 @@
                 "request_id": {
                   "type": "string",
                   "id": 4
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 5
                 }
               }
             },

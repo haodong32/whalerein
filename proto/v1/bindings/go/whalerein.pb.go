@@ -1604,11 +1604,16 @@ func (x *HostResult) GetChannelId() string {
 }
 
 type ErrorResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Code          ErrorCode              `protobuf:"varint,1,opt,name=code,proto3,enum=whalerein.v1.ErrorCode" json:"code,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	TraceId       string                 `protobuf:"bytes,3,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	RequestId     string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Code      ErrorCode              `protobuf:"varint,1,opt,name=code,proto3,enum=whalerein.v1.ErrorCode" json:"code,omitempty"`
+	Message   string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	TraceId   string                 `protobuf:"bytes,3,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
+	RequestId string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Stable authority reason for a denied long-lived observation. A client
+	// treats these as terminal and does not reconnect; an empty reason keeps the
+	// generic ErrorCode behavior. Values are the documented authority reasons,
+	// not free text.
+	Reason        string `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1667,6 +1672,13 @@ func (x *ErrorResponse) GetTraceId() string {
 func (x *ErrorResponse) GetRequestId() string {
 	if x != nil {
 		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ErrorResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
 	}
 	return ""
 }
@@ -10822,13 +10834,14 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x14completed_at_unix_ms\x18\v \x01(\x03R\x11completedAtUnixMs\x12)\n" +
 	"\x10protocol_version\x18\f \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
-	"channel_id\x18\r \x01(\tR\tchannelId\"\x90\x01\n" +
+	"channel_id\x18\r \x01(\tR\tchannelId\"\xa8\x01\n" +
 	"\rErrorResponse\x12+\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x17.whalerein.v1.ErrorCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x19\n" +
 	"\btrace_id\x18\x03 \x01(\tR\atraceId\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x04 \x01(\tR\trequestId\"\xaf\x01\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId\x12\x16\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\"\xaf\x01\n" +
 	"\x0eRequestReceipt\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x122\n" +

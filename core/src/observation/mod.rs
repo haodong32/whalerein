@@ -63,6 +63,7 @@ fn watch_fatal(error: &CoreError) -> bool {
         error,
         CoreError::Revoked
             | CoreError::RevokedRetentionUnverified
+            | CoreError::AuthorityClosed(_)
             | CoreError::NotPaired
             | CoreError::FingerprintMismatch { .. }
             | CoreError::Unsupported

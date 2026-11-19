@@ -24,6 +24,8 @@ pub enum CoreError {
     AuthorizationExpired,
     #[error("device is revoked")]
     Revoked,
+    #[error("authorization ended: {0}")]
+    AuthorityClosed(String),
     #[error(
         "device is revoked; unable to verify whether unconfirmed command or pairing identities were retained"
     )]
@@ -106,6 +108,7 @@ impl CoreError {
             Self::AuthenticationRequired => "authentication_required",
             Self::AuthorizationExpired => "authorization_expired",
             Self::Revoked | Self::RevokedRetentionUnverified => "revoked",
+            Self::AuthorityClosed(_) => "authority_closed",
             Self::HostOffline => "host_offline",
             Self::HostRejected => "rejected",
             Self::Timeout => "timeout",
@@ -178,6 +181,7 @@ impl CoreError {
             | Self::AuthorizationExpired
             | Self::Revoked
             | Self::RevokedRetentionUnverified
+            | Self::AuthorityClosed(_)
             | Self::NotPaired => 4,
             Self::HostOffline | Self::Unavailable(_) => 5,
             Self::HostRejected => 6,
@@ -223,6 +227,7 @@ impl CoreError {
             | Self::AuthorizationExpired
             | Self::Revoked
             | Self::RevokedRetentionUnverified
+            | Self::AuthorityClosed(_)
             | Self::NotPaired => "reauth",
             Self::HostOffline | Self::Unavailable(_) => "retry",
             Self::HostRejected => "refresh",
@@ -324,6 +329,13 @@ impl CoreError {
 
 impl From<AccessError> for CoreError {
     fn from(error: AccessError) -> Self {
+        // A specific authority reason is terminal for a long-lived observation:
+        // Access already decided that the grant/session/enrollment ended, so a
+        // retry cannot recover it. Keep the generic code path only for
+        // responses that do not carry a reason.
+        if !error.reason.is_empty() {
+            return Self::AuthorityClosed(error.reason);
+        }
         if let Some(code) = error.code {
             return Self::Api {
                 code: Some(code),
@@ -486,6 +498,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_authority_reason_is_terminal_and_keeps_the_reason() {
+        let error = CoreError::from(AccessError {
+            kind: AccessErrorKind::Http,
+            status: Some(403),
+            code: Some(ErrorCode::Forbidden),
+            message: "forbidden".into(),
+            reason: "host_removed".into(),
+        });
+        assert!(matches!(&error, CoreError::AuthorityClosed(reason) if reason == "host_removed"));
+        assert_eq!(error.code(), "authority_closed");
+        assert_eq!(error.action(), "reauth");
+        assert_eq!(error.exit_code(), 4);
+    }
+
+    #[test]
     fn exit_codes_follow_wire_contract() {
         let cases = [
             (ErrorCode::InvalidArgument, 2),
@@ -627,6 +654,7 @@ mod tests {
             status: Some(409),
             code: Some(ErrorCode::PayloadDigestMismatch),
             message: "mismatch".into(),
+            reason: String::new(),
         };
         assert!(matches!(
             CoreError::from(api),
@@ -640,6 +668,7 @@ mod tests {
             status: Some(404),
             code: None,
             message: "missing".into(),
+            reason: String::new(),
         };
         assert!(matches!(CoreError::from(not_found), CoreError::NotFound(_)));
         let transport = AccessError::transport("down");
@@ -774,6 +803,7 @@ mod exhaustive_tests {
                 status: Some(status),
                 code: None,
                 message: "x".into(),
+                reason: String::new(),
             };
             assert_eq!(CoreError::from(error).exit_code(), expected_exit);
         }
