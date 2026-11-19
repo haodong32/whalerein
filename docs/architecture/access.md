@@ -4,7 +4,7 @@
 
 Access is a Go monolith for transport authorization, pairing registration,
 durable request/status copies, and encrypted relay. PostgreSQL owns durable
-server state; the pinned Mosquitto 2.1.2 line (with the WhaleRein broker
+server state; the pinned Mosquitto 2.1.4 line (with the WhaleRein broker
 plugin) supplies transport and connection facts.
 
 Access implements Standalone mode in one process with installation-scoped resources.

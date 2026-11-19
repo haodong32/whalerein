@@ -3,7 +3,7 @@
 [Access](access.md) · [Deployment](../../deploy/README.md) · [Wire contract](../../proto/v1/WIRE.md)
 
 The line runs one active Access and one pinned Mosquitto per line, with
-PostgreSQL external and authoritative. Mosquitto 2.1.2 owns MQTT connections,
+PostgreSQL external and authoritative. Mosquitto 2.1.4 owns MQTT connections,
 topic routing and local access enforcement. A narrow native plugin
 (`deploy/mosquitto/plugin`) owns the boundary that Mosquitto does not provide:
 deferred credential validation against Access, revision-fenced policy,
@@ -13,7 +13,7 @@ connection snapshots and notifications, and targeted disconnects.
 
 Upstream Dynamic Security stores its own client credentials and roles. That
 would duplicate device credential authority in the broker and it cannot consult
-Access asynchronously during CONNECT. The Mosquitto 2.1.2 plugin interface
+Access asynchronously during CONNECT. The Mosquitto 2.1.4 plugin interface
 provides the required hooks directly:
 
 | Capability | Native interface |
@@ -123,10 +123,10 @@ There is no HTTP/REST presence fallback.
 
 ## Deployment
 
-The broker image builds Mosquitto 2.1.2 from the pinned upstream release and
+The broker image builds Mosquitto 2.1.4 from the pinned upstream release and
 the plugin against the matching headers (`deploy/docker/mosquitto.Dockerfile`).
 The build applies one narrow broker patch, kept in
-`deploy/mosquitto/patches/loop-tick-schedule.patch`: Mosquitto 2.1.2 resets its
+`deploy/mosquitto/patches/loop-tick-schedule.patch`: Mosquitto 2.1.4 resets its
 loop timeout each iteration but re-arms it only when a plugin tick callback is
 due, so a network event arriving between ticks can leave deferred CONNECT
 completion waiting for an unrelated event. The patch re-arms the loop for the

@@ -1,7 +1,7 @@
 # One-command WhaleRein server stack:
 #   docker compose -f deploy/compose/stack.yaml up -d --build
 #
-# Services: PostgreSQL 18, Mosquitto 2.1.2 (WhaleRein plugin), WhaleRein Access.
+# Services: PostgreSQL 18, Mosquitto 2.1.4 (WhaleRein plugin), WhaleRein Access.
 # The DSH plugin runs on the DSH host (not in this compose) and connects to the
 # published MQTT port. MQTT is plaintext on loopback and Access is HTTP.
 # Published ports are loopback-only.

@@ -9,7 +9,7 @@ FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791c
 # Build the pinned broker and install its matching headers for the product plug-in.
 FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS mosquitto-build
 USER root
-ARG MOSQUITTO_VERSION=2.1.2
+ARG MOSQUITTO_VERSION=2.1.4
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential ca-certificates curl libcjson-dev libedit-dev libsqlite3-dev libssl-dev patch && \
     rm -rf /var/lib/apt/lists/*
@@ -20,7 +20,8 @@ RUN curl -fsSLo mosquitto.tar.gz \
 COPY deploy/mosquitto/patches /src/patches
 RUN cd "/src/mosquitto-${MOSQUITTO_VERSION}" && patch -p0 < /src/patches/loop-tick-schedule.patch
 RUN make -C /src/mosquitto-${MOSQUITTO_VERSION} WITH_TLS=yes WITH_WEBSOCKETS=no WITH_DOCS=no WITH_HTTP_API=no && \
-    make -C /src/mosquitto-${MOSQUITTO_VERSION} WITH_TLS=yes WITH_WEBSOCKETS=no WITH_DOCS=no WITH_HTTP_API=no install
+    make -C /src/mosquitto-${MOSQUITTO_VERSION} WITH_TLS=yes WITH_WEBSOCKETS=no WITH_DOCS=no WITH_HTTP_API=no install && \
+    cp -R "/src/mosquitto-${MOSQUITTO_VERSION}/include" /opt/mosquitto-include
 
 FROM rust AS rust-tools
 RUN --mount=type=bind,source=tools/repo/linux-rust-packages.txt,target=/tmp/linux-rust-packages.txt \
@@ -39,13 +40,13 @@ WORKDIR /workspace
 
 FROM vectors-builder AS services-builder
 COPY --from=go /usr/local/go /usr/local/go
-COPY --from=mosquitto-build /src/mosquitto-2.1.2/include /opt/mosquitto/include
+COPY --from=mosquitto-build /opt/mosquitto-include /opt/mosquitto/include
 RUN apt-get update && apt-get install -y --no-install-recommends python3 libcjson-dev && rm -rf /var/lib/apt/lists/*
 
 # Only the locked dependencies are part of the stable platform. The local
 # workspace package resolves back into the current read-only test view.
 FROM node AS node-dependencies
-RUN npm install --global pnpm@12.18.0
+RUN npm install --global pnpm@12.21.0
 WORKDIR /opt/whalerein-node
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY host/dsh/package.json host/dsh/package.json

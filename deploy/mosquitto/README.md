@@ -1,6 +1,6 @@
 # Mosquitto line
 
-The deployed line runs one Access process and one Mosquitto 2.1.2 broker with
+The deployed line runs one Access process and one Mosquitto 2.1.4 broker with
 the WhaleRein plugin in `plugin/`. PostgreSQL stays external and authoritative.
 See [the architecture](../../docs/architecture/mosquitto.md) for the policy,
 presence and failure contract.
@@ -24,7 +24,7 @@ The Compose stack builds the image from `deploy/docker/mosquitto.Dockerfile`:
 docker compose -f deploy/compose/stack.yaml up -d --build
 ```
 
-Native fixture (requires local Mosquitto 2.1.2 headers and broker binary):
+Native fixture (requires local Mosquitto 2.1.4 headers and broker binary):
 
 ```bash
 MOSQUITTO_INCLUDE=$(brew --prefix)/include \

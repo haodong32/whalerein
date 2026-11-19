@@ -80,7 +80,7 @@ jobs:
 
       - name: Set up pnpm
         if: matrix.kind == 'node'
-        run: npm install --global pnpm@12.18.0
+        run: npm install --global pnpm@12.21.0
 
       - name: Restore pnpm cache
         if: matrix.kind == 'node'
@@ -93,7 +93,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.13.8'
+          version: '0.13.9'
           python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
@@ -182,12 +182,12 @@ jobs:
           node-version: '26.13.1'
 
       - name: Set up pnpm
-        run: npm install --global pnpm@12.18.0
+        run: npm install --global pnpm@12.21.0
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.13.8'
+          version: '0.13.9'
           python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
@@ -239,7 +239,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: '0.13.8'
+          version: '0.13.9'
           python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock

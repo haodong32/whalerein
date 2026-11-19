@@ -155,7 +155,7 @@ def postgres(tmp_path_factory):
 
 
 class Broker:
-    """One disposable Mosquitto 2.1.2 broker per container, supervised across cases.
+    """One disposable Mosquitto 2.1.4 broker per container, supervised across cases.
 
     The broker is transport only: persistence is disabled, its plugin state is
     in memory, and the Access service account authenticates locally against the

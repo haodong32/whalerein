@@ -28,7 +28,7 @@ WhaleRein Core (Rust library)
 WhaleRein Access (Go monolith) ── PostgreSQL (five tables)
   │  MQTT 5
   ▼
-Mosquitto 2.1.2 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
+Mosquitto 2.1.4 ── WhaleRein for DSH plugin (Node.js) ── DSH / FakeDSH
 ```
 
 - `proto/v1/whalerein.proto` is the only wire contract. HTTPS uses proto3 JSON;
@@ -111,7 +111,7 @@ There is no second plugin to install.
 ## Prerequisites
 
 - CI toolchains: Rust 1.100.0 (via rustup), Go 1.27.4, Node.js 26.13.1 LTS,
-  pnpm 12.18.0, Python 3.15.2, and uv 0.13.8.
+  pnpm 12.21.0, Python 3.15.2, and uv 0.13.9.
 - Build tools: Git, Git LFS, Bash, a C/C++ compiler, protoc 36.2, and
   protoc-gen-go 1.36.12.
 - Local server stack: Docker with Compose. Integration tests: Docker with
