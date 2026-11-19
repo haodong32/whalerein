@@ -156,6 +156,54 @@
       "expect": {
         "requestId": "req-6"
       }
+    },
+    {
+      "id": "content-block-retired-tag-is-ignored",
+      "kind": "binary-decode",
+      "message": "whalerein.v1.ContentBlock",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "blockId": "b",
+        "text": {
+          "text": "x"
+        }
+      },
+      "hex": "0a016212030a01781a030a0163",
+      "expect": {
+        "blockId": "b",
+        "text": {
+          "text": "x"
+        }
+      }
+    },
+    {
+      "id": "content-block-retired-json-name-is-ignored",
+      "kind": "json-decode",
+      "message": "whalerein.v1.ContentBlock",
+      "languages": [
+        "rust",
+        "go",
+        "node"
+      ],
+      "json": {
+        "blockId": "b",
+        "toolCall": {
+          "callId": "c"
+        },
+        "text": {
+          "text": "x"
+        }
+      },
+      "expect": {
+        "blockId": "b",
+        "text": {
+          "text": "x"
+        }
+      }
     }
   ]
 }

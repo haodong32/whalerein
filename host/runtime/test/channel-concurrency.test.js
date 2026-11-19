@@ -26,7 +26,7 @@ test('a same-Device send and reply polling preserve the attached live Watch', as
   const send = await sender.command({ send_message: { session_id: 's1', text: 'fixture' } })
   assert.equal(send.status, 'succeeded')
   const messageId = send.response.command_accepted.message_id
-  const readReply = { read_message_reply: { session_id: 's1', message_id: messageId } }
+  const readReply = { read_message_reply: { session_id: 's1', submitted_message_id: messageId } }
   harness.adapter.readMessageReply = async () => ({ state: 'MESSAGE_REPLY_PENDING' })
   for (const seq of [1, 2]) {
     const read = await sender.query(readReply)
@@ -40,7 +40,7 @@ test('a same-Device send and reply polling preserve the attached live Watch', as
         block_id: 'fixture-block',
         first_seq: seq,
         last_seq: seq,
-        delta: { text: 'x' },
+        delta: { kind: 'BLOCK_KIND_TEXT', text: 'x' },
       },
     })
     const update = await waitFor(() => watcher.bufferedEvents

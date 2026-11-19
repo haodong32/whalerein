@@ -3,10 +3,49 @@
 Start with the CLI error code and Diagnostic ID. Search Access/plugin logs by
 that ID as `trace_id`; masked request/device IDs differ between services.
 
-Add `--verbose` to include client configuration, request, and connection stages
-on stderr. Add `--json` to capture diagnostic events as individual JSON lines
-and command results on stdout. For configuration errors, use `configuration_failed`
-and its `code` to identify the failing stage.
+Add `--verbose` to include client configuration, request, connection, history,
+send-recovery and attachment-download stages on stderr. Add `--json` to capture
+diagnostic events as individual JSON lines and one command result on stdout. For
+configuration errors, use `configuration_failed` and its `code` to identify the
+failing stage.
+
+## Verbose history, send and download workflow
+
+Keep the two streams separate: stdout is the machine result (or watch events),
+stderr is diagnostics. Both carry the same `trace_id`.
+
+```sh
+whalerein --verbose --json session history <session-id> > page.json 2> history.log
+whalerein --verbose --json session send <session-id> "Hello" > send.json 2> send.log
+whalerein --verbose --json session download <reference> --host <host> --session <id> --to ./downloads > save.json 2> download.log
+```
+
+History stages are `history_page`, `history_projection` and
+`history_continuation`. Send stages are `send_reply_confirmed`, `send_input` and
+`send_reply_read`. Download stages are `download_open`, `download_admission`,
+`download_part`, `download_verify`, `download_commit` and `download_cancel`. A
+`snapshot_required` history stage means the cut, projection or continuation
+changed: restart with `session history` and no continuation (or omit `--message`
+for a fresh reference). For send, `send_reply_read` may
+fail after `send_reply_confirmed`; the confirmation stands and the CLI prints the
+exact `session history --message` retry. Never resubmit the message.
+
+```sh
+jq -c 'select(.stage | startswith("history_") or startswith("send_") or startswith("download_"))' history.log
+jq '.data.source, .data.continuation' page.json
+jq '.data.reply, .data.read_error' send.json
+jq '.data.path, .data.sha256, .data.verified' save.json
+```
+
+Download progress is separate from diagnostics: in `--json` mode stderr carries
+one `{"event":"download_progress",...}` object per bounded update, and stdout
+stays one result envelope written after the verified commit. A failed download
+also emits a bounded warning `attachment_transfer` event without `--verbose`.
+
+Stage events carry only stage/outcome/stable code, counts and correlation IDs.
+They never include message or reasoning bodies, tool parameters, attachment
+contents or names, local paths, raw cursors or credentials. Diagnostic delivery
+is bounded and best effort so a slow stderr cannot change the command result.
 
 `whalerein doctor` reads local diagnostics; `whalerein host list` checks authorization
 and broker-derived presence. Export with `whalerein doctor --export <file>` after
@@ -23,6 +62,10 @@ review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnosti
 | Device revoked | Confirm Access rejected the stored token, then pair again. |
 | Command timeout/`unknown` | Reconcile the original command result; do not blindly repeat it with a new ID. |
 | Tail gap/stall | Check channel/cursor recovery; run `whalerein session watch <id>`. |
+| History continuation rejected | Restart with `session history <id>` and no `--continuation`; re-read `--cache` only when the cached view is known current. |
+| Send confirmation but no content | Keep the confirmation; run the printed `session history <id> --message <ref>`. Never resend the message. |
+| Attachment download fails | Keep existing destination files. Re-read the attachment row with `session history <id>` and retry a fresh download; add `--force` only to replace a colliding file and `--name` when the suggested name is unsafe. |
+| Reasoning missing | Pass `--show-reasoning`; the default hides reasoning without changing authorization. |
 | Approval rejected | Refresh pending approval state, digest, version and expiry. |
 | Large snapshot fails | Check peer capability, ACK ACLs and [transport/HTTP limits](../proto/v1/WIRE.md#transport-size-budget). |
 | Duplicate device names | Identify the obsolete device ID before revoking it. |

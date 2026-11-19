@@ -93,6 +93,8 @@ fn run() -> Result<usize, String> {
             "whalerein.v1.QuestionPage" => check::<proto::QuestionPage>(name,json,hex)?,
             "whalerein.v1.WatchSession" => check::<proto::WatchSession>(name,json,hex)?,
             "whalerein.v1.WatchReady" => check::<proto::WatchReady>(name,json,hex)?,
+            "whalerein.v1.HostReady" => check::<proto::HostReady>(name,json,hex)?,
+            "whalerein.v1.TransportFrame" => check::<proto::TransportFrame>(name,json,hex)?,
             other => return Err(format!("unsupported fixture message {other}")),
         }
         checked += 1;

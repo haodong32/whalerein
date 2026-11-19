@@ -106,8 +106,15 @@ function makeCtx(options = {}) {
       async events(request) {
         calls.events.push(request)
         if (options.failEvents) throw new Error('unavailable')
+        // The passive native page service serves hot and cold Sessions. The
+        // fixture mirrors that: a live Session's own events feed the page.
+        const sessionId = request.address?.sessionId
+        const liveSession = live.get(sessionId)
+        const sourceEvents = liveSession ? liveSession.events : coldEvents
         const before = request.beforeSeq
-        const eligible = coldEvents.filter((event) => before === undefined || event.seq < before)
+        const through = request.throughSeq
+        const eligible = sourceEvents.filter((event) =>
+          (through === undefined || event.seq <= through) && (before === undefined || event.seq < before))
         const page = eligible.slice(-Math.min(request.maxMessages ?? 10, 500))
         return {
           // Decoy: the public page is `records`, not `events`.
@@ -153,7 +160,7 @@ function makeCtx(options = {}) {
   return ctx
 }
 
-test('when live DSH sessions expose projections, listing and snapshots preserve the documented fields and report truncated history as incomplete', async () => {
+test('when live DSH sessions expose projections, listing and snapshots preserve the documented fields and complete history', async () => {
   const live = new Map()
   live.set('s1', makeLiveSession({
     events: [
@@ -218,10 +225,15 @@ test('when live DSH sessions expose projections, listing and snapshots preserve 
   assert.equal(liveSnapshot.events[1].kind, 'session_state')
   assert.equal(liveSnapshot.source, 'dsh')
 
-  const truncated = new RealDshAdapter({ ctx, config: { snapshotMaxEvents: 1 } })
-  await truncated.open()
-  assert.equal((await truncated.getSessionSnapshot('s1')).complete, false)
-  await truncated.close()
+  // The former 5,000-event tail truncation is removed: a passive snapshot is
+  // complete and never silently substitutes a retained tail for the log.
+  const full = new RealDshAdapter({ ctx, config: { snapshotMaxEvents: 1 } })
+  await full.open()
+  const fullSnapshot = await full.getSessionSnapshot('s1')
+  assert.equal(fullSnapshot.complete, true)
+  assert.equal(fullSnapshot.events.length, 2)
+  assert.equal(fullSnapshot.retained_from, 1)
+  await full.close()
 
   await adapter.close()
 })
@@ -598,22 +610,27 @@ test('when DSH emits assistant frames, the adapter forwards visible deltas and l
   const agent = { session: { id: 's1' } }
   const emit = frame => ctx.emit('agent/assistant-stream', { agent, frame: { attemptId: 'attempt-1', ...frame } })
   emit({ type: 'start', revision: 1, turn: 2, step: 3 })
-  emit({ type: 'chunk', revision: 2, index: 0, chunk: { type: 'text-delta', text: 'x' } })
-  emit({ type: 'chunk', revision: 3, index: 1, chunk: { type: 'tool-call-delta', argumentsDelta: 'fixture-argument' } })
-  emit({ type: 'end', revision: 4, outcome: { kind: 'committed', seq: 9 } })
+  emit({ type: 'chunk', revision: 2, index: 0, chunk: { type: 'text-delta', index: 0, text: 'x' } })
+  emit({ type: 'chunk', revision: 3, index: 1, chunk: { type: 'reasoning-delta', index: 1, text: 'why' } })
+  emit({ type: 'chunk', revision: 4, index: 2, chunk: { type: 'tool-call-delta', index: 2, id: 'call-1', argumentsDelta: 'fixture-argument' } })
+  emit({ type: 'end', revision: 5, outcome: { kind: 'committed', seq: 9 } })
+  // The tool-call frame carries no displayable live text and never crosses the
+  // seam; the committed message contributes its typed ToolActivity instead.
   assert.equal(seen.length, 4)
-  assert.equal(seen[1].data.text.length, 1)
+  assert.equal(seen[1].data.text, 'x')
+  assert.equal(seen[1].data.block_kind, 'BLOCK_KIND_TEXT')
+  assert.equal(seen[2].data.text, 'why')
+  assert.equal(seen[2].data.block_kind, 'BLOCK_KIND_REASONING')
   assert.equal(seen[1].type, 'assistant/preview')
   assert.equal(seen[1].ephemeral, true)
   assert.equal(seen[1].dshSeq, null)
-  assert.equal('text' in seen[2].data, false)
   assert.equal('argumentsDelta' in seen[2].data, false)
   assert.equal('committed_seq' in seen[3].data, false)
   ctx.emit('agent/assistant-stream', { agent: { session: { id: 's1' } }, frame: { attemptId: 'attempt-1', type: 'start', revision: 1, turn: 2, step: 3 } })
   assert.notEqual(seen[0].data.stream_id, seen[4].data.stream_id)
   assert.equal(seen[0].data.stream_id, seen[1].data.stream_id)
   await adapter.close()
-  emit({ type: 'start', revision: 5, turn: 2, step: 4 })
+  emit({ type: 'start', revision: 6, turn: 2, step: 4 })
   assert.equal(seen.length, 5)
 })
 
@@ -693,17 +710,22 @@ test('when diagnostics throw after an approval settles, a nested definitive erro
   }
 })
 
-test('when a live history tail is truncated, delta readers cannot skip the omitted range', async () => {
+test('a complete passive snapshot keeps appends in a forward read instead of fabricating a retained tail', async () => {
   const live = makeLiveSession({sessionId:'s1',events:[0,1].map(seq=>({seq,type:'user/message',time:seq,data:{text:''}}))})
   const ctx=makeCtx({live:new Map([['s1',live]])})
   const adapter=new RealDshAdapter({ctx,config:{snapshotMaxEvents:2}})
   await adapter.open()
   try {
     const baseline=await adapter.readHistory('s1',{snapshot:true})
+    assert.equal(baseline.complete,true)
     for(let seq=2;seq<6;seq++)live.events.push({seq,type:'user/message',time:seq,data:{text:''}})
     const snapshot=await adapter.getSessionSnapshot('s1')
-    assert.equal(snapshot.retained_from,4)
-    await assert.rejects(adapter.readHistory('s1',{after_cursor:baseline.batch.to_cursor}),error=>error.code==='snapshot_required')
+    assert.equal(snapshot.complete,true)
+    assert.equal(snapshot.events.length,6)
+    assert.equal(snapshot.retained_from,0)
+    const next=await adapter.readHistory('s1',{after_cursor:baseline.batch.to_cursor})
+    assert.equal(next.batch.changes.length,4)
+    assert.equal(next.complete,true)
   } finally {await adapter.close()}
 })
 
@@ -1484,6 +1506,42 @@ test('delegate mode claims no approval and still publishes an interrupt attempt 
     await adapter.interrupt('s1')
     assert.equal((await adapter.listApprovals('s1')).length, 0)
     assert.equal(seen.filter((update) => update.live?.ended?.outcome === 'INTERRUPTED').length, 1)
+  } finally {
+    await adapter.close()
+  }
+})
+
+test('real passive pages pin a cut and the same projection resolves an exact committed reference', async () => {
+  const events = [
+    { type: 'user/message', seq: 1, time: 1, data: { id: 'op-real', role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user', rpcId: 'op-real' } } },
+    { type: 'assistant/message', seq: 2, time: 2, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'answer' }], source: { kind: 'model' } } } },
+    { type: 'turn/end', seq: 3, time: 3, data: { running: false, reason: { kind: 'completed' } } },
+  ]
+  const live = makeLiveSession({ sessionId: 's', events })
+  const ctx = makeCtx({ live: new Map([['s', live]]) })
+  const adapter = new RealDshAdapter({ ctx, config: { hostId: 'host-1' } })
+  await adapter.open()
+  try {
+    const first = await adapter.readHistory('s', { page: {}, max_messages: 1 })
+    assert.equal(first.batch.changes.length, 1)
+    assert.equal(first.batch.changes[0].message.role, 'ASSISTANT')
+    assert.equal(first.complete, false)
+    assert.equal(ctx.calls.events.at(-1).throughSeq, 3)
+
+    const reply = await adapter.readMessageReply('s', 'op-real')
+    assert.equal(reply.state, 'MESSAGE_REPLY_COMMITTED')
+    const exact = await adapter.readHistory('s', { exact: reply.committed })
+    assert.equal(exact.batch.changes[0].message.message_id, reply.committed.message_id)
+    assert.equal(exact.batch.changes[0].message.blocks[0].text.text, 'answer')
+
+    // Appends do not enter the pinned traversal but do enter a fresh one.
+    live.events.push({ type: 'assistant/message', seq: 4, time: 4, data: { turn: 2, step: 1, message: { content: [{ type: 'text', text: 'later' }], source: { kind: 'model' } } } })
+    const fixed = await adapter.readHistory('s', { page: { before_cursor: first.continuation }, cut_cursor: first.cut_cursor })
+    assert.equal(fixed.cut_cursor, first.cut_cursor)
+    assert.deepEqual(fixed.batch.changes.map(change => change.message.blocks[0].text.text), ['hello'])
+    const fresh = await adapter.readHistory('s', { page: {}, max_messages: 1 })
+    assert.equal(fresh.batch.changes[0].message.blocks[0].text.text, 'later')
+    assert.notEqual(fresh.cut_cursor, first.cut_cursor)
   } finally {
     await adapter.close()
   }

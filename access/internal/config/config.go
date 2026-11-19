@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,6 +64,7 @@ type Config struct {
 	Revocation            RevocationConfig `yaml:"revocation"`
 	Presence              PresenceConfig   `yaml:"presence"`
 	Cleanup               CleanupConfig    `yaml:"cleanup"`
+	Transport             TransportConfig  `yaml:"transport"`
 	Protocol              ProtocolConfig   `yaml:"protocol"`
 	Log                   LogConfig        `yaml:"log"`
 }
@@ -195,6 +197,9 @@ type RequestConfig struct {
 	RetryInterval   Duration `yaml:"retry_interval"`
 	MaxAttempts     int      `yaml:"max_attempts"`
 	BatchSize       int      `yaml:"batch_size"`
+	// MaxResultBytes is the raw ciphertext cap retained for one encrypted
+	// result. The HTTP body budget separately bounds the encoded response.
+	MaxResultBytes int64 `yaml:"max_result_bytes"`
 }
 
 // RevocationConfig holds revocation acknowledgement wait time.
@@ -286,7 +291,8 @@ func Default() Config {
 			ReadTimeout:       Duration(30 * time.Second),
 			WriteTimeout:      Duration(30 * time.Second),
 			IdleTimeout:       Duration(60 * time.Second),
-			MaxBodyBytes:      24 << 20,
+			// Zero means "derive from the selected transport profile".
+			MaxBodyBytes: 0,
 		},
 		Pairing: PairingConfig{
 			InvitationTTL: Duration(10 * time.Minute),
@@ -301,6 +307,8 @@ func Default() Config {
 			RetryInterval:   Duration(10 * time.Second),
 			MaxAttempts:     5,
 			BatchSize:       50,
+			// Zero means "derive from the selected transport profile envelope".
+			MaxResultBytes: 0,
 		},
 		Revocation: RevocationConfig{AckTimeout: Duration(10 * time.Second)},
 		Presence:   PresenceConfig{CacheTTL: Duration(45 * time.Second)},
@@ -308,8 +316,9 @@ func Default() Config {
 			Interval:              Duration(time.Minute),
 			PairingTokenRetention: Duration(24 * time.Hour),
 		},
-		Protocol: ProtocolConfig{Version: 1},
-		Log:      LogConfig{Level: "info"},
+		Transport: TransportConfig{Profile: whalereinv1.DefaultTransportProfile},
+		Protocol:  ProtocolConfig{Version: 1},
+		Log:       LogConfig{Level: "info"},
 	}
 }
 
@@ -347,6 +356,14 @@ func Parse(raw []byte, lookup func(string) (string, bool)) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	effective, err := cfg.ResolveTransport()
+	if err != nil {
+		return Config{}, err
+	}
+	// Materialize derived bounds so every consumer sees the same numbers that
+	// the resolved transport profile requires.
+	cfg.Requests.MaxResultBytes = effective.ResultLimitBytes
+	cfg.HTTP.MaxBodyBytes = effective.HTTPBodyBytes
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -504,8 +521,17 @@ func (c Config) Validate() error {
 	if c.Internal.CallbackToken != "" && c.Internal.CallbackToken == c.AdminToken {
 		problems = append(problems, "internal.callback_token must differ from admin_token")
 	}
-	if c.HTTP.MaxBodyBytes <= 0 {
-		problems = append(problems, "http.max_body_bytes must be positive")
+	effectiveTransport, transportErr := c.ResolveTransport()
+	if transportErr != nil {
+		problems = append(problems, transportErr.Error())
+	} else if effectiveTransport.ResultLimitBytes <= 0 {
+		problems = append(problems, "requests.max_result_bytes must be positive")
+	}
+	if c.Requests.MaxResultBytes < 0 {
+		problems = append(problems, "requests.max_result_bytes must not be negative")
+	}
+	if c.HTTP.MaxBodyBytes < 0 {
+		problems = append(problems, "http.max_body_bytes must not be negative")
 	}
 	if c.HTTP.ReadHeaderTimeout.D() <= 0 || c.HTTP.ReadTimeout.D() <= 0 ||
 		c.HTTP.WriteTimeout.D() <= 0 || c.HTTP.IdleTimeout.D() <= 0 {
@@ -634,5 +660,6 @@ func (c Config) Redacted() map[string]any {
 		"admission_entries": c.Admission.MaxEntries,
 		"protocol_version":  c.Protocol.Version,
 		"log_level":         c.Log.Level,
+		"transport_profile": c.Transport.Profile,
 	}
 }

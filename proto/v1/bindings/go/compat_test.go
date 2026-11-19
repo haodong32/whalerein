@@ -62,6 +62,8 @@ func newMessage(t *testing.T, name string) proto.Message {
 		return &HostResult{}
 	case "whalerein.v1.RequestPayload":
 		return &RequestPayload{}
+	case "whalerein.v1.ContentBlock":
+		return &ContentBlock{}
 	default:
 		t.Fatalf("unsupported vector message %s", name)
 		return nil

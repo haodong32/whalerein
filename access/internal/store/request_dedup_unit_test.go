@@ -42,6 +42,11 @@ func requestFixtureRow(digest []byte) pgx.Row {
 		*d[24].(*bool) = false
 		*d[25].(**time.Time) = nil
 		*d[26].(*int) = 0
+		grant, revocation, deviceRevocation, resultLimit := int64(1), int64(1), int64(1), int64(16<<20)
+		*d[27].(**int64) = &grant
+		*d[28].(**int64) = &revocation
+		*d[29].(**int64) = &deviceRevocation
+		*d[30].(**int64) = &resultLimit
 	}}
 }
 func TestCreateRequestDeduplicatesOnlyWithinHostDeviceCommandAndDigest(t *testing.T) {
@@ -64,7 +69,7 @@ func TestCreateRequestDeduplicatesOnlyWithinHostDeviceCommandAndDigest(t *testin
 			query := func(_ context.Context, sql string, args ...any) pgx.Row {
 				calls++
 				if calls == 1 {
-					if !strings.Contains(sql, "ON CONFLICT (host_id, device_id, command_id)") || len(args) != 27 || args[1] != "host" || args[2] != "device" || args[3] != "command" {
+					if !strings.Contains(sql, "ON CONFLICT (host_id, device_id, command_id)") || len(args) != 31 || args[1] != "host" || args[2] != "device" || args[3] != "command" {
 						t.Fatal("insert did not preserve the dedupe scope")
 					}
 					switch tc.mode {
@@ -89,7 +94,7 @@ func TestCreateRequestDeduplicatesOnlyWithinHostDeviceCommandAndDigest(t *testin
 				}
 				return requestFixtureRow([]byte{1})
 			}
-			result, err := createRequest(context.Background(), query, Request{RequestID: "request", HostID: "host", DeviceID: "device", CommandID: "command", PayloadDigest: []byte{1}, Status: whalereinv1.OnlineStatus_received, ClientTransportVersion: 2})
+			result, err := createRequest(context.Background(), query, Request{RequestID: "request", HostID: "host", DeviceID: "device", CommandID: "command", PayloadDigest: []byte{1}, Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND, Status: whalereinv1.OnlineStatus_received, ClientTransportVersion: 2, Stamp: &GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 16 << 20}})
 			if !errors.Is(err, tc.wantErr) || result.Created != tc.created || result.DigestMismatch != tc.mismatch || calls != tc.queries {
 				t.Fatalf("err=%v created=%v mismatch=%v queries=%d", err, result.Created, result.DigestMismatch, calls)
 			}
@@ -110,7 +115,7 @@ func TestCreateReadOnlyRequestHasNoCommandDeduplication(t *testing.T) {
 			calls := 0
 			query := func(_ context.Context, sql string, args ...any) pgx.Row {
 				calls++
-				if strings.Contains(sql, "ON CONFLICT") || len(args) != 27 || args[3] != "" {
+				if strings.Contains(sql, "ON CONFLICT") || len(args) != 31 || args[3] != "" {
 					t.Fatal("read-only request was treated as a control")
 				}
 				if tc.scanErr != nil {

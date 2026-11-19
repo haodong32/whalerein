@@ -114,65 +114,6 @@ function eventKind(type) {
   return 'output'
 }
 
-// The native controller persists the submission identity as user source.rpcId.
-// Agent-loop step boundaries associate a consumed user message with the
-// resulting assistant attempt. Missing boundaries never prove a match.
-export function messageReplyEvidence(events, messageId) {
-  let step = null
-  let continuedTurn = null
-  let admitted = false
-  let ambiguous = false
-  for (const event of events) {
-    const data = event.data ?? {}
-    if (event.type === 'step/start') {
-      step = Number.isSafeInteger(data.turn) && Number.isSafeInteger(data.step)
-        ? { turn: data.turn, number: data.step, owned: false, other: false, reply: null }
-        : null
-    } else if (event.type === 'user/message' && data.source?.kind === 'user') {
-      if (data.source.rpcId === messageId) {
-        if (!step) return { state: 'MESSAGE_REPLY_UNCERTAIN' }
-        step.owned = true
-        admitted = true
-      } else if (step) {
-        step.other = true
-      }
-      if (step?.owned && step.other) ambiguous = true
-    } else if (event.type === 'assistant/message' && step && !step.other &&
-        (step.owned || continuedTurn === step.turn) &&
-        data.turn === step.turn && data.step === step.number && !data.interrupted &&
-        Number.isSafeInteger(event.dshSeq)) {
-      const content = Array.isArray(data.message?.content) ? data.message.content : []
-      const toolCall = content.some(block => block?.type === 'tool-call' || block?.type === 'toolCall')
-      const text = content.filter(block => block?.type === 'text' && typeof block.text === 'string')
-        .map(block => block.text).join('')
-      if (!toolCall && text) {
-        step.reply = {
-          state: 'MESSAGE_REPLY_COMMITTED',
-          attempt_id: String(event.dshSeq),
-          text: Array.from(text).slice(0, 32 * 1024).join(''),
-        }
-      }
-    } else if (event.type === 'step/end') {
-      if (step && data.turn === step.turn && data.step === step.number) {
-        if (!ambiguous && step.reply) return step.reply
-        continuedTurn = !step.other && (step.owned || continuedTurn === step.turn) ? step.turn : null
-      } else {
-        continuedTurn = null
-      }
-      step = null
-    } else if (event.type === 'turn/end') {
-      step = null
-      continuedTurn = null
-    }
-  }
-  if (ambiguous) return { state: 'MESSAGE_REPLY_UNCERTAIN' }
-  if (step && !step.other && (step.owned || continuedTurn === step.turn)) {
-    return { state: 'MESSAGE_REPLY_PENDING', active: true }
-  }
-  const waitingForNextStep = continuedTurn !== null
-  return { state: admitted && !waitingForNextStep ? 'MESSAGE_REPLY_UNCERTAIN' : 'MESSAGE_REPLY_PENDING' }
-}
-
 export class RealDshAdapter extends DshAdapter {
   #disposers = []
   #streamEpochs = new WeakMap()
@@ -387,6 +328,15 @@ export class RealDshAdapter extends DshAdapter {
       }
     }
     if (typeof controller?.fork === 'function') capabilities.push('session-fork')
+    // The passive history query service is the proven fixed-cut/page path. It
+    // is passive for hot and cold sessions and never activates the Session.
+    const pageApi = typeof controller?.events === 'function'
+    if (pageApi) capabilities.push('history-page', 'history-exact')
+    const attachmentService = this.#service('attachments')
+    if (pageApi && typeof attachmentService?.readImage === 'function' && typeof attachmentService?.readFileStream === 'function') {
+      capabilities.push('attachments')
+    }
+    if (pageApi && typeof controller?.prompt === 'function') capabilities.push('send-followup')
     return {
       mode: 'real',
       available: Boolean(controller || sessions),
@@ -932,20 +882,6 @@ export class RealDshAdapter extends DshAdapter {
         kind === 'approval' || kind === 'question' ? kind : 'other'))] }
   }
 
-  async readMessageReply(sessionId, messageId, signal) {
-    const snapshot = await this.getSessionSnapshot(sessionId, { signal })
-    const { active, ...reply } = messageReplyEvidence(snapshot.events, messageId)
-    if (active) {
-      const state = await this.readWaitState(sessionId, signal)
-      if (state.pendingInput.length) {
-        // The active attempt may have moved during the asynchronous input read.
-        const after = await this.getSessionSnapshot(sessionId, { signal })
-        if (after.cursor === snapshot.cursor) return { state: 'MESSAGE_REPLY_INPUT_REQUIRED' }
-      }
-    }
-    return reply
-  }
-
   async readWaitState(sessionId, signal) {
     const controller = this.#service('sessionController')
     if (!controller || typeof controller.state !== 'function') throw new AdapterError('unsupported_capability')
@@ -1116,7 +1052,119 @@ export class RealDshAdapter extends DshAdapter {
     if(signal?.aborted)throw new AdapterError('unavailable')
     const live=this.#service('sessions')?.get?.(sessionId)
     if(Number.isSafeInteger(live?.seq))return live.seq-1
-    return (await this.getSessionSnapshot(sessionId,{signal})).cursor
+    // Cold/passive: one bounded native page is enough to establish the cut.
+    // Never materialize the whole log just to learn the head position.
+    const page=await this.nativeEventsPage(sessionId,{maxMessages:1,signal})
+    return page.events.at(-1)?.dshSeq ?? -1
+  }
+
+  attachmentsAvailable() {
+    return this.describe().capabilities.includes('attachments')
+  }
+
+  // One passive, message-aligned backwards page from the proven native history
+  // query service. `throughSeq` pins the fixed cut; `beforeSeq` continues
+  // toward older history. It never activates a cold Session.
+  async nativeEventsPage(sessionId, { throughSeq, beforeSeq, maxMessages = 200, signal } = {}) {
+    const controller = this.#service('sessionController')
+    if (!controller || typeof controller.events !== 'function') {
+      throw new AdapterError('unsupported_capability', 'native history pages unavailable')
+    }
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    try {
+      const value = await controller.events({
+        address: { kind: 'session', sessionId },
+        ...(Number.isSafeInteger(throughSeq) ? { throughSeq } : {}),
+        ...(Number.isSafeInteger(beforeSeq) ? { beforeSeq } : {}),
+        maxMessages: Math.max(1, Math.min(500, maxMessages)),
+      }, signal ? AbortSignal.any([this.#signal(), signal]) : this.#signal())
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      const events = (Array.isArray(value?.records) ? value.records : [])
+        .map((record) => this.#normalizeEvent(sessionId, record?.event))
+        .filter(Boolean)
+        .sort((left, right) => left.dshSeq - right.dshSeq)
+      return { events, hasMore: value?.hasMore === true, cursor: value?.cursor ?? null }
+    } catch (error) {
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      throw toAdapterError(error)
+    }
+  }
+
+  // Exact hot ranges are cheap and bounded; cold windows reuse passive pages.
+  async nativeEventWindow(sessionId, seq, { signal, before = 256 } = {}) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    if (!Number.isSafeInteger(seq) || seq < 0) throw new AdapterError('invalid_argument')
+    try {
+      const live = this.#service('sessions')?.get?.(sessionId)
+      if (live && typeof live.snapshotEvents === 'function') {
+        const events = live.snapshotEvents(Math.max(0, seq - before + 1), seq + 1)
+        return events
+          .map((event) => this.#normalizeEvent(sessionId, event))
+          .filter((event) => Boolean(event) && event.dshSeq <= seq)
+      }
+      const page = await this.nativeEventsPage(sessionId, { throughSeq: seq, maxMessages: before, signal })
+      return page.events.filter((event) => event.dshSeq <= seq).slice(-before)
+    } catch (error) {
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      throw toAdapterError(error)
+    }
+  }
+
+  async nativeEventsRange(sessionId, fromSeq, toSeqExclusive, { signal } = {}) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    try {
+      const live = this.#service('sessions')?.get?.(sessionId)
+      if (live && typeof live.snapshotEvents === 'function') {
+        return live.snapshotEvents(fromSeq, toSeqExclusive)
+          .map((event) => this.#normalizeEvent(sessionId, event))
+          .filter((event) => Boolean(event) && event.dshSeq >= fromSeq && event.dshSeq < toSeqExclusive)
+          .sort((left, right) => left.dshSeq - right.dshSeq)
+      }
+    } catch (error) {
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      throw toAdapterError(error)
+    }
+    const events = []
+    let beforeSeq = toSeqExclusive
+    for (let page = 0; page < 8; page++) {
+      const value = await this.nativeEventsPage(sessionId, {
+        throughSeq: toSeqExclusive - 1,
+        beforeSeq: page === 0 ? undefined : beforeSeq,
+        maxMessages: 500,
+        signal,
+      })
+      events.unshift(...value.events)
+      if (!value.hasMore) break
+      const first = value.events[0]?.dshSeq
+      if (!Number.isSafeInteger(first) || first <= fromSeq) break
+      beforeSeq = first
+    }
+    return events.filter((event) => event.dshSeq >= fromSeq && event.dshSeq < toSeqExclusive)
+      .sort((left, right) => left.dshSeq - right.dshSeq)
+  }
+
+  // Image reads buffer the normalized representation; the reader defers this
+  // call until its first read so metadata is returned without touching bytes.
+  async nativeReadImage(ref, signal) {
+    const service = this.#service('attachments')
+    if (!service || typeof service.readImage !== 'function') throw new AdapterError('unsupported_capability')
+    try {
+      const stored = await service.readImage(ref, signal)
+      if (!(stored?.data instanceof Uint8Array)) throw new AdapterError('unavailable')
+      return stored.data
+    } catch (error) {
+      throw toAdapterError(error)
+    }
+  }
+
+  async nativeReadFileStream(ref, signal) {
+    const service = this.#service('attachments')
+    if (!service || typeof service.readFileStream !== 'function') throw new AdapterError('unsupported_capability')
+    try {
+      return await service.readFileStream(ref, signal)
+    } catch (error) {
+      throw toAdapterError(error)
+    }
   }
 
   async getSessionSnapshot(sessionId, {signal} = {}) {
@@ -1125,65 +1173,61 @@ export class RealDshAdapter extends DshAdapter {
         throw new AdapterError('invalid_argument', 'session id missing')
       }
       if (signal?.aborted) throw new AdapterError('unavailable')
+      const controller = this.#service('sessionController')
+      // The passive page API is the fixed-cut snapshot path. It is complete,
+      // bounded per call and does not truncate a long log to a tail window.
+      if (controller && typeof controller.events === 'function') {
+        return await this.#passiveSnapshot(sessionId, signal)
+      }
       const live = this.#service('sessions')?.get?.(sessionId)
       if (live && typeof live.snapshotEvents === 'function') {
-        const max = this.config.snapshotMaxEvents ?? 5000
         const all = live.snapshotEvents()
-        const retained = all.slice(-max)
-        const events = retained.map((event) => this.#normalizeEvent(sessionId, event))
-        const normalized = events.filter(Boolean)
+        const events = all.map((event) => this.#normalizeEvent(sessionId, event)).filter(Boolean)
         const summary = await this.#summaryFor(sessionId, signal)
         return {
           summary,
-          events: normalized,
+          events,
           cursor: all.at(-1)?.seq ?? -1,
-          retained_from: retained[0]?.seq ?? 0,
-          complete: all.length <= max,
+          retained_from: all[0]?.seq ?? 0,
+          complete: true,
           source: 'dsh',
         }
       }
-      return await this.#coldSnapshot(sessionId, signal)
+      throw new AdapterError('unsupported_capability', 'session snapshot unavailable')
     } catch (error) {
       throw toAdapterError(error)
     }
   }
 
-  async #coldSnapshot(sessionId, signal) {
+  async #passiveSnapshot(sessionId, signal) {
     const controller = this.#service('sessionController')
-    if (!controller || typeof controller.events !== 'function') {
-      throw new AdapterError('unsupported_capability', 'session snapshot unavailable')
-    }
-    const max = this.config.snapshotMaxEvents ?? 5000
     const records = []
+    const seen = new Set()
     let beforeSeq
     let complete = false
-    for (let page = 0; page < 100; page++) {
+    let cursor = null
+    for (let page = 0; page < 1000; page++) {
       if (signal?.aborted) throw new AdapterError('unavailable')
-      const value = await controller.events({
-        address: { kind: 'session', sessionId },
-        ...(beforeSeq === undefined ? {} : { beforeSeq }),
-        maxMessages: Math.min(500, Math.max(1, max - records.length)),
-      }, signal ? AbortSignal.any([this.#signal(),signal]) : this.#signal())
-      if (signal?.aborted) throw new AdapterError('unavailable')
-      const pageRecords = Array.isArray(value?.records) ? value.records : []
-      records.unshift(...pageRecords)
-      if (!value?.hasMore) {
-        complete = true
-        break
+      const value = await this.nativeEventsPage(sessionId, { beforeSeq, maxMessages: 500, signal })
+      for (const event of value.events) {
+        if (!Number.isSafeInteger(event.dshSeq) || seen.has(event.dshSeq)) continue
+        seen.add(event.dshSeq)
+        records.push(event)
       }
-      const first = pageRecords[0]?.event?.seq
-      if (first === undefined || first === beforeSeq || records.length >= max) break
+      if (Number.isSafeInteger(value.cursor)) cursor = value.cursor
+      if (!value.hasMore) { complete = true; break }
+      const first = value.events[0]?.dshSeq
+      if (!Number.isSafeInteger(first) || first === beforeSeq) break
       beforeSeq = first
     }
-    const events = records.slice(-max)
-    const normalized = events.map((record) => this.#normalizeEvent(sessionId, record.event)).filter(Boolean)
+    records.sort((left, right) => left.dshSeq - right.dshSeq)
     const summary = await this.#summaryFor(sessionId, signal)
     return {
       summary,
-      events: normalized,
-      cursor: events.at(-1)?.event?.seq ?? -1,
-      retained_from: events[0]?.event?.seq ?? 0,
-      complete: complete && records.length <= max,
+      events: records,
+      cursor: Number.isSafeInteger(cursor) ? cursor : records.at(-1)?.dshSeq ?? -1,
+      retained_from: records[0]?.dshSeq ?? 0,
+      complete,
       source: 'dsh',
     }
   }

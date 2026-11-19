@@ -125,6 +125,64 @@ enum QuestionAvailability {
 }
 
 // ---------------------------------------------------------------------------
+// Transport configuration and receive advertisements
+// ---------------------------------------------------------------------------
+
+// Shared packaged transport profile vocabulary. The executable defaults and
+// valid alternate profiles live in proto/v1/transport_profiles.json so Access,
+// Host and Core validate the same names and relations. A profile never changes
+// application protocol version 1.
+enum TransportProfile {
+  TRANSPORT_PROFILE_UNSPECIFIED = 0;
+  // 64 KiB packet, 60 KiB fragment payload, 16 MiB logical envelope.
+  TRANSPORT_PROFILE_DEFAULT = 1;
+  // Smaller deployment profile; see transport_profiles.json.
+  TRANSPORT_PROFILE_COMPACT = 2;
+  // Larger deployment profile; see transport_profiles.json.
+  TRANSPORT_PROFILE_ROOMY = 3;
+}
+
+// One validated set of encoded receive limits. All byte counts are encoded
+// bytes, never canonical content bytes. The fragment count is derived at
+// validation time and must cover envelope_bytes at the configured fragment
+// payload width.
+message TransportBudget {
+  uint32 packet_bytes = 1;
+  uint32 fragment_payload_bytes = 2;
+  uint32 fragment_count = 3;
+  uint64 envelope_bytes = 4;
+  uint32 bulk_concurrency = 5;
+  uint64 reserved_bytes = 6;
+  uint32 fragment_idle_timeout_ms = 7;
+  uint32 transfer_timeout_ms = 8;
+}
+
+// An event receive advertisement. It applies only to the authenticated
+// transport connection generation that carried it; a reconnect starts a new
+// generation, and a delayed or replayed advertisement can never update a newer
+// connection. Access registers the advertisement against the broker-derived
+// connection identity, and only receive information crosses this seam.
+message ReceiveAdvertisement {
+  TransportProfile profile = 1;
+  TransportBudget budget = 2;
+  uint64 connection_generation = 3;
+}
+
+// Device request metadata bound at submission. Access stores every value with
+// the admitted request; replay replaces none. Access validates the result bound
+// before forwarding, then requires exact equality of both durable revisions at
+// ciphertext release. Access never inspects the encrypted body.
+message RequestTransportMetadata {
+  // Validated maximum encoded HTTPS result bytes this request accepts.
+  uint64 result_max_bytes = 1;
+  // Access Host/device grant generation captured at submission.
+  uint64 grant_generation = 2;
+  // Access Host/device revocation generation captured at submission. A plain
+  // Host-scoped revoke bumps only this revision, so it must be fenced too.
+  uint64 revocation_generation = 3;
+}
+
+// ---------------------------------------------------------------------------
 // Host request / result envelopes
 // ---------------------------------------------------------------------------
 
@@ -155,6 +213,8 @@ message HostRequest {
   uint32 client_transport_version = 12;
   // Access receiver capability, set by Access before MQTT forwarding.
   uint32 relay_transport_version = 13;
+  // Device result bound and grant generation bound by Access at admission.
+  RequestTransportMetadata transport = 14;
 }
 
 message HostResult {
@@ -329,6 +389,8 @@ message HostReady {
   // The first key for a host is kept.
   bytes authorization_public_key = 3;
   uint32 transport_version = 4;
+  // Host receive limits for the authenticated broker connection generation.
+  ReceiveAdvertisement receive = 5;
 }
 
 // Host-scoped grant revocation. The host id and device id come from the URL.
@@ -357,6 +419,8 @@ message ChannelHello {
   uint32 protocol_version = 3;
   CapabilitySet capabilities = 4;
   string client_nonce = 5;
+  // Device receive limits for the channel this authenticated handshake creates.
+  ReceiveAdvertisement receive = 6;
 }
 
 // Noise payload for handshake message 2 (responder -> initiator).
@@ -366,6 +430,8 @@ message ChannelReady {
   uint32 protocol_version = 3;
   CapabilitySet capabilities = 4;
   string host_nonce = 5;
+  // Host receive limits for the channel this authenticated handshake creates.
+  ReceiveAdvertisement receive = 6;
 }
 
 // Noise payload for pairing message 1.
@@ -435,6 +501,10 @@ message RequestPayload {
     AnswerQuestion answer_question = 262;
     CancelQuestionAnswer cancel_question_answer = 263;
     ForkSession fork_session = 300;
+    // Authorized attachment reads over the existing encrypted query path.
+    OpenAttachment open_attachment = 320;
+    PullAttachment pull_attachment = 321;
+    CloseAttachment close_attachment = 322;
   }
 }
 
@@ -465,6 +535,11 @@ message ResponsePayload {
     QuestionBatch question_batch = 261;
     QuestionReceipt question_receipt = 262;
     QuestionCancelReceipt question_cancel_receipt = 263;
+    // Attachment read results; bytes never travel in conversation events or
+    // history.
+    OpenAttachmentResult open_attachment_result = 320;
+    AttachmentPart attachment_part = 321;
+    CloseAttachmentResult close_attachment_result = 322;
   }
   // Domain failure. HostResult.status carries the online status copy.
   ErrorCode error_code = 8;
@@ -768,6 +843,11 @@ message TransportFrame {
   bool rejected = 10;
   // Only true after the entire logical envelope passed integrity checks.
   bool complete = 11;
+  // Fragment payload width selected for this transfer. It must stay identical
+  // for every part and must not exceed the negotiated receive budget.
+  uint32 fragment_payload_bytes = 12;
+  // Named profile the selected width came from, for diagnostics and validation.
+  TransportProfile profile = 13;
 }
 
 // Normalized conversation domain. Sources interpret native identifiers; clients
@@ -777,6 +857,15 @@ message SourceCapabilities {
   bool history = 1; bool resumable_history = 2; bool live_text = 3;
   bool interrupt = 4; bool approvals = 5;
   repeated DeliveryMode delivery_modes = 6;
+  // Optional expanded conversation capabilities. Absent means unsupported and
+  // must be reported explicitly rather than simulated.
+  bool live_reasoning = 7;
+  bool tool_activity = 8;
+  bool conversation_notices = 9;
+  bool attachments = 10;
+  bool history_page = 11;
+  bool history_exact = 12;
+  bool send_followup = 13;
   bool model_selection = 200;
   bool pending_queue_read = 280; bool pending_queue_edit = 281;
   bool pending_queue_remove = 282; bool pending_queue_steer = 283;
@@ -786,40 +875,271 @@ message SourceCapabilities {
   bool session_fork = 300;
 }
 enum DeliveryMode { DELIVERY_MODE_UNSPECIFIED = 0; START_IF_IDLE = 1; ENQUEUE_AFTER_RUN = 2; STEER = 3; }
-enum MessageRole { MESSAGE_ROLE_UNSPECIFIED = 0; USER = 1; ASSISTANT = 2; TOOL = 3; NOTICE = 4; }
+// Committed authorship. UNSPECIFIED is invalid for a committed Message: a
+// missing or unknown native classification must be normalized to UNKNOWN so a
+// context body is never projected into the user lane.
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  USER = 1;
+  ASSISTANT = 2;
+  TOOL = 3;
+  NOTICE = 4;
+  // Recognized Source-generated context. It projects only a safe notice or
+  // omission and never a user body.
+  MESSAGE_ROLE_CONTEXT = 5;
+  // Missing, unrecognized or unmapped authorship. It projects only a safe
+  // omission and never a user body.
+  MESSAGE_ROLE_UNKNOWN = 6;
+}
 enum RunPhase { RUN_PHASE_UNSPECIFIED = 0; IDLE = 1; RUNNING = 2; STOPPING = 3; SOURCE_UNAVAILABLE = 4; }
 enum AttemptOutcome { ATTEMPT_OUTCOME_UNSPECIFIED = 0; COMMITTED = 1; ABANDONED = 2; INTERRUPTED = 3; ATTEMPT_FAILED = 4; }
 message AttemptRef { string live_epoch = 1; string attempt_id = 2; }
 message TextContent { string text = 1; }
-message ToolCallContent { string call_id = 1; string name = 2; string summary = 3; }
-message ToolResultContent { string call_id = 1; string text = 2; bool is_error = 3; }
-message NoticeContent { string category = 1; string text = 2; }
-message AttachmentContent { string media_type = 1; string name = 2; uint64 size = 3; bool available = 4; }
+// Displayable reasoning content. It is ordered alongside text blocks and keeps
+// the same committed block identity; a reasoning-disabled model emits none.
+message ReasoningContent { string text = 1; }
+// The checked kind of a live block. Delta append and full replacement carry
+// this kind so a reader never merges reasoning into an answer block or the
+// reverse.
+enum BlockKind {
+  BLOCK_KIND_UNSPECIFIED = 0;
+  BLOCK_KIND_TEXT = 1;
+  BLOCK_KIND_REASONING = 2;
+}
+message LiveBlockDelta { BlockKind kind = 1; string text = 2; }
+message LiveBlockReset { BlockKind kind = 1; string text = 2; }
+// Evidenced stages of one Source tool call, in ascending order. A stage is
+// present only when the adapter can prove it happened.
+enum ToolStage {
+  TOOL_STAGE_UNSPECIFIED = 0;
+  TOOL_STAGE_PREPARATION = 1;
+  TOOL_STAGE_EXECUTION = 2;
+  TOOL_STAGE_PROGRESS = 3;
+  TOOL_STAGE_SETTLEMENT = 4;
+}
+enum ToolOutcome {
+  TOOL_OUTCOME_UNSPECIFIED = 0;
+  TOOL_OUTCOME_SUCCEEDED = 1;
+  TOOL_OUTCOME_FAILED = 2;
+  TOOL_OUTCOME_INTERRUPTED = 3;
+  TOOL_OUTCOME_UNKNOWN = 4;
+}
+// Ordered displayable result content for a tool activity. Attachments carry
+// only an opaque occurrence reference, never bytes.
+message ToolResultPart {
+  oneof content { TextContent text = 1; AttachmentContent attachment = 2; }
+}
+// One Source tool call activity. call_id is stable and session-scoped across
+// live updates, committed history and combined history pages; Core merges
+// repeated occurrences by that identity without native correlation.
+message ToolActivity {
+  string call_id = 1;
+  repeated ToolStage stages = 2;
+  // Display-safe tool name.
+  string name = 3;
+  // Optional display-safe label or summary. Never raw arguments.
+  optional string summary = 4;
+  repeated ToolResultPart result = 5;
+  ToolOutcome outcome = 6;
+  // Optional display-safe progress summary; never raw arguments or output.
+  optional string progress = 7;
+  // Stable display-safe failure code when outcome is FAILED.
+  optional string failure_code = 8;
+}
+// Stable Source notice categories. The notice occupies its ordered block
+// position in the committed Message or live block sequence.
+enum NoticeCategory {
+  NOTICE_CATEGORY_UNSPECIFIED = 0;
+  NOTICE_CATEGORY_RETRY = 1;
+  NOTICE_CATEGORY_MAX_OUTPUT = 2;
+  NOTICE_CATEGORY_COMPACTION = 3;
+  NOTICE_CATEGORY_COMMAND = 4;
+  NOTICE_CATEGORY_CONTEXT = 5;
+  NOTICE_CATEGORY_OMISSION = 6;
+}
+// Known Source state. A state is present only when the Source established it.
+enum NoticeState {
+  NOTICE_STATE_UNSPECIFIED = 0;
+  NOTICE_STATE_SCHEDULED = 1;
+  NOTICE_STATE_STARTED = 2;
+  NOTICE_STATE_CANCELLED = 3;
+  NOTICE_STATE_COMPLETED = 4;
+  NOTICE_STATE_FAILED = 5;
+  NOTICE_STATE_REACHED = 6;
+}
+message NoticeContent {
+  NoticeCategory category = 1;
+  NoticeState state = 2;
+  // Optional Source-approved display summary. Never raw command arguments or
+  // compaction input.
+  optional string summary = 3;
+}
+message AttachmentContent {
+  string media_type = 1;
+  string name = 2;
+  uint64 size = 3;
+  bool available = 4;
+  // Opaque Source occurrence reference scoped to the committed session. It
+  // never carries bytes; a read requires the attachment query family.
+  string attachment_ref = 5;
+}
 message ContentBlock {
   string block_id = 1;
-  oneof content { TextContent text = 2; ToolCallContent tool_call = 3;
-    ToolResultContent tool_result = 4; NoticeContent notice = 5; AttachmentContent attachment = 6; }
+  // Tags 3 and 4 are the retired tool_call/tool_result shapes. They stay
+  // reserved so an old peer skips an unknown field instead of silently
+  // decoding the old message type; tool_activity uses a fresh tag.
+  reserved 3, 4;
+  reserved "tool_call", "tool_result";
+  oneof content {
+    TextContent text = 2;
+    ToolActivity tool_activity = 8;
+    NoticeContent notice = 5;
+    AttachmentContent attachment = 6;
+    ReasoningContent reasoning = 7;
+  }
 }
 message ConversationMessage {
-  string message_id = 1; MessageRole role = 2; repeated ContentBlock blocks = 3;
+  string message_id = 1;
+  MessageRole role = 2;
+  repeated ContentBlock blocks = 3;
   int64 authored_at_unix_ms = 4;
 }
 message MessageUpsert { ConversationMessage message = 1; AttemptRef origin = 2; }
 message HistoryBatch {
   string from_cursor = 1; string to_cursor = 2; string batch_id = 3;
   repeated MessageUpsert changes = 4;
+  // Content projection identity; cursor and batch namespaces are bound to it.
+  string projection_id = 5;
+}
+// Latest-first bounded page selection. Mutually exclusive with after_cursor,
+// exact and continuation.
+message HistoryPageSelection {
+  // Opaque position to start before. Empty starts at the most recent committed
+  // message at the fixed cut. Pages step toward older history.
+  string before_cursor = 1;
+}
+enum HistorySource {
+  HISTORY_SOURCE_UNSPECIFIED = 0;
+  HISTORY_SOURCE_ONLINE = 1;
+  HISTORY_SOURCE_CACHE = 2;
+}
+// Scoped canonical committed-message reference. The locator is opaque Source
+// evidence; the projection identity fences stale reads.
+message CommittedMessageRef {
+  SessionKey session = 1;
+  string message_id = 2;
+  string source_locator = 3;
+  string projection_id = 4;
 }
 message HistoryRead {
-  string session_id = 1; bool snapshot = 2;
-  string after_cursor = 3; string cut_cursor = 4;
-  uint32 max_bytes = 5; uint32 max_messages = 6;
+  string session_id = 1;
+  bool snapshot = 2;
+  // Forward traversal for synchronization. Mutually exclusive with page, exact
+  // and continuation. Empty means the origin for a forward read.
+  string after_cursor = 3;
+  string cut_cursor = 4;
+  uint32 max_bytes = 5;
+  uint32 max_messages = 6;
+  HistoryPageSelection page = 7;
+  CommittedMessageRef exact = 8;
+  // Core-owned opaque continuation returned by a previous page. It binds the
+  // validated scope, projection, fixed cut, next position and read source.
+  // Mutually exclusive with after_cursor, page and exact.
+  string continuation = 9;
+  // Requested source. UNSPECIFIED means online; CACHE is served locally by
+  // Core with the same selection semantics and never sent to a Host.
+  HistorySource source = 10;
 }
 message HistoryPage {
   SessionKey session = 1; HistoryBatch batch = 2;
   string cut_cursor = 3; bool complete = 4; bool snapshot = 5;
+  // Core-owned opaque continuation for the next page in the same direction.
+  // Empty means no further page exists at this fixed cut.
+  string continuation = 6;
+  // Active content projection identity for this page.
+  string projection_id = 7;
+  HistorySource source = 8;
 }
+// ---------------------------------------------------------------------------
+// Authorized attachment reads
+//
+// These payloads travel inside the existing encrypted query/result path. Bytes
+// never appear in conversation events, history pages or the transcript cache.
+// Every request is scoped to the authenticated device, Host, session, channel
+// and occurrence; a transfer handle is also bound to those values.
+// ---------------------------------------------------------------------------
+
+message AttachmentPolicy {
+  // Effective total bytes allowed for one attachment read.
+  uint64 max_total_bytes = 1;
+  // Effective bound for one part payload.
+  uint32 max_chunk_bytes = 2;
+  // Active transfer slots allowed for one device/channel.
+  uint32 max_concurrent = 3;
+  uint32 idle_timeout_ms = 4;
+  uint32 overall_timeout_ms = 5;
+}
+
+message AttachmentMetadata {
+  SessionKey session = 1;
+  string attachment_ref = 2;
+  string media_type = 3;
+  // Display suggestion only; the client validates a safe local filename.
+  string name = 4;
+  // Authoritative declared size before any byte is read.
+  uint64 size = 5;
+  AttachmentPolicy policy = 6;
+  // Short-lived opaque transfer handle.
+  string transfer_id = 7;
+  int64 expires_at_unix_ms = 8;
+}
+
+message OpenAttachment {
+  SessionKey session = 1;
+  string attachment_ref = 2;
+}
+message OpenAttachmentResult { AttachmentMetadata attachment = 1; }
+
+message PullAttachment {
+  SessionKey session = 1;
+  string attachment_ref = 2;
+  string transfer_id = 3;
+  // Contiguous next offset. A duplicate of the last completed offset is the
+  // only allowed idempotent retry; any other gap or overlap is rejected.
+  uint64 offset = 4;
+  // Bounded request; the Host returns at most the effective chunk budget.
+  uint32 max_bytes = 5;
+}
+
+message AttachmentPart {
+  SessionKey session = 1;
+  string attachment_ref = 2;
+  string transfer_id = 3;
+  uint64 offset = 4;
+  // Declared payload length; must equal data length.
+  uint32 length = 5;
+  bytes data = 6;
+  bool final = 7;
+  // Terminal integrity metadata. Required when final is true; ignored before
+  // that point.
+  uint64 total_size = 8;
+  bytes sha256 = 9;
+}
+
+message CloseAttachment {
+  SessionKey session = 1;
+  string attachment_ref = 2;
+  string transfer_id = 3;
+  // True cancels and disposes the transfer; false closes a completed one.
+  bool cancel = 4;
+}
+message CloseAttachmentResult {
+  bool closed = 1;
+  bool cancelled = 2;
+}
+
 // Resolve committed Source evidence for a single submitted message.
-message ReadMessageReply { string session_id = 1; string message_id = 2; }
+message ReadMessageReply { string session_id = 1; string submitted_message_id = 2; }
 enum MessageReplyState {
   MESSAGE_REPLY_STATE_UNSPECIFIED = 0;
   MESSAGE_REPLY_PENDING = 1;
@@ -829,17 +1149,21 @@ enum MessageReplyState {
 }
 message MessageReply {
   string session_id = 1;
-  string message_id = 2;
+  string submitted_message_id = 2;
   MessageReplyState state = 3;
-  string attempt_id = 4;
-  string text = 5;
+  reserved 4, 5;
+  reserved "attempt_id", "text";
+  // Present exactly for COMMITTED. Bodies stay in history.
+  CommittedMessageRef committed = 6;
+  // Present exactly for INPUT_REQUIRED; the same vocabulary as WaitSession.
+  repeated InputKind pending_input = 7;
 }
 message AttemptStarted {}
 message AttemptEnded { AttemptOutcome outcome = 1; }
 message LiveFrame {
   AttemptRef attempt = 1; string block_id = 2; uint64 first_seq = 3; uint64 last_seq = 4;
-  oneof payload { AttemptStarted started = 5; TextContent delta = 6;
-    TextContent reset = 7; AttemptEnded ended = 8; }
+  oneof payload { AttemptStarted started = 5; LiveBlockDelta delta = 6;
+    LiveBlockReset reset = 7; AttemptEnded ended = 8; }
 }
 message SessionState {
   SessionKey session = 1; string live_epoch = 2; uint64 revision = 3;
@@ -847,6 +1171,8 @@ message SessionState {
   // Questions readiness is independent of history readiness. A questions-only
   // observation may omit history_head and run_phase.
   QuestionDescriptor questions = 7;
+  // Content projection identity; state and live positions are bound to it.
+  string projection_id = 8;
 }
 message HistoryReset { string reason = 1; }
 message SessionUpdate {

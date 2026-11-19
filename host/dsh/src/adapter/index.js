@@ -26,13 +26,13 @@ export function hasDshServices(ctx) {
 export function createAdapter({ mode = 'auto', ctx, config, store, logger, now, adapter } = {}) {
   if (adapter) return adapter
   if (mode === 'fake') {
-    return new FakeDshAdapter({ store, logger, now })
+    return new FakeDshAdapter({ store, logger, now, hostId: config?.hostId ?? '' })
   }
   if (mode === 'real') {
     return new RealDshAdapter({ ctx, config, store, logger, now })
   }
   if (hasDshServices(ctx)) return new RealDshAdapter({ ctx, config, store, logger, now })
-  return new FakeDshAdapter({ store, logger, now })
+  return new FakeDshAdapter({ store, logger, now, hostId: config?.hostId ?? '' })
 }
 
 export { DshAdapter, normalizeEvent, normalizeSummary, normalizeApproval, EVENT_KINDS, CONTROL_EVENT_KINDS } from './base.js'

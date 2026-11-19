@@ -12,7 +12,8 @@ import {
   requestAad,
   seal,
 } from '../src/security/noise.js'
-import { SecurityManager, HOST_CAPABILITIES } from '../src/security/manager.js'
+import { SecurityManager, HOST_CAPABILITIES, defaultReceiveAdvertisement } from '../src/security/manager.js'
+import { transportProfileBudget } from '../src/contracts/transport.js'
 import { loadOrCreateHostIdentity, HOST_KEY_CREDENTIAL } from '../src/security/identity.js'
 import { StateStore } from '../src/state/store.js'
 import { codec as defaultCodec } from '../src/protocol.js'
@@ -621,4 +622,319 @@ test('an expired staged peer cannot be activated by a late COMMIT after restart'
   const restarted = new SecurityManager({hostId,identity:first.identity,store:first.store,codec,now:()=>now})
   assert.throws(()=>restarted.handlePairingClaim({request,claim:commit}), error=>error.code==='unauthorized')
   assert.equal(first.store.getPeerKey(start.deviceId), null)
+})
+
+test('a device receive advertisement keeps its own channel-scoped generation, independent of the Host broker generation', () => {
+  const store = new StateStore({ path: ':memory:', now: () => 1000 })
+  const identity = generateKeypair()
+  const security = new SecurityManager({
+    hostId, identity, store, codec, now: () => 1000,
+    receiveAdvertisement: () => defaultReceiveAdvertisement(7),
+  })
+  try {
+    const compact = establishChannel({
+      security, store, hostId, deviceId: 'device-1', codec,
+      receive: {
+        profile: 'TRANSPORT_PROFILE_COMPACT',
+        budget: transportProfileBudget('compact'),
+        connection_generation: 3,
+      },
+    })
+    // HostReady's broker generation (7) is never compared with the device's
+    // channel-scoped generation (3), and ChannelReady mints its own value.
+    assert.equal(compact.ready.receive.connection_generation, 1)
+    assert.equal(compact.ready.receive.profile, 'TRANSPORT_PROFILE_DEFAULT')
+    assert.equal(compact.ready.receive.budget.envelope_bytes, 16 * 1024 * 1024)
+    const bound = security.getChannelReceive(compact.channelId)
+    assert.equal(bound.connection_generation, 3)
+    assert.equal(bound.profile, 'TRANSPORT_PROFILE_COMPACT')
+    assert.equal(bound.budget.envelope_bytes, 8 * 1024 * 1024)
+    assert.throws(() => { bound.budget.envelope_bytes = 1 })
+    assert.throws(() => { bound.connection_generation = 4 })
+    assert.equal(security.getChannelReceive(compact.channelId).budget.envelope_bytes, 8 * 1024 * 1024,
+      'an installed advertisement is immutable')
+  } finally {
+    store.close()
+  }
+})
+
+test('a reconnect installs a fresh advertisement and old channel data never refreshes a newer channel', () => {
+  const { store, security } = makeSecurity()
+  try {
+    const first = establishChannel({
+      security, store, hostId, deviceId: 'device-1', codec,
+      receive: {
+        profile: 'TRANSPORT_PROFILE_COMPACT',
+        budget: transportProfileBudget('compact'),
+        connection_generation: 11,
+      },
+    })
+    const second = establishChannel({
+      security, store, hostId, deviceId: 'device-1', codec,
+      receive: {
+        profile: 'TRANSPORT_PROFILE_ROOMY',
+        budget: transportProfileBudget('roomy'),
+        connection_generation: 12,
+      },
+    })
+    assert.notEqual(first.ready.receive.connection_generation, second.ready.receive.connection_generation,
+      'each channel handshake mints its own Host generation')
+    assert.equal(security.getChannelReceive(first.channelId).connection_generation, 11)
+    assert.equal(security.getChannelReceive(first.channelId).budget.envelope_bytes, 8 * 1024 * 1024)
+    assert.equal(security.getChannelReceive(second.channelId).connection_generation, 12)
+    assert.equal(security.getChannelReceive(second.channelId).budget.envelope_bytes, 32 * 1024 * 1024)
+
+    // A new channel that re-sends the older generation still binds that value
+    // to itself; it can never refresh the newer channel.
+    const stale = establishChannel({
+      security, store, hostId, deviceId: 'device-1', codec,
+      receive: {
+        profile: 'TRANSPORT_PROFILE_COMPACT',
+        budget: transportProfileBudget('compact'),
+        connection_generation: 11,
+      },
+    })
+    assert.equal(security.getChannelReceive(stale.channelId).connection_generation, 11)
+    assert.equal(security.getChannelReceive(second.channelId).connection_generation, 12)
+    assert.equal(security.getChannelReceive(second.channelId).budget.envelope_bytes, 32 * 1024 * 1024)
+
+    // A reconnect without an advertisement gets no cap; it never inherits the
+    // prior channel's frozen budget.
+    const absent = establishChannel({ security, store, hostId, deviceId: 'device-1', codec, omitReceive: true })
+    assert.equal(security.getChannelReceive(absent.channelId), null)
+    assert.equal(security.getChannelReceive(second.channelId).connection_generation, 12)
+
+    // An installed channel identity is never renegotiated in place.
+    const replacement = startChannelHello(security, store, { channelId: second.channelId })
+    assert.throws(() => security.handleChannelHandshake({
+      channel_id: replacement.channelId, device_id: replacement.deviceId, body: replacement.body,
+    }), (error) => error.code === 'conflict')
+    assert.equal(security.getChannelReceive(second.channelId).connection_generation, 12)
+  } finally {
+    store.close()
+  }
+})
+
+test('an absent channel receive advertisement adds no cap and a malformed one fails before the channel is usable', () => {
+  const { store, security } = makeSecurity()
+  try {
+    const omitted = establishChannel({ security, store, hostId, deviceId: 'device-1', codec, omitReceive: true })
+    assert.equal(security.getChannelReceive(omitted.channelId), null)
+    const attempt = (receive) => {
+      const channelId = `channel-${Math.random()}`
+      const identity = generateKeypair()
+      store.upsertPeerKey({ deviceId: 'device-1', publicKey: identity.publicKey, fingerprint: fingerprint(identity.publicKey), claimId: 'claim', pairedAt: 1 })
+      const prologue = channelPrologue({ hostId, deviceId: 'device-1', channelId })
+      const noise = new NoiseXX({ initiator: true, staticKeypair: identity, prologue })
+      const hello = codec.encode('whalerein.v1.ChannelHello', {
+        device_id: 'device-1', host_id: hostId, protocol_version: 1,
+        capabilities: { capabilities: ['sessions'], protocol_version: 1 }, client_nonce: 'nonce',
+        receive,
+      })
+      return () => security.handleChannelHandshake({ channel_id: channelId, device_id: 'device-1', protocol_version: 1, body: noise.writeMessage(hello) })
+    }
+    // A per-leg generation is accepted without any cross-leg comparison.
+    assert.ok(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 2 })() instanceof Uint8Array)
+    // Malformed, contradictory, missing and unknown-profile advertisements
+    // fail explicitly before the channel becomes usable.
+    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', connection_generation: 1 }), (error) => error.code === 'invalid_argument')
+    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: { ...transportProfileBudget('default'), fragment_count: 1 }, connection_generation: 1 }), (error) => error.code === 'invalid_argument')
+    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 0 }), (error) => error.code === 'invalid_argument')
+    assert.throws(() => attempt({ profile: 'TRANSPORT_PROFILE_FUTURE', budget: transportProfileBudget('default'), connection_generation: 1 }), (error) => error.code === 'protocol_version_incompatible')
+    assert.equal(security.listChannels().length, 1, 'only the advertisement-free channel was installed')
+  } finally {
+    store.close()
+  }
+})
+
+function prepareFinish(security, start, { finishOverrides = {}, claimOverrides = {} } = {}) {
+  const hello = security.handlePairingClaim({
+    request: { device_id: start.deviceId, protocol_version: 1 },
+    claim: helloClaim(start),
+  })
+  start.noise.readMessage(hello.noise_message)
+  const authHash = new Uint8Array(32).fill(7)
+  const finish = codec.encode('whalerein.v1.PairingFinish', {
+    device_id: start.deviceId,
+    host_id: hostId,
+    host_fingerprint: security.hostFingerprint,
+    device_auth_hash: authHash,
+    ...finishOverrides,
+  })
+  return {
+    claim_id: start.claimId,
+    token_hash: start.tokenHash,
+    phase: 'PAIRING_PHASE_FINISH',
+    noise_message: start.noise.writeMessage(finish),
+    device_auth_hash: authHash,
+    device_id: start.deviceId,
+    ...claimOverrides,
+  }
+}
+
+test('a FINISH with an unknown claim, wrong scope, host, or fingerprint is rejected before staging', () => {
+  const { security, store } = makeSecurity()
+  try {
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: 'device-1', protocol_version: 1 },
+      claim: { claim_id: 'unknown', token_hash: 'ab'.repeat(32), phase: 'PAIRING_PHASE_FINISH', noise_message: new Uint8Array(1), device_id: 'device-1' },
+    }), (error) => error.code === 'invalid_argument')
+
+    const wrongClaimDevice = pairingStart({ claimId: 'wrong-claim-device' })
+    const claim = prepareFinish(security, wrongClaimDevice, { claimOverrides: { device_id: 'other-device' } })
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: wrongClaimDevice.deviceId, protocol_version: 1 }, claim,
+    }), (error) => error.code === 'forbidden')
+
+    const wrongRequestDevice = pairingStart({ claimId: 'wrong-request-device' })
+    const requestClaim = prepareFinish(security, wrongRequestDevice)
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: 'other-device', protocol_version: 1 }, claim: requestClaim,
+    }), (error) => error.code === 'forbidden')
+
+    const wrongFinishDevice = pairingStart({ claimId: 'wrong-finish-device' })
+    const finishClaim = prepareFinish(security, wrongFinishDevice, { finishOverrides: { device_id: 'other-device' } })
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: wrongFinishDevice.deviceId, protocol_version: 1 }, claim: finishClaim,
+    }), (error) => error.code === 'forbidden')
+
+    const wrongHost = pairingStart({ claimId: 'wrong-host' })
+    const hostClaim = prepareFinish(security, wrongHost, { finishOverrides: { host_id: 'other-host' } })
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: wrongHost.deviceId, protocol_version: 1 }, claim: hostClaim,
+    }), (error) => error.code === 'forbidden')
+
+    const wrongFingerprint = pairingStart({ claimId: 'wrong-fingerprint' })
+    const fingerprintClaim = prepareFinish(security, wrongFingerprint, { finishOverrides: { host_fingerprint: '00' } })
+    assert.throws(() => security.handlePairingClaim({
+      request: { device_id: wrongFingerprint.deviceId, protocol_version: 1 }, claim: fingerprintClaim,
+    }), (error) => error.code === 'unauthorized')
+
+    // A storage failure while staging is surfaced and never leaves a reusable
+    // completed entry behind.
+    const staging = pairingStart({ claimId: 'staging-failure' })
+    const stagingClaim = prepareFinish(security, staging)
+    const stagePeer = store.stagePeer
+    store.stagePeer = () => { throw new Error('storage unavailable') }
+    try {
+      assert.throws(() => security.handlePairingClaim({
+        request: { device_id: staging.deviceId, protocol_version: 1 }, claim: stagingClaim,
+      }), /storage unavailable/)
+    } finally {
+      store.stagePeer = stagePeer
+    }
+    assert.equal(store.getPendingPeer(staging.claimId), null)
+  } finally {
+    store.close()
+  }
+})
+
+function startChannelHello(security, store, { deviceId = 'device-1', channelId = 'channel-1', identity = generateKeypair(), hello = {} } = {}) {
+  store.upsertPeerKey({ deviceId, publicKey: identity.publicKey, fingerprint: fingerprint(identity.publicKey), claimId: `claim-${deviceId}-${channelId}`, pairedAt: 1 })
+  const prologue = channelPrologue({ hostId, deviceId, channelId })
+  const noise = new NoiseXX({ initiator: true, staticKeypair: identity, prologue })
+  const message = codec.encode('whalerein.v1.ChannelHello', {
+    device_id: deviceId,
+    host_id: hostId,
+    protocol_version: 1,
+    capabilities: { capabilities: ['sessions'], protocol_version: 1 },
+    client_nonce: 'nonce',
+    ...hello,
+  })
+  return { noise, identity, channelId, deviceId, body: noise.writeMessage(message) }
+}
+
+test('channel handshake rejects invalid host advertisements, pending limits, scope mismatches, and substituted peers', () => {
+  // The Host's own receive advertisement must validate before any channel is
+  // admitted; an invalid one is a configuration failure, not a partial channel.
+  const badHostStore = new StateStore({ path: ':memory:' })
+  const badHost = new SecurityManager({
+    hostId, identity: generateKeypair(), store: badHostStore, codec,
+    receiveAdvertisement: () => ({ profile: 'BROKEN', budget: {}, connection_generation: 0 }),
+  })
+  try {
+    assert.throws(() => establishChannel({
+      security: badHost, store: badHostStore, hostId, deviceId: 'device-1', codec,
+    }), (error) => error.code === 'invalid_argument')
+    assert.equal(badHost.listChannels().length, 0)
+  } finally {
+    badHostStore.close()
+  }
+
+  const { security, store } = makeSecurity({ maxPending: 1 })
+  try {
+    const first = startChannelHello(security, store, { channelId: 'channel-pending' })
+    security.handleChannelHandshake({ channel_id: first.channelId, device_id: first.deviceId, body: first.body })
+    const second = startChannelHello(security, store, { channelId: 'channel-other' })
+    assert.throws(() => security.handleChannelHandshake({
+      channel_id: second.channelId, device_id: second.deviceId, body: second.body,
+    }), (error) => error.code === 'rate_limited')
+  } finally {
+    store.close()
+  }
+
+  const scoped = makeSecurity()
+  try {
+    const hello = startChannelHello(scoped.security, scoped.store, { channelId: 'channel-scope' })
+    scoped.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    scoped.store.upsertPeerKey({ deviceId: 'device-other', publicKey: generateKeypair().publicKey, fingerprint: 'f', claimId: 'other', pairedAt: 1 })
+    assert.throws(() => scoped.security.handleChannelHandshake({
+      channel_id: hello.channelId, device_id: 'device-other', body: new Uint8Array([1]),
+    }), (error) => error.code === 'forbidden')
+  } finally {
+    scoped.store.close()
+  }
+
+  const mismatchedHello = makeSecurity()
+  try {
+    const identity = generateKeypair()
+    const hello = startChannelHello(mismatchedHello.security, mismatchedHello.store, { channelId: 'channel-id', identity, hello: { device_id: 'device-other' } })
+    assert.throws(() => mismatchedHello.security.handleChannelHandshake({
+      channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body,
+    }), (error) => error.code === 'forbidden')
+  } finally {
+    mismatchedHello.store.close()
+  }
+
+  // A non-empty handshake payload is a framing error even when Noise verifies.
+  const payload = makeSecurity()
+  try {
+    const hello = startChannelHello(payload.security, payload.store, { channelId: 'channel-payload' })
+    const reply = payload.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    hello.noise.readMessage(reply)
+    assert.throws(() => payload.security.handleChannelHandshake({
+      channel_id: hello.channelId, device_id: hello.deviceId, body: hello.noise.writeMessage(new Uint8Array([1])),
+    }), (error) => error.code === 'invalid_argument')
+  } finally {
+    payload.store.close()
+  }
+
+  // The Noise peer must be the stored peer key, not merely any valid key.
+  const substituted = makeSecurity()
+  try {
+    const storedIdentity = generateKeypair()
+    const attacker = generateKeypair()
+    const hello = startChannelHello(substituted.security, substituted.store, {
+      channelId: 'channel-substituted', identity: attacker,
+    })
+    substituted.store.upsertPeerKey({
+      deviceId: hello.deviceId, publicKey: storedIdentity.publicKey,
+      fingerprint: fingerprint(storedIdentity.publicKey), claimId: 'stored', pairedAt: 1,
+    })
+    const reply = substituted.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    hello.noise.readMessage(reply)
+    assert.throws(() => substituted.security.handleChannelHandshake({
+      channel_id: hello.channelId, device_id: hello.deviceId, body: hello.noise.writeMessage(new Uint8Array(0)),
+    }), (error) => error.code === 'unauthorized')
+  } finally {
+    substituted.store.close()
+  }
+
+  const idle = makeSecurity()
+  try {
+    idle.security.closeChannel('missing-channel')
+    assert.equal(idle.security.listChannels().length, 0)
+  } finally {
+    idle.store.close()
+  }
 })

@@ -204,6 +204,20 @@ pub struct SessionCapabilities {
     pub live_text: bool,
     pub interrupt: bool,
     pub approvals: bool,
+    #[serde(default)]
+    pub live_reasoning: bool,
+    #[serde(default)]
+    pub tool_activity: bool,
+    #[serde(default)]
+    pub conversation_notices: bool,
+    #[serde(default)]
+    pub attachments: bool,
+    #[serde(default)]
+    pub history_page: bool,
+    #[serde(default)]
+    pub history_exact: bool,
+    #[serde(default)]
+    pub send_followup: bool,
     pub delivery_modes: Vec<String>,
     #[serde(default)]
     pub model_selection: bool,
@@ -232,6 +246,13 @@ impl From<whalerein_proto::SourceCapabilities> for SessionCapabilities {
             live_text: c.live_text,
             interrupt: c.interrupt,
             approvals: c.approvals,
+            live_reasoning: c.live_reasoning,
+            tool_activity: c.tool_activity,
+            conversation_notices: c.conversation_notices,
+            attachments: c.attachments,
+            history_page: c.history_page,
+            history_exact: c.history_exact,
+            send_followup: c.send_followup,
             model_selection: c.model_selection,
             pending_queue_read: c.pending_queue_read,
             pending_queue_edit: c.pending_queue_edit,
@@ -261,6 +282,13 @@ impl From<SessionCapabilities> for whalerein_proto::SourceCapabilities {
             live_text: c.live_text,
             interrupt: c.interrupt,
             approvals: c.approvals,
+            live_reasoning: c.live_reasoning,
+            tool_activity: c.tool_activity,
+            conversation_notices: c.conversation_notices,
+            attachments: c.attachments,
+            history_page: c.history_page,
+            history_exact: c.history_exact,
+            send_followup: c.send_followup,
             model_selection: c.model_selection,
             pending_queue_read: c.pending_queue_read,
             pending_queue_edit: c.pending_queue_edit,
@@ -792,6 +820,7 @@ mod tests {
             questions_answer_open: false,
             questions_answer_continued: true,
             session_fork: true,
+            ..Default::default()
         }
         .into();
         assert!(capabilities.history);
@@ -882,13 +911,18 @@ pub struct WaitState {
     pub pending_input: Vec<WaitInput>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Evidenced pending-input kinds shared by wait and send follow-up. They are
+/// informational and never answer an approval or question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WaitInput {
+pub enum InputKind {
     Approval,
     Question,
     Other,
 }
+
+/// Existing wait vocabulary; kept as an alias of [`InputKind`].
+pub type WaitInput = InputKind;
 
 /// An online observation; queue contents are not cached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

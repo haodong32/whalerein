@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use whalerein_proto::CapabilitySet;
 
+use crate::access::transport::TransportBudget;
 use crate::api::{CoreError, CoreResult};
 use crate::diagnostics::Metrics;
 use crate::security::SecureChannel;
@@ -102,6 +103,9 @@ struct HostRuntime {
     sync: SyncState,
     reconnect_count: u32,
     handshake_phase: HandshakePhase,
+    /// Receive limits advertised by this channel's `ChannelReady`.
+    receive: Option<TransportBudget>,
+    receive_generation: Option<u64>,
 }
 
 impl Default for HostRuntime {
@@ -113,6 +117,8 @@ impl Default for HostRuntime {
             sync: SyncState::Idle,
             reconnect_count: 0,
             handshake_phase: HandshakePhase::Idle,
+            receive: None,
+            receive_generation: None,
         }
     }
 }
@@ -123,6 +129,8 @@ struct RuntimeInner {
     cloud_session: Option<String>,
     recent_errors: VecDeque<String>,
     metrics: Metrics,
+    transport: TransportBudget,
+    receive_generation: u64,
 }
 
 pub struct Runtime {
@@ -145,6 +153,8 @@ impl Runtime {
                 cloud_session: None,
                 recent_errors: VecDeque::new(),
                 metrics: Metrics::new(),
+                transport: TransportBudget::default(),
+                receive_generation: 0,
             }),
             channel_locks: Mutex::new(HashMap::new()),
         }
@@ -194,6 +204,8 @@ impl Runtime {
         if next == ConnectionState::Revoked {
             host.channel = None;
             host.capabilities = None;
+            host.receive = None;
+            host.receive_generation = None;
         }
         let metrics = &inner.metrics;
         metrics.record_connection(next.as_str());
@@ -221,8 +233,10 @@ impl Runtime {
         let mut inner = self.inner.lock().expect("runtime mutex");
         if let Some(host) = inner.hosts.get_mut(host_id) {
             host.channel = None;
-            // Capabilities belong to the channel this handshake established.
+            // Capabilities and receive budgets belong to this handshake.
             host.capabilities = None;
+            host.receive = None;
+            host.receive_generation = None;
         }
     }
 
@@ -246,6 +260,60 @@ impl Runtime {
             .entry(host_id.to_owned())
             .or_default()
             .capabilities = Some(capabilities);
+    }
+
+    /// Install the profile resolved from the client configuration. It is
+    /// fixed for this process; a configuration change takes effect on restart.
+    pub(crate) fn set_transport_budget(&self, budget: TransportBudget) {
+        self.inner.lock().expect("runtime mutex").transport = budget;
+    }
+
+    pub(crate) fn transport_budget(&self) -> TransportBudget {
+        self.inner.lock().expect("runtime mutex").transport
+    }
+
+    /// Monotonic receive-advertisement generation. A new handshake never
+    /// reuses the previous generation, so a delayed advertisement is fenced.
+    pub(crate) fn next_receive_generation(&self) -> u64 {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        inner.receive_generation = inner.receive_generation.saturating_add(1).max(1);
+        inner.receive_generation
+    }
+
+    pub(crate) fn set_channel_receive(
+        &self,
+        host_id: &str,
+        budget: TransportBudget,
+        generation: u64,
+    ) {
+        let mut inner = self.inner.lock().expect("runtime mutex");
+        if inner.revoked {
+            return;
+        }
+        let host = inner.hosts.entry(host_id.to_owned()).or_default();
+        host.receive = Some(budget);
+        host.receive_generation = Some(generation);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_receive_generation(&self, host_id: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .expect("runtime mutex")
+            .hosts
+            .get(host_id)
+            .and_then(|host| host.receive_generation)
+    }
+
+    /// The peer's current authenticated receive budget, if a channel has
+    /// completed. Senders must not exceed this directional limit.
+    pub(crate) fn host_receive(&self, host_id: &str) -> Option<TransportBudget> {
+        self.inner
+            .lock()
+            .expect("runtime mutex")
+            .hosts
+            .get(host_id)
+            .and_then(|host| host.receive)
     }
 
     #[cfg(test)]

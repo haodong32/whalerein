@@ -102,8 +102,8 @@ def test_watch_streams_while_same_device_send_follows_reply(scenario, paired_cli
         try:
             def admitted_message():
                 for event in scenario.dsh.snapshot(session_id)["events"]:
-                    if event["type"] == "user/message" and event["data"].get("messageId"):
-                        return event["data"]["messageId"]
+                    if event["type"] == "user/message" and event["data"].get("id"):
+                        return event["data"]["id"]
                 return None
 
             wait(admitted_message, timeout=10)

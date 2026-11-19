@@ -304,10 +304,11 @@ const readyHandshakeTolerance = 2 * time.Second
 // readiness confirmation a bare broker CONNECT lacks. at is the HostReady
 // publication timestamp. A delayed readiness proof from a superseded
 // connection predates the current connection observation and cannot confirm
-// the replacement; the replacement needs its own HostReady.
-func (p *Presence) MarkHostReady(hostID string, at time.Time) {
+// the replacement; the replacement needs its own HostReady. It reports whether
+// this proof was accepted for the current connection.
+func (p *Presence) MarkHostReady(hostID string, at time.Time) bool {
 	if hostID == "" {
-		return
+		return false
 	}
 	now := p.now()
 	p.mu.Lock()
@@ -315,7 +316,7 @@ func (p *Presence) MarkHostReady(hostID string, at time.Time) {
 	if exists && at.Before(previous.at.Add(-readyHandshakeTolerance)) {
 		p.logger.Debug("stale host readiness proof ignored", "conn", previous.connID)
 		p.mu.Unlock()
-		return
+		return false
 	}
 	if exists {
 		p.hosts[hostID] = presenceEntry{online: true, at: previous.at, seenAt: now,
@@ -325,6 +326,38 @@ func (p *Presence) MarkHostReady(hostID string, at time.Time) {
 	}
 	p.mu.Unlock()
 	p.publishCounts()
+	return true
+}
+
+// HostConnection returns the broker-derived connection identity and observation
+// instant for one host. Receivers bind their advertisement to this identity so a
+// reconnect invalidates the prior entry.
+func (p *Presence) HostConnection(hostID string) (connID uint64, observedAt time.Time, ready bool, known bool) {
+	if hostID == "" {
+		return 0, time.Time{}, false, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.hosts[hostID]
+	if !ok {
+		return 0, time.Time{}, false, false
+	}
+	return entry.connID, entry.at, entry.ready, true
+}
+
+// DeviceConnection returns the broker-derived connection identity for one
+// device, used to invalidate device receive advertisements on reconnect.
+func (p *Presence) DeviceConnection(deviceID string) (connID uint64, known bool) {
+	if deviceID == "" {
+		return 0, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.devices[deviceID]
+	if !ok {
+		return 0, false
+	}
+	return entry.connID, true
 }
 
 // HandleNotification applies one ordered broker connection notification.

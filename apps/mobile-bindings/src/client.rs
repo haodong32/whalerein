@@ -1493,6 +1493,8 @@ mod tests {
                     kind: "text".into(),
                     text: text.into(),
                     tool_name: None,
+                    tool_activity: None,
+                    notice: None,
                 }],
                 created_at_unix_ms: 1,
             },
@@ -1502,6 +1504,7 @@ mod tests {
     fn preview(text: &str) -> ConversationEvent {
         ConversationEvent::Preview {
             attempt_id: "attempt-old".into(),
+            kind: "text".into(),
             text: text.into(),
             replace: false,
             incomplete: true,

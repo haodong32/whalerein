@@ -109,7 +109,7 @@ async fn publish(stream: &mut TcpStream, envelope: EventEnvelope) {
 
 use crate::conversation::ViewUpdate;
 use whalerein_proto::{
-    live_frame, session_update, AttemptRef, LiveFrame, SessionKey, SessionUpdate, TextContent,
+    live_frame, session_update, AttemptRef, LiveFrame, SessionKey, SessionUpdate,
 };
 fn event(core: &Core, session: &str, watch: &str) -> EventEnvelope {
     let channel = core.runtime.channel("host-1").unwrap();
@@ -133,7 +133,12 @@ fn event(core: &Core, session: &str, watch: &str) -> EventEnvelope {
             block_id: "text".into(),
             first_seq: 1,
             last_seq: 1,
-            payload: Some(live_frame::Payload::Delta(TextContent { text: "x".into() })),
+            payload: Some(live_frame::Payload::Delta(
+                whalerein_proto::LiveBlockDelta {
+                    kind: whalerein_proto::BlockKind::Text as i32,
+                    text: "x".into(),
+                },
+            )),
         })),
     };
     let bytes = EventPayload {
@@ -628,6 +633,7 @@ fn history_event(
                 from_cursor: from.into(),
                 to_cursor: to.into(),
                 batch_id: batch.into(),
+                projection_id: "projection-1".into(),
                 changes: messages
                     .iter()
                     .map(|(id, text)| MessageUpsert {
@@ -1048,7 +1054,10 @@ fn live_frame_event(
     let payload = if seq == 1 {
         live_frame::Payload::Started(whalerein_proto::AttemptStarted {})
     } else {
-        live_frame::Payload::Delta(TextContent { text: text.into() })
+        live_frame::Payload::Delta(whalerein_proto::LiveBlockDelta {
+            kind: whalerein_proto::BlockKind::Text as i32,
+            text: text.into(),
+        })
     };
     sealed_event(
         core,

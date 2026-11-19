@@ -126,6 +126,8 @@ The image is built from `deploy/docker/access.Dockerfile`. Its config is
 | `WHALEREIN_HOST_PROVISIONING_TOKEN` | Pre-shared token a host uses for broker auth |
 | `WHALEREIN_BROKER_PASSWORD` | Access's own broker credential |
 | `WHALEREIN_INTERNAL_TOKEN` | Fixed header shared with the broker plugin |
+| `WHALEREIN_TRANSPORT_PROFILE` | Packaged transport profile (`default`, `compact` or `roomy`); must match the Host and clients |
+| `WHALEREIN_MQTT_MAX_PACKET_SIZE` | Rendered Mosquitto packet ceiling (default 4 MiB) |
 
 Development defaults are in `deploy/compose/stack.yaml`. Replace them before
 sharing the stack.
@@ -142,17 +144,68 @@ pg_isready -h 127.0.0.1 -p 55432
 an established subscribed MQTT session, a reconciled broker presence snapshot and
 a confirmed policy reconciliation.
 
-## MQTT packet budget
+## Transport operations
 
-The committed broker ceiling is 1 MiB. Current client/relay source uses packets
-below 64 KiB to carry logical envelopes up to 16 MiB. The broker ceiling,
-frame size, and reconstructed-envelope size are different limits. See the
-[wire budget](../proto/v1/WIRE.md#transport-size-budget) for exact values and ACK
-routing. After changing broker/client limits, reconnect clients to renegotiate.
-Verify interoperability across Access, plugin, and clients before rollout.
+`proto/v1/transport_profiles.json` is the single packaged profile vocabulary
+shared by Access, the Host plugin and clients. The standalone Compose stack
+selects a profile in [`compose/access.yaml`](compose/access.yaml) through
+`WHALEREIN_TRANSPORT_PROFILE` and may override individual values. The same profile name must be selected for Access,
+the Host and clients; a mismatch is a coordinated hard-cut failure, not a silent
+downgrade.
 
-Upgrade Access, the plugin, and clients together before lowering any broker
-override. Reconnect clients after changing negotiated transport limits.
+| Setting | Default profile | Owner |
+|---|---|---|
+| Packet budget | 64 KiB | Access transport, broker and clients |
+| Fragment payload | 60 KiB | Access transport and clients |
+| Fragment count | 274 (covers one 16 MiB envelope) | Access transport and clients |
+| Logical envelope | 16 MiB | Access transport, Host and clients |
+| Bulk concurrency / reserved bytes | 4 / 32 MiB | Access admission |
+| Fragment idle / transfer timeout | 30 s / 120 s | Access transport |
+| Retained encrypted result | 16 MiB (profile envelope) | Access HTTP and storage |
+| HTTP result body | 24 MiB (derived from base64 + JSON) | Access HTTP and ingress |
+| Broker packet ceiling | 4 MiB (parameterized) | Mosquitto |
+
+Run `whalerein-access --check-config --config <file>` to print the resolved
+`transport:` line. The command fails before any listener opens for an unknown
+profile, zero/negative/overflowing value, a fragment width that does not fit the
+packet budget, too few fragments for the envelope, reserved bytes below one
+envelope or the in-flight fragments, out-of-order timeouts, or an HTTP body
+bound below the encoded result minimum. Configuration changes take effect on
+process restart only; reconnect clients after a change so both directions
+renegotiate.
+
+The limits are independent and must stay aligned:
+
+1. **Broker packet ceiling** (`WHALEREIN_MQTT_MAX_PACKET_SIZE`, rendered by
+   `docker/mosquitto-entrypoint.sh` into `/run/whalerein/mosquitto.conf`). The
+   image default is 4 MiB. Access refuses to start on a broker whose CONNACK
+   `maximum_packet_size` is below the configured transport packet budget.
+2. **Framed packet and logical envelope** (Access `transport:` and the matching
+   Host/client profile). Fragmentation happens inside MQTT; the broker sees
+   individual packets, not the reconstructed envelope.
+3. **HTTP result body** (`http.max_body_bytes`, derived when omitted). This is
+   the base64-expanded encrypted result plus JSON framing. Any reverse proxy in
+   front of Access must allow at least this body size. The Cloud deployment
+   templates set nginx `client_max_body_size`; the standalone Compose stack
+   publishes Access directly and has no ingress equivalent. A proxy left at
+   nginx's 1 MiB default rejects normal envelopes.
+4. **Retained result bounds**: `requests.max_result_bytes` must not exceed the
+   logical envelope, and `http.max_body_bytes` must fit its encoded form.
+   Access refuses a stored result that cannot be returned without changing its
+   durable outcome.
+
+Operational signals: `transport_rejections_total{code}` and
+`transport_rejected_bytes_total{code}` use only stable size/code labels;
+`transport_incoming_transfers` and `transport_reserved_bytes` show reassembly
+reservation; `cleanup_last_run_timestamp_seconds{operation}` and the existing
+`cleanup_*` counters expose retention drain after load stops. No metric label
+contains a host, device, request, topic or content identity.
+
+Validate rendered limits and reject invalid transport configuration with
+`deploy/tests/rolling-upgrade-matrix.sh`. It runs `--check-config` against the
+Compose mount, checks the rendered default geometry, asserts the broker packet
+ceiling, and requires invalid profile and relation cases to fail before
+readiness.
 
 ## Standalone setup and credential loss
 

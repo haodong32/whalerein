@@ -318,10 +318,20 @@ def test_tail(scenario, paired_device, session_id):
     text = "selected fixture message — 你好"
     paired_device.send(session_id, text)
     source = scenario.dsh.snapshot(session_id)
+    def native_text(event):
+        data = event.get("data") or {}
+        content = data.get("content")
+        if content is None:
+            content = (data.get("message") or {}).get("content") or []
+        return "".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+
     expected_times = [
         event["createdAt"] for event in source["events"]
         if event["type"] in ("user/message", "assistant/message")
-        and event["data"].get("text") == text
+        and native_text(event) == text
     ]
     messages = [event for event in paired_device.events(session_id) if event["type"] == "message"]
     assert len(messages) == 2, "Tail did not deliver exactly the newly committed pair"

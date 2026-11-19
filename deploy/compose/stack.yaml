@@ -52,6 +52,10 @@ services:
     environment:
       WHALEREIN_BROKER_PASSWORD: "${WHALEREIN_BROKER_PASSWORD:-dev-broker-password}"
       WHALEREIN_INTERNAL_TOKEN: "compose-internal-token"
+      # Broker packet ceiling. The transport profile selects encoded packet and
+      # envelope budgets independently; keep this at or above the largest
+      # configured packet budget. The entrypoint renders the mounted config.
+      WHALEREIN_MQTT_MAX_PACKET_SIZE: "${WHALEREIN_MQTT_MAX_PACKET_SIZE:-4194304}"
     ports:
       - "127.0.0.1:1883:1883"
     volumes:
@@ -84,6 +88,9 @@ services:
       WHALEREIN_HOST_PROVISIONING_TOKEN: "${WHALEREIN_HOST_PROVISIONING_TOKEN:-dev-host-token}"
       WHALEREIN_BROKER_PASSWORD: "${WHALEREIN_BROKER_PASSWORD:-dev-broker-password}"
       WHALEREIN_INTERNAL_TOKEN: "compose-internal-token"
+      # Must match the Host/client transport profile. Access fails startup on
+      # an unknown or invalid profile, and derives HTTP result bounds from it.
+      WHALEREIN_TRANSPORT_PROFILE: "${WHALEREIN_TRANSPORT_PROFILE:-default}"
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8081:8081"

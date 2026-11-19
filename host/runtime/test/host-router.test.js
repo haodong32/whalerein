@@ -117,6 +117,7 @@ function encryptedQuery({ security, store, channel, payload, plaintext: rawPaylo
     protocol_version: 1,
     channel_id: channelId,
     body: frame,
+    ...overrides,
   }
 }
 
@@ -1032,4 +1033,221 @@ test('when an encrypted payload carries an unknown enum value, the host reports 
     assert.equal(result.error_code, 'protocol_version_incompatible')
     assert.match(result.error_message, /DeliveryMode/)
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
+})
+
+test('canonical history packing honors the request result bound without a partial page or cursor advance', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const page = {
+      session: { host_id: 'host-1', session_id: 's1' },
+      batch: {
+        from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'batch-1', projection_id: 'projection-1',
+        changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'x'.repeat(4096) } }] } }],
+      },
+      cut_cursor: 'bookmark:b', complete: true, projection_id: 'projection-1', source: 'HISTORY_SOURCE_ONLINE',
+    }
+    ctx.adapter.readHistory = async () => page
+    const query = async (transport, requestId) => {
+      const request = encryptedQuery({
+        security: ctx.host.security, store: ctx.store, channel,
+        payload: { read_history: { session_id: 's1', max_bytes: 4096 } },
+        overrides: { request_id: requestId, transport },
+      })
+      await ctx.access.handlers.onRequest(request)
+      return { request, result: ctx.access.lastResult() }
+    }
+    const bounded = await query({ result_max_bytes: 1024, grant_generation: 3, revocation_generation: 9 }, 'bound-small')
+    assert.equal(bounded.result.status, 'failed')
+    assert.equal(bounded.result.error_code, 'payload_too_large')
+    assert.equal(bounded.result.result_body?.length ?? 0, 0, 'no partial page is published')
+    assert.equal(bounded.request.transport.revocation_generation, 9, 'request metadata is passed through unchanged')
+
+    const retried = await query({ result_max_bytes: 16 * 1024 * 1024, grant_generation: 3, revocation_generation: 9 }, 'bound-large')
+    assert.equal(retried.result.status, 'succeeded')
+    assert.ok(retried.result.result_body?.length > 0)
+    const aad = requestAad({
+      requestId: retried.request.request_id, hostId: 'host-1', deviceId: 'd1',
+      kind: retried.request.kind, commandId: '', expiresAt: retried.request.expires_at_unix_ms,
+    })
+    const frame = proto.decode('whalerein.v1.EncryptedFrame', retried.result.result_body)
+    const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+    assert.deepEqual(response.history_page.batch.from_cursor, 'bookmark:a')
+    assert.deepEqual(response.history_page.batch.to_cursor, 'bookmark:b')
+    assert.equal(response.history_page.batch.changes[0].message.blocks[0].text.text.length, 4096,
+      'the complete canonical message is preserved')
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('malformed request transport metadata is rejected before the source or encryption runs', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    let reads = 0
+    ctx.adapter.readHistory = async () => { reads++; return { session: { session_id: 's1' } } }
+    for (const transport of [
+      { result_max_bytes: 0, grant_generation: 1, revocation_generation: 0 },
+      { result_max_bytes: 1024, grant_generation: -1, revocation_generation: 0 },
+      { result_max_bytes: 1024, grant_generation: 1, revocation_generation: -1 },
+      { result_max_bytes: 1024, grant_generation: 1, revocation_generation: 'not-a-number' },
+    ]) {
+      const request = encryptedQuery({
+        security: ctx.host.security, store: ctx.store, channel,
+        payload: { read_history: { session_id: 's1' } },
+        overrides: { request_id: `bad-${Math.random()}`, transport },
+      })
+      await ctx.access.handlers.onRequest(request)
+      const result = ctx.access.lastResult()
+      assert.equal(result.status, 'rejected')
+      assert.equal(result.error_code, 'invalid_argument')
+    }
+    assert.equal(reads, 0)
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('typed send replies are scoped to the request and attachment transfers fail explicitly', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    ctx.adapter.readMessageReply = async (sessionId, submittedId) => ({
+      state: 'MESSAGE_REPLY_COMMITTED',
+      committed: {
+        session: { host_id: 'host-1', session_id: sessionId },
+        message_id: 'm-final', source_locator: 'locator-1', projection_id: 'projection-1',
+      },
+    })
+    const read = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel,
+      payload: { read_message_reply: { session_id: 's1', submitted_message_id: 'submitted-1' } },
+      overrides: { request_id: 'reply-1' },
+    })
+    await ctx.access.handlers.onRequest(read)
+    const replyResult = ctx.access.lastResult()
+    assert.equal(replyResult.status, 'succeeded')
+    const aad = requestAad({ requestId: read.request_id, hostId: 'host-1', deviceId: 'd1', kind: read.kind, commandId: '', expiresAt: read.expires_at_unix_ms })
+    const frame = proto.decode('whalerein.v1.EncryptedFrame', replyResult.result_body)
+    const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+    assert.equal(response.message_reply.session_id, 's1')
+    assert.equal(response.message_reply.submitted_message_id, 'submitted-1')
+    assert.equal(response.message_reply.state, 'MESSAGE_REPLY_COMMITTED')
+    assert.equal(response.message_reply.committed.message_id, 'm-final')
+
+    // The reply scope is the request, not the Source's claim.
+    ctx.adapter.readMessageReply = async () => ({
+      session_id: 'other-session', submitted_message_id: 'other-message',
+      state: 'MESSAGE_REPLY_COMMITTED',
+      committed: { session: { host_id: 'host-1', session_id: 'other-session' }, message_id: 'm-other', source_locator: 'locator-2', projection_id: 'projection-1' },
+    })
+    const second = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel,
+      payload: { read_message_reply: { session_id: 's1', submitted_message_id: 'submitted-2' } },
+      overrides: { request_id: 'reply-2' },
+    })
+    await ctx.access.handlers.onRequest(second)
+    const secondResult = ctx.access.lastResult()
+    assert.equal(secondResult.status, 'succeeded')
+    const secondAad = requestAad({ requestId: second.request_id, hostId: 'host-1', deviceId: 'd1', kind: second.kind, commandId: '', expiresAt: second.expires_at_unix_ms })
+    const secondFrame = proto.decode('whalerein.v1.EncryptedFrame', secondResult.result_body)
+    const secondReply = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, secondAad, secondFrame.nonce, secondFrame.ciphertext)).message_reply
+    assert.equal(secondReply.session_id, 's1')
+    assert.equal(secondReply.submitted_message_id, 'submitted-2')
+
+    // The source fixture has no attachment support. Opening still resolves the
+    // occurrence through the Source seam and reports the capability explicitly;
+    // a pull or close for an unknown handle is scoped not_found. The retired
+    // flat `session_id` shape is a typed invalid_argument, never a crash.
+    const session = { host_id: 'host-1', session_id: 's1' }
+    const legacy = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel,
+      payload: { open_attachment: { session_id: 's1', attachment_ref: 'attachment-1' } },
+      overrides: { request_id: 'attachment-legacy' },
+    })
+    await ctx.access.handlers.onRequest(legacy)
+    assert.equal(ctx.access.lastResult().status, 'failed')
+    assert.equal(ctx.access.lastResult().error_code, 'invalid_argument')
+    for (const [payload, code] of [
+      [{ open_attachment: { session, attachment_ref: 'attachment-1' } }, 'unsupported_capability'],
+      [{ pull_attachment: { session, attachment_ref: 'attachment-1', transfer_id: 'f'.repeat(32), offset: 0, max_bytes: 1024 } }, 'not_found'],
+      [{ close_attachment: { session, attachment_ref: 'attachment-1', transfer_id: 'f'.repeat(32) } }, 'not_found'],
+    ]) {
+      const request = encryptedQuery({
+        security: ctx.host.security, store: ctx.store, channel, payload,
+        overrides: { request_id: `attachment-${Math.random()}` },
+      })
+      await ctx.access.handlers.onRequest(request)
+      assert.equal(ctx.access.lastResult().status, 'failed')
+      assert.equal(ctx.access.lastResult().error_code, code)
+    }
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('pairing requests require relay transport version 2 and safe expiry metadata', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    let result = await send(ctx.access, baseRequest({
+      request_id: 'pair-old-relay', kind: 'REQUEST_KIND_PAIRING_CLAIM', relay_transport_version: 1,
+    }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'protocol_version_incompatible')
+
+    result = await send(ctx.access, baseRequest({
+      request_id: 'pair-bad-expiry', kind: 'REQUEST_KIND_PAIRING_CLAIM', expires_at_unix_ms: 'soon',
+    }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'invalid_argument')
+
+    result = await send(ctx.access, baseRequest({
+      request_id: 'pair-negative-expiry', kind: 'REQUEST_KIND_PAIRING_CLAIM', expires_at_unix_ms: -1,
+    }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'invalid_argument')
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('client inventory fails closed and a revocation handler failure is reported as failed', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    ctx.store.listPeerKeys = () => { throw new Error('database unavailable') }
+    assert.equal(ctx.host.clientDevices(), null, 'a storage failure never exposes a partial client list')
+
+    ctx.host.security.handleRevocation = () => { throw new Error('revocation storage unavailable') }
+    const result = await send(ctx.access, baseRequest({
+      request_id: 'rev-handler-failure',
+      kind: 'REQUEST_KIND_REVOCATION',
+      body: proto.encode('whalerein.v1.RevocationNotice', {
+        replay_id: 'replay-failure', device_ids: ['d1'], final: true, revoked_at_unix_ms: 5,
+      }),
+    }))
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error_code, 'internal')
+  } finally {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
 })

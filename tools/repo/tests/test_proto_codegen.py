@@ -19,6 +19,29 @@ from repo.proto import (
 def make_root(tmp_path: Path) -> Path:
     (tmp_path / "proto" / "v1").mkdir(parents=True)
     (tmp_path / "proto" / "v1" / "whalerein.proto").write_text('syntax = "proto3";\n')
+    (tmp_path / "proto" / "v1" / "transport_profiles.json").write_text(
+        json.dumps(
+            {
+                "schema": "whalerein/transport-profiles/v1",
+                "defaultProfile": "default",
+                "profiles": {
+                    "default": {
+                        "wireName": "TRANSPORT_PROFILE_DEFAULT",
+                        "packetBytes": 65536,
+                        "packetOverheadBytes": 4096,
+                        "fragmentPayloadBytes": 61440,
+                        "fragmentCount": 274,
+                        "envelopeBytes": 16777216,
+                        "bulkConcurrency": 4,
+                        "reservedBytes": 33554432,
+                        "fragmentIdleTimeoutMs": 30000,
+                        "transferTimeoutMs": 120000,
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
     (tmp_path / "proto" / "v1" / "bindings" / "go").mkdir(parents=True)
     (tmp_path / "host" / "runtime" / "src" / "generated").mkdir(parents=True)
     (tmp_path / "tools" / "repo" / "js").mkdir(parents=True)
@@ -152,12 +175,24 @@ def test_check_mode_passes_when_generated_files_match(tmp_path):
     )
     (root / "host/runtime/src/generated/whalerein.json").write_text('{"nested": {}}')
     runner = WritingRunner(which_map={"protoc": "/bin/protoc", "protoc-gen-go": "/bin/pg"})
+    run(runner, out, root)
     data = run(runner, out, root, check=True)
-    assert data["check"] is True
+    assert data["check"] is True and data["profiles"]["ok"] is True
 
     runner = WritingRunner(
         js_text='{"nested": {"changed": true}}',
         which_map={"protoc": "/bin/protoc", "protoc-gen-go": "/bin/pg"},
     )
     with pytest.raises(RepoError):
+        run(runner, out, root, check=True)
+
+
+def test_check_detects_stale_transport_profile_artifact(tmp_path):
+    root = make_root(tmp_path)
+    out = Output(stdout=io.StringIO(), stderr=io.StringIO())
+    runner = WritingRunner(which_map={"protoc": "/bin/protoc", "protoc-gen-go": "/bin/pg"})
+    run(runner, out, root)
+    generated = root / "host/runtime/src/generated/transport-profiles.js"
+    generated.write_text(generated.read_text() + "// drift\n")
+    with pytest.raises(RepoError, match="transport-profiles.js is stale"):
         run(runner, out, root, check=True)

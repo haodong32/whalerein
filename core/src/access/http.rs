@@ -15,6 +15,7 @@ use whalerein_proto::{
     PairingClaimResponse, RequestKind, RequestReceipt, RequestState,
 };
 
+use crate::access::transport::TransportBudget;
 use crate::api::{error_code_name, CoreError, CoreResult};
 use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostics};
 use crate::util::now_unix_ms;
@@ -140,6 +141,8 @@ pub struct AccessClient {
     token: Option<String>,
     request_timeout: Duration,
     poll_interval: Duration,
+    transport: TransportBudget,
+    response_limit: usize,
     pub(crate) diagnostics: Arc<Diagnostics>,
     transport_observation: Option<Arc<TransportObservation>>,
     cloud_session: Option<(String, Arc<dyn crate::security::SecretStore>)>,
@@ -198,12 +201,15 @@ impl AccessClient {
         let http = builder
             .build()
             .map_err(|_| AccessError::transport("HTTP client initialization failed"))?;
+        let transport = TransportBudget::default();
         Ok(Self {
             http,
             base,
             token,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            transport,
+            response_limit: https_body_limit(transport.envelope_bytes),
             diagnostics,
             transport_observation: None,
             cloud_session: None,
@@ -216,6 +222,16 @@ impl AccessClient {
 
     pub(crate) fn request_timeout(&self) -> Duration {
         self.request_timeout
+    }
+
+    pub(crate) fn with_transport_budget(mut self, transport: TransportBudget) -> Self {
+        self.transport = transport;
+        self.response_limit = https_body_limit(transport.envelope_bytes);
+        self
+    }
+
+    pub(crate) fn transport_budget(&self) -> TransportBudget {
+        self.transport
     }
 
     pub(crate) fn with_transport_observation(
@@ -358,6 +374,17 @@ impl AccessClient {
         log_exchange: bool,
         observe_headers: impl FnOnce(&reqwest::header::HeaderMap),
     ) -> Result<T, AccessError> {
+        self.send_observing_limit(builder, log_exchange, observe_headers, self.response_limit)
+            .await
+    }
+
+    async fn send_observing_limit<T: DeserializeOwned>(
+        &self,
+        builder: reqwest::RequestBuilder,
+        log_exchange: bool,
+        observe_headers: impl FnOnce(&reqwest::header::HeaderMap),
+        limit: usize,
+    ) -> Result<T, AccessError> {
         self.check_cloud_session()?;
         let started = std::time::Instant::now();
         let response = builder.send().await.map_err(|error| {
@@ -387,7 +414,7 @@ impl AccessClient {
         })?;
         let status = response.status().as_u16();
         observe_headers(response.headers());
-        let result = parse_response(response).await;
+        let result = parse_response(response, limit).await;
         self.check_cloud_session()?;
         if let Some(observation) = &self.transport_observation {
             match &result {
@@ -421,7 +448,7 @@ impl AccessClient {
         if response.status().is_success() {
             return Ok(());
         }
-        Err(parse_error_response(response).await)
+        Err(parse_error_response(response, self.response_limit).await)
     }
 
     pub async fn list_hosts(&self) -> Result<Vec<HostInfo>, AccessError> {
@@ -490,23 +517,39 @@ impl AccessClient {
         if response.status().is_success() {
             return Ok(());
         }
-        Err(parse_error_response(response).await)
+        Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await)
     }
 
     pub async fn get_request(&self, request_id: &str) -> Result<RequestState, AccessError> {
-        self.read_request(request_id, true).await
+        self.read_request(request_id, true, self.response_limit)
+            .await
+    }
+
+    /// Read one stored result under an exact admitted bound. The JSON envelope
+    /// expands the encrypted result body, so the bound includes encoding
+    /// overhead while remaining finite before any allocation.
+    pub async fn get_request_with_limit(
+        &self,
+        request_id: &str,
+        result_max_bytes: u64,
+    ) -> Result<RequestState, AccessError> {
+        let limit =
+            https_body_limit(result_max_bytes).min(https_body_limit(self.transport.envelope_bytes));
+        self.read_request(request_id, true, limit).await
     }
 
     async fn read_request(
         &self,
         request_id: &str,
         log_exchange: bool,
+        limit: usize,
     ) -> Result<RequestState, AccessError> {
         let url = self.endpoint(&["v1", "requests", request_id])?;
-        self.send_observing(
+        self.send_observing_limit(
             self.request(reqwest::Method::GET, url, None),
             log_exchange,
             |_| {},
+            limit,
         )
         .await
     }
@@ -521,7 +564,7 @@ impl AccessClient {
         if response.status().is_success() {
             return Ok(());
         }
-        Err(parse_error_response(response).await)
+        Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await)
     }
 
     pub async fn pair_claim(
@@ -614,7 +657,14 @@ impl AccessClient {
         let mut transport_failed = false;
         let result = loop {
             polls = polls.saturating_add(1);
-            match self.read_request(&request.request_id, false).await {
+            let limit = request
+                .transport
+                .as_ref()
+                .map_or(self.response_limit, |transport| {
+                    https_body_limit(transport.result_max_bytes)
+                        .min(https_body_limit(self.transport.envelope_bytes))
+                });
+            match self.read_request(&request.request_id, false, limit).await {
                 Ok(state) => {
                     self.validate_request_state(request, &state)?;
                     if let Some(observation) = observation {
@@ -719,22 +769,65 @@ pub fn is_terminal(status: i32) -> bool {
     )
 }
 
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const HTTP_OVERHEAD_BYTES: u64 = 1024 * 1024;
+
+pub(crate) fn https_body_limit(result_max_bytes: u64) -> usize {
+    let encoded = result_max_bytes
+        .saturating_mul(4)
+        .div_ceil(3)
+        .saturating_add(HTTP_OVERHEAD_BYTES);
+    usize::try_from(encoded).unwrap_or(usize::MAX)
+}
+
+fn response_too_large() -> AccessError {
+    AccessError {
+        kind: AccessErrorKind::Protocol,
+        status: None,
+        code: Some(ErrorCode::PayloadTooLarge),
+        message: "Access response exceeds the configured transport budget".into(),
+        reason: String::new(),
+    }
+}
+
+async fn read_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, AccessError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(response_too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AccessError::transport("Access response could not be read"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(response_too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 async fn parse_response<T: DeserializeOwned>(
     response: reqwest::Response,
+    limit: usize,
 ) -> Result<T, AccessError> {
     if !response.status().is_success() {
-        return Err(parse_error_response(response).await);
+        return Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await);
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| AccessError::transport("Access response could not be read"))?;
+    let bytes = read_bounded(response, limit).await?;
     crate::api::decode_json(&bytes)
 }
 
-async fn parse_error_response(response: reqwest::Response) -> AccessError {
+async fn parse_error_response(response: reqwest::Response, limit: usize) -> AccessError {
     let status = response.status();
-    let bytes = response.bytes().await.unwrap_or_default();
+    let bytes = read_bounded(response, limit).await.unwrap_or_default();
     let parsed = serde_json::from_slice::<ErrorResponse>(&bytes).ok();
     let (code, message, reason) = match parsed {
         Some(error) => (
@@ -1322,6 +1415,30 @@ mod transport_tests {
             reason: String::new()
         }
         .is_retryable_transport());
+    }
+
+    #[tokio::test]
+    async fn https_reads_are_bounded_before_decoding() {
+        use crate::access::transport::{TransportBudget, TransportProfile, TransportSettings};
+        let server = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            // Larger than the compact profile's encoded envelope plus its
+            // bounded JSON overhead.
+            body: vec![b' '; 13 * 1024 * 1024],
+            delay_ms: 0,
+        }))
+        .await;
+        let compact = TransportBudget::resolve(&TransportSettings {
+            profile: TransportProfile::Compact,
+            overrides: None,
+        })
+        .unwrap();
+        let client = AccessClient::new(server.url(), None)
+            .unwrap()
+            .with_transport_budget(compact);
+        let error = client.list_hosts().await.unwrap_err();
+        assert_eq!(error.code, Some(ErrorCode::PayloadTooLarge));
+        assert!(!error.message.contains("hosts"));
     }
 
     #[tokio::test]

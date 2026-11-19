@@ -18,8 +18,9 @@ export class DshConversation {
     if(signal?.aborted)throw new AdapterError('unavailable')
     const approvals=await this.source.listApprovals(sessionId)
     if(signal?.aborted)throw new AdapterError('unavailable')
+    const projection=this.history.projection(sessionId)
     return {session:{session_id:sessionId},live_epoch:this.epoch,revision:++this.revision,
-      history_head:head,run_phase:summary?.running?'RUNNING':'IDLE',
+      ...(projection?{projection_id:projection}:{}),history_head:head,run_phase:summary?.running?'RUNNING':'IDLE',
       approvals:approvals.map(a=>({approval_id:a.approvalId,session_id:a.sessionId,tool_name:a.toolName,call_id:a.callId,reason:a.reason,digest:a.digest,version:a.version,expires_at_unix_ms:a.expiresAt,state:`APPROVAL_STATE_${a.state.toUpperCase()}`,decision:a.decision?`APPROVAL_DECISION_${a.decision.toUpperCase()}`:'APPROVAL_DECISION_UNSPECIFIED'}))}
   }
   revision=0
@@ -40,6 +41,7 @@ export class DshConversation {
       stream={sessionId:event.sessionId,seq:0,revision:-1,blocks:new Map(),attempt:{live_epoch:this.epoch,attempt_id:id},ended:false}
       this.#streams.set(id,stream)
     }
+    if(stream.ended)return null
     if(!Number.isSafeInteger(data.revision)||data.revision<=stream.revision)return null
     stream.revision=data.revision
     let payload
@@ -49,17 +51,19 @@ export class DshConversation {
       if(this.#origins.size>64)this.#origins.delete(this.#origins.keys().next().value)
     } else if(data.phase==='chunk') {
       const block=data.block_id??'text'
+      const kind=data.block_kind
+      if(kind!=='BLOCK_KIND_TEXT'&&kind!=='BLOCK_KIND_REASONING')return null
       if(typeof data.block_text==='string') {
         const previous=stream.blocks.get(block)
         const hash=createHash('sha256').update(data.block_text)
         if(previous&&previous.copy().digest('hex')===hash.copy().digest('hex'))return null
         if(stream.blocks.size<64||stream.blocks.has(block))stream.blocks.set(block,hash)
-        payload={reset:{text:data.block_text}}
+        payload={reset:{kind,text:data.block_text}}
       } else {
         if(typeof data.text!=='string'||!data.text)return null
         let hash=stream.blocks.get(block)
         if(!hash&&stream.blocks.size<64){hash=createHash('sha256');stream.blocks.set(block,hash)}
-        hash?.update(data.text);payload={delta:{text:data.text}}
+        hash?.update(data.text);payload={delta:{kind,text:data.text}}
       }
     } else {
       if(Number.isSafeInteger(data.native_commit_seq)) {

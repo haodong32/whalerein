@@ -5,8 +5,9 @@
 Core is the self-contained Rust client endpoint. Clients provide a `SecretStore`
 and can register a `DiagnosticSink`. Harness adapters run on Hosts.
 
-Consumers use `api` and the normalized `conversation` types. Transport, cache,
-security, pairing, command, synchronization and runtime modules are private.
+Consumers use `api`, the normalized `conversation` types, and the independent
+`history` module. Transport, cache, security, pairing, command, synchronization
+and runtime modules are private.
 `api` re-exports the supported secret stores, diagnostic events, connection state
 and metric types. Repository-only protocol
 drivers opt into `protocol-testing` and use the explicit `testing` exports.
@@ -33,7 +34,8 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `security`, `pairing` | Persistent device identity, Noise and authenticated payloads. |
 | `commands` | Idempotent submission/result recovery and command projection writes. |
 | `sync` | Typed payload/scope validation and committed-view/cursor writes. |
-| `conversation` | Bounded provisional Attempts, order, resets and final-message precedence. |
+| `conversation` | Bounded provisional Attempts, typed blocks, one tool activity per call, order, resets and final-message precedence. |
+| `history` | Independent bounded committed-history pages, exact message references, source/cache selection and projection fencing. |
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
 | `access` | HTTPS and device MQTT, including opaque fragmentation. |
 | `diagnostics` | Redacted live events, bounded operation history and exports. |
@@ -58,6 +60,13 @@ it receives. Both platforms use the same versioned TOML contract.
 version = 1
 service = "whalerein_cloud"
 data_dir = "./cloud"
+
+# Optional; omitted means the packaged "default" profile.
+[transport]
+profile = "default" # default | compact | roomy
+# Local overrides are validated with the same relations as Access/Host.
+# [transport.overrides]
+# envelope_bytes = 16777216
 ```
 
 The Cloud service defaults to official production. Developers can select
@@ -166,6 +175,44 @@ Host channels, so a send or its reply polling can coexist with a live watch.
 Closing or replacing an observation stops its recovery,
 staging and scoped delivery while a separate answer command can continue.
 
+### Independent history reads
+
+`history_page` reads one latest-first bounded page through the same `HistoryRead`
+request and validation used by synchronization. It creates no watch lease, MQTT
+subscription, `SyncService` state or cache write. The first response fixes a
+Source cut; Core binds the validated Host/session scope, projection, cut, next
+position and origin into an opaque continuation. Later pages keep that scope and
+cut, and an expired, changed or unavailable history returns `snapshot_required`
+instead of restarting silently. Messages are chronological within the page and
+`complete` means the oldest authorized message was reached. `HistoryMode::Cache`
+reads the eligible encrypted local view explicitly under the same projection and
+visibility fence; replacement or eviction invalidates its continuation.
+
+`history_message` resolves one scoped `MessageReference` through an exact
+selection and validates its session, projection and canonical message identity.
+A stale reference, changed projection or unavailable message is an explicit
+failure. The same module owns both paths so live commits, pages and exact reads
+share authorization, identity checks and canonical decoding.
+
+### Confirmed send follow-up
+
+`follow_send_operation` keeps the durable operation association, deadline and
+polling while returning only proof-backed state: `Pending`, `Committed` with a
+canonical `MessageReference`, `InputRequired` with evidenced `InputKind` values,
+or `Uncertain`. Message bodies remain in history. The DSH adapter proves that a
+settled reply belongs to the original submission and derives the reference from
+the same committed projection used for live and paged history; ambiguous,
+missing or late unrelated evidence stays pending or uncertain. Pending input is
+reported only for the owning active operation and reuses wait-state
+classification.
+
+`follow_send_operation_with_content` additionally reads the confirmed reference
+through `history_message` inside the remaining deadline. A failed read keeps the
+`Committed` reply intact and returns a stable redacted `read_error`; callers
+must not resubmit because content was unavailable. Core records distinct
+`send_reply_confirmed`, `send_input` and `send_reply_read` stages with no message
+bodies.
+
 Interrupt follows an accepted stop to its terminal receipt, as send does. An
 accepted stop without terminal confirmation is reported as unknown, and a
 terminal failure as an error; neither claims that the Agent stopped. An
@@ -175,8 +222,32 @@ second read failed, while keeping the successful fork identity.
 
 Core delivers typed ViewUpdates to consumers. Only committed changes enter the
 cache; provisional text never advances a history cursor. The conversation reducer
-owns sequence filtering, bounded completed-Attempt tracking, final precedence and
-exact-prefix information. Clients do not implement protocol sequencing again.
+owns sequence filtering, bounded completed-Attempt tracking, final precedence,
+checked block kinds and separate answer/reasoning preview prefixes. Clients do
+not implement protocol sequencing again. `ViewUpdate::ToolActivity` carries the
+single reducer activity per call, and committed tool occurrences absorb through
+the same reducer for pages and live views.
+
+Core also owns verified, cancellable attachment download from a scoped
+occurrence reference once the Source provides it. The CLI download command
+surface is reserved for that path; in this build it reports the capability as
+unavailable and reads no bytes.
+
+The client `[transport]` profile is loaded from the packaged generated Rust
+artifact and validated before any connection use: packet and fragment widths,
+fragment coverage, aggregate reservations, timeout ordering and the minimum
+control message must all fit. Invalid relations fail `Core::open`. Changes take
+effect on restart. The effective profile bounds HTTPS responses, MQTT packet and
+logical-envelope receive limits, reassembly concurrency/reservations and the
+outbound request/result metadata. `ChannelHello` advertises the device receive
+budget with its own monotonic channel generation. `ChannelReady` must name a
+known packaged profile and carry a relation-valid budget; a valid override of
+that profile is accepted without clamping, and the profile remains the base
+label. The Hello and Ready generations are scoped to their own legs and are not
+compared. Outbound requests use the lower of the local and peer envelope
+budgets. `result_max_bytes` is bound to the
+request and every stored result is read under that exact bound. No content is
+written to transport diagnostics.
 
 The initial device transport has one active watch per Core instance. Competing
 calls fail explicitly rather than opening clients with the same MQTT identity.
@@ -251,9 +322,21 @@ Derived development cache schemas can be rebuilt; credentials and command outcom
 metadata are retained. OS keyring, TLS and real-source behavior require their own
 release acceptance; isolated fixture evidence is not a deployment claim.
 
+Cache schema version 3 adds projection identity to conversation views, staged
+views, committed messages, staged messages and history receipts, plus a
+per-cache install ID, a monotonic cache generation and per-view generation.
+The migration is additive: existing version-2 rows stay in place with an empty
+projection identity and command recovery, session summaries, hosts and pairing
+stay untouched. An empty or changed projection is fenced on every read,
+including offline reads, until a complete replacement installs the active
+projection. A cache with no installation for a session returns a finite empty
+cache page; a continuation that refers to a replaced or evicted installation
+fails with `snapshot_required`.
+
 Conversation message/staging payloads have a 128 MiB logical cache budget. Cache
 writes evict the oldest stored complete views with their cursors and receipts,
-never individual messages beneath a retained cursor. The view being written is
+never individual messages beneath a retained cursor. Replacement and eviction
+bump the cache generation so an old continuation cannot walk a new namespace. The view being written is
 protected; an oversized replacement rolls back, discards its staging and reports
 `payload_too_large`, retaining the previous committed view. Opening a cache also
 trims old views. This is a retained-payload budget, not a physical SQLite file-size

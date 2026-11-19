@@ -2,6 +2,7 @@
 // models real session state: committed events, messages, interrupt, approvals
 // with expiry and atomic one-shot consumption, credentials, and crashes.
 
+import { createHash } from 'node:crypto'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { approvalDigest, bytesEqual, randomId } from 'whalerein-host/security/digest.js'
 import { QuestionProjection, QuestionStampTracker, questionInventoryFingerprint, validateQuestionAnswers } from './questions.js'
@@ -32,6 +33,7 @@ export class FakeDshAdapter extends DshAdapter {
   #heldQuestions = new Set()
   #waitingQuestions = new Set()
   #questionInterrupts = new Map()
+  #attachmentStore = new Map()
 
   /**
    * @param {object} [options]
@@ -104,7 +106,7 @@ export class FakeDshAdapter extends DshAdapter {
     return {
       mode: 'fake',
       available: !this.#crashed,
-      capabilities: ['sessions', 'events', 'messages', ...(this.approvalMode === 'delegate' ? [] : ['approvals']), 'interrupt', 'sync', 'snapshot', 'session-fork', ...(this.behavior.modelOperations ? ['model-catalog', 'model-read', 'model-select'] : []), ...(this.behavior.pendingQueueEnabled ? ['pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer'] : []), ...(this.behavior.questions ? ['questions-read','questions-answer-continued'] : []), ...(this.behavior.questions && this.behavior.questionsOpen ? ['questions-answer-open'] : [])],
+      capabilities: ['sessions', 'events', 'messages', 'attachments', 'history-page', 'history-exact', 'send-followup', ...(this.approvalMode === 'delegate' ? [] : ['approvals']), 'interrupt', 'sync', 'snapshot', 'session-fork', ...(this.behavior.modelOperations ? ['model-catalog', 'model-read', 'model-select'] : []), ...(this.behavior.pendingQueueEnabled ? ['pending-queue-read','pending-queue-edit','pending-queue-remove','pending-queue-steer'] : []), ...(this.behavior.questions ? ['questions-read','questions-answer-continued'] : []), ...(this.behavior.questions && this.behavior.questionsOpen ? ['questions-answer-open'] : [])],
     }
   }
 
@@ -468,6 +470,57 @@ export class FakeDshAdapter extends DshAdapter {
 
   async nativeHead(sessionId) { return this.#session(sessionId).nextSeq - 1 }
 
+  attachmentsAvailable() { return true }
+
+  /** Test-only: store deterministic attachment bytes and return the native ref. */
+  saveFixtureAttachment({ kind = 'file', data = new Uint8Array(0), mediaType = '', name = '' } = {}) {
+    const bytes = data instanceof Uint8Array ? data.slice() : Uint8Array.from(data ?? [])
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const attachmentId = kind === 'image' ? `image-${randomId()}` : `sha256:${digest}`
+    const ref = kind === 'image'
+      ? { attachmentId, mediaType: mediaType || 'image/png', bytes: bytes.length, ...(name ? { name } : {}) }
+      : { attachmentId, bytes: bytes.length, ...(name ? { name } : {}) }
+    this.#attachmentStore.set(attachmentId, { kind, data: bytes, ref })
+    return ref
+  }
+
+  /** Test-only: simulate a corrupt immutable store object. */
+  corruptFixtureAttachment(attachmentId) {
+    const entry = this.#attachmentStore.get(attachmentId)
+    if (!entry) throw new AdapterError('not_found')
+    entry.data = entry.data.subarray(0, Math.max(0, entry.data.length - 1))
+  }
+
+  async nativeReadImage(ref, signal) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    const entry = this.#attachmentStore.get(ref?.attachmentId)
+    if (!entry || entry.kind !== 'image') throw new AdapterError('not_found')
+    return entry.data.slice()
+  }
+
+  async nativeReadFileStream(ref, signal) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    const entry = this.#attachmentStore.get(ref?.attachmentId)
+    if (!entry || entry.kind !== 'file') throw new AdapterError('not_found')
+    const data = entry.data
+    return (async function* () {
+      for (let offset = 0; offset < data.length; offset += 64 * 1024) {
+        if (signal?.aborted) throw new AdapterError('unavailable')
+        yield data.slice(offset, offset + 64 * 1024)
+      }
+    })()
+  }
+
+  async readWaitState(sessionId, signal) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    const session = this.#session(sessionId)
+    const pending = []
+    const approval = [...this.#approvals.values()].some(item => item.sessionId === sessionId && item.state === 'pending')
+    if (approval) pending.push('approval')
+    if (this.behavior.questions && (this.#questions.get(sessionId) ?? []).length > 0) pending.push('question')
+    return { active: true, running: session.running, queueAvailable: true, pendingInput: pending }
+  }
+
   async getSessionSnapshot(sessionId) {
     this.#check('getSessionSnapshot')
     const session = this.#session(sessionId)
@@ -528,7 +581,14 @@ export class FakeDshAdapter extends DshAdapter {
     return this.emit(sessionId, {
       type: 'assistant/message',
       kind: 'output',
-      data: { text },
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: `message-${randomId()}`, role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { kind: 'model', provider: this.#defaultModel.provider, model: this.#defaultModel.model },
+        },
+      },
       ...options,
     })
   }
@@ -575,9 +635,19 @@ export class FakeDshAdapter extends DshAdapter {
       // a later read can prove which model the source actually used.
       session.lastUsedModel = session.modelSelection ?? { ...this.#defaultModel }
       session.modelSelection = null
-      this.emit(sessionId, { type: 'user/message', kind: 'output', data: { text: message, messageId } })
+      this.emit(sessionId, { type: 'user/message', kind: 'output', data: {
+        id: messageId, role: 'user', content: [{ type: 'text', text: message }],
+        source: { kind: 'user', rpcId: messageId },
+      } })
       if (this.behavior.emitOutputOnMessage) {
-        this.emit(sessionId, { type: 'assistant/message', kind: 'output', data: { text: message, messageId } })
+        this.emit(sessionId, { type: 'assistant/message', kind: 'output', data: {
+          turn: 0, step: 0,
+          message: {
+            id: `message-${randomId()}`, role: 'assistant',
+            content: [{ type: 'text', text: message }],
+            source: { kind: 'model', provider: this.#defaultModel.provider, model: this.#defaultModel.model },
+          },
+        } })
       }
       if (this.behavior.longRunning) {
         this.emit(sessionId, { type: 'turn/start', kind: 'session_state', data: { running: true } })
@@ -599,14 +669,6 @@ export class FakeDshAdapter extends DshAdapter {
       this.logger?.info('dsh_message_sent', { session: sessionId })
       return { messageId, deliveryId: messageId }
     })
-  }
-
-  async readMessageReply(sessionId, messageId) {
-    const snapshot = await this.getSessionSnapshot(sessionId)
-    const reply = snapshot.events.find(event =>
-      event.type === 'assistant/message' && event.data?.messageId === messageId)
-    if (!reply) return { state: 'MESSAGE_REPLY_PENDING' }
-    return { state: 'MESSAGE_REPLY_COMMITTED', attempt_id: String(reply.dshSeq), text: reply.data.text }
   }
 
   async interrupt(sessionId) {

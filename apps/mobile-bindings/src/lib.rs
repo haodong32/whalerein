@@ -19,8 +19,9 @@ pub use error::MobileError;
 pub use secret::{MemorySecretStore, SecretStore, SecretStoreError};
 pub use types::{
     ApprovalView, BlockView, ClientStatusView, CommandView, ConversationEvent, DeliveryChoice,
-    DiagnosticsReportView, HostSummary, MessageReplyView, MessageView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionIntentView, QuestionItemView,
-    QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
-    SendOperationView, SessionCapabilitiesView, SessionSummaryView,
+    DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
+    NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView, QuestionIntentView,
+    QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView,
+    QuestionsView, SendOperationView, SessionCapabilitiesView, SessionKeyView, SessionSummaryView,
+    ToolActivityView, ToolResultPartView,
 };

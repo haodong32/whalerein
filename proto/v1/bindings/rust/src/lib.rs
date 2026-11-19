@@ -13,6 +13,9 @@ mod serde_impls {
 mod compat;
 pub use compat::*;
 
+mod transport_profiles;
+pub use transport_profiles::*;
+
 /// Protocol version carried on every request and result envelope.
 pub const PROTOCOL_VERSION: u32 = MIN_SUPPORTED_PROTOCOL_VERSION;
 

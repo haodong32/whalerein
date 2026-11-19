@@ -8,13 +8,16 @@ use std::collections::HashMap;
 
 use whalerein_core::api as core_api;
 use whalerein_core::api::{
-    ApprovalInfo, DeliveryMode, HostInfo, PairingPrompt, QuestionBatchInfo, QuestionFreshness,
-    QuestionPageInfo, SessionCapabilities, SessionSummary,
+    ApprovalInfo, DeliveryMode, HostInfo, InputKind, PairingPrompt, QuestionBatchInfo,
+    QuestionFreshness, QuestionPageInfo, SendReply, SessionCapabilities, SessionKey,
+    SessionSummary,
 };
 use whalerein_core::conversation::{
-    content_block, ApprovalState, AttemptOutcome, ConversationMessage, MessageRole, RunPhase,
+    content_block, ApprovalState, AttemptOutcome, BlockKind, ConversationMessage, MessageRole,
+    NoticeCategory, NoticeState, RunPhase, ToolActivity, ToolResultPart, ToolStage, ToolState,
     ViewUpdate,
 };
+use whalerein_core::history::MessageReference;
 
 /// A paired Host as reported by Access. `fingerprint` is the confirmed pin.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -75,6 +78,20 @@ pub struct SessionCapabilitiesView {
     pub live_text: bool,
     pub interrupt: bool,
     pub approvals: bool,
+    /// The Source can stream displayable reasoning blocks.
+    pub live_reasoning: bool,
+    /// The Source reports typed tool activities.
+    pub tool_activity: bool,
+    /// The Source reports typed conversation notices.
+    pub conversation_notices: bool,
+    /// The Source supports attachment metadata and reads.
+    pub attachments: bool,
+    /// The Source supports independent bounded history pages.
+    pub history_page: bool,
+    /// The Source supports exact committed-message reads.
+    pub history_exact: bool,
+    /// The Source supports typed send follow-up replies.
+    pub send_followup: bool,
     pub delivery_modes: Vec<String>,
     pub model_selection: bool,
     pub pending_queue_read: bool,
@@ -95,6 +112,13 @@ impl From<SessionCapabilities> for SessionCapabilitiesView {
             live_text: value.live_text,
             interrupt: value.interrupt,
             approvals: value.approvals,
+            live_reasoning: value.live_reasoning,
+            tool_activity: value.tool_activity,
+            conversation_notices: value.conversation_notices,
+            attachments: value.attachments,
+            history_page: value.history_page,
+            history_exact: value.history_exact,
+            send_followup: value.send_followup,
             delivery_modes: value
                 .delivery_modes
                 .into_iter()
@@ -192,14 +216,143 @@ fn approval_state_name(value: ApprovalState) -> String {
     normalize_approval_state(value.as_str_name())
 }
 
+/// One ordered, displayable part of a settled tool result.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ToolResultPartView {
+    Text {
+        text: String,
+    },
+    Attachment {
+        media_type: String,
+        name: String,
+        size: u64,
+        available: bool,
+    },
+}
+
+impl From<&ToolResultPart> for ToolResultPartView {
+    fn from(value: &ToolResultPart) -> Self {
+        match value {
+            ToolResultPart::Text(text) => Self::Text { text: text.clone() },
+            ToolResultPart::Attachment(attachment) => Self::Attachment {
+                media_type: attachment.media_type.clone(),
+                name: attachment.name.clone(),
+                size: attachment.size,
+                available: attachment.available,
+            },
+        }
+    }
+}
+
+/// One canonical tool activity. Core merges repeated occurrences by `call_id`;
+/// the binding never correlates call and result records itself.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ToolActivityView {
+    pub call_id: String,
+    pub name: String,
+    pub summary: Option<String>,
+    /// Stable lowercase state: `preparing`, `running`, `succeeded`, `failed`,
+    /// `interrupted`, `abandoned` or `unknown`.
+    pub state: String,
+    /// Evidenced stages in ascending order, as stable lowercase names.
+    pub stages: Vec<String>,
+    pub progress: Option<String>,
+    pub failure_code: Option<String>,
+    pub result: Vec<ToolResultPartView>,
+    /// True when the first observed occurrence proved a result without the
+    /// corresponding call record.
+    pub call_missing: bool,
+}
+
+impl From<&ToolActivity> for ToolActivityView {
+    fn from(value: &ToolActivity) -> Self {
+        Self {
+            call_id: value.id.call_id.clone(),
+            name: value.name.clone(),
+            summary: value.summary.clone(),
+            state: tool_state_name(value.state),
+            stages: value.stages.iter().copied().map(tool_stage_name).collect(),
+            progress: value.progress.clone(),
+            failure_code: value.failure_code.clone(),
+            result: value.result.iter().map(ToolResultPartView::from).collect(),
+            call_missing: value.call_missing,
+        }
+    }
+}
+
+fn tool_state_name(value: ToolState) -> String {
+    value.as_str().to_owned()
+}
+
+fn tool_stage_name(value: ToolStage) -> String {
+    match value {
+        ToolStage::Preparation => "preparation",
+        ToolStage::Execution => "execution",
+        ToolStage::Progress => "progress",
+        ToolStage::Settlement => "settlement",
+        ToolStage::Unspecified => "unknown",
+    }
+    .to_owned()
+}
+
+/// One typed notice. `summary` is the only display body; Core never exposes raw
+/// command arguments, compaction input or an unclassified notice body.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NoticeView {
+    pub category: String,
+    pub state: String,
+    pub summary: Option<String>,
+}
+
+impl From<&content_block::NoticeContent> for NoticeView {
+    fn from(value: &content_block::NoticeContent) -> Self {
+        Self {
+            category: notice_category_name(value.category),
+            state: notice_state_name(value.state),
+            summary: value.summary.clone(),
+        }
+    }
+}
+
+fn notice_category_name(value: NoticeCategory) -> String {
+    match value {
+        NoticeCategory::Retry => "retry",
+        NoticeCategory::MaxOutput => "max_output",
+        NoticeCategory::Compaction => "compaction",
+        NoticeCategory::Command => "command",
+        NoticeCategory::Context => "context",
+        NoticeCategory::Omission => "omission",
+        NoticeCategory::Unspecified => "unknown",
+    }
+    .to_owned()
+}
+
+fn notice_state_name(value: NoticeState) -> String {
+    match value {
+        NoticeState::Scheduled => "scheduled",
+        NoticeState::Started => "started",
+        NoticeState::Cancelled => "cancelled",
+        NoticeState::Completed => "completed",
+        NoticeState::Failed => "failed",
+        NoticeState::Reached => "reached",
+        NoticeState::Unspecified => "unknown",
+    }
+    .to_owned()
+}
+
 /// One content block of a committed message. `kind` is stable text:
-/// `text`, `tool`, `notice`, `attachment` or `unknown`.
+/// `text`, `reasoning`, `tool`, `notice`, `attachment` or `unknown`.
+///
+/// `tool_activity` is present for tool blocks and `notice` for notice blocks;
+/// `text` stays the display body so existing clients keep rendering.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BlockView {
     pub block_id: String,
     pub kind: String,
     pub text: String,
     pub tool_name: Option<String>,
+    pub tool_activity: Option<ToolActivityView>,
+    pub notice: Option<NoticeView>,
 }
 
 /// A committed conversation message.
@@ -233,24 +386,64 @@ pub(crate) fn message_view(message: &ConversationMessage) -> MessageView {
 }
 
 fn block_view(block_id: &str, content: Option<&content_block::Content>) -> BlockView {
-    let (kind, text, tool_name) = match content {
-        Some(content_block::Content::Text(text)) => ("text", text.text.clone(), None),
-        Some(content_block::Content::ToolCall(call)) => {
-            ("tool", call.summary.clone(), Some(call.name.clone()))
-        }
-        Some(content_block::Content::ToolResult(result)) => ("tool", result.text.clone(), None),
-        Some(content_block::Content::Notice(notice)) => ("notice", notice.text.clone(), None),
-        Some(content_block::Content::Attachment(attachment)) => {
-            ("attachment", attachment.name.clone(), None)
-        }
-        None => ("unknown", String::new(), None),
-    };
-    BlockView {
+    let mut view = BlockView {
         block_id: block_id.to_owned(),
-        kind: kind.to_owned(),
-        text,
-        tool_name,
+        kind: "unknown".into(),
+        text: String::new(),
+        tool_name: None,
+        tool_activity: None,
+        notice: None,
+    };
+    match content {
+        Some(content_block::Content::Text(text)) => {
+            view.kind = "text".into();
+            view.text = text.text.clone();
+        }
+        Some(content_block::Content::Reasoning(reasoning)) => {
+            view.kind = "reasoning".into();
+            view.text = reasoning.text.clone();
+        }
+        Some(content_block::Content::ToolActivity(activity)) => {
+            view.kind = "tool".into();
+            view.text = tool_activity_text(activity);
+            if !activity.name.is_empty() {
+                view.tool_name = Some(activity.name.clone());
+            }
+            view.tool_activity = Some(ToolActivityView::from(activity));
+        }
+        Some(content_block::Content::Notice(notice)) => {
+            view.kind = "notice".into();
+            view.text = notice.summary.clone().unwrap_or_default();
+            view.notice = Some(NoticeView::from(notice));
+        }
+        Some(content_block::Content::Attachment(attachment)) => {
+            view.kind = "attachment".into();
+            view.text = attachment.name.clone();
+        }
+        None => {}
     }
+    view
+}
+
+/// Display body for a tool block: settled result text when one exists, then
+/// the call summary or progress. It never invents a state.
+fn tool_activity_text(activity: &ToolActivity) -> String {
+    if !activity.result.is_empty() {
+        return activity
+            .result
+            .iter()
+            .map(|part| match part {
+                ToolResultPart::Text(text) => text.clone(),
+                ToolResultPart::Attachment(attachment) => attachment.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    activity
+        .summary
+        .clone()
+        .or_else(|| activity.progress.clone())
+        .unwrap_or_default()
 }
 
 fn message_role_name(value: MessageRole) -> String {
@@ -259,8 +452,18 @@ fn message_role_name(value: MessageRole) -> String {
         MessageRole::Assistant => "assistant".into(),
         MessageRole::Tool => "tool".into(),
         MessageRole::Notice => "notice".into(),
-        MessageRole::Unspecified => "unknown".into(),
+        MessageRole::Context => "context".into(),
+        MessageRole::Unspecified | MessageRole::Unknown => "unknown".into(),
     }
+}
+
+fn block_kind_name(value: BlockKind) -> String {
+    match value {
+        BlockKind::Text => "text",
+        BlockKind::Reasoning => "reasoning",
+        BlockKind::Unspecified => "unknown",
+    }
+    .to_owned()
 }
 
 fn run_phase_name(value: RunPhase) -> String {
@@ -321,22 +524,95 @@ pub struct SendOperationView {
     pub reply: Option<MessageReplyView>,
 }
 
+/// Host-qualified session identity carried by typed send results.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SessionKeyView {
+    pub host_id: String,
+    pub session_id: String,
+}
+
+impl From<SessionKey> for SessionKeyView {
+    fn from(value: SessionKey) -> Self {
+        Self {
+            host_id: value.host_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
+impl From<&SessionKey> for SessionKeyView {
+    fn from(value: &SessionKey) -> Self {
+        Self {
+            host_id: value.host_id.clone(),
+            session_id: value.session_id.clone(),
+        }
+    }
+}
+
+/// Scoped reference to a canonical committed message. Resolve its body through
+/// Core history; the reference itself never carries content.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MessageReferenceView {
+    pub session: SessionKeyView,
+    pub message_id: String,
+    pub projection_id: String,
+}
+
+impl From<&MessageReference> for MessageReferenceView {
+    fn from(value: &MessageReference) -> Self {
+        Self {
+            session: SessionKeyView::from(value.session()),
+            message_id: value.message_id().to_owned(),
+            projection_id: value.projection_id().to_owned(),
+        }
+    }
+}
+
+/// Proof-backed outcome of following one submitted message. `Committed` names
+/// the canonical message; the body stays in history.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum MessageReplyView {
-    Committed { attempt_id: String, text: String },
-    InputRequired,
+    Pending,
+    Committed {
+        reference: MessageReferenceView,
+    },
+    InputRequired {
+        /// Stable lowercase kinds: `approval`, `question` or `other`.
+        kinds: Vec<String>,
+        operation: String,
+        session: SessionKeyView,
+    },
     Uncertain,
 }
 
-impl From<whalerein_core::api::MessageReply> for MessageReplyView {
-    fn from(value: whalerein_core::api::MessageReply) -> Self {
-        use whalerein_core::api::MessageReply;
+impl From<SendReply> for MessageReplyView {
+    fn from(value: SendReply) -> Self {
         match value {
-            MessageReply::Committed { attempt_id, text } => Self::Committed { attempt_id, text },
-            MessageReply::InputRequired => Self::InputRequired,
-            MessageReply::Uncertain => Self::Uncertain,
+            SendReply::Pending => Self::Pending,
+            SendReply::Committed { reference } => Self::Committed {
+                reference: MessageReferenceView::from(&reference),
+            },
+            SendReply::InputRequired {
+                kinds,
+                operation,
+                session,
+            } => Self::InputRequired {
+                kinds: kinds.into_iter().map(input_kind_name).collect(),
+                operation,
+                session: SessionKeyView::from(session),
+            },
+            SendReply::Uncertain => Self::Uncertain,
         }
     }
+}
+
+fn input_kind_name(value: InputKind) -> String {
+    match value {
+        InputKind::Approval => "approval",
+        InputKind::Question => "question",
+        InputKind::Other => "other",
+    }
+    .to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -435,9 +711,17 @@ pub enum ConversationEvent {
     },
     Preview {
         attempt_id: String,
+        /// The checked kind of the previewed block: `text` or `reasoning`.
+        /// Callers must not merge reasoning into an answer block.
+        kind: String,
         text: String,
         replace: bool,
         incomplete: bool,
+    },
+    /// One material change to a canonical tool activity. Core has already
+    /// merged the call and result occurrences.
+    ToolActivity {
+        activity: ToolActivityView,
     },
     AttemptEnded {
         attempt_id: String,
@@ -527,15 +811,20 @@ pub(crate) fn convert_update(
         }],
         ViewUpdate::Preview {
             attempt,
+            kind,
             text,
             replace,
             incomplete,
             ..
         } => vec![ConversationEvent::Preview {
             attempt_id: attempt.attempt_id.clone(),
+            kind: block_kind_name(*kind),
             text: text.clone(),
             replace: *replace,
             incomplete: *incomplete,
+        }],
+        ViewUpdate::ToolActivity(activity) => vec![ConversationEvent::ToolActivity {
+            activity: ToolActivityView::from(activity),
         }],
         ViewUpdate::AttemptEnded { attempt, outcome } => vec![ConversationEvent::AttemptEnded {
             attempt_id: attempt.attempt_id.clone(),
@@ -841,10 +1130,10 @@ pub(crate) fn question_guard(value: &QuestionBatchView) -> core_api::QuestionBat
 mod tests {
     use super::*;
     use whalerein_core::conversation::content_block::{
-        AttachmentContent, NoticeContent, TextContent, ToolCallContent, ToolResultContent,
+        AttachmentContent, NoticeContent, ReasoningContent, TextContent,
     };
     use whalerein_core::conversation::{
-        Approval, ApprovalDecision, AttemptRef, ContentBlock, SessionKey, SessionState,
+        Approval, ApprovalDecision, AttemptRef, ContentBlock, SessionKey, SessionState, ToolOutcome,
     };
 
     fn message_with(
@@ -886,8 +1175,28 @@ mod tests {
             live_epoch: "epoch".into(),
             revision: 3,
             history_head: "head".into(),
+            projection_id: "projection-1".into(),
             run_phase,
             approvals,
+        }
+    }
+
+    fn tool_activity(state: ToolState, result: Vec<ToolResultPart>) -> ToolActivity {
+        ToolActivity {
+            id: whalerein_core::conversation::ToolActivityId {
+                call_id: "c".into(),
+            },
+            name: "shell".into(),
+            summary: Some("ls".into()),
+            order: 1,
+            state,
+            stages: vec![ToolStage::Execution, ToolStage::Settlement],
+            progress: None,
+            failure_code: None,
+            result,
+            outcome: ToolOutcome::Succeeded,
+            attempt: None,
+            call_missing: false,
         }
     }
 
@@ -903,64 +1212,138 @@ mod tests {
         assert_eq!(view.blocks[0].kind, "unknown");
         assert!(view.blocks[0].text.is_empty());
         assert!(view.blocks[0].tool_name.is_none());
+        assert!(view.blocks[0].tool_activity.is_none());
+        assert!(view.blocks[0].notice.is_none());
         assert_eq!(
             message_role_name(MessageRole::try_from(-5).unwrap_or_default()),
             "unknown"
         );
+        // Context and explicit unknown roles never become user content.
+        assert_eq!(message_role_name(MessageRole::Context), "context");
+        assert_eq!(message_role_name(MessageRole::Unknown), "unknown");
+        assert!(!MessageRole::Context.is_user());
+        assert!(!MessageRole::Unknown.is_user());
     }
 
     #[test]
     fn block_kinds_map_without_panicking() {
-        let cases = [
-            (
-                content_block::Content::Text(TextContent {
-                    text: "hello".into(),
-                }),
-                "text",
-                None,
-            ),
-            (
-                content_block::Content::ToolCall(ToolCallContent {
-                    call_id: "c".into(),
-                    name: "shell".into(),
-                    summary: "ls".into(),
-                }),
-                "tool",
-                Some("shell"),
-            ),
-            (
-                content_block::Content::ToolResult(ToolResultContent {
-                    call_id: "c".into(),
-                    text: "out".into(),
-                    is_error: false,
-                }),
-                "tool",
-                None,
-            ),
-            (
-                content_block::Content::Notice(NoticeContent {
-                    category: "info".into(),
-                    text: "note".into(),
-                }),
-                "notice",
-                None,
-            ),
-            (
-                content_block::Content::Attachment(AttachmentContent {
+        let reasoning = block_view(
+            "b",
+            Some(&content_block::Content::Reasoning(ReasoningContent {
+                text: "thinking".into(),
+            })),
+        );
+        assert_eq!(reasoning.kind, "reasoning");
+        assert_eq!(reasoning.text, "thinking");
+        assert!(reasoning.tool_activity.is_none());
+        assert!(reasoning.notice.is_none());
+
+        let notice = block_view(
+            "b",
+            Some(&content_block::Content::Notice(NoticeContent {
+                category: NoticeCategory::Retry,
+                state: NoticeState::Started,
+                summary: Some("retrying".into()),
+            })),
+        );
+        assert_eq!(notice.kind, "notice");
+        assert_eq!(notice.text, "retrying");
+        let typed_notice = notice.notice.expect("typed notice");
+        assert_eq!(typed_notice.category, "retry");
+        assert_eq!(typed_notice.state, "started");
+        assert_eq!(typed_notice.summary.as_deref(), Some("retrying"));
+
+        let missing_summary = block_view(
+            "b",
+            Some(&content_block::Content::Notice(NoticeContent {
+                category: NoticeCategory::Compaction,
+                state: NoticeState::Completed,
+                summary: None,
+            })),
+        );
+        assert_eq!(missing_summary.kind, "notice");
+        assert!(missing_summary.text.is_empty());
+        assert_eq!(
+            missing_summary
+                .notice
+                .as_ref()
+                .map(|notice| notice.category.as_str()),
+            Some("compaction")
+        );
+
+        let text = block_view(
+            "b",
+            Some(&content_block::Content::Text(TextContent {
+                text: "hello".into(),
+            })),
+        );
+        assert_eq!(text.kind, "text");
+        assert_eq!(text.text, "hello");
+
+        let attachment = block_view(
+            "b",
+            Some(&content_block::Content::Attachment(AttachmentContent {
+                media_type: "text/plain".into(),
+                name: "file.txt".into(),
+                size: 3,
+                available: true,
+                attachment_ref: "ref".into(),
+            })),
+        );
+        assert_eq!(attachment.kind, "attachment");
+        assert_eq!(attachment.text, "file.txt");
+        assert!(attachment.tool_activity.is_none());
+        assert!(attachment.notice.is_none());
+    }
+
+    #[test]
+    fn typed_tool_activity_keeps_merge_and_settlement_fields() {
+        let result_first = content_block::Content::ToolActivity(tool_activity(
+            ToolState::Succeeded,
+            vec![
+                ToolResultPart::Text("out".into()),
+                ToolResultPart::Attachment(AttachmentContent {
                     media_type: "text/plain".into(),
-                    name: "file.txt".into(),
+                    name: "out.txt".into(),
                     size: 3,
                     available: true,
+                    attachment_ref: "ref".into(),
                 }),
-                "attachment",
-                None,
-            ),
-        ];
-        for (content, kind, tool_name) in cases {
-            let view = block_view("b", Some(&content));
-            assert_eq!(view.kind, kind);
-            assert_eq!(view.tool_name.as_deref(), tool_name);
-        }
+            ],
+        ));
+        let view = block_view("b", Some(&result_first));
+        assert_eq!(view.kind, "tool");
+        assert_eq!(view.text, "out\nout.txt");
+        assert_eq!(view.tool_name.as_deref(), Some("shell"));
+        let activity = view.tool_activity.expect("typed activity");
+        assert_eq!(activity.call_id, "c");
+        assert_eq!(activity.state, "succeeded");
+        assert_eq!(activity.stages, vec!["execution", "settlement"]);
+        assert!(!activity.call_missing);
+        assert_eq!(activity.result.len(), 2);
+        assert_eq!(
+            activity.result[0],
+            ToolResultPartView::Text { text: "out".into() }
+        );
+
+        let update = ViewUpdate::ToolActivity(tool_activity(ToolState::Running, Vec::new()));
+        let mut seen = None;
+        assert_eq!(
+            convert_update(&update, &mut seen),
+            vec![ConversationEvent::ToolActivity {
+                activity: ToolActivityView {
+                    call_id: "c".into(),
+                    name: "shell".into(),
+                    summary: Some("ls".into()),
+                    state: "running".into(),
+                    stages: vec!["execution".into(), "settlement".into()],
+                    progress: None,
+                    failure_code: None,
+                    result: Vec::new(),
+                    call_missing: false,
+                }
+            }]
+        );
     }
 
     #[test]
@@ -1052,7 +1435,7 @@ mod tests {
         let update = ViewUpdate::Message {
             message: message.clone(),
             origin: None,
-            preview_prefix_bytes: None,
+            preview_prefix: None,
         };
         let mut seen = None;
         assert_eq!(
@@ -1066,6 +1449,8 @@ mod tests {
                         kind: "text".into(),
                         text: "hi".into(),
                         tool_name: None,
+                        tool_activity: None,
+                        notice: None,
                     }],
                     created_at_unix_ms: 7,
                 }
@@ -1078,6 +1463,7 @@ mod tests {
                 attempt_id: "a".into(),
             },
             block_id: "b".into(),
+            kind: BlockKind::Reasoning,
             text: "stream".into(),
             replace: true,
             incomplete: true,
@@ -1086,6 +1472,7 @@ mod tests {
             convert_update(&update, &mut seen),
             vec![ConversationEvent::Preview {
                 attempt_id: "a".into(),
+                kind: "reasoning".into(),
                 text: "stream".into(),
                 replace: true,
                 incomplete: true,
@@ -1103,11 +1490,10 @@ mod tests {
         );
         message.blocks.push(ContentBlock {
             block_id: "b-2".into(),
-            content: Some(content_block::Content::ToolCall(ToolCallContent {
-                call_id: "c-2".into(),
-                name: "shell".into(),
-                summary: "ls".into(),
-            })),
+            content: Some(content_block::Content::ToolActivity(tool_activity(
+                ToolState::Succeeded,
+                vec![ToolResultPart::Text("ls output".into())],
+            ))),
         });
         let direct = message_view(&message);
         assert_eq!(MessageView::from(&message), direct);
@@ -1116,7 +1502,7 @@ mod tests {
             &ViewUpdate::Message {
                 message: message.clone(),
                 origin: None,
-                preview_prefix_bytes: None,
+                preview_prefix: None,
             },
             &mut seen,
         );
@@ -1128,6 +1514,62 @@ mod tests {
         assert_eq!(direct.blocks.len(), 2);
         assert_eq!(direct.blocks[1].kind, "tool");
         assert_eq!(direct.blocks[1].tool_name.as_deref(), Some("shell"));
+        assert_eq!(
+            direct.blocks[1]
+                .tool_activity
+                .as_ref()
+                .map(|activity| activity.state.as_str()),
+            Some("succeeded")
+        );
+    }
+
+    #[test]
+    fn send_reply_states_map_to_the_typed_surface() {
+        let session = SessionKey {
+            host_id: "h".into(),
+            session_id: "s".into(),
+        };
+        let reference =
+            MessageReference::new(session.clone(), "message-1", "locator-1", "projection-1")
+                .expect("reference");
+        let committed: MessageReplyView = SendReply::Committed { reference }.into();
+        assert_eq!(
+            committed,
+            MessageReplyView::Committed {
+                reference: MessageReferenceView {
+                    session: SessionKeyView {
+                        host_id: "h".into(),
+                        session_id: "s".into(),
+                    },
+                    message_id: "message-1".into(),
+                    projection_id: "projection-1".into(),
+                }
+            }
+        );
+
+        assert_eq!(
+            MessageReplyView::from(SendReply::Pending),
+            MessageReplyView::Pending
+        );
+        assert_eq!(
+            MessageReplyView::from(SendReply::Uncertain),
+            MessageReplyView::Uncertain
+        );
+        assert_eq!(
+            MessageReplyView::from(SendReply::InputRequired {
+                kinds: vec![InputKind::Approval, InputKind::Question, InputKind::Other],
+                operation: "operation-1".into(),
+                session,
+            }),
+            MessageReplyView::InputRequired {
+                kinds: vec!["approval".into(), "question".into(), "other".into()],
+                operation: "operation-1".into(),
+                session: SessionKeyView {
+                    host_id: "h".into(),
+                    session_id: "s".into(),
+                },
+            }
+        );
     }
 
     #[test]
@@ -1179,6 +1621,13 @@ mod tests {
                 live_text: true,
                 interrupt: true,
                 approvals: true,
+                live_reasoning: true,
+                tool_activity: true,
+                conversation_notices: true,
+                attachments: true,
+                history_page: true,
+                history_exact: true,
+                send_followup: true,
                 delivery_modes: vec![
                     "STEER".into(),
                     "ENQUEUE_AFTER_RUN".into(),
@@ -1225,6 +1674,13 @@ mod tests {
             live_text: true,
             interrupt: true,
             approvals: true,
+            live_reasoning: true,
+            tool_activity: true,
+            conversation_notices: true,
+            attachments: true,
+            history_page: true,
+            history_exact: true,
+            send_followup: true,
             delivery_modes: vec![
                 "STEER".into(),
                 "DELIVERY_MODE_ENQUEUE_AFTER_RUN".into(),
@@ -1247,6 +1703,13 @@ mod tests {
         assert!(view.live_text);
         assert!(view.interrupt);
         assert!(view.approvals);
+        assert!(view.live_reasoning);
+        assert!(view.tool_activity);
+        assert!(view.conversation_notices);
+        assert!(view.attachments);
+        assert!(view.history_page);
+        assert!(view.history_exact);
+        assert!(view.send_followup);
         assert!(view.model_selection);
         assert!(view.pending_queue_read);
         assert!(view.pending_queue_edit);
@@ -1267,6 +1730,13 @@ mod tests {
             live_text: false,
             interrupt: false,
             approvals: false,
+            live_reasoning: false,
+            tool_activity: false,
+            conversation_notices: false,
+            attachments: false,
+            history_page: false,
+            history_exact: false,
+            send_followup: false,
             delivery_modes: Vec::new(),
             model_selection: false,
             pending_queue_read: false,

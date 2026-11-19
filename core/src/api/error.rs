@@ -46,6 +46,8 @@ pub enum CoreError {
     ProtocolIncompatible,
     #[error("pairing was cancelled")]
     PairingCancelled,
+    #[error("operation was cancelled")]
+    Cancelled,
     #[error("pairing intent was invalidated before commit")]
     PairingFenced,
     #[error("pairing committed but its original grant is unavailable")]
@@ -116,7 +118,7 @@ impl CoreError {
             Self::Conflict(_) => "conflict",
             Self::Unsupported => "unsupported_capability",
             Self::ProtocolIncompatible => "protocol_version_incompatible",
-            Self::PairingCancelled => "cancelled",
+            Self::PairingCancelled | Self::Cancelled => "cancelled",
             Self::PairingFenced => "pairing_fenced",
             Self::PairingCommittedUnavailable => "pairing_committed_unavailable",
             Self::PairingCommittedUnconfirmed => "pairing_committed_unconfirmed",
@@ -194,7 +196,7 @@ impl CoreError {
             | Self::ChannelMismatch
             | Self::StaleCommand { .. } => 8,
             Self::Unsupported | Self::ProtocolIncompatible => 9,
-            Self::PairingCancelled => 2,
+            Self::PairingCancelled | Self::Cancelled => 2,
             Self::Cache(_) | Self::Security(_) | Self::Internal(_) => 1,
             Self::Host { code: None, .. }
             | Self::Source { code: None, .. }
@@ -237,6 +239,7 @@ impl CoreError {
             Self::PairingCancelled | Self::PairingFenced | Self::PairingCommittedUnavailable => {
                 "restart_pairing"
             }
+            Self::Cancelled => "none",
             Self::PairingCommittedUnconfirmed => "review_pairing",
             Self::ChannelMismatch | Self::StaleCommand { .. } => "retry",
             Self::Host { code: None, .. }
@@ -764,6 +767,7 @@ mod exhaustive_tests {
             CoreError::Unsupported,
             CoreError::ProtocolIncompatible,
             CoreError::PairingCancelled,
+            CoreError::Cancelled,
             CoreError::FingerprintMismatch {
                 expected: "a".into(),
                 actual: "b".into(),
@@ -923,6 +927,7 @@ mod exhaustive_tests {
             CoreError::Unsupported,
             CoreError::ProtocolIncompatible,
             CoreError::PairingCancelled,
+            CoreError::Cancelled,
             CoreError::PairingFenced,
             CoreError::PairingCommittedUnavailable,
             CoreError::PairingCommittedUnconfirmed,

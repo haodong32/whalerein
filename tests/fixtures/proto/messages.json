@@ -220,7 +220,7 @@
           }
         }
       },
-      "hex": "0a340a0777617463682d3112060a016812017322210a0a0a0565706f63681201611204746578741801200232090a07e4bda0f09f9982"
+      "hex": "0a340a0777617463682d3112060a016812017322210a0a0a0565706f63681201611204746578741801200232091207e4bda0f09f9982"
     },
     {
       "caseId": "typed-history",
@@ -468,6 +468,468 @@
         }
       },
       "hex": "0a060a0168120173120565706f6368182a220b6f70617175652d6265746128023a1b08031a170a136f62736572766174696f6e2d65706f63682d311009"
+    },
+    {
+      "caseId": "typed-reasoning-live",
+      "description": "When {language} round-trips a reasoning live delta, the checked block kind and append payload survive without a synthetic reasoning block for a disabled model.",
+      "name": "whalerein.v1.EventPayload",
+      "json": {
+        "update": {
+          "watchId": "watch-1",
+          "session": {
+            "hostId": "h",
+            "sessionId": "s"
+          },
+          "live": {
+            "attempt": {
+              "liveEpoch": "epoch",
+              "attemptId": "a"
+            },
+            "blockId": "reasoning",
+            "firstSeq": "1",
+            "lastSeq": "2",
+            "delta": {
+              "kind": "BLOCK_KIND_REASONING",
+              "text": "think"
+            }
+          }
+        }
+      },
+      "hex": "0a390a0777617463682d3112060a016812017322260a0a0a0565706f63681201611209726561736f6e696e67180120023209080212057468696e6b"
+    },
+    {
+      "caseId": "typed-reasoning-history",
+      "description": "When {language} round-trips committed reasoning beside answer text, block order, reasoning type and projection identity survive.",
+      "name": "whalerein.v1.HistoryPage",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "batch": {
+          "fromCursor": "opaque-alpha",
+          "toCursor": "opaque-beta",
+          "batchId": "batch",
+          "projectionId": "projection-1",
+          "changes": [
+            {
+              "message": {
+                "messageId": "m",
+                "role": "ASSISTANT",
+                "blocks": [
+                  {
+                    "blockId": "reasoning",
+                    "reasoning": {
+                      "text": "think"
+                    }
+                  },
+                  {
+                    "blockId": "answer",
+                    "text": {
+                      "text": "answer"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "cutCursor": "opaque-beta",
+        "complete": true,
+        "projectionId": "projection-1",
+        "source": "HISTORY_SOURCE_ONLINE"
+      },
+      "hex": "0a060a016812017312630a0c6f70617175652d616c706861120b6f70617175652d626574611a05626174636822310a2f0a016d10021a140a09726561736f6e696e673a070a057468696e6b1a120a06616e7377657212080a06616e737765722a0c70726f6a656374696f6e2d311a0b6f70617175652d6265746120013a0c70726f6a656374696f6e2d314001"
+    },
+    {
+      "caseId": "typed-tool-activity",
+      "description": "When {language} round-trips one tool activity, evidenced stages, ordered result content, attachment occurrence identity, failure state and settlement survive.",
+      "name": "whalerein.v1.HistoryPage",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "batch": {
+          "fromCursor": "a",
+          "toCursor": "b",
+          "batchId": "batch",
+          "projectionId": "projection-1",
+          "changes": [
+            {
+              "message": {
+                "messageId": "m",
+                "role": "TOOL",
+                "blocks": [
+                  {
+                    "blockId": "tool",
+                    "toolActivity": {
+                      "callId": "call-1",
+                      "stages": [
+                        "TOOL_STAGE_PREPARATION",
+                        "TOOL_STAGE_EXECUTION",
+                        "TOOL_STAGE_SETTLEMENT"
+                      ],
+                      "name": "read_file",
+                      "summary": "Read a file",
+                      "result": [
+                        {
+                          "text": {
+                            "text": "ok"
+                          }
+                        },
+                        {
+                          "attachment": {
+                            "mediaType": "text/plain",
+                            "name": "note.txt",
+                            "size": "4",
+                            "available": true,
+                            "attachmentRef": "occurrence-1"
+                          }
+                        }
+                      ],
+                      "outcome": "TOOL_OUTCOME_FAILED",
+                      "progress": "read complete",
+                      "failureCode": "file_unreadable"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "cutCursor": "b",
+        "complete": true,
+        "projectionId": "projection-1",
+        "source": "HISTORY_SOURCE_ONLINE"
+      },
+      "hex": "0a060a016812017312ac010a01611201621a056261746368228e010a8b010a016d10031a83010a04746f6f6c427b0a0663616c6c2d3112030102041a09726561645f66696c65220b5265616420612066696c652a060a040a026f6b2a2a12280a0a746578742f706c61696e12086e6f74652e747874180420012a0c6f6363757272656e63652d3130023a0d7265616420636f6d706c657465420f66696c655f756e7265616461626c652a0c70726f6a656374696f6e2d311a016220013a0c70726f6a656374696f6e2d314001"
+    },
+    {
+      "caseId": "typed-notice",
+      "description": "When {language} round-trips a retry notice, category, known state, ordered position and optional safe summary survive.",
+      "name": "whalerein.v1.HistoryPage",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "batch": {
+          "fromCursor": "a",
+          "toCursor": "b",
+          "batchId": "batch",
+          "projectionId": "projection-1",
+          "changes": [
+            {
+              "message": {
+                "messageId": "m",
+                "role": "NOTICE",
+                "blocks": [
+                  {
+                    "blockId": "notice",
+                    "notice": {
+                      "category": "NOTICE_CATEGORY_RETRY",
+                      "state": "NOTICE_STATE_SCHEDULED",
+                      "summary": "Retry scheduled"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "cutCursor": "b",
+        "complete": true,
+        "projectionId": "projection-1",
+        "source": "HISTORY_SOURCE_ONLINE"
+      },
+      "hex": "0a060a016812017312450a01611201621a05626174636822280a260a016d10041a1f0a066e6f746963652a15080110011a0f5265747279207363686564756c65642a0c70726f6a656374696f6e2d311a016220013a0c70726f6a656374696f6e2d314001"
+    },
+    {
+      "caseId": "typed-context-message",
+      "description": "When {language} round-trips recognized Source context, it remains a safe notice and never becomes a user body.",
+      "name": "whalerein.v1.HistoryPage",
+      "json": {
+        "session": {
+          "hostId": "h",
+          "sessionId": "s"
+        },
+        "batch": {
+          "fromCursor": "a",
+          "toCursor": "b",
+          "batchId": "batch",
+          "projectionId": "projection-1",
+          "changes": [
+            {
+              "message": {
+                "messageId": "m",
+                "role": "MESSAGE_ROLE_CONTEXT",
+                "blocks": [
+                  {
+                    "blockId": "notice",
+                    "notice": {
+                      "category": "NOTICE_CATEGORY_CONTEXT",
+                      "state": "NOTICE_STATE_COMPLETED"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "cutCursor": "b",
+        "complete": true,
+        "projectionId": "projection-1",
+        "source": "HISTORY_SOURCE_ONLINE"
+      },
+      "hex": "0a060a016812017312340a01611201621a05626174636822170a150a016d10051a0e0a066e6f746963652a04080510042a0c70726f6a656374696f6e2d311a016220013a0c70726f6a656374696f6e2d314001"
+    },
+    {
+      "caseId": "typed-send-reply-committed",
+      "description": "When {language} round-trips a committed send reply, the scoped canonical reference replaces flattened content.",
+      "name": "whalerein.v1.ResponsePayload",
+      "json": {
+        "messageReply": {
+          "sessionId": "s",
+          "submittedMessageId": "submitted-1",
+          "state": "MESSAGE_REPLY_COMMITTED",
+          "committed": {
+            "session": {
+              "hostId": "h",
+              "sessionId": "s"
+            },
+            "messageId": "m",
+            "sourceLocator": "locator-1",
+            "projectionId": "projection-1"
+          }
+        }
+      },
+      "hex": "7a380a0173120b7375626d69747465642d31180232240a060a016812017312016d1a096c6f6361746f722d31220c70726f6a656374696f6e2d31"
+    },
+    {
+      "caseId": "typed-send-reply-input",
+      "description": "When {language} round-trips an input-required send reply, the same InputKind vocabulary as wait is preserved without a body.",
+      "name": "whalerein.v1.ResponsePayload",
+      "json": {
+        "messageReply": {
+          "sessionId": "s",
+          "submittedMessageId": "submitted-1",
+          "state": "MESSAGE_REPLY_INPUT_REQUIRED",
+          "pendingInput": [
+            "INPUT_APPROVAL",
+            "INPUT_QUESTION"
+          ]
+        }
+      },
+      "hex": "7a160a0173120b7375626d69747465642d3118033a020102"
+    },
+    {
+      "caseId": "typed-history-page-read",
+      "description": "When {language} round-trips a latest-first bounded history page request, the page selection and budgets stay distinct from forward sync.",
+      "name": "whalerein.v1.RequestPayload",
+      "json": {
+        "readHistory": {
+          "sessionId": "s",
+          "page": {
+            "beforeCursor": "opaque-beta"
+          },
+          "cutCursor": "opaque-beta",
+          "maxBytes": 262144,
+          "maxMessages": 100,
+          "source": "HISTORY_SOURCE_ONLINE"
+        }
+      },
+      "hex": "5a270a0173220b6f70617175652d626574612880801030643a0d0a0b6f70617175652d626574615001"
+    },
+    {
+      "caseId": "typed-history-exact-read",
+      "description": "When {language} round-trips an exact committed-message history request, the scoped reference carries session, message, locator and projection identity.",
+      "name": "whalerein.v1.RequestPayload",
+      "json": {
+        "readHistory": {
+          "sessionId": "s",
+          "exact": {
+            "session": {
+              "hostId": "h",
+              "sessionId": "s"
+            },
+            "messageId": "m",
+            "sourceLocator": "locator-1",
+            "projectionId": "projection-1"
+          },
+          "maxBytes": 262144,
+          "maxMessages": 1
+        }
+      },
+      "hex": "5a2f0a017328808010300142240a060a016812017312016d1a096c6f6361746f722d31220c70726f6a656374696f6e2d31"
+    },
+    {
+      "caseId": "typed-attachment-open",
+      "description": "When {language} round-trips an attachment open query, the Host-qualified session and opaque occurrence reference are preserved.",
+      "name": "whalerein.v1.RequestPayload",
+      "json": {
+        "openAttachment": {
+          "session": {
+            "hostId": "h",
+            "sessionId": "s"
+          },
+          "attachmentRef": "occurrence-1"
+        }
+      },
+      "hex": "8214160a060a0168120173120c6f6363757272656e63652d31"
+    },
+    {
+      "caseId": "typed-attachment-metadata",
+      "description": "When {language} round-trips attachment metadata, declared size, media type, effective policy and the short-lived transfer handle survive.",
+      "name": "whalerein.v1.ResponsePayload",
+      "json": {
+        "openAttachmentResult": {
+          "attachment": {
+            "session": {
+              "hostId": "h",
+              "sessionId": "s"
+            },
+            "attachmentRef": "occurrence-1",
+            "mediaType": "text/plain",
+            "name": "note.txt",
+            "size": "4",
+            "policy": {
+              "maxTotalBytes": "1048576",
+              "maxChunkBytes": 61440,
+              "maxConcurrent": 2,
+              "idleTimeoutMs": 30000,
+              "overallTimeoutMs": 120000
+            },
+            "transferId": "transfer-1",
+            "expiresAtUnixMs": "1700000000000"
+          }
+        }
+      },
+      "hex": "8214570a550a060a0168120173120c6f6363757272656e63652d311a0a746578742f706c61696e22086e6f74652e74787428043212088080401080e003180220b0ea0128c0a9073a0a7472616e736665722d314080d095ffbc31"
+    },
+    {
+      "caseId": "typed-attachment-part",
+      "description": "When {language} round-trips a final attachment part, contiguous offset, declared length, bytes and terminal integrity metadata survive.",
+      "name": "whalerein.v1.ResponsePayload",
+      "json": {
+        "attachmentPart": {
+          "session": {
+            "hostId": "h",
+            "sessionId": "s"
+          },
+          "attachmentRef": "occurrence-1",
+          "transferId": "transfer-1",
+          "offset": "4",
+          "length": 2,
+          "data": "BQY=",
+          "final": true,
+          "totalSize": "6",
+          "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        }
+      },
+      "hex": "8a14500a060a0168120173120c6f6363757272656e63652d311a0a7472616e736665722d312004280232020506380140064a200000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "caseId": "typed-attachment-close",
+      "description": "When {language} round-trips an attachment close query, the transfer scope and explicit cancellation remain distinct.",
+      "name": "whalerein.v1.RequestPayload",
+      "json": {
+        "closeAttachment": {
+          "session": {
+            "hostId": "h",
+            "sessionId": "s"
+          },
+          "attachmentRef": "occurrence-1",
+          "transferId": "transfer-1",
+          "cancel": true
+        }
+      },
+      "hex": "9214240a060a0168120173120c6f6363757272656e63652d311a0a7472616e736665722d312001"
+    },
+    {
+      "caseId": "typed-request-transport",
+      "description": "When {language} round-trips request transport metadata, the validated HTTPS result bound plus the submission grant and revocation generations stay attached.",
+      "name": "whalerein.v1.HostRequest",
+      "json": {
+        "requestId": "req-1",
+        "hostId": "host-1",
+        "deviceId": "device-1",
+        "kind": "REQUEST_KIND_QUERY",
+        "expiresAtUnixMs": "1700000000000",
+        "protocolVersion": 1,
+        "transport": {
+          "resultMaxBytes": "16777216",
+          "grantGeneration": "7",
+          "revocationGeneration": "2"
+        }
+      },
+      "hex": "0a057265712d311206686f73742d311a086465766963652d3120023880d095ffbc3148017209088080800810071802"
+    },
+    {
+      "caseId": "typed-receive-advertisement",
+      "description": "When {language} round-trips a receive advertisement, the named profile, encoded budget and authenticated connection generation stay correlated.",
+      "name": "whalerein.v1.HostReady",
+      "json": {
+        "hostId": "host-1",
+        "connectedAtUnixMs": "1700000000000",
+        "transportVersion": 2,
+        "receive": {
+          "profile": "TRANSPORT_PROFILE_DEFAULT",
+          "budget": {
+            "packetBytes": 65536,
+            "fragmentPayloadBytes": 61440,
+            "fragmentCount": 274,
+            "envelopeBytes": "16777216",
+            "bulkConcurrency": 4,
+            "reservedBytes": "33554432",
+            "fragmentIdleTimeoutMs": 30000,
+            "transferTimeoutMs": 120000
+          },
+          "connectionGeneration": "3"
+        }
+      },
+      "hex": "0a06686f73742d311080d095ffbc3120022a250801121f088080041080e00318920220808080082804308080801038b0ea0140c0a9071803"
+    },
+    {
+      "caseId": "typed-transport-frame",
+      "description": "When {language} round-trips a transport frame, the selected fragment payload width and named profile stay bound to the transfer.",
+      "name": "whalerein.v1.TransportFrame",
+      "json": {
+        "version": 2,
+        "transferId": "transfer-1",
+        "topic": "whalerein/v1/h/h/event",
+        "count": 1,
+        "totalBytes": 16,
+        "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "payload": "AQIDBA==",
+        "complete": true,
+        "fragmentPayloadBytes": 61440,
+        "profile": "TRANSPORT_PROFILE_DEFAULT"
+      },
+      "hex": "0802120a7472616e736665722d311a167768616c657265696e2f76312f682f682f6576656e74280130103a20000000000000000000000000000000000000000000000000000000000000000042040102030458016080e0036801"
+    },
+    {
+      "caseId": "typed-source-capabilities-expanded",
+      "description": "When {language} round-trips expanded source capabilities, each optional content, history and attachment feature is independently explicit.",
+      "name": "whalerein.v1.SourceCapabilities",
+      "json": {
+        "history": true,
+        "resumableHistory": true,
+        "liveText": true,
+        "interrupt": true,
+        "approvals": true,
+        "deliveryModes": [
+          "START_IF_IDLE"
+        ],
+        "liveReasoning": true,
+        "toolActivity": true,
+        "conversationNotices": true,
+        "attachments": true,
+        "historyPage": true,
+        "historyExact": true,
+        "sendFollowup": true
+      },
+      "hex": "080110011801200128013201013801400148015001580160016801"
     }
   ]
 }

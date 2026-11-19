@@ -2,7 +2,8 @@
 // owns only watch lifetime, recipients, encryption and bounded publication.
 import { LiveBuffer } from './live-buffer.js'
 import { randomUUID } from 'node:crypto'
-import { PluginError } from '../errors.js'
+import { ERROR_CODES, PluginError } from '../errors.js'
+import { MESSAGE_BYTES } from '../access/transport.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   questionDescriptorToProto,
@@ -10,8 +11,37 @@ import {
   validateQuestionDescriptor,
   validateSessionUpdate,
 } from '../contracts/source.js'
+import { transportProfileBudget } from '../contracts/transport.js'
 
 const LEASE = 30000
+// Bounded replay/settlement memory per shared Source. It suppresses exact
+// duplicate live frames and committed batches and retires an Attempt once its
+// end or authoritative commit was observed.
+const SETTLED_LIMIT = 128
+const LIVE_SEEN_LIMIT = 128
+const BATCH_SEEN_LIMIT = 512
+// Per-channel live publication lane. It bounds latency, not canonical content.
+const LIVE_LANE_PUBLICATIONS = 64
+const LIVE_LANE_BYTES = 256 * 1024
+
+function attemptKey(attempt, projectionId) {
+  return `${projectionId ?? ''}\u0000${attempt?.live_epoch ?? ''}\u0000${attempt?.attempt_id ?? ''}`
+}
+
+function blockKey(frame, projectionId) {
+  return `${attemptKey(frame.attempt, projectionId)}|${frame.block_id ?? ''}|${frame.delta?.kind ?? frame.reset?.kind ?? ''}`
+}
+
+function safeCode(value) {
+  return typeof value === 'string' && ERROR_CODES.includes(value) ? value : 'invalid_argument'
+}
+
+function boundedSetEntry(map, key, value, limit) {
+  if (map.has(key)) map.delete(key)
+  map.set(key, value)
+  if (map.size > limit) map.delete(map.keys().next().value)
+  return value
+}
 // A questions facet failure is contained unless it disproves authority over the
 // whole session. These codes stop every selected facet.
 const QUESTION_FATAL_CODES = new Set(['forbidden', 'unauthorized', 'not_found', 'expired', 'invalid_argument', 'protocol_version_incompatible'])
@@ -175,6 +205,7 @@ export class WatchedEvents {
           buffer: new LiveBuffer(update => this.#fanout(sessionId, update), this.config.eventBatchMs ?? 20),
           registration: null, subscription: null, stateTask: null,
           questionTask: null, questionDirty: false, questionGeneration: 0, questionsAccepted: null,
+          projectionId: null, settled: new Map(), liveSeen: new Map(), batches: new Map(),
         }
         this.#sources.set(sessionId, source)
         source.recipients.add(watch.id)
@@ -332,7 +363,7 @@ export class WatchedEvents {
   #receive(sessionId, notification) {
     if (!notification || typeof notification !== 'object') return
     if (notification.session?.session_id !== sessionId) {
-      this.logger?.warn('source_update_rejected', { code: 'invalid_argument' })
+      this.logger?.warn('source_update_rejected', { code: 'invalid_argument', reason: 'scope' })
       return
     }
     if (notification.questions_changed === true) {
@@ -359,33 +390,188 @@ export class WatchedEvents {
       }
       return
     }
+    let update
     try {
-      const update = validateSessionUpdate({ ...notification, session: { host_id: this.hostId, session_id: sessionId } })
-      this.#expire()
-      this.#sources.get(sessionId)?.buffer.push(update)
-    } catch { this.logger?.warn('source_update_rejected', { code: 'invalid_argument' }) }
+      update = validateSessionUpdate({ ...notification, session: { host_id: this.hostId, session_id: sessionId } })
+    } catch (error) {
+      this.logger?.warn('source_update_rejected', { code: safeCode(error?.code), reason: 'shape' })
+      return
+    }
+    this.#expire()
+    const source = this.#sources.get(sessionId)
+    if (!source) return
+    try {
+      if (update.live) {
+        if (!this.#admitLive(source, update.live)) return
+      } else if (update.history) {
+        if (!this.#admitHistory(source, update.history)) return
+      } else if (update.state?.projection_id !== undefined) {
+        this.#adoptProjection(source, update.state.projection_id)
+      }
+    } catch (error) {
+      this.logger?.warn('source_update_rejected', { code: safeCode(error?.code), reason: 'stream' })
+      return
+    }
+    source.buffer.push(update)
   }
-  #fanout(sessionId, update) {
-    const questionsOnly = update.questions != null
-    for (const id of this.#sources.get(sessionId)?.recipients ?? []) {
-      const watch = this.#watches.get(id); if (!watch) continue
-      if (questionsOnly ? !watch.interests.questions : !watch.interests.conversation) continue
-      this.#enqueue(watch, { ...update, watch_id: id })
+
+  /**
+   * Projection is part of preview identity. A changed projection invalidates
+   * every remembered attempt; old previews cannot survive the switch.
+   */
+  #adoptProjection(source, projectionId) {
+    if (source.projectionId === projectionId) return
+    source.buffer?.flush()
+    source.projectionId = projectionId
+    source.settled.clear()
+    source.liveSeen.clear()
+  }
+
+  #markSettled(source, attempt) {
+    if (!attempt) return
+    boundedSetEntry(source.settled, attemptKey(attempt, source.projectionId), true, SETTLED_LIMIT)
+    for (const key of [...source.liveSeen.keys()]) {
+      if (key.startsWith(`${attemptKey(attempt, source.projectionId)}|`)) source.liveSeen.delete(key)
     }
   }
-  #enqueue(watch, update) {
+
+  /** Reject duplicate/retired previews; accept valid intervals for fanout. */
+  #admitLive(source, frame) {
+    const settled = source.settled.has(attemptKey(frame.attempt, source.projectionId))
+    if (frame.started) {
+      // A replayed start for a settled Attempt cannot reopen preview output.
+      if (settled) {
+        this.logger?.warn('source_update_rejected', { code: 'expired', reason: 'attempt_settled' })
+        return false
+      }
+      const startKey = `${attemptKey(frame.attempt, source.projectionId)}|started`
+      const started = source.liveSeen.get(startKey)
+      if (started !== undefined && frame.last_seq <= started) {
+        this.logger?.warn('source_update_rejected', { code: 'conflict', reason: 'duplicate_start' })
+        return false
+      }
+      boundedSetEntry(source.liveSeen, startKey, frame.last_seq, LIVE_SEEN_LIMIT)
+      return true
+    }
+    if (frame.ended) {
+      // The pending preview belongs before its settlement. LiveBuffer flush is
+      // triggered by the missing delta payload before this update is published.
+      this.#markSettled(source, frame.attempt)
+      return true
+    }
+    if (frame.delta || frame.reset) {
+      if (settled) {
+        this.logger?.warn('source_update_rejected', { code: 'expired', reason: 'preview_retired' })
+        return false
+      }
+      const key = blockKey(frame, source.projectionId)
+      const previous = source.liveSeen.get(key)
+      if (previous !== undefined && frame.last_seq <= previous) {
+        this.logger?.warn('source_update_rejected', { code: 'conflict', reason: 'duplicate_preview' })
+        return false
+      }
+      boundedSetEntry(source.liveSeen, key, frame.last_seq, LIVE_SEEN_LIMIT)
+    }
+    return true
+  }
+
+  /** Drop exact committed replays and remember the Attempt settled by a commit. */
+  #admitHistory(source, batch) {
+    const batchId = batch.batch_id
+    if (source.batches.has(batchId)) {
+      this.logger?.warn('source_update_rejected', { code: 'conflict', reason: 'duplicate_batch' })
+      return false
+    }
+    boundedSetEntry(source.batches, batchId, true, BATCH_SEEN_LIMIT)
+    if (batch.projection_id !== undefined) this.#adoptProjection(source, batch.projection_id)
+    for (const change of batch.changes ?? []) {
+      if (change?.origin) this.#markSettled(source, change.origin)
+    }
+    // A commit settles before its preview lane can publish; the pending
+    // preview is flushed by the non-delta update in LiveBuffer.
+    return true
+  }
+
+  #fanout(sessionId, update) {
+    const source = this.#sources.get(sessionId)
+    if (!source) return
+    const questionsOnly = update.questions != null
+    // One shared event route is bounded by its smallest authenticated receiver
+    // and by local Host policy. A larger receiver cannot raise it.
+    const budget = this.#eventBudget(source)
+    for (const id of source.recipients) {
+      const watch = this.#watches.get(id); if (!watch) continue
+      if (questionsOnly ? !watch.interests.questions : !watch.interests.conversation) continue
+      this.#enqueue(watch, { ...update, watch_id: id }, budget)
+    }
+  }
+
+  #eventBudget(source) {
+    let limit = this.config.transportBudget?.envelope_bytes
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      try { limit = transportProfileBudget(this.config.transportProfile ?? 'default').envelope_bytes }
+      catch { limit = MESSAGE_BYTES }
+    }
+    for (const id of source.recipients) {
+      const watch = this.#watches.get(id)
+      if (!watch) continue
+      const receive = this.security.getChannelReceive?.(watch.channelId)
+      const advertised = receive?.budget?.envelope_bytes
+      if (Number.isSafeInteger(advertised) && advertised > 0) limit = Math.min(limit, advertised)
+    }
+    return limit
+  }
+
+  /**
+   * An oversized complete event is not delivered partially. The durable outbox
+   * receives a tiny HistoryReset instead and the channel is marked for snapshot
+   * repair; canonical content is repaired from committed history.
+   */
+  #eventTooLarge(watch, kind, bytes, limit) {
+    const previous = this.#snapshotRequired.get(watch.channelId)
+    this.#snapshotRequired.set(watch.channelId, {
+      deviceId: watch.deviceId, droppedUpdate: true, resetSent: previous?.resetSent ?? false,
+    })
+    this.logger?.warn('event_oversize', { code: 'payload_too_large', kind, bytes, limit })
+    // One reset per channel is enough; repeated oversized updates cannot
+    // amplify the outbox while the client repairs from committed history.
+    if (previous?.resetSent) return
+    const plaintext = this.codec.encode('whalerein.v1.EventPayload', {
+      update: {
+        session: { host_id: this.hostId, session_id: watch.sessionId },
+        reset: { reason: 'snapshot_required' },
+        watch_id: watch.id,
+      },
+    })
+    const at = this.now()
+    const envelope = this.#envelope(watch, plaintext, at)
+    if (!envelope || envelope.length > limit) return
+    const row = this.#addOutbox(watch, envelope, at)
+    if (row.overflow) {
+      this.#outboxDrops++
+      this.logger?.warn('event_outbox_full', { code: 'snapshot_required', reason: row.reason })
+      return
+    }
+    this.#snapshotRequired.get(watch.channelId).resetSent = true
+    if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
+  }
+
+  #enqueue(watch, update, budget = MESSAGE_BYTES) {
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
-    if (update.live && plaintext.length > 256 * 1024) return
     const at = this.now()
     const envelope = this.#envelope(watch, plaintext, at)
     if (!envelope) return
+    if (envelope.length > budget) {
+      this.#eventTooLarge(watch, update.live ? 'live' : update.history ? 'committed' : 'control', envelope.length, budget)
+      return
+    }
     let lane = this.#lanes.get(watch.channelId)
     if (!lane) {
       lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }
       this.#lanes.set(watch.channelId, lane)
     }
     if (update.live) {
-      if (!this.access?.connected || lane.count >= 64 || lane.bytes + envelope.length > 256 * 1024) return
+      if (!this.access?.connected || lane.count >= LIVE_LANE_PUBLICATIONS || lane.bytes + envelope.length > LIVE_LANE_BYTES) return
       lane.count++
       lane.bytes += envelope.length
       lane.live = lane.live.then(() => {
@@ -413,6 +599,7 @@ export class WatchedEvents {
       this.store.removeOutbox(row.id)
     }).catch(() => this.logger?.warn('event_publish_failed', { code: 'unavailable' }))
   }
+
   async flushOutbox() {
     if (!this.access?.connected) return 0
     let count = 0

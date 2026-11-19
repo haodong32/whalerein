@@ -224,6 +224,50 @@ pub enum LifecycleReply {
     },
 }
 
+/// One Source attachment occurrence served by the fake Host.
+#[derive(Clone)]
+pub struct FakeAttachmentObject {
+    pub session_id: String,
+    pub attachment_ref: String,
+    pub media_type: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub policy: whalerein_proto::AttachmentPolicy,
+}
+
+impl FakeAttachmentObject {
+    pub fn new(
+        session_id: impl Into<String>,
+        attachment_ref: impl Into<String>,
+        name: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            attachment_ref: attachment_ref.into(),
+            media_type: "application/octet-stream".into(),
+            name: name.into(),
+            bytes,
+            policy: whalerein_proto::AttachmentPolicy {
+                max_total_bytes: 0,
+                max_chunk_bytes: 64 * 1024,
+                max_concurrent: 4,
+                idle_timeout_ms: 30_000,
+                overall_timeout_ms: 120_000,
+            },
+        }
+    }
+}
+
+struct FakeAttachmentTransfer {
+    session_id: String,
+    attachment_ref: String,
+    attachment: FakeAttachmentObject,
+    next_offset: u64,
+    parts: usize,
+    last_part: Option<whalerein_proto::AttachmentPart>,
+}
+
 pub struct FakeHost {
     pub identity: StaticIdentity,
     pub host_id: String,
@@ -262,6 +306,10 @@ pub struct FakeHost {
     pub wait_last_timeout_ms: u32,
     pub wait_bad_id: bool,
     pub message_reply_state: Option<whalerein_proto::MessageReplyState>,
+    /// Optional explicit committed reference override.
+    pub message_reply_committed: Option<whalerein_proto::CommittedMessageRef>,
+    /// Pending input kinds served for `INPUT_REQUIRED`.
+    pub message_reply_input: Vec<whalerein_proto::InputKind>,
     pub wait_drop_channel_once: bool,
     pub wait_replaced_once: bool,
     pub wait_extra_replacements: usize,
@@ -291,6 +339,12 @@ pub struct FakeHost {
     /// Overrides the capabilities the fake Host advertises in `ChannelReady`.
     /// `None` advertises the production default set.
     pub channel_capabilities: Option<whalerein_proto::CapabilitySet>,
+    /// Receive advertisement the device supplied in `ChannelHello`.
+    pub last_hello_receive: Option<whalerein_proto::ReceiveAdvertisement>,
+    /// Overrides the Host receive advertisement in `ChannelReady`.
+    pub channel_receive: Option<whalerein_proto::ReceiveAdvertisement>,
+    /// Omits the Host receive advertisement to exercise the explicit failure.
+    pub omit_channel_receive: bool,
     pub revoke_after_command: bool,
     pub drop_command_receipts: bool,
     pub omit_next_command_response_body: bool,
@@ -329,7 +383,33 @@ pub struct FakeHost {
     /// `(host id, approval id, decision)` recorded for each resolve command.
     pub approval_resolutions: Vec<(String, String, i32)>,
     pub history_messages: Vec<whalerein_proto::ConversationMessage>,
+    /// Attachment occurrences served by this fake Host.
+    pub attachment_objects: HashMap<(String, String), FakeAttachmentObject>,
+    pub attachment_unsupported: bool,
+    pub attachment_open_error: Option<ErrorCode>,
+    pub attachment_pull_error: Option<ErrorCode>,
+    pub attachment_pull_error_after: Option<(usize, ErrorCode)>,
+    pub attachment_open_calls: usize,
+    pub attachment_pull_calls: usize,
+    pub attachment_close_calls: usize,
+    pub attachment_open_delay_ms: u64,
+    pub attachment_pull_delay_ms: u64,
+    pub attachment_duplicate_part_at: Option<usize>,
+    pub attachment_gap_part_at: Option<usize>,
+    pub attachment_overlap_part_at: Option<usize>,
+    pub attachment_wrong_length_part_at: Option<usize>,
+    pub attachment_stalled_part_at: Option<usize>,
+    pub attachment_wrong_digest: bool,
+    pub attachment_wrong_total: bool,
+    pub attachment_missing_final: bool,
+    pub attachment_pull_offsets: Vec<u64>,
+    attachment_transfers: HashMap<String, FakeAttachmentTransfer>,
+    attachment_counter: usize,
     pub history_cut: String,
+    /// Active content projection served with history pages.
+    pub history_projection: String,
+    /// Latest-first page size override; zero uses the request's max_messages.
+    pub history_page_size: usize,
     pub history_advance: Option<(Vec<whalerein_proto::ConversationMessage>, String)>,
     /// Authoritative question descriptor served in `WatchReady`/refresh/state.
     pub question_descriptor: whalerein_proto::QuestionDescriptor,
@@ -358,6 +438,238 @@ impl FakeHost {
 
     pub fn set_query_unavailable(&mut self, value: bool) {
         self.query_error = value.then_some(ErrorCode::Unavailable);
+    }
+
+    pub fn put_attachment(&mut self, attachment: FakeAttachmentObject) {
+        self.attachment_objects.insert(
+            (
+                attachment.session_id.clone(),
+                attachment.attachment_ref.clone(),
+            ),
+            attachment,
+        );
+    }
+
+    fn attachment_open(
+        &mut self,
+        open: whalerein_proto::OpenAttachment,
+    ) -> Result<ResponsePayload, ErrorCode> {
+        self.attachment_open_calls += 1;
+        if self.attachment_open_delay_ms > 0 {
+            self.pending_wait_delay_ms = self
+                .pending_wait_delay_ms
+                .max(self.attachment_open_delay_ms);
+        }
+        if let Some(code) = self.attachment_open_error.take() {
+            return Err(code);
+        }
+        if self.attachment_unsupported {
+            return Err(ErrorCode::UnsupportedCapability);
+        }
+        let session = open.session.ok_or(ErrorCode::InvalidArgument)?;
+        if session.host_id != "host-1" {
+            return Err(ErrorCode::Forbidden);
+        }
+        let key = (session.session_id.clone(), open.attachment_ref.clone());
+        let attachment = match self.attachment_objects.get(&key).cloned() {
+            Some(attachment) => attachment,
+            None => {
+                if self
+                    .attachment_objects
+                    .keys()
+                    .any(|(_, reference)| reference == &open.attachment_ref)
+                {
+                    return Err(ErrorCode::Forbidden);
+                }
+                return Err(ErrorCode::NotFound);
+            }
+        };
+        if attachment.policy.max_total_bytes > 0
+            && attachment.bytes.len() as u64 > attachment.policy.max_total_bytes
+        {
+            return Err(ErrorCode::PayloadTooLarge);
+        }
+        self.attachment_counter += 1;
+        let transfer_id = format!("transfer-{:08x}", self.attachment_counter);
+        self.attachment_transfers.insert(
+            transfer_id.clone(),
+            FakeAttachmentTransfer {
+                session_id: session.session_id.clone(),
+                attachment_ref: open.attachment_ref.clone(),
+                attachment: attachment.clone(),
+                next_offset: 0,
+                parts: 0,
+                last_part: None,
+            },
+        );
+        Ok(ResponsePayload {
+            payload: Some(
+                whalerein_proto::response_payload::Payload::OpenAttachmentResult(
+                    whalerein_proto::OpenAttachmentResult {
+                        attachment: Some(whalerein_proto::AttachmentMetadata {
+                            session: Some(session),
+                            attachment_ref: open.attachment_ref,
+                            media_type: attachment.media_type,
+                            name: attachment.name,
+                            size: attachment.bytes.len() as u64,
+                            policy: Some(attachment.policy),
+                            transfer_id,
+                            expires_at_unix_ms: crate::util::now_unix_ms() + 120_000,
+                        }),
+                    },
+                ),
+            ),
+            ..Default::default()
+        })
+    }
+
+    fn attachment_pull(
+        &mut self,
+        pull: whalerein_proto::PullAttachment,
+    ) -> Result<ResponsePayload, ErrorCode> {
+        self.attachment_pull_calls += 1;
+        self.attachment_pull_offsets.push(pull.offset);
+        if self.attachment_pull_delay_ms > 0 {
+            self.pending_wait_delay_ms = self
+                .pending_wait_delay_ms
+                .max(self.attachment_pull_delay_ms);
+        }
+        if let Some(code) = self.attachment_pull_error.take() {
+            return Ok(error_payload(code, "attachment part rejected"));
+        }
+        let session = pull.session.clone().ok_or(ErrorCode::InvalidArgument)?;
+        if session.host_id != "host-1" {
+            return Err(ErrorCode::Forbidden);
+        }
+        let transfer = match self.attachment_transfers.get(&pull.transfer_id) {
+            Some(transfer) => transfer,
+            None => return Err(ErrorCode::NotFound),
+        };
+        if transfer.session_id != session.session_id
+            || transfer.attachment_ref != pull.attachment_ref
+        {
+            return Err(ErrorCode::Forbidden);
+        }
+        if let Some((after, code)) = self.attachment_pull_error_after {
+            if transfer.parts >= after {
+                self.attachment_transfers.remove(&pull.transfer_id);
+                return Ok(error_payload(code, "attachment part rejected"));
+            }
+        }
+        if let Some(index) = self.attachment_duplicate_part_at {
+            if transfer.parts == index {
+                if let Some(last) = transfer.last_part.clone() {
+                    self.attachment_duplicate_part_at = None;
+                    return Ok(ResponsePayload {
+                        payload: Some(whalerein_proto::response_payload::Payload::AttachmentPart(
+                            last,
+                        )),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        let transfer_id = pull.transfer_id.clone();
+        let attachment_ref = pull.attachment_ref.clone();
+        let session_id = session.session_id.clone();
+        let requested =
+            u64::from(pull.max_bytes).min(u64::from(transfer.attachment.policy.max_chunk_bytes));
+        let start = transfer.next_offset;
+        let end = start
+            .saturating_add(requested)
+            .min(transfer.attachment.bytes.len() as u64);
+        let stalled = self.attachment_stalled_part_at == Some(transfer.parts);
+        let data = if stalled {
+            self.attachment_stalled_part_at = None;
+            Vec::new()
+        } else {
+            transfer.attachment.bytes[start as usize..end as usize].to_vec()
+        };
+        let mut offset = start;
+        if self.attachment_gap_part_at == Some(transfer.parts) {
+            offset = start.saturating_add(1);
+            self.attachment_gap_part_at = None;
+        }
+        if self.attachment_overlap_part_at == Some(transfer.parts) {
+            offset = start.saturating_sub(1);
+            self.attachment_overlap_part_at = None;
+        }
+        let mut length = data.len() as u32;
+        if self.attachment_wrong_length_part_at == Some(transfer.parts) {
+            length = length.saturating_add(1);
+            self.attachment_wrong_length_part_at = None;
+        }
+        let final_part =
+            end == transfer.attachment.bytes.len() as u64 && !self.attachment_missing_final;
+        let mut total_size = if final_part { end } else { 0 };
+        if self.attachment_wrong_total && final_part {
+            total_size = total_size.saturating_add(1);
+            self.attachment_wrong_total = false;
+        }
+        let mut digest = if final_part {
+            crate::util::sha256(&transfer.attachment.bytes).to_vec()
+        } else {
+            Vec::new()
+        };
+        if self.attachment_wrong_digest && final_part {
+            if let Some(byte) = digest.first_mut() {
+                *byte ^= 1;
+            }
+            self.attachment_wrong_digest = false;
+        }
+        let part = whalerein_proto::AttachmentPart {
+            session: Some(session),
+            attachment_ref,
+            transfer_id: transfer_id.clone(),
+            offset,
+            length,
+            data,
+            r#final: final_part,
+            total_size,
+            sha256: digest,
+        };
+        if let Some(transfer) = self.attachment_transfers.get_mut(&transfer_id) {
+            transfer.next_offset = end;
+            transfer.parts += 1;
+            transfer.last_part = Some(part.clone());
+            let _ = session_id;
+        }
+        Ok(ResponsePayload {
+            payload: Some(whalerein_proto::response_payload::Payload::AttachmentPart(
+                part,
+            )),
+            ..Default::default()
+        })
+    }
+
+    fn attachment_close(
+        &mut self,
+        close: whalerein_proto::CloseAttachment,
+    ) -> Result<ResponsePayload, ErrorCode> {
+        self.attachment_close_calls += 1;
+        let session = close.session.ok_or(ErrorCode::InvalidArgument)?;
+        if session.host_id != "host-1" {
+            return Err(ErrorCode::Forbidden);
+        }
+        if let Some(transfer) = self.attachment_transfers.get(&close.transfer_id) {
+            if transfer.session_id != session.session_id
+                || transfer.attachment_ref != close.attachment_ref
+            {
+                return Err(ErrorCode::Forbidden);
+            }
+        }
+        self.attachment_transfers.remove(&close.transfer_id);
+        Ok(ResponsePayload {
+            payload: Some(
+                whalerein_proto::response_payload::Payload::CloseAttachmentResult(
+                    whalerein_proto::CloseAttachmentResult {
+                        closed: true,
+                        cancelled: close.cancel,
+                    },
+                ),
+            ),
+            ..Default::default()
+        })
     }
 
     /// Fail the next query with a channel-replaced signal so Core performs its
@@ -403,6 +715,8 @@ impl FakeHost {
             wait_last_timeout_ms: 0,
             wait_bad_id: false,
             message_reply_state: None,
+            message_reply_committed: None,
+            message_reply_input: Vec::new(),
             wait_drop_channel_once: false,
             wait_replaced_once: false,
             wait_extra_replacements: 0,
@@ -430,6 +744,9 @@ impl FakeHost {
             drop_channel_after_command: false,
             reject_channel_handshakes: false,
             channel_capabilities: None,
+            last_hello_receive: None,
+            channel_receive: None,
+            omit_channel_receive: false,
             revoke_after_command: false,
             drop_command_receipts: false,
             omit_next_command_response_body: false,
@@ -463,7 +780,30 @@ impl FakeHost {
             approval_filters: Vec::new(),
             approval_resolutions: Vec::new(),
             history_messages: vec![history_message("message-1", "x")],
+            attachment_objects: HashMap::new(),
+            attachment_unsupported: false,
+            attachment_open_error: None,
+            attachment_pull_error: None,
+            attachment_pull_error_after: None,
+            attachment_open_calls: 0,
+            attachment_pull_calls: 0,
+            attachment_close_calls: 0,
+            attachment_open_delay_ms: 0,
+            attachment_pull_delay_ms: 0,
+            attachment_duplicate_part_at: None,
+            attachment_gap_part_at: None,
+            attachment_overlap_part_at: None,
+            attachment_wrong_length_part_at: None,
+            attachment_stalled_part_at: None,
+            attachment_wrong_digest: false,
+            attachment_wrong_total: false,
+            attachment_missing_final: false,
+            attachment_pull_offsets: Vec::new(),
+            attachment_transfers: HashMap::new(),
+            attachment_counter: 0,
             history_cut: "bookmark:committed".into(),
+            history_projection: "projection-1".into(),
+            history_page_size: 0,
             history_advance: None,
             question_descriptor: fake_question_descriptor(),
             question_pages: std::collections::VecDeque::new(),
@@ -971,6 +1311,7 @@ impl FakeHost {
             .map_err(|_| ErrorCode::InvalidArgument)?;
         let hello =
             ChannelHello::decode(payload.as_slice()).map_err(|_| ErrorCode::InvalidArgument)?;
+        self.last_hello_receive = hello.receive;
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(ErrorCode::ProtocolVersionIncompatible);
         }
@@ -984,6 +1325,15 @@ impl FakeHost {
                     .unwrap_or_else(default_capabilities),
             ),
             host_nonce: "host-channel-nonce".into(),
+            receive: if self.omit_channel_receive {
+                None
+            } else {
+                Some(self.channel_receive.unwrap_or_else(|| {
+                    crate::access::transport::TransportBudget::default()
+                        .advertisement(1)
+                        .expect("fixture receive advertisement")
+                }))
+            },
         };
         let message = noise
             .write(&ready.encode_to_vec())
@@ -1163,24 +1513,136 @@ impl FakeHost {
                 ),
                 ..Default::default()
             },
-            Some(Payload::ReadMessageReply(read)) => ResponsePayload {
-                payload: Some(whalerein_proto::response_payload::Payload::MessageReply(
-                    whalerein_proto::MessageReply {
-                        session_id: read.session_id,
-                        message_id: read.message_id,
-                        state: self
-                            .message_reply_state
-                            .unwrap_or(whalerein_proto::MessageReplyState::MessageReplyCommitted)
-                            as i32,
-                        attempt_id: "fixture-attempt".into(),
-                        text: "fixture-reply".into(),
-                    },
-                )),
-                ..Default::default()
-            },
+            Some(Payload::ReadMessageReply(read)) => {
+                let state = self
+                    .message_reply_state
+                    .unwrap_or(whalerein_proto::MessageReplyState::MessageReplyCommitted);
+                let committed =
+                    if state == whalerein_proto::MessageReplyState::MessageReplyCommitted {
+                        Some(self.message_reply_committed.clone().unwrap_or_else(|| {
+                            whalerein_proto::CommittedMessageRef {
+                                session: Some(whalerein_proto::SessionKey {
+                                    host_id: "host-1".into(),
+                                    session_id: read.session_id.clone(),
+                                }),
+                                message_id: read.submitted_message_id.clone(),
+                                source_locator: format!("locator:{}", read.submitted_message_id),
+                                projection_id: self.history_projection.clone(),
+                            }
+                        }))
+                    } else {
+                        None
+                    };
+                let pending_input =
+                    if state == whalerein_proto::MessageReplyState::MessageReplyInputRequired {
+                        if self.message_reply_input.is_empty() {
+                            vec![whalerein_proto::InputKind::InputApproval as i32]
+                        } else {
+                            self.message_reply_input
+                                .iter()
+                                .map(|kind| *kind as i32)
+                                .collect()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::MessageReply(
+                        whalerein_proto::MessageReply {
+                            session_id: read.session_id,
+                            submitted_message_id: read.submitted_message_id,
+                            state: state as i32,
+                            committed,
+                            pending_input,
+                        },
+                    )),
+                    ..Default::default()
+                }
+            }
+            Some(Payload::OpenAttachment(open)) => return self.attachment_open(open),
+            Some(Payload::PullAttachment(pull)) => return self.attachment_pull(pull),
+            Some(Payload::CloseAttachment(close)) => return self.attachment_close(close),
             Some(Payload::ReadHistory(read)) => {
                 use whalerein_proto::*;
                 self.history_reads += 1;
+                let session = Some(SessionKey {
+                    host_id: "host-1".into(),
+                    session_id: read.session_id.clone(),
+                });
+                let projection = self.history_projection.clone();
+                if let Some(exact) = read.exact.clone() {
+                    let message = self
+                        .history_messages
+                        .iter()
+                        .find(|message| message.message_id == exact.message_id)
+                        .cloned();
+                    return match message {
+                        Some(message) => Ok(ResponsePayload {
+                            payload: Some(response_payload::Payload::HistoryPage(HistoryPage {
+                                session,
+                                batch: Some(HistoryBatch {
+                                    from_cursor: format!("exact-before:{}", exact.message_id),
+                                    to_cursor: self.history_cut.clone(),
+                                    batch_id: format!("exact:{}", exact.message_id),
+                                    changes: vec![MessageUpsert {
+                                        message: Some(message),
+                                        origin: None,
+                                    }],
+                                    projection_id: projection.clone(),
+                                }),
+                                cut_cursor: self.history_cut.clone(),
+                                complete: true,
+                                snapshot: false,
+                                continuation: String::new(),
+                                projection_id: projection,
+                                source: HistorySource::Online as i32,
+                            })),
+                            ..Default::default()
+                        }),
+                        None => return Err(ErrorCode::NotFound),
+                    };
+                }
+                if let Some(page) = read.page.as_ref() {
+                    let total = self.history_messages.len();
+                    let requested = if self.history_page_size > 0 {
+                        self.history_page_size
+                    } else {
+                        read.max_messages.max(1) as usize
+                    };
+                    let before = page.before_cursor.as_str();
+                    let end = if before.is_empty() {
+                        total
+                    } else {
+                        let index = before
+                            .strip_prefix("page:")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .ok_or(ErrorCode::InvalidArgument)?;
+                        index.min(total)
+                    };
+                    let start = end.saturating_sub(requested);
+                    let changes = history_upserts(self.history_messages[start..end].to_vec());
+                    let next = format!("page:{start}");
+                    let complete = start == 0;
+                    return Ok(ResponsePayload {
+                        payload: Some(response_payload::Payload::HistoryPage(HistoryPage {
+                            session,
+                            batch: Some(HistoryBatch {
+                                from_cursor: next.clone(),
+                                to_cursor: format!("page:{end}"),
+                                batch_id: format!("page:{start}:{end}"),
+                                changes,
+                                projection_id: projection.clone(),
+                            }),
+                            cut_cursor: self.history_cut.clone(),
+                            complete,
+                            snapshot: false,
+                            continuation: if complete { String::new() } else { next },
+                            projection_id: projection,
+                            source: HistorySource::Online as i32,
+                        })),
+                        ..Default::default()
+                    });
+                }
                 let cut = self.history_cut.clone();
                 let advance = if !read.snapshot && read.after_cursor == cut {
                     self.history_advance.take()
@@ -1208,19 +1670,20 @@ impl FakeHost {
                 };
                 ResponsePayload {
                     payload: Some(response_payload::Payload::HistoryPage(HistoryPage {
-                        session: Some(SessionKey {
-                            host_id: "host-1".into(),
-                            session_id: read.session_id,
-                        }),
+                        session,
                         batch: Some(HistoryBatch {
                             from_cursor,
                             to_cursor: to_cursor.clone(),
                             batch_id: format!("batch:{}:{to_cursor}", read.after_cursor),
                             changes,
+                            projection_id: projection.clone(),
                         }),
                         cut_cursor: to_cursor,
                         complete: true,
                         snapshot: read.snapshot,
+                        continuation: String::new(),
+                        projection_id: projection,
+                        source: HistorySource::Online as i32,
                     })),
                     ..Default::default()
                 }
@@ -1823,6 +2286,7 @@ fn fake_watch(
             run_phase: whalerein_proto::RunPhase::Idle as i32,
             approvals: vec![],
             questions: Some(question_descriptor),
+            projection_id: "projection-1".into(),
         }),
     }
 }
@@ -1852,6 +2316,14 @@ pub fn history_message(message_id: &str, text: &str) -> whalerein_proto::Convers
                 whalerein_proto::TextContent { text: text.into() },
             )),
         }],
+        ..Default::default()
+    }
+}
+
+fn error_payload(code: ErrorCode, message: &str) -> ResponsePayload {
+    ResponsePayload {
+        error_code: code as i32,
+        error_detail: message.to_owned(),
         ..Default::default()
     }
 }

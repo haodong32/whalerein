@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline'
 import { DefinitiveExecutionError } from '../../../host/runtime/src/errors.js'
 import { FakeDshAdapter } from '../../../host/dsh/src/adapter/fake.js'
 import { encode,decode } from './adapter.mjs'
-const adapter=new FakeDshAdapter({behavior:{modelOperations:true,pendingQueueEnabled:true,questions:process.env.WHALEREIN_QUESTIONS!=='false',questionsOpen:process.env.WHALEREIN_QUESTIONS!=='false'}})
+const adapter=new FakeDshAdapter({hostId:process.env.WHALEREIN_HOST_ID||'',behavior:{modelOperations:true,pendingQueueEnabled:true,questions:process.env.WHALEREIN_QUESTIONS!=='false',questionsOpen:process.env.WHALEREIN_QUESTIONS!=='false'}})
 let queueReadCount=0
 const readQueue=adapter.readPendingQueue.bind(adapter)
 adapter.readPendingQueue=(...args)=>{queueReadCount++;return readQueue(...args)}
@@ -147,7 +147,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
       const chunkIndex=index??0
       adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:start
         ? {stream_id:'fixture-attempt',revision:1,phase:'start',reply_id:'1:1',block_id:'text-0'}
-        : {stream_id:'fixture-attempt',revision:2+chunkIndex,phase:'chunk',index:chunkIndex,block_id:'text-0',text:text??'x'}})
+        : {stream_id:'fixture-attempt',revision:2+chunkIndex,phase:'chunk',index:chunkIndex,block_id:'text-0',block_kind:'BLOCK_KIND_TEXT',text:text??'x'}})
       value=true
     }
     else if(method==='preview_final') {
@@ -156,7 +156,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
         reply_id:'1:1',message:{content:[{type:'text',text:reply}]},
         ...(message_id ? {messageId:message_id,text:reply} : {}),
       }})
-      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:2+(count??1),phase:'end',block_id:'text-0',outcome:'committed',committed_seq:event.seq}})
+      adapter.emit(session_id,{type:'assistant/preview',kind:'output',ephemeral:true,data:{stream_id:'fixture-attempt',revision:2+(count??1),phase:'end',block_id:'text-0',outcome:'committed',native_commit_seq:event.seq}})
       value=true
     }
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})

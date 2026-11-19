@@ -21,7 +21,7 @@ func testTransportFrame(id string, index int) *whalereinv1.TransportFrame {
 	if index == 1 {
 		part = make([]byte, 1)
 	}
-	return &whalereinv1.TransportFrame{Version: 2, TransferId: id, Topic: "data", Index: uint32(index), Count: 2, TotalBytes: transportChunkBytes + 1, Digest: hash[:], Payload: part}
+	return &whalereinv1.TransportFrame{Version: 2, TransferId: id, Topic: "data", Index: uint32(index), Count: 2, TotalBytes: transportChunkBytes + 1, Digest: hash[:], Payload: part, FragmentPayloadBytes: transportChunkBytes, Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT}
 }
 
 func TestLogicalTransportReceiptsRetransmitAndNoPartialDelivery(t *testing.T) {
@@ -255,14 +255,16 @@ func transportFrames(t *testing.T, topic string, payload []byte) [][]byte {
 	frames := make([][]byte, 0, count)
 	for index := 0; index < count; index++ {
 		frame := &whalereinv1.TransportFrame{
-			Version:    transportVersion,
-			TransferId: transfer,
-			Topic:      topic,
-			Index:      uint32(index),
-			Count:      uint32(count),
-			TotalBytes: uint32(len(payload)),
-			Digest:     hash[:],
-			Payload:    payload[index*transportChunkBytes : min(len(payload), (index+1)*transportChunkBytes)],
+			Version:              transportVersion,
+			TransferId:           transfer,
+			Topic:                topic,
+			Index:                uint32(index),
+			Count:                uint32(count),
+			TotalBytes:           uint32(len(payload)),
+			Digest:               hash[:],
+			Payload:              payload[index*transportChunkBytes : min(len(payload), (index+1)*transportChunkBytes)],
+			FragmentPayloadBytes: transportChunkBytes,
+			Profile:              whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
 		}
 		frames = append(frames, encodeTransport(frame))
 	}
@@ -377,13 +379,13 @@ func TestLogicalTransportPayloadBoundariesAroundTheChunkSize(t *testing.T) {
 func TestTransientBulkSaturationIsRetryableAndNotAPermanentBudgetFailure(t *testing.T) {
 	transport := newLogicalTransport(func(context.Context, string, []byte) error { return nil }, func(string, []byte) {})
 	transport.ackTimeout = time.Millisecond
-	if err := transport.acquireBulk(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	concurrency := cap(transport.bulkSlots)
+	for index := 0; index < concurrency; index++ {
+		if err := transport.acquireBulk(context.Background(), 1); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := transport.acquireBulk(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	// Both bulk slots are held and every waiter slot is occupied, which is a
+	// Every bulk slot is held and every waiter slot is occupied, which is a
 	// transient admission condition, not an oversized message.
 	var waiters []context.CancelFunc
 	for index := 0; index < cap(transport.bulkWaiters); index++ {
@@ -406,8 +408,9 @@ func TestTransientBulkSaturationIsRetryableAndNotAPermanentBudgetFailure(t *test
 		cancel()
 	}
 	// After the cancellation releases the waiters, a retry succeeds.
-	<-transport.bulkSlots
-	<-transport.bulkSlots
+	for index := 0; index < concurrency; index++ {
+		<-transport.bulkSlots
+	}
 	deadline = time.Now().Add(time.Second)
 	for len(transport.bulkWaiters) > 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -448,11 +451,11 @@ func TestChunkReceiptsFromDifferentReceiverStatesDoNotConfirmDelivery(t *testing
 
 func TestBulkAdmissionWaitsAndReleasesCancellationBudget(t *testing.T) {
 	transport := newLogicalTransport(func(context.Context, string, []byte) error { return nil }, func(string, []byte) {})
-	if err := transport.acquireBulk(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := transport.acquireBulk(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	concurrency := cap(transport.bulkSlots)
+	for index := 0; index < concurrency; index++ {
+		if err := transport.acquireBulk(context.Background(), 1); err != nil {
+			t.Fatal(err)
+		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- transport.acquireBulk(context.Background(), 1) }()
@@ -483,17 +486,18 @@ func TestBulkAdmissionWaitsAndReleasesCancellationBudget(t *testing.T) {
 	transport.mu.Lock()
 	transport.waitingBytes = 0
 	transport.mu.Unlock()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < cap(transport.bulkWaiters); i++ {
 		transport.bulkWaiters <- struct{}{}
 	}
 	if err := transport.acquireBulk(context.Background(), 1); err == nil {
 		t.Fatal("queued admission count bypassed")
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < cap(transport.bulkWaiters); i++ {
 		<-transport.bulkWaiters
 	}
-	<-transport.bulkSlots
-	<-transport.bulkSlots
+	for i := 0; i < concurrency; i++ {
+		<-transport.bulkSlots
+	}
 }
 
 func TestCompletedFramedReplyRestoresOnlyItsAuthenticatedHostCapability(t *testing.T) {

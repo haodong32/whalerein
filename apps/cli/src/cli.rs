@@ -38,6 +38,11 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Render model reasoning blocks in live, history and send output.
+    /// Reasoning is hidden by default; this flag never changes authorization.
+    #[arg(long, global = true)]
+    pub show_reasoning: bool,
+
     /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic export).
     #[arg(long, global = true)]
     pub yes: bool,
@@ -209,6 +214,57 @@ enum SessionArgs {
         #[arg(long, value_name = "HOST_ID")]
         host: Option<String>,
     },
+    /// Read one bounded page of committed history, newest page first.
+    History {
+        #[arg(value_name = "SESSION_ID")]
+        session: String,
+        /// Select the Host for this operation.
+        #[arg(long, value_name = "HOST_ID")]
+        host: Option<String>,
+        /// Read the eligible encrypted local cache instead of the Source.
+        #[arg(long)]
+        cache: bool,
+        /// Continue toward older history with a token from a previous page.
+        #[arg(long, value_name = "TOKEN", conflicts_with_all = ["message", "cache"])]
+        continuation: Option<String>,
+        /// Resolve one exact committed-message reference shown by send or history.
+        #[arg(
+            long,
+            value_name = "REFERENCE",
+            conflicts_with_all = ["continuation", "cache", "max_messages", "max_bytes"]
+        )]
+        message: Option<String>,
+        /// Bound the number of messages in this page (1-1000).
+        #[arg(long, value_name = "N")]
+        max_messages: Option<u32>,
+        /// Bound the encoded content bytes in this page.
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u32>,
+    },
+    /// Download one verified attachment reference shown by `session history`.
+    Download {
+        /// Opaque attachment reference shown by `session history`.
+        #[arg(value_name = "REFERENCE")]
+        reference: String,
+        /// Destination directory for the verified file.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Explicitly replace an existing destination file.
+        #[arg(long)]
+        force: bool,
+        /// Override the Source-suggested display name.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Overall download deadline in seconds (positive, decimals allowed).
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<String>,
+        /// Select the Host that owns the attachment.
+        #[arg(long, value_name = "HOST_ID")]
+        host: Option<String>,
+        /// Session identity that owns the attachment (required by the save action).
+        #[arg(long, value_name = "SESSION_ID", required = true)]
+        session: String,
+    },
     /// Fork the latest completed turn; the child shares the working directory.
     Fork {
         #[arg(value_name = "SESSION_ID")]
@@ -330,6 +386,44 @@ impl SessionArgs {
                 host,
             ),
             Self::Show { session, host } => (Command::Sync { session }, host),
+            Self::History {
+                session,
+                cache,
+                continuation,
+                message,
+                max_messages,
+                max_bytes,
+                host,
+            } => (
+                Command::History {
+                    session,
+                    cache,
+                    continuation,
+                    message,
+                    max_messages,
+                    max_bytes,
+                },
+                host,
+            ),
+            Self::Download {
+                reference,
+                to,
+                force,
+                name,
+                timeout,
+                host,
+                session,
+            } => (
+                Command::SessionDownload {
+                    reference,
+                    to,
+                    force,
+                    name,
+                    timeout,
+                    session,
+                },
+                host,
+            ),
             Self::Fork { session, host } => (Command::SessionFork { session }, host),
             Self::Send {
                 session,
@@ -692,6 +786,26 @@ pub enum Command {
         session: String,
     },
 
+    /// Read one bounded page of committed history, newest page first.
+    History {
+        session: String,
+        cache: bool,
+        continuation: Option<String>,
+        message: Option<String>,
+        max_messages: Option<u32>,
+        max_bytes: Option<u32>,
+    },
+
+    /// Download one verified attachment reference shown by `session history`.
+    SessionDownload {
+        reference: String,
+        to: PathBuf,
+        force: bool,
+        name: Option<String>,
+        timeout: Option<String>,
+        session: String,
+    },
+
     /// Send a user message to a session.
     Send {
         session: String,
@@ -882,10 +996,12 @@ impl QueueCommand {
 impl Command {
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::SessionFork { session }
+            Self::SessionDownload { session, .. }
+            | Self::SessionFork { session }
             | Self::Tail { session, .. }
             | Self::Wait { session, .. }
             | Self::Sync { session }
+            | Self::History { session, .. }
             | Self::Send { session, .. }
             | Self::Questions { session, .. }
             | Self::Answer { session, .. }
@@ -932,6 +1048,8 @@ impl Command {
             Self::Tail { .. } => "session.watch",
             Self::Wait { .. } => "session.wait",
             Self::Sync { .. } => "session.show",
+            Self::History { .. } => "session.history",
+            Self::SessionDownload { .. } => "session.download",
             Self::Send { .. } => "session.send",
             Self::Approvals { .. } => "session.approval.list",
             Self::Questions { .. } => "session.question.list",
@@ -1005,6 +1123,68 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_is_a_global_opt_in_and_history_selectors_are_exclusive() {
+        let (command, _) =
+            Cli::try_parse_from(["whalerein", "--show-reasoning", "session", "history", "s"])
+                .unwrap()
+                .into_command();
+        assert!(matches!(command, Command::History { session, .. } if session == "s"));
+        assert!(
+            Cli::try_parse_from(["whalerein", "session", "history", "s", "--show-reasoning"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session",
+            "history",
+            "s",
+            "--message",
+            "m",
+            "--continuation",
+            "c"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session",
+            "history",
+            "s",
+            "--message",
+            "m",
+            "--cache"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session",
+            "history",
+            "s",
+            "--continuation",
+            "c",
+            "--cache"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "whalerein",
+            "session",
+            "download",
+            "ref",
+            "--to",
+            "dir",
+            "--force",
+            "--session",
+            "s",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["whalerein", "session", "download", "ref"]).is_err());
+        // The scoped save action requires the owning session explicitly.
+        assert!(
+            Cli::try_parse_from(["whalerein", "session", "download", "ref", "--to", "dir",])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn each_group_exposes_the_documented_leaf_commands() {
         let cases: &[(&[&str], &str)] = &[
             (&["login"], "login"),
@@ -1020,6 +1200,20 @@ mod tests {
                 "session.create",
             ),
             (&["session", "show", "id"], "session.show"),
+            (&["session", "history", "id"], "session.history"),
+            (&["session", "history", "id", "--cache"], "session.history"),
+            (
+                &[
+                    "session",
+                    "download",
+                    "attachment-ref",
+                    "--to",
+                    "downloads",
+                    "--session",
+                    "id",
+                ],
+                "session.download",
+            ),
             (&["session", "fork", "id"], "session.fork"),
             (&["session", "watch", "id", "--once"], "session.watch"),
             (&["session", "wait", "id"], "session.wait"),

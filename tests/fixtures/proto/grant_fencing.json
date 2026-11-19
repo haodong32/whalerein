@@ -1,0 +1,142 @@
+{
+  "schema": "whalerein/grant-fencing-vectors/v1",
+  "comment": "Release-decision vectors for RequestTransportMetadata. Access captures grantGeneration and revocationGeneration at submission and releases stored ciphertext only when both still equal the current durable grant row. A QUERY without the stamp fails closed; a COMMAND keeps metadata-only recovery. Access never inspects the body.",
+  "vectors": [
+    {
+      "id": "stored-before-revoke-first-get",
+      "kind": "query",
+      "stored": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2"
+      },
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "3",
+        "active": false
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    },
+    {
+      "id": "repeat-get-after-revoke",
+      "kind": "query",
+      "stored": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2"
+      },
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "3",
+        "active": false
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    },
+    {
+      "id": "revoke-then-regrant",
+      "kind": "query",
+      "stored": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2"
+      },
+      "current": {
+        "grantGeneration": "8",
+        "revocationGeneration": "3",
+        "active": true
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    },
+    {
+      "id": "new-result-after-regrant",
+      "kind": "query",
+      "stored": {
+        "grantGeneration": "8",
+        "revocationGeneration": "3"
+      },
+      "current": {
+        "grantGeneration": "8",
+        "revocationGeneration": "3",
+        "active": true
+      },
+      "expect": {
+        "body": "release",
+        "metadata": "available"
+      }
+    },
+    {
+      "id": "matching-query-release",
+      "kind": "query",
+      "stored": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2"
+      },
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2",
+        "active": true
+      },
+      "expect": {
+        "body": "release",
+        "metadata": "available"
+      }
+    },
+    {
+      "id": "missing-stamp-query-fails-closed",
+      "kind": "query",
+      "stored": null,
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2",
+        "active": true
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    },
+    {
+      "id": "missing-stamp-command-keeps-metadata",
+      "kind": "command",
+      "stored": null,
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2",
+        "active": true
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    },
+    {
+      "id": "command-recovery-on-mismatch",
+      "kind": "command",
+      "stored": {
+        "grantGeneration": "7",
+        "revocationGeneration": "2"
+      },
+      "current": {
+        "grantGeneration": "7",
+        "revocationGeneration": "3",
+        "active": false
+      },
+      "expect": {
+        "body": "deny",
+        "metadata": "available",
+        "errorCode": "forbidden"
+      }
+    }
+  ]
+}

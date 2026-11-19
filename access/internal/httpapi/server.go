@@ -60,6 +60,7 @@ type PairingService interface {
 // RequestService is the requests package boundary used by HTTP.
 type RequestService interface {
 	Submit(ctx context.Context, input requests.SubmitInput) (store.Request, bool, error)
+	Release(ctx context.Context, deviceID, sessionID, requestID string, deliveryLimitBytes int64) (store.Request, error)
 	Get(ctx context.Context, deviceID, requestID string) (store.Request, error)
 	Touch(ctx context.Context, deviceID, requestID string) (bool, error)
 }

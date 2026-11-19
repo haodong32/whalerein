@@ -26,6 +26,11 @@ import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import { PluginError } from '../errors.js'
 import { sanitizeDisplayName } from '../display-name.js'
 import { sanitizeOs } from '../os.js'
+import {
+  resolveTransportProfile,
+  transportProfileBudget,
+  validateReceiveAdvertisement,
+} from '../contracts/transport.js'
 
 export const HOST_CAPABILITIES = Object.freeze([
   'sessions',
@@ -42,6 +47,16 @@ const PENDING_TTL_MS = 120_000
 const CHANNEL_IDLE_MS = 120_000
 const MAX_DEVICE_CHANNELS = 64
 const MAX_HOST_CHANNELS = 512
+
+/** Host receive limits for the authenticated broker connection generation. */
+export function defaultReceiveAdvertisement(generation = 1) {
+  const profile = resolveTransportProfile('default')
+  return {
+    profile: profile.wireName,
+    budget: transportProfileBudget(profile.name),
+    connection_generation: generation,
+  }
+}
 
 function protocolMismatch(value, expected) {
   // WIRE treats 0/absent as an old peer that must upgrade. A missing field is
@@ -66,6 +81,7 @@ export class SecurityManager {
   #pendingPairings = new Map()
   #completedPairings = new Map()
   #revocationsPending = false
+  #channelReceiveGeneration = 0
 
   /**
    * @param {object} options
@@ -82,6 +98,9 @@ export class SecurityManager {
    * @param {number} [options.maxHostChannels]
    * @param {(channels: Array<{deviceId: string, channelId: string}>, reason: string) => void} [options.onClosedChannels]
    * @param {(channels: Array<{deviceId: string, channelId: string}>, deviceIds: string[]) => void} [options.onRevokedChannels]
+   * @param {() => object} [options.receiveAdvertisement] Host receive limits for
+   *   the authenticated broker connection generation. Re-evaluated per channel
+   *   handshake so a reconnect can never reuse an older generation.
    */
   constructor({
     hostId,
@@ -98,6 +117,7 @@ export class SecurityManager {
     maxHostChannels = MAX_HOST_CHANNELS,
     onClosedChannels = () => {},
     onRevokedChannels = () => {},
+    receiveAdvertisement = () => defaultReceiveAdvertisement(1),
   }) {
     this.hostId = hostId
     this.identity = identity
@@ -113,6 +133,7 @@ export class SecurityManager {
     this.maxHostChannels = maxHostChannels
     this.onClosedChannels = onClosedChannels
     this.onRevokedChannels = onRevokedChannels
+    this.receiveAdvertisement = receiveAdvertisement
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
     this.hostFingerprintDisplay = formatFingerprint(identity.publicKey)
   }
@@ -138,6 +159,32 @@ export class SecurityManager {
   getChannel(channelId) {
     const channel = this.#channels.get(channelId)
     return channel && !this.#isIdle(channel, this.now()) ? channel : null
+  }
+
+  /** The immutable receive limits bound to one authenticated channel. */
+  getChannelReceive(channelId) {
+    return this.getChannel(channelId)?.receive ?? null
+  }
+
+  #hostReceive() {
+    try { return validateReceiveAdvertisement(this.receiveAdvertisement()) }
+    catch { throw new PluginError('invalid_argument', 'host receive advertisement invalid') }
+  }
+
+  /**
+   * A Host channel advertisement is scoped to the Noise channel that carries
+   * it, not to the Host's Access-broker connection. A fresh channel handshake
+   * always mints a new value so a delayed advertisement cannot look current.
+   */
+  #channelReceive(hostReceive) {
+    this.#channelReceiveGeneration = this.#channelReceiveGeneration >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : this.#channelReceiveGeneration + 1
+    return validateReceiveAdvertisement({
+      profile: hostReceive.profile,
+      budget: hostReceive.budget,
+      connection_generation: this.#channelReceiveGeneration,
+    })
   }
 
   #isIdle(channel, now) {
@@ -474,6 +521,20 @@ export class SecurityManager {
       if (protocolMismatch(hello.protocol_version, this.protocolVersion)) {
         throw new PluginError('protocol_version_incompatible', 'channel version mismatch')
       }
+      // The Host's ChannelReady advertisement is scoped to this Noise channel,
+      // never to the Access-broker generation used by HostReady.
+      const hostReceive = this.#channelReceive(this.#hostReceive())
+      let deviceReceive = null
+      if (hello.receive !== undefined) {
+        try {
+          deviceReceive = validateReceiveAdvertisement(hello.receive)
+        } catch {
+          throw new PluginError('invalid_argument', 'receive advertisement invalid')
+        }
+        // The device's generation belongs to this channel's leg. It is
+        // validated only as a positive value and frozen below; comparing it
+        // with the Host's broker connection generation would cross legs.
+      }
       const ready = this.codec.encode('whalerein.v1.ChannelReady', {
         host_id: this.hostId,
         device_id: deviceId,
@@ -483,11 +544,14 @@ export class SecurityManager {
           protocol_version: this.protocolVersion,
         },
         host_nonce: randomNonce(),
+        receive: hostReceive,
       })
       const reply = noise.writeMessage(ready)
       this.#pendingHandshakes.set(channelId, {
         deviceId,
         noise,
+        receive: deviceReceive,
+        receiveGeneration: hostReceive.connection_generation,
         expiresAt: this.now() + this.pendingTtlMs,
       })
       this.logger?.info('channel_hello', { device: deviceId, channel: channelId, phase: 'hello' })
@@ -527,6 +591,9 @@ export class SecurityManager {
       createdAt: now,
       lastUsedAt: now,
       inFlight: 0,
+      // Set once at install; a later advertisement never mutates it.
+      receive: pending.receive ? Object.freeze({ ...pending.receive, budget: pending.receive.budget }) : null,
+      receiveGeneration: pending.receiveGeneration,
     }
     this.#channels.set(channelId, channel)
     this.logger?.info('channel_established', { device: deviceId, channel: channelId })

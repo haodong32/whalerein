@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -96,6 +97,9 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 	default:
 		return CreateOutcome{}, fmt.Errorf("create request: invalid client lease state %q", req.ClientLeaseState)
 	}
+	if err := validateGrantStamp(req); err != nil {
+		return CreateOutcome{}, err
+	}
 
 	args := []any{
 		req.RequestID,
@@ -125,12 +129,16 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 		req.CancelPending,
 		req.CancelPublishedAt,
 		req.CancelAttempts,
+		stampGrantGeneration(req),
+		stampRevocationGeneration(req),
+		stampDeviceRevocationGeneration(req),
+		stampResultLimitBytes(req),
 	}
 
 	if req.CommandID != "" {
 		insertSQL := `
 			INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,true)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,true)
 			ON CONFLICT (host_id, device_id, command_id) WHERE command_id <> '' DO NOTHING
 			RETURNING ` + requestColumns
 		row := queryRow(ctx, insertSQL, args...)
@@ -156,7 +164,7 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 
 	insertSQL := `
 		INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,true)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,true)
 		RETURNING ` + requestColumns
 	row := queryRow(ctx, insertSQL, args...)
 	inserted, err := scanRequest(row)
@@ -167,6 +175,57 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 		return CreateOutcome{}, fmt.Errorf("create request: %w", err)
 	}
 	return CreateOutcome{Request: inserted, Created: true}, nil
+}
+
+// validateGrantStamp requires a complete stamp for newly admitted encrypted
+// requests. Handshake and Access-authored control kinds keep their historical
+// no-stamp shape; retained rows are never created through this path.
+func validateGrantStamp(req Request) error {
+	needsStamp := req.Kind == whalereinv1.RequestKind_REQUEST_KIND_QUERY ||
+		req.Kind == whalereinv1.RequestKind_REQUEST_KIND_COMMAND
+	stamp := req.Stamp
+	if stamp == nil {
+		if needsStamp {
+			return ErrMissingGrantStamp
+		}
+		return nil
+	}
+	if stamp.ResultLimitBytes < 0 {
+		return fmt.Errorf("%w: invalid result bound", ErrMissingGrantStamp)
+	}
+	if stamp.GrantGeneration > math.MaxInt64 || stamp.RevocationGeneration > math.MaxInt64 ||
+		stamp.DeviceRevocationGeneration > math.MaxInt64 {
+		return fmt.Errorf("%w: revision out of range", ErrMissingGrantStamp)
+	}
+	return nil
+}
+
+func stampGrantGeneration(req Request) any {
+	if req.Stamp == nil {
+		return nil
+	}
+	return int64(req.Stamp.GrantGeneration)
+}
+
+func stampRevocationGeneration(req Request) any {
+	if req.Stamp == nil {
+		return nil
+	}
+	return int64(req.Stamp.RevocationGeneration)
+}
+
+func stampDeviceRevocationGeneration(req Request) any {
+	if req.Stamp == nil {
+		return nil
+	}
+	return int64(req.Stamp.DeviceRevocationGeneration)
+}
+
+func stampResultLimitBytes(req Request) any {
+	if req.Stamp == nil {
+		return nil
+	}
+	return req.Stamp.ResultLimitBytes
 }
 
 func requestByCommand(ctx context.Context, queryRow func(context.Context, string, ...any) pgx.Row, hostID, deviceID, commandID string) (Request, error) {
@@ -188,6 +247,105 @@ func (s *Store) GetRequest(ctx context.Context, requestID string) (Request, erro
 		return Request{}, wrapRequestScan(err)
 	}
 	return req, nil
+}
+
+// ReleaseScope identifies one ciphertext read. DeliveryLimitBytes is the raw
+// ciphertext allowance derived from the current HTTP response bound, not a
+// caller-supplied grant decision.
+type ReleaseScope struct {
+	DeviceID           string
+	SessionID          string
+	RequestID          string
+	DeliveryLimitBytes int64
+}
+
+// ReleaseOutcome is the single-snapshot authorization record for one
+// ciphertext read. Every boolean is computed by the same statement that reads
+// the row, so no revocation can interleave between ownership and grant checks.
+type ReleaseOutcome struct {
+	Request           Request
+	SessionValid      bool
+	StampPresent      bool
+	GrantActive       bool
+	StampCurrent      bool
+	BodiesCleared     bool
+	WithinResultBound bool
+	WithinDelivery    bool
+}
+
+// ReleaseRequest reads the request and its current authority in one statement.
+// It returns ErrNotFound for a missing row or a row owned by another device.
+// The caller applies the per-kind release policy.
+//
+// The LEFT JOINs are deliberate: a missing grant row is an inactive grant, not
+// a lookup error, so the caller can fence ciphertext without disclosing which
+// authority component disappeared.
+func (s *Store) ReleaseRequest(ctx context.Context, scope ReleaseScope) (ReleaseOutcome, error) {
+	if scope.DeviceID == "" || scope.RequestID == "" {
+		return ReleaseOutcome{}, ErrNotFound
+	}
+	if scope.DeliveryLimitBytes < 0 {
+		scope.DeliveryLimitBytes = 0
+	}
+	var target requestScan
+	var (
+		sessionValid      bool
+		stampPresent      bool
+		grantActive       bool
+		stampCurrent      bool
+		bodiesCleared     bool
+		withinResultBound bool
+		withinDelivery    bool
+	)
+	targets := append(target.targets(),
+		&sessionValid,
+		&stampPresent,
+		&grantActive,
+		&stampCurrent,
+		&bodiesCleared,
+		&withinResultBound,
+		&withinDelivery,
+	)
+	err := s.db.QueryRow(ctx, `
+		SELECT `+requestColumnsR+`,
+		       ($3 = '' OR (r.device_session_id = $3 AND EXISTS (
+		           SELECT 1 FROM device_sessions s
+		           WHERE s.session_id = $3 AND NOT s.revoked
+		             AND s.expires_at > clock_timestamp()
+		             AND (r.device_session_authority IS NULL OR s.authority_revision = r.device_session_authority)
+		             AND ($5 = '' OR s.authority_revision = $5)))),
+		       (r.grant_generation IS NOT NULL AND r.revocation_generation IS NOT NULL
+		           AND r.device_revocation_generation IS NOT NULL AND r.result_limit_bytes IS NOT NULL),
+		       COALESCE(g.active, false),
+		       COALESCE(r.grant_generation = g.grant_generation
+		           AND r.revocation_generation = g.revocation_generation
+		           AND r.device_revocation_generation = d.revocation_generation, false),
+		       COALESCE(r.bodies_cleared, false),
+		       COALESCE(r.result_limit_bytes IS NOT NULL
+		           AND octet_length(r.result_body) <= r.result_limit_bytes, false),
+		       (octet_length(r.result_body) <= $4)
+		FROM requests r
+		LEFT JOIN grant_authority g ON g.host_id = r.host_id AND g.device_id = r.device_id
+		LEFT JOIN devices d ON d.device_id = r.device_id
+		WHERE r.request_id = $1 AND r.device_id = $2`,
+		scope.RequestID, scope.DeviceID, scope.SessionID, scope.DeliveryLimitBytes, servingDeviceSessionAuthority(ctx)).
+		Scan(targets...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ReleaseOutcome{}, ErrNotFound
+	}
+	if err != nil {
+		return ReleaseOutcome{}, wrapRequestScan(err)
+	}
+	return ReleaseOutcome{
+		Request:           target.finish(),
+		SessionValid:      sessionValid,
+		StampPresent:      stampPresent,
+		GrantActive:       grantActive,
+		StampCurrent:      stampCurrent,
+		BodiesCleared:     bodiesCleared,
+		WithinResultBound: withinResultBound,
+		WithinDelivery:    withinDelivery,
+	}, nil
 }
 
 // nonTerminalStatuses is the durable set that may still renew or expire. It

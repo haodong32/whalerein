@@ -18,14 +18,13 @@ use rustls::{ClientConfig, RootCertStore};
 use url::Url;
 use whalerein_proto::EventEnvelope;
 
+use super::transport::TransportBudget;
 use super::AccessError;
 use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 
 pub const EVENT_TOPIC_PREFIX: &str = "whalerein/v1/h";
 pub const PRESENCE_TOPIC_PREFIX: &str = "whalerein/v1/presence/device";
 pub const DEFAULT_MQTT_PORT: u16 = 8883;
-/// Matches the deployed broker packet budget, including MQTT framing.
-pub const MAX_MQTT_PACKET_BYTES: u32 = super::transport::PACKET_BYTES as u32;
 /// A hard-disconnected device must be observable promptly. Access treats the
 /// broker last will as a fallback for missing `$SYS` lifecycle events.
 pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(10);
@@ -40,6 +39,7 @@ pub struct MqttSettings {
     pub ca_pem: Option<Vec<u8>>,
     pub alpn: Vec<String>,
     pub keep_alive: Duration,
+    pub(crate) budget: TransportBudget,
 }
 
 impl MqttSettings {
@@ -69,6 +69,7 @@ impl MqttSettings {
                 Vec::new()
             },
             keep_alive: DEFAULT_KEEP_ALIVE,
+            budget: TransportBudget::default(),
         })
     }
 
@@ -97,11 +98,17 @@ impl MqttSettings {
             ca_pem: None,
             alpn: Vec::new(),
             keep_alive: DEFAULT_KEEP_ALIVE,
+            budget: TransportBudget::default(),
         })
     }
 
     pub fn with_ca(mut self, ca_pem: Option<Vec<u8>>) -> Self {
         self.ca_pem = ca_pem;
+        self
+    }
+
+    pub(crate) fn with_transport_budget(mut self, budget: TransportBudget) -> Self {
+        self.budget = budget;
         self
     }
 
@@ -169,7 +176,7 @@ impl MqttSettings {
             .set_credentials(username, token)
             .set_keep_alive(self.keep_alive)
             .set_clean_start(true)
-            .set_max_packet_size(Some(MAX_MQTT_PACKET_BYTES));
+            .set_max_packet_size(Some(self.budget.packet_bytes));
         if self.tls {
             options.set_transport(Transport::Tls(TlsConfiguration::Rustls(self.tls_config()?)));
         } else {
@@ -330,7 +337,7 @@ impl DeviceMqttClient {
         let topic = self.topic();
         let mut attempt = 0u32;
         let mut subscribed = false;
-        let mut receiver = super::transport::Receiver::default();
+        let mut receiver = super::transport::Receiver::new(self.settings.budget);
         let mut queued_receipts = 0usize;
 
         loop {
@@ -637,7 +644,10 @@ mod tests {
         assert_eq!(settings.alpn, vec!["mqtt".to_owned()]);
         let options = settings.options("d-1", "token").unwrap();
         assert_eq!(options.client_id(), device_client_id("d-1"));
-        assert_eq!(options.max_packet_size(), Some(MAX_MQTT_PACKET_BYTES));
+        assert_eq!(
+            options.max_packet_size(),
+            Some(TransportBudget::default().packet_bytes)
+        );
         assert_eq!(options.keep_alive(), DEFAULT_KEEP_ALIVE);
         let login = options.credentials().unwrap();
         assert_eq!(login.username, device_username("d-1"));

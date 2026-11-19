@@ -21,6 +21,7 @@ func boundWatch(t *testing.T, s *store.Store, ctx context.Context, requestID, ho
 		RequestID: requestID, HostID: host, DeviceID: device, DeviceSessionID: session,
 		PayloadDigest: bytes.Repeat([]byte{2}, 32), Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
 		Status: whalereinv1.OnlineStatus_received, ProtocolVersion: 1, ExpiresAt: now.Add(time.Minute),
+		Stamp: &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 16 << 20},
 	}); err != nil {
 		t.Fatal(err)
 	}

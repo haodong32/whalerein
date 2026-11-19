@@ -21,6 +21,7 @@ whalerein host list
 whalerein host connect <host-id>
 whalerein session list
 whalerein session create
+whalerein session history <session-id>
 whalerein session send <session-id> "Hello"
 ```
 
@@ -57,13 +58,38 @@ Session IDs belong to the selected Host.
 - `device revoke` applies Device revocation.
   `device forget` clears local pairing identity. Review prompts or supply
   `--yes` for non-interactive destructive commands.
-- `session show <id>`, `session fork <id>`, `session watch <id>`,
-  `session wait <id>` and `session interrupt <id>` operate on one Session.
+- `session show <id>` remains a finite metadata summary. `session fork <id>`,
+  `session watch <id>`, `session wait <id>` and `session interrupt <id>` operate
+  on one Session.
+- `session history <id>` reads one bounded committed-history page, newest first,
+  without creating a watch lease or changing the cache. Messages are
+  chronological inside the page. `--continuation <token>` walks toward older
+  history; an expired, stale or wrong-scope token fails with `snapshot_required`
+  and asks you to restart without `--continuation`. `--cache` reads the eligible
+  encrypted local cache explicitly, `--message <reference>` resolves one exact
+  committed message, and `--max-messages` / `--max-bytes` bound the page.
+- `session download <reference> --to <dir> --session <id>` saves one verified
+  attachment. Use the `save_command` shown by `session history` (or its human
+  `Save:` line); the reference is opaque and belongs to that Host and session.
+  `--name <name>` overrides the Source-suggested file name, `--force` explicitly
+  replaces an existing final file, and `--timeout <seconds>` bounds the whole
+  transfer. Without `--force` a collision preserves the existing file. A
+  verified file appears only after the local save commits; a failure removes
+  temporary data and leaves existing files unchanged. Success is reported after
+  that commit, never before. Recovery is always a fresh transfer, not a resume.
 - `session model`, `session queue`, `session approval` and `session question`
   expose advanced operations and their verification guards.
-- `session send <id> <text>` follows the submitted message's reply.
-  `--detach` returns the submission receipt. `--timeout <seconds>` limits
-  observation. Use `--` before text that could be parsed as a flag.
+- `session send <id> <text>` follows the submitted message's reply and renders
+  the confirmed committed message in the original command. `--detach` returns
+  the submission receipt. `--timeout <seconds>` limits observation. Pending
+  approval or question input shows the scoped inspection command. If the later
+  content read fails, the confirmation stays and the exact
+  `session history --message` command is shown; never resend because content was
+  unavailable. Use `--` before text that could be parsed as a flag.
+- `--show-reasoning` renders typed reasoning blocks in live, `session history`
+  and confirmed send output. It is off by default and never changes
+  authorization. Hidden reasoning does not satisfy `session watch --once` and
+  does not appear in default JSON.
 - `operation list` displays retained operations. `operation recover <id>`
   checks the original operation using its recorded target. Recover uncertain
   sends before submitting another message.
@@ -72,11 +98,28 @@ Session IDs belong to the selected Host.
 
 ## Machine output
 
-`--json` on a finite command writes one newline-terminated
-`whalerein/client/v1` JSON envelope with a command and typed data or an error.
-Errors contain a stable code and message. An uncertain outcome includes the
-operation ID when available and uses exit status 7. Explicit `session watch`
-emits scoped JSON events. Sign-in prompts and diagnostics use stderr.
+`--json` on a finite command writes exactly one newline-terminated
+`whalerein/client/v1` JSON envelope on stdout with a command and typed data or
+an error. Errors contain a stable code and message. An uncertain outcome
+includes the operation ID when available and uses exit status 7. Explicit
+`session watch` is the only streaming stdout command and emits scoped JSON
+events. Sign-in prompts, progress and diagnostics use stderr.
+
+`session history` JSON data contains `target`, `source` (`online` or `cache`),
+`projection`, `complete`, chronological `messages`, folded `activities`,
+`attachments` with `reference` and `save_command`, and a usable `continuation`
+or `null`. `--message` returns the same typed `message` plus its `reference`.
+`session send` JSON keeps `reply.state`, the confirmed `reference` (and the
+nested `reply.reference`), typed `input_kinds` when applicable, the typed
+`message` when its read succeeds, and a stable `read_error` when it does not. Reasoning blocks appear as
+`{"type":"reasoning"}` only with `--show-reasoning`.
+
+`session download` JSON data contains `target`, the opaque `reference`, the
+written `path`, `name`, `bytes`, `sha256`, `media_type` and `verified`. Progress
+never enters stdout. In `--json` mode each progress update is one
+`{"event":"download_progress","received":N,"total":N}` object on stderr; human
+mode uses a throttled `Progress: received/total bytes (percent%)` line. The
+envelope is written only after Core verified the bytes and committed the file.
 
 ## Detailed diagnostics
 
@@ -93,6 +136,38 @@ queued diagnostics after writing the command result.
 ```sh
 whalerein --verbose --json host list > result.json 2> diagnostics.log
 ```
+
+The same shape applies to history and send recovery. stdout stays one command
+envelope (or watch events); stderr is one JSON event per line when `--json` is
+also set. Correlate both streams with `trace_id`.
+
+```sh
+# One history page on stdout, redacted stages on stderr.
+whalerein --verbose --json session history <session-id> > page.json 2> history.log
+
+# One verified save on stdout, progress and download stages on stderr.
+whalerein --verbose --json session download <reference> --host <host> --session <id> --to ./downloads > save.json 2> download.log
+jq -c 'select(.event == "download_progress" or (.stage // "" | startswith("download_")))' download.log
+jq '.data.path, .data.sha256, .data.verified' save.json
+
+# Find the bounded history/send stages without touching stdout.
+jq -c 'select(.stage | startswith("history_") or startswith("send_"))' history.log
+
+# A later content-read failure remains a successful confirmation.
+whalerein --verbose --json session send <session-id> "Hello" > send.json 2> send.log
+jq -c 'select(.stage | startswith("send_"))' send.log
+jq '.data.reply, .data.read_error' send.json
+```
+
+Stable diagnostic stages include `history_page`, `history_projection`,
+`history_continuation`, `send_reply_confirmed`, `send_input`,
+`send_reply_read`, `download_open`, `download_admission`, `download_part`,
+`download_verify`, `download_commit` and `download_cancel`. A failed download
+stage is a bounded warning diagnostic even without `--verbose`; verbose adds the
+successful transfer stages. Events exclude message and reasoning bodies, tool
+parameters, attachment names and contents, local paths, raw cursors and
+credentials. Diagnostic delivery is bounded and best effort; the command result
+is written before the CLI waits briefly for queued diagnostics.
 
 ## Replace an existing installation
 

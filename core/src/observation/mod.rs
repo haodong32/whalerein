@@ -680,6 +680,7 @@ async fn run_connection(
     let overflow = Arc::new(AtomicBool::new(false));
     let task_overflow = overflow.clone();
     let transport_core = core.clone();
+    let event_queue_bytes = core.transport_budget().reserved_bytes as usize;
     let task = tokio::spawn(async move {
         let stop_requested = || {
             task_stop.load(Ordering::SeqCst)
@@ -692,7 +693,7 @@ async fn run_connection(
             stop_requested,
             |envelope| {
                 let bytes = envelope.ciphertext.len();
-                if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > 32 * 1024 * 1024 {
+                if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > event_queue_bytes {
                     task_queued.fetch_sub(bytes, Ordering::SeqCst);
                     task_overflow.store(true, Ordering::SeqCst);
                     return true;
@@ -809,8 +810,17 @@ async fn run_connection(
         .map(|state| state.live_epoch.clone())
         .unwrap_or_default();
     let state_revision = initial.as_ref().map_or(0, |state| state.revision);
+    let projection = initial
+        .as_ref()
+        .map(|state| state.projection_id.clone())
+        .unwrap_or_default();
     if interests.conversation {
         let initial = initial.as_ref().expect("conversation baseline");
+        if projection.is_empty() || projection.len() > 128 {
+            return Err(CoreError::Security(
+                "missing watch content projection".into(),
+            ));
+        }
         conversation.reset(&epoch);
         // Anything already in the local committed view predates this watch:
         // it is baseline, not output, and a reconnect must not replay it.
@@ -828,7 +838,7 @@ async fn run_connection(
             pump.finish().await;
             return Ok(End::Done);
         }
-        core.sync_conversation(key, conversation, false, false, &mut sink)
+        core.sync_conversation(key, conversation, false, false, &projection, &mut sink)
             .await?;
         let _ = core
             .runtime
@@ -854,6 +864,7 @@ async fn run_connection(
         channel,
         epoch,
         state_revision,
+        projection,
         conversation,
         rx,
         events,
@@ -881,6 +892,7 @@ async fn conversation_loop(
     channel: crate::security::SecureChannel,
     epoch: String,
     initial_revision: u64,
+    mut projection: String,
     conversation: &mut Conversation,
     mut rx: mpsc::Receiver<EventEnvelope>,
     events: &mpsc::Sender<SessionEvent>,
@@ -957,6 +969,7 @@ async fn conversation_loop(
                     &wire_key,
                     &epoch,
                     &mut state_revision,
+                    &mut projection,
                     conversation,
                     events,
                     questions,
@@ -1036,6 +1049,22 @@ async fn conversation_loop(
                 if state.session.as_ref() != Some(&wire_key) {
                     return Err(CoreError::Security("watch refresh scope mismatch".into()));
                 }
+                if state.projection_id.is_empty() || state.projection_id != projection {
+                    if !send_event(
+                        events,
+                        key,
+                        observation_id,
+                        generation,
+                        SessionEventPayload::Conversation(conversation.reset_projection("")),
+                    )
+                    .await
+                    {
+                        pump.finish().await;
+                        return Ok(End::Done);
+                    }
+                    pump.finish().await;
+                    return Ok(End::Reconnect);
+                }
                 if state.live_epoch != epoch {
                     pump.finish().await;
                     return Ok(End::Reconnect);
@@ -1049,8 +1078,15 @@ async fn conversation_loop(
                             generation,
                             failed: false,
                         };
-                        core.sync_conversation(key, conversation, true, false, &mut sink)
-                            .await?;
+                        core.sync_conversation(
+                            key,
+                            conversation,
+                            true,
+                            false,
+                            &projection,
+                            &mut sink,
+                        )
+                        .await?;
                         if sink.failed {
                             pump.finish().await;
                             return Ok(End::Done);
@@ -1085,6 +1121,7 @@ async fn handle_update(
     wire_key: &whalerein_proto::SessionKey,
     epoch: &str,
     state_revision: &mut u64,
+    projection: &mut String,
     conversation: &mut Conversation,
     events: &mpsc::Sender<SessionEvent>,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
@@ -1130,6 +1167,11 @@ async fn handle_update(
                     "conversation sync is unavailable".into(),
                 ));
             };
+            if batch.projection_id.is_empty() || batch.projection_id != *projection {
+                conversation.reset_projection("");
+                *projection = batch.projection_id.clone();
+                return Ok(Flow::Reconnect);
+            }
             match sync.apply_batch(key, &batch)? {
                 BatchOutcome::Applied => {
                     for change in &batch.changes {
@@ -1147,6 +1189,19 @@ async fn handle_update(
                         {
                             return Ok(Flow::Done);
                         }
+                        for activity in conversation.take_activity_updates() {
+                            if !send_event(
+                                events,
+                                key,
+                                observation_id,
+                                generation,
+                                SessionEventPayload::Conversation(activity),
+                            )
+                            .await
+                            {
+                                return Ok(Flow::Done);
+                            }
+                        }
                     }
                 }
                 BatchOutcome::Duplicate => {}
@@ -1158,7 +1213,7 @@ async fn handle_update(
                         generation,
                         failed: false,
                     };
-                    core.sync_conversation(key, conversation, true, false, &mut sink)
+                    core.sync_conversation(key, conversation, true, false, projection, &mut sink)
                         .await?;
                     if sink.failed {
                         return Ok(Flow::Done);
@@ -1178,6 +1233,11 @@ async fn handle_update(
             }
             if !interests.conversation {
                 return Ok(Flow::Continue);
+            }
+            if state.projection_id.is_empty() || state.projection_id != *projection {
+                conversation.reset_projection("");
+                *projection = state.projection_id.clone();
+                return Ok(Flow::Reconnect);
             }
             if state.live_epoch != epoch {
                 return Ok(Flow::Reconnect);

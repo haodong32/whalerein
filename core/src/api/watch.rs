@@ -156,6 +156,7 @@ impl Core {
         conversation: &mut Conversation,
         deliver_snapshot: bool,
         force_snapshot: bool,
+        expected_projection: &str,
         sink: &mut S,
     ) -> CoreResult<u64>
     where
@@ -165,11 +166,21 @@ impl Core {
         let wire_key = whalerein_proto::SessionKey::from(key);
         self.runtime
             .set_sync_state(&key.host_id, crate::sync::SyncState::Syncing);
-        let mut snapshot = force_snapshot || sync.cursor(key)?.is_none();
-        let mut after = if force_snapshot {
+        let view = sync.history_view(key)?;
+        let cache_matches = !expected_projection.is_empty()
+            && view
+                .as_ref()
+                .is_some_and(|view| view.projection == expected_projection);
+        let mut snapshot = force_snapshot || !cache_matches;
+        let mut projection = if expected_projection.is_empty() {
             String::new()
         } else {
-            sync.cursor(key)?.unwrap_or_default()
+            expected_projection.to_owned()
+        };
+        let mut after = if snapshot || !cache_matches {
+            String::new()
+        } else {
+            view.map(|view| view.cursor).unwrap_or_default()
         };
         let mut cut = String::new();
         let mut seen = HashSet::new();
@@ -189,6 +200,10 @@ impl Core {
                             cut_cursor: cut.clone(),
                             max_bytes: 256 * 1024,
                             max_messages: 100,
+                            page: None,
+                            exact: None,
+                            continuation: String::new(),
+                            source: whalerein_proto::HistorySource::Online as i32,
                         })),
                     },
                 )
@@ -213,58 +228,120 @@ impl Core {
             if page.session.as_ref() != Some(&wire_key) || page.snapshot != snapshot {
                 return Err(CoreError::Security("history scope mismatch".into()));
             }
+            if page.projection_id.is_empty()
+                || page.projection_id.len() > 128
+                || page.cut_cursor.is_empty()
+                || page.cut_cursor.len() > 4096
+            {
+                return Err(CoreError::Security(
+                    "history page has no valid content projection".into(),
+                ));
+            }
             let batch = page
                 .batch
                 .as_ref()
                 .ok_or_else(|| CoreError::Security("missing history batch".into()))?;
-            if (!cut.is_empty() && cut != page.cut_cursor)
+            if batch.projection_id != page.projection_id {
+                return Err(CoreError::Security(
+                    "history page projection mismatch".into(),
+                ));
+            }
+            if projection.is_empty() {
+                projection = page.projection_id.clone();
+            } else if projection != page.projection_id {
+                // A watch baseline names the active projection. A page from a
+                // different namespace means the watch must re-register rather
+                // than adopt content under a stale state. Callers without a
+                // baseline (explicit sync) may restart on the new projection.
+                if !expected_projection.is_empty() {
+                    sync.discard_stage(key)?;
+                    return Err(CoreError::Api {
+                        code: Some(whalerein_proto::ErrorCode::SnapshotRequired),
+                        message: "content projection changed; refresh the observation".into(),
+                    });
+                }
+                if !sink.emit(&conversation.reset_projection("")).await {
+                    return Ok(emitted);
+                }
+                snapshot = true;
+                projection = page.projection_id.clone();
+                after.clear();
+                cut.clear();
+                seen.clear();
+                sync.discard_stage(key)?;
+                continue;
+            }
+            let inconsistent = (!cut.is_empty() && cut != page.cut_cursor)
                 || (!after.is_empty() && after != batch.from_cursor)
                 || page.cut_cursor.is_empty()
                 || (page.complete && batch.to_cursor != page.cut_cursor)
                 || (!page.complete
                     && (batch.to_cursor == batch.from_cursor
-                        || !seen.insert(batch.to_cursor.clone())))
-            {
-                return Err(CoreError::Security("inconsistent history cut".into()));
+                        || !seen.insert(batch.to_cursor.clone())));
+            if inconsistent {
+                // An interrupted or missing range cannot certify a complete
+                // snapshot. Drop only staged pages and restart from the fresh
+                // Source cut; the previously committed view remains untouched.
+                if !snapshot {
+                    if !sink.emit(&conversation.reset("")).await {
+                        return Ok(emitted);
+                    }
+                    snapshot = true;
+                }
+                after.clear();
+                cut.clear();
+                seen.clear();
+                sync.discard_stage(key)?;
+                continue;
             }
             cut = page.cut_cursor.clone();
             after = batch.to_cursor.clone();
             let installed = sync.apply_page(key, &page)?;
-            if installed {
-                if snapshot {
-                    // A snapshot replaces the whole committed view only on its
-                    // final page. Emitting from earlier pages would either
-                    // replay the previous view or deliver the replacement
-                    // twice, so only the committed complete view is considered.
-                    if !page.complete {
-                        continue;
-                    }
-                    let mut ordinal = -1;
-                    while let Some((next, message)) = sync.next_message(key, ordinal)? {
-                        ordinal = next;
-                        if deliver_snapshot {
-                            if let Some(update) = conversation.committed_once(&message)? {
-                                emitted += 1;
-                                if !sink.emit(&update).await {
+            if snapshot {
+                // A snapshot replaces the whole committed view only on its
+                // final page. Emitting from earlier pages would either replay
+                // the previous view or deliver the replacement twice, so only
+                // the committed complete view is considered. An idempotent
+                // repeat of the same complete snapshot still reports the whole
+                // view to an explicit caller.
+                if !page.complete {
+                    continue;
+                }
+                let mut ordinal = -1;
+                while let Some((next, message)) = sync.next_message(key, ordinal)? {
+                    ordinal = next;
+                    if deliver_snapshot {
+                        if let Some(update) = conversation.committed_once(&message)? {
+                            emitted += 1;
+                            if !sink.emit(&update).await {
+                                return Ok(emitted);
+                            }
+                            for activity in conversation.take_activity_updates() {
+                                if !sink.emit(&activity).await {
                                     return Ok(emitted);
                                 }
                             }
-                        } else {
-                            // Cold baseline: record what the viewer has now
-                            // seen without presenting it as new output.
-                            conversation.mark_delivered(&message);
                         }
+                    } else {
+                        // Cold baseline: record what the viewer has now seen
+                        // without presenting it as new output.
+                        conversation.mark_delivered(&message);
                     }
-                    self.runtime
-                        .set_sync_state(&key.host_id, crate::sync::SyncState::Synced);
-                    return Ok(emitted);
-                } else {
-                    for change in &batch.changes {
-                        let Some(update) = conversation.committed_once(change)? else {
-                            continue;
-                        };
-                        emitted += 1;
-                        if !sink.emit(&update).await {
+                }
+                self.runtime
+                    .set_sync_state(&key.host_id, crate::sync::SyncState::Synced);
+                return Ok(emitted);
+            } else if installed {
+                for change in &batch.changes {
+                    let Some(update) = conversation.committed_once(change)? else {
+                        continue;
+                    };
+                    emitted += 1;
+                    if !sink.emit(&update).await {
+                        return Ok(emitted);
+                    }
+                    for activity in conversation.take_activity_updates() {
+                        if !sink.emit(&activity).await {
                             return Ok(emitted);
                         }
                     }

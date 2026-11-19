@@ -439,3 +439,356 @@ fn plain_usage_diagnostics_use_stderr_and_redact_extra_arguments() {
     assert!(stderr.contains("--help"));
     assert!(!stderr.contains("fixture-private-marker"));
 }
+
+#[test]
+fn help_discovers_reasoning_history_and_download_surface() {
+    let help = binary().arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--show-reasoning"), "{help}");
+    let session_help = binary()
+        .args(["--json", "session", "--help"])
+        .output()
+        .unwrap();
+    let session_help = outcome(&session_help, 0)["data"]["help"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for fragment in ["history", "download"] {
+        assert!(
+            session_help.contains(fragment),
+            "{fragment}: {session_help}"
+        );
+    }
+    let history = binary()
+        .args(["--json", "session", "history", "--help"])
+        .output()
+        .unwrap();
+    let value = outcome(&history, 0);
+    let text = value["data"]["help"].as_str().unwrap();
+    for fragment in ["--cache", "--continuation", "--message", "--max-messages"] {
+        assert!(text.contains(fragment), "{fragment}: {text}");
+    }
+    let download = binary()
+        .args(["--json", "session", "download", "--help"])
+        .output()
+        .unwrap();
+    let value = outcome(&download, 0);
+    let text = value["data"]["help"].as_str().unwrap();
+    assert!(text.contains("--to"), "{text}");
+    assert!(text.contains("--session"), "{text}");
+    assert!(text.contains("--force"), "{text}");
+    assert!(text.contains("--timeout"), "{text}");
+}
+
+fn attachment_fixture(
+    destination: &Path,
+) -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    PathBuf,
+    whalerein_core::api::test_support::FakeAccess,
+) {
+    use whalerein_core::api::test_support::FakeAttachmentObject;
+
+    let fixture = paired_binary();
+    std::fs::create_dir(destination).unwrap();
+    fixture
+        .3
+        .host
+        .lock()
+        .unwrap()
+        .put_attachment(FakeAttachmentObject::new(
+            "session-1",
+            "attachment-1",
+            "note.txt",
+            b"verified bytes".to_vec(),
+        ));
+    fixture
+}
+
+fn download_args(destination: &Path) -> Vec<String> {
+    [
+        "session",
+        "download",
+        "attachment-1",
+        "--host",
+        "host-1",
+        "--session",
+        "session-1",
+        "--to",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(std::iter::once(destination.to_str().unwrap().to_owned()))
+    .collect()
+}
+
+#[test]
+fn download_saves_verified_bytes_with_one_envelope_and_progress_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("downloads");
+    let (_runtime, _fixture, config, access) = attachment_fixture(&destination);
+    let args = download_args(&destination);
+    let result = invocation(&config).args(&args).output().unwrap();
+    let value = outcome(&result, 0);
+    assert_eq!(value["command"], "session.download");
+    assert_eq!(value["data"]["reference"], "attachment-1");
+    assert_eq!(value["data"]["name"], "note.txt");
+    assert_eq!(value["data"]["bytes"], 14);
+    assert_eq!(value["data"]["verified"], true);
+    assert_eq!(value["data"]["media_type"], "application/octet-stream");
+    assert_eq!(
+        Path::new(value["data"]["path"].as_str().unwrap()),
+        destination.join("note.txt")
+    );
+    assert_eq!(
+        std::fs::read(destination.join("note.txt")).unwrap(),
+        b"verified bytes"
+    );
+    assert_eq!(
+        value["data"]["sha256"],
+        "186287b2d987891f027b4bc8baaf621a3e5a4a73ec78e04b0f65dc309b1ccc03"
+    );
+    assert_eq!(access.host.lock().unwrap().attachment_open_calls, 1);
+
+    // Progress is structured stderr, never mixed into the single stdout envelope.
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events.len() >= 2, "{events:?}");
+    assert!(events
+        .iter()
+        .all(|event| event["event"] == "download_progress"));
+    assert_eq!(events[0]["received"], 0);
+    assert_eq!(events[0]["total"], 14);
+    assert_eq!(events.last().unwrap()["received"], 14);
+    assert!(!stderr.contains("note.txt"));
+    assert!(!stderr.contains(destination.to_str().unwrap()));
+    assert!(!String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("download_progress"));
+}
+
+#[test]
+fn human_download_keeps_progress_on_stderr_and_success_on_stdout() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("downloads");
+    let (_runtime, _fixture, config, _access) = attachment_fixture(&destination);
+    let args = download_args(&destination);
+    let result = binary()
+        .arg("--config")
+        .arg(config)
+        .args(&args)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(stdout.contains("Saved: "), "{stdout}");
+    assert!(stdout.contains("Verified: yes"), "{stdout}");
+    assert!(stdout.contains("SHA-256: "), "{stdout}");
+    assert!(!stdout.contains("whalerein/client/v1"), "{stdout}");
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    assert!(stderr.lines().all(|line| line.starts_with("Progress: ")));
+    assert!(stderr.ends_with("(100%)\n"), "{stderr}");
+}
+
+#[test]
+fn download_failure_is_one_envelope_that_touches_no_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("downloads");
+    let (_runtime, _fixture, config, access) = attachment_fixture(&destination);
+    access.host.lock().unwrap().attachment_unsupported = true;
+    let args = download_args(&destination);
+    let result = invocation(&config).args(&args).output().unwrap();
+    let value = outcome(&result, 9);
+    assert_eq!(value["command"], "session.download");
+    assert_eq!(value["error"]["code"], "unsupported_capability");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("No bytes were read"), "{message}");
+    assert!(message.contains("session history session-1"), "{message}");
+    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    // The failed stage is a bounded warning event; no progress or path leaks.
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let event: Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(event["event"], "attachment_transfer");
+    assert_eq!(event["stage"], "download_open");
+    assert_eq!(event["outcome"], "failed");
+    assert!(!stderr.contains("note.txt"));
+    assert!(!stderr.contains(destination.to_str().unwrap()));
+}
+
+#[test]
+fn verbose_download_reports_core_stages_without_changing_stdout() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("downloads");
+    let (_runtime, _fixture, config, _access) = attachment_fixture(&destination);
+    let args = download_args(&destination);
+    let result = invocation(&config)
+        .args(["--verbose"])
+        .args(&args)
+        .output()
+        .unwrap();
+    let value = outcome(&result, 0);
+    assert_eq!(value["data"]["verified"], true);
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let stages: Vec<&str> = events
+        .iter()
+        .filter(|event| event["event"] == "operation_diagnostic")
+        .filter_map(|event| event["stage"].as_str())
+        .collect();
+    for stage in [
+        "download_open",
+        "download_admission",
+        "download_part",
+        "download_verify",
+        "download_commit",
+    ] {
+        assert!(stages.contains(&stage), "{stage}: {stages:?}");
+    }
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "download_progress"));
+    assert!(!String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("operation_diagnostic"));
+}
+
+#[test]
+fn history_without_a_pairing_is_a_single_error_envelope() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = selected(temp.path(), "standalone");
+    let result = invocation(&config)
+        .args(["session", "history", "session-1"])
+        .output()
+        .unwrap();
+    let value = outcome(&result, 4);
+    assert_eq!(value["command"], "session.history");
+    assert_eq!(value["error"]["code"], "not_paired");
+    assert!(result.stderr.is_empty());
+}
+
+fn paired_binary() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    PathBuf,
+    whalerein_core::api::test_support::FakeAccess,
+) {
+    use whalerein_core::api::test_support::FakeAccess;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let temp = tempfile::tempdir().unwrap();
+    let config = selected(temp.path(), "standalone");
+    let mut pairing = invocation(&config)
+        .args(["--yes", "host", "connect", "--invite-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    pairing
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(access.pairing_uri().as_bytes())
+        .unwrap();
+    let paired = pairing.wait_with_output().unwrap();
+    assert_eq!(paired.status.code(), Some(0), "{paired:?}");
+    (runtime, temp, config, access)
+}
+
+#[test]
+fn verbose_history_separates_structured_stderr_from_one_stdout_envelope() {
+    let (_runtime, _temp, config, _access) = paired_binary();
+
+    let history = invocation(&config)
+        .args(["--verbose", "session", "history", "session-1"])
+        .output()
+        .unwrap();
+    let value = outcome(&history, 0);
+    assert_eq!(value["command"], "session.history");
+    assert_eq!(value["data"]["source"], "online");
+    assert_eq!(value["data"]["messages"][0]["message_id"], "message-1");
+
+    let stderr = String::from_utf8(history.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|event| {
+            event["event"] == "operation_diagnostic" && event["stage"] == "history_page"
+        }),
+        "{events:?}"
+    );
+    assert!(events.iter().all(|event| event["trace_id"].is_string()));
+    assert!(!stderr.contains("message-1"));
+}
+
+#[test]
+fn verbose_send_reports_confirmed_input_and_read_stages_without_changing_stdout() {
+    use whalerein_proto::MessageReplyState;
+
+    let (_runtime, _temp, config, access) = paired_binary();
+
+    access.host.lock().unwrap().message_reply_state =
+        Some(MessageReplyState::MessageReplyInputRequired);
+    let input = invocation(&config)
+        .args(["--verbose", "session", "send", "session-1", "Hello"])
+        .output()
+        .unwrap();
+    let value = outcome(&input, 0);
+    assert_eq!(value["data"]["reply"]["state"], "input_required");
+    assert_eq!(value["data"]["reply"]["kinds"][0], "approval");
+    assert_eq!(value["data"]["input_kinds"][0], "approval");
+    let stderr = String::from_utf8(input.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|event| {
+            event["event"] == "operation_diagnostic" && event["stage"] == "send_input"
+        }),
+        "{events:?}"
+    );
+    assert!(!stderr.contains("Hello"));
+
+    access.host.lock().unwrap().message_reply_state = None;
+    access.host.lock().unwrap().history_messages.clear();
+    let failed = invocation(&config)
+        .args(["--verbose", "session", "send", "session-1", "Hello again"])
+        .output()
+        .unwrap();
+    let value = outcome(&failed, 0);
+    assert_eq!(value["data"]["reply"]["state"], "committed");
+    assert!(value["data"]["reference"].is_string());
+    assert_eq!(value["data"]["read_error"], "not_found");
+    let stderr = String::from_utf8(failed.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (stage, outcome) in [
+        ("send_reply_confirmed", "confirmed"),
+        ("send_reply_read", "failed"),
+    ] {
+        assert!(
+            events.iter().any(|event| {
+                event["event"] == "operation_diagnostic"
+                    && event["stage"] == stage
+                    && event["outcome"] == outcome
+            }),
+            "{stage}: {events:?}"
+        );
+    }
+    assert!(!stderr.contains("Hello again"));
+}

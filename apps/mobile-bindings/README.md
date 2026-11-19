@@ -149,24 +149,35 @@ Records: `HostSummary { hostId, online, fingerprint, protocolVersion }`,
 `SessionSummaryView { sessionId, title, updatedAtUnixMs, cwd, running,
 capabilities: SessionCapabilitiesView? }`,
 `SessionCapabilitiesView { history, resumableHistory, liveText, interrupt,
-approvals, deliveryModes: [String], modelSelection, pendingQueueRead,
-pendingQueueEdit, pendingQueueRemove, pendingQueueSteer, questionsRead,
-questionsAnswerOpen, questionsAnswerContinued, sessionFork }`,
+approvals, liveReasoning, toolActivity, conversationNotices, attachments,
+historyPage, historyExact, sendFollowup, deliveryModes: [String],
+modelSelection, pendingQueueRead, pendingQueueEdit, pendingQueueRemove,
+pendingQueueSteer, questionsRead, questionsAnswerOpen,
+questionsAnswerContinued, sessionFork }`,
 `PairingPromptView { hostId, accessUrl, fingerprint, fingerprintDisplay }`,
 `ApprovalView { approvalId, sessionId, toolName, callId, reason, version,
 expiresAtUnixMs, digestHex, state }`, `MessageView { messageId, role, blocks,
-createdAtUnixMs }`, `BlockView { blockId, kind, text, toolName }`,
+createdAtUnixMs }`,
+`BlockView { blockId, kind, text, toolName, toolActivity: ToolActivityView?,
+notice: NoticeView? }`, `ToolActivityView { callId, name, summary, state,
+stages: [String], progress, failureCode, result: [ToolResultPartView],
+callMissing }`, `ToolResultPartView { text | attachment(mediaType, name, size,
+available) }`, `NoticeView { category, state, summary }`,
 `CommandView { requestId, commandId, status, messageId, deliveryId }`,
-`DiagnosticsReportView { json, redactionFields, lastFailureCode, appVersion,
-coreVersion }`.
+`SessionKeyView { hostId, sessionId }`, `MessageReferenceView { session,
+messageId, projectionId }`, `DiagnosticsReportView { json, redactionFields,
+lastFailureCode, appVersion, coreVersion }`.
 
 Enums: `DeliveryChoice { steer, queue, send }`;
+`MessageReplyView { pending, committed(reference: MessageReferenceView),
+inputRequired(kinds: [String], operation, session: SessionKeyView), uncertain }`;
 `ConversationEvent { state(runPhase:running:revision:approvals:), historyReset,
-message(message:), preview(attemptId:text:replace:incomplete:),
-attemptEnded(attemptId:outcome:), connection(hostId:status:),
-pairingPrompt(prompt:), pairingFinished(hostId:code:),
-commandStatus(command:), approvalChanged(approval:),
-error(code:message:), droppedEvents(count:), watchEnded }`.
+message(message:), preview(attemptId:kind:text:replace:incomplete:),
+toolActivity(activity:), attemptEnded(attemptId:outcome:),
+connection(hostId:status:), pairingPrompt(prompt:),
+pairingFinished(hostId:code:), commandStatus(command:),
+approvalChanged(approval:), questions(view:), error(code:message:),
+droppedEvents(count:), watchEnded }`.
 
 Semantics:
 
@@ -199,9 +210,30 @@ Semantics:
 - `revoke` blocks until Core confirms revocation, then stops the watch.
   `forgetDevice` also stops the watch; Core requires the profile to be revoked
   (or unpaired) first, so a paired unrevoked profile returns `conflict`.
-- `role` values are `user`, `assistant`, `tool`, `notice`, `unknown`; `kind`
-  values are `text`, `tool`, `notice`, `attachment`, `unknown`; `runPhase`,
-  `outcome` and approval `state` use `unknown` for unrecognized protocol values.
+- `role` values are `user`, `assistant`, `tool`, `notice`, `context`,
+  `unknown`. `context` and `unknown` never enter the user lane. `kind` values are
+  `text`, `reasoning`, `tool`, `notice`, `attachment`, `unknown`; reasoning keeps
+  its own block identity and is never merged into an answer block. `runPhase`,
+  `outcome`, tool `state`/`stages` and approval `state` use `unknown` for
+  unrecognized protocol values.
+- Tool blocks carry the canonical typed activity in `toolActivity`; Core has
+  already merged repeated call/result occurrences by `callId`. `text` is the
+  settled result text (or the call summary/progress before settlement) so a flat
+  renderer keeps working. Tool `state` values are `preparing`, `running`,
+  `succeeded`, `failed`, `interrupted`, `abandoned`, `unknown`; stages are
+  `preparation`, `execution`, `progress`, `settlement`, `unknown`.
+- Notice blocks carry only `summary` as their display body plus typed
+  `category` (`retry`, `max_output`, `compaction`, `command`, `context`,
+  `omission`, `unknown`) and `state` (`scheduled`, `started`, `cancelled`,
+  `completed`, `failed`, `reached`, `unknown`). A missing summary stays empty;
+  the binding never invents notice text.
+- `preview.kind` is `text` or `reasoning`; callers must not append a reasoning
+  preview to answer text. `toolActivity` events report one material change to a
+  canonical activity; `message` events remain the committed projection.
+- `MessageReplyView` mirrors Core `SendReply`: `pending`, `committed` with a
+  scoped `MessageReferenceView`, `inputRequired` with evidenced lowercase
+  `kinds` (`approval`, `question`, `other`), or `uncertain`. A committed reply
+  names the canonical message; its body stays in history.
 - `DiagnosticsReportView.json` uses Core's redacted preview/export. It excludes
   message and draft text, tool arguments, credentials, invitation/device tokens,
   private keys, full ciphertext and raw Host/device ids.
@@ -223,6 +255,14 @@ Semantics:
   Swift cannot pass it directly as `SecretStore`; use
   `newWithMemorySecretStore` or wrap its methods in a `SecretStore`
   conformance. No `unwrap`/panic path exists on FFI input paths.
+- The typed conversation contract is a hard cut. `BlockView` gained
+  `toolActivity` and `notice`, `ConversationEvent` gained `toolActivity` and a
+  `kind` on `preview`, and `MessageReplyView` mirrors Core `SendReply`; a client
+  compiled against the previous contract must be rebuilt. Independent history
+  pages (`HistoryPage`) are not exposed by these bindings.
+- iOS feature and UI work remains deferred for this release (design D-12). This
+  crate only performs workspace compile maintenance, so the app must not be
+  treated as validated against the new typed values until that work resumes.
 
 ## Security
 

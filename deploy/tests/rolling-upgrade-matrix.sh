@@ -12,6 +12,8 @@
 # throwaway container on loopback port 55490.
 #
 # It verifies:
+#   0. the rendered standalone transport settings validate and invalid profiles
+#      are rejected before any listener opens;
 #   1. an old binary migrates an empty database;
 #   2. a new binary migrates the same database forward;
 #   3. the old binary refuses the newer schema instead of starting blindly;
@@ -88,6 +90,69 @@ migrate() {
     -v "$ROOT_DIR/deploy/compose/access.yaml:/etc/whalerein/access.yaml:ro" \
     "$image" --migrate-only --config /etc/whalerein/access.yaml
 }
+
+check_config() {
+  local image="$1" config="$2"
+  docker run --rm --network host \
+    -e WHALEREIN_DATABASE_URL="postgres://postgres@127.0.0.1:${PORT}/whalerein_dev?sslmode=disable" \
+    -e WHALEREIN_ADMIN_TOKEN=rolling-upgrade-admin \
+    -e WHALEREIN_HOST_PROVISIONING_TOKEN=rolling-upgrade-host \
+    -e WHALEREIN_BROKER_PASSWORD=rolling-upgrade-broker \
+    -e WHALEREIN_INTERNAL_TOKEN=rolling-upgrade-internal \
+    -e WHALEREIN_TRANSPORT_PROFILE="${WHALEREIN_TRANSPORT_PROFILE:-default}" \
+    -v "$config:/etc/whalerein/access.yaml:ro" \
+    "$image" --check-config --config /etc/whalerein/access.yaml
+}
+
+echo "==> standalone preflight: rendered transport limits"
+rendered="$(check_config "$NEW_IMAGE" "$ROOT_DIR/deploy/compose/access.yaml")"
+for expected in   "profile=default" \
+  "packet_bytes=65536" \
+  "fragment_payload_bytes=61440" \
+  "fragment_count=274" \
+  "envelope_bytes=16777216" \
+  "bulk_concurrency=4" \
+  "reserved_bytes=33554432" \
+  "result_limit_bytes=16777216" \
+  "http_max_body_bytes=25165824"; do
+  if ! grep -q "$expected" <<<"$rendered"; then
+    echo "rendered transport limit missing: $expected" >&2
+    echo "$rendered" >&2
+    exit 1
+  fi
+done
+roomy="$(WHALEREIN_TRANSPORT_PROFILE=roomy check_config "$NEW_IMAGE" "$ROOT_DIR/deploy/compose/access.yaml")"
+for expected in "profile=roomy" "envelope_bytes=33554432" "bulk_concurrency=8" "http_max_body_bytes=47185920"; do
+  if ! grep -q "$expected" <<<"$roomy"; then
+    echo "rendered alternate transport limit missing: $expected" >&2
+    echo "$roomy" >&2
+    exit 1
+  fi
+done
+if ! grep -q '^max_packet_size 4194304$' "$ROOT_DIR/deploy/mosquitto/mosquitto.conf"; then
+  echo "broker packet ceiling is not rendered at the standalone default" >&2
+  exit 1
+fi
+if ! grep -q 'WHALEREIN_MQTT_MAX_PACKET_SIZE' "$ROOT_DIR/deploy/compose/stack.yaml"; then
+  echo "compose does not parameterize the broker packet ceiling" >&2
+  exit 1
+fi
+
+echo "==> standalone preflight: invalid profiles must fail before readiness"
+invalid_dir="$(mktemp -d)"
+TEMP_DIRS+=("$invalid_dir")
+sed 's|^  profile: .*$|  profile: not-a-profile|' \
+  "$ROOT_DIR/deploy/compose/access.yaml" > "$invalid_dir/unknown-profile.yaml"
+if check_config "$NEW_IMAGE" "$invalid_dir/unknown-profile.yaml" >/dev/null 2>&1; then
+  echo "unknown transport profile was accepted" >&2
+  exit 1
+fi
+awk '{print} /^  profile: / {print "  fragment_payload_bytes: 999999"}' \
+  "$ROOT_DIR/deploy/compose/access.yaml" > "$invalid_dir/invalid-relation.yaml"
+if check_config "$NEW_IMAGE" "$invalid_dir/invalid-relation.yaml" >/dev/null 2>&1; then
+  echo "invalid transport relation was accepted" >&2
+  exit 1
+fi
 
 echo "==> migrate with old image: $OLD_IMAGE"
 migrate "$OLD_IMAGE"

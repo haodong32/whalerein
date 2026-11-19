@@ -94,8 +94,19 @@ func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, ops s
 		if derived {
 			source = "derived"
 		}
+		effective, err := cfg.ResolveTransport()
+		if err != nil {
+			fmt.Fprintf(stderr, "access: invalid configuration: %v\n", err)
+			return 2
+		}
 		fmt.Fprintf(stdout, "config ok: mode=%s listen=%s internal_listen=%s protocol=%d mqtt_public_url=%s (%s)\n",
 			cfg.Mode, cfg.Listen, cfg.InternalListen, cfg.Protocol.Version, mqttURL, source)
+		fmt.Fprintf(stdout, "transport: profile=%s packet_bytes=%d overhead_bytes=%d fragment_payload_bytes=%d fragment_count=%d envelope_bytes=%d bulk_concurrency=%d reserved_bytes=%d fragment_idle_timeout=%s transfer_timeout=%s result_limit_bytes=%d http_max_body_bytes=%d\n",
+			effective.Profile, effective.PacketBytes, effective.PacketOverheadBytes,
+			effective.FragmentPayloadBytes, effective.FragmentCount, effective.EnvelopeBytes,
+			effective.BulkConcurrency, effective.ReservedBytes,
+			effective.FragmentIdleTimeout, effective.TransferTimeout,
+			effective.ResultLimitBytes, effective.HTTPBodyBytes)
 		return 0
 	}
 
@@ -175,6 +186,25 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	metrics := diagnostics.NewMetrics()
 	masker := diagnostics.NewMasker()
 
+	// Validate the packaged vocabulary and the effective budget before any
+	// listener, database or broker connection becomes ready.
+	transport, err := cfg.ResolveTransport()
+	if err != nil {
+		return fmt.Errorf("transport configuration: %w", err)
+	}
+	logger.Info("transport configured",
+		"profile", transport.Profile,
+		"packet_bytes", transport.PacketBytes,
+		"fragment_payload_bytes", transport.FragmentPayloadBytes,
+		"fragment_count", transport.FragmentCount,
+		"envelope_bytes", transport.EnvelopeBytes,
+		"bulk_concurrency", transport.BulkConcurrency,
+		"reserved_bytes", transport.ReservedBytes,
+		"fragment_idle_timeout_ms", transport.FragmentIdleTimeout.Milliseconds(),
+		"transfer_timeout_ms", transport.TransferTimeout.Milliseconds(),
+		"result_limit_bytes", transport.ResultLimitBytes,
+		"http_max_body_bytes", transport.HTTPBodyBytes)
+
 	db, err := ops.open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
@@ -193,7 +223,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	presence := broker.NewPresence(cfg.Presence.CacheTTL.D(), metrics, logger)
 
 	var service *broker.Service
-	connector, err := broker.NewPahoConnector(cfg.Broker, func(topic string, payload []byte) {
+	connector, err := broker.NewPahoConnectorWithTransport(cfg.Broker, transport, metrics, func(topic string, payload []byte) {
 		service.HandleMessage(topic, payload)
 	}, logger)
 	if err != nil {
@@ -201,6 +231,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 	service, err = broker.New(broker.Dependencies{
 		Config:      cfg.Broker,
+		Transport:   transport,
 		Presence:    presence,
 		Connector:   connector,
 		DeviceHosts: db.ListAuthorizedHostIDs,
@@ -279,6 +310,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Store:    db,
 		Broker:   service,
 		Presence: service,
+		Grants:   db,
 		Config: requests.Config{
 			SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
 			ProtocolVersion:          cfg.Protocol.Version,
@@ -288,6 +320,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			RetryInterval:            cfg.Requests.RetryInterval.D(),
 			MaxAttempts:              cfg.Requests.MaxAttempts,
 			BatchSize:                cfg.Requests.BatchSize,
+			MaxResultBytes:           transport.ResultLimitBytes,
+			MaxDeliveryBytes:         transport.HTTPBodyBytes,
+			EnvelopeBytes:            int64(transport.EnvelopeBytes),
 		},
 		Metrics: metrics,
 		Masker:  masker,
@@ -388,7 +423,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Masker:                   masker,
 		Logger:                   logger,
 		InternalToken:            cfg.Internal.CallbackToken,
-		MaxBodyBytes:             cfg.HTTP.MaxBodyBytes,
+		MaxBodyBytes:             transport.HTTPBodyBytes,
 	}
 	// Assign through the interface only when external mode is configured. A
 	// typed nil *external.Service would make the interface non-nil and turn the
@@ -607,6 +642,7 @@ func drainCleanupTask(ctx context.Context, task cleanupTask, now time.Time, logg
 			logger.Info(task.success, "count", count, "operation", task.operation)
 		}
 		if count < store.CleanupBatchSize {
+			metrics.CleanupCompleted(task.operation)
 			return
 		}
 		metrics.CleanupBacklog()

@@ -47,6 +47,12 @@ impl SyncService {
     pub fn cursor(&self, key: &SessionKey) -> CoreResult<Option<String>> {
         Ok(self.cache.history_cursor(key)?)
     }
+    pub(crate) fn history_view(
+        &self,
+        key: &SessionKey,
+    ) -> CoreResult<Option<crate::cache::HistoryView>> {
+        Ok(self.cache.history_view(key)?)
+    }
     pub fn history_message_ids(&self, key: &SessionKey) -> CoreResult<Vec<String>> {
         Ok(self.cache.history_message_ids(key)?)
     }
@@ -79,7 +85,8 @@ impl SyncService {
         match self.cache.apply_history_batch(key, batch) {
             Ok(true) => Ok(BatchOutcome::Applied),
             Ok(false) => Ok(BatchOutcome::Duplicate),
-            Err(crate::cache::CacheError::HistoryGap) => Ok(BatchOutcome::Gap),
+            Err(crate::cache::CacheError::HistoryGap)
+            | Err(crate::cache::CacheError::ProjectionMismatch) => Ok(BatchOutcome::Gap),
             Err(error) => Err(error.into()),
         }
     }
@@ -146,13 +153,15 @@ pub(crate) fn open_event(
     Ok(OpenedEvent::Update(update))
 }
 
-fn validate_batch(batch: &HistoryBatch) -> CoreResult<()> {
+pub(crate) fn validate_batch(batch: &HistoryBatch) -> CoreResult<()> {
     if batch.from_cursor.is_empty()
         || batch.to_cursor.is_empty()
         || batch.from_cursor.len() > 4096
         || batch.to_cursor.len() > 4096
         || batch.batch_id.is_empty()
         || batch.batch_id.len() > 128
+        || batch.projection_id.is_empty()
+        || batch.projection_id.len() > 128
         || batch.changes.len() > 1000
         || (batch.from_cursor == batch.to_cursor && !batch.changes.is_empty())
     {
@@ -163,17 +172,32 @@ fn validate_batch(batch: &HistoryBatch) -> CoreResult<()> {
             .message
             .as_ref()
             .ok_or_else(|| CoreError::Security("missing message".into()))?;
-        if message.message_id.is_empty()
-            || message.message_id.len() > 512
-            || message.blocks.len() > 1000
-            || whalerein_proto::MessageRole::try_from(message.role).is_err()
-            || message.role == 0
-            || message
-                .blocks
-                .iter()
-                .any(|block| block.block_id.is_empty() || block.content.is_none())
+        validate_message(message)?;
+    }
+    Ok(())
+}
+
+/// Shared canonical-message validation used by sync and independent history.
+pub(crate) fn validate_message(message: &whalerein_proto::ConversationMessage) -> CoreResult<()> {
+    if message.message_id.is_empty()
+        || message.message_id.len() > 512
+        || message.blocks.len() > 1000
+        || whalerein_proto::MessageRole::try_from(message.role).is_err()
+        || message.role == 0
+        || message
+            .blocks
+            .iter()
+            .any(|block| block.block_id.is_empty() || block.content.is_none())
+    {
+        return Err(CoreError::Security("invalid normalized message".into()));
+    }
+    for block in &message.blocks {
+        if let Some(whalerein_proto::content_block::Content::ToolActivity(activity)) =
+            &block.content
         {
-            return Err(CoreError::Security("invalid normalized message".into()));
+            if activity.call_id.is_empty() || activity.call_id.len() > 128 {
+                return Err(CoreError::Security("invalid tool activity identity".into()));
+            }
         }
     }
     Ok(())

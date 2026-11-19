@@ -9,11 +9,11 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 }
 
 /** Fields that may appear in a log record. Everything else is dropped. */
 const ID_FIELDS = new Set([
-  'request', 'command', 'host', 'device', 'session', 'channel', 'approval', 'replay',
+  'request', 'command', 'host', 'device', 'session', 'channel', 'approval', 'replay', 'transfer',
 ])
 const SCALAR_FIELDS = new Set([
   'status', 'code', 'kind', 'phase', 'eventSeq', 'count', 'depth', 'ms', 'bytes',
-  'limit', 'mode', 'online', 'reconnects', 'cursor', 'source', 'complete', 'pending', 'layer', 'stage', 'scope', 'reason', 'reasonCode', 'generation', 'revokedAt', 'final',
+  'limit', 'mode', 'online', 'reconnects', 'cursor', 'source', 'complete', 'pending', 'layer', 'stage', 'scope', 'reason', 'reasonCode', 'generation', 'revokedAt', 'final', 'offset',
 ])
 
 export function createLogSalt() {

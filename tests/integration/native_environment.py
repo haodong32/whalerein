@@ -18,6 +18,8 @@ class Model:
     def __init__(self):
         self.kind = "text"
         self.calls = 0
+        self.epoch = 0
+        self.bulk_calls = 120
         self.started = threading.Event()
         self.release = threading.Event()
         self.release.set()
@@ -34,6 +36,35 @@ class Model:
                 owner.calls += 1
                 call = owner.calls
                 owner.started.set()
+                # A provider failure before any stream frame exercises native
+                # retry scheduling; the second call succeeds deterministically.
+                if kind == "retry" and call == 1:
+                    body = json.dumps(
+                        {"error": {"type": "server_error", "message": "fixture"}}
+                    ).encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                # A truncated stream settles one abandoned native Attempt.
+                if kind == "attempt-error" and call == 1:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(
+                        b'event: message_start\ndata: {"type": "message_start", "message": '
+                        b'{"id": "native-fixture", "role": "assistant", "type": "message", '
+                        b'"model": "deepseek-flash", "content": []}}\n\n'
+                        b'event: content_block_start\ndata: {"type": "content_block_start", '
+                        b'"index": 0, "content_block": {"type": "text", "text": ""}}\n\n'
+                        b'event: content_block_delta\ndata: {"type": "content_block_delta", '
+                        b'"index": 0, "delta": {"type": "text_delta", "text": "native partial"}}\n\n'
+                    )
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -57,6 +88,155 @@ class Model:
                             "usage": {"input_tokens": 10, "output_tokens": 0},
                         },
                     )
+                    if kind == "bulk-tools" and call % 2 == 1:
+                        # Many concurrent calls in one step build a long, fully
+                        # native history without synthetic events.
+                        for index in range(owner.bulk_calls):
+                            emit(
+                                "content_block_start",
+                                index=index,
+                                content_block={
+                                    "type": "tool_use",
+                                    "id": f"native-bulk-{call}-{index}",
+                                    "name": "native_fixture_bulk",
+                                    "input": {},
+                                },
+                            )
+                        for index in range(owner.bulk_calls):
+                            emit("content_block_stop", index=index)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "tool_use"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
+                    if kind == "reasoning":
+                        # One reasoning block settles before the visible answer.
+                        emit(
+                            "content_block_start",
+                            index=0,
+                            content_block={"type": "thinking", "thinking": "native reasoning "},
+                        )
+                        emit(
+                            "content_block_delta",
+                            index=0,
+                            delta={"type": "thinking_delta", "thinking": "prefix"},
+                        )
+                        emit("content_block_stop", index=0)
+                        emit(
+                            "content_block_start",
+                            index=1,
+                            content_block={"type": "text", "text": ""},
+                        )
+                        emit(
+                            "content_block_delta",
+                            index=1,
+                            delta={"type": "text_delta", "text": "native fixture response"},
+                        )
+                        emit("content_block_stop", index=1)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "end_turn"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
+                    if kind == "interleaved":
+                        # Reasoning and text indices interleave without losing order.
+                        emit(
+                            "content_block_start",
+                            index=0,
+                            content_block={"type": "thinking", "thinking": ""},
+                        )
+                        emit(
+                            "content_block_start",
+                            index=1,
+                            content_block={"type": "text", "text": ""},
+                        )
+                        emit("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": "native "})
+                        emit("content_block_delta", index=1, delta={"type": "text_delta", "text": "native "})
+                        emit("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": "reasoning"})
+                        emit("content_block_delta", index=1, delta={"type": "text_delta", "text": "fixture "})
+                        emit("content_block_stop", index=0)
+                        emit("content_block_delta", index=1, delta={"type": "text_delta", "text": "response"})
+                        emit("content_block_stop", index=1)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "end_turn"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
+                    if kind == "tool-parallel" and call == 1:
+                        # Two calls in one step settle independently and out of order.
+                        emit(
+                            "content_block_start",
+                            index=0,
+                            content_block={
+                                "type": "tool_use",
+                                "id": "native-fixture-parallel-a",
+                                "name": "native_fixture_parallel_a",
+                                "input": {},
+                            },
+                        )
+                        emit(
+                            "content_block_start",
+                            index=1,
+                            content_block={
+                                "type": "tool_use",
+                                "id": "native-fixture-parallel-b",
+                                "name": "native_fixture_parallel_b",
+                                "input": {},
+                            },
+                        )
+                        emit("content_block_stop", index=0)
+                        emit("content_block_stop", index=1)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "tool_use"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
+                    if kind == "tool-attachment" and call == 1:
+                        emit(
+                            "content_block_start",
+                            index=0,
+                            content_block={
+                                "type": "tool_use",
+                                "id": "native-fixture-attachment",
+                                "name": "native_fixture_attachment",
+                                "input": {},
+                            },
+                        )
+                        emit("content_block_stop", index=0)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "tool_use"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
+                    if kind == "max-tokens":
+                        emit(
+                            "content_block_start",
+                            index=0,
+                            content_block={"type": "text", "text": ""},
+                        )
+                        emit(
+                            "content_block_delta",
+                            index=0,
+                            delta={"type": "text_delta", "text": "native fixture partial"},
+                        )
+                        emit("content_block_stop", index=0)
+                        emit(
+                            "message_delta",
+                            delta={"stop_reason": "max_tokens"},
+                            usage={"output_tokens": 3},
+                        )
+                        emit("message_stop")
+                        return
                     if kind in {"tool", "tool-sensitive", "question", "question-long", "question-multiple"} and call == 1:
                         emit(
                             "content_block_start",
@@ -118,9 +298,15 @@ class Model:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
-    def plan(self, kind="text", hold=False):
+    def plan(self, kind="text", hold=False, bulk_calls=None):
         self.kind = kind
+        if bulk_calls is not None:
+            self.bulk_calls = bulk_calls
+        if kind == "bulk-tools":
+            self.epoch += 1
         self.calls = 0
+        self.epoch = 0
+        self.bulk_calls = 120
         self.started.clear()
         self.release.clear() if hold else self.release.set()
 
@@ -133,7 +319,7 @@ class Model:
 
 
 class NativeScenario(Scenario):
-    def __init__(self, directory, schema, timed_questions=False, short_approvals=False, debug_logging=False, wrapper_launcher=False, external_launcher=False):
+    def __init__(self, directory, schema, timed_questions=False, short_approvals=False, debug_logging=False, wrapper_launcher=False, external_launcher=False, reasoning=False, compactable=False):
         super().__init__(directory, schema)
         self.model = None
         self.native = None
@@ -143,6 +329,8 @@ class NativeScenario(Scenario):
         self.debug_logging = debug_logging
         self.wrapper_launcher = wrapper_launcher
         self.external_launcher = external_launcher
+        self.reasoning = reasoning
+        self.compactable = compactable
         self.socket = directory / "native.sock"
         self.home = directory / "dsh-home"
         self.http_port = 3109
@@ -151,9 +339,9 @@ class NativeScenario(Scenario):
         self.work.mkdir()
         self.overlay = directory / "native-overlay.yml"
 
-    def request(self, method, **fields):
+    def request(self, method, timeout=25, **fields):
         connection = socket.socket(socket.AF_UNIX)
-        connection.settimeout(25)
+        connection.settimeout(timeout)
         try:
             connection.connect(str(self.socket))
             connection.sendall(
@@ -234,10 +422,19 @@ class NativeScenario(Scenario):
             "  config:",
             f"    baseURL: http://127.0.0.1:{self.model.server.server_port}",
             "    apiKeyEnv: NATIVE_MODEL_KEY",
-            "    thinking: disabled",
-            "    reasoningEffort: off",
+            f"    thinking: {'enabled' if self.reasoning else 'disabled'}",
+            f"    reasoningEffort: {'high' if self.reasoning else 'off'}",
             "    maxTokens: 1024",
             "    streamIdleTimeoutMs: 30000",
+            *([
+                "    models:",
+                "      - id: deepseek-flash",
+                "        name: DeepSeek-V4.1-Flash",
+                "        contextWindow: 8000",
+                "        maxTokens: 512",
+                "        systemPromptUpdate: in-history",
+                "        toolUpdate: addition-only",
+            ] if self.compactable else []),
             "- insert:",
             "    - id: native-integration-driver",
             f"      name: {json.dumps((ROOT / 'tests/integration/native/driver.mjs').as_uri())}",

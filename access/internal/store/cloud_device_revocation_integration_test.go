@@ -118,6 +118,7 @@ func TestCloudDeviceGrantRevocationIsHostScopedAndReleasesTheSlotAfterEnforcemen
 		if _, err := s.CreateRequest(scoped, store.Request{
 			RequestID: requestID, HostID: host, DeviceID: device, DeviceSessionID: permission.ID,
 			PayloadDigest: bytes.Repeat([]byte{2}, 32), Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
+			Stamp:  &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 16 << 20},
 			Status: whalereinv1.OnlineStatus_received, ProtocolVersion: 1, ExpiresAt: now.Add(time.Minute),
 		}); err != nil {
 			t.Fatal(err)

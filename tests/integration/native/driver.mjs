@@ -9,7 +9,7 @@ import { codec } from '../../../host/runtime/src/protocol.js'
 const installed = createRequire('/opt/native/node_modules/@deepseek-ai/dsh/package.json')
 const { defineTool } = await import(installed.resolve('@deepseek-ai/dsh-tools'))
 const { installModelSelection } = await import(installed.resolve('@deepseek-ai/dsh-agent'))
-const { createUserMessage, createSystemMessage } = await import(installed.resolve('@deepseek-ai/dsh-llm'))
+const { createUserMessage, createSystemMessage, createAssistantMessage, BlockAssembler } = await import(installed.resolve('@deepseek-ai/dsh-llm'))
 const { RemoteError } = await import(installed.resolve('@deepseek-ai/dsh-typert-protocol'))
 const { OpenQuestionBroker, QuestionHandles } = await import('/workspace/host/dsh/src/adapter/questions.js')
 const { RealDshAdapter } = await import('/workspace/host/dsh/src/adapter/real.js')
@@ -89,7 +89,210 @@ let channelQueueBarrier = null
         return effects
       },
     }))
+    // Deterministic native tools for parallel, failure and result-attachment shapes.
+    const FIXTURE_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==', 'base64')
+    const FIXTURE_FILE = Buffer.from('whalerein native fixture file bytes', 'utf8')
+    const removeParallelA = ctx.tools.register(defineTool({
+      name: 'native_fixture_parallel_a', description: 'Slow isolated parallel fixture.', parameters: {}, isConcurrencySafe: () => true,
+      output: { schema: { type: 'integer' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute() { const started = Date.now(); await new Promise(resolve => setTimeout(resolve, 600)); toolRuns.push({ name: 'parallel_a', started, finished: Date.now() }); return 11 },
+    }))
+    const removeParallelB = ctx.tools.register(defineTool({
+      name: 'native_fixture_parallel_b', description: 'Failing isolated parallel fixture.', parameters: {}, isConcurrencySafe: () => true,
+      output: { schema: { type: 'integer' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute() { const started = Date.now(); toolRuns.push({ name: 'parallel_b', started, finished: Date.now() }); throw new Error('native fixture failure') },
+    }))
+    const removeBulk = ctx.tools.register(defineTool({
+      name: 'native_fixture_bulk', description: 'Immediate concurrency-safe bulk fixture.', parameters: {}, isConcurrencySafe: () => true,
+      output: { schema: { type: 'integer' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute() { return 1 },
+    }))
+    const removeAttachment = ctx.tools.register(defineTool({
+      name: 'native_fixture_attachment', description: 'Stored image and exact file result fixture.', parameters: {},
+      output: { schema: { type: 'object', properties: { image: { type: 'object', additionalProperties: true }, file: { type: 'object', additionalProperties: true } }, additionalProperties: true },
+        render: (_args, value) => [{ type: 'image', attachment: value.image }, { type: 'file', attachment: value.file }] },
+      async execute() {
+        const attachments = ctx.get('attachments')
+        const image = await attachments.saveImage({ data: FIXTURE_PNG, mediaType: 'image/png', name: 'native-fixture.png' })
+        const file = await attachments.saveFile({ data: FIXTURE_FILE, name: 'native-fixture.bin' })
+        return { image, file }
+      },
+    }))
     const host = () => ctx.get('whalereinSettings')?.host
+    // Structural probe helpers export event and field shapes only. Message
+    // bodies, tool arguments and attachment names never leave the fixture.
+    const sha = value => createHash('sha256').update(typeof value === 'string' ? value : Buffer.from(value)).digest('hex')
+    const keysOf = value => value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).sort() : []
+    const streamFrames = []
+    const toolRuns = []
+    const blockShape = block => {
+      const type = block?.type
+      const shape = { type, keys: keysOf(block) }
+      if (type === 'text' || type === 'reasoning') {
+        shape.textLen = typeof block.text === 'string' ? block.text.length : null
+        shape.textDigest = typeof block.text === 'string' ? sha(block.text) : null
+      } else if (type === 'tool-call') {
+        shape.callDigest = sha(String(block.id ?? ''))
+        shape.name = block.name
+        shape.argsLen = typeof block.arguments === 'string' ? block.arguments.length : 0
+      } else if (type === 'image' || type === 'file') {
+        const attachment = block.attachment ?? {}
+        shape.mediaType = attachment.mediaType ?? null
+        shape.bytes = attachment.bytes ?? null
+        shape.width = attachment.width ?? null
+        shape.height = attachment.height ?? null
+        shape.namePresent = typeof attachment.name === 'string' && attachment.name.length > 0
+        shape.attachmentKeys = keysOf(attachment)
+      }
+      return shape
+    }
+    const eventShape = event => {
+      const data = event?.data ?? {}
+      const shape = { type: event?.type, seq: event?.seq, turn: data.turn ?? null, step: data.step ?? null, dataKeys: keysOf(data),
+        surface: event?.surfaceOp === 'append' ? 'append' : event?.surfaceOp?.op ?? null,
+        sourceEventSeqCount: Array.isArray(event?.sourceEventSeqs) ? event.sourceEventSeqs.length : 0 }
+      if (event?.type === 'user/message') {
+        shape.messageKeys = keysOf(data)
+        shape.sourceKind = data.source?.kind ?? null
+        shape.sourceForm = data.source?.form ?? null
+        shape.messageIdDigest = sha(String(data.id ?? ''))
+        shape.rpcIdPresent = typeof data.source?.rpcId === 'string'
+        shape.rpcIdDigest = typeof data.source?.rpcId === 'string' ? sha(data.source.rpcId) : null
+        shape.blocks = (data.content ?? []).map(blockShape)
+      } else if (event?.type === 'system/message' || event?.type === 'developer/message') {
+        shape.messageKeys = keysOf(data.message)
+        shape.sourceKind = data.message?.source?.kind ?? null
+        shape.sourceForm = data.message?.source?.form ?? null
+        shape.blocks = (data.message?.content ?? []).map(blockShape)
+      } else if (event?.type === 'assistant/message') {
+        shape.messageKeys = keysOf(data.message)
+        shape.messageIdDigest = sha(String(data.message?.id ?? ''))
+        shape.provider = data.message?.source?.provider ?? null
+        shape.model = data.message?.source?.model ?? null
+        shape.blocks = (data.message?.content ?? []).map(blockShape)
+        shape.interrupted = data.interrupted === true
+        shape.streamTypes = [...new Set((data.stream ?? []).map(record => record?.type))]
+        shape.usageKeys = keysOf(data.usage)
+      } else if (event?.type === 'assistant/attempt') {
+        shape.streamTypes = [...new Set((data.stream ?? []).map(record => record?.type))]
+        shape.turn = data.turn
+        shape.step = data.step
+      } else if (event?.type === 'tool/call') {
+        shape.callDigest = sha(String(data.callId ?? ''))
+        shape.name = data.name
+        shape.argsLen = typeof data.arguments === 'string' ? data.arguments.length : 0
+      } else if (event?.type === 'tool/result') {
+        shape.callDigest = sha(String(data.message?.toolCallId ?? ''))
+        shape.isError = data.message?.isError === true
+        shape.errorCode = data.error?.code ?? null
+        shape.blocks = (data.message?.content ?? []).map(blockShape)
+        shape.metaKeys = keysOf(data.meta)
+      } else if (event?.type === 'turn/end') {
+        shape.reasonKind = data.reason?.kind ?? null
+      } else if (event?.type === 'request/header') {
+        shape.reason = data.reason ?? null
+        shape.configKeys = keysOf(data.header?.config)
+        shape.provider = data.header?.config?.provider ?? null
+        shape.model = data.header?.config?.model ?? null
+        shape.thinking = data.header?.config?.thinking ?? null
+        shape.reasoningEffort = data.header?.config?.reasoningEffort ?? null
+        shape.maxTokens = data.header?.config?.maxTokens ?? null
+      } else if (event?.type === 'llm/retry') {
+        shape.retry = data.retry ?? null
+        shape.maxRetries = data.maxRetries ?? null
+        shape.delayMs = data.delayMs ?? null
+        shape.mode = data.mode ?? null
+        shape.failureCode = data.failure?.code ?? null
+      } else if (event?.type === 'llm/retry-started') {
+        shape.retry = data.retry ?? null
+      } else if (event?.type === 'command/run') {
+        shape.name = data.name ?? null
+        shape.argsLen = typeof data.args === 'string' ? data.args.length : 0
+        shape.sourceKind = data.source?.kind ?? null
+      } else if (event?.type === 'command/done') {
+        shape.kind = data.kind ?? null
+        shape.textLen = typeof data.text === 'string' ? data.text.length : 0
+      } else if (event?.type === 'compaction/start') {
+        shape.turn = data.turn ?? null
+        shape.commandPresent = typeof data.sourceCommandId === 'string'
+      } else if (event?.type === 'compaction/summary') {
+        shape.blockTypes = (data.summary ?? []).map(block => block?.type)
+        shape.shadowedCount = Array.isArray(data.shadowedSeqs) ? data.shadowedSeqs.length : null
+        shape.summaryPresent = Array.isArray(data.summary) && data.summary.length > 0
+      } else if (event?.type === 'compaction/end') {
+        shape.errorPresent = typeof data.error === 'string'
+      } else if (event?.type === 'tool/ptc-dispatch' || event?.type === 'tool/ptc-dispatch-start') {
+        shape.callDigest = sha(String(data.subCallId ?? data.callId ?? ''))
+        shape.name = data.name ?? null
+      }
+      return shape
+    }
+    const occurrenceFrom = (events, wanted) => {
+      for (let index = events.length - 1; index >= 0; index--) {
+        const event = events[index]
+        const content = event?.type === 'user/message' ? event.data?.content
+          : event?.type === 'tool/result' ? event.data?.message?.content : null
+        if (!Array.isArray(content)) continue
+        for (let position = content.length - 1; position >= 0; position--) {
+          const block = content[position]
+          if (block?.type === wanted && block.attachment) return { ref: block.attachment, eventType: event.type, seq: event.seq }
+        }
+      }
+      return null
+    }
+    const attachmentKeys = ref => ({ mediaType: ref?.mediaType ?? null, bytes: ref?.bytes ?? null,
+      width: ref?.width ?? null, height: ref?.height ?? null,
+      namePresent: typeof ref?.name === 'string' && ref.name.length > 0, keys: keysOf(ref) })
+    const readFileAll = async (ref, signal) => {
+      const chunks = []
+      for await (const chunk of ctx.get('attachments').readFileStream(ref, signal)) chunks.push(Buffer.from(chunk))
+      const data = Buffer.concat(chunks)
+      return { chunks: chunks.length, bytes: data.length, digest: sha(data) }
+    }
+    const coldOccurrence = async (sessionId, wanted, limit = 200) => {
+      let beforeSeq
+      let pages = 0, records = 0, bytes = 0
+      for (let page = 0; page < limit; page++) {
+        const value = await ctx.sessionController.events({ address: { kind: 'session', sessionId },
+          ...(beforeSeq === undefined ? {} : { beforeSeq }), maxMessages: 200 }, AbortSignal.timeout(20000))
+        pages += 1
+        records += value.records.length
+        bytes += JSON.stringify(value.records).length
+        const events = value.records.map(record => record.event)
+        const found = occurrenceFrom(events, wanted)
+        if (found) return { ...found, source: 'cold', pages, records, bytes }
+        if (!value.hasMore || !events.length) break
+        beforeSeq = events[0].seq
+      }
+      return { source: 'cold', missing: true, pages, records, bytes }
+    }
+    const historyEvents = async (sessionId, options = {}) => {
+      const live = ctx.sessions.get(sessionId)
+      if (live && typeof live.snapshotEvents === 'function') {
+        return { source: 'hot', events: live.snapshotEvents() }
+      }
+      const page = await ctx.sessionController.events({ address: { kind: 'session', sessionId },
+        maxMessages: options.maxMessages ?? 500 }, AbortSignal.timeout(20000))
+      return { source: 'cold', events: page.records.map(record => record.event) }
+    }
+    ctx.on('agent/assistant-stream', notification => {
+      const sessionId = notification?.agent?.session?.id
+      const frame = notification?.frame
+      if (typeof sessionId !== 'string' || !frame) return
+      const entry = { sessionId, phase: frame.type, attemptDigest: sha(String(frame.attemptId ?? '')),
+        revision: frame.revision ?? null, turn: frame.turn ?? null, step: frame.step ?? null }
+      if (frame.type === 'chunk') {
+        entry.recordIndex = frame.index ?? null
+        entry.chunkType = frame.chunk?.type ?? null
+        entry.blockType = frame.chunk?.blockType ?? frame.chunk?.block?.type ?? null
+        entry.chunkIndex = frame.chunk?.index ?? null
+      } else if (frame.type === 'end') {
+        entry.outcomeKind = frame.outcome?.kind ?? null
+        entry.outcomeEventType = frame.outcome?.eventType ?? null
+      }
+      streamFrames.push(entry)
+      if (streamFrames.length > 4000) streamFrames.splice(0, streamFrames.length - 4000)
+    }, { global: true })
     const server = net.createServer(socket => {
       let buffer = ''
       socket.on('data', chunk => {
@@ -99,7 +302,7 @@ let channelQueueBarrier = null
         const line = buffer.slice(0, buffer.indexOf('\n'))
         buffer = ''
         Promise.resolve().then(async () => {
-          const { method, sessionId, itemId, deviceId, config, selection, otherSelection, timeoutMs } = JSON.parse(line)
+          const { method, sessionId, itemId, deviceId, config, selection, otherSelection, timeoutMs, count, cold, beforeSeq, throughSeq, maxMessages, maxPages, cancel, occurrenceKind, fromSeq, toSeq, bytes, turns, turnOffset } = JSON.parse(line)
           const signal = AbortSignal.timeout(15000)
           if (method === 'cycle-controller') {
             const raw = ctx.sessionController[Symbol.for('cordis.original')]
@@ -1936,6 +2139,239 @@ let channelQueueBarrier = null
               throw error
             } finally { if (timer) clearTimeout(timer) }
           }
+          if (method === 'tool-overlap') {
+            if (!toolRuns.length) return { runs: [] }
+            const origin = Math.min(...toolRuns.map(run => run.started))
+            return { runs: toolRuns.map(run => ({ name: run.name, startedMs: run.started - origin,
+              finishedMs: run.finished - origin })) }
+          }
+          if (method === 'native-prompt-turns') {
+            const turns = Math.max(1, Number(count ?? 1))
+            const signal = AbortSignal.timeout(600000)
+            for (let index = 0; index < turns; index++) {
+              await ctx.sessionController.prompt({ requestId: `native-cold-${index}`, sessionId, mode: 'queue',
+                content: [{ type: 'text', text: `native cold continuation turn ${index}` }] }, signal)
+              for (let spin = 0; spin < 200; spin++) {
+                const state = await ctx.sessionController.state({ sessionId }, signal)
+                if (state.running) break
+                await new Promise(resolve => setTimeout(resolve, 5))
+              }
+              await ctx.sessionController.wait({ sessionId, timeoutMs: 30000 }, signal)
+            }
+            return { turns, seq: ctx.sessions.get(sessionId)?.seq ?? null }
+          }
+          if (method === 'send-request-id') {
+            return await host().adapter.sendUserMessage(sessionId, 'native send ownership fixture', 'queue', 'native-fixture-request-id')
+          }
+          if (method === 'events-shape') {
+            const events = (await historyEvents(sessionId, { maxMessages })).events
+            return { count: events.length, events: events.map(eventShape) }
+          }
+          if (method === 'stream-shape') {
+            return { frames: streamFrames.filter(entry => entry.sessionId === sessionId).slice(-400).map(({ sessionId: _session, ...rest }) => rest) }
+          }
+          if (method === 'block-assembler-probe') {
+            const corrected = new BlockAssembler()
+            corrected.push({ type: 'block-start', index: 0, blockType: 'text' })
+            corrected.push({ type: 'text-delta', index: 0, text: 'native delta prefix' })
+            corrected.push({ type: 'block-end', index: 0, block: { type: 'text', text: 'native corrected block' } })
+            corrected.push({ type: 'text-delta', index: 0, text: 'ignored after block end' })
+            const ordered = new BlockAssembler()
+            ordered.push({ type: 'block-start', index: 0, blockType: 'reasoning' })
+            ordered.push({ type: 'block-start', index: 1, blockType: 'text' })
+            ordered.push({ type: 'reasoning-delta', index: 0, text: 'native reasoning' })
+            ordered.push({ type: 'text-delta', index: 1, text: 'native answer' })
+            ordered.push({ type: 'block-end', index: 1, block: { type: 'text', text: 'native answer' } })
+            ordered.push({ type: 'block-end', index: 0, block: { type: 'reasoning', text: 'native reasoning' } })
+            return { corrected: corrected.blocks().map(blockShape), ordered: ordered.blocks().map(blockShape) }
+          }
+          if (method === 'native-range') {
+            const live = ctx.sessions.get(sessionId)
+            if (!live || typeof live.snapshotEvents !== 'function') throw new Error('session not hot')
+            const started = Date.now()
+            const events = live.snapshotEvents(Math.max(0, Number(fromSeq ?? 0)), toSeq === undefined || toSeq === null ? undefined : Number(toSeq))
+            return { records: events.length, bytes: JSON.stringify(events).length,
+              firstSeq: events[0]?.seq ?? null, lastSeq: events.at(-1)?.seq ?? null,
+              types: events.map(event => event.type), elapsedMs: Date.now() - started }
+          }
+          if (method === 'native-page') {
+            const controller = ctx.sessionController
+            if (!controller || typeof controller.events !== 'function') throw new Error('events unavailable')
+            const started = Date.now()
+            const signal = cancel ? AbortSignal.abort() : AbortSignal.timeout(20000)
+            const pageLimit = Math.max(1, Number(maxPages ?? 1))
+            let calls = 0, records = 0, stagedBytes = 0, maxPageBytes = 0, pages = 0, minSeq = null, maxSeq = null, hasMore = null, cursor = null
+            let before = beforeSeq === undefined || beforeSeq === null ? undefined : Number(beforeSeq)
+            try {
+              for (let page = 0; page < pageLimit; page++) {
+                calls += 1
+                const value = await controller.events({ address: { kind: 'session', sessionId },
+                  ...(before === undefined ? {} : { beforeSeq: before }),
+                  ...(throughSeq === undefined || throughSeq === null ? {} : { throughSeq: Number(throughSeq) }),
+                  maxMessages: Math.max(1, Math.min(500, Number(maxMessages ?? 200))) }, signal)
+                pages += 1
+                records += value.records.length
+                const pageBytes = JSON.stringify(value.records).length
+                stagedBytes += pageBytes
+                maxPageBytes = Math.max(maxPageBytes, pageBytes)
+                hasMore = value.hasMore === true
+                cursor = value.cursor ?? null
+                const seqs = value.records.map(record => record.event?.seq).filter(Number.isSafeInteger)
+                if (seqs.length) {
+                  minSeq = minSeq === null ? seqs[0] : Math.min(minSeq, seqs[0])
+                  maxSeq = maxSeq === null ? seqs[seqs.length - 1] : Math.max(maxSeq, seqs[seqs.length - 1])
+                }
+                if (!hasMore || !value.records.length) break
+                before = value.records[0].event.seq
+              }
+              return { calls, pages, records, stagedBytes, maxPageBytes, firstSeq: minSeq, lastSeq: maxSeq, minSeq, maxSeq, hasMore, cursor, elapsedMs: Date.now() - started }
+            } catch (error) {
+              return { calls, pages, records, stagedBytes, maxPageBytes, firstSeq: minSeq, lastSeq: maxSeq, minSeq, maxSeq, hasMore, cursor,
+                elapsedMs: Date.now() - started, errorCode: signal.aborted ? 'aborted' : error?.code ?? error?.name ?? 'error' }
+            }
+          }
+          if (method === 'history-materialization') {
+            const live = ctx.sessions.get(sessionId)
+            if (!live || typeof live.snapshotEvents !== 'function') throw new Error('session not hot')
+            const original = live.snapshotEvents.bind(live)
+            let calls = 0, materialized = 0
+            live.snapshotEvents = (...args) => {
+              const value = original(...args)
+              calls += 1
+              materialized = Math.max(materialized, value.length)
+              return value
+            }
+            const started = Date.now()
+            try {
+              const snapshot = await host().adapter.getSessionSnapshot(sessionId)
+              return { calls, materialized, totalEvents: original().length, complete: snapshot.complete === true,
+                cursor: snapshot.cursor ?? null, retainedFrom: snapshot.retained_from ?? null,
+                normalized: snapshot.events.length, elapsedMs: Date.now() - started }
+            } finally {
+              live.snapshotEvents = original
+            }
+          }
+          if (method === 'bulk-append') {
+            const session = ctx.sessions.get(sessionId)
+            if (!session || typeof session.append !== 'function') throw new Error('session not hot')
+            const pairs = Math.max(1, Number(count ?? 1))
+            const withTurns = turns === true
+            const existingEvents = session.snapshotEvents()
+            let lastTurn = -1
+            for (const existing of existingEvents) if (existing.type === 'turn/start' && Number.isSafeInteger(existing.data?.turn)) lastTurn = Math.max(lastTurn, existing.data.turn)
+            const turnBase = turnOffset === undefined || turnOffset === null ? lastTurn + 1 : Number(turnOffset)
+            const started = Date.now()
+            let firstSeq = null
+            for (let index = 0; index < pairs; index++) {
+              const turn = turnBase + index
+              if (withTurns) session.append('turn/start', { turn })
+              if (withTurns) session.append('step/start', { turn, step: 1 })
+              const message = createUserMessage({ content: [{ type: 'text', text: `native history fixture ${index}` }], source: { kind: 'user' } })
+              const appended = session.append('user/message', message, { surfaceOp: 'append' })
+              if (firstSeq === null) firstSeq = appended.seq
+              const reply = createAssistantMessage({ content: [{ type: 'text', text: 'native history reply' }], source: { provider: 'deepseek', model: 'deepseek-flash' } })
+              session.append('assistant/message', { turn, step: 1, message: reply, stream: [] }, { surfaceOp: 'append' })
+              if (withTurns) {
+                session.append('step/end', { turn, step: 1 })
+                session.append('turn/end', { turn, reason: { kind: 'completed' } })
+              }
+            }
+            await ctx.sessions.flush(session)
+            return { pairs, events: pairs * (withTurns ? 6 : 2), firstSeq, lastSeq: session.seq - 1, elapsedMs: Date.now() - started }
+          }
+          if (method === 'attachment-occurrence') {
+            const wanted = occurrenceKind === 'file' ? 'file' : 'image'
+            const found = cold ? await coldOccurrence(sessionId, wanted)
+              : { ...occurrenceFrom(ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? [], wanted), source: 'hot' }
+            return { ...found, ref: found?.ref ? attachmentKeys(found.ref) : null }
+          }
+          if (method === 'attachment-read-image') {
+            const found = cold ? await coldOccurrence(sessionId, 'image')
+              : { ...occurrenceFrom(ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? [], 'image'), source: 'hot' }
+            if (!found?.ref) return { available: false, missing: true, source: found?.source ?? null }
+            const started = Date.now()
+            try {
+              const stored = await ctx.get('attachments').readImage(found.ref, AbortSignal.timeout(15000))
+              return { available: true, source: found.source, seq: found.seq, ref: attachmentKeys(found.ref),
+                readRef: attachmentKeys(stored.ref), dataLen: stored.data.length,
+                isUint8Array: stored.data instanceof Uint8Array, digest: sha(Buffer.from(stored.data)),
+                elapsedMs: Date.now() - started }
+            } catch (error) {
+              return { available: false, source: found.source, errorCode: error?.code ?? error?.name ?? 'error' }
+            }
+          }
+          if (method === 'attachment-read-file') {
+            const found = cold ? await coldOccurrence(sessionId, 'file')
+              : { ...occurrenceFrom(ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? [], 'file'), source: 'hot' }
+            if (!found?.ref) return { available: false, missing: true, source: found?.source ?? null }
+            const started = Date.now()
+            try {
+              const value = await readFileAll(found.ref, cancel ? AbortSignal.abort() : AbortSignal.timeout(15000))
+              return { available: true, source: found.source, seq: found.seq, ref: attachmentKeys(found.ref), ...value,
+                elapsedMs: Date.now() - started }
+            } catch (error) {
+              return { available: false, source: found.source, cancelled: cancel === true,
+                errorCode: error?.code ?? error?.name ?? 'error', elapsedMs: Date.now() - started }
+            }
+          }
+          if (method === 'attachment-file-facts') {
+            const empty = await ctx.get('attachments').saveFile({ data: new Uint8Array(0), name: 'native-empty.bin' })
+            const payload = new Uint8Array(bytes ?? [110, 97, 116, 105, 118, 101])
+            const exact = await ctx.get('attachments').saveFile({ data: payload, name: 'native-exact.bin' })
+            const emptyRead = await readFileAll(empty, AbortSignal.timeout(15000))
+            const exactRead = await readFileAll(exact, AbortSignal.timeout(15000))
+            return { empty: { ref: attachmentKeys(empty), ...emptyRead },
+              exact: { ref: attachmentKeys(exact), ...exactRead },
+              digestMatches: exactRead.digest === sha(Buffer.from(payload)) }
+          }
+          if (method === 'attachment-remove-source') {
+            const events = ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? []
+            const image = occurrenceFrom(events, 'image')
+            const file = occurrenceFrom(events, 'file')
+            const result = { imageRemoved: false, fileRemoved: false, imageError: null, fileError: null }
+            if (image?.ref) {
+              const path = ctx.get('attachments').imageHostPath(image.ref)
+              if (typeof path === 'string') { fs.unlinkSync(path); result.imageRemoved = true }
+              try { await ctx.get('attachments').readImage(image.ref, AbortSignal.timeout(15000)) } catch (error) { result.imageError = error?.code ?? error?.name ?? 'error' }
+            }
+            if (file?.ref) {
+              const path = ctx.get('attachments').fileHostPath(file.ref)
+              if (typeof path === 'string') { fs.unlinkSync(path); result.fileRemoved = true }
+              try { await readFileAll(file.ref, AbortSignal.timeout(15000)) } catch (error) { result.fileError = error?.code ?? error?.name ?? 'error' }
+            }
+            return result
+          }
+          if (method === 'synthetic-source-probe') {
+            const session = ctx.sessions.get(sessionId)
+            if (!session || typeof session.append !== 'function') throw new Error('session not hot')
+            const outcome = {}
+            try {
+              const unknown = createUserMessage({ content: [{ type: 'text', text: 'native unknown source fixture' }],
+                source: { kind: 'fixture-unknown-context', form: 'notice', summary: 'native fixture notice' } })
+              const appended = session.append('user/message', unknown, { surfaceOp: 'append' })
+              outcome.unknown = { accepted: true, seq: appended.seq }
+            } catch (error) { outcome.unknown = { accepted: false, code: error?.code ?? 'rejected' } }
+            try {
+              const missing = createUserMessage({ content: [{ type: 'text', text: 'native missing source fixture' }], source: {} })
+              session.append('user/message', missing, { surfaceOp: 'append' })
+              outcome.missing = { accepted: true }
+            } catch (error) { outcome.missing = { accepted: false, code: 'rejected' } }
+            return outcome
+          }
+          if (method === 'command-probe') {
+            const commands = ctx.get('commands')
+            const agent = ctx.agents.get(sessionId)
+            if (!commands || typeof commands.execute !== 'function' || !agent) return { available: false }
+            const before = (ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? []).length
+            let failure, success, failureError = null, successError = null
+            try { failure = await commands.execute(agent, '/compact unexpected-fixture-argument', [], AbortSignal.timeout(60000)) }
+            catch (error) { failureError = error?.code ?? error?.name ?? 'error' }
+            try { success = await commands.execute(agent, '/compact', [], AbortSignal.timeout(60000)) }
+            catch (error) { successError = error?.code ?? error?.name ?? 'error' }
+            const added = (ctx.sessions.get(sessionId)?.snapshotEvents?.() ?? []).slice(before)
+            return { available: true, failureKind: failure?.result?.kind ?? null, successKind: success?.result?.kind ?? null,
+              failureError, successError, added: added.map(eventShape) }
+          }
           if (method === 'events') {
             const events = ctx.sessions.get(sessionId)?.snapshotEvents?.()
             if (!Array.isArray(events)) throw new Error('session not hot')
@@ -1966,6 +2402,10 @@ let channelQueueBarrier = null
       if (questionResolve) questionResolve({ answers: [{ id: 'model-fixture-question', selected: [], custom: 'fixture cleanup' }] })
       removeQuestion?.()
       removeTool?.()
+      removeParallelA?.()
+      removeParallelB?.()
+      removeAttachment?.()
+      removeBulk?.()
       await new Promise(resolve => server.close(resolve))
       try { fs.unlinkSync(socketPath) } catch {}
     }

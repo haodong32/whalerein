@@ -598,7 +598,7 @@ log:
         authority = Process(
             ["node", str(ROOT / "tests/integration/fixtures/dsh.mjs")],
             self.directory,
-            {"WHALEREIN_DSH_SOCKET": str(self.socket), **(extra_env or {})},
+            {"WHALEREIN_DSH_SOCKET": str(self.socket), "WHALEREIN_HOST_ID": self.host, **(extra_env or {})},
             control=True,
         )
         self.processes.append(authority)

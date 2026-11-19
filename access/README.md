@@ -539,8 +539,12 @@ logs include original revocation timestamps instead of implying a new revoke.
 
 Access reassembles/acknowledges opaque logical MQTT envelopes before dispatch,
 using bounded state rather than raising broker limits. Device receivers may
-publish receipts only on their own active-grant ACK topic. The HTTP request
-budget is 24 MiB to accommodate base64-encoded logical envelopes up to 16 MiB.
+publish receipts only on their own active-grant ACK topic. Packet, fragment,
+envelope, concurrency, reservation and timeout budgets come from the `transport:`
+configuration block and its packaged profile; explicit overrides must satisfy the
+same relations. The HTTP result-body budget derives from the selected profile
+(24 MiB for the default 16 MiB envelope) so base64 expansion and JSON framing
+always fit. Configuration changes take effect only after a process restart.
 
 Pairing consumes the invitation and writes device/grant/activation-outbox state
 in one PostgreSQL transaction. The existing requests queue retries idempotent
