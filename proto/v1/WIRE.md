@@ -468,6 +468,26 @@ POST /internal/broker/connect
 HTTP errors use `ErrorResponse` JSON with a stable `ErrorCode` value. Success
 bodies are the messages above; `POST /requests` returns `RequestReceipt`.
 
+`ErrorResponse.reason` carries a stable authority reason for a denied
+long-lived observation. A non-empty reason is terminal: a client must not
+reconnect, and must surface it instead of retrying. The values are protocol
+constants, never free text:
+
+| Reason | Meaning |
+| --- | --- |
+| `session_revoked` | The Cloud App session was revoked or expired. |
+| `grant_revoked` | This Device's grant for the Host was revoked. |
+| `host_removed` | The Host enrollment no longer exists. |
+| `host_disabled` | The Host enrollment was disabled. |
+| `authority_advanced` | The authority revision moved; re-authorization is required. |
+| `authority_unavailable` | Authority could not be proven; the observation is closed rather than extended on stale state. |
+
+`GET /v1/hosts/{host_id}/authority` is the observation lease renewal. A live
+grant, session and enrollment answer `204`; an ended authority answers the
+documented `403`/`503` with `reason`. The encrypted observation stream is
+end-to-end between Host and Device, so Access cannot author a close frame in
+it; the lease renewal is the authoritative lifetime signal.
+
 ## CLI exit codes
 
 ```text
