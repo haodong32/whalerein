@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { StateStore } from '../src/state/store.js'
+import { establishChannel } from './support/channel.js'
 import { startHarness, waitFor } from './support/harness.js'
 
 const payload = (text) => Buffer.from(`envelope:${text}`)
@@ -95,21 +96,30 @@ test('outbox overflow is accounted per device and a recovered Host drains retain
   }
 })
 
-test('a channel replacement clears the previous outbox and its snapshot demand', async () => {
+test('closing one channel preserves a sibling outbox and snapshot demand for the same Device', async () => {
   const harness = await startHarness({
     sessions: [{ sessionId: 's1' }],
-    config: { outboxPerDeviceLimit: 1, outboxTotalLimit: 4 },
+    config: { outboxPerDeviceLimit: 2, outboxTotalLimit: 4 },
   })
   try {
     const device = await harness.newPairedDevice('device-1')
+    const sibling = establishChannel({
+      security: harness.host.security, store: harness.host.store,
+      hostId: device.hostId, deviceId: device.deviceId, identity: device.identity,
+    })
+    await harness.host.events.watch(device.deviceId, sibling.channelId, 's1', undefined, { conversation: true, questions: false })
     harness.host.access.publishEvent = async () => { throw new Error('synthetic slow consumer') }
     emitCommitted(harness, 0)
     emitCommitted(harness, 1)
-    await waitFor(() => harness.host.store.countOutbox() === 1)
+    await waitFor(() => harness.host.store.countOutbox() === 2)
     assert.equal(harness.host.events.describe().snapshotRequired, 1)
-    harness.host.events.onChannelReplaced('device-1', device.channel.channelId)
+    harness.host.security.closeChannel(device.channel.channelId)
+    assert.deepEqual(harness.host.store.listOutbox().map(row => row.channelId), [sibling.channelId])
+    assert.equal(harness.host.events.describe().snapshotRequired, 1)
+    assert.equal(harness.host.events.describe().watches, 1)
+    harness.host.security.closeChannel(sibling.channelId)
     assert.equal(harness.host.events.describe().snapshotRequired, 0)
-    assert.equal(harness.host.events.describe().outboxDrops, 1)
+    assert.equal(harness.host.events.describe().outboxDrops, 2)
     assert.equal(harness.host.store.countOutbox(), 0)
   } finally {
     await harness.stop()

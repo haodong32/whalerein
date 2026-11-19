@@ -530,11 +530,7 @@ def test_native_question_cancel_scopes_cancellation_to_the_owner(scenario, paire
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 1, timeout=15, process=scenario.native)
         assert second.call("session", "question", "cancel", "--session", session, "--command", command_id)["cancellation_requested"] is False
         assert scenario.request("question-native-claim-status")["held"] == 1
-        # A second process for the owning device opens a new channel, and the
-        # Host replaces the answering channel before it dispatches the cancel
-        # payload. The claim is released either way; the reported boolean races
-        # with that replacement, so it is deliberately not asserted here.
-        paired_device.call("session", "question", "cancel", "--session", session, "--command", command_id)
+        assert paired_device.call("session", "question", "cancel", "--session", session, "--command", command_id)["cancellation_requested"] is True
         wait(lambda: scenario.request("question-native-claim-status")["held"] == 0, timeout=15, process=scenario.native)
         output, _ = process.communicate(timeout=30)
         # The exact failure code depends on how the source surfaces the abort;

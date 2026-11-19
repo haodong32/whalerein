@@ -33,7 +33,7 @@ def test_wait_deadline_replacement_does_not_reset_total(scenario, paired_device,
         first = read_records(records)[0]["timeoutMs"]
         while time.monotonic() - started < 6.3:
             time.sleep(0.02)
-        paired_device.sessions(scenario.host)
+        (records.parent / "test-wait-close-channel").touch()
         wait(lambda: any(row["status"] == "aborted" for row in read_records(records))
              and any(row["status"] == "active" for row in read_records(records)), timeout=2)
         active = [row["timeoutMs"] for row in read_records(records) if row["status"] == "active"]

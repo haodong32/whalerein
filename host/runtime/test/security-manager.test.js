@@ -32,6 +32,10 @@ function makeSecurity(overrides = {}) {
     now: overrides.now ?? (() => 1000),
     pendingTtlMs: overrides.pendingTtlMs ?? 60_000,
     maxPending: overrides.maxPending ?? 32,
+    channelIdleMs: overrides.channelIdleMs,
+    maxDeviceChannels: overrides.maxDeviceChannels,
+    maxHostChannels: overrides.maxHostChannels,
+    onClosedChannels: overrides.onClosedChannels,
     onRevokedChannels: overrides.onRevokedChannels,
   })
   return { store, identity, security }
@@ -263,17 +267,11 @@ test('when pending pairing claims exceed the limit, the manager rejects addition
 test('when a channel handshake succeeds, it installs the envelope ID and rejects invalid peers or versions', () => {
   const { security, store } = makeSecurity()
   const channel = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
-  assert.equal(channel.second.established, true)
-  assert.equal(channel.second.replacedChannelId, null)
   assert.equal(channel.ready.device_id, 'device-1')
   assert.equal(security.listChannels().length, 1)
   assert.equal(security.listChannels()[0].channelId, channel.channelId)
   assert.equal(security.getChannel(channel.channelId).channelId, channel.channelId)
   assert.equal(security.getChannel('missing'), null)
-
-  const second = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
-  assert.equal(second.second.replacedChannelId, channel.channelId)
-  assert.equal(security.listChannels().length, 1)
 
   assert.throws(() => establishChannel({
     security,
@@ -301,8 +299,8 @@ test('when a channel handshake succeeds, it installs the envelope ID and rejects
     protocol_version: 2,
   })
   assert.throws(() => security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: 'device-4', protocol_version: 1 },
-    message: noise.writeMessage(hello),
+    channel_id: channelId, device_id: 'device-4', protocol_version: 1,
+    body: noise.writeMessage(hello),
   }), (error) => error.code === 'protocol_version_incompatible')
 })
 
@@ -317,27 +315,27 @@ test('when revocation replay, message shape, or TTL checks fail, the channel han
 
   security.setRevocationsPending(true)
   assert.throws(() => security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: 'device-1' },
-    message: noise.writeMessage(hello),
+    channel_id: channelId, device_id: 'device-1',
+    body: noise.writeMessage(hello),
   }), (error) => error.code === 'revocations_pending')
   security.setRevocationsPending(false)
 
-  assert.throws(() => security.handleChannelHandshake({ request: { channel_id: '', device_id: 'device-1' }, message: hello }), (error) => error.code === 'invalid_argument')
-  assert.throws(() => security.handleChannelHandshake({ request: { channel_id: channelId, device_id: 'device-1' }, message: new Uint8Array(0) }), (error) => error.code === 'invalid_argument')
+  assert.throws(() => security.handleChannelHandshake({ channel_id: '', device_id: 'device-1', body: hello }), (error) => error.code === 'invalid_argument')
+  assert.throws(() => security.handleChannelHandshake({ channel_id: channelId, device_id: 'device-1', body: new Uint8Array(0) }), (error) => error.code === 'invalid_argument')
 
   const noise2 = new NoiseXX({ initiator: true, staticKeypair: identity, prologue: channelPrologue({ hostId, deviceId: 'device-1', channelId }) })
   security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: 'device-1' },
-    message: noise2.writeMessage(hello),
+    channel_id: channelId, device_id: 'device-1',
+    body: noise2.writeMessage(hello),
   })
   now += 20
   assert.throws(() => security.handleChannelHandshake({
-    request: { channel_id: channelId, device_id: 'device-1' },
-    message: new Uint8Array(1),
+    channel_id: channelId, device_id: 'device-1',
+    body: new Uint8Array(1),
   }), (error) => error.code === 'unauthorized')
 })
 
-test('when request frame channel/MAC/AAD checks pass, results are sealed to that same channel', () => {
+test('when request frame channel/MAC/AAD checks pass, results are sealed to that same channel', async () => {
   const { security, store } = makeSecurity()
   const device = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
   const request = {
@@ -364,16 +362,17 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
     nonce: sealed.nonce,
     ciphertext: sealed.ciphertext,
   })
-  const opened = security.openRequest({ request, body })
+  const authenticate = (request, body) => security.withRequest({ ...request, body }, result => result)
+  const opened = await authenticate(request, body)
   assert.equal(opened.ok, true)
   assert.deepEqual([...opened.plaintext], [...plaintext])
 
-  assert.equal(security.openRequest({ request: { ...request, channel_id: 'other' }, body }).ok, false)
-  assert.equal(security.openRequest({ request: { ...request, device_id: 'other' }, body }).ok, false)
-  assert.equal(security.openRequest({ request, body: new Uint8Array([1, 2]) }).ok, false)
+  assert.equal((await authenticate({ ...request, channel_id: 'other' }, body)).ok, false)
+  assert.equal((await authenticate({ ...request, device_id: 'other' }, body)).ok, false)
+  assert.equal((await authenticate(request, new Uint8Array([1, 2]))).ok, false)
   const tampered = new Uint8Array(body)
   tampered[tampered.length - 1] ^= 1
-  assert.equal(security.openRequest({ request, body: tampered }).ok, false)
+  assert.equal((await authenticate(request, tampered)).ok, false)
 
   const resultBody = security.sealResult({ request, plaintext: new Uint8Array([4, 5]) })
   const frame = codec.decode('whalerein.v1.EncryptedFrame', resultBody)
@@ -388,22 +387,52 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
   assert.equal(security.sealEvent({ deviceId: 'device-1', channelId: 'other', plaintext: eventPlaintext, createdAt: 900 }), null)
 })
 
-test('when a new channel replaces old channels, stale ciphertext is removed and clearChannels closes every channel', () => {
-  const { security, store } = makeSecurity()
-  const first = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
-  store.addOutbox({ deviceId: 'device-1', channelId: first.channelId, payload: new Uint8Array([1]) })
-  const second = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
-  assert.equal(second.second.replacedChannelId, first.channelId)
-  assert.equal(store.countOutbox(), 0)
-  const closed = security.clearChannels()
-  assert.deepEqual(closed, [{ deviceId: 'device-1', channelId: second.channelId }])
+test('channel admission bounds preserve active channels and release idle capacity', (t) => {
+  let now = 1000
+  const closures = []
+  const { security, store } = makeSecurity({
+    now: () => now,
+    channelIdleMs: 100,
+    maxDeviceChannels: 2,
+    maxHostChannels: 3,
+    onClosedChannels: (channels, reason) => closures.push({ channels, reason }),
+  })
+  t.after(() => store.close())
+  const options = { security, store, hostId, deviceId: 'device-1', identity: generateKeypair(), codec }
+  const first = establishChannel(options)
+  now += 50
+  const second = establishChannel(options)
+  assert.throws(() => establishChannel(options), error => error.code === 'rate_limited')
+  assert.throws(() => establishChannel({ ...options, channelId: second.channelId }), error => error.code === 'conflict')
+  const other = establishChannel({ ...options, deviceId: 'device-2', identity: generateKeypair() })
+  assert.throws(() => establishChannel({ ...options, deviceId: 'device-3', identity: generateKeypair() }), error => error.code === 'rate_limited')
+  assert.deepEqual(security.listChannels().map(channel => channel.channelId), [first.channelId, second.channelId, other.channelId])
+
+  now += 50
+  const fresh = establishChannel(options)
+  assert.deepEqual(closures, [{
+    channels: [{ deviceId: 'device-1', channelId: first.channelId }],
+    reason: 'channel_replaced',
+  }])
+  assert.equal(security.getChannel(first.channelId), null)
+  security.clearChannels()
+  assert.deepEqual(closures[1], {
+    channels: [
+      { deviceId: 'device-1', channelId: second.channelId },
+      { deviceId: 'device-2', channelId: other.channelId },
+      { deviceId: 'device-1', channelId: fresh.channelId },
+    ],
+    reason: 'unavailable',
+  })
   assert.equal(security.listChannels().length, 0)
-  assert.deepEqual(security.clearChannels(), [])
+  security.clearChannels()
+  assert.equal(closures.length, 2)
 })
 
 test('when revocation notices arrive, peers/channels are removed and replay ends only on the final notice', () => {
   const { security, store } = makeSecurity()
   const channel = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
+  const sibling = establishChannel({ security, store, hostId, deviceId: 'device-1', identity: channel.identity, codec })
   security.setRevocationsPending(true)
   const partial = security.handleRevocation({
     notice: { replay_id: 'r1', device_ids: ['device-1'], final: false, revoked_at_unix_ms: 5 },
@@ -413,7 +442,8 @@ test('when revocation notices arrive, peers/channels are removed and replay ends
   assert.equal(security.revocationsPending, true)
   assert.equal(store.getPeerKey('device-1'), null)
   assert.equal(security.getChannel(channel.channelId), null)
-  assert.deepEqual(partial.closed, [{ deviceId: 'device-1', channelId: channel.channelId }])
+  assert.equal(security.getChannel(sibling.channelId), null)
+  assert.deepEqual(partial.closed, [channel, sibling].map(({ channelId }) => ({ deviceId: 'device-1', channelId })))
   const final = security.handleRevocation({ notice: { replay_id: 'r2', device_ids: [], final: true } })
   assert.equal(final.final, true)
   assert.equal(security.revocationsPending, false)
@@ -435,8 +465,8 @@ test('after Access-confirmed host revocation, local peer cleanup closes its chan
   const reconnect = new NoiseXX({ initiator: true, staticKeypair: channel.identity, prologue: channelPrologue({ hostId, deviceId: 'device-1', channelId: 'revoked-reconnect' }) })
   security.setRevocationsPending(false)
   assert.throws(() => security.handleChannelHandshake({
-    request: { channel_id: 'revoked-reconnect', device_id: 'device-1', protocol_version: 1 },
-    message: reconnect.writeMessage(codec.encode('whalerein.v1.ChannelHello', { host_id: hostId, device_id: 'device-1', protocol_version: 1 })),
+    channel_id: 'revoked-reconnect', device_id: 'device-1', protocol_version: 1,
+    body: reconnect.writeMessage(codec.encode('whalerein.v1.ChannelHello', { host_id: hostId, device_id: 'device-1', protocol_version: 1 })),
   }), error => error.code === 'unauthorized' || error.code === 'forbidden')
   assert.equal(security.forgetPairedDevice(''), null)
 })
@@ -523,13 +553,20 @@ test('a revoked grant cannot reactivate and stale revocations do not clear a rep
   finishPairing({security,start})
   const commit={claim_id:start.claimId,phase:'PAIRING_PHASE_COMMIT',device_id:start.deviceId,device_public_key:start.identity.publicKey,grant_generation:1}
   security.handlePairingClaim({request,claim:commit})
-  store.applyRevocations([start.deviceId],{generations:{[start.deviceId]:1}})
-  assert.throws(()=>security.handlePairingClaim({request,claim:commit}),error=>error.code==='unauthorized')
-  store.upsertPeerKey({deviceId:start.deviceId,publicKey:start.identity.publicKey,fingerprint:'fp',claimId:'repair',grantGeneration:2})
+  const channelOptions={security,store,hostId,deviceId:start.deviceId,identity:start.identity,persistPeer:false}
+  const previous=establishChannel(channelOptions)
+  const repair=pairingStart({deviceId:start.deviceId,identity:start.identity,claimId:'repair'})
+  const repairHello=security.handlePairingClaim({request,claim:helloClaim(repair)})
+  repair.noise.readMessage(repairHello.noise_message)
+  finishPairing({security,start:repair})
+  security.handlePairingClaim({request,claim:{...commit,claim_id:repair.claimId,grant_generation:2}})
+  assert.equal(security.getChannel(previous.channelId),null)
+  const current=establishChannel(channelOptions)
   const stale=security.handleRevocation({notice:{device_ids:[start.deviceId],grant_generations:{[start.deviceId]:1}}})
   assert.deepEqual(stale.applied,[])
   assert.deepEqual(stale.ack.device_ids,[start.deviceId])
   assert.equal(store.getPeerKey(start.deviceId).grantGeneration,2)
+  assert.ok(security.getChannel(current.channelId))
   assert.throws(()=>security.handlePairingClaim({request,claim:commit}),error=>error.code==='unauthorized')
  } finally {store.close()}
 })

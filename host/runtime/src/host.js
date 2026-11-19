@@ -56,6 +56,7 @@ export class HostRuntime {
   #codec = null
   #readyRetryTimer = null
   #readyRetryAttempt = 0
+  #channelPruneTimer = null
   #config
 
   /**
@@ -148,9 +149,13 @@ export class HostRuntime {
         now: this.now,
         protocolVersion: PROTOCOL_VERSION,
         codec: this.#codec,
-        onRevokedChannels: channels => {
+        onClosedChannels: (channels, reason) => {
           this.#events?.onChannelsCleared(channels)
-          for (const { deviceId, channelId } of channels) this.#commands?.cancelChannel(deviceId, channelId, 'revoked')
+          for (const { deviceId, channelId } of channels) this.#commands?.cancelChannel(deviceId, channelId, reason)
+        },
+        onRevokedChannels: (channels, deviceIds) => {
+          this.#events?.onChannelsCleared(channels)
+          for (const deviceId of deviceIds) this.#commands?.revokeDevice(deviceId)
         },
       })
       this.#access = this.injectedAccess ?? new MqttAccess({
@@ -189,10 +194,12 @@ export class HostRuntime {
       // Crash recovery happens before any request is accepted.
       this.#commands.recover()
       this.#events.start()
+      this.#channelPruneTimer = setInterval(() => this.#security.pruneIdleChannels(), 30_000)
+      this.#channelPruneTimer.unref?.()
       this.#access.start({
         onRequest: (request) => this.#track(this.#handleRequest(request)),
         onConnected: () => {
-          this.#clearChannels()
+          this.#security.clearChannels()
           this.#readyRetryAttempt = 0
           this.#security.setRevocationsPending(true)
         },
@@ -201,10 +208,10 @@ export class HostRuntime {
           this.#scheduleRevocationReplay()
         },
         onDisconnected: () => {
-          this.#clearChannels()
+          this.#security?.clearChannels()
           this.#logger?.warn('host_offline', { code: 'unavailable' })
         },
-        onPresence: (event) => this.#handleDeviceOffline(event),
+        onPresence: (event) => this.#handlePresence(event),
       })
       this.#started = true
       this.#logger.info('plugin_started', { status: 'started' })
@@ -217,18 +224,18 @@ export class HostRuntime {
   }
 
   /** Normalized presence entry point (also used by the integration fixture). */
-  notifyPresence(event) { this.#handleDeviceOffline(event) }
+  notifyPresence(event) { this.#handlePresence(event) }
 
 
-  #handleDeviceOffline(event) {
+  #handlePresence(event) {
     if (event?.event === 'request_stale') return this.#handleRequestStale(event)
     const deviceId = event?.device_id
     if (typeof deviceId !== 'string' || !deviceId) return
-    const closed = this.#security?.clearDeviceChannels(deviceId) ?? []
-    this.#events?.onChannelsCleared(closed)
-    this.#commands?.cancelDevice(deviceId, 'device_offline')
+    // Presence describes the Device's MQTT subscriber. Its independent HTTP
+    // requests retain their own channel and exact request lease.
+    this.#events?.onDeviceOffline(deviceId)
     this.presenceEvents += 1
-    this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32), closed: closed.length })
+    this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32) })
   }
 
   // A cancellation notice is only authoritative for its exact existing scope.
@@ -314,13 +321,6 @@ export class HostRuntime {
     this.#readyRetryTimer.unref?.()
   }
 
-  #clearChannels() {
-    const closed = this.#security?.clearChannels() ?? []
-    this.#events?.onChannelsCleared(closed)
-    for (const { deviceId, channelId } of closed) this.#commands?.cancelChannel(deviceId, channelId)
-    return closed
-  }
-
   #track(promise) {
     this.#inFlight.add(promise)
     promise.then(
@@ -349,6 +349,8 @@ export class HostRuntime {
   }
 
   async #teardown({ closeStore, force }) {
+    clearInterval(this.#channelPruneTimer)
+    this.#channelPruneTimer = null
     if (this.#readyRetryTimer !== null) {
       clearTimeout(this.#readyRetryTimer)
       this.#readyRetryTimer = null
@@ -467,7 +469,9 @@ export class HostRuntime {
         return await this.#handlePairing(request)
       }
       if (kind === 'REQUEST_KIND_HANDSHAKE') return await this.#handleHandshake(request)
-      if (kind === 'REQUEST_KIND_QUERY' || kind === 'REQUEST_KIND_COMMAND') return await this.#handleEncrypted(request)
+      if (kind === 'REQUEST_KIND_QUERY' || kind === 'REQUEST_KIND_COMMAND') {
+        return await this.#security.withRequest(request, opened => this.#handleEncrypted(request, opened))
+      }
       if (kind === 'REQUEST_KIND_HOST_CLIENTS') {
         if (request.host_id !== this.#config.hostId || request.device_id || request.relay_transport_version !== 2) {
           return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
@@ -519,12 +523,8 @@ export class HostRuntime {
 
   async #handleHandshake(request) {
     try {
-      const outcome = this.#security.handleChannelHandshake({ request, message: request.body })
-      if (outcome.established && outcome.replacedChannelId) {
-        this.#events.onChannelReplaced(request.device_id, outcome.replacedChannelId)
-        this.#commands.cancelChannel(request.device_id, outcome.replacedChannelId, 'channel_replaced')
-      }
-      return await this.#reply(request, { status: 'succeeded', resultBody: outcome.noiseMessage })
+      const resultBody = this.#security.handleChannelHandshake(request)
+      return await this.#reply(request, { status: 'succeeded', resultBody })
     } catch (error) {
       const code = codeOf(error)
       this.#logger?.warn('handshake_rejected', { code, device: request.device_id, channel: request.channel_id })
@@ -549,8 +549,7 @@ export class HostRuntime {
     }
   }
 
-  async #handleEncrypted(request) {
-    const opened = this.#security.openRequest({ request, body: request.body })
+  async #handleEncrypted(request, opened) {
     if (!opened.ok) {
       this.#logger?.warn('request_frame_rejected', { trace: request.trace_id, request: request.request_id, device: request.device_id, channel: request.channel_id, code: opened.code, reason: opened.reason, layer: 'host', scope: 'channel' })
       return await this.#reply(request, { status: 'rejected', errorCode: opened.code })

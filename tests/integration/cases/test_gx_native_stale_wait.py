@@ -30,7 +30,7 @@ def test_gx04_native_stale_wait_does_not_complete_new_channel(scenario, paired_d
         stage("await-entry")
         wait(lambda: scenario.request("gx-stale-wait-status")["entered"], timeout=10)
         stage("replace-channel")
-        assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
+        assert scenario.request("gx-close-stale-wait-channel")["closed"]
         wait(lambda: scenario.request("gx-stale-wait-status")["aborted"], timeout=10)
         assert scenario.request("gx-release-stale-wait")["released"]
         wait(lambda: scenario.request("gx-stale-wait-status")["lateReturned"], timeout=5)

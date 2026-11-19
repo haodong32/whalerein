@@ -49,9 +49,8 @@ export class WatchedEvents {
   #sources = new Map()
   #lanes = new Map()
   #timer = null
-  outboxDrops = 0
-  droppedByDevice = new Map()
-  outboxSnapshotRequired = new Set()
+  #outboxDrops = 0
+  #snapshotRequired = new Map()
   constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger }) {
     Object.assign(this, { hostId, store, security, adapter, access, now, config, logger }); this.codec = resolveCodec(codec)
   }
@@ -120,7 +119,6 @@ export class WatchedEvents {
   }
 
   #enqueueClosed(watch, reason) {
-    if (!this.security.getChannel(watch.channelId)) return
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', {
       watch_closed: {
         watch_id: watch.id,
@@ -133,7 +131,9 @@ export class WatchedEvents {
     if (!envelope) return
     // The durable copy is the delivery guarantee; the live copy is latency.
     const row = this.#addOutbox(watch, envelope, at)
-    if (row.overflow) this.outboxSnapshotRequired.add(watch.deviceId)
+    if (row.overflow && !this.#snapshotRequired.has(watch.channelId)) {
+      this.#snapshotRequired.set(watch.channelId, { deviceId: watch.deviceId, droppedUpdate: false })
+    }
     if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
     this.#remove(watch.id)
   }
@@ -374,31 +374,44 @@ export class WatchedEvents {
     }
   }
   #enqueue(watch, update) {
-    if (!this.security.getChannel(watch.channelId)) return
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
     if (update.live && plaintext.length > 256 * 1024) return
     const at = this.now()
     const envelope = this.#envelope(watch, plaintext, at)
     if (!envelope) return
-    let lane = this.#lanes.get(watch.deviceId)
-    if (!lane) { lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }; this.#lanes.set(watch.deviceId, lane) }
+    let lane = this.#lanes.get(watch.channelId)
+    if (!lane) {
+      lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }
+      this.#lanes.set(watch.channelId, lane)
+    }
     if (update.live) {
       if (!this.access?.connected || lane.count >= 64 || lane.bytes + envelope.length > 256 * 1024) return
-      lane.count++; lane.bytes += envelope.length
-      lane.live = lane.live.then(() => { if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) return this.access.publishEvent(envelope) }).catch(() => { }).finally(() => { lane.count--; lane.bytes -= envelope.length })
-    } else {
-      const row = this.#addOutbox(watch, envelope, at)
-      if (row.overflow) {
-        // A dropped committed envelope is a cursor gap. Keep bounded drop
-        // accounting and require a snapshot instead of silently continuing.
-        this.outboxDrops += 1
-        this.droppedByDevice.set(watch.deviceId, (this.droppedByDevice.get(watch.deviceId) ?? 0) + 1)
-        this.outboxSnapshotRequired.add(watch.deviceId)
-        this.logger?.warn('event_outbox_full', { code: 'snapshot_required', reason: row.reason })
-        return
-      }
-      if (this.access?.connected) lane.committed = lane.committed.then(async () => { if (!this.#watches.has(watch.id)) return; await this.access.publishEvent(envelope); this.store.removeOutbox(row.id) }).catch(() => this.logger?.warn('event_publish_failed', { code: 'unavailable' }))
+      lane.count++
+      lane.bytes += envelope.length
+      lane.live = lane.live.then(() => {
+        if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) {
+          return this.access.publishEvent(envelope)
+        }
+      }).catch(() => {}).finally(() => {
+        lane.count--
+        lane.bytes -= envelope.length
+      })
+      return
     }
+
+    const row = this.#addOutbox(watch, envelope, at)
+    if (row.overflow) {
+      this.#outboxDrops++
+      this.#snapshotRequired.set(watch.channelId, { deviceId: watch.deviceId, droppedUpdate: true })
+      this.logger?.warn('event_outbox_full', { code: 'snapshot_required', reason: row.reason })
+      return
+    }
+    if (!this.access?.connected) return
+    lane.committed = lane.committed.then(async () => {
+      if (!this.#watches.has(watch.id)) return
+      await this.access.publishEvent(envelope)
+      this.store.removeOutbox(row.id)
+    }).catch(() => this.logger?.warn('event_publish_failed', { code: 'unavailable' }))
   }
   async flushOutbox() {
     if (!this.access?.connected) return 0
@@ -409,16 +422,24 @@ export class WatchedEvents {
     }
     return count
   }
-  onChannelReplaced(deviceId, channelId) {
+  #clearChannelEvents(deviceId, channelId) {
     for (const [id, w] of this.#watches) if (w.deviceId === deviceId && w.channelId === channelId) this.#remove(id)
     this.store.deleteOutboxForChannel(deviceId, channelId)
-    this.#lanes.delete(deviceId)
-    // A replaced/cleared channel starts a new client view; the resync demand
-    // belongs to the previous channel and must not leak across identities.
-    this.outboxSnapshotRequired.delete(deviceId)
-    this.droppedByDevice.delete(deviceId)
+    this.#lanes.delete(channelId)
+    this.#snapshotRequired.delete(channelId)
   }
-  onChannelsCleared(channels) { for (const { deviceId, channelId } of channels ?? []) this.onChannelReplaced(deviceId, channelId) }
+
+  onChannelsCleared(channels) {
+    for (const { deviceId, channelId } of channels) this.#clearChannelEvents(deviceId, channelId)
+  }
+
+  onDeviceOffline(deviceId) {
+    const observedChannels = new Set()
+    for (const watch of this.#watches.values()) {
+      if (watch.deviceId === deviceId) observedChannels.add(watch.channelId)
+    }
+    for (const channelId of observedChannels) this.#clearChannelEvents(deviceId, channelId)
+  }
 
   observingDeviceIds() {
     this.#expire()
@@ -430,9 +451,17 @@ export class WatchedEvents {
   }
 
   describe() {
+    const devicesNeedingSnapshot = new Set()
+    const devicesWithDroppedUpdates = new Set()
+    for (const { deviceId, droppedUpdate } of this.#snapshotRequired.values()) {
+      devicesNeedingSnapshot.add(deviceId)
+      if (droppedUpdate) devicesWithDroppedUpdates.add(deviceId)
+    }
     return {
       watches: this.#watches.size, sessions: this.#sources.size, pending: this.store.countOutbox(),
-      outboxDrops: this.outboxDrops, snapshotRequired: this.outboxSnapshotRequired.size, droppedDevices: this.droppedByDevice.size,
+      outboxDrops: this.#outboxDrops,
+      snapshotRequired: devicesNeedingSnapshot.size,
+      droppedDevices: devicesWithDroppedUpdates.size,
     }
   }
 }

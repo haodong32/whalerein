@@ -421,9 +421,10 @@ process above.
   `revocations_pending`; new pairing/channel handshakes are rejected until a
   `RevocationNotice{final=true}` batch is applied. Access is authoritative on
   conflict; the plugin never deletes an Access ACL.
-- **Channels**: one live channel per device, replaced by a completed handshake;
-  old-channel ciphertext is deleted. MQTT disconnect/reconnect clears all
-  channels, so clients always run a fresh handshake.
+- **Channels** support independent CLI processes for the same Device. The Host
+  accepts up to 64 channels per Device and 512 in total. Idle channels expire
+  after two minutes and their pending ciphertext is cleared. A Host MQTT
+  disconnect or reconnect clears all channels and requires fresh handshakes.
 - **Commands**: `(device_id, command_id)` plus `SHA-256(body)` are persisted.
   The accepted row is written and `host_accepted` is published **before** DSH is
   called. Same id + same digest replays the stored terminal result; same id +

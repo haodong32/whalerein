@@ -1140,7 +1140,7 @@ def test_wait_reconnect_after_host_restart(scenario, paired_device, session_id):
 
 
 
-def test_wait_recovers_after_another_client_replaces_channel(scenario, paired_device, session_id):
+def test_wait_recovers_after_its_channel_closes(scenario, paired_device, session_id):
     """A wait recovers from a verified channel replacement with remaining time and never interrupts the Agent."""
     import json
     import os
@@ -1160,7 +1160,7 @@ def test_wait_recovers_after_another_client_replaces_channel(scenario, paired_de
         return json.loads(observations.read_text())
     try:
         wait(lambda: any(row["status"] == "active" for row in records()), timeout=10)
-        paired_device.sessions(scenario.host)
+        (observations.parent / "test-wait-close-channel").touch()
         wait(lambda: any(row["status"] == "aborted" for row in records())
              and any(row["status"] == "active" for row in records()), timeout=10)
         scenario.dsh.process.control("idle", session_id=session_id)

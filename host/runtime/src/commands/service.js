@@ -218,21 +218,29 @@ export class CommandService {
   }
 
   cancelChannel(deviceId, channelId, reason = 'unavailable') {
+    this.#cancelScopes(entry => entry.deviceId === deviceId && entry.channelId === channelId, reason)
+  }
+
+  /** Abort all executions and reads owned by a revoked Device. */
+  revokeDevice(deviceId) {
+    this.#cancelScopes(entry => entry.deviceId === deviceId, 'revoked')
+  }
+
+  #cancelScopes(matches, reason) {
     for (const entry of this.requests) {
-      if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
+      if (matches(entry)) entry.controller.abort('unavailable')
     }
     for (const entry of this.modelQueries.values()) {
-      if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
+      if (matches(entry)) entry.controller.abort('unavailable')
     }
-    // Transport loss and channel replacement stop observation, not an
-    // independently live HTTP answer. Only applicable revocation fences it.
+    // An admitted HTTP answer is fenced by its exact lease or Device revocation.
     if (reason === 'revoked') {
       for (const entry of this.questionAnswers.values()) {
-        if (entry.deviceId === deviceId && entry.channelId === channelId) entry.controller.abort('unavailable')
+        if (matches(entry)) entry.controller.abort('unavailable')
       }
     }
     for (const wait of this.waits.values()) {
-      if (wait.deviceId === deviceId && wait.channelId === channelId) {
+      if (matches(wait)) {
         wait.reason = reason
         wait.controller.abort()
       }
@@ -280,25 +288,6 @@ export class CommandService {
    */
   fenceCancelledCommand({ deviceId, requestId = '', commandId, digest, expiresAt = 0, errorCode = 'unavailable' }) {
     return this.store.fenceCancelledCommand({ deviceId, requestId, commandId, digest, expiresAt, errorCode, now: this.now() })
-  }
-
-  /** Abort every scope owned by one device after a broker presence loss. */
-  cancelDevice(deviceId, reason = 'device_offline') {
-    for (const entry of this.requests) {
-      if (entry.deviceId === deviceId) entry.controller.abort('unavailable')
-    }
-    for (const entry of this.modelQueries.values()) {
-      if (entry.deviceId === deviceId) entry.controller.abort('unavailable')
-    }
-    // A device MQTT disconnect does not establish the death of a separately
-    // live HTTP answer. Exact request cancellation (request_stale) still stops
-    // the matching answer, and revocation remains authoritative.
-    for (const wait of this.waits.values()) {
-      if (wait.deviceId === deviceId) {
-        wait.reason = reason
-        wait.controller.abort()
-      }
-    }
   }
 
   closeRequests() {

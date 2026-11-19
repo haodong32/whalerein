@@ -4,9 +4,8 @@
 //           returns the device public key without persisting it. AUTHORIZE is
 //           the only path that persists a peer key; Access sends it only after
 //           its grants transaction committed.
-// Channels: one Noise XX handshake over two HostRequest calls, one live channel
-//           per device, a fresh channel_id on every reconnect, and frame AAD
-//           exactly as WIRE.md defines it.
+// Channels: one Noise XX handshake over two HostRequest calls, bounded
+//           concurrent channels per device, and frame AAD as defined in WIRE.md.
 
 import {
   NoiseXX,
@@ -40,6 +39,9 @@ export const HOST_CAPABILITIES = Object.freeze([
 
 const TOKEN_HASH = /^[0-9a-fA-F]{64}$/
 const PENDING_TTL_MS = 120_000
+const CHANNEL_IDLE_MS = 120_000
+const MAX_DEVICE_CHANNELS = 64
+const MAX_HOST_CHANNELS = 512
 
 function protocolMismatch(value, expected) {
   // WIRE treats 0/absent as an old peer that must upgrade. A missing field is
@@ -60,7 +62,6 @@ function requiredString(value, name) {
 
 export class SecurityManager {
   #channels = new Map()
-  #deviceChannels = new Map()
   #pendingHandshakes = new Map()
   #pendingPairings = new Map()
   #completedPairings = new Map()
@@ -76,7 +77,11 @@ export class SecurityManager {
    * @param {number} [options.pendingTtlMs]
    * @param {number} [options.protocolVersion]
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
-   * @param {(channels: Array<{deviceId: string, channelId: string}>) => void} [options.onRevokedChannels]
+   * @param {number} [options.channelIdleMs]
+   * @param {number} [options.maxDeviceChannels]
+   * @param {number} [options.maxHostChannels]
+   * @param {(channels: Array<{deviceId: string, channelId: string}>, reason: string) => void} [options.onClosedChannels]
+   * @param {(channels: Array<{deviceId: string, channelId: string}>, deviceIds: string[]) => void} [options.onRevokedChannels]
    */
   constructor({
     hostId,
@@ -88,6 +93,10 @@ export class SecurityManager {
     protocolVersion = 1,
     maxPending = 32,
     codec = defaultCodec,
+    channelIdleMs = CHANNEL_IDLE_MS,
+    maxDeviceChannels = MAX_DEVICE_CHANNELS,
+    maxHostChannels = MAX_HOST_CHANNELS,
+    onClosedChannels = () => {},
     onRevokedChannels = () => {},
   }) {
     this.hostId = hostId
@@ -99,6 +108,10 @@ export class SecurityManager {
     this.protocolVersion = protocolVersion
     this.maxPending = maxPending
     this.codec = resolveCodec(codec)
+    this.channelIdleMs = channelIdleMs
+    this.maxDeviceChannels = maxDeviceChannels
+    this.maxHostChannels = maxHostChannels
+    this.onClosedChannels = onClosedChannels
     this.onRevokedChannels = onRevokedChannels
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
     this.hostFingerprintDisplay = formatFingerprint(identity.publicKey)
@@ -113,56 +126,73 @@ export class SecurityManager {
     if (pending) this.logger?.info('revocations_pending', {})
   }
 
-  // --- diagnostics --------------------------------------------------------
+  // --- channel inventory and lifetime -------------------------------------
 
   listChannels() {
-    return [...this.#channels.values()].map((channel) => ({
-      channelId: channel.channelId,
-      deviceId: channel.deviceId,
-      createdAt: channel.createdAt,
-    }))
+    const now = this.now()
+    return [...this.#channels.values()]
+      .filter(channel => !this.#isIdle(channel, now))
+      .map(({ channelId, deviceId, createdAt }) => ({ channelId, deviceId, createdAt }))
   }
 
   getChannel(channelId) {
-    return this.#channels.get(channelId) ?? null
+    const channel = this.#channels.get(channelId)
+    return channel && !this.#isIdle(channel, this.now()) ? channel : null
+  }
+
+  #isIdle(channel, now) {
+    return channel.inFlight === 0 && channel.lastUsedAt + this.channelIdleMs <= now
+  }
+
+  #removeChannels(matches) {
+    const closed = []
+    for (const [channelId, channel] of this.#channels) {
+      if (!matches(channel)) continue
+      this.#channels.delete(channelId)
+      closed.push({ deviceId: channel.deviceId, channelId })
+    }
+    return closed
+  }
+
+  pruneIdleChannels() {
+    const now = this.now()
+    for (const [channelId, channel] of this.#channels) {
+      if (this.#isIdle(channel, now)) this.closeChannel(channelId)
+    }
+  }
+
+  closeChannel(channelId) {
+    const channel = this.#channels.get(channelId)
+    if (!channel) return
+    this.#channels.delete(channelId)
+    this.onClosedChannels([{ deviceId: channel.deviceId, channelId }], 'channel_replaced')
   }
 
   /**
    * Drop every live and in-progress channel. A reconnect always requires a
    * fresh Noise handshake with a new channel_id; peer keys and applied
    * revocations are untouched.
-   * @returns {Array<{deviceId: string, channelId: string}>} closed channels.
    */
   clearChannels() {
-    const closed = [...this.#channels.values()].map((channel) => ({
-      deviceId: channel.deviceId,
-      channelId: channel.channelId,
-    }))
-    this.#channels.clear()
-    this.#deviceChannels.clear()
+    const closed = this.#removeChannels(() => true)
     this.#pendingHandshakes.clear()
     if (closed.length > 0) {
       this.logger?.info('channels_cleared', { count: closed.length })
+      this.onClosedChannels(closed, 'unavailable')
     }
-    return closed
   }
 
   /**
-   * Drop the live channel and any in-progress handshake for one device.
+   * Drop the live channels and any in-progress handshake for one device.
    * @param {string} deviceId
    * @returns {Array<{deviceId: string, channelId: string}>} closed channels.
    */
-  clearDeviceChannels(deviceId) {
-    const closed = []
-    for (const [channelId, channel] of this.#channels) {
-      if (channel.deviceId !== deviceId) continue
-      closed.push({ deviceId, channelId })
-      this.#channels.delete(channelId)
-      this.#deviceChannels.delete(deviceId)
-    }
+  #clearDeviceChannels(deviceId) {
+    const closed = this.#removeChannels(channel => channel.deviceId === deviceId)
     for (const [key, pending] of this.#pendingHandshakes) {
       if (pending.deviceId === deviceId) this.#pendingHandshakes.delete(key)
     }
+    this.store.deleteOutboxForDevice(deviceId)
     if (closed.length > 0) this.logger?.info('device_channels_cleared', { count: closed.length, device: deviceId })
     return closed
   }
@@ -386,6 +416,10 @@ export class SecurityManager {
       displayName: completed.displayName ?? '',
       os: completed.os ?? '',
     })
+    if (existing && existing.grantGeneration < generation) {
+      const closed = this.#clearDeviceChannels(deviceId)
+      this.onRevokedChannels(closed, [deviceId])
+    }
     this.#completedPairings.delete(claimId)
     this.store.deletePendingPeer(claimId)
     this.logger?.info('pairing_authorized', { device: deviceId })
@@ -404,14 +438,16 @@ export class SecurityManager {
    * One channel handshake step. The first call for a channel_id consumes msg1
    * and returns msg2; the second consumes msg3 and installs the channel.
    */
-  handleChannelHandshake({ request, message }) {
+  handleChannelHandshake(request) {
     this.#pruneLocked()
     if (this.#revocationsPending) throw new PluginError('revocations_pending', 'revocation replay pending')
     const channelId = requiredString(request.channel_id, 'channel_id')
     const deviceId = requiredString(request.device_id, 'device_id')
+    const message = request.body
     const peer = this.store.getPeerKey(deviceId)
     if (!peer) throw new PluginError('unauthorized', 'device not paired')
     if (this.store.isRevoked(deviceId)) throw new PluginError('forbidden', 'device revoked')
+    if (this.getChannel(channelId)) throw new PluginError('conflict', 'channel identity already in use')
     if (!(message instanceof Uint8Array) || message.length === 0) {
       throw new PluginError('invalid_argument', 'handshake message missing')
     }
@@ -452,52 +488,54 @@ export class SecurityManager {
       this.#pendingHandshakes.set(channelId, {
         deviceId,
         noise,
-        createdAt: this.now(),
         expiresAt: this.now() + this.pendingTtlMs,
       })
       this.logger?.info('channel_hello', { device: deviceId, channel: channelId, phase: 'hello' })
-      return { noiseMessage: reply, established: false, replacedChannelId: null }
+      return reply
     }
     if (pending.deviceId !== deviceId) throw new PluginError('forbidden', 'channel device mismatch')
+    this.#pendingHandshakes.delete(channelId)
     let payload
     try {
       payload = pending.noise.readMessage(message)
     } catch {
-      this.#pendingHandshakes.delete(channelId)
       throw new PluginError('unauthorized', 'handshake message rejected')
     }
     if (payload.length !== 0) throw new PluginError('invalid_argument', 'handshake payload unexpected')
     const remote = pending.noise.remoteStaticKey
     if (!remote || !bytesEqual(remote, peer.publicKey)) {
-      this.#pendingHandshakes.delete(channelId)
       throw new PluginError('unauthorized', 'device key mismatch')
+    }
+    this.pruneIdleChannels()
+    let deviceChannels = 0
+    for (const channel of this.#channels.values()) {
+      if (channel.deviceId === deviceId) deviceChannels++
+    }
+    if (deviceChannels >= this.maxDeviceChannels || this.#channels.size >= this.maxHostChannels) {
+      throw new PluginError('rate_limited', 'channel capacity reached')
     }
     const derived = deriveChannelKeys(
       pending.noise.handshakeHash,
       channelPrologue({ hostId: this.hostId, deviceId, channelId }),
     )
-    const replaced = this.#deviceChannels.get(deviceId) ?? null
-    if (replaced) {
-      this.#channels.delete(replaced)
-      this.store.deleteOutboxForChannel(deviceId, replaced)
-    }
+    const now = this.now()
     const channel = {
       channelId,
       deviceId,
       c2h: derived.c2h,
       h2c: derived.h2c,
-      createdAt: this.now(),
+      createdAt: now,
+      lastUsedAt: now,
+      inFlight: 0,
     }
     this.#channels.set(channelId, channel)
-    this.#deviceChannels.set(deviceId, channelId)
-    this.#pendingHandshakes.delete(channelId)
     this.logger?.info('channel_established', { device: deviceId, channel: channelId })
-    return { noiseMessage: new Uint8Array(0), established: true, replacedChannelId: replaced }
+    return new Uint8Array(0)
   }
 
   #resolveChannel(channelId, deviceId) {
     if (!channelId || !deviceId) return null
-    const channel = this.#channels.get(channelId)
+    const channel = this.getChannel(channelId)
     if (!channel || channel.deviceId !== deviceId) return null
     return channel
   }
@@ -506,12 +544,12 @@ export class SecurityManager {
    * Decode and authenticate one request frame. A wrong channel, MAC, or AAD
    * returns `{ok:false}` without side effects.
    */
-  openRequest({ request, body }) {
+  #openRequest(request) {
     const channel = this.#resolveChannel(request.channel_id, request.device_id)
     if (!channel) return { ok: false, code: 'unauthorized', reason: 'channel_missing' }
     let frame
     try {
-      frame = this.codec.decode('whalerein.v1.EncryptedFrame', body)
+      frame = this.codec.decode('whalerein.v1.EncryptedFrame', request.body)
     } catch {
       return { ok: false, code: 'unauthorized', reason: 'frame_invalid' }
     }
@@ -530,6 +568,20 @@ export class SecurityManager {
       return { ok: false, code: 'unauthorized', reason: 'authentication_failed' }
     }
     return { ok: true, plaintext, channel }
+  }
+
+  /** Keep an authenticated request's channel available through its response. */
+  async withRequest(request, handle) {
+    const opened = this.#openRequest(request)
+    if (!opened.ok) return handle(opened)
+    const { channel, plaintext } = opened
+    channel.inFlight++
+    try {
+      return await handle({ ok: true, plaintext })
+    } finally {
+      channel.lastUsedAt = this.now()
+      channel.inFlight--
+    }
   }
 
   /** Encrypt one query/command response for the channel that produced it. */
@@ -596,17 +648,11 @@ export class SecurityManager {
     })
     const closed = []
     for (const deviceId of applied) {
-      const channelId = this.#deviceChannels.get(deviceId)
-      if (channelId) {
-        this.#channels.delete(channelId)
-        this.#deviceChannels.delete(deviceId)
-        this.store.deleteOutboxForDevice(deviceId)
-        closed.push({ deviceId, channelId })
-      }
+      closed.push(...this.#clearDeviceChannels(deviceId))
       this.logger?.info('revocation_applied', { device: deviceId, replay: replayId, source: replayId ? 'access_notice' : 'host_settings', revokedAt: notice.revoked_at_unix_ms, final: notice.final === true })
     }
     if (notice.final === true) this.setRevocationsPending(false)
-    this.onRevokedChannels(closed)
+    this.onRevokedChannels(closed, applied)
     return {
       ack: { replay_id: replayId, device_ids: deviceIds },
       applied,
