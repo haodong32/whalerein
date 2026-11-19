@@ -30,7 +30,7 @@ macOS or Windows validation.
 - The Linux container integration suite remains Linux-only; it does not establish
   macOS or Windows behavior.
 - The CI workflow runs affected Rust projects' checks, builds, unit tests and
-  per-crate coverage on Linux, macOS 15 and Windows Server 2025. Linux also owns
+  per-crate coverage on Linux, macOS 26 and Windows Server 2025. Linux also owns
   the Go, Node.js and Python groups and the separate container integration suite.
   All selected native matrix jobs must pass the `Full CI gate`.
 - Windows runs the Core file-lock/sharing and reparse-point cases natively,
@@ -52,7 +52,7 @@ The opt-in `.github/workflows/full-ci.yml` owns the full platform matrix:
 | Job | Runner | What it proves |
 |---|---|---|
 | Checks and coverage | `ubuntu-26.04` | Static checks, builds and affected-project unit coverage. |
-| Native Rust checks and coverage | `macos-15`, `windows-2025` | Native checks, builds, unit tests and per-crate coverage. |
+| Native Rust checks and coverage | `macos-26`, `windows-2025` | Native checks, builds, unit tests and per-crate coverage. |
 | Deployment acceptance | `ubuntu-24.04` | Compose restart/recovery, shutdown, backup/restore and retention. |
 
 The full native jobs reuse the affected-project selection and invoke the repo

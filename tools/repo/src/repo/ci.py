@@ -89,7 +89,7 @@ def native_plan(root: Path, paths: list[str]) -> dict:
         if identity not in bindings
     ]
     return {
-        "include": [{"os": os, "projects": rust} for os in ("macos-15", "windows-2025") if rust]
+        "include": [{"os": os, "projects": rust} for os in ("macos-26", "windows-2025") if rust]
     }
 
 
