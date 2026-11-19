@@ -1005,6 +1005,15 @@ async fn conversation_loop(
                         pump.finish().await;
                         return Ok(End::Reconnect);
                     }
+                    // The Host's authoritative refresh says the Source no
+                    // longer has this session. That is terminal even when the
+                    // explicit `watch_closed` event is delayed or lost.
+                    Err(error) if error.code() == "not_found" => {
+                        return Err(CoreError::AuthorityClosed("session_deleted".into()));
+                    }
+                    Err(error) if error.code() == "forbidden" || error.code() == "unauthorized" => {
+                        return Err(CoreError::AuthorityClosed("unauthorized".into()));
+                    }
                     other => other?,
                 };
                 let Some(response_payload::Payload::WatchStates(states)) = response.payload else {

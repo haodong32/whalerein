@@ -238,7 +238,7 @@ export class WatchedEvents {
           // observation of it with a Host-authored event before the client's
           // own lease or timeout hides the reason.
           this.#closeSession(watch.sessionId, sessionCloseReason(code))
-          throw new PluginError('expired', 'session ended')
+          throw new PluginError('not_found', 'session ended')
         }
         throw error
       })

@@ -137,6 +137,7 @@ fn event(core: &Core, session: &str, watch: &str) -> EventEnvelope {
         })),
     };
     let bytes = EventPayload {
+        watch_closed: None,
         update: Some(update),
     }
     .encode_to_vec();
@@ -568,6 +569,7 @@ fn sealed_event(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
     };
     let bytes = EventPayload {
+        watch_closed: None,
         update: Some(update),
     }
     .encode_to_vec();
