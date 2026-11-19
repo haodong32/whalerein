@@ -1216,8 +1216,7 @@ mod tests {
             );
             assert!(instance.manifest().unwrap().unwrap().account.is_none());
             assert_eq!(load_state(&secrets).unwrap().attempt.is_some(), cancel);
-            assert!(AccountClient::local_logout_pending(&secrets).unwrap() == false);
-
+            assert!(!AccountClient::local_logout_pending(&secrets).unwrap());
         }
     }
 
@@ -1742,7 +1741,7 @@ mod tests {
         assert!(AccountClient::local_session_id(&instance, &secrets)
             .unwrap()
             .is_none());
-        let calls = calls.lock().unwrap();
+        let calls = calls.lock().unwrap().clone();
         assert_eq!(
             calls
                 .iter()

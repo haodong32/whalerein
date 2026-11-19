@@ -92,20 +92,26 @@ async fn a_confirmed_authorization_denial_never_serves_cached_sessions_as_author
     let error = core.sessions("host-1").await.unwrap_err();
     assert!(!matches!(error, CoreError::HostOffline), "{error:?}");
     assert!(
-        matches!(error, CoreError::Revoked | CoreError::HostRejected | CoreError::Host { .. }),
+        matches!(
+            error,
+            CoreError::Revoked | CoreError::HostRejected | CoreError::Host { .. }
+        ),
         "{error:?}"
     );
 
     // The same denial fences a cached session action instead of replaying it.
-    assert!(matches!(
-        core.send_message(&key("host-1", "session-1"), "hello").await,
-        Err(_)
-    ));
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "hello")
+        .await
+        .is_err());
     // A confirmed revocation is terminal for this pairing; the cached rows do
     // not remain usable after the grant is gone.
     access.host.lock().unwrap().revoked = false;
     assert!(!core.is_paired());
-    assert!(matches!(core.sessions("host-1").await, Err(CoreError::NotPaired)));
+    assert!(matches!(
+        core.sessions("host-1").await,
+        Err(CoreError::NotPaired)
+    ));
 }
 
 #[tokio::test]

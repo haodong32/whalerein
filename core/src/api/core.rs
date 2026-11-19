@@ -1147,7 +1147,10 @@ impl Core {
     /// so a network blip does not end a healthy watch.
     pub(crate) async fn check_host_authority(&self, host_id: &str) -> CoreResult<()> {
         let access = self.access_client().await?;
-        access.host_authority(host_id).await.map_err(CoreError::from)
+        access
+            .host_authority(host_id)
+            .await
+            .map_err(CoreError::from)
     }
 
     pub(crate) async fn ensure_channel(

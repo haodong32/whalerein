@@ -336,14 +336,7 @@ async fn a_write_to_an_offline_host_reports_host_offline_without_submitting() {
     f.access.host.lock().unwrap().host_online = false;
     let submitted = f.access.host.lock().unwrap().commands_seen;
     let outcome = f
-        .run(&[
-            "session",
-            "send",
-            "session-1",
-            "hello",
-            "--host",
-            "host-1",
-        ])
+        .run(&["session", "send", "session-1", "hello", "--host", "host-1"])
         .await;
     assert_eq!(outcome.exit, 5, "{outcome:?}");
     assert_eq!(outcome.to_json()["error"]["code"], "host_offline");
