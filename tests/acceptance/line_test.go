@@ -248,6 +248,33 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 	c := &mqttClient{}
 	c.connect(t, s.mqttAddr, "whalerein-host-"+s.hostID, "host:"+s.hostID, s.hostToken)
 	s.root.Cleanup(c.close)
+
+	// Announce readiness after subscribing, as the Host runtime does on each connection.
+	topic := "whalerein/v1/h/" + s.hostID
+	if err := c.subscribe(t, topic+"/request"); err != nil {
+		t.Fatalf("host request subscription: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	ready, err := proto.Marshal(&whalereinv1.HostReady{
+		HostId:            s.hostID,
+		ConnectedAtUnixMs: now,
+	})
+	if err != nil {
+		t.Fatalf("encode HostReady: %v", err)
+	}
+	result, err := proto.Marshal(&whalereinv1.HostResult{
+		HostId:            s.hostID,
+		Status:            whalereinv1.OnlineStatus_succeeded,
+		ResultBody:        ready,
+		CompletedAtUnixMs: now,
+		ProtocolVersion:   1,
+	})
+	if err != nil {
+		t.Fatalf("encode HostReady result: %v", err)
+	}
+	if err := c.publish(t, topic+"/result", result); err != nil {
+		t.Fatalf("publish HostReady: %v", err)
+	}
 	return c
 }
 
