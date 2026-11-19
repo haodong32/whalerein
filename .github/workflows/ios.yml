@@ -116,7 +116,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
@@ -144,10 +144,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .data/ios-build/source/target
-          key: rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-ios-sim-xcode26.2-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
-            rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-
+            rust-ios-sim-xcode26.2-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-ios-sim-xcode26.2-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Select an available iPhone simulator
         id: simulator
