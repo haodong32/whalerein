@@ -495,9 +495,9 @@ is stored verbatim while the row has not expired. A late result may still advanc
 Run from the repository root:
 
 ```bash
-./repo check --project access
-./repo test --project access
-./repo test --project access --coverage
+./repo check access
+./repo test access
+./repo test access --coverage
 ```
 
 The [repo reference](../tools/repo/README.md) defines project selection and
@@ -506,8 +506,8 @@ coverage gates; native Go tools remain available for specialized debugging.
 Database and MQTT integration tests run in the single Linux test container:
 
 ```bash
-./repo test --suite integration --group storage
-./repo test --suite integration --group transport
+./repo test storage
+./repo test transport
 ```
 
 Pytest owns PostgreSQL, Mosquitto, fixture callbacks, and native driver execution.

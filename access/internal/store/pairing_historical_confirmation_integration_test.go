@@ -356,11 +356,28 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// Recreate the 009 schema in this disposable test database only.
-			if _, err := s.Pool().Exec(ctx, `ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified; ALTER TABLE requests DROP COLUMN bodies_cleared; DELETE FROM schema_migrations WHERE name='010_pairing_commit_binding.sql'`); err != nil {
+			// Keep the later Cloud-session schema. Restore its trigger after the
+			// 010 rewind recreates the Host confirmation columns.
+			var activationTrigger string
+			if err := s.Pool().QueryRow(ctx, `
+				SELECT pg_get_triggerdef(oid)
+				FROM pg_trigger
+				WHERE tgrelid = 'pairing_outcomes'::regclass
+				  AND tgname = 'session_pairing_activation' AND NOT tgisinternal`).Scan(&activationTrigger); err != nil {
+				t.Fatal(err)
+			}
+			// Recreate the 009 fields in this disposable test schema.
+			if _, err := s.Pool().Exec(ctx, `DROP TRIGGER session_pairing_activation ON pairing_outcomes;
+                DROP VIEW grant_authority;
+                ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified;
+                ALTER TABLE requests DROP COLUMN bodies_cleared;
+                DELETE FROM schema_migrations WHERE name IN ('010_pairing_commit_binding.sql','016_external_device_revocations.sql')`); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Pool().Exec(ctx, activationTrigger); err != nil {
 				t.Fatal(err)
 			}
 			var legacyUnknown bool

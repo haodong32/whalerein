@@ -435,7 +435,7 @@ extension IntegrationTestCase {
         XCTAssertFalse(revision.isEmpty)
         XCTAssertNotNil(
             revision.range(
-                of: #"^git:[0-9a-f]{7,40}(-dirty)? core:[0-9]+\.[0-9]+\.[0-9]+$"#,
+                of: #"^(git:[0-9a-f]{7,40}(-dirty)?|source:[0-9a-f]{64}) core:[0-9]+\.[0-9]+\.[0-9]+$"#,
                 options: .regularExpression
             ),
             "coreRevision does not use the documented provenance format"

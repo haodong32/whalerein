@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -37,6 +38,8 @@ class Docker:
         self.progress = None
         self.interrupted = False
         self.environ = {}
+        self.created = None
+        self.identity = "c" * 64
 
     def which(self, tool):
         return None if (tool == "docker" and self.missing_buildx) else "/usr/bin/" + tool
@@ -50,22 +53,21 @@ class Docker:
     def run(self, argv, cwd, *, env=None, timeout=None, check=False, quiet=False):
         args = tuple(str(part) for part in argv)
         self.calls.append(args)
-        if args[1:3] == ("buildx", "version"):
-            return ok(returncode=1 if self.missing_buildx else 0)
-        if args[1:3] == ("buildx", "build"):
-            if self.build_code:
-                return ok("build failed", returncode=self.build_code)
-            from pathlib import Path
-
-            Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "a" * 64 + "\n")
-            return ok()
-        if args[1] == "run":
-            mount = args[args.index("--mount") + 1]
+        if args[1] == "create":
+            self.created = args
+            return ok(self.identity)
+        if args[1:3] == ("container", "inspect"):
+            if not self.created:
+                return ok(returncode=1)
+            label = self.created[self.created.index("--label") + 1].split("=", 1)[1]
+            image = self.created[self.created.index("timeout") - 1]
+            return ok(f"{self.identity} {label} {image} false")
+        if args[1] == "start":
+            mount = next(part for part in self.created if part.endswith("dst=/reports"))
             source = next(part[4:] for part in mount.split(",") if part.startswith("src="))
             from pathlib import Path
 
             target = Path(source)
-            target.mkdir(parents=True, exist_ok=True)
             if self.export_bytes is not None:
                 (target / "benchmark.json").write_text(self.export_bytes)
             elif self.document is not None:
@@ -73,15 +75,41 @@ class Docker:
             return ok(returncode=self.container_code)
         if args[1] == "ps":
             return ok(self.cleanup_stdout)
+        if args[1] == "rm":
+            self.created = None
         if args[1] in ("stop", "rm"):
             return ok()
         raise AssertionError("unexpected docker call: " + repr(args))
 
-    def container_name(self):
-        for args in self.calls:
-            if args[1] == "run":
-                return args[args.index("--name") + 1]
-        return None
+
+@pytest.fixture(autouse=True)
+def prepared_workspace(tmp_path, monkeypatch):
+    from repo.verification import VerificationError
+
+    def git(*args):
+        subprocess.run(["git", "-C", tmp_path, *args], check=True, capture_output=True)
+
+    git("init")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    )
+
+    def prepare(context, docker, target):
+        assert target == "protocol-http"
+        if docker.missing_buildx:
+            raise VerificationError("docker-unavailable", 3)
+        if docker.build_code:
+            raise VerificationError("image-build-failed")
+        return "sha256:" + "a" * 64, context.sources["public"].root
+
+    monkeypatch.setattr(runner, "prepare", prepare)
 
 
 def attempt(identity="attempt-0000", outcome="completed", phase="measured", **extra):
@@ -218,22 +246,22 @@ def test_successful_run_writes_validated_report_and_uses_one_owned_container(tmp
     saved = json.loads(result.path.read_text())
     assert saved["outcomes"]["correct_by_deadline"] == 1
     assert saved["status"]["cleanup"]["result"] == "verified"
-    run_call = next(args for args in docker.calls if args[1] == "run")
+    run_call = next(args for args in docker.calls if args[1] == "create")
     name = run_call[run_call.index("--name") + 1]
-    assert name.startswith("whalerein-bench-")
+    assert name.startswith("wr-verify-benchmark-")
     # Isolation: no network, private tmpfs, only this run's export mounted.
     assert run_call[run_call.index("--network") + 1] == "none"
     assert any(part.startswith("/tmp:") for part in run_call)
-    assert run_call[-1] == "benchmark"
+    assert run_call[-1] == "tests/integration/benchmark/main.py"
     stopped = {args[-1] for args in docker.calls if args[1] in ("stop", "rm")}
-    assert stopped == {name}
+    assert stopped == {docker.identity}
 
 
 def test_benchmark_entry_point_is_distinct_from_the_correctness_suite(tmp_path):
     docker = Docker(document())
     run(tmp_path, docker)
-    run_call = next(args for args in docker.calls if args[1] == "run")
-    assert run_call[-1] == "benchmark"
+    run_call = next(args for args in docker.calls if args[1] == "create")
+    assert run_call[-1] == "tests/integration/benchmark/main.py"
     assert "-m" not in run_call and "pytest.ini" not in " ".join(run_call)
 
 
@@ -261,7 +289,7 @@ def test_existing_report_in_the_output_directory_is_rejected(tmp_path):
     output = tmp_path / "report"
     output.mkdir()
     (output / "benchmark.json").write_text("{}")
-    with pytest.raises(UsageError, match="already contains a benchmark report"):
+    with pytest.raises(UsageError, match="output directory already exists"):
         runner.run(tmp_path, Docker(document()), runner.BenchRequest(), output)
 
 
@@ -291,7 +319,7 @@ def test_a_cadence_that_cannot_settle_before_the_deadline_is_a_usage_error():
 def test_cadence_is_recorded_and_reaches_the_container(tmp_path):
     docker = Docker(document())
     run(tmp_path, docker, cadence_ms=20)
-    run_call = next(args for args in docker.calls if args[1] == "run")
+    run_call = next(args for args in docker.calls if args[1] == "create")
     probe = next(part for part in run_call if part.startswith("WHALEREIN_BENCHMARK_CONFIG="))
     configuration = json.loads(probe.split("=", 1)[1])
     assert configuration["cadence_ms"] == 20
@@ -303,7 +331,7 @@ def test_default_cadence_matches_the_streaming_scenario():
 
 
 def test_missing_buildx_is_a_prerequisite_failure(tmp_path):
-    with pytest.raises(ToolMissingError, match="Docker buildx is required"):
+    with pytest.raises(ToolMissingError, match="docker-unavailable"):
         run(tmp_path, Docker(document(), missing_buildx=True))
 
 
@@ -312,8 +340,8 @@ def test_build_failure_is_invalid_execution_with_no_invented_attempts(tmp_path):
     result = run(tmp_path, docker)
     assert result.exit_code == 1
     assert result.document["status"]["state"] == "invalid"
-    assert any("image build" in reason for reason in result.document["status"]["reasons"])
-    assert not any(args[1] == "run" for args in docker.calls)
+    assert any("image-build" in reason for reason in result.document["status"]["reasons"])
+    assert not any(args[1] == "create" for args in docker.calls)
 
 
 def test_missing_export_is_invalid_and_explicit(tmp_path):
@@ -348,7 +376,7 @@ def test_interruption_keeps_partial_evidence_and_reports_130(tmp_path, monkeypat
     original = docker.run
 
     def interrupt_on_run(argv, cwd, **kwargs):
-        if tuple(map(str, argv))[1] == "run":
+        if tuple(map(str, argv))[1] == "start":
             raise KeyboardInterrupt
         return original(argv, cwd, **kwargs)
 

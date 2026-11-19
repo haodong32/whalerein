@@ -274,7 +274,7 @@ def test_native_remote_session_create_and_reuse(scenario, paired_device):
     assert reused["session_id"] == session
     assert any(item["session_id"] == session for item in paired_device.sessions(scenario.host))
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic fixture", delivery="start-if-idle")["receipt"]['status'] == 'succeeded'
+    assert paired_device.send_confirmed(session, "synthetic fixture", delivery="start-if-idle")['status'] == 'succeeded'
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -1211,18 +1211,9 @@ def test_native_fork_proven_concurrent_watches(scenario, paired_device):
     second = Device(second_dir)
     invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
     second.pair(invitation["pairingUri"])
-    parent_tail = scenario.tail(paired_device, parent)
-    child_tail = scenario.tail(second, child)
+    parent_tail = scenario.tail(paired_device, parent, baseline=True)
+    child_tail = scenario.tail(second, child, baseline=True)
     wait(lambda: scenario.request("watches") == 2, timeout=8, process=scenario.native)
-    def baseline_seen(process):
-        for line in Path(process.output.name).read_text().splitlines():
-            try:
-                if json.loads(line).get("data", {}).get("event", {}).get("type") == "reset":
-                    return True
-            except (ValueError, AttributeError):
-                pass
-        return False
-    wait(lambda: baseline_seen(parent_tail) and baseline_seen(child_tail), timeout=8, process=scenario.native)
     scenario.model.plan(hold=True)
     scenario.request("start", sessionId=parent)
     scenario.request("start", sessionId=child)
@@ -1437,10 +1428,8 @@ def test_native_approval_refuses_a_stale_guard(scenario, paired_device):
         code, values = paired_device.invoke(
             "session", "approval", "approve", "--request", approval["approval_id"], "--digest", digest,
             "--version", str(version), success=False)
-        # The Host rejects an admission guard before journaling the command, so
-        # the client receives no authenticated result and reports the outcome as
-        # unknown. The definitive approval codes remain the adapter contract.
-        assert code == 7 and values[-1]["error"]["code"] == "unknown"
+        # The Host journals a definitive rejection before authorizing the approval.
+        assert code == 8 and values[-1]["error"]["code"] == "approval_version_mismatch"
         assert values[-1].get("data") is None
     assert scenario.request("effects")["count"] == 0
     paired_device.resolve("approve", approval)
@@ -1461,7 +1450,7 @@ def test_native_approval_refuses_an_expired_guard(scenario, paired_device):
     code, values = paired_device.invoke(
         "session", "approval", "approve", "--request", approval["approval_id"], "--digest", approval["digest"],
         "--version", str(approval["version"]), success=False)
-    assert code == 7 and values[-1]["error"]["code"] == "unknown"
+    assert code == 8 and values[-1]["error"]["code"] == "approval_expired"
     assert values[-1].get("data") is None
     assert scenario.request("effects")["count"] == 0
 
@@ -1568,16 +1557,16 @@ def test_native_delivery_queue_and_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan(hold=True)
-    first = paired_device.send(session, "synthetic initial", delivery="start-if-idle")["receipt"]
+    first = paired_device.send_confirmed(session, "synthetic initial", delivery="start-if-idle")
     assert first["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")["receipt"]
+    queued = paired_device.send_confirmed(session, "synthetic queued")
     assert queued["delivery_id"] and queued["delivery_id"] != first["delivery_id"]
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
     )
-    steered = paired_device.send(session, "synthetic steer", delivery="steer")["receipt"]
+    steered = paired_device.send_confirmed(session, "synthetic steer", delivery="steer")
     assert steered["delivery_id"] not in (first["delivery_id"], queued["delivery_id"])
     scenario.model.release.set()
     scenario.wait_idle(session, assistant_count=2)
@@ -1593,8 +1582,7 @@ def test_native_idle_steer(scenario, paired_device):
     scenario.request("enable-delivery-for-test")
     session = scenario.create()
     scenario.model.plan()
-    receipt = paired_device.send(session, "synthetic idle steer", delivery="steer")["receipt"]
-    assert receipt["delivery_id"]
+    paired_device.send_confirmed(session, "synthetic idle steer", delivery="steer")
     scenario.wait_idle(session)
 
 
@@ -1604,12 +1592,16 @@ def test_native_start_if_idle_busy(scenario, paired_device):
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic initial", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
+    text = "synthetic busy"
     code, values = paired_device.invoke(
-        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic busy",
+        "session", "send", session, "--detach", "--delivery", "start-if-idle", "--", text,
         success=False,
     )
+    code, result = paired_device.settle_detached_delivery(
+        code, values[-1], session, text, "start-if-idle"
+    )
     assert code == 8
-    assert values[-1]["error"]["code"] == "conflict"
+    assert result["error"]["code"] == "conflict"
     assert scenario.model.calls == 1
     scenario.model.release.set()
     scenario.wait_idle(session)
@@ -1622,7 +1614,7 @@ def test_native_interrupt_keeps_queued_delivery(scenario, paired_device):
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queued")["receipt"]
+    queued = paired_device.send_confirmed(session, "synthetic queued")
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
@@ -1645,7 +1637,7 @@ def test_native_steer_after_interrupt(scenario, paired_device):
     paired_device.send(session, "synthetic running", delivery="start-if-idle")
     assert scenario.model.started.wait(timeout=15)
     paired_device.interrupt(session)
-    receipt = paired_device.send(session, "synthetic after interrupt", delivery="steer")["receipt"]
+    receipt = paired_device.send_confirmed(session, "synthetic after interrupt", delivery="steer")
     assert receipt["delivery_id"]
     scenario.model.release.set()
     wait(
@@ -1661,7 +1653,7 @@ def test_native_start_if_idle_after_local_start_race(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("arm-start-if-idle-race")
-    receipt = paired_device.send(session, "synthetic remote race", delivery="start-if-idle")["receipt"]
+    receipt = paired_device.send_confirmed(session, "synthetic remote race", delivery="start-if-idle")
     assert receipt["delivery_id"]
     assert scenario.model.started.wait(timeout=15)
     wait(
@@ -1789,7 +1781,7 @@ def test_native_pending_queue_concurrent_mutations(scenario, paired_device):
     other.sessions(scenario.host)
     item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        edits = [executor.submit(device.invoke, "queue", "edit", "--session", session, "--item", item, value, success=False) for device, value in ((paired_device, "edit first fixture"), (other, "edit second fixture"))]
+        edits = [executor.submit(device.invoke, "session", "queue", "edit", "--session", session, "--item", item, value, success=False) for device, value in ((paired_device, "edit first fixture"), (other, "edit second fixture"))]
         results = [future.result() for future in edits]
     assert all(code == 0 for code, _ in results)
     current = paired_device.call("session", "queue", "list", "--session", session)
@@ -1817,7 +1809,7 @@ def test_native_pending_queue_local_remote_race(scenario, paired_device):
     item = paired_device.call("session", "queue", "list", "--session", session)["items"][0]["item_id"]
     with ThreadPoolExecutor(max_workers=2) as executor:
         local = executor.submit(scenario.request, "queue-remove-direct", sessionId=session, itemId=item)
-        remote = executor.submit(paired_device.invoke, "queue", "edit", "--session", session, "--item", item, "race fixture", success=False)
+        remote = executor.submit(paired_device.invoke, "session", "queue", "edit", "--session", session, "--item", item, "race fixture", success=False)
         assert local.result()["accepted"]
         code, envelope = remote.result()
     assert code == 0 or envelope[-1]["error"]["code"] in ("not_found", "unknown")
@@ -1984,11 +1976,21 @@ def test_native_remote_model_selection_preserves_pending_approval(scenario, pair
     wait(lambda: bool(paired_device.approvals(session)), process=scenario.native)
     approval = paired_device.approvals(session)[0]
     before = scenario.request("state", sessionId=session)
+    current = paired_device.call("session", "model", "get", "--session", session)["next"] or {}
+    effective = (current.get("provider"), current.get("model"))
     catalog = paired_device.call("session", "models", "--host", scenario.host)
-    group = next(group for group in catalog["groups"] if group["models"])
-    receipt = paired_device.call("session", "model", "set", "--session", session,
-                                 "--provider", group["id"], "--model", group["models"][0]["id"])
+    provider, model = next(
+        (group["id"], entry["id"])
+        for group in catalog["groups"]
+        for entry in group["models"]
+        if (group["id"], entry["id"]) != effective
+    )
+    receipt = paired_device.call(
+        "session", "model", "set", "--session", session, "--provider", provider, "--model", model
+    )
     assert receipt["status"] == "succeeded"
+    selected = receipt["model_selection"]["selected"]
+    assert (selected["provider"], selected["model"]) == (provider, model)
     after = scenario.request("state", sessionId=session)
     assert after["pendingInputCount"] == before["pendingInputCount"]
     assert [item["approval_id"] for item in paired_device.approvals(session)] == [approval["approval_id"]]
@@ -2191,7 +2193,8 @@ def test_native_queue_order_and_promotion_guard(scenario, paired_device):
     remote = paired_device.call("session", "queue", "list", "--session", session)
     assert [item["item_id"] for item in remote["items"]] == source_ids
     assert all(item["placement"] == "QUEUED" for item in remote["items"])
-    assert set(remote) == {"session_id", "available", "running", "items"}
+    assert set(remote) == {"session_id", "available", "running", "items", "target"}
+    assert remote["target"] == {"host_id": scenario.host, "session_id": session}
     assert all(set(item) == {"item_id", "placement", "delivery_id", "blocks", "actions"} for item in remote["items"])
     assert scenario.request("queue-promote", sessionId=session)["id"] == source_ids[0]
     promoted = paired_device.call("session", "queue","list","--session",session)
@@ -2267,7 +2270,7 @@ def test_native_delivery_completion_race(scenario, paired_device, mode):
     assert scenario.model.started.wait(timeout=15)
     scenario.request("arm-delivery-barrier")
     with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(paired_device.send, session, "synthetic raced delivery", mode)
+        pending = executor.submit(paired_device.send_confirmed, session, "synthetic raced delivery", mode)
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=10, process=scenario.native)
             scenario.model.release.set()
@@ -2636,15 +2639,16 @@ def test_native_steer_during_abort_targets_next_turn(scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     scenario.request("arm-delivery-barrier")
     scenario.request("arm-abort-steer-observation", sessionId=session)
+    text = "synthetic during abort"
     with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(paired_device.send, session, "synthetic during abort", "steer")
+        pending = executor.submit(paired_device.send, session, text, "steer")
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=10, process=scenario.native)
             other.interrupt(session)
-            receipt = pending.result(timeout=20)
+            submission = pending.result(timeout=20)
         finally:
             scenario.request("release-delivery-barrier")
-    assert receipt["delivery_id"]
+    paired_device.confirm_detached_delivery(submission, session, text, "steer")
     observation = scenario.request("abort-steer-observation")
     assert observation == {"aborted": True, "nextTurn": True}
     scenario.model.release.set()
@@ -2660,9 +2664,11 @@ def test_native_delivery_unknown_survives_restart(scenario, paired_device):
     session = scenario.create()
     scenario.model.plan()
     scenario.request("arm-delivery-receipt-loss")
-    code, values = paired_device.invoke("session", "send", "--detach", session, "synthetic lost reply", success=False)
+    text = "synthetic lost reply"
+    code, values = paired_device.invoke("session", "send", "--detach", session, text, success=False)
+    code, outcome = paired_device.settle_detached_delivery(code, values[-1], session, text, None)
     assert code != 0
-    assert values[-1]["error"]["code"] == "unknown"
+    assert outcome["error"]["code"] == "unknown"
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
@@ -2688,7 +2694,7 @@ def test_native_delivery_receipt_identity_after_restart(scenario, paired_device)
     scenario.model.plan(hold=True)
     paired_device.send(session, "synthetic initial")
     assert scenario.model.started.wait(timeout=15)
-    queued = paired_device.send(session, "synthetic queue")["receipt"]
+    queued = paired_device.send_confirmed(session, "synthetic queue")
     wait(
         lambda: queued["delivery_id"] in scenario.request("inbox-metadata", sessionId=session)["ids"],
         process=scenario.native,
@@ -2721,7 +2727,7 @@ def test_native_queue_real_receipt_correlation(scenario, paired_device):
     assert scenario.model.started.wait(timeout=15)
     assert scenario.request("queue-read", sessionId=session)["available"]
     paired_device.sessions(scenario.host)
-    receipt=paired_device.send(session,"synthetic queued",delivery="enqueue-after-run")["receipt"]
+    receipt = paired_device.send_confirmed(session, "synthetic queued", delivery="enqueue-after-run")
     assert receipt["status"] == "succeeded" and receipt["delivery_id"]
     queue=paired_device.call("session", "queue","list","--session",session)
     assert len(queue["items"]) == 1 and queue["items"][0]["delivery_id"] == receipt["delivery_id"]
@@ -2746,10 +2752,14 @@ def test_native_start_if_idle_rejects_local_start_before_observation(scenario, p
     session = scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("arm-precheck-running-race")
+    text = "synthetic remote attempt"
     code, output = paired_device.invoke(
-        "session", "send", "--detach", session, "--delivery", "start-if-idle", "synthetic remote attempt", success=False,
+        "session", "send", "--detach", session, "--delivery", "start-if-idle", text, success=False,
     )
-    assert code == 8 and output[-1]["error"]["code"] == "conflict"
+    code, outcome = paired_device.settle_detached_delivery(
+        code, output[-1], session, text, "start-if-idle"
+    )
+    assert code == 8 and outcome["error"]["code"] == "conflict"
     assert scenario.model.started.wait(timeout=15)
     assert scenario.model.calls == 1
     scenario.model.release.set()
@@ -2776,7 +2786,10 @@ def test_native_delivery_unknown_after_completion_race(scenario, paired_device):
         finally:
             scenario.request("release-delivery-barrier")
         code, values = pending.result(timeout=20)
-    assert code != 0 and values[-1]["error"]["code"] == "unknown"
+    code, outcome = paired_device.settle_detached_delivery(
+        code, values[-1], session, "synthetic raced unknown", None
+    )
+    assert code != 0 and outcome["error"]["code"] == "unknown"
     scenario.wait_idle(session, assistant_count=2)
     calls = scenario.model.calls
     status, _receipt = scenario.replay_command(paired_device)
@@ -2841,7 +2854,7 @@ def _native_queue_revocation_barrier(scenario, paired_device, phase):
     paired_device.sessions(scenario.host)
     assert scenario.request("arm-channel-queue-barrier",config={"phase":phase})["armed"]
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future=executor.submit(paired_device.invoke,"queue","remove","--session",session,"--item",item,success=False)
+        future=executor.submit(paired_device.invoke,"session","queue","remove","--session",session,"--item",item,success=False)
         try:
             wait(lambda:scenario.request("channel-queue-barrier")["entered"],timeout=15,process=scenario.native)
             before=scenario.request("queue-native-ids",sessionId=session)["ids"]
@@ -3002,7 +3015,7 @@ def test_native_queue_concurrent_replays_and_private_receipts(scenario, paired_d
     assert scenario.request("count-queue-mutations")["armed"]
     assert scenario.request("arm-channel-queue-barrier", config={"phase":"pre-native"})["armed"]
     with ThreadPoolExecutor(max_workers=3) as executor:
-        original = executor.submit(paired_device.invoke, "queue", "edit", "--session", session, "--item", item, marker)
+        original = executor.submit(paired_device.invoke, "session", "queue", "edit", "--session", session, "--item", item, marker)
         try:
             wait(lambda: scenario.request("channel-queue-barrier")["entered"], timeout=15, process=scenario.native)
             replays = [executor.submit(scenario.replay_command, paired_device) for _ in range(2)]
@@ -3087,7 +3100,7 @@ def test_native_delivery_privacy_in_receipt_or_diagnostics(scenario, paired_devi
     assert result.returncode == 0
     assert marker not in result.stdout and marker not in result.stderr
     envelope = json.loads(result.stdout.splitlines()[-1])
-    receipt = envelope["data"]
+    receipt = paired_device.confirm_detached_delivery(envelope["data"], session, marker, None)
     assert receipt["delivery_id"] and receipt["command_id"]
     scenario.wait_idle(session)
     with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
@@ -3117,8 +3130,9 @@ def test_native_delivery_concurrent_replays_reach_source_once(scenario, paired_d
     baseline = scenario.request("gx-user-delivery-count", sessionId=session)["count"]
     scenario.model.plan()
     scenario.request("arm-delivery-barrier")
+    text = "synthetic delivery"
     with ThreadPoolExecutor(max_workers=3) as executor:
-        original = executor.submit(paired_device.send, session, "synthetic delivery", mode)
+        original = executor.submit(paired_device.send, session, text, mode)
         try:
             wait(lambda: scenario.request("delivery-barrier-state")["entered"], timeout=15, process=scenario.native)
             futures = [executor.submit(scenario.replay_command, paired_device) for _ in range(2)]
@@ -3127,7 +3141,8 @@ def test_native_delivery_concurrent_replays_reach_source_once(scenario, paired_d
             assert outcomes[0][1]["commandId"] == outcomes[1][1]["commandId"]
         finally:
             scenario.request("release-delivery-barrier")
-        receipt = original.result(timeout=25)
+        submission = original.result(timeout=25)
+    receipt = paired_device.confirm_detached_delivery(submission, session, text, mode)
     assert receipt["command_id"] == outcomes[0][1]["commandId"]
     assert receipt["delivery_id"]
     scenario.wait_idle(session)

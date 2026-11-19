@@ -21,7 +21,7 @@ Host plugin runtime + FakeDSH fixture (Node.js, repo fixtures)
   current worktree on every fresh `up`. Access itself has no SecretStore
   abstraction; the file SecretStore in the contract belongs to the repository
   CLI. The iOS app continues to use its Keychain-backed SecretStore.
-- PostgreSQL runs in a disposable container with a per-run database. A fresh
+- PostgreSQL runs from the pinned deployment image in a disposable container with a per-run database. A fresh
   `up` creates a new container and database; an idempotent `up` reuses the
   current one; `down` removes the container, which removes the database. Nothing
   is written to a host volume.

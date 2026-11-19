@@ -40,12 +40,14 @@ def test_two_native_hosts_colliding_session_ids_require_explicit_routing(scenari
         assert code != 0 and values[-1]['error']['code'] == 'conflict'
         scenario.model.plan()
         result = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', '--host', scenario.host, "--detach")
-        assert result['receipt']['status'] == 'succeeded'
+        assert result["target"] == {"host_id": scenario.host, "session_id": shared}
+        paired_device.confirm_detached_delivery(result, shared, "synthetic route", "start-if-idle")
         scenario.wait_idle(shared)
         assert scenario.model.calls == 1 and other.model.calls == 0
         other.model.plan()
         result = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', '--host', other.host, "--detach")
-        assert result['receipt']['status'] == 'succeeded'
+        assert result["target"] == {"host_id": other.host, "session_id": shared}
+        paired_device.confirm_detached_delivery(result, shared, "synthetic route", "start-if-idle")
         other.wait_idle(shared)
         assert scenario.model.calls == 1 and other.model.calls == 1
         for host in (scenario.host, other.host):
@@ -93,7 +95,7 @@ def test_two_native_hosts_colliding_session_ids_require_explicit_routing(scenari
         assert other.request('gx-revoke-host-grant', deviceId=paired_device.identity['device_id'])['revoked']
         wait(lambda: other.host not in {row['host_id'] for row in paired_device.hosts()}, timeout=20)
         code, values = paired_device.invoke('session', 'interrupt', shared, '--host', other.host, success=False)
-        assert code != 0 and values[-1]['error']['code'] == 'not_found'
+        assert code == 4 and values[-1]['error']['code'] == 'forbidden'
         scenario.model.plan()
         accepted = paired_device.call('session', 'send', shared, '--delivery', 'start-if-idle', 'synthetic route', "--detach")
         assert accepted['receipt']['status'] == 'succeeded'

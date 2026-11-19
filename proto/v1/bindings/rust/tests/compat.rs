@@ -3,7 +3,7 @@
 //! These tests are the enforcement point for `proto/v1/WIRE.md`,
 //! `proto/v1/error_codes.json`, `proto/v1/compat/baseline.json`,
 //! `proto/v1/compat/vectors.json` and `proto/v1/compat/surface.json`. They run
-//! with `./repo test --project proto`, so a schema or document edit that is not
+//! with `./repo test proto`, so a schema or document edit that is not
 //! reflected in the golden artifacts fails before `./repo proto` can refresh a
 //! generated binding.
 

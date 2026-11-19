@@ -10,19 +10,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from . import __version__, doctor, proto, testing, toolchain
+from . import __version__, doctor, proto, targets, testing, toolchain
 from .benchmark import runner as benchmark
 from .diagnostics import sanitize
 from .errors import RepoError, UsageError
 from .output import Output
 from .paths import find_root
 from .process import Runner
-from .projects import load_projects, select_projects
+from .projects import load_projects
 from .reports.html import render
 from .reports.model import atomic_write, read_report
+from .verification import VerificationError
 
 
 class Parser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, allow_abbrev=False, **kwargs)
+
     def error(self, message):
         raise UsageError(f"{message}\nRun '{self.prog} --help' for usage.")
 
@@ -47,17 +51,17 @@ def common(suppress=False):
     return parser
 
 
-def build_parser():
+def build_parser(projects=()):
     parser = Parser(
         prog="./repo",
         description="WhaleRein repository engineering tasks. Run from the repository root.",
         parents=[common()],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  ./repo check --project core
-  ./repo test --project core --only reconnect
-  ./repo test --suite integration --group protocol
-  ./repo doctor --for test
+  ./repo check core
+  ./repo test core --only reconnect
+  ./repo test protocol-vectors
+  ./repo doctor integration
 
 Run './repo COMMAND --help' for command options.
 Run './repo projects' for project IDs and supported operations.
@@ -77,25 +81,26 @@ Full reference: tools/repo/README.md""",
         "bench": "Run the opt-in streaming-reply product benchmark in an isolated container.",
         "bench-compare": "Compare saved benchmark runs under the predeclared protocol.",
         "report": "Render saved JSON test results as offline HTML without running tests.",
-        "proto": "Generate committed Go/JS protocol bindings, or check their consistency.",
+        "recover": "Clean up resources still owned by an abandoned verification run.",
+        "proto": "Generate committed Go/JS protocol bindings.",
     }
     examples = {
         "projects": "  ./repo projects\n  ./repo projects --json",
-        "doctor": "  ./repo doctor\n  ./repo doctor --for coverage",
-        "fmt": "  ./repo fmt\n  ./repo fmt --project core --project cli",
-        "check": "  ./repo check\n  ./repo check --project repo",
-        "build": "  ./repo build\n  ./repo build --project access",
+        "doctor": "  ./repo doctor\n  ./repo doctor integration",
+        "fmt": "  ./repo fmt\n  ./repo fmt core",
+        "check": "  ./repo check\n  ./repo check repo\n  ./repo check proto",
+        "build": "  ./repo build\n  ./repo build access",
         "test": (
-            "  ./repo test --project core --only reconnect\n"
-            "  ./repo test --project core --coverage\n"
-            "  ./repo test --project core --list\n"
-            "  ./repo test --project repo --coverage\n"
-            "  ./repo test --suite integration --group protocol\n"
-            "  ./repo test --suite integration --group chain --parallel 2\n"
-            "  ./repo test --suite all"
+            "  ./repo test core --only reconnect\n"
+            "  ./repo test core --coverage\n"
+            "  ./repo test core --list\n"
+            "  ./repo test protocol-vectors\n"
+            "  ./repo test chain --parallel 2\n"
+            "  ./repo test integration"
         ),
-        "report": "  ./repo report .data/runs/my-check/report.json --output /tmp/test-report.html",
-        "proto": "  ./repo proto\n  ./repo proto --check",
+        "report": "  ./repo report .data/runs/my-check",
+        "recover": "  ./repo recover .data/runs/interrupted-check",
+        "proto": "  ./repo proto",
         "bench": (
             "  ./repo bench\n"
             "  ./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline\n"
@@ -111,25 +116,12 @@ Full reference: tools/repo/README.md""",
         notes = ""
         if name == "test":
             notes = (
-                "Iteration: select a project and matching --only cases; defer coverage.\n"
-                "Final validation: run affected-project coverage once after the final edit.\n"
-                "Bare test selects all unit projects. Integration scope follows changed behavior.\n"
-                "Startup reports scope and advisory historical wall time; it never skips tests.\n\n"
-                "Selection rules:\n"
-                "  --project is unit-only; --group is integration-only.\n"
-                "  Unit --only requires exactly one project; --only cannot use suite all.\n"
-                "  --coverage cannot combine with --only, --list or suite integration.\n"
-                "  --parallel requires integration, is incompatible with --list,\n"
-                "  and accepts 1..8.\n"
-                "  With suite all, coverage measures only the unit portion.\n"
-                "  --list may compile tests or build an image;\n"
-                "  Node static listing is unsupported.\n\n"
+                "Bare test selects unit targets. Integration targets are explicit.\n"
+                "Select a leaf for --only or --list. Use --coverage for unfiltered unit tests.\n"
+                "Use --parallel for Linux integration execution (1–8 shards).\n\n"
             )
         elif name == "doctor":
-            notes = (
-                "Without --for, probe basic tools. This does not verify package installation,\n"
-                "daemon readiness or deployment behavior.\n\n"
-            )
+            notes = "Without a target, probe the basic local toolchain.\n\n"
         sub = commands.add_parser(
             name,
             parents=[common(True)],
@@ -137,42 +129,19 @@ Full reference: tools/repo/README.md""",
             description=description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=notes
+            + targets.describe(name, projects)
             + "Examples:\n"
             + examples[name]
             + "\n\nFull reference: tools/repo/README.md",
         )
-        if name in ("fmt", "check", "build", "test"):
-            sub.add_argument(
-                "--project",
-                action="append",
-                metavar="ID",
-                help="exact project ID (repeatable); default: all applicable projects; "
-                "see ./repo projects",
-            )
-        if name == "doctor":
-            sub.add_argument(
-                "--for",
-                dest="task",
-                choices=("check", "build", "test", "coverage", "integration", "proto"),
-                help="check prerequisites for this task (default: basic tools)",
-            )
+        if name in ("fmt", "check", "build", "test", "doctor"):
+            sub.add_argument("target", nargs="?", metavar="TARGET", help="scope to select")
         if name == "test":
-            sub.add_argument(
-                "--suite",
-                choices=("unit", "integration", "all"),
-                default="unit",
-                help="test suite to run (default: unit)",
-            )
-            sub.add_argument(
-                "--group",
-                choices=("protocol", "storage", "transport", "chain", "native-dsh"),
-                help="select one integration group (default: all groups)",
-            )
             sub.add_argument(
                 "--integration-timeout",
                 type=int,
                 metavar="SECONDS",
-                help="integration execution deadline in seconds (default: 7200; build is separate)",
+                help="Linux integration run deadline in seconds (default: 7200)",
             )
             sub.add_argument(
                 "--only",
@@ -203,27 +172,19 @@ Full reference: tools/repo/README.md""",
                 type=Path,
                 metavar="DIR",
                 help="save report.json and report.html (default: unique .data/runs/ directory); "
-                "must not already contain a report",
+                "must be a fresh run directory",
             )
-        if name == "report":
             sub.add_argument(
-                "input",
+                "--simulator",
+                metavar="UDID",
+                help="select a native iOS simulator by UDID",
+            )
+        if name in {"report", "recover"}:
+            sub.add_argument(
+                "directory",
                 type=Path,
-                metavar="REPORT_JSON",
-                help="saved report.json from a test run",
-            )
-            sub.add_argument(
-                "--output",
-                type=Path,
-                required=True,
-                metavar="HTML_FILE",
-                help="destination HTML file (required)",
-            )
-        if name == "proto":
-            sub.add_argument(
-                "--check",
-                action="store_true",
-                help="check binding consistency instead of writing generated files",
+                metavar="RUN_DIRECTORY",
+                help="verification run directory",
             )
         if name == "bench":
             sub.add_argument(
@@ -295,7 +256,7 @@ Full reference: tools/repo/README.md""",
                 type=Path,
                 metavar="DIR",
                 help="save benchmark.json (default: unique .data/benchmarks/ directory); "
-                "must not already contain a benchmark report",
+                "must not already exist",
             )
         if name == "bench-compare":
             sub.add_argument(
@@ -326,9 +287,30 @@ Full reference: tools/repo/README.md""",
 
 
 def dispatch(args, root, runner):
+    if args.command == "recover":
+        from .runners.integration import recover_container
+        from .runners.ios import recovery_callbacks
+        from .verification import recover_run
+
+        directory = args.directory.resolve()
+        callbacks = {
+            "docker-container": lambda name, ownership, deadline: recover_container(
+                runner, root, name, ownership, deadline
+            ),
+            **recovery_callbacks(runner, directory),
+        }
+        outcome = recover_run(directory, callbacks)
+        runner.out.info("Recovery: " + outcome["status"])
+        return outcome, int(outcome["status"] != "complete")
     if args.command == "report":
-        atomic_write(args.output, render(read_report(args.input)))
-        return {"html": str(args.output)}, 0
+        directory = args.directory.resolve()
+        source = directory / "report.json"
+        if not source.is_file():
+            raise UsageError(f"expected a run directory containing report.json: {directory}")
+        destination = directory / "report.html"
+        atomic_write(destination, render(read_report(source)))
+        runner.out.info("Report: " + str(destination))
+        return {"json": str(source), "html": str(destination)}, 0
     if args.command == "bench-compare":
         from .benchmark import compare as benchmark_compare
         from .benchmark import summary as benchmark_summary
@@ -375,13 +357,9 @@ def dispatch(args, root, runner):
             "snapshot": result.document["environment"]["artifacts"],
             "errors": [sanitize(entry) for entry in result.errors],
         }, result.exit_code
-    if args.command == "proto":
-        return proto.run(runner, runner.out, root, check=args.check), 0
-    if args.command == "doctor":
-        data = doctor.run_doctor(runner, doctor.specs_for(args.task))
-        runner.out.info(doctor.format_doctor(data))
-        return data, 0 if data["ok"] else 3
-    projects = [] if args.command == "test" and args.suite == "integration" else load_projects(root)
+    if args.command == "proto" or (args.command == "check" and args.target == "proto"):
+        return proto.run(runner, runner.out, root, check=args.command == "check"), 0
+    projects = load_projects(root)
     if args.command == "projects":
         data = [p.as_dict() for p in projects]
         for p in data:
@@ -389,21 +367,57 @@ def dispatch(args, root, runner):
                 f"{p['id']:<12} {p['kind']:<8} {p['path']:<26} {', '.join(p['operations'])}"
             )
         return {"projects": data}, 0
-    selected = select_projects(projects, args.project)
+    target = targets.resolve(args.command, args.target, projects)
+    if args.command == "doctor":
+        data = doctor.run_doctor(runner, doctor.specs_for_target(target))
+        runner.out.info(doctor.format_doctor(data))
+        return data, 0 if data["ok"] else 3
     if args.command == "test":
+        if (args.only is not None or args.list_only) and (target is None or not target.leaf):
+            raise UsageError("--only and --list require a leaf target")
+        if args.list_only and target and target.project and target.project.kind == "node":
+            raise UsageError("Node static case listing is unsupported; select a different target")
+        if args.only is not None and not args.only.strip():
+            raise UsageError("--only requires nonempty text")
+        kind = target.kind if target else "unit"
+        if args.simulator is not None and kind != "ios":
+            raise UsageError("--simulator requires an iOS target")
+        if kind == "ios":
+            if any(
+                (
+                    args.coverage,
+                    args.parallel is not None,
+                    args.integration_timeout is not None,
+                )
+            ):
+                raise UsageError("iOS targets support --only, --list, --output, and --simulator")
+            from .runners.ios import run_ios
+
+            result = run_ios(
+                runner,
+                root,
+                target.name,
+                case_filter=args.only,
+                output=args.output,
+                simulator=args.simulator,
+                list_only=args.list_only,
+            )
+            return testing.saved_test_result(result, runner.out)
+        selected = [target.project] if target and target.project else projects
         request = testing.TestRequest(
-            args.suite,
-            tuple(p.id for p in selected),
-            args.only,
-            args.group,
-            args.coverage,
-            args.list_only,
-            args.integration_timeout,
-            args.parallel,
+            suite=kind,
+            projects=tuple(p.id for p in selected) if kind == "unit" else (),
+            only=args.only,
+            group=target.name if kind == "integration" and target.name != "integration" else None,
+            coverage=args.coverage,
+            list_only=args.list_only,
+            integration_timeout=args.integration_timeout,
+            parallel=args.parallel,
         )
-        request.validate(bool(args.project))
+        request.validate()
         return testing.run(root, selected, runner, request, args.output)
-    return toolchain.run(selected, runner, args.command, explicit=bool(args.project))
+    selected = [target.project] if target else projects
+    return toolchain.run(selected, runner, args.command, explicit=target is not None)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -418,7 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     previous_term = signal.signal(signal.SIGTERM, terminate)
     try:
-        parser = build_parser()
+        parser = build_parser(load_projects(find_root()) if "--help" in arguments else ())
         if not arguments:
             parser.print_help()
             return 0
@@ -435,11 +449,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             command,
             ok=code == 0,
             data=data,
-            error={"code": "command_failed", "message": "operation failed; inspect results"}
+            error={
+                "code": {2: "usage_error", 3: "tool_missing"}.get(code, "command_failed"),
+                "message": data.get("verification_error")
+                or {
+                    2: "No test cases match --only",
+                    3: "Blocked by prerequisites; inspect results",
+                    130: "Interrupted; inspect results",
+                }.get(code, "Operation failed; inspect results"),
+            }
             if code
             else None,
         )
         return code
+    except VerificationError as exc:
+        out.failure(command, UsageError(str(exc)) if exc.exit_code == 2 else RepoError(str(exc)))
+        return exc.exit_code
     except RepoError as exc:
         out.failure(command, exc)
         return exc.exit_code

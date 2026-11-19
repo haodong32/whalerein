@@ -25,7 +25,7 @@ def test_gx05_native_default_open_capabilities_preserve_existing_operations(scen
     assert code != 0 and values[-1]["error"]["code"] != "unsupported_capability"
     assert scenario.request("question-root-probe", sessionId=session)["answered"]
     scenario.model.plan()
-    assert paired_device.send(session, "synthetic baseline", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
+    paired_device.send_confirmed(session, "synthetic baseline", delivery="start-if-idle")
     scenario.wait_idle(session)
     assert scenario.model.calls == 1
 
@@ -131,14 +131,21 @@ def test_gx05_native_disable_one_inflight_mutation(operation, scenario, paired_d
         scenario.model.plan()
     if operation == "model":
         catalog = paired_device.call('session', 'models', "--host", scenario.host)
-        group = next(group for group in catalog["groups"] if group["models"])
-        selection = ["session", "model", "set", "--session", session, "--provider", group["id"], "--model", group["models"][0]["id"]]
+        group = next(group for group in catalog["groups"] if len(group["models"]) >= 2)
+        model_args = ["session", "model", "set", "--session", session, "--provider", group["id"], "--model"]
+        selection = [*model_args, group["models"][0]["id"]]
+        alternative_selection = [*model_args, group["models"][1]["id"]]
+    delivery_modes = {"send": "enqueue-after-run", "steer": "steer"}
+    delivery = delivery_modes.get(operation)
+    text = "synthetic turn"
     args = {
-        "send": ["session", "send", session, "--detach", "--delivery", "enqueue-after-run", "synthetic turn"],
-        "steer": ["session", "send", session, "--detach", "--delivery", "steer", "synthetic turn"],
+        name: ["session", "send", session, "--detach", "--delivery", mode, text]
+        for name, mode in delivery_modes.items()
+    }
+    args.update({
         "model": selection if operation == "model" else [],
         "fork": ["session", "fork", session],
-    }
+    })
     if operation.startswith("queue_"):
         action = {"queue_edit":"edit", "queue_remove":"remove", "queue_promote":"steer"}[operation]
         args[operation] = ["session", "queue", action, "--session", session, "--item", item] + (["synthetic replacement"] if action == "edit" else [])
@@ -160,31 +167,41 @@ def test_gx05_native_disable_one_inflight_mutation(operation, scenario, paired_d
         data = result["data"]
         if operation.startswith("queue_"):
             original = data["command"]
-        elif operation in ("send", "steer"):
-            original = data["receipt"]
+        elif delivery:
+            original = paired_device.confirm_detached_delivery(data, session, text, delivery)
         else:
             original = data
         assert original["status"] == "succeeded"
         assert scenario.request("gx-held-native-status")["calls"] == 1
         paired_device.sessions(scenario.host)
         stage("new-request")
-        code, values = paired_device.invoke(*args[operation], success=False)
-        stage("new-result", exit=code, error_code=values[-1].get("error",{}).get("code"))
-        assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
+        new_args = alternative_selection if operation == "model" else args[operation]
+        code, values = paired_device.invoke(*new_args, success=False)
+        outcome = values[-1]
+        if delivery:
+            code, outcome = paired_device.settle_detached_delivery(
+                code, outcome, session, text, delivery
+            )
+        stage("new-result", exit=code, error_code=outcome.get("error",{}).get("code"))
+        assert code != 0 and outcome["error"]["code"] == "unsupported_capability"
         assert scenario.request("gx-held-native-status")["calls"] == 1
         # An independently enabled operation remains usable after withdrawal.
         assert paired_device.call('session', 'models', "--host", scenario.host)["groups"]
-        if operation in ("send", "steer"):
-            alternative = "steer" if operation == "send" else "enqueue-after-run"
-            assert paired_device.send(session, "synthetic independent", delivery=alternative)["receipt"]["status"] == "succeeded"
-        elif operation.startswith("queue_"):
+        if operation.startswith("queue_"):
             if operation == "queue_remove":
                 independent = paired_device.call('session', 'queue', "edit", "--session", session, "--item", independent_item, "synthetic independent")
             else:
                 independent = paired_device.call('session', 'queue', "remove", "--session", session, "--item", independent_item)
             assert independent["command"]["status"] == "succeeded"
         else:
-            assert paired_device.send(session, "synthetic independent", delivery="start-if-idle")["receipt"]["status"] == "succeeded"
+            alternative = {"send": "steer", "steer": "enqueue-after-run"}.get(
+                operation, "start-if-idle"
+            )
+            independent_text = "synthetic independent"
+            independent = paired_device.send(session, independent_text, delivery=alternative)
+            paired_device.confirm_detached_delivery(
+                independent, session, independent_text, alternative
+            )
         assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
         stage("done")
     finally:
@@ -209,7 +226,7 @@ def test_gx05_native_disable_open_answer_during_claim(scenario, paired_device):
     assert batch["phase"] == "QUESTION_OPEN" and batch["answerable"]
     answer = scenario.directory / "gx-open-answer.json"
     answer.write_text(json.dumps({"answers":[{"id":"q1", "selected":["Yes"]}]}))
-    args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-open-answer"]
+    args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-open-answer"]
     assert scenario.request("gx-hold-question-claim")["armed"]
     process = subprocess.Popen(paired_device.args(*args), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     released = False
@@ -226,7 +243,7 @@ def test_gx05_native_disable_open_answer_during_claim(scenario, paired_device):
         # existing claim, not complete disable/teardown of the local provider.
         assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
         next_batch = paired_device.call('session', 'question', 'list', "--session", session)["batches"][0]
-        next_args = ["session", "question", "answer", session, "--batch", next_batch["batch_id"], "--epoch", next_batch["source_epoch"], "--version", str(next_batch["version"]), "--digest", next_batch["digest"], "--phase", next_batch["phase"], "--input", str(answer)]
+        next_args = ["session", "question", "answer", "--session", session, "--batch", next_batch["batch_id"], "--epoch", next_batch["source_epoch"], "--version", str(next_batch["version"]), "--digest", next_batch["digest"], "--phase", next_batch["phase"], "--input", str(answer)]
         code, values = paired_device.invoke(*next_args, success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
     finally:
@@ -254,13 +271,13 @@ def test_gx05_native_disable_continued_answer_during_admission(scenario, paired_
     assert batch["phase"] == "QUESTION_CONTINUED" and batch["answerable"]
     answer = scenario.directory / "gx-continued-answer.json"
     answer.write_text(json.dumps({"answers":[{"id":"q1", "selected":["Yes"]}]}))
-    args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-continued-answer"]
+    args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer), "--command-id", "gx-continued-answer"]
     assert scenario.request("gx-hold-continued-answer")["armed"]
     process = subprocess.Popen(paired_device.args(*args), cwd=ROOT, env=paired_device.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: scenario.request("gx-held-continued-status")["entered"], timeout=15)
         assert scenario.request("gx-disable-one-capability", config={"operation":"question_continued"})["disabled"]
-        next_args = ["session", "question", "answer", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
+        next_args = ["session", "question", "answer", "--session", session, "--batch", batch["batch_id"], "--epoch", batch["source_epoch"], "--version", str(batch["version"]), "--digest", batch["digest"], "--phase", batch["phase"], "--input", str(answer)]
         code, values = other.invoke(*next_args, success=False)
         assert code != 0 and values[-1]["error"]["code"] == "unsupported_capability"
         assert scenario.request("gx-held-continued-status")["calls"] == 0

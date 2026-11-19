@@ -96,8 +96,7 @@ def test_journey_first_self_hosted_message(scenario):
     watch = device.start_watch("session", "watch", session, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
-        sent = device.send(session, "first self-hosted message")["receipt"]
-        assert sent["status"] == "succeeded" and sent["delivery_id"]
+        device.send_confirmed(session, "first self-hosted message")
         watch.wait(
             lambda value: any(
                 "first self-hosted message" in text for text in _texts(_event(value))
@@ -178,8 +177,7 @@ def test_journey_network_path_change_rebuilds_the_channel(scenario, paired_devic
             )
         except Exception as error:  # noqa: BLE001 - observation then re-raise
             raise
-        later = paired_device.send(session, "after path change")["receipt"]
-        assert later["status"] == "succeeded"
+        paired_device.send_confirmed(session, "after path change")
         watch.wait(
             lambda value: any("after path change" in text for text in _texts(_event(value))),
             timeout=30,
@@ -241,7 +239,7 @@ def test_journey_stale_approval_card_after_a_second_operator(scenario, paired_de
     stale_card = second.approvals(session)[0]
     assert stale_card["approval_id"] == first_card["approval_id"]
 
-    while_running = second.send(session, "operator B send fixture")["receipt"]
+    while_running = second.send_confirmed(session, "operator B send fixture")
     assert while_running["status"] == "succeeded"
     decision = paired_device.resolve("approve", first_card)
     assert decision["status"] in {"host_accepted", "succeeded"}
@@ -482,8 +480,7 @@ def test_journey_access_upgrade_during_pairing_and_requests(scenario):
     # Releasing the hung command requires a Host restart; afterwards a new send works once.
     restart_plugin(scenario)
     wait_online(device, scenario.host)
-    after = device.send(session, "after the Access upgrade")["receipt"]
-    assert after["status"] == "succeeded"
+    device.send_confirmed(session, "after the Access upgrade")
     assert effects(scenario, "sendUserMessage") == before + 2
 
 
@@ -609,8 +606,7 @@ def test_journey_overnight_disconnect_and_both_restarts(scenario, paired_device)
     assert effects(scenario, "resolveApproval") == 1
 
     scenario.dsh.process.control("idle", session_id=session)
-    after = paired_device.send(session, "after the gap")["receipt"]
-    assert after["status"] == "succeeded"
+    paired_device.send_confirmed(session, "after the gap")
     events = scenario.dsh.snapshot(session)["events"]
     for text in ("before the overnight gap", "after the gap"):
         assert sum(
@@ -684,8 +680,7 @@ def test_journey_cli_crash_then_next_day_recovery(scenario, paired_device):
     events = scenario.dsh.snapshot(session)["events"]
     assert all("crashed command fixture" not in json.dumps(event) for event in events)
 
-    sent = paired_device.send(session, "after the crash")["receipt"]
-    assert sent["status"] == "succeeded"
+    paired_device.send_confirmed(session, "after the crash")
     assert effects(scenario, "sendUserMessage") == before + 2
 
 
@@ -728,7 +723,7 @@ def test_journey_pairing_interrupted_after_commit_resumes(scenario, paired_devic
         drop_at="finish", listen_port=18080, upstream_port=upstream_port
     )
     try:
-        scenario.start_access()
+        scenario.start_access(listener_port=upstream_port)
         code, values = paired_device.invoke("host", "connect", "--invite-stdin", "--yes", stdin_text=proxy.route(link), success=False)
         assert code != 0 and proxy.lost.is_set()
         assert live_grants(scenario.schema, paired_device.identity["device_id"]) == 2
@@ -779,7 +774,7 @@ def test_journey_token_and_certificate_rotation_keeps_grants(scenario, paired_de
     watch = paired_device.start_watch("session", "watch", session, "--timeout", "30")
     try:
         watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
-        sent = paired_device.send(session, "after rotation")["receipt"]
+        sent = paired_device.send_confirmed(session, "after rotation")
         assert sent["status"] == "succeeded"
         watch.wait(
             lambda value: any("after rotation" in text for text in _texts(_event(value))),

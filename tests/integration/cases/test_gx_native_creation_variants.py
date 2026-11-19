@@ -40,7 +40,7 @@ def test_gx01_native_creation_placement_open_workflow(placement, scenario, paire
     assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
     select_model(paired_device, scenario.host, session)
     scenario.model.plan()
-    sent = paired_device.send(session, "synthetic gx variant", delivery="enqueue-after-run")["receipt"]
+    sent = paired_device.send_confirmed(session, "synthetic gx variant", delivery="enqueue-after-run")
     assert sent["status"] == "succeeded" and sent["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.request("question-enable-remote-fixture")["enabled"]

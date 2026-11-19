@@ -28,6 +28,7 @@ fn main() {
     let version = workspace_version(&workspace_root.join("Cargo.toml"))
         .or_else(|| core_package_version(&workspace_root.join("core/Cargo.toml")))
         .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rerun-if-env-changed=WHALEREIN_MOBILE_SOURCE");
     let revision = revision(&workspace_root, &version);
     println!("cargo:rustc-env=WHALERIN_MOBILE_REVISION={revision}");
     println!("cargo:rustc-env=WHALERIN_CORE_VERSION={version}");
@@ -44,6 +45,9 @@ fn main() {
 
 /// `<git shorthand>[-dirty] core:<version>`, with `unknown` fallbacks.
 fn revision(workspace_root: &Path, version: &str) -> String {
+    if let Ok(source) = std::env::var("WHALEREIN_MOBILE_SOURCE") {
+        return format!("source:{source} core:{version}");
+    }
     let head = git(workspace_root, &["rev-parse", "HEAD"])
         .map(|sha| sha.chars().take(12).collect::<String>())
         .filter(|sha| !sha.is_empty())

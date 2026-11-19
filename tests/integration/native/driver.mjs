@@ -40,6 +40,7 @@ export function apply(ctx) {
     let effects = 0
     let watchBarrier = null
     let gxOriginalSessionList = null
+    let creationHistoryFault = null
     let gxHeldPairCommitResult = null
     let gxOriginal = null
     let gxWaitActive = 0
@@ -732,14 +733,25 @@ let channelQueueBarrier = null
           }
           if (method === 'create-adapter') return host().adapter.executeHost({create_session:{}})
           if (method === 'create-native-default') return ctx.sessionController.create({})
-          if (method === 'creation-fail-next-history') {
+          if (method === 'creation-hold-history-failure') {
+            if (creationHistoryFault) throw new Error('history fault already armed')
             const adapter = host().adapter
             const original = adapter.readHistory
-            adapter.readHistory = async function(...args) {
-              adapter.readHistory = original
+            const fault = {adapter, original, attempts: 0}
+            creationHistoryFault = fault
+            adapter.readHistory = async function(target, ...args) {
+              if (target !== sessionId) return original.call(this, target, ...args)
+              fault.attempts++
               throw new Error('synthetic history read failure')
             }
             return {armed:true}
+          }
+          if (method === 'creation-release-history-failure') {
+            const fault = creationHistoryFault
+            if (!fault) throw new Error('history fault not armed')
+            fault.adapter.readHistory = fault.original
+            creationHistoryFault = null
+            return {restored:true, attempts:fault.attempts}
           }
           if (method === 'create-preferred') return host().adapter.executeHost({create_session:{preferred_session_id:sessionId}})
           if (method === 'create') return ctx.sessionController.create({ cwd: process.cwd() })

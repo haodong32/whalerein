@@ -30,10 +30,17 @@ def test_gx04_native_delivery_modes_recover_without_replay(delivery, fault, scen
     else:
         assert scenario.request("gx-drop-next-command-success")["armed"]
     stage("send")
-    code, envelopes = paired_device.invoke("session", "send", "--detach", session, "--delivery", delivery, "synthetic delivery", success=False)
+    text = "synthetic delivery"
+    code, envelopes = paired_device.invoke(
+        "session", "send", "--detach", session, "--delivery", delivery, text, success=False
+    )
     stage("sent", exit=code, error_code=envelopes[-1].get("error",{}).get("code"))
     if fault == "journal":
-        assert code == 7 and envelopes[-1]["error"]["code"] == "unknown"
+        code, outcome = paired_device.settle_detached_delivery(
+            code, envelopes[-1], session, text, delivery
+        )
+        stage("journal-settled", exit=code, error_code=outcome.get("error", {}).get("code"))
+        assert code == 7 and outcome["error"]["code"] == "unknown"
         pending = paired_device.call("operation", "list")["sends"]
         stage("pending", count=len(pending))
         assert len(pending) == 1
@@ -42,10 +49,13 @@ def test_gx04_native_delivery_modes_recover_without_replay(delivery, fault, scen
     else:
         assert code == 0
         operation = envelopes[-1]["data"]
-        receipt = operation["receipt"]
         drop_count = scenario.request("gx-drop-status")["count"]
-        stage("notification-receipt", has_delivery=bool(receipt.get("delivery_id")), drops=drop_count)
-        assert receipt["delivery_id"] and drop_count == 1
+        stage("notification-submitted", receipt_status=operation["receipt"]["status"], drops=drop_count)
+        assert drop_count == 1
+        receipt = paired_device.confirm_detached_delivery(
+            operation, session, text, delivery
+        )
+        stage("notification-receipt", has_delivery=True, drops=drop_count)
         request = operation["operation_id"]
     stage("wait-idle")
     scenario.wait_idle(session)

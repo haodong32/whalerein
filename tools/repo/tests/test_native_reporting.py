@@ -591,3 +591,97 @@ def test_rust_stderr_panic_keeps_only_the_source_location(tmp_path):
     assert result["tests"][0]["diagnostics"] == [
         {"phase": "test", "message": "Rust panic at core\\src\\sample.rs:42:9"}
     ]
+
+
+@pytest.mark.parametrize("only", [None, "line 10)"])
+def test_rustdoc_compile_output_matches_listed_cases(tmp_path, only):
+    from conftest import ok
+
+    from repo.projects import Project
+    from repo.runners.rust import collect as collect_rust
+
+    manifest = tmp_path / "Cargo.toml"
+    manifest.write_text('[package]\nname="p"\nversion="0.1.0"\n')
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "lib.rs").touch()
+    names = [f"src/lib.rs - api (line {line})" for line in (10, 14, 18)]
+    listing = "".join(f"{name}: test\n" for name in names)
+    execution = (
+        f"test {names[0]} - compile fail ... ok\n"
+        f"test {names[1]} - compile ... ok\n"
+        f"test {names[2]} ... ignored\n"
+        "test result: ok. 2 passed; 0 failed; 1 ignored;\n"
+    )
+    expected = [
+        (f"doctest::{name}", status)
+        for name, status in zip(names, ("passed", "passed", "skipped"), strict=True)
+    ]
+    if only:
+        execution = (
+            f"test {names[0]} - compile fail ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored;\n"
+        )
+        expected = expected[:1]
+    result = collect_rust(
+        Project("p", "rust", tmp_path, manifest, tmp_path),
+        FakeRunner(responses=[ok(""), ok(listing), ok(execution)]),
+        True,
+        only=only,
+    )
+    assert result["completeness"] == "complete"
+    assert [(case["id"], case["status"]) for case in result["tests"]] == expected
+
+
+@pytest.mark.parametrize("only", [None, "authorization::TestSecond"])
+def test_go_authorization_package_retains_distinct_filterable_case_ids(tmp_path, only):
+    from repo.process import ProcessResult
+    from repo.projects import Project
+    from repo.reports.model import validate_scope
+
+    package = "example.test/internal/adapters/authorization"
+    names = ("TestFirst", "TestSecond")
+    selected = names if only is None else names[1:]
+
+    def response(action, cases):
+        events = [
+            {
+                "Action": action,
+                "Package": package,
+                **({"Output": name + "\n"} if action == "output" else {"Test": name}),
+            }
+            for name in cases
+        ]
+        events.append({"Action": "pass", "Package": package})
+        return ProcessResult((), str(tmp_path), 0, stdout="\n".join(map(json.dumps, events)))
+
+    runner = FakeRunner(
+        responses=([response("output", names)] if only else []) + [response("pass", selected)]
+    )
+    project = Project("p", "go", tmp_path, tmp_path / "go.mod", tmp_path)
+    scope = collect(project, runner, execute=True, only=only)
+    scope["suite_id"] = "unit:go"
+    validate_scope(scope)
+    assert scope["completeness"] == "complete"
+    assert scope["tests"] == [{"id": f"{package}::{name}", "status": "passed"} for name in selected]
+    if only:
+        assert runner.calls[-1][0][-3:] == ("-run", "^TestSecond$", package)
+
+
+def test_go_redaction_collision_does_not_merge_native_outcomes_or_expose_values(tmp_path):
+    from repo.projects import Project
+    from repo.reports.model import validate_scope
+
+    names = ("TestCases", "TestCases/token=private-first", "TestCases/token=private-second")
+    events = [{"Action": "pass", "Package": "p", "Test": name} for name in names]
+    events.append({"Action": "pass", "Package": "p"})
+    project = Project("p", "go", tmp_path, tmp_path / "go.mod", tmp_path)
+    scope = collect(
+        project, FakeRunner(default_stdout="\n".join(map(json.dumps, events))), execute=True
+    )
+    scope["suite_id"] = "unit:go"
+    validate_scope(scope)
+    assert scope["completeness"] == "incomplete"
+    assert scope["errors"] == ["Go case IDs collide after redaction"]
+    assert scope["tests"] == [{"id": "p::TestCases", "status": "passed"}]
+    assert "private-first" not in json.dumps(scope) and "private-second" not in json.dumps(scope)

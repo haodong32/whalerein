@@ -798,9 +798,7 @@ def test_pairing_receipt_survives_lost_response_and_both_restarts(scenario):
 def test_delivery_queue_while_running(scenario, paired_device, session_id):
     """A remote queued command is accepted once while the current FakeDSH turn remains active."""
     scenario.dsh.start_running(session_id)
-    receipt = paired_device.send(session_id, "synthetic queued fixture")["receipt"]
-    assert receipt["status"] == "succeeded"
-    assert receipt["delivery_id"]
+    paired_device.send_confirmed(session_id, "synthetic queued fixture")
     snapshot = scenario.dsh.snapshot(session_id)
     assert snapshot["summary"]["running"]
     assert snapshot["summary"]["queuedPrompts"] == 1

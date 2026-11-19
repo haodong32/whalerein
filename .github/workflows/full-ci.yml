@@ -203,7 +203,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check generated protocol bindings
-        run: ./repo proto --check
+        run: ./repo check proto
 
       - name: Check Swift surface drift
         run: |
@@ -269,7 +269,7 @@ jobs:
 
       - name: Verify Windows repository process handling
         if: runner.os == 'Windows'
-        run: uv run --project tools/repo python -m repo test --project repo --only windows
+        run: uv run --project tools/repo python -m repo test repo --only windows
 
       - name: Check, build and test selected native projects
         env:

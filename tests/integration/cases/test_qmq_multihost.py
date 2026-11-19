@@ -22,6 +22,8 @@ def test_same_named_sessions_use_scoped_model_queue_and_question_reads(scenario,
         paired_device.pair(invitation["pairingUri"])
         assert scenario.request("test-enable-create")["enabled"]
         assert other.request("test-enable-create")["enabled"]
+        assert scenario.request("test-enable-gx")["enabled"]
+        assert other.request("test-enable-gx")["enabled"]
         shared = "qmq-shared-session"
         assert paired_device.call("session", "create", "--host", scenario.host, "--session-id", shared)["lifecycle_receipt"]["session_id"] == shared
         assert paired_device.call("session", "create", "--host", other.host, "--session-id", shared)["lifecycle_receipt"]["session_id"] == shared

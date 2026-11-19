@@ -38,8 +38,8 @@ def test_gx01_native_default_create_model_queue_open_answer(scenario, paired_dev
     assert any(row["session_id"] == session for row in paired_device.sessions(scenario.host))
     select_model(paired_device, scenario.host, session)
     scenario.model.plan()
-    sent = paired_device.send(session, "synthetic gx turn", delivery="enqueue-after-run")
-    assert sent["receipt"]["status"] == "succeeded" and sent["receipt"]["delivery_id"]
+    sent = paired_device.send_confirmed(session, "synthetic gx turn", delivery="enqueue-after-run")
+    assert sent["status"] == "succeeded" and sent["delivery_id"]
     scenario.wait_idle(session)
     assert scenario.request("question-enable-remote-fixture")["enabled"]
     assert scenario.request("question-start-remote-fixture", sessionId=session)["started"]
@@ -62,8 +62,9 @@ def test_gx01_native_continued_native_timeout_then_answer(scenario, paired_devic
     select_model(paired_device, scenario.host, session)
     scenario.model.plan("question", hold=True)
     try:
-        receipt = paired_device.send(session, "synthetic continued question", delivery="enqueue-after-run")
-        assert receipt["receipt"]["status"] == "succeeded" and receipt["receipt"]["delivery_id"]
+        paired_device.send_confirmed(
+            session, "synthetic continued question", delivery="enqueue-after-run"
+        )
         wait(lambda: scenario.request("question-projected", sessionId=session)["phases"] == ["QUESTION_CONTINUED"], timeout=15, process=scenario.native)
         batches = paired_device.call('session', 'question', 'list', "--session", session)["batches"]
         assert len(batches) == 1 and batches[0]["phase"] == "QUESTION_CONTINUED"
@@ -98,7 +99,11 @@ def test_gx02_native_fork_model_and_independent_history(scenario, paired_device)
     paired_device.sessions(scenario.host)
     select_model(paired_device, scenario.host, parent)
     scenario.model.plan()
-    assert paired_device.send(parent, "synthetic parent", delivery="enqueue-after-run")["receipt"]["status"] == "succeeded"
+    parent_text = "synthetic parent"
+    parent_send = paired_device.send(parent, parent_text, delivery="enqueue-after-run")
+    paired_device.confirm_detached_delivery(
+        parent_send, parent, parent_text, "enqueue-after-run"
+    )
     scenario.wait_idle(parent)
     paired_device.observe_history(parent)
     before = scenario.cached(paired_device, parent)
@@ -136,7 +141,10 @@ def test_gx03_native_queue_edit_remove_promote_interrupt_and_wait(scenario, pair
         assert scenario.model.started.wait(timeout=15)
         stage("enqueue")
         for _ in range(4):
-            assert paired_device.send(session, "synthetic pending", delivery="enqueue-after-run")["receipt"]["delivery_id"]
+            pending = paired_device.send(session, "synthetic pending", delivery="enqueue-after-run")
+            paired_device.confirm_detached_delivery(
+                pending, session, "synthetic pending", "enqueue-after-run"
+            )
         stage("queue_available")
         assert scenario.request("queue-read", sessionId=session)["available"]
         paired_device.sessions(scenario.host)
@@ -188,7 +196,7 @@ def test_gx03_native_queue_edit_remove_promote_interrupt_and_wait(scenario, pair
     stage("direct_steer")
     scenario.model.plan()
     direct = paired_device.send(session, "synthetic idle steer", delivery="steer")
-    assert direct["receipt"]["status"] == "succeeded" and direct["receipt"]["delivery_id"]
+    paired_device.confirm_detached_delivery(direct, session, "synthetic idle steer", "steer")
     assert paired_device.call('session', 'wait', session, "--timeout", "20")["reason"] == "idle"
 
 
@@ -208,9 +216,13 @@ def test_gx03_native_interrupt_acceptance_requires_confirmation(scenario, paired
     assert scenario.request("gx-hold-interrupt")["armed"]
     released = False
     try:
-        receipt = paired_device.interrupt(session)
-        assert receipt["status"] == "host_accepted"
+        code, values = paired_device.invoke("session", "interrupt", session, success=False)
+        assert code == 7 and values[-1]["error"]["code"] == "unknown"
         wait(lambda: scenario.request("gx-held-interrupt-status")["entered"], timeout=10)
+        pending = paired_device.call("operation", "list")["pending_commands"]
+        assert len(pending) == 1 and pending[0]["host_id"] == scenario.host
+        receipt = pending[0]
+
         def journal_status():
             with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as db:
                 row = db.execute("SELECT status FROM commands WHERE device_id=? AND command_id=?", (paired_device.identity["device_id"], receipt["command_id"])).fetchone()

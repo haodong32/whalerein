@@ -74,7 +74,7 @@ jobs:
             pull_request|merge_group) ;;
             *) git merge-base --is-ancestor "$revision" origin/main ;;
           esac
-          key=$(python3 tools/repo/src/repo/integration_ci.py key --revision "$revision")
+          key=$(PYTHONPATH=tools/repo/src python3 -m repo.integration_ci key --revision "$revision")
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/integration-passed
-          key: integration-pass-ubuntu-26.04-v1-${{ steps.inputs.outputs.key }}
+          key: integration-pass-ubuntu-26.04-v2-${{ steps.inputs.outputs.key }}
 
       - name: Decide whether to run
         id: selection
@@ -115,7 +115,7 @@ jobs:
               echo 'run=true' >> "$GITHUB_OUTPUT"
               ;;
             schedule)
-              prior=$(python3 tools/repo/src/repo/integration_ci.py cached --revision "$REVISION" --output .data/integration-passed/receipt.json)
+              prior=$(PYTHONPATH=tools/repo/src python3 -m repo.integration_ci cached --revision "$REVISION" --output .data/integration-passed/receipt.json)
               if [ "$CACHE_HIT" = true ] && [ -n "$prior" ]; then
                 echo "verified_revision=$prior" >> "$GITHUB_OUTPUT"
                 echo 'run=false' >> "$GITHUB_OUTPUT"
@@ -147,7 +147,7 @@ jobs:
       - name: Run the complete isolated suite
         if: steps.selection.outputs.run == 'true'
         id: tests
-        run: ./repo test --suite integration --output .data/runs/integration
+        run: ./repo test integration --output .data/runs/integration
 
       - name: Record complete success
         if: >-
@@ -157,7 +157,7 @@ jobs:
         env:
           REVISION: ${{ steps.inputs.outputs.revision }}
         run: >-
-          python3 tools/repo/src/repo/integration_ci.py record
+          PYTHONPATH=tools/repo/src python3 -m repo.integration_ci record
           --revision "$REVISION"
           --report .data/runs/integration/report.json
           --output .data/integration-passed/receipt.json
@@ -171,7 +171,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/integration-passed
-          key: integration-pass-ubuntu-26.04-v1-${{ steps.inputs.outputs.key }}
+          key: integration-pass-ubuntu-26.04-v2-${{ steps.inputs.outputs.key }}
 
       - name: Upload reports and verification record
         if: always()
@@ -181,6 +181,7 @@ jobs:
           path: |
             .data/runs/integration/report.json
             .data/runs/integration/report.html
+            .data/runs/integration/artifact-manifest.json
             .data/integration-passed/receipt.json
           include-hidden-files: true
           if-no-files-found: warn

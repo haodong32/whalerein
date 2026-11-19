@@ -238,7 +238,7 @@ enum FixtureCatalog {
                         blockId: "\(messageId)-block-0",
                         kind: .tool,
                         text: """
-                        $ ./repo test --project core
+                        $ ./repo test core
                         compiling whalerein-core v0.1.0
                         running 148 tests
                         test result: \(exitCode == 0 ? "ok" : "FAILED"). 148 passed; 0 failed

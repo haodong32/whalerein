@@ -31,14 +31,21 @@ func TestUndocumented(t *testing.T) {}
     }
 
 
-def test_export_rejects_compiled_case_without_authored_description(descriptions, tmp_path):
+def test_export_rejects_compiled_case_without_authored_description(
+    descriptions, tmp_path, monkeypatch
+):
     output = tmp_path / "tests/integration/fixtures"
     output.mkdir(parents=True)
-    (output / "store-cases.txt").write_text("TestMissingDescription\n")
+    monkeypatch.setattr(descriptions.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        descriptions,
+        "_test_names",
+        lambda path: {"TestMissingDescription"} if path.name == "store-tests" else set(),
+    )
     source = tmp_path / "access/internal/store"
     source.mkdir(parents=True)
     (source / "fixture_test.go").write_text(
         "package store\nfunc TestMissingDescription(t *testing.T) {}\n"
     )
     with pytest.raises(ValueError, match="Missing native test descriptions"):
-        descriptions.export(tmp_path)
+        descriptions.export(tmp_path, tmp_path)

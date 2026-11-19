@@ -16,7 +16,15 @@ def test_cleaned_unconfirmed_commit_retains_pending_until_host_revocation(scenar
     other.http_port = 3110
     other.env = scenario.env.copy()
     def sql(statement):
-        subprocess.run(['psql','-h','127.0.0.1','-p','55432','-U','postgres','-d','whalerein_test','-v','ON_ERROR_STOP=1','-c',f'SET search_path TO {scenario.schema}; {statement}'],check=True,capture_output=True,timeout=5)
+        result = subprocess.run(
+            [
+                'psql', '-h', '127.0.0.1', '-p', '55432', '-U', 'postgres',
+                '-d', 'whalerein_test', '-v', 'ON_ERROR_STOP=1', '-qAt', '-c',
+                f'SET search_path TO {scenario.schema}; {statement}',
+            ],
+            check=True, capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip()
     def invitation():
         return http('/v1/pairing/invitations', {'hostId':other.host}, scenario.admin)['pairingUri']
     try:
@@ -24,7 +32,29 @@ def test_cleaned_unconfirmed_commit_retains_pending_until_host_revocation(scenar
         sql("CREATE FUNCTION fail_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.host_confirmed THEN RAISE EXCEPTION 'fixture'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_confirmation BEFORE UPDATE ON pairing_outcomes FOR EACH ROW EXECUTE FUNCTION fail_confirmation()")
         code, _ = paired_device.invoke('host', 'connect', '--invite-stdin', '--yes', stdin_text=invitation(), success=False)
         assert code != 0
-        sql("DROP TRIGGER fail_confirmation ON pairing_outcomes; DROP FUNCTION fail_confirmation(); DELETE FROM pairing_operations WHERE host_id='host-integration-2'; DELETE FROM pairing_tokens WHERE host_id='host-integration-2'")
+        commit_row = (
+            "request_id = (SELECT commit_request_id FROM pairing_outcomes "
+            "WHERE host_id='host-integration-2' AND commit_binding_verified "
+            "AND NOT host_confirmed AND NOT host_confirmation_verified)"
+        )
+        # The stored COMMIT ACK can prove confirmation even after the token
+        # and operation records expire. Simulate request body cleanup too.
+        wait(lambda: sql(
+            f"SELECT count(*) FROM requests WHERE {commit_row} "
+            "AND (octet_length(request_body)>0 OR octet_length(result_body)>0)"
+        ) == "1", timeout=10)
+        sql(
+            "UPDATE requests SET request_body=''::bytea, result_body=''::bytea, "
+            f"bodies_cleared=true WHERE {commit_row}; "
+            "DROP TRIGGER fail_confirmation ON pairing_outcomes; "
+            "DROP FUNCTION fail_confirmation(); "
+            "DELETE FROM pairing_operations WHERE host_id='host-integration-2'; "
+            "DELETE FROM pairing_tokens WHERE host_id='host-integration-2'"
+        )
+        assert sql(
+            f"SELECT count(*) FROM requests WHERE {commit_row} AND bodies_cleared "
+            "AND octet_length(request_body)=0 AND octet_length(result_body)=0"
+        ) == "1"
         for _ in range(2):
             operation_id, _ = paired_device.call('operation', 'list')['pending_pairing']
             code, result = paired_device.invoke('operation', 'recover', operation_id, success=False)

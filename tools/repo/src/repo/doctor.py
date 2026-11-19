@@ -182,3 +182,33 @@ def specs_for(task):
     if task == "coverage":
         result.append(ToolSpec("cargo", ("llvm-cov", "--version")))
     return result
+
+
+def specs_for_target(target):
+    if target is None:
+        return specs_for(None)
+    if target.kind in ("integration", "proto"):
+        return specs_for(target.kind)
+    base = [spec for spec in TOOL_SPECS if spec.name in ("uv", "git")]
+    if target.kind == "ios":
+        return [
+            *base,
+            *(spec for spec in TOOL_SPECS if spec.name in ("cargo", "rustc", "protoc")),
+            ToolSpec("rustup", hint="install Rust and the iOS device and Simulator targets"),
+            ToolSpec("lipo", (), hint="install the Xcode command-line tools"),
+            ToolSpec("rsync", hint="install a local source mirroring tool"),
+            ToolSpec("xcodebuild", ("-version",), hint="install Xcode"),
+            ToolSpec("xcrun", ("simctl", "help"), hint="install an iOS Simulator runtime"),
+            *(
+                [spec for spec in TOOL_SPECS if spec.name in ("docker", "go", "node", "pnpm")]
+                if target.name == "ios-integration"
+                else []
+            ),
+        ]
+    names = {
+        "rust": ("cargo", "rustc", "protoc"),
+        "go": ("go",),
+        "node": ("node", "pnpm"),
+        "python": (),
+    }[target.project.kind]
+    return base + [spec for spec in TOOL_SPECS if spec.name in names]

@@ -306,7 +306,7 @@ adapter failures as the primary debugging target.
 
 ```bash
 pnpm install --frozen-lockfile
-./repo test --project dsh
+./repo test dsh
 ```
 
 The repository-only harness composes FakeDSH with the shared Host test harness:
@@ -447,7 +447,7 @@ process above.
 ```bash
 cd host/dsh
 pnpm test          # node:test with coverage thresholds
-# Repository gate: ./repo test --project dsh --coverage
+# Repository gate: ./repo test dsh --coverage
 ```
 
 Coverage thresholds in `package.json` are 90% line, 85% branch and 90%
@@ -479,8 +479,8 @@ against a fake Cordis context; MQTT client; host lifecycle and reload.
 The reproducible `native-dsh` integration group runs in the shared Docker image:
 
 ```bash
-./repo test --suite integration --group native-dsh
-./repo test --suite integration --group native-dsh --only test_native_browser
+./repo test native-dsh
+./repo test native-dsh --only test_native_browser
 ```
 
 See the [integration guide](../../tests/integration/README.md#native-dsh-and-browser-journeys)
@@ -551,7 +551,7 @@ successful partial content. Reconnect clients after changing transport limits.
 
 The large-message regression lives in
 `tests/integration/drivers/transport/mqtt-large-message.test.js`. Run
-`./repo test --suite integration --group transport` from the repository root. The test
+`./repo test transport` from the repository root. The test
 container owns its private broker and synthetic two MiB body; no host broker
 credentials are required and no user devices are paired or revoked.
 

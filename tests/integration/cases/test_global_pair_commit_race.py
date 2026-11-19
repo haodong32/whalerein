@@ -83,7 +83,11 @@ def test_revoke_then_ordinary_forget_allows_a_new_pairing(scenario, paired_devic
     assert revoked.returncode == 0 and json.loads(revoked.stdout)['data']['revoked']
     forgotten = subprocess.run([*common, 'device', 'forget'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
     assert forgotten.returncode == 0
-    assert json.loads(forgotten.stdout)['data'] == {'identity_forgotten': True, 'local_only': False}
+    assert json.loads(forgotten.stdout)['data'] == {
+        'identity_forgotten': True,
+        'local_only': False,
+        'remote_grant_may_remain': False,
+    }
     assert not (paired_device.data_dir / 'regional.json').exists()
     invitation = http('/v1/pairing/invitations', {'hostId': scenario.host}, scenario.admin)
     paired = subprocess.run([*common, 'host', 'connect', '--invite-stdin'], cwd=ROOT, env=env, input=invitation['pairingUri'], capture_output=True, text=True, timeout=25)

@@ -119,8 +119,8 @@ There is no second plugin to install.
 - Optional: cargo-llvm-cov and llvm-tools-preview for Rust coverage;
   DSH for real-host plugin development.
 
-Run `./repo doctor` to check the basic toolchains, or add
-`--for build|coverage|proto|integration` to check a specific workflow.
+Run `./repo doctor` to check the basic toolchains. Use `./repo doctor integration`
+or `./repo doctor proto` for target-specific prerequisites.
 
 ## Quickstart (self-hosted)
 
@@ -134,7 +134,7 @@ docker compose -f deploy/compose/stack.yaml up -d --build
 curl -sS http://127.0.0.1:8080/readyz
 
 # 3. Build the native CLI and install plugin workspace dependencies.
-./repo build --project cli
+./repo build cli
 pnpm install --frozen-lockfile
 
 # 4. In another terminal, start the plugin against real DSH.
@@ -163,12 +163,12 @@ See [deploy/README.md](deploy/README.md) for the Compose layout and smoke tests.
 
 ```bash
 ./repo projects                     # Project IDs and available operations
-./repo fmt --project core           # Write formatting changes
-./repo check --project core         # Format checks and static analysis
+./repo fmt core                     # Write formatting changes
+./repo check core                   # Format checks and static analysis
 ./repo build                        # Applicable native builds
 ./repo test                         # Unit tests only
-./repo test --project repo --coverage
-./repo test --suite integration     # Explicit, slower container suite
+./repo test repo --coverage
+./repo test integration             # Explicit, slower container suite
 ```
 
 Use the [repo command reference](tools/repo/README.md) for project selection,

@@ -43,7 +43,12 @@ def test_journey_suspended_client_resumes_native_stream(scenario, paired_device)
     session = scenario.create()
     watch = paired_device.start_watch("session", "watch", session, "--timeout", "90")
     try:
-        wait(lambda: scenario.request("watches") > 0, process=scenario.native)
+        target = {"host_id": scenario.host, "session_id": session}
+        watch.wait(
+            lambda value: _event(value).get("type") == "state"
+            and _event(value).get("session") == target,
+            timeout=20,
+        )
         scenario.model.plan(hold=True)
         paired_device.send(session, "native suspend fixture", delivery="start-if-idle")
         assert scenario.model.started.wait(timeout=15)
@@ -59,12 +64,15 @@ def test_journey_suspended_client_resumes_native_stream(scenario, paired_device)
         finally:
             continue_process(watch.process)
 
-        watch.wait(
+        first = watch.wait(
             lambda value: _event(value).get("type") == "message"
             and _event(value).get("role") == "ASSISTANT"
+            and _event(value).get("session") == target
             and any("native fixture response" in text for text in _texts(_event(value))),
             timeout=45,
         )
+        first_message_id = _event(first)["message_id"]
+        assert first_message_id
         time.sleep(0.3)
         reply = "native fixture response"
         assert assistant_texts(watch.values).count(reply) == 1
@@ -75,6 +83,9 @@ def test_journey_suspended_client_resumes_native_stream(scenario, paired_device)
         watch.wait(
             lambda value: _event(value).get("type") == "message"
             and _event(value).get("role") == "ASSISTANT"
+            and _event(value).get("session") == target
+            and bool(_event(value).get("message_id"))
+            and _event(value)["message_id"] != first_message_id
             and any("native fixture response" in text for text in _texts(_event(value))),
             timeout=30,
         )
@@ -161,6 +172,5 @@ def test_journey_lost_device_revoked_from_settings(scenario, paired_device):
             http("/v1/hosts", token=bearer)
     assert host_online(first, scenario.host) is True
     session = scenario.create()
-    sent = first.send(session, "survivor after revoke fixture", delivery="start-if-idle")["receipt"]
-    assert sent["status"] == "succeeded"
+    first.send_confirmed(session, "survivor after revoke fixture", delivery="start-if-idle")
     scenario.wait_idle(session)

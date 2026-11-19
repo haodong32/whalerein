@@ -1,5 +1,6 @@
 """Scheduled reuse must never turn incomplete integration into a passed baseline."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -10,10 +11,36 @@ from repo import integration_ci as ci
 
 @pytest.fixture
 def report(tmp_path):
+    manifest = b'{"target/debug/whalerein":{"sha256":"fixture"}}'
+    (tmp_path / "artifact-manifest.json").write_bytes(manifest)
     document = {
         "configuration": {"suite": "integration"},
         "completeness": "complete",
-        "scopes": [{"exit_code": 0, "completeness": "complete", "tests": [{"status": "passed"}]}],
+        "scopes": [
+            {
+                "exit_code": 0,
+                "completeness": "complete",
+                "tests": [{"id": "case", "status": "passed"}],
+            }
+        ],
+        "verification": {
+            "purpose": "ci",
+            "suite": "integration",
+            "exit_code": 0,
+            "cleanup": {"status": "complete", "errors": []},
+            "sources": {
+                "public": {"revision": "a" * 40, "mode": "commit", "fingerprint": "b" * 64}
+            },
+            "collected_cases": ["case"],
+            "artifacts": {
+                "products": {
+                    "source": "b" * 64,
+                    "manifest": "artifact-manifest.json",
+                    "digest": hashlib.sha256(manifest).hexdigest(),
+                }
+            },
+            "identities": {"test-container": {"expected": "image", "actual": "image"}},
+        },
     }
     path = tmp_path / "report.json"
     path.write_text(json.dumps(document))
@@ -36,7 +63,7 @@ def test_success_and_invalid_receipts(report, tmp_path):
     path, _ = report
     receipt = tmp_path / "passed/receipt.json"
     revision = "a" * 40
-    ci.record_success(path, receipt, revision, "key")
+    ci.record_success(path, receipt, revision, "key", "b" * 64)
     assert ci.cached_revision(receipt, "key") == revision
     assert ci.cached_revision(receipt, "changed") == ""
     for value in [
@@ -66,7 +93,7 @@ def test_partial_reports_never_establish_baseline(report, tmp_path, change):
         doc["scopes"] = []
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError):
-        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key")
+        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)
     assert not (tmp_path / "receipt").exists()
 
 
@@ -86,7 +113,7 @@ def test_failure_and_cleanup_errors_never_establish_baseline(report, tmp_path, c
         scope["tests"][0]["status"] = change
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError):
-        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key")
+        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)
 
 
 def test_command_operations(monkeypatch, tmp_path, capsys):
@@ -103,6 +130,13 @@ def test_command_operations(monkeypatch, tmp_path, capsys):
     calls = []
     monkeypatch.setattr(ci, "record_success", lambda *args: calls.append(args))
     monkeypatch.setattr(
+        ci,
+        "capture_sources",
+        lambda *args: {
+            "public": SimpleNamespace(revision="commit", fingerprint="digest"),
+        },
+    )
+    monkeypatch.setattr(
         "sys.argv",
         [
             "integration_ci",
@@ -116,4 +150,42 @@ def test_command_operations(monkeypatch, tmp_path, capsys):
         ],
     )
     ci.main()
-    assert calls[0][-2:] == ("HEAD", "key")
+    assert calls[0][-3:] == ("commit", "key", "digest")
+
+
+@pytest.mark.parametrize(
+    "change", ["source", "artifact", "cleanup", "runtime", "inventory", "local"]
+)
+def test_cannot_reuse_receipt_with_wrong_runtime_or_inputs(report, tmp_path, change):
+    path, document = report
+    facts = document["verification"]
+    if change == "source":
+        facts["sources"]["public"]["revision"] = "c" * 40
+    elif change == "artifact":
+        facts["artifacts"]["products"]["source"] = "c" * 64
+    elif change == "cleanup":
+        facts["cleanup"]["status"] = "failed"
+    elif change == "runtime":
+        facts["identities"]["test-container"]["actual"] = "stale"
+    elif change == "inventory":
+        facts["collected_cases"].append("missing")
+    else:
+        facts["purpose"] = "local"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="expected inputs and scope"):
+        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)
+
+
+def test_changed_runner_image_invalidates_scheduled_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(ci.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=b""))
+    monkeypatch.setenv("ImageVersion", "first")
+    first = ci.fingerprint(tmp_path, "HEAD")
+    monkeypatch.setenv("ImageVersion", "next")
+    assert ci.fingerprint(tmp_path, "HEAD") != first
+
+
+def test_changed_artifact_manifest_rejects_receipt(report, tmp_path):
+    path, _ = report
+    (tmp_path / "artifact-manifest.json").write_text("{}")
+    with pytest.raises(ValueError, match="artifact manifest"):
+        ci.record_success(path, tmp_path / "receipt", "a" * 40, "key", "b" * 64)

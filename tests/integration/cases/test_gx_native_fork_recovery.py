@@ -21,7 +21,7 @@ def test_gx04_native_fork_recovers_without_replay(fault, scenario, paired_device
     parent = scenario.create()
     paired_device.sessions(scenario.host)
     scenario.model.plan()
-    paired_device.send(parent, "synthetic parent", delivery="enqueue-after-run")
+    paired_device.send_confirmed(parent, "synthetic parent", delivery="enqueue-after-run")
     scenario.wait_idle(parent)
     before_sessions = {row["session_id"] for row in paired_device.sessions(scenario.host)}
     assert scenario.request("gx-arm-fork-counter")["armed"]

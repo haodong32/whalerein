@@ -3,6 +3,8 @@
 import json
 import sys
 
+import pytest
+
 from repo.output import Output
 from repo.process import Runner
 from repo.progress import PREFIX, parse
@@ -15,6 +17,19 @@ def test_parses_go_events_but_omits_test_output():
     )
     event = parse(json.dumps({"Action": "pass", "Package": "p", "Test": "Case"}))
     assert event == {"event": "finish", "id": "p::Case", "status": "passed"}
+
+
+def test_go_progress_masks_labeled_case_values_without_losing_package_identity():
+    event = parse(
+        json.dumps(
+            {
+                "Action": "run",
+                "Package": "example.test/authorization",
+                "Test": "TestCases/token=test-fixture-value",
+            }
+        )
+    )
+    assert event["id"] == "example.test/authorization::TestCases/token=<redacted>"
 
 
 def test_malformed_or_unknown_events_are_ignored():
@@ -301,13 +316,14 @@ def test_long_case_description_preserves_live_counts_and_elapsed(monkeypatch):
         display.close()
 
 
-def test_cancelled_run_summary_is_interrupted(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("code", "label"), [(2, "INVALID REQUEST"), (3, "BLOCKED"), (130, "INTERRUPTED")]
+)
+def test_run_summary_distinguishes_evidence_statuses(monkeypatch, capsys, code, label):
     from repo.progress import Display
 
     monkeypatch.setenv("NO_COLOR", "1")
     display = Display()
-    display.result({"scopes": []}, 2)
+    display.result({"scopes": []}, code)
     display.close()
-    output = capsys.readouterr().err
-    assert "Test execution INTERRUPTED" in output
-    assert "Test execution FAIL" not in output
+    assert f"Test execution {label}" in capsys.readouterr().err

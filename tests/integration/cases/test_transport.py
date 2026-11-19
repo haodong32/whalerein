@@ -59,17 +59,17 @@ def test_native_transport(case, postgres, broker):
     }
     commands = {
         "routes": [
-            "/usr/local/bin/broker-tests",
+            "/workspace/.verification/bin/broker-tests",
             "-test.run=^TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto$",
             "-test.v",
         ],
         "logical": [
-            "/usr/local/bin/broker-tests",
+            "/workspace/.verification/bin/broker-tests",
             "-test.run=^TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust$",
             "-test.v",
         ],
         "identity": [
-            "/usr/local/bin/server-tests",
+            "/workspace/.verification/bin/server-tests",
             "-test.run=^TestIdentityAndEncryptedTransportAgainstIsolatedStack$",
             "-test.v",
         ],

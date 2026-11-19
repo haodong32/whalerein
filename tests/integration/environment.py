@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # Shared broker bootstrap credentials. The plugin authenticates the Access
 # identity locally against its password file; the internal token authenticates
 # the Access callback the plugin makes for external principals.
-BROKER_PASSWORD = "integration-broker-password"
-INTERNAL_TOKEN = "compose-internal-token"
+BROKER_PASSWORD = uuid.uuid4().hex
+INTERNAL_TOKEN = uuid.uuid4().hex
 
 
 def wait(predicate, timeout=60, process=None):
@@ -39,6 +39,18 @@ def wait(predicate, timeout=60, process=None):
         # command completion are observed promptly without busy-waiting.
         time.sleep(0.02)
     raise TimeoutError("Expected fixture condition was not observed")
+
+
+def owns_listener(process, port):
+    """Tie a loopback health response to the exact fixture process."""
+    proc = Path("/proc") / str(process.child.pid)
+    address = f"0100007F:{port:04X}"
+    listeners = set()
+    for line in (proc / "net/tcp").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1] == address and fields[3] == "0A":
+            listeners.add(f"socket:[{fields[9]}]")
+    return any(str(descriptor.readlink()) in listeners for descriptor in (proc / "fd").iterdir())
 
 
 class Process:
@@ -224,6 +236,55 @@ class Device:
     def send(self, session, message, delivery=None):
         options = ["--delivery", delivery] if delivery else []
         return self.call("session", "send", session, "--detach", *options, "--", message)
+
+    def send_confirmed(self, session, message, delivery=None):
+        """Wait for a terminal acceptance from the original detached send."""
+        submission = self.send(session, message, delivery=delivery)
+        return self.confirm_detached_delivery(submission, session, message, delivery)
+
+    def settle_detached_delivery(self, code, envelope, session, text, delivery):
+        """Read the exact recorded send's terminal effect without waiting for a reply."""
+        if code != 0:
+            return code, envelope
+        submission = envelope["data"]
+        operation = submission["operation_id"]
+        target = submission["target"]
+        assert isinstance(operation, str) and operation.strip() == operation and operation
+        deadline = time.monotonic() + 20
+        delivery_args = () if delivery is None else ("--delivery", delivery)
+        while True:
+            submission = envelope["data"]
+            assert submission["state"] == "submission"
+            assert submission["operation_id"] == operation and submission["target"] == target
+            if submission["receipt"]["status"] not in {"received", "host_accepted"}:
+                return code, envelope
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TimeoutError("Detached delivery did not reach a terminal receipt")
+            time.sleep(0.1)
+            # Core resolves a saved operation ID and checks the original
+            # intent before reading its receipt. Detach avoids waiting for
+            # a model reply while the case holds the active run.
+            code, envelopes = self.invoke(
+                "session", "send", session, "--host", target["host_id"],
+                "--detach", *delivery_args, "--operation-id", operation,
+                "--timeout", str(int(remaining)),
+                "--", text, success=False,
+            )
+            envelope = envelopes[-1]
+            if code != 0:
+                return code, envelope
+
+    def confirm_detached_delivery(self, submission, session, text, delivery):
+        code, envelope = self.settle_detached_delivery(
+            0, {"data": submission}, session, text, delivery
+        )
+        assert code == 0, "Delivery did not succeed"
+        receipt = envelope["data"]["receipt"]
+        identity = receipt.get("delivery_id")
+        assert receipt["status"] == "succeeded"
+        assert isinstance(identity, str) and identity and identity.strip() == identity
+        return receipt
 
     def approvals(self, session):
         return self.call("session", "approval", "list", "--session", session)["approvals"]
@@ -553,18 +614,25 @@ log:
         failing admission and retrying.
         """
         self.access = Process(
-            ["/usr/local/bin/whalerein-access", "--config", str(self.config)],
+            ["/workspace/.verification/bin/whalerein-access", "--config", str(self.config)],
             self.directory,
             self.env,
         )
         self.processes.append(self.access)
 
-    def wait_access_ready(self):
-        wait(lambda: http("/readyz"), process=self.access)
+    def wait_access_ready(self, *, listener_port=18080):
+        binary = ROOT / ".verification/bin/whalerein-access"
+        executable = Path(f"/proc/{self.access.child.pid}/exe")
+        wait(
+            lambda: executable.samefile(binary)
+            and owns_listener(self.access, listener_port)
+            and http("/readyz"),
+            process=self.access,
+        )
 
-    def start_access(self):
+    def start_access(self, *, listener_port=18080):
         self.start_access_process()
-        self.wait_access_ready()
+        self.wait_access_ready(listener_port=listener_port)
 
     def start_plugin(self, extra_env=None):
         self.plugin = Process(

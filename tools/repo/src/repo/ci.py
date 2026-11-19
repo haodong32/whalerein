@@ -95,19 +95,27 @@ def native_plan(root: Path, paths: list[str]) -> dict:
 
 def run_projects(root: Path, projects: list[str]) -> None:
     from .projects import load_projects, select_projects
+    from .targets import project_target_name
 
     selected = select_projects(load_projects(root), projects)
     if not projects:
         raise ValueError("CI requires explicit projects")
     for operation in ("check", "build", "test"):
         supported = [p.id for p in selected if operation in p.capabilities]
-        if supported:
-            command = [sys.executable, "-m", "repo", operation]
-            for identity in supported:
-                command += ["--project", identity]
+        failure = None
+        for identity in supported:
+            target = project_target_name(operation, identity)
+            command = [sys.executable, "-m", "repo", operation, target]
             if operation == "test":
                 command += ["--coverage"]
-            subprocess.run(command, cwd=root, check=True)
+            try:
+                subprocess.run(command, cwd=root, check=True)
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode in (-2, 130):
+                    raise
+                failure = failure or exc
+        if failure is not None:
+            raise failure
 
 
 def run_quick(root: Path, projects: list[str]) -> None:
@@ -126,7 +134,7 @@ def run_quick(root: Path, projects: list[str]) -> None:
             for operation in ("check", "test"):
                 if operation in project.capabilities:
                     subprocess.run(
-                        [sys.executable, "-m", "repo", operation, "--project", project.id],
+                        [sys.executable, "-m", "repo", operation, project.id],
                         cwd=root,
                         check=True,
                     )

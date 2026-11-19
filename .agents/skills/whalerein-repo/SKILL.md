@@ -14,18 +14,19 @@ Use the quick entries below for ordinary tasks. Read only the relevant reference
 section when the task needs additional flags or behavior. Reuse guidance already
 read in this conversation. When the project ID is unknown, inspect
 [projects.toml](../../../tools/repo/projects.toml) or run `./repo projects`.
-Select exact IDs with `--project`; directory paths are not selectors.
+Use `./repo COMMAND --help` to find the exact target for an operation.
 
 | Intent | Entry point |
 |---|---|
-| Check the affected project | `./repo check --project ID` |
-| Format or build the affected project | `./repo fmt --project ID` / `./repo build --project ID` |
-| Final affected-project unit tests / coverage | `./repo test --project ID` / `./repo test --project ID --coverage` |
-| Find cases without executing their bodies | `./repo test --project ID --list` |
-| Run a matching unit case | `./repo test --project ID --only TEXT` |
-| Check or regenerate protocol bindings | `./repo proto --check` / `./repo proto` |
-| Render saved facts without executing tests | `./repo report FILE --output FILE` |
-| Diagnose missing tools | `./repo doctor --for TASK` |
+| Check the affected project | `./repo check ID` |
+| Format or build the affected project | `./repo fmt ID` / `./repo build ID` |
+| Final affected-project unit tests / coverage | `./repo test ID` / `./repo test ID --coverage` |
+| Find cases without executing their bodies | `./repo test ID --list` |
+| Run matching cases in a leaf target | `./repo test TARGET --only TEXT` |
+| Run both protocol integration targets | `./repo test protocol` |
+| Check or regenerate protocol bindings | `./repo check proto` / `./repo proto` |
+| Render saved facts without executing tests | `./repo report RUN_DIRECTORY` |
+| Diagnose missing tools | `./repo doctor TARGET` |
 
 Iteration: choose explicit projects and matching `--only` cases without coverage.
 Final validation: run affected-project unit coverage once after the final relevant
@@ -78,7 +79,7 @@ check cancellation and observation retention; for selector changes, check that
 unmatched test bodies do not execute.
 
 For repo-tool implementation changes, iterate with
-`./repo test --project repo --only TEXT`. At completion, run
-`./repo check --project repo` and `./repo test --project repo --coverage` once,
+`./repo test repo --only TEXT`. At completion, run
+`./repo check repo` and `./repo test repo --coverage` once,
 plus the product/integration checks required by the changed behavior. Keep the
 command reference synchronized with changes to CLI or report contracts.

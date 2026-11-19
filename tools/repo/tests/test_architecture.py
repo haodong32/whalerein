@@ -11,8 +11,8 @@ from conftest import FakeRunner, ok, report_facts
 from repo import cli, testing, toolchain
 from repo.errors import RepoError, UsageError
 from repo.projects import Project, load_projects, select_projects
-from repo.reports.model import atomic_write, read_report, summary, validate
-from repo.runners import integration, rust
+from repo.reports.model import atomic_write, read_report, validate
+from repo.runners import rust
 
 
 @pytest.fixture
@@ -97,6 +97,12 @@ def test_registry_rejects_invalid_entries(registry, change):
         ["commit-msg", "message"],
         ["test", "unit"],
         ["test", "all"],
+        ["test", "--suite", "integration"],
+        ["test", "protocol", "--group", "protocol"],
+        ["check", "--project", "core"],
+        ["doctor", "--for", "integration"],
+        ["proto", "--check"],
+        ["report", "report.json", "--output", "report.html"],
         ["--dry-run", "build"],
         ["fmt", "--check"],
         ["test", "--baseline-report", "old.json"],
@@ -113,33 +119,33 @@ def test_json_projects_and_errors(registry, monkeypatch, capsys):
     monkeypatch.setenv("WHALEREIN_ROOT", str(registry))
     assert cli.main(["projects", "--json"]) == 0
     assert len(json.loads(capsys.readouterr().out)["data"]["projects"]) == 4
-    assert cli.main(["--json", "build", "--project", "missing"]) == 4
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "project_not_found"
+    assert cli.main(["--json", "build", "missing"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "usage_error"
     monkeypatch.setattr(cli, "dispatch", lambda *a: (_ for _ in ()).throw(RuntimeError("private")))
     assert cli.main(["--json", "projects"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["message"] == "internal error"
 
 
 @pytest.mark.parametrize(
-    "test_request,explicit",
+    "test_request",
     [
-        (testing.TestRequest(suite="bad"), False),
-        (testing.TestRequest(suite="integration"), True),
-        (testing.TestRequest(group="protocol"), False),
-        (testing.TestRequest(integration_timeout=5), False),
-        (testing.TestRequest(suite="integration", integration_timeout=0), False),
-        (testing.TestRequest(suite="integration", integration_timeout=-1), False),
-        (testing.TestRequest(coverage=True, only="case"), False),
-        (testing.TestRequest(coverage=True, list_only=True), False),
-        (testing.TestRequest(coverage=True, suite="integration"), False),
-        (testing.TestRequest(only=""), False),
-        (testing.TestRequest(only="case", suite="all"), False),
-        (testing.TestRequest(only="case"), False),
+        testing.TestRequest(suite="bad"),
+        testing.TestRequest(suite="integration", projects=("core",)),
+        testing.TestRequest(group="protocol"),
+        testing.TestRequest(integration_timeout=5),
+        testing.TestRequest(suite="integration", integration_timeout=0),
+        testing.TestRequest(suite="integration", integration_timeout=-1),
+        testing.TestRequest(coverage=True, only="case"),
+        testing.TestRequest(coverage=True, list_only=True),
+        testing.TestRequest(coverage=True, suite="integration"),
+        testing.TestRequest(only=""),
+        testing.TestRequest(only="case", suite="all"),
+        testing.TestRequest(only="case"),
     ],
 )
-def test_invalid_test_requests_fail_before_execution(test_request, explicit):
+def test_invalid_test_requests_fail_before_execution(test_request):
     with pytest.raises(UsageError):
-        test_request.validate(explicit)
+        test_request.validate()
 
 
 def test_request_is_immutable():
@@ -162,42 +168,36 @@ def test_execution_persists_facts_and_json_envelope(
     monkeypatch.setenv("WHALEREIN_ROOT", str(registry))
     monkeypatch.setattr(rust, "collect", lambda *a, **kw: scope(status, code))
     destination = registry / "result"
-    assert (
-        cli.main(["--json", "test", "--project", "core", "--output", str(destination)]) == expected
-    )
+    assert cli.main(["--json", "test", "core", "--output", str(destination)]) == expected
     result = json.loads(capsys.readouterr().out)
     assert result["ok"] == (expected == 0)
     document = read_report(destination / "report.json")
     assert document["summary"]["cases"] == 1
     assert document["scopes"][0]["tests"][0]["id"] == "core::native::chosen"
     assert (destination / "report.html").exists()
-    assert cli.main(["--json", "test", "--project", "core", "--output", str(destination)]) == 2
+    assert cli.main(["--json", "test", "core", "--output", str(destination)]) == 2
     capsys.readouterr()
 
 
 def test_list_and_offline_render_share_facts(registry, monkeypatch, capsys):
     monkeypatch.setenv("WHALEREIN_ROOT", str(registry))
     monkeypatch.setattr(rust, "collect", lambda *a, **k: scope("not_run"))
-    assert (
-        cli.main(
-            ["--json", "test", "--project", "core", "--list", "--output", str(registry / "listed")]
-        )
-        == 0
-    )
+    assert cli.main(["--json", "test", "core", "--list", "--output", str(registry / "listed")]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert (
         cli.main(
             [
                 "--json",
                 "report",
-                payload["data"]["json"],
-                "--output",
-                str(registry / "offline.html"),
+                str(Path(payload["data"]["json"]).parent),
             ]
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["data"]["html"].endswith("offline.html")
+    assert (
+        Path(json.loads(capsys.readouterr().out)["data"]["html"])
+        == registry / "listed" / "report.html"
+    )
 
 
 @pytest.mark.parametrize("failure", [RepoError("native failed"), KeyboardInterrupt()])
@@ -256,7 +256,7 @@ def test_unsupported_listing_and_empty_selection_fail(registry, monkeypatch, out
         testing.TestRequest(only="missing"),
         registry / "empty",
     )
-    assert code == 1
+    assert code == 2
     assert "No test cases" in read_report(Path(data["json"]))["scopes"][0]["errors"][0]
 
 
@@ -310,60 +310,6 @@ def test_atomic_report_does_not_replace_good_file_on_failure(tmp_path, monkeypat
         atomic_write(target, "new")
     assert target.read_text() == "old"
     assert list(tmp_path.iterdir()) == [target]
-
-
-@pytest.mark.parametrize(
-    "mode", ["success", "build-fail", "invalid-export", "cleanup-fail", "interrupted"]
-)
-@pytest.mark.parametrize("group", ["protocol", "native-dsh"])
-def test_container_ownership_and_export(tmp_path, mode, out, group):
-    class Docker(FakeRunner):
-        def run(self, argv, cwd, **kw):
-            args = tuple(map(str, argv))
-            self.calls.append((args, str(cwd)))
-            if args[1:3] == ("buildx", "build") and mode == "build-fail":
-                return ok(returncode=1)
-            if args[1:3] == ("buildx", "build"):
-                Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "a" * 64)
-            if args[1] == "run":
-                if mode != "invalid-export":
-                    (tmp_path / "container/integration.json").write_text(
-                        json.dumps(
-                            {
-                                "version": 1,
-                                "scope": {
-                                    **scope(),
-                                    "suite_id": "integration",
-                                    "project": "integration",
-                                },
-                            }
-                        )
-                    )
-                if mode == "interrupted":
-                    raise KeyboardInterrupt
-            if args[1] == "rm" and mode == "cleanup-fail":
-                return ok(returncode=1)
-            return ok()
-
-    runner = Docker()
-    runner.out = out
-    result = integration.collect(
-        tmp_path,
-        runner,
-        testing.TestRequest(suite="integration", only="chosen", group=group),
-        tmp_path,
-    )
-    assert (not result["errors"]) == (mode == "success")
-    if mode != "build-fail":
-        run = next(args for args, _ in runner.calls if args[1] == "run")
-        name = run[run.index("--name") + 1]
-        assert name.startswith("whalerein-test-")
-        assert run[run.index("--tmpfs") + 1] == "/tmp:rw,exec,size=1024m,mode=1777"
-        assert any(args[1] == "rm" and args[-1] == name for args, _ in runner.calls)
-        assert run[run.index("--group") + 1] == group
-        assert run[run.index("--only") + 1] == "chosen"
-    if mode == "interrupted":
-        assert result["exit_code"] == 130
 
 
 @pytest.mark.parametrize("kind", ["go", "python", "node"])
@@ -564,12 +510,12 @@ def test_doctor_and_proto_dispatch(registry, monkeypatch, capsys):
             "missing_optional": [],
         },
     )
-    assert cli.main(["--json", "doctor", "--for", "integration"]) == 0
+    assert cli.main(["--json", "doctor", "integration"]) == 0
     assert json.loads(capsys.readouterr().out)["ok"]
     assert any(s.version_args == ("buildx", "version") for s in doctor.specs_for("integration"))
     assert any(s.version_args == ("llvm-cov", "--version") for s in doctor.specs_for("coverage"))
     monkeypatch.setattr(proto, "run", lambda *a, **k: {"checked": k["check"]})
-    assert cli.main(["--json", "proto", "--check"]) == 0
+    assert cli.main(["--json", "check", "proto"]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["checked"]
     monkeypatch.setattr(cli, "dispatch", lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
     assert cli.main(["--json", "projects"]) == 130
@@ -720,91 +666,6 @@ raise SystemExit(cli.main(['--json','projects']))
         if process.poll() is None:
             process.kill()
             process.wait()
-
-
-def test_parallel_builds_run_their_own_immutable_image_id(tmp_path):
-    request = testing.TestRequest(suite="integration")
-    observed = {}
-
-    class Docker(FakeRunner):
-        def __init__(self, label):
-            super().__init__()
-            self.label = label
-
-        def run(self, argv, cwd, **kwargs):
-            args = list(map(str, argv))
-            if args[1:3] == ["buildx", "build"]:
-                Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + self.label * 64)
-                assert "-t" not in args
-            if args[1] == "run":
-                if self.label == "a":
-                    integration.collect(tmp_path, Docker("b"), request, tmp_path / "b")
-                observed[self.label] = args[-1]
-                (tmp_path / self.label / "container/integration.json").write_text(
-                    json.dumps({"version": 1, "scope": scope()})
-                )
-            return ok()
-
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    result = integration.collect(tmp_path, Docker("a"), request, tmp_path / "a")
-    assert result["exit_code"] == 0
-    assert observed == {label: "sha256:" + label * 64 for label in ("a", "b")}
-
-
-@pytest.mark.parametrize("requested,expected", [(None, 7200), (37, 37)])
-def test_integration_execution_deadline_and_timeout_cleanup(tmp_path, requested, expected):
-    timeouts = {}
-    calls = []
-
-    class Docker(FakeRunner):
-        def run(self, argv, cwd, **kwargs):
-            args = tuple(map(str, argv))
-            calls.append(args)
-            if args[1:3] == ("buildx", "build"):
-                timeouts["build"] = kwargs["timeout"]
-                Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "a" * 64)
-            if args[1] == "run":
-                timeouts["run"] = kwargs["timeout"]
-                return ok(returncode=124)
-            if args[1] == "stop":
-                assert args[args.index("--signal") + 1] == "SIGINT"
-                (tmp_path / "container/integration.json").write_text(
-                    json.dumps(
-                        {
-                            "version": 1,
-                            "scope": {
-                                **scope("interrupted", 130),
-                                "suite_id": "integration",
-                                "project": "integration",
-                            },
-                        }
-                    )
-                )
-            return ok()
-
-    request = testing.TestRequest(suite="integration", integration_timeout=requested)
-    request.validate()
-    result = integration.collect(tmp_path, Docker(), request, tmp_path)
-    assert timeouts == {"build": 1800, "run": expected + 40}
-    run_args = next(args for args in calls if args[1] == "run")
-    assert f"WHALEREIN_INTEGRATION_TIMEOUT={expected}" in run_args
-    assert result["exit_code"] == 124
-    assert result["completeness"] == "incomplete"
-    assert summary([result])["total_cases"] is None
-    assert result["tests"][0]["status"] == "interrupted"
-    assert any("timed out" in error for error in result["errors"])
-    assert any(args[1] == "rm" for args in calls)
-    assert any(args[1] == "ps" for args in calls)
-
-
-def test_integration_docker_entrypoint_uses_the_supplied_execution_deadline():
-    root = Path(__file__).resolve().parents[3]
-    dockerfile = (root / "tests/integration/Dockerfile").read_text()
-    entrypoint = next(line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT "))
-    assert "pytest" in entrypoint
-    assert "${WHALEREIN_INTEGRATION_TIMEOUT:-7200}" in entrypoint
-    assert '"1800s"' not in entrypoint
 
 
 @pytest.mark.parametrize("failure_stream", ["stdout", "stderr"])

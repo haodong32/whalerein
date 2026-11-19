@@ -38,7 +38,7 @@ def native_cases():
 def test_storage(package, name, postgres):
     """Passes the selected native PostgreSQL behavior without skipped assertions."""
     result = subprocess.run(
-        [f"/usr/local/bin/{package}-tests", f"-test.run=^{name}$", "-test.v"],
+        [f"/workspace/.verification/bin/{package}-tests", f"-test.run=^{name}$", "-test.v"],
         cwd=ROOT,
         capture_output=True,
         text=True,

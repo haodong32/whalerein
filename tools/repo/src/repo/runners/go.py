@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,11 @@ from ..diagnostics import redact, sanitize
 from ..projects import go_test_paths
 from ..reports.model import atomic_write
 from .coverage import CoverageResult, parse_go_coverprofile
+
+
+def case_id(package: str, name: str) -> str:
+    """Redact native components before adding the report's structural separator."""
+    return f"{redact(package)}::{redact(name)}"
 
 
 def collect(project, runner, execute=False, only=None, coverage=False, coverage_output=None):
@@ -109,9 +115,9 @@ def _collect(project, runner, execute=False, only=None, profile=None):
             )
             if results[-1].returncode == 130:
                 unexecuted = [
-                    identity
-                    for identity in selected
-                    if identity.split("::", 1)[0] in list(grouped)[index + 1 :]
+                    (package, name)
+                    for package in list(grouped)[index + 1 :]
+                    for name in grouped[package]
                 ]
                 break
         result = replace(
@@ -150,9 +156,9 @@ def _collect(project, runner, execute=False, only=None, profile=None):
             if not execute and event.get("Action") == "output":
                 candidate = event.get("Output", "").strip()
                 if re.fullmatch("(Test|Example|Fuzz)\\w+", candidate):
-                    cases[package + "::" + candidate] = "not_run"
+                    cases[package, candidate] = "not_run"
             if execute and name:
-                key = package + "::" + name
+                key = package, name
                 if event.get("Action") == "output":
                     messages[key] = sanitize(messages.get(key, "") + event.get("Output", ""))
                 status = {
@@ -167,8 +173,17 @@ def _collect(project, runner, execute=False, only=None, profile=None):
                         durations[key] = round(event["Elapsed"] * 1000, 3)
         except (ValueError, AttributeError):
             malformed = True
-    scope["tests"] = [{"id": redact(k), "status": v} for k, v in sorted(cases.items())]
-    for case, key in zip(scope["tests"], sorted(cases), strict=True):
+    identities = {key: case_id(*key) for key in cases}
+    counts = Counter(identities.values())
+    ambiguous = any(count > 1 for count in counts.values())
+    if ambiguous:
+        scope.setdefault("errors", []).append("Go case IDs collide after redaction")
+    for key, status in sorted(cases.items()):
+        identity = identities[key]
+        if counts[identity] != 1:
+            continue
+        case = {"id": identity, "status": status}
+        scope["tests"].append(case)
         if key in durations:
             case["duration_ms"] = durations[key]
         if case["status"] == "failed" and messages.get(key):
@@ -179,7 +194,12 @@ def _collect(project, runner, execute=False, only=None, profile=None):
         "Native Go events; dynamic children require execution. "
         "Fuzz campaigns and build matrices are excluded."
     )
-    if result.returncode != 130 and packages and (packages == finished) and (not malformed):
+    if (
+        result.returncode != 130
+        and packages
+        and packages == finished
+        and not (malformed or ambiguous)
+    ):
         if all(c["status"] != "interrupted" for c in scope["tests"]):
             scope["completeness"] = "complete"
             scope["note"] = (

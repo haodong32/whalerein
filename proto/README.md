@@ -19,7 +19,7 @@ examples; cross-language test vectors live in `tests/fixtures/`.
 
 The `bindings` directory groups generated language bindings with hand-written
 build configuration and wire tests. Edit the schema when changing messages, and
-maintain the build/test scaffolding directly. Run `./repo proto --check` to verify
+maintain the build/test scaffolding directly. Run `./repo check proto` to verify
 committed Go and JavaScript artifacts. Rust types regenerate into Cargo's
 `OUT_DIR` during a build.
 
@@ -33,8 +33,8 @@ value and a missing oneof are explicit errors.
 ```bash
 python3 tests/integration/drivers/protobuf/proto_compat.py --check
 python3 proto/v1/bindings/swift/check_swift_surface.py
-./repo test --project proto
-./repo test --suite integration --group protocol
+./repo test proto
+./repo test protocol
 ```
 
 `proto_compat.py --check` compares the compiled descriptor with both the frozen
@@ -42,5 +42,5 @@ baseline and the exact snapshot. `--write` refreshes the snapshot and absorbs
 additive baseline growth, but refuses a breaking change; `--update-baseline
 --rationale TEXT` is the only path that records a reviewed breaking change and
 appends it to `v1/compat/CHANGELOG.md`. The Rust `compat` tests enforce the same
-rules during `./repo test --project proto`, so regenerating bindings cannot
+rules during `./repo test proto`, so regenerating bindings cannot
 silently bless a deletion, a reused tag number or a changed oneof.

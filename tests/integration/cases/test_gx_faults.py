@@ -28,7 +28,10 @@ def test_gx04_fake_mutation_recovery(operation, source_method, fault, scenario, 
     session = scenario.dsh.create_session()
     paired_device.sessions(scenario.host)
     if operation == "fork":
-        paired_device.send(session, "synthetic completed parent")
+        completed = paired_device.call(
+            "session", "send", session, "synthetic completed parent", "--timeout", "15"
+        )
+        assert completed["reply"]["state"] == "committed"
     if operation == "interrupt":
         scenario.dsh.start_running(session)
     if operation.startswith("queue_"):

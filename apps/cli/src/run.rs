@@ -1266,6 +1266,8 @@ async fn render_send(
             ))
         }
     };
+    // Following the reply can recover and persist a newer delivery receipt.
+    data["receipt"] = json!(core.send_operation(&operation.operation_id)?.receipt);
     data["reply"] = json!(reply);
     Ok(CliOutcome::success(command, data, human))
 }
@@ -1512,7 +1514,10 @@ async fn tail(
         let _ = crate::stream::to_stdout(tail.as_bytes());
     }
     if !finished && emitted == 0 {
-        return Err(CoreError::Timeout);
+        return Err(observation
+            .take_terminal_error()
+            .or_else(|| observation.take_last_error())
+            .unwrap_or(CoreError::Timeout));
     }
     if finished && !stopped {
         // Core owns reconnect. An observation that ends before the caller's
@@ -2052,6 +2057,45 @@ mod instance_command_tests {
     }
 
     #[tokio::test]
+    async fn bounded_watch_reports_host_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("client.toml");
+        Core::write_config(
+            &config,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let access = FakeAccess::start().await;
+        let core = Core::open(&config, secrets.clone()).unwrap();
+        core.connect_standalone(&access.pairing_uri(), |_| PairingDecision::approve())
+            .await
+            .unwrap();
+
+        access.host.lock().unwrap().host_online = false;
+        let watch = execute(
+            &config,
+            secrets,
+            &[
+                "session",
+                "watch",
+                "session-1",
+                "--host",
+                "host-1",
+                "--once",
+                "--timeout",
+                "3",
+            ],
+        )
+        .await;
+        assert_eq!(
+            watch.to_json()["error"]["code"],
+            "host_offline",
+            "{watch:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn grouped_commands_use_one_open_instance_and_exact_send_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("client.toml");
@@ -2087,6 +2131,7 @@ mod instance_command_tests {
         )
         .await;
         assert_eq!(read.to_json()["data"]["target"]["host_id"], "host-1");
+        access.host.lock().unwrap().omit_next_command_response_body = true;
         let sent = execute(
             &config,
             secrets.clone(),
@@ -2104,6 +2149,7 @@ mod instance_command_tests {
         let data = sent.to_json()["data"].clone();
         assert_eq!(data["reply"]["state"], "committed");
         assert_eq!(data["reply"]["attempt_id"], "fixture-attempt");
+        assert_eq!(data["receipt"]["message_id"], "message-1");
         let operation = data["operation_id"].as_str().unwrap();
         let commands_seen = access.host.lock().unwrap().commands_seen;
         let recovered = execute(
@@ -2114,6 +2160,7 @@ mod instance_command_tests {
         .await;
         assert_eq!(recovered.exit, 0, "{recovered:?}");
         assert_eq!(recovered.to_json()["data"]["reply"], data["reply"]);
+        assert_eq!(recovered.to_json()["data"]["receipt"], data["receipt"]);
         assert_eq!(access.host.lock().unwrap().commands_seen, commands_seen);
 
         let detached = execute(

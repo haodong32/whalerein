@@ -111,20 +111,18 @@ light/dark appearance. Mac Catalyst windows resize freely, including across the
 
 | Plan | Command | Covers |
 | --- | --- | --- |
-| `Unit` | `xcodebuild test -project apps/ios/WhaleRein.xcodeproj -scheme WhaleRein -testPlan Unit -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4.1'` | Swift Testing units for conversation-first restore, switcher state, the 720 pt adaptive breakpoint, presentation state, delivery choice, approvals, drafts, diagnostics and localization. |
-| `UI` | same with `-testPlan UI` | XCUITest flows over deterministic fixtures: pairing into a conversation, switcher Host/session changes, iPhone landscape with the persistent sidebar and rotation back, streaming retention, composer, approvals, diagnostics, both languages, accessibility sizes and appearances. |
-| `Integration` | `apps/ios/scripts/test-integration.sh` | Stack-backed XCTest journeys over the real Swift-to-UniFFI-to-Core path against a disposable Access, PostgreSQL, Mosquitto and Host fixture. |
+| `Unit` | `./repo test ios-unit` | Swift Testing units for conversation state, presentation, delivery, drafts, diagnostics, and localization. |
+| `UI` | `./repo test ios-ui` | XCUITest journeys over deterministic fixtures, including navigation, layouts, and accessibility. |
+| `Integration` | `./repo test ios-integration` | Stack-backed XCTest journeys over Swift, UniFFI, Rust Core, Access, and a disposable host fixture. |
 
-`apps/ios/scripts/test.sh` wraps the Unit and UI invocations and records result
-bundles under `.local-docs/acceptance/add-ios-client/xcode/`. The dedicated
-`test-integration.sh` starts or reuses the stack, mints a fresh invitation,
-builds, injects `WHALEREIN_IOS_STACK_*` into the generated `.xctestrun`, and runs
-`test-without-building`; it writes `Integration.result`. Test plans and schemes
-are shared in the project. UI and unit fixtures are selected with launch
-arguments (`-ui-fixtures`, `-integration-fixtures`, `-ui-test-reset`). The
-recorded local acceptance run is
-`.local-docs/acceptance/add-ios-client/integration-ios.md` (Integration 21/21,
-Unit 123/123, UI 19/19).
+Use `--simulator UDID` to select an available device. The command can use a
+single available device or a single booted iPhone by default. Use `--only TEXT`
+to select a literal substring of a native test ID. Each invocation builds from
+its captured source, leases the device, and saves scoped verification facts
+under `.data/runs/`. It builds before starting the integration fixture and
+removes the private XCTest configuration during cleanup. The app chooses its
+fixture with launch arguments (`-ui-fixtures`, `-integration-fixtures`,
+`-ui-test-reset`).
 
 ## Local integration stack
 
@@ -159,9 +157,9 @@ support, and treats Core's authoritative `state` event as the online signal.
 The requested commands are:
 
 ```bash
-apps/ios/scripts/test.sh Unit     # 123 Swift Testing cases
-apps/ios/scripts/test-integration.sh  # 21 stack-backed XCTest cases
-apps/ios/scripts/test.sh UI       # 19 XCUITest cases
+./repo test ios-unit
+./repo test ios-integration
+./repo test ios-ui
 ```
 
 ## Composer submissions

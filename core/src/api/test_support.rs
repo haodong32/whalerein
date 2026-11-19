@@ -293,6 +293,7 @@ pub struct FakeHost {
     pub channel_capabilities: Option<whalerein_proto::CapabilitySet>,
     pub revoke_after_command: bool,
     pub drop_command_receipts: bool,
+    pub omit_next_command_response_body: bool,
     pub command_receipt_status_override: Option<OnlineStatus>,
     pub commands_seen: usize,
     /// Query frames that reached the fake Host, including retries.
@@ -431,6 +432,7 @@ impl FakeHost {
             channel_capabilities: None,
             revoke_after_command: false,
             drop_command_receipts: false,
+            omit_next_command_response_body: false,
             command_receipt_status_override: None,
             commands_seen: 0,
             query_attempts: 0,
@@ -1625,7 +1627,12 @@ impl FakeHost {
         if self.revoke_after_command {
             self.revoked = true;
         }
-        Ok((OnlineStatus::HostAccepted, sealed.encode_to_vec()))
+        let body = if std::mem::take(&mut self.omit_next_command_response_body) {
+            Vec::new()
+        } else {
+            sealed.encode_to_vec()
+        };
+        Ok((OnlineStatus::HostAccepted, body))
     }
 }
 

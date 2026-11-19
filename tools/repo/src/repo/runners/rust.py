@@ -8,6 +8,37 @@ from ..diagnostics import sanitize
 from .coverage import CoverageResult, extract_json, parse_llvm_cov_json
 
 
+def _execution_case_name(target, name):
+    if target == "doctest":
+        # Rustdoc decorates compile-only outcomes but omits the suffix in --list.
+        return re.sub(r"(?<=\)) - compile(?: fail)?$", "", name)
+    return name
+
+
+def _execution_filters(target, names, selected):
+    if len(names) == len(selected):
+        return []
+    if target != "doctest":
+        return ["--exact", *selected]
+    # Rustdoc splits its test arguments on whitespace. Use only native tokens
+    # that select a listed case without also matching any unselected example.
+    excluded = set(names) - selected.keys()
+    filters = []
+    for name in selected:
+        token = next(
+            (
+                part
+                for part in name.split()
+                if not part.startswith("-") and not any(part in other for other in excluded)
+            ),
+            None,
+        )
+        if token is None:
+            return None
+        filters.append(token)
+    return list(dict.fromkeys(filters))
+
+
 def collect(project, runner, execute, only=None):
     scope = {
         "project": project.name,
@@ -74,6 +105,14 @@ def collect(project, runner, execute, only=None):
             scope["not_run_targets"] = [t[0] for t in targets[index:]]
             break
         if execute:
+            filters = _execution_filters(target, names, cases)
+            if filters is None:
+                scope["errors"] = [
+                    "Rustdoc cannot isolate this selection; run the complete doctest target"
+                ]
+                scope["tests"].extend(cases.values())
+                complete = False
+                break
             if getattr(runner, "progress", None):
                 runner.progress.event(
                     {
@@ -87,7 +126,7 @@ def collect(project, runner, execute, only=None):
                     *run_command,
                     "--test-threads=1",
                     "--format=pretty",
-                    *(["--exact", *cases] if only else []),
+                    *filters,
                 ],
                 project.path,
                 quiet=True,
@@ -96,8 +135,8 @@ def collect(project, runner, execute, only=None):
             scope["exit_code"] = result.returncode or scope["exit_code"]
             for line in result.stdout.splitlines():
                 match = re.fullmatch(r"test (.+) \.\.\. (ok|FAILED|ignored)(?:, .*)?", line)
-                if match and match[1] in cases:
-                    cases[match[1]]["status"] = {
+                if match and (name := _execution_case_name(target, match[1])) in cases:
+                    cases[name]["status"] = {
                         "ok": "passed",
                         "FAILED": "failed",
                         "ignored": "skipped",
@@ -110,8 +149,9 @@ def collect(project, runner, execute, only=None):
                 re.MULTILINE | re.DOTALL,
             )
             for block in blocks:
-                if block[1] in cases and cases[block[1]]["status"] == "failed":
-                    cases[block[1]]["diagnostics"] = [
+                name = _execution_case_name(target, block[1])
+                if name in cases and cases[name]["status"] == "failed":
+                    cases[name]["diagnostics"] = [
                         {"phase": "test", "message": sanitize(block[2].strip())}
                     ]
             # Panic headers can be on stderr without a captured stdout block.

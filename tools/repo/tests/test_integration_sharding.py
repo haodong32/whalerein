@@ -83,9 +83,9 @@ def test_parallel_is_valid_only_for_integration(parallel):
 
 def test_parser_exposes_parallel_and_defaults_to_single_container():
     parser = cli.build_parser()
-    parsed = parser.parse_known_args(["test", "--suite", "integration", "--parallel", "3"])
+    parsed = parser.parse_known_args(["test", "integration", "--parallel", "3"])
     assert parsed[0].parallel == 3
-    default = parser.parse_known_args(["test", "--suite", "integration"])[0]
+    default = parser.parse_known_args(["test", "integration"])[0]
     assert default.parallel is None
 
 

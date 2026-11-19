@@ -25,7 +25,7 @@ keeps the fixture path.
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
   ```
 
-  `scripts/build.sh` and `scripts/test.sh` set it when unset.
+  `scripts/build.sh` uses the default installation when available.
 - Simulator runtime installed on the reference host: iOS 26.4.1
   (`iPhone 17`, `iPad Pro 13-inch (M5)`), plus iOS 27.2. There is no iOS 18
   runtime installed.
@@ -82,29 +82,18 @@ xcodebuild -project apps/ios/WhaleRein.xcodeproj -scheme WhaleRein \
   -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath .data/ios-derived/catalyst CODE_SIGNING_ALLOWED=NO build
 
-# Unit plan (Swift Testing, WhaleReinTests)
-apps/ios/scripts/test.sh Unit
+# Run a specific local plan
+./repo test ios-unit
+./repo test ios-integration
+./repo test ios-ui
 
-# Integration plan over the real stack (real Swift -> UniFFI -> Core)
-apps/ios/scripts/test-integration.sh
-
-# UI plan (XCTest + XCUIAutomation, WhaleReinUITests)
-apps/ios/scripts/test.sh UI
-
-# Wide-layout UI evidence on iPad (the iPhone run skips this case explicitly)
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-xcodebuild -project apps/ios/WhaleRein.xcodeproj -scheme WhaleRein \
-  -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.4.1' \
-  -testPlan UI -only-testing:WhaleReinUITests/WideLayoutUITests test
-
-# Unit, Integration and UI plans
-apps/ios/scripts/test.sh all
+# Wide-layout UI evidence on a selected iPad Simulator
+./repo test ios-ui --simulator "$IPAD_UDID" --only WideLayoutUITests
 ```
 
-Result bundles are written under
-`.local-docs/acceptance/add-ios-client/xcode/` (gitignored).
-`test-integration.sh` accepts `KEEP_STACK=1`, `ONLY_TESTING=<selector>`,
-`RESULT_DIR`, and `DERIVED_DATA`. It never prints invitation URIs or tokens.
+Run the commands from the repository root. Results and native result bundles
+are scoped to each run under `.data/runs/`. Identify devices with
+`xcrun simctl list devices available`.
 
 ### Schemes and test plans
 

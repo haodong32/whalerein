@@ -26,7 +26,7 @@ def second_node(model):
     text = text.replace('127.0.0.1:18081', '127.0.0.1:18084')
     text = text.replace(model.access_client_id, model.access_client_id + '-b')
     config.write_text(text)
-    node = Process(['/usr/local/bin/whalerein-access', '--config', str(config)],
+    node = Process(['/workspace/.verification/bin/whalerein-access', '--config', str(config)],
                    directory, model.env)
     model.processes.append(node)
     return node

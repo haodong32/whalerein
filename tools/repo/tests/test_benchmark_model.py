@@ -343,3 +343,48 @@ def test_run_checks_mark_insufficient_samples_incomplete():
     checks = analysis.run_checks(facts)
     assert checks["state"] == "incomplete"
     assert any(item["name"] == "attempts_below_declared_floor" for item in checks["reasons"])
+
+
+def test_benchmark_cli_reports_result_and_compares_saved_evidence(monkeypatch, capsys, tmp_path):
+    from repo import cli
+    from repo.benchmark import runner
+
+    baseline = tmp_path / "baseline"
+    comparison = tmp_path / "comparison.json"
+
+    def measure(root, process, request, directory):
+        assert request.attempts == 1
+        assert request.warmup == 0
+        assert directory == baseline
+        result = document()
+        directory.mkdir()
+        path = directory / "benchmark.json"
+        path.write_text(json.dumps(result))
+        return runner.BenchResult(result, 0, path)
+
+    monkeypatch.setattr(cli.benchmark, "run", measure)
+    assert (
+        cli.main(["bench", "--attempts", "1", "--warmup", "0", "--output", str(baseline), "--json"])
+        == 0
+    )
+    measured = json.loads(capsys.readouterr().out)
+    assert measured["data"]["report"] == str(baseline / "benchmark.json")
+    assert measured["data"]["outcomes"]["correct_by_deadline"] == 1
+    assert (
+        cli.main(
+            [
+                "bench-compare",
+                "-b",
+                str(baseline),
+                "-c",
+                str(baseline),
+                "--output",
+                str(comparison),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    compared = json.loads(capsys.readouterr().out)
+    assert compared["data"]["comparison"]["verdict"] == "inconclusive"
+    assert json.loads(comparison.read_text()) == compared["data"]["comparison"]
