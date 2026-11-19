@@ -3,8 +3,10 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -385,5 +387,56 @@ func TestMigration019FencesRetainedCiphertextWithoutBackfill(t *testing.T) {
 	}
 	if string(outcome.Request.ResultBody) != "retained-ciphertext" {
 		t.Fatal("retained ciphertext was not preserved")
+	}
+}
+
+// When an admitted read-only workload with retained result bodies stops and its requests expire, bounded cleanup returns the retained result rows and ciphertext bytes to their pre-test levels while preserving request identity.
+func TestRetainedResultDrainReturnsToItsInitialLevel(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seedDevice(t, s, "drain-host", "drain-device")
+	countRetained := func() (int64, int64) {
+		var rows, bytes int64
+		if err := s.Pool().QueryRow(ctx, `
+			SELECT count(*), COALESCE(sum(octet_length(result_body)), 0)
+			FROM requests WHERE result_body <> ''::bytea`).Scan(&rows, &bytes); err != nil {
+			t.Fatal(err)
+		}
+		return rows, bytes
+	}
+	beforeRows, beforeBytes := countRetained()
+	stamp := &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 1 << 20}
+	const workload = 8
+	for index := 0; index < workload; index++ {
+		row := newRequest(fmt.Sprintf("drain-%d", index), "drain-host", "drain-device", "", []byte("digest"), whalereinv1.OnlineStatus_succeeded, store.ForwardNone, now)
+		row.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
+		row.Stamp = stamp
+		row.ExpiresAt = now.Add(time.Second)
+		row.ResultBody = bytes.Repeat([]byte{0x5a}, 64*1024)
+		if _, err := s.CreateRequest(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, ciphertext := countRetained()
+	if rows != beforeRows+workload || ciphertext <= beforeBytes {
+		t.Fatalf("workload was not admitted: rows=%d bytes=%d", rows, ciphertext)
+	}
+	// A bounded cleanup pass after the retention window must drain the
+	// test-owned ciphertext without deleting durable identities.
+	cleared, err := s.ClearExpiredBodies(ctx, now.Add(time.Minute))
+	if err != nil || cleared != workload {
+		t.Fatalf("cleared = %d err=%v", cleared, err)
+	}
+	afterRows, afterBytes := countRetained()
+	if afterRows != beforeRows || afterBytes != beforeBytes {
+		t.Fatalf("retained result did not drain: rows=%d bytes=%d want rows=%d bytes=%d", afterRows, afterBytes, beforeRows, beforeBytes)
+	}
+	var stored int64
+	if err := s.Pool().QueryRow(ctx, `SELECT count(*) FROM requests WHERE host_id = 'drain-host'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != workload {
+		t.Fatalf("cleanup removed durable request identities: %d", stored)
 	}
 }
