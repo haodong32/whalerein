@@ -30,7 +30,6 @@ type fakeAuth struct {
 	activeHosts    map[string]bool
 	list           []auth.HostView
 	revoked        []string
-	authErr        error
 	deviceErr      error
 	authorizeErr   error
 	hostsErr       error

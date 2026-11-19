@@ -249,6 +249,7 @@ pub fn request_kind_name(kind: RequestKind) -> &'static str {
         RequestKind::PairingClaim => "REQUEST_KIND_PAIRING_CLAIM",
         RequestKind::PairingAuthorize => "REQUEST_KIND_PAIRING_AUTHORIZE",
         RequestKind::Revocation => "REQUEST_KIND_REVOCATION",
+        RequestKind::HostClients => "REQUEST_KIND_HOST_CLIENTS",
     }
 }
 

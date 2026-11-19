@@ -1142,6 +1142,17 @@ impl Core {
         })
     }
 
+    /// Renew one observation's authority lease. A typed authority close is
+    /// terminal; transport failures are left to the observation's normal retry
+    /// so a network blip does not end a healthy watch.
+    pub(crate) async fn check_host_authority(&self, host_id: &str) -> CoreResult<()> {
+        let access = self.access_client().await?;
+        access
+            .host_authority(host_id)
+            .await
+            .map_err(CoreError::from)
+    }
+
     pub(crate) async fn ensure_channel(
         &self,
         host_id: &str,

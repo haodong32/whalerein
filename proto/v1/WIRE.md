@@ -407,6 +407,20 @@ authenticated connection is observed.
 `GET /v1/enrollments/hosts/{host_id}` and `GET /v1/operations/{operation_id}`
 report state, bindings and revisions. Neither ever returns a credential.
 
+The admin enrollment response includes `WhaleRein-Host-Presence` with
+`online`, `offline`, or `unavailable`. This is the current broker observation.
+An older Access without this header leaves live presence unknown.
+
+`GET /v1/enrollments/hosts/{host_id}/clients` requires an admin bearer and the
+`workspaceId` and `enrollmentRevision` query parameters. It returns
+`{"presence":"known","devices":[{"deviceId":"device-1","connected":true}]}`
+for confirmed grants in that exact enrollment. Access obtains the active
+Device IDs from an internal `REQUEST_KIND_HOST_CLIENTS` request and intersects
+them with the confirmed grants. The Host reports Devices with a live Session
+observation lease. An offline Host has no connected Devices. Missing Host
+observation returns `presence: unavailable` with the confirmed grants.
+Device request submission cannot invoke the internal request kind.
+
 ### Correlated message reply
 
 The encrypted `ReadMessageReply` query uses the session ID and the message ID
@@ -432,6 +446,7 @@ POST   /v1/enrollments/devices/pairing  Cloud authorization and Noise proof
 GET    /v1/enrollments/hosts/{host_id}/devices/{device_id}  admin bearer
 POST   /v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation  admin bearer
 GET    /v1/enrollments/hosts/{host_id} admin bearer (device/Host proof pending)
+GET    /v1/enrollments/hosts/{host_id}/clients  admin bearer
 GET    /v1/operations/{operation_id}   admin bearer (original-endpoint proof pending)
 GET    /healthz
 GET    /readyz
@@ -452,6 +467,32 @@ POST /internal/broker/connect
 
 HTTP errors use `ErrorResponse` JSON with a stable `ErrorCode` value. Success
 bodies are the messages above; `POST /requests` returns `RequestReceipt`.
+
+`ErrorResponse.reason` carries a stable authority reason for a denied
+long-lived observation. A non-empty reason is terminal: a client must not
+reconnect, and must surface it instead of retrying. The values are protocol
+constants, never free text:
+
+| Reason | Meaning |
+| --- | --- |
+| `session_revoked` | The Cloud App session was revoked or expired. |
+| `grant_revoked` | This Device's grant for the Host was revoked. |
+| `host_removed` | The Host enrollment no longer exists. |
+| `host_disabled` | The Host enrollment was disabled. |
+| `authority_unavailable` | Authority could not be proven; the observation is closed rather than extended on stale state. |
+
+A Host-authored terminal close uses `EventPayload.watch_closed` with
+`{watch_id, session, reason}`. The reason is stable (`session_deleted`,
+`session_expired`, `unauthorized`). The client treats it exactly like an Access
+authority reason: terminal, no reconnect. The Host also writes the close to the
+device outbox so a disconnected client receives it on reconnect; a stale
+`watch_id` is ignored by a later observation.
+
+`GET /v1/hosts/{host_id}/authority` is the observation lease renewal. A live
+grant, session and enrollment answer `204`; an ended authority answers the
+documented `403`/`503` with `reason`. The encrypted observation stream is
+end-to-end between Host and Device, so Access cannot author a close frame in
+it; the lease renewal is the authoritative lifetime signal.
 
 ## CLI exit codes
 

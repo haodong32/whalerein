@@ -81,6 +81,10 @@ func TestHostPresenceRequiresReadyConfirmationForANewConnection(t *testing.T) {
 	if p.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("new connection inherited readiness")
 	}
+	p.ApplySnapshot([]SnapshotClient{{Kind: "host", HostID: "h1", ConnID: 2, State: "connected", Connected: 2000}}, 12)
+	if p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("reconciliation made a known unready connection look ready")
+	}
 	p.MarkHostReady("h1", time.UnixMilli(2100))
 	if !p.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("new connection readiness was not applied")
@@ -175,5 +179,146 @@ func TestHandleNotificationIgnoresMalformedEntries(t *testing.T) {
 	p.HandleNotification(&Notification{Sequence: 3, Event: "connected", Kind: "probe", HostID: "h1"})
 	if hosts, devices := p.ConnectedCounts(); hosts != 0 || devices != 0 {
 		t.Fatalf("counts = %d/%d", hosts, devices)
+	}
+}
+
+func TestReplacementConnectionFromSnapshotWaitsForItsOwnHostReady(t *testing.T) {
+	p := newPresence()
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 1, State: "connected", Connected: 1000},
+	}, 10)
+	if !p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("initial snapshot did not recover the established Host")
+	}
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 2, State: "connected", Connected: 2000},
+	}, 11)
+	if p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("replacement connection from a snapshot inherited readiness")
+	}
+	// A delayed readiness proof published by the previous connection predates
+	// the replacement connection by more than the handshake window and cannot
+	// confirm it.
+	p.MarkHostReady("h1", time.UnixMilli(-3000))
+	if p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("delayed readiness proof confirmed the replacement connection")
+	}
+	p.MarkHostReady("h1", time.UnixMilli(2100))
+	if !p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("the replacement connection's own readiness was not applied")
+	}
+	// Later reconciliation of the same established connection preserves the
+	// readiness that was already confirmed.
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 2, State: "connected", Connected: 2000},
+	}, 12)
+	if !p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("reconciliation dropped established replacement readiness")
+	}
+	if p.hosts["h1"].connID != 2 {
+		t.Fatalf("replacement connection = %d", p.hosts["h1"].connID)
+	}
+}
+
+func TestLiveConnectionBeforeSnapshotReconciliationIsNotRolledBack(t *testing.T) {
+	p := newPresence()
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 1, State: "connected", Connected: 1000},
+	}, 10)
+	// A fast reconnect reports two newer connections before the reconciliation
+	// reply for the snapshot that still lists the old one.
+	p.HandleNotification(&Notification{Sequence: 11, Event: "connected", Kind: "host", HostID: "h1", ConnID: 2, AtUnixMilli: 2000})
+	p.HandleNotification(&Notification{Sequence: 12, Event: "connected", Kind: "host", HostID: "h1", ConnID: 3, AtUnixMilli: 3000})
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 1, State: "connected", Connected: 1000},
+	}, 10)
+	if p.hosts["h1"].connID != 3 || p.IsHostOnline(context.Background(), "h1") {
+		t.Fatalf("late snapshot overwrote newer connection: %+v", p.hosts["h1"])
+	}
+	if p.lastSeq < 12 {
+		t.Fatalf("snapshot rewound the notification boundary to %d", p.lastSeq)
+	}
+	// A delayed disconnect for the superseded connection cannot mark the newer
+	// connection offline.
+	p.HandleNotification(&Notification{Sequence: 13, Event: "disconnected", Kind: "host", HostID: "h1", ConnID: 1, AtUnixMilli: 4000})
+	if p.hosts["h1"].connID != 3 {
+		t.Fatal("superseded disconnect changed the newer connection")
+	}
+	p.MarkHostReady("h1", time.UnixMilli(500))
+	if p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("readiness from the middle connection confirmed the newest one")
+	}
+	p.MarkHostReady("h1", time.UnixMilli(3100))
+	if !p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("newest connection readiness was not applied")
+	}
+}
+
+func TestAbruptHostExitReportsKnownOfflineAndRecovers(t *testing.T) {
+	p := newPresence()
+	base := time.Unix(5000, 0)
+	p.now = func() time.Time { return base }
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 1, State: "connected", Connected: 1000},
+	}, 1)
+	p.MarkHostReady("h1", time.UnixMilli(1100))
+	if online, known := p.HostPresence("h1"); !online || !known {
+		t.Fatalf("established Host presence = %v/%v", online, known)
+	}
+
+	// Abrupt exit without a disconnect notification: no event or snapshot
+	// refreshes the cached observation, so it expires and reports a known
+	// offline Host rather than an unavailable broker view.
+	base = base.Add(60 * time.Millisecond)
+	if online, known := p.HostPresence("h1"); online || !known {
+		t.Fatalf("expired Host presence = %v/%v", online, known)
+	}
+	if hosts, _ := p.ConnectedCounts(); hosts != 0 {
+		t.Fatalf("expired Host counted online: %d", hosts)
+	}
+	if !p.Available() {
+		t.Fatal("expiry should not make broker presence unavailable")
+	}
+
+	// An unavailable regional observation is distinguishable from known
+	// offline: both report offline, but only the established view is known.
+	p.SetAvailable(false)
+	if online, known := p.HostPresence("h1"); online || known {
+		t.Fatalf("unavailable presence = %v/%v", online, known)
+	}
+	p.SetAvailable(true)
+
+	// Restoring the observation returns the actual live state.
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "host", HostID: "h1", ConnID: 1, State: "connected", Connected: 1000},
+	}, 2)
+	if online, known := p.HostPresence("h1"); !online || !known {
+		t.Fatalf("restored Host presence = %v/%v", online, known)
+	}
+}
+
+func TestReadinessProofInsideTheHandshakeWindowConfirmsTheCurrentConnection(t *testing.T) {
+	p := newPresence()
+	p.ApplySnapshot(nil, 10)
+	// A replacement connection is observed at T. Mosquitto publishes the login
+	// plugin's connect notification after the client already holds CONNACK, so
+	// a Host that subscribes and publishes readiness immediately reports a
+	// timestamp a few tens of milliseconds earlier than T. That proof belongs
+	// to the current connection and must confirm it.
+	const connectedAt = int64(2_000)
+	p.HandleNotification(&Notification{Sequence: 11, Event: "connected", Kind: "host", HostID: "h1", ConnID: 2, AtUnixMilli: connectedAt})
+	p.MarkHostReady("h1", time.UnixMilli(connectedAt-40))
+	if !p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("a readiness proof from the current connection's handshake must confirm it")
+	}
+
+	// A proof older than the handshake window is a delayed proof from a
+	// superseded connection and still cannot confirm the replacement.
+	p2 := newPresence()
+	p2.ApplySnapshot(nil, 10)
+	p2.HandleNotification(&Notification{Sequence: 11, Event: "connected", Kind: "host", HostID: "h1", ConnID: 2, AtUnixMilli: connectedAt})
+	p2.MarkHostReady("h1", time.UnixMilli(connectedAt-int64(readyHandshakeTolerance/time.Millisecond)-1))
+	if p2.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("a proof older than the handshake window confirmed the replacement")
 	}
 }

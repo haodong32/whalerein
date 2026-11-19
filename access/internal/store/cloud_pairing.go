@@ -111,6 +111,44 @@ func (s *Store) CloudDeviceGrantStatus(ctx context.Context, workspaceID, hostID,
 	return *status, nil
 }
 
+// HostClientIDs returns confirmed, current grants for the exact enrollment.
+func (s *Store) HostClientIDs(ctx context.Context, workspaceID, hostID, revision string) ([]string, error) {
+	rows, err := s.poolQuery(ctx, `
+		SELECT g.device_id
+		FROM external_enrollments e
+		LEFT JOIN grant_authority g ON g.host_id=e.host_id AND g.active
+		  AND e.state='enrollment_ready' AND e.disabled_at IS NULL
+		  AND EXISTS (SELECT 1 FROM pairing_outcomes p
+			WHERE p.host_id=g.host_id AND p.device_id=g.device_id AND p.grant_generation=g.grant_generation
+			  AND p.host_confirmed AND p.host_confirmation_verified AND p.commit_binding_verified
+			  AND octet_length(p.token_hash)=33)
+		WHERE e.workspace_id=$1 AND e.host_id=$2 AND e.enrollment_revision=$3
+		ORDER BY g.device_id`, workspaceID, hostID, revision)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	found := false
+	for rows.Next() {
+		found = true
+		var id *string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id != nil {
+			ids = append(ids, *id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	return ids, nil
+}
+
 // BeginCloudDeviceRevocation records a workspace-scoped fence before any live
 // enforcement. It shares the Host lock with Cloud pairing commit and disable.
 func (s *Store) BeginCloudDeviceRevocation(ctx context.Context, workspaceID, hostID, deviceID string, now time.Time) (bool, error) {

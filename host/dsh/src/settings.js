@@ -2,10 +2,11 @@
 // for a one-time pairing URI and returns that URI plus the host fingerprint.
 // revoke asks Access to revoke one device. The managed cloud connection is
 // projected through a separate allowlisted snapshot; private keys, peer keys,
-// the admin token, poll credentials, authorization documents, host ids, routes
+// the admin token, poll credentials, authorization documents, private routes
 // and raw approval locators stay off this API and out of logs.
 
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { validateTopicId } from 'whalerein-host/config.js'
 import { createInvitation, revokeDevice } from './pairing.js'
 import { testConnection } from './connection-test.js'
 import { SERVICES } from './service-config.js'
@@ -41,6 +42,7 @@ export const EMPTY_MANAGED_SNAPSHOT = Object.freeze({
   approvalUrl: '',
   error: null,
   connected: false,
+  devices: null,
   pendingOperation: false,
   capabilities: Object.freeze([]),
   configError: null,
@@ -98,13 +100,39 @@ export function sanitizeManagerSnapshot(raw = {}, extra = {}) {
       ? { code: safeCode(raw.error.code) }
       : null,
     connected: safeBoolean(raw?.connected),
+    devices: safeDevices(raw?.devices),
     pendingOperation: safeBoolean(raw?.pendingOperation),
     capabilities: safeCapabilities(raw?.capabilities),
     configError: extra.configError ?? null,
   }
 }
 
-/** Project manager details without routes, credentials or host identifiers. */
+function safeTopicId(value) {
+  try {
+    return validateTopicId(value, 'topic ID')
+  } catch {
+    return null
+  }
+}
+
+function safeDevices(devices) {
+  if (!Array.isArray(devices)) return null
+  const rows = []
+  for (const device of devices) {
+    const deviceId = safeTopicId(device?.deviceId)
+    if (!deviceId) continue
+    rows.push({
+      deviceId,
+      displayName: text(device.displayName, 64),
+      os: text(device.os, 24),
+      pairedAt: Number.isSafeInteger(device.pairedAt) ? device.pairedAt : null,
+      connected: device.connected === true,
+    })
+  }
+  return rows
+}
+
+/** Project active Host details without private routes or credentials. */
 export function sanitizeManagerDetails(raw = {}) {
   if (!raw || typeof raw !== 'object') return null
   return {
@@ -112,6 +140,7 @@ export function sanitizeManagerDetails(raw = {}) {
     environment: ENVIRONMENTS.has(raw.environment) ? raw.environment : null,
     label: text(raw.label, 64) || null,
     hostName: text(raw.hostName, 64) || null,
+    hostId: safeTopicId(raw.hostId),
     accessOrigin: safeApprovalUrl(raw.accessOrigin) || null,
     region: text(raw.region, 64) || null,
     revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : null,

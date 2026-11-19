@@ -5,20 +5,9 @@
 // accepted skew window is the pairing signature window, two minutes in the past
 // through one minute in the future.
 
-import { PluginError } from '../errors.js'
-
-export const UNIX_MS_UNIT = 'unix-epoch-milliseconds'
 export const PAIRING_SIGNATURE_PAST_MS = 120_000
 export const PAIRING_SIGNATURE_FUTURE_MS = 60_000
 export const CLOCK_SKEW_TOLERANCE_MS = 60_000
-
-/** Require an integer Unix-millisecond value. */
-export function assertUnixMs(value, name) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new PluginError('invalid_argument', `${name} is not a safe Unix-millisecond value`)
-  }
-  return value
-}
 
 /** Ordering of a peer timestamp against the local clock. */
 export function classifyTimestamp(atUnixMs, nowUnixMs) {

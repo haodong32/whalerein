@@ -324,24 +324,26 @@ test('invalid or hostile manager values fail closed without leaking them', () =>
     route: 'private', hostId: 'private-host', mqttUrl: 'mqtts://private',
   })
   assert.deepEqual(details, {
-    state: 'connected', environment: 'production', label: null, hostName: null,
+    state: 'connected', environment: 'production', label: null, hostName: null, hostId: 'private-host',
     accessOrigin: 'https://access.example/', region: 'eu-west', revision: 4,
     lastErrorCode: 'internal', protocolVersion: null,
   })
   assert.equal(sanitizeManagerDetails(null), null)
+  assert.equal(sanitizeManagerDetails({ hostId: 'host/invalid' }).hostId, null)
+  assert.equal(sanitizeManagerDetails({}).hostId, null)
 })
 
 test('managed settings exposes sanitized manager details and refuses missing or failing managers', async () => {
   const ctx = new Context()
   const manager = {
     snapshot: () => ({ state: 'connected', environment: 'production', connected: true }),
-    details: () => ({ state: 'connected', region: 'eu-west', route: 'private', hostId: 'secret' }),
+    details: () => ({ state: 'connected', region: 'eu-west', route: 'private', hostId: 'host-test-1' }),
   }
   const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
   assert.equal(service.snapshot().managed, true)
   assert.equal(service.snapshot().connected, true)
   assert.deepEqual(service.details(), {
-    state: 'connected', environment: null, label: null, hostName: null,
+    state: 'connected', environment: null, label: null, hostName: null, hostId: 'host-test-1',
     accessOrigin: null, region: 'eu-west', revision: null, lastErrorCode: null, protocolVersion: null,
   })
   await ctx.fiber.dispose()

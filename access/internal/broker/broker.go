@@ -417,7 +417,15 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 		s.metrics.RouteError()
 		return
 	}
-	s.presence.MarkHostReady(hostID, s.now())
+	// HostReady carries the publication time. A delayed readiness proof from a
+	// superseded connection must not confirm the replacement connection that
+	// the broker already reported, so presence compares this timestamp with the
+	// observed connection time.
+	readyAt := s.now()
+	if ready.GetConnectedAtUnixMs() > 0 {
+		readyAt = time.UnixMilli(ready.GetConnectedAtUnixMs()).UTC()
+	}
+	s.presence.MarkHostReady(hostID, readyAt)
 	s.logger.Info("host ready", "host", s.masker.Host(hostID))
 	s.rememberHostKey(hostID, ready.GetAuthorizationPublicKey())
 

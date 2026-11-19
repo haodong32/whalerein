@@ -11,7 +11,6 @@ import { LogicalTransport, MESSAGE_BYTES, TRANSPORT_VERSION, PACKET_BYTES } from
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 
 // Leave room for protobuf/MQTT headers and HTTP base64 wrapping in Access.
-export const MAX_APPLICATION_MESSAGE_BYTES = MESSAGE_BYTES
 export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
 
 export class MqttAccess {

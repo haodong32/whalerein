@@ -41,6 +41,8 @@ enum RequestKind {
   REQUEST_KIND_PAIRING_AUTHORIZE = 5;
   // Access -> host revocation replay notice.
   REQUEST_KIND_REVOCATION = 6;
+  // Access -> Host query for Devices with a current Session observation.
+  REQUEST_KIND_HOST_CLIENTS = 7;
 }
 
 enum ErrorCode {
@@ -179,6 +181,11 @@ message ErrorResponse {
   string message = 2;
   string trace_id = 3;
   string request_id = 4;
+  // Stable authority reason for a denied long-lived observation. A client
+  // treats these as terminal and does not reconnect; an empty reason keeps the
+  // generic ErrorCode behavior. Values are the documented authority reasons,
+  // not free text.
+  string reason = 5;
 }
 
 message RequestReceipt {
@@ -730,6 +737,18 @@ message EventEnvelope {
 // Encrypted event plaintext.
 message EventPayload {
   SessionUpdate update = 1;
+  // A Host-authored terminal end of one observation. Access cannot author this
+  // frame because the stream is end-to-end encrypted; the Host sends it when
+  // the source no longer has the session.
+  WatchClosed watch_closed = 2;
+}
+
+// Host-side terminal close. reason is a stable string; a client treats every
+// non-empty reason as terminal and never reconnects.
+message WatchClosed {
+  string watch_id = 1;
+  SessionKey session = 2;
+  string reason = 3;
 }
 
 // Opaque MQTT fragmentation. A packet starts with ASCII WRMQTT2 followed by
@@ -984,4 +1003,9 @@ message OperationStatus {
   string authorization_id = 7;
   bytes payload_digest = 8;
   int64 committed_at_unix_ms = 9;
+}
+
+// Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.
+message HostClients {
+  repeated string observing_device_ids = 1;
 }

@@ -543,6 +543,7 @@ pub fn render_account_hosts(hosts: &[whalerein_core::api::AccountHost]) -> Strin
             ("missing", _) => "not enrolled",
             ("known", "enrollment_pending") => "enrollment pending",
             ("known", "enrollment_disabled") => "disabled",
+            ("known", _) if host.presence == "unavailable" => "status unavailable",
             ("known", _) if host.enrolled && host.online => "online",
             ("known", _) if host.enrolled => "offline",
             _ => "status unavailable",
@@ -1440,7 +1441,8 @@ mod tests {
             {"hostId":"host-id-3", "displayName":"Other", "online":true, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"},
             {"hostId":"host-id-4", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_pending"},
             {"hostId":"host-id-5", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_disabled"},
-            {"hostId":"host-id-6", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"}
+            {"hostId":"host-id-6", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready", "presence":"offline"},
+            {"hostId":"host-id-7", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready", "presence":"unavailable"}
         ])).unwrap();
         assert_eq!(
             render_account_hosts(&cloud),
@@ -1452,10 +1454,57 @@ mod tests {
                 "host-id-4\tOther\tenrollment pending\tunavailable\n",
                 "host-id-5\tOther\tdisabled\tunavailable\n",
                 "host-id-6\tOther\toffline\tunavailable\n",
+                "host-id-7\tOther\tstatus unavailable\tunavailable\n",
             )
         );
         assert_eq!(json!(cloud)[0]["host_id"], "host-id-1");
         assert!(render_account_hosts(&[]).starts_with("No computers"));
+    }
+
+    #[test]
+    fn explicit_unavailable_presence_stays_distinct_from_known_offline_and_old_cloud() {
+        let explicit: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-unavailable", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready", "presence":"unavailable"},
+            {"hostId":"host-offline", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready", "presence":"offline"}
+        ]))
+        .unwrap();
+        let unavailable = serde_json::to_value(&explicit[0]).unwrap();
+        let offline = serde_json::to_value(&explicit[1]).unwrap();
+        assert_eq!(unavailable["presence"], "unavailable");
+        assert_eq!(offline["presence"], "offline");
+        assert_ne!(unavailable["presence"], offline["presence"]);
+        let human = render_account_hosts(&explicit);
+        assert!(
+            human.contains("host-unavailable\tComputer\tstatus unavailable"),
+            "{human}"
+        );
+        assert!(human.contains("host-offline\tComputer\toffline"), "{human}");
+
+        // An older Cloud omits presence. Absence is not an explicit
+        // "unavailable": a known online/offline observation still renders.
+        let legacy: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-legacy-online", "displayName":"Computer", "enrolled":true, "online":true,
+             "observation":"known", "enrollmentState":"enrollment_ready"},
+            {"hostId":"host-legacy-offline", "displayName":"Computer", "enrolled":true, "online":false,
+             "observation":"known", "enrollmentState":"enrollment_ready"}
+        ])).unwrap();
+        assert_eq!(legacy[0].presence, "");
+        let legacy_value = serde_json::to_value(&legacy[0]).unwrap();
+        assert!(
+            legacy_value.get("presence").is_none(),
+            "an omitted older-Cloud field stays omitted"
+        );
+        let legacy_human = render_account_hosts(&legacy);
+        assert!(
+            legacy_human.contains("host-legacy-online\tComputer\tonline"),
+            "{legacy_human}"
+        );
+        assert!(
+            legacy_human.contains("host-legacy-offline\tComputer\toffline"),
+            "{legacy_human}"
+        );
     }
 
     #[test]

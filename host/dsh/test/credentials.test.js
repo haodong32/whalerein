@@ -88,6 +88,42 @@ test('credential failures become stable adapter errors without native text', asy
   await assert.rejects(writeFailure.setCredential('ignored', 'x'), (error) => error instanceof AdapterError && !error.message.includes('private write detail'))
 })
 
+test('a temporarily inaccessible credential store fails closed and resumes with the same identity', async () => {
+  const credentials = store()
+  const signing = 'whalerein-host/v1/dsh/0123456789abcdef0123456789abcdef/ed25519-signing-key'
+  const first = new DshHostCredentials({ ctx: { credentials }, profileId: 'profile-one' })
+  await first.setCredential(signing, 'original-secret')
+  const record = credentials.records.get([...credentials.records.keys()][0])
+  assert.deepEqual(record.payload, { privateKeyBase64: 'original-secret' })
+
+  const nativeRead = credentials.readRecord
+  const nativeWrite = credentials.modifyRecord
+  credentials.readRecord = async () => { throw new Error('credential store is locked') }
+  credentials.modifyRecord = async () => { throw new Error('credential store is locked') }
+  const during = new DshHostCredentials({ ctx: { credentials }, profileId: 'profile-one' })
+  for (const operation of [
+    () => during.getCredential(signing),
+    () => during.setCredential(signing, 'replacement-secret'),
+  ]) {
+    await assert.rejects(operation(), (error) => {
+      assert.equal(error instanceof AdapterError, true)
+      assert.equal(error.message.includes('credential store is locked'), false,
+        'native failure text never reaches the adapter error')
+      return true
+    })
+  }
+  assert.equal(credentials.records.size, 1, 'a failed access neither adds nor moves the record')
+  assert.deepEqual(credentials.records.get([...credentials.records.keys()][0]).payload,
+    { privateKeyBase64: 'original-secret' }, 'the stored identity is intact')
+
+  credentials.readRecord = nativeRead
+  credentials.modifyRecord = nativeWrite
+  assert.equal(await during.getCredential(signing), 'original-secret')
+  await during.setCredential(signing, 'replacement-secret')
+  assert.deepEqual(credentials.records.get([...credentials.records.keys()][0]).payload,
+    { privateKeyBase64: 'replacement-secret' })
+})
+
 test('managed profiles bind credentials to an opaque per-profile record and never reuse the legacy key', async () => {
   const credentials = store()
   const first = new DshHostCredentials({ ctx: { credentials }, profileId: 'profile-one' })

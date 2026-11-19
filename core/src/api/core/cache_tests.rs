@@ -77,6 +77,70 @@ async fn sessions_fall_back_to_the_cache_when_the_host_is_offline() {
 }
 
 #[tokio::test]
+async fn a_confirmed_authorization_denial_never_serves_cached_sessions_as_authorized() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert_eq!(core.sessions("host-1").await.unwrap().source, "remote");
+
+    // A confirmed denial is not an ordinary transport loss. The primed cache
+    // must not be presented as an authorized fallback.
+    access.host.lock().unwrap().revoked = true;
+    let error = core.sessions("host-1").await.unwrap_err();
+    assert!(!matches!(error, CoreError::HostOffline), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            CoreError::Revoked | CoreError::HostRejected | CoreError::Host { .. }
+        ),
+        "{error:?}"
+    );
+
+    // The same denial fences a cached session action instead of replaying it.
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "hello")
+        .await
+        .is_err());
+    // A confirmed revocation is terminal for this pairing; the cached rows do
+    // not remain usable after the grant is gone.
+    access.host.lock().unwrap().revoked = false;
+    assert!(!core.is_paired());
+    assert!(matches!(
+        core.sessions("host-1").await,
+        Err(CoreError::NotPaired)
+    ));
+}
+
+#[tokio::test]
+async fn a_host_directory_listing_never_enrolls_or_authorizes_a_host() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    access.host.lock().unwrap().extra_host = true;
+    let hosts = core.hosts().await.unwrap();
+    assert_eq!(hosts.len(), 2, "discovery may list the advertised Host");
+    let config = core.current_config().unwrap();
+    assert!(
+        !config.host_fingerprints.contains_key("host-2"),
+        "listing alone does not pin the other Host"
+    );
+    assert!(matches!(
+        core.sessions("host-2").await,
+        Err(CoreError::NotFound(_))
+    ));
+    assert!(
+        core.session_key("session-1").await.is_err(),
+        "an overlapping Session ID never silently runs on the listed-but-unauthorized Host"
+    );
+}
+
+#[tokio::test]
 async fn send_without_a_cached_session_uses_the_paired_host() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();

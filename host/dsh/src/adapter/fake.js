@@ -85,6 +85,21 @@ export class FakeDshAdapter extends DshAdapter {
     this.#questionOwners.clear()
   }
 
+  /** Test-only: remove a session so authoritative reads return not_found. */
+  deleteSession(sessionId) {
+    this.#sessions.delete(sessionId)
+  }
+
+  /** Test-only: make authoritative reads fail not_found for a removed session. */
+  async readState(sessionId, options) {
+    if (!this.#sessions.has(sessionId)) {
+      const error = new Error('session not found')
+      error.code = 'not_found'
+      throw error
+    }
+    return super.readState(sessionId, options)
+  }
+
   describe() {
     return {
       mode: 'fake',
@@ -261,10 +276,6 @@ export class FakeDshAdapter extends DshAdapter {
     }
     this.#sessions.set(sessionId, session)
     return this.summaryOf(session)
-  }
-
-  hasSession(sessionId) {
-    return this.#sessions.has(sessionId)
   }
 
   #changed(sessionId) { this.notifyQuestionsChanged(sessionId) }

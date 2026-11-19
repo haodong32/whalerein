@@ -65,6 +65,22 @@ func (s *Server) handleEnrollmentStatus(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, r, classifyExternal(err))
 		return
 	}
+	presence := "unavailable"
+	switch status.GetState() {
+	case whalereinv1.EnrollmentState_enrollment_pending, whalereinv1.EnrollmentState_enrollment_disabled:
+		presence = "offline"
+	case whalereinv1.EnrollmentState_enrollment_ready:
+		if s.deps.HostPresence != nil {
+			switch online, known := s.deps.HostPresence.HostPresence(hostID); {
+			case known && online:
+				presence = "online"
+			case known:
+				presence = "offline"
+			}
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("WhaleRein-Host-Presence", presence)
 	s.writeProto(w, http.StatusOK, status)
 }
 

@@ -28,6 +28,43 @@ function fixture(access={connected:true,published:[],async publishEvent(value){t
 const CONV={conversation:true,questions:false}
 const settle=()=>new Promise(r=>setTimeout(r,30))
 const tick=()=>new Promise(r=>setImmediate(r))
+
+test('connected devices require a current observation and are deduplicated by Device ID', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'a paired channel alone cannot prove a live observation')
+  const first = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  await ctx.events.watch('d', ctx.channel.channelId, 'other-session', undefined, CONV)
+  const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
+  ctx.advance(100)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  ctx.events.unwatch('d', ctx.channel.channelId, first.watch_id)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  ctx.advance(first.lease_ms - 100)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
+  ctx.events.onChannelReplaced('second', other.channelId)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [])
+})
+
+test('an abrupt watcher exit expires only its lease while the Host and another watcher stay connected', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.advance(100)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  assert.equal(ctx.access.connected, true, 'the Host transport stays connected')
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  // The first CLI exits without unwatch. Only its lease lapses.
+  ctx.advance(29_900)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
+  assert.equal(ctx.access.connected, true, 'lease expiry does not disconnect the Host')
+  assert.equal(ctx.events.describe().watches, 1, 'the other watcher still holds an active observation')
+  ctx.advance(200)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'every expired lease leaves no active observation')
+})
+
 function deferred() {
   const value = {}
   value.promise = new Promise((resolve, reject) => { value.resolve = resolve; value.reject = reject })
@@ -527,4 +564,24 @@ test('session-observation/AC-08.a failed reconciliation is explicit and later co
   assert.equal(repaired.stamp.revision,2)
   const refreshed=await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
   assert.deepEqual(refreshed.watches[0].questions.stamp,{observation_epoch:'epoch-one',revision:2})
+})
+
+test('a source that no longer has the session closes the watch with a terminal event', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const watch = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.readState = async () => {
+    const error = new Error('session gone')
+    error.code = 'not_found'
+    throw error
+  }
+  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]), error => error.code === 'not_found')
+  assert.equal(ctx.access.published.length, 1, 'the terminal close must be delivered')
+  const outer = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
+  const payload = openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+  assert.equal(payload.watch_closed.watch_id, watch.watch_id)
+  assert.equal(payload.watch_closed.reason, 'session_deleted')
+  assert.deepEqual(payload.watch_closed.session, { host_id: 'h', session_id: 's' })
+  assert.equal(ctx.events.describe().watches, 0, 'the terminal close removes the watch')
+  assert.equal(ctx.events.describe().sessions, 0, 'the terminal close releases the source')
 })

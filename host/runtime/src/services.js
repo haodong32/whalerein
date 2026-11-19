@@ -33,8 +33,6 @@ export const OFFICIAL_SERVICES = Object.freeze(Object.fromEntries(
   BUILTIN_ENVIRONMENTS.map((environment) => [environment, descriptor(environment)]),
 ))
 
-export const OFFICIAL_SERVICE_LIST = Object.freeze(BUILTIN_ENVIRONMENTS.map((environment) => OFFICIAL_SERVICES[environment]))
-
 export function officialService(environment) {
   const service = OFFICIAL_SERVICES[environment]
   if (!service) throw new PluginError('invalid_argument', 'unknown official environment')

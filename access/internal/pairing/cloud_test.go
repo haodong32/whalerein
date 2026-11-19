@@ -108,3 +108,56 @@ func TestCloudPairingSeparatesInvitationTokensAndRequiresAnExactReplay(t *testin
 		t.Fatalf("Host activation count %d, want 1", f.store.confirmCalls)
 	}
 }
+
+// A first Cloud pairing attempted while the Host is offline fails before any
+// Host contact and establishes no usable grant. The same operation can pair
+// once after the Host becomes ready.
+func TestCloudPairingWhileHostOfflineCreatesNoUsableGrant(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	scope := CloudScope{
+		Issuer: "issuer", Audience: "https://regional.fixture.test", RegionID: "region",
+		WorkspaceID: "workspace", Revision: "revision", HostID: "h1", DeviceID: "device", OperationID: "operation",
+		HostKey: []byte("host-key"), DeviceKey: bytes.Repeat([]byte{4}, 32), ExpiresAt: f.now.Add(time.Hour),
+	}
+	hello := &whalereinv1.PairingClaimRequest{ClaimId: scope.OperationID, DeviceId: scope.DeviceID,
+		NoiseMessage: []byte("initial-proof"), Phase: whalereinv1.PairingPhase_PAIRING_PHASE_HELLO, ProtocolVersion: 1}
+	finish := proto.Clone(hello).(*whalereinv1.PairingClaimRequest)
+	finish.Phase = whalereinv1.PairingPhase_PAIRING_PHASE_FINISH
+	finish.NoiseMessage = []byte("final-proof")
+	finish.Confirmed = true
+	finish.DeviceToken = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+
+	f.transport.awaitFn = func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		result, err := defaultPairingAnswers(req)
+		if err != nil {
+			return nil, err
+		}
+		var reply whalereinv1.PairingClaimResult
+		if err := proto.Unmarshal(result.ResultBody, &reply); err != nil {
+			return nil, err
+		}
+		reply.HostPublicKey = scope.HostKey
+		result.ResultBody, err = proto.Marshal(&reply)
+		return result, err
+	}
+	f.presence.online["h1"] = false
+	if _, err := f.service.ClaimCloud(ctx, hello, scope); !errors.Is(err, ErrHostOffline) {
+		t.Fatalf("offline first pairing = %v", err)
+	}
+	if len(f.transport.requests) != 0 || f.store.confirmCalls != 0 || len(f.store.grants) != 0 {
+		t.Fatalf("offline first pairing reached the Host or created a grant: requests=%d confirms=%d grants=%v",
+			len(f.transport.requests), f.store.confirmCalls, f.store.grants)
+	}
+
+	f.presence.online["h1"] = true
+	if _, err := f.service.ClaimCloud(ctx, hello, scope); err != nil {
+		t.Fatalf("recovered first pairing HELLO: %v", err)
+	}
+	if _, err := f.service.ClaimCloud(ctx, finish, scope); err != nil {
+		t.Fatalf("recovered first pairing FINISH: %v", err)
+	}
+	if len(f.store.grants) != 1 || f.store.confirmCalls != 1 {
+		t.Fatalf("recovered pairing grants=%v confirms=%d", f.store.grants, f.store.confirmCalls)
+	}
+}

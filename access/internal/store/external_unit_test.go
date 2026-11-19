@@ -51,7 +51,6 @@ func (r externalRow) Scan(dest ...any) error {
 // externalTx records whether it committed and serves its own rows.
 type externalTx struct {
 	pgx.Tx
-	row        pgx.Row
 	insertedID string
 	execErr    error
 	committed  bool

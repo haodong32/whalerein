@@ -51,6 +51,7 @@ pub fn decode_failure(error: &serde_json::Error) -> AccessError {
         status: None,
         code,
         message,
+        reason: String::new(),
     }
 }
 

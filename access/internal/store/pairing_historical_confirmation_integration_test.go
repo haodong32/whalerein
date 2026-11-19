@@ -321,40 +321,39 @@ func TestLegacyCommitProofSurvivesBothCleanupOrders(t *testing.T) {
 func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 	for _, missingBody := range []bool{false, true} {
 		t.Run(map[bool]string{false: "retained commit", true: "body already gone"}[missingBody], func(t *testing.T) {
-			s, _ := storetest.New(t)
+			// Build the real pre-010 schema, seed legacy rows, then exercise the
+			// production upgrade path.
+			s := openStoreAtMigration(t, "009_pairing_outcomes.sql")
 			ctx := context.Background()
 			now := time.Now().UTC()
 			if _, err := s.EnsureHost(ctx, "host"); err != nil {
 				t.Fatal(err)
 			}
-			hash, authHash := bytes.Repeat([]byte{4}, 32), bytes.Repeat([]byte{5}, 32)
-			if err := s.CreatePairingToken(ctx, hash, "host", now.Add(time.Minute), now); err != nil {
+			publicKey := bytes.Repeat([]byte{3}, 32)
+			keyHash := sha256.Sum256(publicKey)
+			authHash := bytes.Repeat([]byte{5}, 32)
+			if err := s.CreatePairedDevice(ctx, "host", "device", hex.EncodeToString(keyHash[:]), authHash, now); err != nil {
 				t.Fatal(err)
 			}
-			op, notice := fixturePairingOperation(t, s, hash, "host", "device", "claim", now, nil)
-			keyHash := sha256.Sum256(bytes.Repeat([]byte{3}, 32))
-			if accepted, err := s.CommitPairing(ctx, hash, "host", "device", hex.EncodeToString(keyHash[:]), authHash, now, notice, &op); err != nil || !accepted {
-				t.Fatal("valid setup did not commit")
+			var generation int64
+			if err := s.Pool().QueryRow(ctx, `SELECT grant_generation FROM grants WHERE host_id='host' AND device_id='device'`).Scan(&generation); err != nil {
+				t.Fatal(err)
 			}
-			ack, err := proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "device"})
+			claimBody, err := proto.Marshal(&whalereinv1.PairingClaim{
+				ClaimId: "claim", DeviceId: "device", DevicePublicKey: publicKey,
+				Phase:           whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT,
+				ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli(), GrantGeneration: uint64(generation),
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.Pool().Exec(ctx, `UPDATE requests SET result_body=$2,status='succeeded',updated_at=$3 WHERE request_id=$1`, notice.RequestId, ack, now); err != nil {
+			ackBody, err := proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "device"})
+			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.Pool().Exec(ctx, `UPDATE pairing_outcomes SET host_confirmed=true WHERE claim_id=$1`, "claim"); err != nil {
-				t.Fatal(err)
-			}
-			legacyEmpty := newRequest("legacy-empty", "host", "device", "legacy-command", []byte{1}, whalereinv1.OnlineStatus_received, store.ForwardPending, now)
-			legacyEmpty.RequestBody = []byte{}
-			if _, err := s.CreateRequest(ctx, legacyEmpty); err != nil {
-				t.Fatal(err)
-			}
+			requestBody := claimBody
 			if missingBody {
-				if _, err := s.Pool().Exec(ctx, `UPDATE requests SET request_body=''::bytea WHERE request_id=$1`, notice.RequestId); err != nil {
-					t.Fatal(err)
-				}
+				requestBody = []byte{}
 			}
 			// Keep the later Cloud-session schema. Restore its trigger after the
 			// 010 rewind recreates the Host confirmation columns.
@@ -381,7 +380,7 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 				t.Fatal(err)
 			}
 			var legacyUnknown bool
-			if err := s.Pool().QueryRow(ctx, `SELECT bodies_cleared IS NULL FROM requests WHERE request_id=$1`, legacyEmpty.RequestID).Scan(&legacyUnknown); err != nil || !legacyUnknown {
+			if err := s.Pool().QueryRow(ctx, `SELECT bodies_cleared IS NULL FROM requests WHERE request_id=$1`, legacyEmptyID).Scan(&legacyUnknown); err != nil || !legacyUnknown {
 				t.Fatal("upgrade invented retention history for legacy empty request")
 			}
 			newEmpty := newRequest("new-empty", "host", "device", "new-command", []byte{2}, whalereinv1.OnlineStatus_received, store.ForwardPending, now)

@@ -26,7 +26,6 @@ import {
 import { randomBytes } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
-import { PluginError } from './errors.js'
 import { isBuiltinEnvironment } from './configuration/catalog.js'
 import { IDENTIFIER_PATTERN } from './configuration/document.js'
 import { OFFICIAL_SERVICES, PROFILE_MODES, validateServiceOrigin } from './services.js'

@@ -283,18 +283,24 @@ func (s *Service) AuthorizeHost(ctx context.Context, identity Identity, hostID s
 	if identity.SessionID != "" {
 		_, hosts, err := s.sessionHosts(ctx, identity)
 		if err != nil {
-			return err
+			if errors.Is(err, ErrUnauthorized) {
+				return &AuthorityDenial{Reason: ReasonSessionRevoked, StatusCode: 403}
+			}
+			return &AuthorityDenial{Reason: ReasonAuthorityUnavailable, StatusCode: 503, Cause: err}
 		}
 		if !hosts[hostID] {
-			return ErrForbidden
+			// The session is live but this Host is no longer in its authorized
+			// set: either the grant or the enrollment went away. Explain which
+			// so a watch can end with a terminal reason instead of retrying.
+			return s.hostDenial(ctx, hostID)
 		}
 	}
 	active, err := s.admission.Authorize(ctx, hostID, identity.DeviceID)
 	if err != nil {
-		return fmt.Errorf("authorize host: %w", err)
+		return &AuthorityDenial{Reason: ReasonAuthorityUnavailable, StatusCode: 503, Cause: err}
 	}
 	if !active {
-		return ErrForbidden
+		return s.hostDenial(ctx, hostID)
 	}
 	return nil
 }

@@ -49,7 +49,10 @@ pub(crate) enum QuestionSignal {
 fn watch_fatal(error: &CoreError) -> bool {
     if matches!(
         error.code(),
-        "unsupported_capability" | "protocol_version_incompatible"
+        // A scope denial is an authoritative answer, not a transport problem.
+        // Reconnecting would only repeat the same 401/403 until the deadline,
+        // hiding the revocation from a bounded caller.
+        "unsupported_capability" | "protocol_version_incompatible" | "unauthorized" | "forbidden"
     ) {
         return true;
     }
@@ -57,6 +60,7 @@ fn watch_fatal(error: &CoreError) -> bool {
         error,
         CoreError::Revoked
             | CoreError::RevokedRetentionUnverified
+            | CoreError::AuthorityClosed(_)
             | CoreError::NotPaired
             | CoreError::FingerprintMismatch { .. }
             | CoreError::Unsupported
@@ -926,7 +930,17 @@ async fn conversation_loop(
                     return Ok(End::Reconnect);
                 };
                 queued.fetch_sub(envelope.ciphertext.len(), Ordering::SeqCst);
-                let update = crate::sync::open_update(&channel, &envelope)?;
+                let update = match crate::sync::open_event(&channel, &envelope)? {
+                    crate::sync::OpenedEvent::Update(update) => update,
+                    crate::sync::OpenedEvent::Closed(closed) => {
+                        if closed.watch_id == watch_id && closed.session.as_ref() == Some(&wire_key) {
+                            // A Host-authored terminal close is authoritative,
+                            // like an Access authority reason: never reconnect.
+                            return Err(CoreError::AuthorityClosed(closed.reason));
+                        }
+                        continue;
+                    }
+                };
                 if update.session.as_ref() != Some(&wire_key) || update.watch_id != watch_id {
                     continue;
                 }
@@ -940,7 +954,6 @@ async fn conversation_loop(
                     generation,
                     interests,
                     &wire_key,
-                    &watch_id,
                     &epoch,
                     &mut state_revision,
                     conversation,
@@ -963,6 +976,14 @@ async fn conversation_loop(
                 }
             }
             _ = interval.tick() => {
+                // The encrypted stream cannot carry an Access-authored close,
+                // and a removed grant can leave it idle. Renew the authority
+                // lease over HTTP; a typed reason is terminal immediately.
+                if let Err(authority) = core.check_host_authority(&key.host_id).await {
+                    if matches!(authority, CoreError::AuthorityClosed(_)) {
+                        return Err(authority);
+                    }
+                }
                 let failure = error.lock().expect("watch error mutex").take();
                     if let Some(failure) = failure {
                     return Err(failure);
@@ -979,6 +1000,15 @@ async fn conversation_loop(
                     Err(error) if error.code() == "expired" => {
                         pump.finish().await;
                         return Ok(End::Reconnect);
+                    }
+                    // The Host's authoritative refresh says the Source no
+                    // longer has this session. That is terminal even when the
+                    // explicit `watch_closed` event is delayed or lost.
+                    Err(error) if error.code() == "not_found" => {
+                        return Err(CoreError::AuthorityClosed("session_deleted".into()));
+                    }
+                    Err(error) if error.code() == "forbidden" || error.code() == "unauthorized" => {
+                        return Err(CoreError::AuthorityClosed("unauthorized".into()));
                     }
                     other => other?,
                 };
@@ -1026,8 +1056,7 @@ async fn conversation_loop(
                         }
                     }
                 }
-                if interests.conversation
-                    && state.revision > state_revision
+                if state.revision > state_revision
                     && !send_event(
                         events,
                         key,
@@ -1053,7 +1082,6 @@ async fn handle_update(
     generation: u64,
     interests: ObservationInterests,
     wire_key: &whalerein_proto::SessionKey,
-    watch_id: &str,
     epoch: &str,
     state_revision: &mut u64,
     conversation: &mut Conversation,
@@ -1062,7 +1090,6 @@ async fn handle_update(
     sync: Option<&crate::sync::SyncService>,
     payload: session_update::Payload,
 ) -> CoreResult<Flow> {
-    let _ = watch_id;
     match payload {
         session_update::Payload::Questions(descriptor) => {
             if interests.questions {

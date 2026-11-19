@@ -15,6 +15,16 @@ const LEASE = 30000
 // A questions facet failure is contained unless it disproves authority over the
 // whole session. These codes stop every selected facet.
 const QUESTION_FATAL_CODES = new Set(['forbidden', 'unauthorized', 'not_found', 'expired', 'invalid_argument', 'protocol_version_incompatible'])
+// A source error that proves the session is gone ends every observation of it
+// with an explicit Host-authored close instead of leaving the client to time
+// out. Transient source failures stay warnings and are retried.
+const SESSION_FATAL_CODES = new Set(['forbidden', 'unauthorized', 'not_found', 'expired'])
+
+function sessionCloseReason(code) {
+  if (code === 'not_found') return 'session_deleted'
+  if (code === 'expired') return 'session_expired'
+  return 'unauthorized'
+}
 
 function validInterests(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -65,6 +75,69 @@ export class WatchedEvents {
       this.#sources.delete(watch.sessionId)
     }
   }
+  // End every observation of one Source with a Host-authored terminal event.
+  // The event is always written to the outbox and also published live when
+  // possible, so a disconnected client receives it on reconnect. A stale
+  // watch_id is ignored by a new observation.
+  #closeSession(sessionId, reason) {
+    const source = this.#sources.get(sessionId)
+    if (!source) return
+    for (const id of [...source.recipients]) {
+      const watch = this.#watches.get(id)
+      if (watch) this.#enqueueClosed(watch, reason)
+    }
+  }
+
+  // A source error code that proves the session is gone ends every
+  // observation of it; transient failures stay with the caller to report or
+  // retry.
+  #closeIfGone(sessionId, code) {
+    if (!SESSION_FATAL_CODES.has(code)) return false
+    this.#closeSession(sessionId, sessionCloseReason(code))
+    return true
+  }
+
+  // Seal one watch event and wrap it for delivery. A missing key means the
+  // event cannot be delivered, so the caller drops it.
+  #envelope(watch, plaintext, at) {
+    const sealed = this.security.sealEvent({
+      deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at,
+    })
+    if (!sealed) return null
+    return this.codec.encode('whalerein.v1.EventEnvelope', {
+      host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId,
+      nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at,
+    })
+  }
+
+  // The outbox row is the durable copy of one watch event.
+  #addOutbox(watch, envelope, at) {
+    return this.store.addOutbox({
+      deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at,
+      perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100,
+      totalLimit: this.config.outboxTotalLimit ?? 1000,
+    })
+  }
+
+  #enqueueClosed(watch, reason) {
+    if (!this.security.getChannel(watch.channelId)) return
+    const plaintext = this.codec.encode('whalerein.v1.EventPayload', {
+      watch_closed: {
+        watch_id: watch.id,
+        session: { host_id: this.hostId, session_id: watch.sessionId },
+        reason,
+      },
+    })
+    const at = this.now()
+    const envelope = this.#envelope(watch, plaintext, at)
+    if (!envelope) return
+    // The durable copy is the delivery guarantee; the live copy is latency.
+    const row = this.#addOutbox(watch, envelope, at)
+    if (row.overflow) this.outboxSnapshotRequired.add(watch.deviceId)
+    if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
+    this.#remove(watch.id)
+  }
+
   #owned(deviceId, channelId, id) {
     this.#expire(); const watch = this.#watches.get(id)
     if (!watch || watch.deviceId !== deviceId || watch.channelId !== channelId) throw new PluginError('expired', 'watch unavailable')
@@ -146,7 +219,14 @@ export class WatchedEvents {
       // union for the shared Source observation; delivery stays per recipient.
       watch.interests = mergeInterests(watch.interests, requested)
     }
-    try { return await this.#ready(watch, signal) } catch (error) { this.#remove(watch.id); throw error }
+    try {
+      const ready = await this.#ready(watch, signal)
+      watch.observing = true
+      return ready
+    } catch (error) {
+      this.#remove(watch.id)
+      throw error
+    }
   }
   async #readQuestionDescriptor(sessionId, signal) {
     let raw
@@ -171,6 +251,12 @@ export class WatchedEvents {
         if (signal?.aborted) throw new PluginError('unavailable')
         if (state.session?.session_id !== watch.sessionId || !state.history_head || !state.live_epoch) throw new PluginError('unavailable', 'source state unavailable')
         return state
+      }).catch(error => {
+        // An authoritative read proved the session is gone. Close every
+        // observation of it with a Host-authored event before the client's
+        // own lease or timeout hides the reason.
+        if (this.#closeIfGone(watch.sessionId, errorCode(error))) throw new PluginError('not_found', 'session ended')
+        throw error
       })
       : null
     const questionsRead = interests.questions ? this.#readQuestionDescriptor(watch.sessionId, signal) : null
@@ -223,7 +309,9 @@ export class WatchedEvents {
         try { descriptor = await this.#readQuestionDescriptor(sessionId, source.controller.signal) }
         catch (error) {
           if (source.controller.signal.aborted || this.#sources.get(sessionId) !== source) return
-          descriptor = { availability: 'unavailable', code: errorCode(error) }
+          const code = errorCode(error)
+          if (this.#closeIfGone(sessionId, code)) return
+          descriptor = { availability: 'unavailable', code }
         }
         if (this.#sources.get(sessionId) !== source || source.controller.signal.aborted) return
         // A late old read can never regress the accepted observation.
@@ -264,7 +352,10 @@ export class WatchedEvents {
           if (state.session?.session_id !== sessionId) throw new PluginError('invalid_argument')
           state.session = { host_id: this.hostId, session_id: sessionId }
           this.#receive(sessionId, { session: { session_id: sessionId }, state })
-        }).catch(() => this.logger?.warn('source_state_unavailable', { code: 'unavailable' })).finally(() => { source.stateTask = null })
+        }).catch((error) => {
+          const code = errorCode(error)
+          if (!this.#closeIfGone(sessionId, code)) this.logger?.warn('source_state_unavailable', { code })
+        }).finally(() => { source.stateTask = null })
       }
       return
     }
@@ -283,13 +374,12 @@ export class WatchedEvents {
     }
   }
   #enqueue(watch, update) {
-    const channel = this.security.getChannel(watch.channelId); if (!channel) return
+    if (!this.security.getChannel(watch.channelId)) return
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
     if (update.live && plaintext.length > 256 * 1024) return
     const at = this.now()
-    const sealed = this.security.sealEvent({ deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at })
-    if (!sealed) return
-    const envelope = this.codec.encode('whalerein.v1.EventEnvelope', { host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId, nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at })
+    const envelope = this.#envelope(watch, plaintext, at)
+    if (!envelope) return
     let lane = this.#lanes.get(watch.deviceId)
     if (!lane) { lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }; this.#lanes.set(watch.deviceId, lane) }
     if (update.live) {
@@ -297,7 +387,7 @@ export class WatchedEvents {
       lane.count++; lane.bytes += envelope.length
       lane.live = lane.live.then(() => { if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) return this.access.publishEvent(envelope) }).catch(() => { }).finally(() => { lane.count--; lane.bytes -= envelope.length })
     } else {
-      const row = this.store.addOutbox({ deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at, perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100, totalLimit: this.config.outboxTotalLimit ?? 1000 })
+      const row = this.#addOutbox(watch, envelope, at)
       if (row.overflow) {
         // A dropped committed envelope is a cursor gap. Keep bounded drop
         // accounting and require a snapshot instead of silently continuing.
@@ -329,6 +419,16 @@ export class WatchedEvents {
     this.droppedByDevice.delete(deviceId)
   }
   onChannelsCleared(channels) { for (const { deviceId, channelId } of channels ?? []) this.onChannelReplaced(deviceId, channelId) }
+
+  observingDeviceIds() {
+    this.#expire()
+    const devices = new Set()
+    for (const watch of this.#watches.values()) {
+      if (watch.observing) devices.add(watch.deviceId)
+    }
+    return [...devices].sort()
+  }
+
   describe() {
     return {
       watches: this.#watches.size, sessions: this.#sources.size, pending: this.store.countOutbox(),

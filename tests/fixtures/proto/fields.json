@@ -496,6 +496,10 @@
       {
         "name": "REQUEST_KIND_REVOCATION",
         "number": 6
+      },
+      {
+        "name": "REQUEST_KIND_HOST_CLIENTS",
+        "number": 7
       }
     ],
     "RunPhase": [
@@ -1117,6 +1121,13 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1182,6 +1193,14 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.SessionUpdate"
+        },
+        {
+          "json_name": "watchClosed",
+          "name": "watch_closed",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.WatchClosed"
         }
       ]
     },
@@ -1554,6 +1573,17 @@
           "number": 300,
           "repeated": false,
           "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "HostClients": {
+      "fields": [
+        {
+          "json_name": "observingDeviceIds",
+          "name": "observing_device_ids",
+          "number": 1,
+          "repeated": true,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -5031,6 +5061,32 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "WatchClosed": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },

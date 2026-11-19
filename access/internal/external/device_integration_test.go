@@ -171,6 +171,18 @@ func TestCloudDevicePairingActivationRecoveryAndRevocation(t *testing.T) {
 			t.Fatalf("grant active %v, %v, want %v", active, err, usable)
 		}
 	}
+	checkClients := func(want string) {
+		t.Helper()
+		got, err := database.HostClientIDs(ctx, "workspace", "host", "1")
+		if err != nil || (want == "" && len(got) != 0) || (want != "" && (len(got) != 1 || got[0] != want)) {
+			t.Fatalf("Host clients = %v, want %q, error = %v", got, want, err)
+		}
+	}
+	for _, scope := range [][3]string{{"foreign", "host", "1"}, {"workspace", "host", "2"}, {"workspace", "other", "1"}} {
+		if _, err := database.HostClientIDs(ctx, scope[0], scope[1], scope[2]); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("foreign Host client scope %v: %v", scope, err)
+		}
+	}
 	hello := &whalereinv1.PairingClaimRequest{
 		ClaimId: "pairing", DeviceId: "device", NoiseMessage: []byte("hello"),
 		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_HELLO, ProtocolVersion: 1,
@@ -184,6 +196,7 @@ func TestCloudDevicePairingActivationRecoveryAndRevocation(t *testing.T) {
 	wireClaim(proof, hello, http.StatusOK)
 	wireClaim(proof, finish, http.StatusServiceUnavailable)
 	checkGrant("device", "pending", false)
+	checkClients("")
 	credentialHash := sha256.Sum256([]byte(finish.DeviceToken))
 	if _, err := database.ActiveDeviceByAuthHash(ctx, credentialHash[:]); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unconfirmed credential lookup returned %v", err)
@@ -192,6 +205,7 @@ func TestCloudDevicePairingActivationRecoveryAndRevocation(t *testing.T) {
 	peer.commitUnavailable = false
 	wireClaim(proof, finish, http.StatusOK)
 	checkGrant("device", "ready", true)
+	checkClients("device")
 	refreshed := proto.Clone(proof).(*whalereinv1.ExternalAuthorization)
 	refreshed.AuthorizationId = "refreshed-pairing-authorization"
 	wireClaim(provider.issue(t, refreshed), finish, http.StatusOK)
@@ -199,11 +213,48 @@ func TestCloudDevicePairingActivationRecoveryAndRevocation(t *testing.T) {
 		t.Fatalf("Host activation ran %d times", peer.commits)
 	}
 
+	// A single Device can pair to two Hosts in one workspace. Revoking one
+	// pairing removes only that Host's row from its client list.
+	secondOperation := operation
+	secondOperation.OperationID, secondOperation.AuthorizationID = "another-enrollment", "another-host-authorization"
+	secondOperation.HostID, secondOperation.EnrollmentRevision = "another-host", "2"
+	_, _, _, err = database.EnrollHost(ctx, secondOperation, store.ExternalEnrollment{
+		HostID: "another-host", WorkspaceID: "workspace", EnrollmentRevision: "2", State: "enrollment_pending",
+		HostSigningPublicKey: signingKey, HostNoisePublicKey: peer.hostKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.EnsureHost(ctx, "another-host"); err != nil {
+		t.Fatal(err)
+	}
+	if _, advanced, err := database.MarkEnrollmentReady(ctx, "another-host", now); err != nil || !advanced {
+		t.Fatalf("sibling enrollment was not ready: %v", err)
+	}
+	sibling := auth("device", "sibling-pair")
+	sibling.HostId, sibling.EnrollmentRevision = "another-host", "2"
+	sibling = provider.issue(t, sibling)
+	siblingHello := proto.Clone(hello).(*whalereinv1.PairingClaimRequest)
+	siblingFinish := proto.Clone(finish).(*whalereinv1.PairingClaimRequest)
+	siblingHello.ClaimId, siblingFinish.ClaimId = "sibling-pair", "sibling-pair"
+	wireClaim(sibling, siblingHello, http.StatusOK)
+	wireClaim(sibling, siblingFinish, http.StatusOK)
+	checkSibling := func() {
+		t.Helper()
+		got, err := database.HostClientIDs(ctx, "workspace", "another-host", "2")
+		if err != nil || len(got) != 1 || got[0] != "device" {
+			t.Fatalf("sibling Host client list = %v, error = %v", got, err)
+		}
+	}
+	checkSibling()
+
 	path := "/v1/enrollments/hosts/host/devices/device"
 	webRequest(t, server.URL, http.MethodGet, path+"?workspaceId=workspace", "", nil, http.StatusUnauthorized)
 	webRequest(t, server.URL, http.MethodGet, path+"?workspaceId=another-workspace", adminToken, nil, http.StatusNotFound)
 	webRequest(t, server.URL, http.MethodPost, path+"/revocation?workspaceId=workspace", adminToken, nil, http.StatusNoContent)
 	checkGrant("device", "revoked", false)
+	checkClients("")
+	checkSibling()
 	wireClaim(proof, finish, http.StatusConflict)
 
 	hello.ClaimId, hello.DeviceId = "before-commit", "another-device"

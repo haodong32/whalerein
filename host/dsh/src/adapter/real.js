@@ -13,7 +13,7 @@ import {
   assertQuestionAdmission, questionInventoryFingerprint, validateQuestionAnswers,
 } from './questions.js'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
-import { approvalDigest, bytesEqual, randomId, sha256Text } from 'whalerein-host/security/digest.js'
+import { approvalDigest, bytesEqual, randomId } from 'whalerein-host/security/digest.js'
 import {
   APPROVAL_REASON_MAX,
   DshAdapter,

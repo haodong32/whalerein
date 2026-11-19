@@ -57,6 +57,8 @@ window.__ModuleLoader__.load({
       revokeFailed: 'Could not revoke this device. Try again.',
       deviceCount: '{count} devices',
       noDevices: 'No paired devices yet.',
+      devicesUnavailable: 'The device list is temporarily unavailable.',
+      managedDevicesHint: 'Connected devices are watching a session.',
       deviceConnected: 'Connected',
       devicePaired: 'Paired',
       pairedAt: 'Paired {time}',
@@ -263,6 +265,8 @@ window.__ModuleLoader__.load({
       revokeFailed: '暂时无法撤销这台设备，请重试。',
       deviceCount: '{count} 台设备',
       noDevices: '暂无已配对设备。',
+      devicesUnavailable: '暂时无法读取设备列表。',
+      managedDevicesHint: '已连接的设备正在观察会话。',
       deviceConnected: '已连接',
       devicePaired: '已配对',
       pairedAt: '配对于 {time}',
@@ -628,7 +632,7 @@ window.__ModuleLoader__.load({
       const status = h(Tag, { tone: device.connected ? 'success' : 'quiet' },
         h(StateDot, { state: device.connected ? 'done' : 'idle', size: 10 }),
         device.connected ? t('deviceConnected') : t('devicePaired'))
-      const revokeControls = confirming
+      const revokeControls = !onAsk ? null : confirming
         ? h('div', {
           style: styles.deviceActions,
           onKeyDown: (event) => {
@@ -1400,6 +1404,7 @@ window.__ModuleLoader__.load({
       const detailRows = currentDetails ? [
         [tr('cloudDetailsState'), currentDetails.state ? tr(`state_${currentDetails.state}`) : '—'],
         [tr('cloudDetailsEnvironment'), managedEnvironmentLabel(tr, currentDetails.environment || snapshot.environment)],
+        [tr('hostId'), currentDetails.hostId || '—'],
         [tr('cloudDetailsRegion'), currentDetails.region || '—'],
         [tr('cloudDetailsOrigin'), currentDetails.accessOrigin || '—'],
         [tr('cloudDetailsRevision'), currentDetails.revision == null ? '—' : String(currentDetails.revision)],
@@ -1465,6 +1470,17 @@ window.__ModuleLoader__.load({
               browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
             : null,
           actionError ? h('p', { style: styles.error, role: 'alert' }, tr(actionError)) : null),
+        ['connected', 'reconnecting', 'disconnected'].includes(state) ? h('section', {
+          style: styles.section, 'aria-labelledby': `${fieldId}-devices`,
+        },
+        h('h3', { id: `${fieldId}-devices`, style: styles.sectionTitle }, tr('devices')),
+        h('p', { style: styles.hint }, tr('managedDevicesHint')),
+        !snapshot.available || !Array.isArray(snapshot.devices)
+          ? h('p', { style: styles.hint, role: 'status' }, tr('devicesUnavailable'))
+          : snapshot.devices.length === 0
+            ? h('p', { style: styles.hint }, tr('noDevices'))
+            : h('ul', { style: styles.deviceList }, snapshot.devices.map((device) =>
+              h(DeviceRow, { key: device.deviceId, device, t: tr, locale: activeLocale })))) : null,
         h('section', { style: styles.details },
           h(DisclosureRow, {
             title: tr('cloudDetails'), icon: h(IconSettingsOutlineRegular, { size: 16 }),
@@ -1726,7 +1742,7 @@ window.__ModuleLoader__.load({
                 connected: result.value.connected === true,
                 hostId: typeof result.value.hostId === 'string' ? result.value.hostId : '',
                 pairingCode: typeof result.value.pairingCode === 'string' ? result.value.pairingCode : '',
-                devices: Array.isArray(result.value.devices) ? result.value.devices : [],
+                devices: Array.isArray(result.value.devices) ? result.value.devices : null,
                 diagnostics: result.value.diagnostics ?? null,
                 configError: result.value.configError ?? null,
                 ...cloudSnapshot(result.value),

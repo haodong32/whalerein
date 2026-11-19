@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { EventEmitter } from 'node:events'
 import { MqttAccess } from '../src/access/mqtt.js'
 import { ConfigError } from '../src/config.js'
 import { codec } from '../src/protocol.js'
@@ -49,6 +50,40 @@ test('only an mqtts URL on port 443 offers the MQTT ALPN protocol', () => {
   const loopback = makeAccess({ url: 'mqtt://127.0.0.1:1883' })
   loopback.access.start()
   assert.equal(loopback.options[0].opts.ALPNProtocols, undefined)
+})
+
+test('a blocked MQTT port or ALPN negotiation fails closed without a plaintext fallback', async () => {
+  for (const code of ['ECONNREFUSED', 'ERR_SSL_ALPN_NEGOTIATION_FAILED']) {
+    const attempts = []
+    const connect = (url, options) => {
+      attempts.push({ url, options })
+      const client = new EventEmitter()
+      client.end = (force, opts, callback) => {
+        const done = typeof force === 'function' ? force : callback
+        queueMicrotask(() => { client.emit('close'); done?.() })
+        return client
+      }
+      queueMicrotask(() => client.emit('error', Object.assign(new Error('private transport detail'), { code })))
+      return client
+    }
+    const access = new MqttAccess({
+      url: 'mqtts://access.example:443',
+      hostId: 'host-1',
+      token: 'secret-token',
+      connect,
+      reconnectMinMs: 60_000,
+      reconnectMaxMs: 60_000,
+    })
+    access.start()
+    await assert.rejects(access.waitForConnected(120), (error) => error.code === 'unavailable', code)
+    assert.equal(access.describe().connected, false)
+    assert.equal(access.describe().lastErrorCode, 'unavailable')
+    assert.equal(attempts.length, 1, `${code} does not fall back to another transport`)
+    assert.equal(attempts[0].url, 'mqtts://access.example:443')
+    assert.deepEqual(attempts[0].options.ALPNProtocols, ['mqtt'])
+    assert.equal(attempts[0].options.rejectUnauthorized, undefined)
+    await access.stop()
+  }
 })
 
 test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends HostReady', async () => {
