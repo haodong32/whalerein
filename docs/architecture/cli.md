@@ -9,7 +9,8 @@ authority binding, credential storage and the client instance lifecycle.
 | `cli.rs` | Grouped command grammar and argument validation |
 | `run.rs` | Dispatch, interactive prompts and cancellation |
 | `output.rs` | Human and machine output |
-| `main.rs` | Streams, tracing and process exit codes |
+| `main.rs` | Streams and process exit codes |
+| `diagnostics.rs` | CLI diagnostic receiver, level filtering, and stderr formatting |
 
 Core resolves one Host and Session before sending a request. The resolved key
 travels with the request and its observation. A durable send record binds the
@@ -22,6 +23,8 @@ waiting.
 
 The Host adapter translates native attempt evidence into a scoped result.
 Watch output contains normalized conversation events. Finite machine commands
-write one `whalerein/client/v1` JSON envelope. Log diagnostics use stderr.
+write one `whalerein/client/v1` JSON envelope. The CLI opens Core with an
+instance-local diagnostic receiver that writes events to stderr. `--verbose`
+enables informational and debug events alongside warnings and errors.
 
 See the [CLI usage guide](../../apps/cli/README.md) and the [Core architecture](core.md).

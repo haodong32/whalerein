@@ -1,8 +1,8 @@
 //! WhaleRein client core.
 //!
 //! The client interface lives in [`api`] and [`conversation`]; other modules
-//! are internal implementation details. `SecretStore` is the only injected
-//! capability.
+//! are internal implementation details. Clients provide a `SecretStore` and
+//! can receive redacted events through a `DiagnosticSink`.
 
 mod access;
 mod account;

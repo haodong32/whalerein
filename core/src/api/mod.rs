@@ -47,6 +47,9 @@ pub use crate::account::Environment;
 pub use crate::account::{
     AccountBinding, CustomServiceInput, ProfileMode, ServiceDescriptor, ServiceKind,
 };
+pub use crate::diagnostics::journal::{
+    DiagnosticContext, DiagnosticEvent, DiagnosticKind, DiagnosticLevel, DiagnosticSink,
+};
 pub use crate::diagnostics::MetricSample;
 pub use crate::observation::SessionObservation;
 pub use crate::pairing::{PairingDecision, PairingError};

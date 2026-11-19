@@ -16,7 +16,10 @@ use whalerein_proto::{
     RequestPayload, RequestReceipt, RequestState, ResponsePayload,
 };
 
-use crate::access::{http::TransportObservation, AccessClient};
+use crate::access::{
+    http::{receipt_matches_request, TransportObservation},
+    AccessClient,
+};
 use crate::api::{
     error_code_name, CommandHandle, CoreError, CoreResult, LifecycleReceipt,
     OnlineStatus as DomainStatus, QuestionReceiptInfo,
@@ -221,9 +224,8 @@ impl CommandService {
         }
         let state = self
             .access
-            .wait_for_request_observed(&request_id, false, transport)
+            .wait_for_request_observed(&request, false, transport)
             .await?;
-        validate_request_state_identity(&request, &state)?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         let result = decrypt_response_raw(channel, &aad, &state).map_err(|error| {
             if source_sensitive
@@ -438,8 +440,7 @@ impl CommandService {
             | DomainStatus::HostOffline => {}
         }
 
-        let state = self.access.wait_for_request(&request_id, true).await?;
-        validate_request_state_identity(&request, &state)?;
+        let state = self.access.wait_for_request(&request, true).await?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         if matches!(
             status,
@@ -763,9 +764,9 @@ impl CommandService {
         for attempt in 0..MAX_SUBMIT_ATTEMPTS {
             match self.access.submit_request(&request.host_id, request).await {
                 Ok(receipt) => {
-                    if let Err(error) = validate_request_receipt_identity(request, &receipt) {
+                    if !receipt_matches_request(&receipt, request) {
                         return Err(SubmitFailure {
-                            error,
+                            error: CoreError::Security("request receipt identity mismatch".into()),
                             definitely_unsent: false,
                         });
                     }
@@ -789,7 +790,7 @@ impl CommandService {
                     // The previous attempt may have reached Access before the
                     // connection failed. Read the same request id back.
                     if let Ok(state) = self.access.get_request(&request.request_id).await {
-                        if let Err(error) = validate_request_state_identity(request, &state) {
+                        if let Err(error) = self.access.validate_request_state(request, &state) {
                             return Err(SubmitFailure {
                                 error,
                                 definitely_unsent: false,
@@ -823,31 +824,6 @@ impl CommandService {
             definitely_unsent,
         })
     }
-}
-
-fn validate_request_receipt_identity(
-    request: &HostRequest,
-    receipt: &RequestReceipt,
-) -> CoreResult<()> {
-    if receipt.request_id != request.request_id || receipt.command_id != request.command_id {
-        return Err(CoreError::Security(
-            "request receipt identity mismatch".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_request_state_identity(request: &HostRequest, state: &RequestState) -> CoreResult<()> {
-    if state.request_id != request.request_id
-        || state.host_id != request.host_id
-        || state.device_id != request.device_id
-        || state.command_id != request.command_id
-    {
-        return Err(CoreError::Security(
-            "request status identity mismatch".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

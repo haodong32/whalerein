@@ -6,8 +6,7 @@ UniFFI 0.29 binding between WhaleRein Core and the iOS app. The crate is
 
 The crate projects Core's transport-neutral state into flat, typed values. It
 does not implement protocol, pairing, cache, draft or command logic: those stay
-in `core/`. `SecretStore` is the only injected capability; the app implements
-it with the Keychain.
+in `core/`. The app implements the bindings' `SecretStore` with the Keychain.
 
 ## Layout
 

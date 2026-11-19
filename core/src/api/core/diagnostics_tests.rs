@@ -143,6 +143,63 @@ async fn diagnostic_export_manifest_is_unchanged() {
 }
 
 #[tokio::test]
+async fn cache_rebuild_diagnostic_can_read_the_published_cache() {
+    use crate::api::{DiagnosticEvent, MemorySecretStore};
+    use std::sync::{OnceLock, Weak};
+
+    #[derive(Default)]
+    struct CacheSink {
+        core: OnceLock<Weak<Core>>,
+        observed: AtomicBool,
+    }
+
+    impl DiagnosticSink for CacheSink {
+        fn on_event(&self, event: &DiagnosticEvent) {
+            if matches!(
+                event.kind,
+                DiagnosticKind::OperationStage {
+                    stage: "cache_rebuild",
+                    ..
+                }
+            ) {
+                let core = self.core.get().unwrap().upgrade().unwrap();
+                assert!(
+                    core.cache.try_lock().is_ok(),
+                    "callback ran with the cache lock held"
+                );
+                assert!(core.pending_commands().unwrap().is_empty());
+                self.observed.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("client.toml");
+    Core::write_config(
+        &config,
+        &ClientConfig::new(ClientService::Standalone, "instance"),
+    )
+    .unwrap();
+    let secrets = Arc::new(MemorySecretStore::new());
+    let paired = Core::open(&config, secrets.clone()).unwrap();
+    paired
+        .connect_standalone(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    let cache_path = paired.options.data_dir.join("cache.sqlite3");
+    drop(paired);
+    std::fs::write(cache_path, b"invalid SQLite header").unwrap();
+
+    let sink = Arc::new(CacheSink::default());
+    let reopened =
+        Arc::new(Core::open_with_diagnostic_sink(&config, secrets, sink.clone()).unwrap());
+    sink.core.set(Arc::downgrade(&reopened)).unwrap();
+    assert!(reopened.pending_commands().unwrap().is_empty());
+    assert!(sink.observed.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
 async fn an_unopenable_cache_produces_a_degraded_doctor_report_instead_of_failing() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();

@@ -26,7 +26,8 @@ flowchart LR
 | Access | `access/` | [Authorization, persistence, relay](architecture/access.md) |
 | DSH plugin | `host/dsh/` | [Execution, adapter, events](architecture/dsh-plugin.md) |
 
-Core is self-contained Rust with `SecretStore` as its only injected capability.
+Core is self-contained Rust. Clients provide a `SecretStore` and can register
+a `DiagnosticSink` to receive redacted events.
 All DSH APIs, credentials, projections, and subscriptions stay behind the plugin
 adapter. Access is a Go monolith backed by PostgreSQL; forwarding work uses the
 same database. Deployment configuration stays in `deploy/`.
