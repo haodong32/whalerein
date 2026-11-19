@@ -104,6 +104,8 @@ const (
 	RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE RequestKind = 5
 	// Access -> host revocation replay notice.
 	RequestKind_REQUEST_KIND_REVOCATION RequestKind = 6
+	// Access -> Host query for Devices with a current Session observation.
+	RequestKind_REQUEST_KIND_HOST_CLIENTS RequestKind = 7
 )
 
 // Enum value maps for RequestKind.
@@ -116,6 +118,7 @@ var (
 		4: "REQUEST_KIND_PAIRING_CLAIM",
 		5: "REQUEST_KIND_PAIRING_AUTHORIZE",
 		6: "REQUEST_KIND_REVOCATION",
+		7: "REQUEST_KIND_HOST_CLIENTS",
 	}
 	RequestKind_value = map[string]int32{
 		"REQUEST_KIND_UNSPECIFIED":       0,
@@ -125,6 +128,7 @@ var (
 		"REQUEST_KIND_PAIRING_CLAIM":     4,
 		"REQUEST_KIND_PAIRING_AUTHORIZE": 5,
 		"REQUEST_KIND_REVOCATION":        6,
+		"REQUEST_KIND_HOST_CLIENTS":      7,
 	}
 )
 
@@ -10727,6 +10731,51 @@ func (x *OperationStatus) GetCommittedAtUnixMs() int64 {
 	return 0
 }
 
+// Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.
+type HostClients struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ObservingDeviceIds []string               `protobuf:"bytes,1,rep,name=observing_device_ids,json=observingDeviceIds,proto3" json:"observing_device_ids,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *HostClients) Reset() {
+	*x = HostClients{}
+	mi := &file_whalerein_proto_msgTypes[122]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostClients) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostClients) ProtoMessage() {}
+
+func (x *HostClients) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[122]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostClients.ProtoReflect.Descriptor instead.
+func (*HostClients) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{122}
+}
+
+func (x *HostClients) GetObservingDeviceIds() []string {
+	if x != nil {
+		return x.ObservingDeviceIds
+	}
+	return nil
+}
+
 var File_whalerein_proto protoreflect.FileDescriptor
 
 const file_whalerein_proto_rawDesc = "" +
@@ -11541,7 +11590,9 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x13enrollment_revision\x18\x06 \x01(\tR\x12enrollmentRevision\x12)\n" +
 	"\x10authorization_id\x18\a \x01(\tR\x0fauthorizationId\x12%\n" +
 	"\x0epayload_digest\x18\b \x01(\fR\rpayloadDigest\x12/\n" +
-	"\x14committed_at_unix_ms\x18\t \x01(\x03R\x11committedAtUnixMs*\x96\x01\n" +
+	"\x14committed_at_unix_ms\x18\t \x01(\x03R\x11committedAtUnixMs\"?\n" +
+	"\vHostClients\x120\n" +
+	"\x14observing_device_ids\x18\x01 \x03(\tR\x12observingDeviceIds*\x96\x01\n" +
 	"\fOnlineStatus\x12\x1d\n" +
 	"\x19online_status_unspecified\x10\x00\x12\f\n" +
 	"\breceived\x10\x01\x12\x10\n" +
@@ -11551,7 +11602,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\tsucceeded\x10\x05\x12\n" +
 	"\n" +
 	"\x06failed\x10\x06\x12\v\n" +
-	"\aunknown\x10\a*\xda\x01\n" +
+	"\aunknown\x10\a*\xf9\x01\n" +
 	"\vRequestKind\x12\x1c\n" +
 	"\x18REQUEST_KIND_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16REQUEST_KIND_HANDSHAKE\x10\x01\x12\x16\n" +
@@ -11559,7 +11610,8 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x14REQUEST_KIND_COMMAND\x10\x03\x12\x1e\n" +
 	"\x1aREQUEST_KIND_PAIRING_CLAIM\x10\x04\x12\"\n" +
 	"\x1eREQUEST_KIND_PAIRING_AUTHORIZE\x10\x05\x12\x1b\n" +
-	"\x17REQUEST_KIND_REVOCATION\x10\x06*\xbb\x04\n" +
+	"\x17REQUEST_KIND_REVOCATION\x10\x06\x12\x1d\n" +
+	"\x19REQUEST_KIND_HOST_CLIENTS\x10\a*\xbb\x04\n" +
 	"\tErrorCode\x12\x1a\n" +
 	"\x16error_code_unspecified\x10\x00\x12\x14\n" +
 	"\x10invalid_argument\x10\x01\x12\x10\n" +
@@ -11710,7 +11762,7 @@ func file_whalerein_proto_rawDescGZIP() []byte {
 }
 
 var file_whalerein_proto_enumTypes = make([]protoimpl.EnumInfo, 21)
-var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 124)
+var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 125)
 var file_whalerein_proto_goTypes = []any{
 	(OnlineStatus)(0),                // 0: whalerein.v1.OnlineStatus
 	(RequestKind)(0),                 // 1: whalerein.v1.RequestKind
@@ -11855,8 +11907,9 @@ var file_whalerein_proto_goTypes = []any{
 	(*HostEnrollmentStatus)(nil),     // 140: whalerein.v1.HostEnrollmentStatus
 	(*HostEnrollmentResponse)(nil),   // 141: whalerein.v1.HostEnrollmentResponse
 	(*OperationStatus)(nil),          // 142: whalerein.v1.OperationStatus
-	nil,                              // 143: whalerein.v1.RevocationNotice.GrantGenerationsEntry
-	nil,                              // 144: whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	(*HostClients)(nil),              // 143: whalerein.v1.HostClients
+	nil,                              // 144: whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	nil,                              // 145: whalerein.v1.QuestionLocalizedText.TranslationsEntry
 }
 var file_whalerein_proto_depIdxs = []int32{
 	3,   // 0: whalerein.v1.CapabilitySet.capabilities:type_name -> whalerein.v1.Capability
@@ -11871,7 +11924,7 @@ var file_whalerein_proto_depIdxs = []int32{
 	4,   // 9: whalerein.v1.PairingClaimRequest.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 10: whalerein.v1.PairingClaimResponse.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 11: whalerein.v1.PairingClaim.phase:type_name -> whalerein.v1.PairingPhase
-	143, // 12: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	144, // 12: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
 	21,  // 13: whalerein.v1.ChannelHello.capabilities:type_name -> whalerein.v1.CapabilitySet
 	21,  // 14: whalerein.v1.ChannelReady.capabilities:type_name -> whalerein.v1.CapabilitySet
 	21,  // 15: whalerein.v1.PairingHello.capabilities:type_name -> whalerein.v1.CapabilitySet
@@ -11941,7 +11994,7 @@ var file_whalerein_proto_depIdxs = []int32{
 	51,  // 79: whalerein.v1.SessionModel.next:type_name -> whalerein.v1.ModelChoice
 	51,  // 80: whalerein.v1.ModelSelectionReceipt.selected:type_name -> whalerein.v1.ModelChoice
 	8,   // 81: whalerein.v1.LifecycleReceipt.disposition:type_name -> whalerein.v1.LifecycleDisposition
-	144, // 82: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	145, // 82: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
 	65,  // 83: whalerein.v1.QuestionDisplay.question:type_name -> whalerein.v1.QuestionLocalizedText
 	65,  // 84: whalerein.v1.QuestionDisplay.detail:type_name -> whalerein.v1.QuestionLocalizedText
 	65,  // 85: whalerein.v1.QuestionDisplay.approve:type_name -> whalerein.v1.QuestionLocalizedText
@@ -12119,7 +12172,7 @@ func file_whalerein_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whalerein_proto_rawDesc), len(file_whalerein_proto_rawDesc)),
 			NumEnums:      21,
-			NumMessages:   124,
+			NumMessages:   125,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

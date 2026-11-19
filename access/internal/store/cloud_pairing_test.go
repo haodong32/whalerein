@@ -42,6 +42,44 @@ func TestCloudDeviceGrantStatusDistinguishesAnEmptyAuthorizedScope(t *testing.T)
 	}
 }
 
+func TestHostClientIDsDistinguishesNoGrantsFromUnknownEnrollment(t *testing.T) {
+	deviceRow := func(id *string) pgx.Row {
+		return syntheticRow{fill: func(dest ...any) { *dest[0].(**string) = id }}
+	}
+	first, second := "device-a", "device-b"
+	for _, tc := range []struct {
+		name       string
+		rows       []pgx.Row
+		wanted     []string
+		query, row error
+		err        error
+	}{
+		{name: "two grants", rows: []pgx.Row{deviceRow(&first), deviceRow(&second)}, wanted: []string{first, second}},
+		{name: "no grants", rows: []pgx.Row{deviceRow(nil)}},
+		{name: "foreign or stale enrollment", err: ErrNotFound},
+		{name: "scan error", rows: []pgx.Row{syntheticRow{err: errStoreUnit}}, err: errStoreUnit},
+		{name: "iteration error", rows: []pgx.Row{deviceRow(&first)}, row: errStoreUnit, err: errStoreUnit},
+		{name: "query error", query: errStoreUnit, err: errStoreUnit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := &fakeRowSet{rows: tc.rows, err: tc.row}
+			database := &fakeDB{t: t, queryFn: func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+				if !slices.Equal(args, []any{"workspace", "host", "3"}) {
+					t.Fatalf("client list lost enrollment scope: %v", args)
+				}
+				return rows, tc.query
+			}}
+			ids, err := newStore(database).HostClientIDs(context.Background(), "workspace", "host", "3")
+			if !slices.Equal(ids, tc.wanted) || !errors.Is(err, tc.err) {
+				t.Fatalf("devices=%v error=%v", ids, err)
+			}
+			if tc.query == nil && rows.closed != 1 {
+				t.Fatal("client rows stayed open")
+			}
+		})
+	}
+}
+
 func TestCloudDeviceRevocationRecordsFenceUnderHostLock(t *testing.T) {
 	now := time.Now().UTC()
 	for _, tc := range []struct {

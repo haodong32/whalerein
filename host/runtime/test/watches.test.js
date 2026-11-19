@@ -28,6 +28,25 @@ function fixture(access={connected:true,published:[],async publishEvent(value){t
 const CONV={conversation:true,questions:false}
 const settle=()=>new Promise(r=>setTimeout(r,30))
 const tick=()=>new Promise(r=>setImmediate(r))
+
+test('connected devices require a current observation and are deduplicated by Device ID', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'a paired channel alone cannot prove a live observation')
+  const first = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  await ctx.events.watch('d', ctx.channel.channelId, 'other-session', undefined, CONV)
+  const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
+  ctx.advance(100)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  ctx.events.unwatch('d', ctx.channel.channelId, first.watch_id)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  ctx.advance(first.lease_ms - 100)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
+  ctx.events.onChannelReplaced('second', other.channelId)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [])
+})
+
 function deferred() {
   const value = {}
   value.promise = new Promise((resolve, reject) => { value.resolve = resolve; value.reject = reject })

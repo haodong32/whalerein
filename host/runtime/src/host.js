@@ -30,6 +30,7 @@ const REQUEST_KINDS = new Set([
   'REQUEST_KIND_PAIRING_CLAIM',
   'REQUEST_KIND_PAIRING_AUTHORIZE',
   'REQUEST_KIND_REVOCATION',
+  'REQUEST_KIND_HOST_CLIENTS',
 ])
 
 function sanitizeDetail(value) {
@@ -467,6 +468,18 @@ export class HostRuntime {
       }
       if (kind === 'REQUEST_KIND_HANDSHAKE') return await this.#handleHandshake(request)
       if (kind === 'REQUEST_KIND_QUERY' || kind === 'REQUEST_KIND_COMMAND') return await this.#handleEncrypted(request)
+      if (kind === 'REQUEST_KIND_HOST_CLIENTS') {
+        if (request.host_id !== this.#config.hostId || request.device_id || request.relay_transport_version !== 2) {
+          return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+        }
+        if (!this.#started || this.#stopping || !this.#access.connected || this.#security.revocationsPending) {
+          return await this.#reply(request, { status: 'rejected', errorCode: 'unavailable' })
+        }
+        const body = this.#codec.encode('whalerein.v1.HostClients', {
+          observing_device_ids: this.#events.observingDeviceIds(),
+        })
+        return await this.#reply(request, { status: 'succeeded', resultBody: body })
+      }
       return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
     } catch (error) {
       const code = codeOf(error)
@@ -640,6 +653,18 @@ export class HostRuntime {
   }
 
   // --- diagnostics --------------------------------------------------------
+
+  clientDevices() {
+    if (!this.#started || this.#stopping || !this.#access.connected || this.#security.revocationsPending) return null
+    try {
+      const observing = new Set(this.#events.observingDeviceIds())
+      return this.#store.listPeerKeys().map(({ deviceId, displayName, os, pairedAt }) => ({
+        deviceId, displayName, os, pairedAt, connected: observing.has(deviceId),
+      }))
+    } catch {
+      return null
+    }
+  }
 
   /** Secret-free runtime summary for `doctor`-style local diagnostics. */
   diagnostics() {

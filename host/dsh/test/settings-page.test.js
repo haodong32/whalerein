@@ -1712,7 +1712,7 @@ test('managed state changes announce through role=status and move focus to the s
   }
 })
 
-test('connection details are collapsed by default and show only redacted diagnostics', async () => {
+test('managed connection details show the Host ID and redact private connection material', async () => {
   const runtime = await createManagedRuntime()
   try {
     runtime.setCloudState('connected', { connected: true })
@@ -1723,7 +1723,7 @@ test('connection details are collapsed by default and show only redacted diagnos
       value: {
         state: 'connected', environment: 'production', region: 'eu-west', accessOrigin: 'https://access.example',
         revision: 7, lastErrorCode: 'temporarily_unavailable',
-        hostId: 'host-private', route: 'mqtts://private.example', token: 'secret-token',
+        hostId: 'host-test-42', route: 'mqtts://private.example', token: 'secret-token',
         authorization: { signature: 'private' },
       },
     })
@@ -1735,8 +1735,31 @@ test('connection details are collapsed by default and show only redacted diagnos
     assert.match(rendered, /eu-west/)
     assert.match(rendered, /https:\/\/access\.example/)
     assert.match(rendered, /temporarily_unavailable/)
-    assert.doesNotMatch(rendered, /host-private|private\.example|secret-token|private/)
-    assert.doesNotMatch(rendered, /主机 ID|host-private|mqtts:/)
+    assert.match(rendered, /主机 ID/)
+    assert.match(rendered, /host-test-42/)
+    assert.doesNotMatch(rendered, /private\.example|secret-token|private|mqtts:/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('managed settings distinguish paired and watching clients without Standalone actions', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('connected', { connected: true, devices: [
+      { deviceId: 'device-one', displayName: 'Client One', connected: true },
+      { deviceId: 'device-two', connected: false },
+    ] })
+    await runtime.refresh()
+    const row = (id) => find(runtime.render(), (node) => node.type === 'li' && text(node).includes(id))
+    assert.match(text(row('device-one')), /已连接/)
+    assert.match(text(row('device-two')), /已配对/)
+    assert.doesNotMatch(text(row('device-one')), /撤销配对/)
+    runtime.setCloudState('disconnected', { connected: false, devices: null })
+    await runtime.refresh()
+    const disconnected = text(runtime.render())
+    assert.doesNotMatch(disconnected, /device-one|device-two/)
+    assert.match(disconnected, /暂时无法读取设备列表/)
   } finally {
     await runtime.dispose()
   }

@@ -198,6 +198,35 @@ test('when the host router receives an invalid envelope, it rejects it before ca
   }
 })
 
+test('the Host reports observation, not a cached channel, for an internal client read', async (t) => {
+  const ctx = setup()
+  t.after(async () => {
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  })
+  await ctx.host.start()
+  const read = (overrides = {}) => send(ctx.access, baseRequest({
+    kind: 'REQUEST_KIND_HOST_CLIENTS', device_id: '', channel_id: '', ...overrides,
+  }))
+  assert.equal((await read({ device_id: 'd1' })).error_code, 'forbidden')
+  assert.equal((await read({ host_id: '' })).error_code, 'forbidden')
+  assert.equal((await read({ relay_transport_version: 0 })).error_code, 'forbidden')
+  assert.equal((await read()).error_code, 'unavailable')
+  ctx.host.security.setRevocationsPending(false)
+  const channel = establishChannel({ hostId: 'host-1', deviceId: 'd1', security: ctx.host.security, store: ctx.store })
+  assert.deepEqual(ctx.host.clientDevices().map(({ deviceId, connected }) => [deviceId, connected]), [['d1', false]])
+  const watch = await ctx.host.events.watch('d1', channel.channelId, 's1', undefined, { conversation: true, questions: false })
+  const active = await read()
+  assert.equal(active.status, 'succeeded')
+  assert.deepEqual(proto.decode('whalerein.v1.HostClients', active.result_body).observing_device_ids, ['d1'])
+  assert.deepEqual(ctx.host.clientDevices().map(({ deviceId, connected }) => [deviceId, connected]), [['d1', true]])
+  ctx.host.events.unwatch('d1', channel.channelId, watch.watch_id)
+  const ended = await read()
+  assert.equal(ended.status, 'succeeded')
+  assert.deepEqual(proto.decode('whalerein.v1.HostClients', ended.result_body ?? new Uint8Array()).observing_device_ids ?? [], [])
+})
+
 test('when the host router receives an encrypted query, it maps adapter errors and seals the response', async () => {
   const ctx = setup()
   try {

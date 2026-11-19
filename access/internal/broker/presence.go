@@ -109,20 +109,26 @@ func (p *Presence) Available() bool {
 // presence view reports offline. A Host whose broker connection exists but has
 // not confirmed subscription readiness (HostReady) is not online yet: the
 // broker would accept a publish that no subscriber can receive.
-func (p *Presence) IsHostOnline(ctx context.Context, hostID string) bool {
+func (p *Presence) IsHostOnline(_ context.Context, hostID string) bool {
+	online, _ := p.HostPresence(hostID)
+	return online
+}
+
+// HostPresence distinguishes offline from an unreconciled broker view.
+func (p *Presence) HostPresence(hostID string) (online, known bool) {
 	if hostID == "" {
-		return false
+		return false, false
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if !p.available {
-		return false
+		return false, false
 	}
 	entry, ok := p.hosts[hostID]
 	if !ok {
-		return false
+		return false, true
 	}
-	return entry.online && entry.ready && !p.stale(entry, p.now())
+	return entry.online && entry.ready && !p.stale(entry, p.now()), true
 }
 
 // stale reports whether a cached observation has outlived cache_ttl. The
@@ -357,10 +363,14 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		switch client.Kind {
 		case "host":
 			if client.HostID != "" {
-				// A snapshot connection predates this Access session, so its
-				// subscription was already established. Only a live CONNECT
-				// after the snapshot waits for HostReady.
-				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: true}
+				// Initial snapshots recover established connections. Later
+				// reconciliation preserves readiness already known for an
+				// observed live connection that may still be subscribing.
+				ready := true
+				if previous, exists := p.hosts[client.HostID]; exists && previous.online && previous.connID == client.ConnID {
+					ready = previous.ready
+				}
+				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: ready}
 			}
 		case "device":
 			if client.DeviceID != "" {

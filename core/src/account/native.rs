@@ -50,6 +50,8 @@ pub struct AccountHost {
     pub display_name: String,
     pub enrolled: bool,
     pub online: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presence: String,
     #[serde(default)]
     pub observation: String,
     #[serde(default)]

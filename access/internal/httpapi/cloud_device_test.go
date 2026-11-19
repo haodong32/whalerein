@@ -34,6 +34,42 @@ func (f *fakeExternalDevice) RevokeDeviceGrant(_ context.Context, workspace, hos
 	return f.err
 }
 
+func (f *fakeExternalDevice) HostClients(_ context.Context, workspace, host, revision string) (external.HostClientList, error) {
+	f.received = []string{workspace, host, revision}
+	return external.HostClientList{Presence: "known", Devices: []external.HostClient{{DeviceID: "paired-device"}}}, f.err
+}
+
+func TestHostClientReadRequiresAdminAndExactEnrollmentScope(t *testing.T) {
+	const path = "/v1/enrollments/hosts/host/clients"
+	const scope = "?workspaceId=workspace&enrollmentRevision=3"
+	admin := map[string]string{adminHeaderName: "Bearer admin-token"}
+	fake := &fakeExternalDevice{}
+	api := newExternalFixture(t, fake).PublicHandler()
+	for _, tc := range []struct {
+		path    string
+		headers map[string]string
+		want    int
+	}{
+		{path + scope, nil, http.StatusUnauthorized},
+		{path + scope, map[string]string{adminHeaderName: "Bearer device-bearer"}, http.StatusUnauthorized},
+		{path + "?workspaceId=workspace", admin, http.StatusBadRequest},
+		{path + scope + "&enrollmentRevision=4", admin, http.StatusBadRequest},
+	} {
+		if got := doRequest(t, api, http.MethodGet, tc.path, nil, tc.headers); got.Code != tc.want || fake.received != nil {
+			t.Fatalf("status=%d, want=%d, received=%v", got.Code, tc.want, fake.received)
+		}
+	}
+	got := doRequest(t, api, http.MethodGet, path+scope, nil, admin)
+	if got.Code != http.StatusOK || got.Header().Get("Cache-Control") != "no-store" ||
+		!slices.Equal(fake.received, []string{"workspace", "host", "3"}) {
+		t.Fatalf("authorized read: status=%d scope=%v", got.Code, fake.received)
+	}
+	fake.err = store.ErrNotFound
+	if got := doRequest(t, api, http.MethodGet, path+scope, nil, admin); got.Code != http.StatusNotFound {
+		t.Fatalf("foreign enrollment returned %d", got.Code)
+	}
+}
+
 func TestCloudPairingHTTPRequiresThePortableAuthorizationAndClaim(t *testing.T) {
 	const path = "/v1/enrollments/devices/pairing"
 	const body = `{"authorization":{"purpose":"device_pairing"},"claim":{"deviceId":"device","claimId":"operation"}}`

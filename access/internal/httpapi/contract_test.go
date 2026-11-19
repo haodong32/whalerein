@@ -294,6 +294,7 @@ func TestRouteTableSnapshot(t *testing.T) {
 		"GET /metrics",
 		"GET /readyz",
 		"GET /v1/enrollments/hosts/{host_id}",
+		"GET /v1/enrollments/hosts/{host_id}/clients",
 		"GET /v1/enrollments/hosts/{host_id}/devices/{device_id}",
 		"GET /v1/external/hosts/{host_id}/pairings/{operation_id}",
 		"GET /v1/hosts",

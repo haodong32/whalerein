@@ -543,6 +543,7 @@ pub fn render_account_hosts(hosts: &[whalerein_core::api::AccountHost]) -> Strin
             ("missing", _) => "not enrolled",
             ("known", "enrollment_pending") => "enrollment pending",
             ("known", "enrollment_disabled") => "disabled",
+            ("known", _) if host.presence == "unavailable" => "status unavailable",
             ("known", _) if host.enrolled && host.online => "online",
             ("known", _) if host.enrolled => "offline",
             _ => "status unavailable",
@@ -1440,7 +1441,8 @@ mod tests {
             {"hostId":"host-id-3", "displayName":"Other", "online":true, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"},
             {"hostId":"host-id-4", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_pending"},
             {"hostId":"host-id-5", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_disabled"},
-            {"hostId":"host-id-6", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready"}
+            {"hostId":"host-id-6", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready", "presence":"offline"},
+            {"hostId":"host-id-7", "displayName":"Other", "online":false, "enrolled":true, "observation":"known", "enrollmentState":"enrollment_ready", "presence":"unavailable"}
         ])).unwrap();
         assert_eq!(
             render_account_hosts(&cloud),
@@ -1452,6 +1454,7 @@ mod tests {
                 "host-id-4\tOther\tenrollment pending\tunavailable\n",
                 "host-id-5\tOther\tdisabled\tunavailable\n",
                 "host-id-6\tOther\toffline\tunavailable\n",
+                "host-id-7\tOther\tstatus unavailable\tunavailable\n",
             )
         );
         assert_eq!(json!(cloud)[0]["host_id"], "host-id-1");

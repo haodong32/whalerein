@@ -81,6 +81,10 @@ func TestHostPresenceRequiresReadyConfirmationForANewConnection(t *testing.T) {
 	if p.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("new connection inherited readiness")
 	}
+	p.ApplySnapshot([]SnapshotClient{{Kind: "host", HostID: "h1", ConnID: 2, State: "connected", Connected: 2000}}, 12)
+	if p.IsHostOnline(context.Background(), "h1") {
+		t.Fatal("reconciliation made a known unready connection look ready")
+	}
 	p.MarkHostReady("h1", time.UnixMilli(2100))
 	if !p.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("new connection readiness was not applied")

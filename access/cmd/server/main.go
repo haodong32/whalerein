@@ -360,6 +360,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		externalService = external.New(trust, db, cfg.External.MQTTURL,
 			external.WithHostEnforcer(authService),
 			external.WithDeviceGrants(pairingService, db, authService),
+			external.WithHostClients(db, service, presence),
 			external.WithDeviceSessions(db, service, cfg.External.RequireDeviceSession))
 		logger.Info("external account mode enabled", "issuer", trust.Issuer, "region", trust.Region)
 	}
@@ -378,6 +379,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	dependencies := httpapi.Dependencies{
 		SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
 		RequireDeviceSession:     cfg.Mode == "external" && cfg.External.RequireDeviceSession,
+		HostPresence:             presence,
 		Auth:                     authService,
 		Pairing:                  pairingService,
 		Requests:                 requestService,

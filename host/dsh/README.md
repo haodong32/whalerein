@@ -162,8 +162,8 @@ and optional trust parameters under Advanced.
 Loading settings never begins enrollment or opens a browser. The primary Connect
 action reserves a tab during the click and navigates it only to the validated
 approval URL. The page handles browser blocking with a manual link. Account login
-stays in the browser. Status and details are allowlisted projections without
-credentials, routes, host IDs or inactive identity lists. The DSH remote surface
+stays in the browser. Status and details are allowlisted projections. Connection
+details show the current Host ID and omit credentials, private routes, and inactive identities. The DSH remote surface
 exposes lifecycle actions, read-only details, connection probes and device pairing;
 configuration edits use the existing revisioned DSH settings writer only.
 
@@ -172,6 +172,8 @@ computer** is browser-authorized and stays `removing` until the service enforces
 removal. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
 unless the selected service advertises pairing support; Standalone profiles keep
 the existing pairing, invitation, revocation, and connection-test behavior.
+Managed settings list paired Devices and mark those with an active Session
+observation as connected. A one-shot command leaves the Device paired.
 
 The page reuses the host's `@deepseek-ai/dsh-client-ui-primitives` module for
 buttons, inputs, disclosure rows, the log-level menu,

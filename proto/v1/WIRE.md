@@ -407,6 +407,20 @@ authenticated connection is observed.
 `GET /v1/enrollments/hosts/{host_id}` and `GET /v1/operations/{operation_id}`
 report state, bindings and revisions. Neither ever returns a credential.
 
+The admin enrollment response includes `WhaleRein-Host-Presence` with
+`online`, `offline`, or `unavailable`. This is the current broker observation.
+An older Access without this header leaves live presence unknown.
+
+`GET /v1/enrollments/hosts/{host_id}/clients` requires an admin bearer and the
+`workspaceId` and `enrollmentRevision` query parameters. It returns
+`{"presence":"known","devices":[{"deviceId":"device-1","connected":true}]}`
+for confirmed grants in that exact enrollment. Access obtains the active
+Device IDs from an internal `REQUEST_KIND_HOST_CLIENTS` request and intersects
+them with the confirmed grants. The Host reports Devices with a live Session
+observation lease. An offline Host has no connected Devices. Missing Host
+observation returns `presence: unavailable` with the confirmed grants.
+Device request submission cannot invoke the internal request kind.
+
 ### Correlated message reply
 
 The encrypted `ReadMessageReply` query uses the session ID and the message ID
@@ -432,6 +446,7 @@ POST   /v1/enrollments/devices/pairing  Cloud authorization and Noise proof
 GET    /v1/enrollments/hosts/{host_id}/devices/{device_id}  admin bearer
 POST   /v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation  admin bearer
 GET    /v1/enrollments/hosts/{host_id} admin bearer (device/Host proof pending)
+GET    /v1/enrollments/hosts/{host_id}/clients  admin bearer
 GET    /v1/operations/{operation_id}   admin bearer (original-endpoint proof pending)
 GET    /healthz
 GET    /readyz

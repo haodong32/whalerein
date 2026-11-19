@@ -18,6 +18,37 @@ type externalDeviceService interface {
 	RevokeDeviceGrant(context.Context, string, string, string) error
 }
 
+type externalHostClientService interface {
+	HostClients(ctx context.Context, workspaceID, hostID, revision string) (external.HostClientList, error)
+}
+
+func (s *Server) handleHostClients(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	service, ok := s.deps.External.(externalHostClientService)
+	if !ok {
+		s.writeError(w, r, errExternalNotConfigured)
+		return
+	}
+	if err := s.externalReadAuth(r); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	query := r.URL.Query()
+	workspace, revision := query["workspaceId"], query["enrollmentRevision"]
+	hostID := params["host_id"]
+	if len(workspace) != 1 || len(revision) != 1 || !validResourceID(hostID) ||
+		!validResourceID(workspace[0]) || !validResourceID(revision[0]) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	list, err := service.HostClients(r.Context(), workspace[0], hostID, revision[0])
+	if err != nil {
+		s.writeError(w, r, classifyExternal(err))
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	s.writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) handleCloudPairing(w http.ResponseWriter, r *http.Request, _ map[string]string) {
 	service, ok := s.deps.External.(externalDeviceService)
 	if !ok {

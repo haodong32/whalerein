@@ -146,7 +146,14 @@ export class WatchedEvents {
       // union for the shared Source observation; delivery stays per recipient.
       watch.interests = mergeInterests(watch.interests, requested)
     }
-    try { return await this.#ready(watch, signal) } catch (error) { this.#remove(watch.id); throw error }
+    try {
+      const ready = await this.#ready(watch, signal)
+      watch.observing = true
+      return ready
+    } catch (error) {
+      this.#remove(watch.id)
+      throw error
+    }
   }
   async #readQuestionDescriptor(sessionId, signal) {
     let raw
@@ -329,6 +336,16 @@ export class WatchedEvents {
     this.droppedByDevice.delete(deviceId)
   }
   onChannelsCleared(channels) { for (const { deviceId, channelId } of channels ?? []) this.onChannelReplaced(deviceId, channelId) }
+
+  observingDeviceIds() {
+    this.#expire()
+    const devices = new Set()
+    for (const watch of this.#watches.values()) {
+      if (watch.observing) devices.add(watch.deviceId)
+    }
+    return [...devices].sort()
+  }
+
   describe() {
     return {
       watches: this.#watches.size, sessions: this.#sources.size, pending: this.store.countOutbox(),

@@ -27,7 +27,8 @@
                 "REQUEST_KIND_COMMAND": 3,
                 "REQUEST_KIND_PAIRING_CLAIM": 4,
                 "REQUEST_KIND_PAIRING_AUTHORIZE": 5,
-                "REQUEST_KIND_REVOCATION": 6
+                "REQUEST_KIND_REVOCATION": 6,
+                "REQUEST_KIND_HOST_CLIENTS": 7
               }
             },
             "ErrorCode": {
@@ -3151,6 +3152,15 @@
                 "committed_at_unix_ms": {
                   "type": "int64",
                   "id": 9
+                }
+              }
+            },
+            "HostClients": {
+              "fields": {
+                "observing_device_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 1
                 }
               }
             }

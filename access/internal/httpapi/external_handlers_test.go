@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/broker"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -168,9 +169,46 @@ func TestExternalStatusEndpointsRequireTheAdminBearer(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200 with the admin token, got %d", recorder.Code)
 	}
+	if got := recorder.Header().Get("WhaleRein-Host-Presence"); got != "unavailable" {
+		t.Fatalf("expected an explicit unavailable presence without broker evidence, got %q", got)
+	}
 	if fake.lastHost != "host-1" {
 		t.Fatalf("the path parameter was not passed through: %q", fake.lastHost)
 	}
+}
+
+func TestEnrollmentStatusKeepsReadyEnrollmentAcrossBrokerReconnect(t *testing.T) {
+	fake := &fakeExternal{statusResponse: &whalereinv1.HostEnrollmentStatus{
+		HostId: "host-1", State: whalereinv1.EnrollmentState_enrollment_ready,
+	}}
+	server := newExternalFixture(t, fake)
+	presence := broker.NewPresence(time.Minute, nil, nil)
+	server.deps.HostPresence = presence
+	want := func(expected string) {
+		t.Helper()
+		recorder := doRequest(t, server.PublicHandler(), http.MethodGet, "/v1/enrollments/hosts/host-1", nil,
+			map[string]string{adminHeaderName: "Bearer admin-token"})
+		var status whalereinv1.HostEnrollmentStatus
+		if recorder.Code != http.StatusOK || protojson.Unmarshal(recorder.Body.Bytes(), &status) != nil ||
+			status.GetState() != whalereinv1.EnrollmentState_enrollment_ready {
+			t.Fatalf("enrollment changed: %d %s", recorder.Code, recorder.Body.String())
+		}
+		if got := recorder.Header().Get("WhaleRein-Host-Presence"); got != expected {
+			t.Fatalf("presence = %q, want %q", got, expected)
+		}
+	}
+	want("unavailable")
+	presence.ApplySnapshot(nil, 0)
+	presence.HandleNotification(&broker.Notification{Sequence: 1, Kind: "host", HostID: "host-1", ConnID: 1, Event: "connected"})
+	want("offline")
+	presence.MarkHostReady("host-1", time.Now())
+	want("online")
+	presence.HandleNotification(&broker.Notification{Sequence: 2, Kind: "host", HostID: "host-1", ConnID: 1, Event: "disconnected"})
+	want("offline")
+	presence.HandleNotification(&broker.Notification{Sequence: 3, Kind: "host", HostID: "host-1", ConnID: 2, Event: "connected"})
+	presence.MarkHostReady("host-1", time.Now())
+	presence.HandleNotification(&broker.Notification{Sequence: 4, Kind: "host", HostID: "host-1", ConnID: 1, Event: "disconnected"})
+	want("online")
 }
 
 func TestOperationStatusEndpointReportsRefusals(t *testing.T) {

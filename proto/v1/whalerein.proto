@@ -41,6 +41,8 @@ enum RequestKind {
   REQUEST_KIND_PAIRING_AUTHORIZE = 5;
   // Access -> host revocation replay notice.
   REQUEST_KIND_REVOCATION = 6;
+  // Access -> Host query for Devices with a current Session observation.
+  REQUEST_KIND_HOST_CLIENTS = 7;
 }
 
 enum ErrorCode {
@@ -984,4 +986,9 @@ message OperationStatus {
   string authorization_id = 7;
   bytes payload_digest = 8;
   int64 committed_at_unix_ms = 9;
+}
+
+// Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.
+message HostClients {
+  repeated string observing_device_ids = 1;
 }

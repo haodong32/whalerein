@@ -77,6 +77,7 @@ type Dependencies struct {
 	Logger                   *slog.Logger
 	InternalToken            string
 	MaxBodyBytes             int64
+	HostPresence             external.HostPresence
 	// External serves external account mode when it is configured. Standalone
 	// deployments leave it nil and keep the invitation routes only.
 	External ExternalService
@@ -160,6 +161,7 @@ func (s *Server) publicRoutes() []routeSpec {
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}", handler: s.handleCloudDeviceStatus},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation", handler: s.handleCloudDeviceRevocation},
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}", handler: s.handleEnrollmentStatus},
+		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/clients", handler: s.handleHostClients},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/disable", handler: s.handleDisableHostEnrollment},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts/{host_id}/credential", handler: s.handleCredentialReplacement},
 		routeSpec{method: http.MethodGet, pattern: "/v1/hosts/{host_id}/enrollment", handler: s.handleHostEnrollmentProofStatus},

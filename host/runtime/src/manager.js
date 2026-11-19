@@ -247,6 +247,7 @@ export class ConnectionManager {
       approvalUrl: this.#state === 'awaiting_approval' ? (intent?.approveUrl ?? null) : null,
       error: this.#errorCode === null ? null : { code: this.#errorCode },
       connected: this.#connected,
+      devices: this.#runtime?.clientDevices?.() ?? null,
       pendingOperation: this.#pendingOperation(record, intent),
       profiles,
       capabilities: record ? this.#capabilitiesFor(record) : [],
@@ -258,6 +259,7 @@ export class ConnectionManager {
     return {
       ...this.snapshot(),
       mode: record?.mode ?? null,
+      hostId: record?.bindings?.hostId ?? null,
       serviceId: record?.service?.id ?? null,
       apiOrigin: record?.service?.apiOrigin ?? null,
       accessOrigin: record?.bindings?.accessOrigin ?? null,

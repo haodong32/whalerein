@@ -298,7 +298,7 @@ test('startConnect runs create, poll, proof-bound enrollment and real readiness 
       assert.equal(serialized.includes(secret), false)
     }
     assert.equal(serialized.includes(f.network.intent().signingKey), false)
-    assert.equal(details.hostId, undefined)
+    assert.equal(details.hostId, f.network.intent().hostId)
     // Duplicate start does nothing.
     const duplicate = await f.manager.startConnect()
     assert.equal(duplicate.state, 'connected')
@@ -318,6 +318,7 @@ test('disconnect persists paused intent; restart does not auto-reconnect and rec
     const before = await f.manager.disconnect()
     assert.equal(before.state, 'disconnected')
     assert.equal(before.connected, false)
+    assert.equal(f.manager.details().hostId, hostId)
     assert.equal(f.runtimes[0].stopped > 0, true)
     await waitFor(async () => {
       const registry = new HostProfileRegistry({ stateRoot: f.stateRoot }).read()
@@ -338,8 +339,10 @@ test('disconnect persists paused intent; restart does not auto-reconnect and rec
     await second.ready
     assert.equal(second.snapshot().state, 'disconnected')
     assert.equal(second.snapshot().connected, false)
+    assert.equal(second.details().hostId, hostId)
     const reconnected = await second.reconnect()
     assert.equal(reconnected.state, 'connected')
+    assert.equal(second.details().hostId, hostId)
     assert.equal(f.network.intent().hostId, hostId)
     await second.disconnect()
     const creates = f.network.calls.filter((call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')).length

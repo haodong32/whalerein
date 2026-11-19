@@ -63,14 +63,17 @@ type Service struct {
 	sessionEnforcer      DeviceSessionEnforcer
 	requireDeviceSession bool
 
-	trust          Trust
-	store          Store
-	mqttURL        string
-	enforcer       HostEnforcer
-	now            func() time.Time
-	devicePairing  DevicePairing
-	deviceGrants   DeviceGrantStore
-	deviceEnforcer DeviceGrantEnforcer
+	trust            Trust
+	store            Store
+	mqttURL          string
+	enforcer         HostEnforcer
+	now              func() time.Time
+	devicePairing    DevicePairing
+	deviceGrants     DeviceGrantStore
+	deviceEnforcer   DeviceGrantEnforcer
+	hostClientGrants HostClientGrants
+	hostClientProbe  HostClientProbe
+	hostPresence     HostPresence
 }
 
 // New constructs the service.

@@ -496,6 +496,10 @@
       {
         "name": "REQUEST_KIND_REVOCATION",
         "number": 6
+      },
+      {
+        "name": "REQUEST_KIND_HOST_CLIENTS",
+        "number": 7
       }
     ],
     "RunPhase": [
@@ -1554,6 +1558,17 @@
           "number": 300,
           "repeated": false,
           "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "HostClients": {
+      "fields": [
+        {
+          "json_name": "observingDeviceIds",
+          "name": "observing_device_ids",
+          "number": 1,
+          "repeated": true,
+          "type": "TYPE_STRING"
         }
       ]
     },
