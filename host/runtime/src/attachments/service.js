@@ -169,12 +169,20 @@ export class AttachmentService {
     let reservedBytes = 0
     for (const value of this.#deviceReserved.values()) reservedBytes += value
     let active = 0
-    for (const transfer of this.#transfers.values()) if (!transfer.finished) active++
+    // Retained part bytes are the measurable in-flight buffer: at most one
+    // cached part per active transfer, bounded by the effective chunk budget.
+    let bufferedBytes = 0
+    for (const transfer of this.#transfers.values()) {
+      if (transfer.finished) continue
+      active++
+      bufferedBytes += transfer.lastPart?.data?.length ?? 0
+    }
     return {
       active,
       handles: this.#transfers.size,
       devices: this.#deviceTransfers.size,
       reservedBytes,
+      bufferedBytes,
       maxActive: this.#maxActive,
     }
   }

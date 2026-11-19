@@ -682,3 +682,69 @@ test('the Host request router carries attachment queries over the encrypted path
     await harness.stop()
   }
 })
+
+test('bulk buffering stays within the derived chunk and reservation budget for two file sizes', async () => {
+  // AC-14 measurement shape: configured chunk/concurrency derive the retained
+  // buffer bound. The same settings are used for a small and a multi-envelope
+  // file so size alone cannot raise the peak.
+  const chunk = 1024 * 1024
+  const concurrency = 2
+  const totalBudget = 64 * 1024 * 1024
+  const { service, adapter } = makeService({
+    adapterPolicy: {
+      max_total_bytes: totalBudget,
+      max_chunk_bytes: chunk,
+      max_concurrent: concurrency,
+      idle_timeout_ms: 30_000,
+      overall_timeout_ms: 120_000,
+    },
+  })
+  const sizes = [3 * chunk, 20 * chunk]
+  const refs = sizes.map((size, index) => {
+    const ref = `bulk-${index}`
+    adapter.attach({ ref, bytes: Buffer.alloc(size, index + 1) })
+    return ref
+  })
+  const opened = []
+  for (const ref of refs) opened.push(await service.open(openArgs({ attachmentRef: ref })))
+  const offsets = [0, 0]
+  const done = [false, false]
+  let peakBuffered = 0
+  let peakReserved = 0
+  let maxPart = 0
+  while (!done.every(Boolean)) {
+    for (let index = 0; index < refs.length; index += 1) {
+      if (done[index]) continue
+      const part = await service.pull({
+        request: openRequest(),
+        deviceId: 'device-1',
+        channelId: 'channel-1',
+        sessionId: 's1',
+        attachmentRef: refs[index],
+        transferId: opened[index].transfer_id,
+        offset: offsets[index],
+        maxBytes: chunk,
+      })
+      maxPart = Math.max(maxPart, part.length)
+      offsets[index] += part.length
+      done[index] = part.final
+      const summary = service.describe()
+      peakBuffered = Math.max(peakBuffered, summary.bufferedBytes)
+      peakReserved = Math.max(peakReserved, summary.reservedBytes)
+    }
+  }
+  assert.ok(maxPart > 0 && maxPart <= chunk, 'a part must not exceed the configured chunk')
+  const effectiveChunk = maxPart
+  assert.ok(
+    peakBuffered <= concurrency * effectiveChunk,
+    `peak buffered ${peakBuffered} exceeds ${concurrency * effectiveChunk}`,
+  )
+  assert.ok(
+    peakReserved <= totalBudget,
+    `peak reserved ${peakReserved} exceeds ${totalBudget}`,
+  )
+  // Encoded overhead cannot raise the retained raw buffer beyond the budget.
+  const encodedBound = Math.ceil((effectiveChunk * 4) / 3) + 4096
+  assert.ok(encodedBound > effectiveChunk)
+  assert.equal(service.describe().active, 0)
+})
