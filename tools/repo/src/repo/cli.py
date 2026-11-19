@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sys
 from collections.abc import Sequence
@@ -173,6 +174,11 @@ Full reference: tools/repo/README.md""",
                 metavar="DIR",
                 help="save report.json and report.html (default: unique .data/runs/ directory); "
                 "must be a fresh run directory",
+            )
+            sub.add_argument(
+                "--shard",
+                metavar="INDEX/COUNT",
+                help="run one 1-based shard of the full ios-ui plan (2–8 shards)",
             )
             sub.add_argument(
                 "--simulator",
@@ -382,6 +388,18 @@ def dispatch(args, root, runner):
         kind = target.kind if target else "unit"
         if args.simulator is not None and kind != "ios":
             raise UsageError("--simulator requires an iOS target")
+        shard = None
+        if args.shard is not None:
+            if kind != "ios" or target.name != "ios-ui":
+                raise UsageError("--shard requires the ios-ui target")
+            if args.only is not None:
+                raise UsageError("--shard cannot combine with --only")
+            match = re.fullmatch(r"([1-8])/([2-8])", args.shard)
+            if match is None or int(match[1]) > int(match[2]):
+                raise UsageError(
+                    "--shard requires INDEX/COUNT with 1 <= INDEX <= COUNT and 2 <= COUNT <= 8"
+                )
+            shard = (int(match[1]), int(match[2]))
         if kind == "ios":
             if any(
                 (
@@ -401,6 +419,7 @@ def dispatch(args, root, runner):
                 output=args.output,
                 simulator=args.simulator,
                 list_only=args.list_only,
+                shard=shard,
             )
             return testing.saved_test_result(result, runner.out)
         selected = [target.project] if target and target.project else projects

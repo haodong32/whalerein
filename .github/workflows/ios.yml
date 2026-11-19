@@ -55,6 +55,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       build: ${{ steps.diff.outputs.build }}
+      matrix: ${{ steps.diff.outputs.matrix }}
     steps:
       - name: Check out the merge revision
         if: github.event_name != 'pull_request' || (github.event.action == 'labeled' && github.event.label.name == 'run-full-ci')
@@ -67,12 +68,14 @@ jobs:
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
+          SUITE: ${{ inputs.suite }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = pull_request ] && { [ "$ACTION" != labeled ] || [ "$LABEL" != run-full-ci ]; }; then
             echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
             echo 'iOS verification not requested: add run-full-ci to test this revision.'
             exit 0
           fi
@@ -88,73 +91,100 @@ jobs:
             build=true
           fi
           echo "build=$build" >> "$GITHUB_OUTPUT"
+          if [ "$build" = false ]; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+          else
+            python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          jobs = [{"name": "unit", "target": "ios-unit", "shard": ""}]
+          suite = os.environ.get("SUITE", "")
+          if suite == "smoke":
+              jobs.append({"name": "smoke", "target": "ios-ui-smoke", "shard": ""})
+          elif suite != "unit":
+              for index in range(1, 5):
+                  jobs.append({"name": f"ui-{index}", "target": "ios-ui", "shard": f"{index}/4"})
+          print("matrix=" + json.dumps({"include": jobs}, separators=(",", ":")))
+          PYTHON
+          fi
 
   native:
-    name: iOS native verification
+    name: iOS native verification (${{ matrix.name }})
     needs: changes
     if: needs.changes.outputs.build == 'true'
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Select Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
-          xcodebuild -version
+      - name: Verify the Xcode version
+        run: xcodebuild -version
 
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Set up Rust iOS targets
-        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+        run: rustup target add aarch64-apple-ios-sim
 
       - name: Install protoc for the bindings build
         run: brew install protobuf
 
-      - name: Cache Rust dependencies and iOS builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore Rust simulator build cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             .data/ios-build/source/target
-          key: rust-ios-verify-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rust-ios-verify-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
-            rust-ios-verify-${{ hashFiles('rust-toolchain.toml') }}-
+            rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            rust-ios-sim-xcode16.4-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Select an available iPhone simulator
         id: simulator
         uses: ./.github/actions/select-ios-simulator
 
-      - name: Run the unit plan
+      - name: Run native test selection
+        shell: bash
         env:
           SIMULATOR: ${{ steps.simulator.outputs.udid }}
-        run: ./repo test ios-unit --simulator "$SIMULATOR" --output .data/runs/ios-ci-unit
-
-      - name: Run the UI plan
-        if: github.event_name != 'workflow_dispatch' || inputs.suite != 'unit'
-        env:
-          SIMULATOR: ${{ steps.simulator.outputs.udid }}
-          SUITE: ${{ inputs.suite }}
+          TARGET: ${{ matrix.target }}
+          SHARD: ${{ matrix.shard }}
         run: |
-          case "$SUITE" in
-            smoke) target=ios-ui-smoke ;;
-            *) target=ios-ui ;;
-          esac
-          ./repo test "$target" --simulator "$SIMULATOR" --output .data/runs/ios-ci-ui
+          args=("$TARGET" --simulator "$SIMULATOR" --output .data/runs/ios-ci)
+          if [ -n "$SHARD" ]; then
+            args+=(--shard "$SHARD")
+          fi
+          ./repo test "${args[@]}"
+
+      - name: Save Rust simulator build cache
+        if: ${{ matrix.name == 'unit' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .data/ios-build/source/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       - name: Upload native results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ios-native-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ios-native-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.name }}
           path: |
-            .data/runs/ios-ci-*/report.json
-            .data/runs/ios-ci-*/report.html
-            .data/runs/ios-ci-*/native.xcresult
+            .data/runs/ios-ci/report.json
+            .data/runs/ios-ci/report.html
+            .data/runs/ios-ci/native.xcresult
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7

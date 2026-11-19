@@ -12,6 +12,7 @@
 #   PROFILE=release|debug|<cargo profile>   build profile (default: release)
 #   SIM_TARGETS="aarch64-apple-ios-sim x86_64-apple-ios"
 #                                           simulator slices (default: arm64)
+#   WHALEREIN_MOBILE_SIMULATOR_ONLY=1        omit the device slice for tests
 #   DEVELOPER_DIR                           Xcode developer directory; when
 #                                           unset, /Applications/Xcode.app is
 #                                           used if it exists.
@@ -38,6 +39,7 @@ BINDINGS_DIR="$BUILD_ROOT/bindings"
 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 PROFILE=${PROFILE:-release}
 SIM_TARGETS=${SIM_TARGETS:-"aarch64-apple-ios-sim"}
+SIMULATOR_ONLY=${WHALEREIN_MOBILE_SIMULATOR_ONLY:-0}
 
 DEVICE_TARGET="aarch64-apple-ios"
 FRAMEWORK_NAME="WhaleReinMobileFFI"
@@ -85,7 +87,11 @@ log "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
 log "Profile: $PROFILE ($PROFILE_DIR)"
 
 # Fail early with an actionable message when a Rust target is missing.
-for target in "$DEVICE_TARGET" $SIM_TARGETS; do
+BUILD_TARGETS=($SIM_TARGETS)
+if [[ "$SIMULATOR_ONLY" != 1 ]]; then
+  BUILD_TARGETS+=("$DEVICE_TARGET")
+fi
+for target in "${BUILD_TARGETS[@]}"; do
   if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
     fail "Rust target $target is not installed (run: rustup target add $target)"
   fi
@@ -169,8 +175,10 @@ PLIST
   printf '%s\n' "$framework_dir"
 }
 
-DEVICE_FRAMEWORK=$(make_framework "device" "$(build_slice "$DEVICE_TARGET")" "device")
-FRAMEWORKS=("$DEVICE_FRAMEWORK")
+FRAMEWORKS=()
+if [[ "$SIMULATOR_ONLY" != 1 ]]; then
+  FRAMEWORKS+=("$(make_framework "device" "$(build_slice "$DEVICE_TARGET")" "device")")
+fi
 
 # xcodebuild requires one framework per platform. Combine multiple Simulator
 # architectures into a single universal static archive first.

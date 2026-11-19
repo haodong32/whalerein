@@ -25,8 +25,10 @@ PLIST = {"TestConfigurations": [{"TestTargets": [{"EnvironmentVariables": {"EXIS
 
 
 class Xcode:
-    def __init__(self, fault):
+    def __init__(self, fault, *, names=("checkConnection()",)):
         self.fault = fault
+        self.names = names
+        self.executed = None
         self.commands = []
         self.seen_contract = None
 
@@ -63,10 +65,11 @@ class Xcode:
         if args[0] == "pnpm":
             return self.result()
         if args[0] == "bash":
+            assert env["WHALEREIN_MOBILE_SIMULATOR_ONLY"] == "1"
             if self.fault == "compile":
                 return self.result(code=1)
             vendor = cwd / "apps/ios/Vendor"
-            vendor.mkdir(parents=True)
+            vendor.mkdir(parents=True, exist_ok=True)
             (vendor / "revision.txt").write_text(
                 f"source:{env['WHALEREIN_MOBILE_SOURCE']} core:0.1.0"
             )
@@ -74,7 +77,7 @@ class Xcode:
         if args[:2] == ("xcodebuild", "build-for-testing"):
             products = Path(args[args.index("-derivedDataPath") + 1]) / "Build/Products"
             app = products / "WhaleRein.app"
-            app.mkdir(parents=True)
+            app.mkdir(parents=True, exist_ok=True)
             (app / "WhaleRein").write_bytes(b"test binary")
             (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "WhaleRein"}))
             plan = args[args.index("-testPlan") + 1]
@@ -97,7 +100,9 @@ class Xcode:
                                     {
                                         "kind": "class",
                                         "name": "TinyTests",
-                                        "children": [{"kind": "test", "name": "checkConnection()"}],
+                                        "children": [
+                                            {"kind": "test", "name": name} for name in self.names
+                                        ],
                                     }
                                 ],
                             }
@@ -136,14 +141,19 @@ class Xcode:
                 return self.result({"cleaned": True})
         if args[:2] == ("xcodebuild", "test-without-building"):
             contract = Path(args[args.index("-xctestrun") + 1])
-            assert contract.stat().st_mode & 0o777 == 0o600
-            self.seen_contract = contract
-            variables = plistlib.loads(contract.read_bytes())["TestConfigurations"][0][
-                "TestTargets"
-            ][0]["EnvironmentVariables"]
-            assert variables["EXISTING"] == "yes"
-            assert variables["WHALEREIN_IOS_STACK_INVITATION_URI"] == "test-invitation"
-            assert f"-only-testing:{CASE}" in args
+            if contract.name == "verification.xctestrun":
+                assert contract.stat().st_mode & 0o777 == 0o600
+                self.seen_contract = contract
+                variables = plistlib.loads(contract.read_bytes())["TestConfigurations"][0][
+                    "TestTargets"
+                ][0]["EnvironmentVariables"]
+                assert variables["EXISTING"] == "yes"
+                assert variables["WHALEREIN_IOS_STACK_INVITATION_URI"] == "test-invitation"
+            self.executed = [
+                arg.removeprefix("-only-testing:")
+                for arg in args
+                if arg.startswith("-only-testing:")
+            ]
             if self.fault == "cancel":
                 return self.result(code=130)
             Path(args[args.index("-resultBundlePath") + 1]).mkdir()
@@ -158,8 +168,9 @@ class Xcode:
                         {
                             "nodeType": "Test Case",
                             "result": "Passed",
-                            "nodeIdentifierURL": f"test://com.apple.xcode/WhaleRein/{CASE.removesuffix('()')}",
+                            "nodeIdentifierURL": f"test://com.apple.xcode/WhaleRein/{case.removesuffix('()')}",
                         }
+                        for case in self.executed
                     ],
                 }
             )
@@ -228,7 +239,34 @@ def test_ios_adapter_contract(checkout, tmp_path, fault, exit_code, error):
         assert xcode.seen_contract is not None and not xcode.seen_contract.exists()
     if not fault:
         assert verification["collected_cases"] == [CASE]
+        assert xcode.executed == [CASE]
         assert verification["identities"]["xctest-simulator"]["actual"] == [DEVICE]
+
+
+def test_ios_ui_shards_execute_disjoint_inventory_subsets(checkout, tmp_path):
+    names = ("testD()", "testC()", "testE()", "testA()", "testB()")
+    observed = []
+    inventories = []
+    for index in range(1, 3):
+        xcode = Xcode(None, names=names)
+        result = ios.run_ios(
+            xcode,
+            checkout,
+            "ios-ui",
+            output=tmp_path / f"shard-{index}",
+            simulator=DEVICE,
+            shard=(index, 2),
+        )
+        assert result.exit_code == 0
+        report = json.loads((result.report_directory / "report.json").read_text())
+        assert report["configuration"]["shard"] == [index, 2]
+        assert xcode.executed == report["verification"]["collected_cases"]
+        observed.extend(xcode.executed)
+        inventories.append(report["verification"]["artifacts"]["xctest-inventory"])
+
+    assert inventories[0] == inventories[1]
+    assert inventories[0]["count"] == len(names)
+    assert sorted(observed) == [f"WhaleReinTests/TinyTests/{name}" for name in sorted(names)]
 
 
 def test_recovery_never_unlinks_a_contract_outside_the_run(tmp_path):
