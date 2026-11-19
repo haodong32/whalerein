@@ -3,6 +3,11 @@
 Start with the CLI error code and Diagnostic ID. Search Access/plugin logs by
 that ID as `trace_id`; masked request/device IDs differ between services.
 
+Add `--verbose` to include client configuration, request, and connection stages
+on stderr. Add `--json` to capture diagnostic events as individual JSON lines
+and command results on stdout. For configuration errors, use `configuration_failed`
+and its `code` to identify the failing stage.
+
 `whalerein doctor` reads local diagnostics; `whalerein host list` checks authorization
 and broker-derived presence. Export with `whalerein doctor --export <file>` after
 review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnostics).

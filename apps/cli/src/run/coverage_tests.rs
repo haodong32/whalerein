@@ -1,4 +1,5 @@
 use super::{run_with_signal, Cli, CliOutcome};
+use crate::diagnostics::CliDiagnosticSink;
 use clap::Parser;
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -6,7 +7,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use whalerein_core::api::{
     test_support::{FakeAccess, LifecycleReply},
-    ClientConfig, ClientService, MemorySecretStore, PairingDecision, SecretStore,
+    ClientConfig, ClientService, DiagnosticContext, MemorySecretStore, PairingDecision,
+    SecretStore,
 };
 use whalerein_core::Core;
 use whalerein_proto::{Approval, ApprovalDecision, ApprovalState, ErrorCode, MessageReplyState};
@@ -61,7 +63,15 @@ impl Fixture {
             .chain(args.iter().copied()),
         )
         .unwrap();
-        run_with_signal(cli, self.secrets.clone(), signal).await
+        let diagnostics = CliDiagnosticSink::disabled();
+        run_with_signal(
+            cli,
+            self.secrets.clone(),
+            signal,
+            &diagnostics,
+            DiagnosticContext::new(diagnostics.clone()),
+        )
+        .await
     }
 }
 

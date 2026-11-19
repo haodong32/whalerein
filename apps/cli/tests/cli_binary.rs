@@ -36,6 +36,159 @@ fn outcome(result: &Output, code: i32) -> Value {
 }
 
 #[test]
+fn verbose_diagnostics_preserve_json_output_and_stay_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = selected(temp.path(), "standalone");
+    let quiet = invocation(&config).arg("status").output().unwrap();
+    let expected = outcome(&quiet, 0);
+    assert!(quiet.stderr.is_empty());
+
+    for args in [["--verbose", "status"], ["status", "-v"]] {
+        let result = invocation(&config).args(args).output().unwrap();
+        assert_eq!(outcome(&result, 0), expected);
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(!stderr.contains("selected.toml"));
+        let events: Vec<Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events[0]["event"], "command_started");
+        assert_eq!(events[0]["configuration_source"], "explicit");
+        assert_eq!(events[1]["event"], "configuration_loaded");
+        assert_eq!(events[1]["level"], "info");
+        let trace_id = events[1]["trace_id"].as_str().unwrap();
+        assert_eq!(trace_id.len(), 32);
+        assert!(events.iter().all(|event| event["trace_id"] == trace_id));
+        assert_eq!(events[2]["event"], "command_completed");
+        assert_eq!(events[2]["exit_code"], 0);
+        assert_eq!(events[2]["outcome_exit_code"], 0);
+    }
+}
+
+#[test]
+fn verbose_diagnostics_cover_configuration_failure_and_text_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("private-fixture-name.toml");
+    let result = invocation(&missing)
+        .args(["--verbose", "status"])
+        .output()
+        .unwrap();
+    let value = outcome(&result, 2);
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(!stderr.contains("private-fixture-name"));
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[1]["event"], "configuration_failed");
+    assert_eq!(events[1]["code"], value["error"]["code"]);
+    assert_eq!(events[2]["exit_code"], 2);
+    let trace_id = events[1]["trace_id"].as_str().unwrap();
+    assert!(events.iter().all(|event| event["trace_id"] == trace_id));
+
+    let config = selected(temp.path(), "standalone");
+    let result = binary()
+        .arg("--config")
+        .arg(config)
+        .args(["status", "--verbose"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .contains("INFO configuration_loaded"));
+    assert!(!String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("configuration_loaded"));
+}
+
+#[test]
+fn verbose_diagnostics_correlate_missing_home_before_core_opens() {
+    let result = binary()
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .args(["--verbose", "--json", "status"])
+        .output()
+        .unwrap();
+    let value = outcome(&result, 2);
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[0]["event"], "command_started");
+    assert_eq!(events[1]["event"], "configuration_failed");
+    assert_eq!(events[1]["code"], value["error"]["code"]);
+    assert_eq!(events[2]["event"], "command_completed");
+    let trace_id = events[0]["trace_id"].as_str().unwrap();
+    assert!(events.iter().all(|event| event["trace_id"] == trace_id));
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_diagnostics_report_the_process_exit_after_a_closed_stdout() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader);
+    let result = invocation(&temp.path().join("missing.toml"))
+        .args(["--verbose", "status"])
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0));
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let completion: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(completion["event"], "command_completed");
+    assert_eq!(completion["exit_code"], 0);
+    assert_eq!(completion["outcome_exit_code"], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_diagnostics_exit_even_with_a_blocked_stderr() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = selected(temp.path(), "standalone");
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    for bytes in [&[0; 4096][..], &[0][..]] {
+        loop {
+            match writer.write(bytes) {
+                Ok(count) => assert_ne!(count, 0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("could not fill stderr fixture: {error}"),
+            }
+        }
+    }
+    writer.set_nonblocking(false).unwrap();
+
+    let mut child = invocation(&config)
+        .args(["--verbose", "status"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(OwnedFd::from(writer)))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("command did not exit with stderr blocked");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = child.wait_with_output().unwrap();
+    drop(reader);
+    assert_eq!(outcome(&result, 0)["command"], "status");
+}
+
+#[test]
 fn fresh_cloud_status_only_reads_selected_file() {
     let temp = tempfile::tempdir().unwrap();
     let config = selected(temp.path(), "whalerein_cloud");
@@ -151,6 +304,7 @@ fn help_discovers_the_full_journey_and_leaf_host_placement() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     for fragment in [
+        "--verbose",
         "login",
         "host list",
         "host connect",

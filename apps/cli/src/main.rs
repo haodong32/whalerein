@@ -7,16 +7,20 @@
 
 mod account;
 mod cli;
+mod diagnostics;
 mod output;
 mod run;
 mod signal;
 mod stream;
 
+use std::borrow::Cow;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::error::ErrorKind;
 use clap::Parser;
 use serde_json::json;
+use whalerein_core::api::DiagnosticContext;
 
 use crate::cli::Cli;
 use crate::output::CliOutcome;
@@ -48,14 +52,27 @@ async fn async_main() -> ExitCode {
     // they are the documented way to discover the correct variables.
     let parsed = match Cli::try_parse_from(&args) {
         Ok(parsed) => parsed,
-        Err(error) => {
-            init_tracing();
-            return finish_parse_error(error, wants_json);
-        }
+        Err(error) => return ExitCode::from(finish_parse_error(error, wants_json)),
     };
-    init_tracing();
     let json = parsed.json;
-    finish(json, run::run(parsed).await)
+    let (diagnostics, completion) = diagnostics::CliDiagnosticSink::start(parsed.verbose, json);
+    let context = DiagnosticContext::new(diagnostics.clone());
+    let trace_id = context.trace_id().to_owned();
+    let started = Instant::now();
+    let outcome = run::run(parsed, &diagnostics, context).await;
+    let exit = finish(json, &outcome);
+    diagnostics.cli_event(&trace_id, || {
+        json!({
+            "event": "command_completed",
+            "command": outcome.command,
+            "exit_code": exit,
+            "outcome_exit_code": outcome.exit,
+            "code": outcome.error.as_ref().map(|error| &error.code),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })
+    });
+    diagnostics.finish(completion);
+    ExitCode::from(exit)
 }
 
 /// `--json` is global, so it may appear before or after the subcommand. Only
@@ -67,26 +84,21 @@ fn argv_requests_json(args: &[String]) -> bool {
 }
 
 /// Write one outcome and map a failed write to an exit code.
-fn finish(json: bool, outcome: CliOutcome) -> ExitCode {
-    if json {
-        return match serde_json::to_string(&outcome.to_json()) {
-            Ok(line) => {
-                let written = stream::to_stdout(format!("{line}\n").as_bytes());
-                report_write_error(&written);
-                exit_for(outcome.exit, &written, true)
-            }
+fn finish(json: bool, outcome: &CliOutcome) -> u8 {
+    let (text, to_stdout) = if json {
+        match serde_json::to_string(&outcome.to_json()) {
+            Ok(line) => (Cow::Owned(format!("{line}\n")), true),
             Err(_) => {
                 let _ = stream::to_stderr(b"error: output could not be encoded (internal)\n");
-                ExitCode::from(1)
+                return 1;
             }
-        };
-    }
-    let (text, to_stdout) = if outcome.error.is_some() {
-        (outcome.render(), false)
+        }
+    } else if outcome.error.is_some() {
+        (Cow::Owned(outcome.render()), false)
     } else if !outcome.human.is_empty() {
-        (outcome.human.clone(), true)
+        (Cow::Borrowed(outcome.human.as_str()), true)
     } else {
-        return ExitCode::from(outcome.exit);
+        return outcome.exit;
     };
     let written = if to_stdout {
         stream::to_stdout(text.as_bytes())
@@ -105,20 +117,26 @@ fn report_write_error(written: &Result<(), stream::WriteFailure>) {
     }
 }
 
-fn exit_for(exit: u8, written: &Result<(), stream::WriteFailure>, to_stdout: bool) -> ExitCode {
+fn exit_for(exit: u8, written: &Result<(), stream::WriteFailure>, to_stdout: bool) -> u8 {
     match written {
-        Ok(()) => ExitCode::from(exit),
+        Ok(()) => exit,
         // A closed consumer (`head -1`) ends the stream without a panic. It is
         // success for stdout; a closed stderr keeps the command's own failure.
-        Err(failure) if failure.is_closed() => ExitCode::from(if to_stdout { 0 } else { exit }),
-        Err(_) if to_stdout => ExitCode::from(1),
-        Err(_) => ExitCode::from(exit),
+        Err(failure) if failure.is_closed() => {
+            if to_stdout {
+                0
+            } else {
+                exit
+            }
+        }
+        Err(_) if to_stdout => 1,
+        Err(_) => exit,
     }
 }
 
 /// Render a clap parse result. Help and version are successful local output;
 /// every other kind is an `invalid_argument` usage error (exit 2).
-fn finish_parse_error(error: clap::Error, json: bool) -> ExitCode {
+fn finish_parse_error(error: clap::Error, json: bool) -> u8 {
     let kind = error.kind();
     let text = error.to_string();
     match kind {
@@ -127,7 +145,7 @@ fn finish_parse_error(error: clap::Error, json: bool) -> ExitCode {
             if json {
                 return finish(
                     true,
-                    CliOutcome {
+                    &CliOutcome {
                         command: "cli".to_owned(),
                         data: Some(json!({ "version": version })),
                         error: None,
@@ -137,13 +155,13 @@ fn finish_parse_error(error: clap::Error, json: bool) -> ExitCode {
                 );
             }
             let _ = stream::to_stdout(text.as_bytes());
-            ExitCode::SUCCESS
+            0
         }
         ErrorKind::DisplayHelp => {
             if json {
                 return finish(
                     true,
-                    CliOutcome {
+                    &CliOutcome {
                         command: "cli".to_owned(),
                         data: Some(json!({ "help": text })),
                         error: None,
@@ -153,18 +171,18 @@ fn finish_parse_error(error: clap::Error, json: bool) -> ExitCode {
                 );
             }
             let _ = stream::to_stdout(text.as_bytes());
-            ExitCode::SUCCESS
+            0
         }
         _ => {
             let message = usage_message(&error);
             if json {
                 return finish(
                     true,
-                    CliOutcome::cli_failure("invalid_argument", message, 2),
+                    &CliOutcome::cli_failure("invalid_argument", message, 2),
                 );
             }
             let _ = stream::to_stderr(format!("error: {message}\n").as_bytes());
-            ExitCode::from(2)
+            2
         }
     }
 }
@@ -174,12 +192,4 @@ fn usage_message(error: &clap::Error) -> String {
         return "Run `whalerein --help` for usage.".to_owned();
     }
     "Invalid command or arguments. Run the command with `--help` for usage.".to_owned()
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("warn")
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .try_init();
 }

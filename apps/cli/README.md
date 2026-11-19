@@ -78,6 +78,22 @@ Errors contain a stable code and message. An uncertain outcome includes the
 operation ID when available and uses exit status 7. Explicit `session watch`
 emits scoped JSON events. Sign-in prompts and diagnostics use stderr.
 
+## Detailed diagnostics
+
+Pass `-v` or `--verbose` before or after a subcommand to include informational
+and debug events. The default log level includes warnings and errors. When
+combined with `--json`, diagnostic events on stderr use one JSON object per
+line. Use the `event` and `trace_id` fields to locate request and connection
+stages. `command_completed` includes the actual `exit_code` and the
+`outcome_exit_code` selected by command execution before writing its result.
+Interactive prompts can also appear on stderr. Diagnostic delivery is
+best effort when stderr falls behind. The CLI limits how long it waits for
+queued diagnostics after writing the command result.
+
+```sh
+whalerein --verbose --json host list > result.json 2> diagnostics.log
+```
+
 ## Replace an existing installation
 
 On the old client, settle pending sends and connections while their original

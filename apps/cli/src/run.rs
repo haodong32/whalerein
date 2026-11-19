@@ -6,14 +6,15 @@ use std::time::Duration;
 
 use serde_json::json;
 use whalerein_core::api::{
-    Cancellation, ClientService, CreateSessionInput, MessageReply, ObservationInterests,
-    PairingDecision, PendingQueueAction, SecretStore, SessionEventPayload, SessionKey,
-    SessionModel, WaitReason,
+    Cancellation, ClientService, CreateSessionInput, DiagnosticContext, MessageReply,
+    ObservationInterests, PairingDecision, PendingQueueAction, SecretStore, SessionEventPayload,
+    SessionKey, SessionModel, WaitReason,
 };
 use whalerein_core::conversation::ViewUpdate;
 use whalerein_core::{Core, CoreError};
 
 use crate::cli::{Cli, Command, ModelAction, QueueCommand};
+use crate::diagnostics::CliDiagnosticSink;
 use crate::output::{
     approval_data, command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
     lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approval, render_approvals,
@@ -108,6 +109,22 @@ fn command_budget(command: &Command) -> Result<Option<Duration>, &'static str> {
     }
 }
 
+fn log_target_resolution<T>(
+    diagnostics: &CliDiagnosticSink,
+    core: &Core,
+    target: &'static str,
+    result: &Result<T, CoreError>,
+) {
+    diagnostics.cli_event(core.diagnostic_id(), || {
+        json!({
+            "event": "target_resolved",
+            "target": target,
+            "outcome": if result.is_ok() { "succeeded" } else { "failed" },
+            "code": result.as_ref().err().map(CoreError::code),
+        })
+    });
+}
+
 /// Borrow the key resolved by `run_with_signal`. Every session command reaches
 /// dispatch only after resolution, so a missing key is an internal invariant
 /// violation rather than a user-input problem.
@@ -153,36 +170,57 @@ fn default_config_path() -> Result<std::path::PathBuf, CoreError> {
         })
 }
 
-pub async fn run(cli: Cli) -> CliOutcome {
+pub async fn run(
+    cli: Cli,
+    diagnostics: &CliDiagnosticSink,
+    context: DiagnosticContext,
+) -> CliOutcome {
     run_with_signal(
         cli,
         Arc::new(whalerein_core::api::KeyringSecretStore::new("whalerein")),
         crate::signal::registered_interrupt(),
+        diagnostics,
+        context,
     )
     .await
 }
 
 pub(crate) async fn run_with_signal<S>(
-    parsed: Cli,
+    mut parsed: Cli,
     secrets: Arc<dyn SecretStore>,
     signal: S,
+    diagnostics: &CliDiagnosticSink,
+    context: DiagnosticContext,
 ) -> CliOutcome
 where
     S: std::future::Future<Output = ()>,
 {
-    let config = parsed.config.clone();
+    let config = parsed.config.take();
     let json = parsed.json;
     let yes = parsed.yes;
     let (mut command, host) = parsed.into_command();
+    diagnostics.cli_event(context.trace_id(), || {
+        json!({
+            "event": "command_started",
+            "command": command.name(),
+            "configuration_source": if config.is_some() { "explicit" } else { "default" },
+        })
+    });
     if let Command::Send { operation_id, .. } = &mut command {
         operation_id.get_or_insert_with(Core::new_command_id);
     }
     let cli = Execution { host, json, yes };
     let config = match config.map_or_else(default_config_path, Ok) {
         Ok(path) => path,
-        Err(error) => return core_error_outcome(&command, error),
+        Err(error) => {
+            diagnostics.cli_event(
+                context.trace_id(),
+                || json!({"event": "configuration_failed", "code": error.code()}),
+            );
+            return core_error_outcome(&command, error);
+        }
     };
-    let core = match Core::open(&config, secrets) {
+    let core = match Core::open_with_diagnostics(&config, secrets, context) {
         Ok(core) => core,
         Err(error) => return core_error_outcome(&command, error),
     };
@@ -190,7 +228,9 @@ where
     | Command::Models { host }
     | Command::SessionCreate { host, .. } = &mut command
     {
-        *host = match core.resolve_operation_host(cli.host.as_deref()).await {
+        let resolved = core.resolve_operation_host(cli.host.as_deref()).await;
+        log_target_resolution(diagnostics, &core, "host", &resolved);
+        *host = match resolved {
             Ok(host) => host,
             Err(error) => return core_error_outcome(&command, error),
         };
@@ -220,6 +260,7 @@ where
             },
             None => resolve.await,
         };
+        log_target_resolution(diagnostics, &core, "session", &resolved);
         match resolved {
             Ok(key) => Some(key),
             Err(error) => return core_error_outcome(&command, error),
@@ -415,10 +456,8 @@ fn finish_core_result(
             let mut outcome = core_error_outcome(command, error);
             if let Some(error) = outcome.error.as_mut() {
                 error.diagnostic_id = Some(core.diagnostic_id().to_owned());
-                if !matches!(command, Command::AccountStatus | Command::Hosts)
-                    && core.save_failure(&error.code).is_err()
-                {
-                    tracing::warn!(event = "diagnostic_save_failed", trace_id = %core.diagnostic_id(), code = "unavailable");
+                if !matches!(command, Command::AccountStatus | Command::Hosts) {
+                    let _ = core.save_failure(&error.code);
                 }
             }
             outcome
@@ -1839,9 +1878,7 @@ fn read_question_answers(
 /// The bounded diagnostic history is written as well so a later
 /// `doctor --export` can explain what was not observed.
 fn unknown_outcome(core: &Core, command: &Command, message: String) -> CliOutcome {
-    if core.save_failure("unknown").is_err() {
-        tracing::warn!(event = "diagnostic_save_failed", trace_id = %core.diagnostic_id(), code = "unavailable");
-    }
+    let _ = core.save_failure("unknown");
     CliOutcome::local_failure_with_diagnostic(command, "unknown", message, 7, core.diagnostic_id())
 }
 
@@ -2053,7 +2090,15 @@ mod instance_command_tests {
                 .chain(args.iter().copied()),
         )
         .unwrap();
-        Box::pin(run_with_signal(cli, secrets, std::future::pending())).await
+        let diagnostics = CliDiagnosticSink::disabled();
+        Box::pin(run_with_signal(
+            cli,
+            secrets,
+            std::future::pending(),
+            &diagnostics,
+            DiagnosticContext::new(diagnostics.clone()),
+        ))
+        .await
     }
 
     #[tokio::test]

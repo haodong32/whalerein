@@ -12,9 +12,11 @@ use serde::de::DeserializeOwned;
 use url::Url;
 use whalerein_proto::{
     ErrorCode, ErrorResponse, HostInfo, HostList, HostRequest, OnlineStatus, PairingClaimRequest,
-    PairingClaimResponse, RequestReceipt, RequestState,
+    PairingClaimResponse, RequestKind, RequestReceipt, RequestState,
 };
 
+use crate::api::{error_code_name, CoreError, CoreResult};
+use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostics};
 use crate::util::now_unix_ms;
 
 pub const TRACE_HEADER: &str = "x-whalerein-trace-id";
@@ -138,7 +140,7 @@ pub struct AccessClient {
     token: Option<String>,
     request_timeout: Duration,
     poll_interval: Duration,
-    trace_id: String,
+    pub(crate) diagnostics: Arc<Diagnostics>,
     transport_observation: Option<Arc<TransportObservation>>,
     cloud_session: Option<(String, Arc<dyn crate::security::SecretStore>)>,
 }
@@ -155,7 +157,7 @@ impl std::fmt::Debug for AccessClient {
 impl AccessClient {
     #[cfg(test)]
     pub fn new(base: Url, token: Option<String>) -> Result<Self, AccessError> {
-        Self::with_ca(base, token, None)
+        Self::with_ca(base, token, None, Arc::default())
     }
 
     /// `ca_pem` adds a private CA on top of the platform trust roots.
@@ -163,6 +165,7 @@ impl AccessClient {
         base: Url,
         token: Option<String>,
         ca_pem: Option<&[u8]>,
+        diagnostics: Arc<Diagnostics>,
     ) -> Result<Self, AccessError> {
         if !matches!(base.scheme(), "https" | "http")
             || base.host_str().is_none()
@@ -201,20 +204,14 @@ impl AccessClient {
             token,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
-            trace_id: crate::util::random_id(16),
+            diagnostics,
             transport_observation: None,
             cloud_session: None,
         })
     }
 
-    /// Bind every HTTP call, including polling, to one ephemeral operation.
-    pub fn with_trace_id(mut self, trace_id: &str) -> Self {
-        self.trace_id = trace_id.to_owned();
-        self
-    }
-
     pub fn trace_id(&self) -> &str {
-        &self.trace_id
+        self.diagnostics.trace_id()
     }
 
     pub(crate) fn request_timeout(&self) -> Duration {
@@ -344,7 +341,7 @@ impl AccessClient {
                 builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
             }
         }
-        builder = builder.header(TRACE_HEADER, trace_id.unwrap_or(&self.trace_id));
+        builder = builder.header(TRACE_HEADER, trace_id.unwrap_or_else(|| self.trace_id()));
         builder
     }
 
@@ -352,24 +349,40 @@ impl AccessClient {
         &self,
         builder: reqwest::RequestBuilder,
     ) -> Result<T, AccessError> {
-        self.send_observing(builder, |_| {}).await
+        self.send_observing(builder, true, |_| {}).await
     }
 
     async fn send_observing<T: DeserializeOwned>(
         &self,
         builder: reqwest::RequestBuilder,
+        log_exchange: bool,
         observe_headers: impl FnOnce(&reqwest::header::HeaderMap),
     ) -> Result<T, AccessError> {
         self.check_cloud_session()?;
         let started = std::time::Instant::now();
         let response = builder.send().await.map_err(|error| {
-            tracing::warn!(event = "http_transport_failed", trace_id = %self.trace_id, layer = "access", code = "unavailable");
+            if log_exchange {
+                let code = if error.is_timeout() {
+                    "timeout"
+                } else if error.is_connect() {
+                    "connection_failed"
+                } else {
+                    "unavailable"
+                };
+                self.diagnostics
+                    .record(DiagnosticKind::HttpTransportFailed {
+                        code,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    });
+            }
             let error = if error.is_connect() || error.is_builder() {
                 AccessError::not_sent()
             } else {
                 AccessError::transport("Access request failed")
             };
-            if let Some(observation) = &self.transport_observation { observation.failed(&error); }
+            if let Some(observation) = &self.transport_observation {
+                observation.failed(&error);
+            }
             error
         })?;
         let status = response.status().as_u16();
@@ -382,7 +395,17 @@ impl AccessClient {
                 _ => observation.recovered(),
             }
         }
-        tracing::debug!(event = "http_result", trace_id = %self.trace_id, layer = "access", status, ms = started.elapsed().as_millis() as u64, code = ?result.as_ref().err().and_then(|error| error.code));
+        if log_exchange {
+            self.diagnostics.record(DiagnosticKind::HttpCompleted {
+                status,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                code: result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.code)
+                    .map(error_code_name),
+            });
+        }
         result
     }
 
@@ -413,11 +436,15 @@ impl AccessClient {
         let url = self.endpoint(&["v1", "hosts"])?;
         let mut complete = true;
         let list: HostList = self
-            .send_observing(self.request(reqwest::Method::GET, url, None), |headers| {
-                if let Some(truncated) = headers.get("X-Whalerein-Hosts-Truncated") {
-                    complete = truncated == "false";
-                }
-            })
+            .send_observing(
+                self.request(reqwest::Method::GET, url, None),
+                true,
+                |headers| {
+                    if let Some(truncated) = headers.get("X-Whalerein-Hosts-Truncated") {
+                        complete = truncated == "false";
+                    }
+                },
+            )
             .await?;
         Ok((list.hosts, complete))
     }
@@ -431,8 +458,24 @@ impl AccessClient {
         let builder = self
             .request(reqwest::Method::POST, url, Some(&request.trace_id))
             .json(request);
-        tracing::info!(event = "request_submitted", trace_id = %request.trace_id, request_id = %request.request_id, kind = request.kind, bytes = request.body.len());
-        self.send(builder).await
+        let request_id = request_id_for_log(&request.request_id);
+        self.diagnostics
+            .record(DiagnosticKind::AccessRequestSubmitting {
+                request_id: request_id.clone(),
+                request_kind: RequestKind::try_from(request.kind)
+                    .map_or("unknown", |kind| kind.as_str_name()),
+            });
+        let receipt: RequestReceipt = self.send(builder).await?;
+        self.diagnostics
+            .record(if receipt_matches_request(&receipt, request) {
+                DiagnosticKind::AccessRequestAccepted {
+                    request_id,
+                    status: status_name(receipt.status),
+                }
+            } else {
+                DiagnosticKind::RequestReceiptMismatch { request_id }
+            });
+        Ok(receipt)
     }
 
     /// Renew the Access client-poll lease without reading the result.
@@ -451,9 +494,21 @@ impl AccessClient {
     }
 
     pub async fn get_request(&self, request_id: &str) -> Result<RequestState, AccessError> {
+        self.read_request(request_id, true).await
+    }
+
+    async fn read_request(
+        &self,
+        request_id: &str,
+        log_exchange: bool,
+    ) -> Result<RequestState, AccessError> {
         let url = self.endpoint(&["v1", "requests", request_id])?;
-        self.send(self.request(reqwest::Method::GET, url, None))
-            .await
+        self.send_observing(
+            self.request(reqwest::Method::GET, url, None),
+            log_exchange,
+            |_| {},
+        )
+        .await
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<(), AccessError> {
@@ -539,46 +594,118 @@ impl AccessClient {
     /// when requested, for control commands).
     pub async fn wait_for_request(
         &self,
-        request_id: &str,
+        request: &HostRequest,
         allow_host_accepted: bool,
-    ) -> Result<RequestState, AccessError> {
-        self.wait_for_request_observed(request_id, allow_host_accepted, None)
+    ) -> CoreResult<RequestState> {
+        self.wait_for_request_observed(request, allow_host_accepted, None)
             .await
     }
 
     pub(crate) async fn wait_for_request_observed(
         &self,
-        request_id: &str,
+        request: &HostRequest,
         allow_host_accepted: bool,
         observation: Option<&TransportObservation>,
-    ) -> Result<RequestState, AccessError> {
+    ) -> CoreResult<RequestState> {
         let deadline = now_unix_ms() + self.request_timeout.as_millis() as i64;
-        loop {
-            match self.get_request(request_id).await {
+        let started = std::time::Instant::now();
+        let logged_request_id = request_id_for_log(&request.request_id);
+        let mut polls = 0u32;
+        let mut transport_failed = false;
+        let result = loop {
+            polls = polls.saturating_add(1);
+            match self.read_request(&request.request_id, false).await {
                 Ok(state) => {
+                    self.validate_request_state(request, &state)?;
                     if let Some(observation) = observation {
                         observation.recovered();
+                    }
+                    if transport_failed {
+                        transport_failed = false;
+                        self.diagnostics
+                            .record(DiagnosticKind::AccessRequestPollRecovered {
+                                request_id: logged_request_id.clone(),
+                                polls,
+                            });
                     }
                     if is_terminal(state.status)
                         || (allow_host_accepted
                             && state.status == OnlineStatus::HostAccepted as i32)
                     {
-                        return Ok(state);
+                        break Ok(state);
                     }
                 }
                 Err(error) if error.is_retryable_transport() => {
                     if let Some(observation) = observation {
                         observation.failed(&error);
                     }
+                    if !transport_failed {
+                        transport_failed = true;
+                        self.diagnostics
+                            .record(DiagnosticKind::AccessRequestPollFailed {
+                                request_id: logged_request_id.clone(),
+                                code: CoreError::from(error.clone()).code(),
+                                polls,
+                            });
+                    }
                 }
-                Err(error) => return Err(error),
+                Err(error) => break Err(error.into()),
             }
             if now_unix_ms() >= deadline {
-                return Err(AccessError::timeout());
+                break Err(CoreError::Timeout);
             }
             tokio::time::sleep(self.poll_interval).await;
-        }
+        };
+
+        let request_id = logged_request_id;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.diagnostics.record(match &result {
+            Ok(state) if state.status != OnlineStatus::Unknown as i32 => {
+                DiagnosticKind::AccessRequestObserved {
+                    request_id,
+                    status: status_name(state.status),
+                    polls,
+                    elapsed_ms,
+                }
+            }
+            _ => DiagnosticKind::AccessRequestUnconfirmed {
+                request_id,
+                code: result.as_ref().err().map_or("unknown", CoreError::code),
+                polls,
+                elapsed_ms,
+            },
+        });
+        result
     }
+
+    pub(crate) fn validate_request_state(
+        &self,
+        request: &HostRequest,
+        state: &RequestState,
+    ) -> CoreResult<()> {
+        if state.request_id == request.request_id
+            && state.host_id == request.host_id
+            && state.device_id == request.device_id
+            && state.command_id == request.command_id
+        {
+            return Ok(());
+        }
+        self.diagnostics
+            .record(DiagnosticKind::RequestStateMismatch {
+                request_id: request_id_for_log(&request.request_id),
+            });
+        Err(CoreError::Security(
+            "request status identity mismatch".into(),
+        ))
+    }
+}
+
+fn status_name(status: i32) -> &'static str {
+    OnlineStatus::try_from(status).map_or("unknown", |status| status.as_str_name())
+}
+
+pub(crate) fn receipt_matches_request(receipt: &RequestReceipt, request: &HostRequest) -> bool {
+    receipt.request_id == request.request_id && receipt.command_id == request.command_id
 }
 
 pub fn is_terminal(status: i32) -> bool {
@@ -810,6 +937,7 @@ mod transport_tests {
 
     #[tokio::test]
     async fn sends_expected_wire_paths_headers_and_bodies() {
+        const REQUEST_ID: &str = "00000000000000000000000000000001";
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler_seen = seen.clone();
         let server = MockServer::start(Arc::new(move |mock| {
@@ -834,16 +962,16 @@ mod transport_tests {
                 ("POST", "/v1/hosts/h-1/requests") => MockResponse::json(
                     200,
                     &whalerein_proto::RequestReceipt {
-                        request_id: "r-1".into(),
+                        request_id: REQUEST_ID.into(),
                         status: OnlineStatus::Received as i32,
                         command_id: String::new(),
                         expires_at_unix_ms: 1,
                     },
                 ),
-                ("GET", "/v1/requests/r-1") => MockResponse::json(
+                ("GET", "/v1/requests/00000000000000000000000000000001") => MockResponse::json(
                     200,
                     &RequestState {
-                        request_id: "r-1".into(),
+                        request_id: REQUEST_ID.into(),
                         status: OnlineStatus::Succeeded as i32,
                         ..Default::default()
                     },
@@ -862,15 +990,25 @@ mod transport_tests {
             }
         }))
         .await;
-        let client = AccessClient::new(server.url(), Some("device-token".into()))
-            .unwrap()
-            .with_trace_id("trace-1");
+        let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
+        let client = AccessClient::with_ca(
+            server.url(),
+            Some("device-token".into()),
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
 
         let hosts = client.list_hosts().await.unwrap();
         assert_eq!(hosts[0].host_id, "h-1");
-        let receipt = client.submit_request("h-1", &request()).await.unwrap();
+        let outgoing = HostRequest {
+            request_id: REQUEST_ID.into(),
+            trace_id: client.trace_id().into(),
+            ..request()
+        };
+        let receipt = client.submit_request("h-1", &outgoing).await.unwrap();
         assert_eq!(receipt.status, OnlineStatus::Received as i32);
-        let state = client.get_request("r-1").await.unwrap();
+        let state = client.get_request(REQUEST_ID).await.unwrap();
         assert_eq!(state.status, OnlineStatus::Succeeded as i32);
         client.delete_device("d-1").await.unwrap();
         let pairing_client = AccessClient::new(server.url(), None).unwrap();
@@ -892,11 +1030,32 @@ mod transport_tests {
             "Bearer device-token"
         );
         let submitted: HostRequest = serde_json::from_slice(&seen[1].3).unwrap();
-        assert_eq!(submitted.request_id, "r-1");
-        assert_eq!(seen[1].2.get(TRACE_HEADER).unwrap(), "trace-1");
-        assert_eq!(seen[2].2.get(TRACE_HEADER).unwrap(), "trace-1");
+        assert_eq!(submitted.request_id, REQUEST_ID);
+        assert_eq!(seen[1].2.get(TRACE_HEADER).unwrap(), client.trace_id());
+        assert_eq!(seen[2].2.get(TRACE_HEADER).unwrap(), client.trace_id());
         assert_eq!(seen[4].1, "/v1/pairing/claims");
         assert!(!seen[4].2.contains_key("authorization"));
+
+        let events = sink.0.lock().unwrap();
+        let request_events: Vec<_> = events
+            .iter()
+            .filter(|event| event["request_id"] == REQUEST_ID)
+            .collect();
+        assert_eq!(request_events.len(), 2);
+        assert_eq!(request_events[0]["event"], "access_request_submitting");
+        assert_eq!(request_events[0]["level"], "debug");
+        assert_eq!(request_events[1]["event"], "access_request_accepted");
+        assert_eq!(request_events[1]["level"], "info");
+        assert_eq!(
+            request_events[1]["status"],
+            OnlineStatus::Received.as_str_name()
+        );
+        assert!(request_events
+            .iter()
+            .all(|event| event["trace_id"] == client.trace_id()));
+        assert!(!serde_json::to_string(&*events)
+            .unwrap()
+            .contains("device-token"));
     }
 
     #[tokio::test]
@@ -921,6 +1080,75 @@ mod transport_tests {
         assert_eq!(error.to_string(), "digest");
     }
 
+    fn poll_request() -> HostRequest {
+        HostRequest {
+            request_id: "r".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn request_diagnostics_keep_offline_receipts_and_exclude_mismatched_states() {
+        const REQUEST_ID: &str = "00000000000000000000000000000001";
+        let request = HostRequest {
+            request_id: REQUEST_ID.into(),
+            ..request()
+        };
+        let server = MockServer::start(Arc::new(|incoming| {
+            if incoming.method == "POST" {
+                return MockResponse::json(
+                    200,
+                    &RequestReceipt {
+                        request_id: REQUEST_ID.into(),
+                        status: OnlineStatus::HostOffline as i32,
+                        ..Default::default()
+                    },
+                );
+            }
+            MockResponse::json(
+                200,
+                &RequestState {
+                    request_id: REQUEST_ID.into(),
+                    host_id: "unexpected-host".into(),
+                    device_id: "d-1".into(),
+                    status: OnlineStatus::Succeeded as i32,
+                    ..Default::default()
+                },
+            )
+        }))
+        .await;
+        let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
+        let client = AccessClient::with_ca(
+            server.url(),
+            None,
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
+        let receipt = client.submit_request("h-1", &request).await.unwrap();
+        assert_eq!(receipt.status, OnlineStatus::HostOffline as i32);
+        let error = client.wait_for_request(&request, false).await.unwrap_err();
+        assert!(matches!(error, CoreError::Security(_)));
+        let events = sink.0.lock().unwrap();
+        let receipt_event = events
+            .iter()
+            .find(|event| event["event"] == "access_request_accepted")
+            .unwrap();
+        assert_eq!(
+            receipt_event["status"],
+            OnlineStatus::HostOffline.as_str_name()
+        );
+        assert!(!events
+            .iter()
+            .any(|event| event["event"] == "access_request_observed"));
+        let mismatch = events.last().unwrap();
+        assert_eq!(mismatch["event"], "request_state_mismatch");
+        assert_eq!(mismatch["request_id"], REQUEST_ID);
+        assert!(!serde_json::to_string(&*events)
+            .unwrap()
+            .contains("unexpected-host"));
+    }
+
     #[tokio::test]
     async fn polls_request_until_access_returns_terminal_status() {
         let calls = Arc::new(Mutex::new(0u32));
@@ -943,11 +1171,26 @@ mod transport_tests {
             )
         }))
         .await;
-        let mut client = AccessClient::new(server.url(), None).unwrap();
+        let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
+        let mut client = AccessClient::with_ca(
+            server.url(),
+            None,
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
         client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(1));
-        let state = client.wait_for_request("r", false).await.unwrap();
+        let state = client
+            .wait_for_request(&poll_request(), false)
+            .await
+            .unwrap();
         assert_eq!(state.status, OnlineStatus::Succeeded as i32);
         assert_eq!(*calls.lock().unwrap(), 3);
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "access_request_observed");
+        assert_eq!(events[0]["polls"], 3);
+        assert!(events[0].get("request_id").is_none());
     }
 
     #[tokio::test]
@@ -966,11 +1209,8 @@ mod transport_tests {
         let mut client = AccessClient::new(server.url(), None).unwrap();
         client.set_poll_timing(Duration::from_millis(20), Duration::from_millis(1));
         assert!(matches!(
-            client.wait_for_request("r", true).await,
-            Err(AccessError {
-                kind: AccessErrorKind::Timeout,
-                ..
-            })
+            client.wait_for_request(&poll_request(), true).await,
+            Err(CoreError::Timeout)
         ));
     }
 
@@ -998,17 +1238,33 @@ mod transport_tests {
             )
         }))
         .await;
-        let mut client = AccessClient::new(server.url(), None).unwrap();
+        let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
+        let mut client = AccessClient::with_ca(
+            server.url(),
+            None,
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
         client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
         let observation = TransportObservation::default();
         let result = tokio::time::timeout(
             Duration::from_millis(100),
-            client.wait_for_request_observed("r", false, Some(&observation)),
+            client.wait_for_request_observed(&poll_request(), false, Some(&observation)),
         )
         .await;
         assert!(result.is_err());
         assert!(*calls.lock().unwrap() >= 2);
         assert!(observation.latest_error().is_none());
+        {
+            let mut events = sink.0.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["event"], "access_request_poll_failed");
+            assert_eq!(events[0]["polls"], 1);
+            assert_eq!(events[1]["event"], "access_request_poll_recovered");
+            assert_eq!(events[1]["polls"], 2);
+            events.clear();
+        }
 
         let unavailable = MockServer::start(Arc::new(|_| MockResponse {
             status: 0,
@@ -1016,18 +1272,28 @@ mod transport_tests {
             delay_ms: 0,
         }))
         .await;
-        let mut client = AccessClient::new(unavailable.url(), None).unwrap();
+        let mut client = AccessClient::with_ca(
+            unavailable.url(),
+            None,
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
         client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
         let observation = TransportObservation::default();
         assert!(tokio::time::timeout(
             Duration::from_millis(100),
-            client.wait_for_request_observed("r", false, Some(&observation))
+            client.wait_for_request_observed(&poll_request(), false, Some(&observation))
         )
         .await
         .is_err());
         assert!(observation
             .latest_error()
             .is_some_and(|error| error.is_retryable_transport()));
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "access_request_poll_failed");
+        assert_eq!(events[0]["level"], "warn");
     }
 
     #[test]
@@ -1036,6 +1302,7 @@ mod transport_tests {
             Url::parse("https://example.test").unwrap(),
             None,
             Some(b"not a certificate"),
+            Arc::default(),
         )
         .err()
         .unwrap();

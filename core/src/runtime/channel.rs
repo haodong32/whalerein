@@ -9,6 +9,7 @@ use whalerein_proto::{
 use super::{ConnectionState, HandshakePhase, Runtime};
 use crate::access::AccessClient;
 use crate::api::{CoreError, CoreResult, OnlineStatus};
+use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 use crate::pairing::{default_capabilities, PROTOCOL_VERSION};
 use crate::security::{channel_prologue, fingerprint, NoiseSession, SecureChannel, StaticIdentity};
 use crate::sync::SyncState;
@@ -225,11 +226,9 @@ async fn handshake(
     let hash = noise.handshake_hash()?;
     let channel =
         SecureChannel::from_handshake(&hash, &prologue, &negotiation_id, host_id, device_id)?;
-    tracing::debug!(
-        trace_id = %access.trace_id(),
-        host_fingerprint = %fingerprint(&host_public_key),
-        "secure channel established"
-    );
+    access
+        .diagnostics
+        .record(DiagnosticKind::SecureChannelEstablished);
     Ok(Established {
         channel,
         capabilities,
@@ -283,6 +282,7 @@ pub fn require_payload_capability(
     runtime: &Runtime,
     host_id: &str,
     payload: &RequestPayload,
+    diagnostics: &Diagnostics,
 ) -> CoreResult<()> {
     let Some(required) = required_capability(payload) else {
         return Ok(());
@@ -291,11 +291,9 @@ pub fn require_payload_capability(
     if whalerein_proto::has_capability(&advertised, required) {
         Ok(())
     } else {
-        tracing::debug!(
-            host_id,
-            capability = required.as_str_name(),
-            "operation requires a capability this channel did not negotiate"
-        );
+        diagnostics.record(DiagnosticKind::CapabilityMissing {
+            capability: required.as_str_name(),
+        });
         Err(CoreError::Unsupported)
     }
 }
@@ -333,7 +331,7 @@ async fn send_handshake(
         _ => {}
     }
 
-    let state = access.wait_for_request(&request_id, false).await?;
+    let state = access.wait_for_request(&request, false).await?;
     match OnlineStatus::from_proto(state.status) {
         Some(OnlineStatus::Succeeded) => Ok(state.result_body),
         Some(OnlineStatus::HostOffline) => Err(CoreError::HostOffline),
@@ -434,7 +432,8 @@ mod fake_host_tests {
             })),
         };
         let traced = access.host.lock().unwrap().request_traces.len();
-        let error = require_payload_capability(&runtime, "host-1", &watch).unwrap_err();
+        let error = require_payload_capability(&runtime, "host-1", &watch, &Diagnostics::default())
+            .unwrap_err();
         assert!(matches!(error, CoreError::Unsupported));
         assert_eq!(error.code(), "unsupported_capability");
         assert_eq!(error.exit_code(), 9);
@@ -448,7 +447,9 @@ mod fake_host_tests {
         let list = RequestPayload {
             payload: Some(Payload::ListSessions(ListSessions {})),
         };
-        assert!(require_payload_capability(&runtime, "host-1", &list).is_ok());
+        assert!(
+            require_payload_capability(&runtime, "host-1", &list, &Diagnostics::default()).is_ok()
+        );
     }
 
     #[tokio::test]
@@ -522,7 +523,8 @@ mod fake_host_tests {
         ];
         for payload in &gated {
             assert!(
-                require_payload_capability(&runtime, "host-1", payload).is_ok(),
+                require_payload_capability(&runtime, "host-1", payload, &Diagnostics::default())
+                    .is_ok(),
                 "{:?}",
                 required_capability(payload)
             );
@@ -532,7 +534,9 @@ mod fake_host_tests {
             payload: Some(Payload::Ping(Default::default())),
         };
         assert!(required_capability(&ping).is_none());
-        assert!(require_payload_capability(&runtime, "host-1", &ping).is_ok());
+        assert!(
+            require_payload_capability(&runtime, "host-1", &ping, &Diagnostics::default()).is_ok()
+        );
 
         // The same channel still carries an ordinary read.
         let cache = Arc::new(Cache::open_in_memory([3u8; 32]).unwrap());

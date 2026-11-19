@@ -147,18 +147,6 @@ impl CliOutcome {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn failure(command: &Command, error: CliError) -> Self {
-        let exit = error_exit_code(&error.code);
-        Self {
-            command: command.name().to_owned(),
-            data: None,
-            error: Some(error),
-            human: String::new(),
-            exit,
-        }
-    }
-
     pub fn local_failure(
         command: &Command,
         code: &str,
@@ -223,7 +211,7 @@ impl CliOutcome {
     }
 
     pub fn to_json(&self) -> Value {
-        let mut value = match &self.error {
+        match &self.error {
             Some(error) => {
                 let mut value = json!({
                     "schema": "whalerein/client/v1",
@@ -231,10 +219,17 @@ impl CliOutcome {
                     "error": {
                         "code": error.code,
                         "message": error.message,
+                        "action": error.action,
                     }
                 });
                 if let Some(data) = &self.data {
                     value["data"] = data.clone();
+                }
+                if let Some(id) = &error.diagnostic_id {
+                    value["error"]["diagnostic_id"] = json!(id);
+                }
+                if let Some(layer) = &error.layer {
+                    value["error"]["layer"] = json!(layer);
                 }
                 value
             }
@@ -243,21 +238,7 @@ impl CliOutcome {
                 "command": self.command,
                 "data": self.data,
             }),
-        };
-        if let Some(action) = self.error.as_ref().map(|error| error.action.clone()) {
-            value["error"]["action"] = json!(action);
         }
-        if let Some(id) = self
-            .error
-            .as_ref()
-            .and_then(|error| error.diagnostic_id.as_ref())
-        {
-            value["error"]["diagnostic_id"] = json!(id);
-        }
-        if let Some(layer) = self.error.as_ref().and_then(|error| error.layer.as_ref()) {
-            value["error"]["layer"] = json!(layer);
-        }
-        value
     }
 
     pub fn render(&self) -> String {
@@ -271,35 +252,10 @@ impl CliOutcome {
             }
             return text;
         }
-        if self.human.is_empty() {
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(&self.data).unwrap_or_default()
-            )
-        } else {
-            self.human.clone()
-        }
-    }
-}
-
-/// Exit code for a stable CLI error code string.
-///
-/// Wire names come from the single `ErrorCode` table in Core (which is pinned
-/// to `proto/v1/WIRE.md`); this function only adds the local codes that have no
-/// wire `ErrorCode` because they are produced inside the client.
-pub fn error_exit_code(code: &str) -> u8 {
-    match code {
-        "invalid_configuration" | "cancelled" => 2,
-        "revoked" | "not_paired" => 4,
-        "host_offline" => 5,
-        "rejected" => 6,
-        "timeout" | "unknown" => 7,
-        "cache_error" | "security_error" => 1,
-        "operation_failed" => 5,
-        _ => match whalerein_proto::ErrorCode::from_str_name(&code.to_ascii_lowercase()) {
-            Some(wire) => whalerein_core::api::error_code_exit_code(wire),
-            None => 1,
-        },
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&self.data).unwrap_or_default()
+        )
     }
 }
 
@@ -426,13 +382,16 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
         ),
         _ => error.to_string(),
     };
-    let mut cli_error = CliError::new(code, message);
-    cli_error.action = error.action().to_owned();
-    cli_error.layer = Some(error.source_layer().to_owned());
     CliOutcome {
         command: command.name().to_owned(),
         data: None,
-        error: Some(cli_error),
+        error: Some(CliError {
+            code,
+            message,
+            action: error.action().to_owned(),
+            diagnostic_id: None,
+            layer: Some(error.source_layer().to_owned()),
+        }),
         human: String::new(),
         exit,
     }
@@ -1380,31 +1339,13 @@ mod tests {
 
     #[test]
     fn emits_stable_json_error_shape_for_failed_outcomes() {
-        let outcome = CliOutcome::failure(&command(), CliError::new("unauthorized", "no"));
+        let outcome = CliOutcome::local_failure(&command(), "unauthorized", "no", 4);
         let value = outcome.to_json();
         assert_eq!(value["schema"], "whalerein/client/v1");
         assert_eq!(value["error"]["code"], "unauthorized");
         assert_eq!(value["error"]["message"], "no");
         assert_eq!(outcome.exit, 4);
         assert_eq!(outcome.render(), "error: no (unauthorized)\n");
-    }
-
-    #[test]
-    fn maps_local_error_codes_to_process_exit_codes() {
-        for (code, exit) in [
-            ("invalid_argument", 2),
-            ("not_found", 3),
-            ("revoked", 4),
-            ("host_offline", 5),
-            ("rejected", 6),
-            ("timeout", 7),
-            ("payload_digest_mismatch", 8),
-            ("protocol_version_incompatible", 9),
-            ("internal", 1),
-        ] {
-            let outcome = CliOutcome::failure(&command(), CliError::new(code, "x"));
-            assert_eq!(outcome.exit, exit, "{code}");
-        }
     }
 
     #[test]
@@ -2059,50 +2000,31 @@ mod cli_contract_tests {
     }
 
     #[test]
-    fn every_wire_error_code_maps_to_the_core_exit_table() {
-        for code in ALL_ERROR_CODES {
-            let name = code.as_str_name();
-            assert_eq!(
-                error_exit_code(name),
-                whalerein_core::api::error_code_exit_code(code),
-                "{name}"
-            );
-            // Error codes are produced from CoreError; the CLI string table must
-            // agree with the error's own exit code for both remote and local
-            // variants of the same code.
-            for error in [
-                whalerein_core::CoreError::Api {
-                    code: Some(code),
-                    message: "m".into(),
-                },
-                whalerein_core::CoreError::Host {
-                    code: Some(code),
-                    message: "m".into(),
-                },
-            ] {
-                assert_eq!(error_exit_code(error.code()), error.exit_code(), "{name}");
-            }
-        }
-        // Local codes that have no wire ErrorCode stay classified.
-        for (code, exit) in [
-            ("invalid_configuration", 2),
-            ("cancelled", 2),
-            ("not_paired", 4),
-            ("revoked", 4),
-            ("host_offline", 5),
-            ("rejected", 6),
-            ("timeout", 7),
-            ("unknown", 7),
-            ("cache_error", 1),
-            ("security_error", 1),
-            ("something_unknown", 1),
+    fn local_core_errors_keep_their_code_and_exit_in_the_cli_outcome() {
+        use whalerein_core::CoreError::*;
+
+        for (error, code, exit) in [
+            (Config("fixture".into()), "invalid_configuration", 2),
+            (PairingCancelled, "cancelled", 2),
+            (NotPaired, "not_paired", 4),
+            (Revoked, "revoked", 4),
+            (HostOffline, "host_offline", 5),
+            (HostRejected, "rejected", 6),
+            (Timeout, "timeout", 7),
+            (UnknownResult, "unknown", 7),
+            (Cache("fixture".into()), "cache_error", 1),
+            (Security("fixture".into()), "security_error", 1),
         ] {
-            assert_eq!(error_exit_code(code), exit, "{code}");
+            let outcome = core_error_outcome(&Command::Hosts, error);
+            assert_eq!(outcome.error.unwrap().code, code);
+            assert_eq!(outcome.exit, exit, "{code}");
         }
     }
 
     #[test]
     fn the_cli_error_contract_matches_the_proto_json_table() {
+        use whalerein_core::CoreError::{Api, Host};
+
         let table: serde_json::Value =
             serde_json::from_str(include_str!("../../../proto/v1/error_codes.json")).unwrap();
         let mut seen = std::collections::BTreeSet::new();
@@ -2110,12 +2032,34 @@ mod cli_contract_tests {
             let name = entry["name"].as_str().unwrap();
             let exit = entry["exitCode"].as_u64().unwrap() as u8;
             let action = entry["action"].as_str().unwrap();
-            assert_eq!(error_exit_code(name), exit, "exit for {name}");
             assert_eq!(error_action(name), action, "action for {name}");
             let wire = whalerein_proto::ErrorCode::from_str_name(name).expect(name);
             assert_eq!(whalerein_core::api::error_code_exit_code(wire), exit);
             assert_eq!(whalerein_core::api::error_code_action(wire), action);
             assert_eq!(wire.as_str_name(), name);
+            for (error, layer) in [
+                (
+                    Api {
+                        code: Some(wire),
+                        message: "fixture".into(),
+                    },
+                    "access",
+                ),
+                (
+                    Host {
+                        code: Some(wire),
+                        message: "fixture".into(),
+                    },
+                    "host",
+                ),
+            ] {
+                let outcome = core_error_outcome(&Command::Hosts, error);
+                let envelope = outcome.to_json();
+                assert_eq!(outcome.exit, exit, "{name}");
+                assert_eq!(envelope["error"]["code"], name);
+                assert_eq!(envelope["error"]["action"], action);
+                assert_eq!(envelope["error"]["layer"], layer);
+            }
             seen.insert(name.to_owned());
         }
         assert_eq!(seen.len(), whalerein_proto::ALL_ERROR_CODES.len());
@@ -2172,67 +2116,11 @@ mod cli_contract_tests {
     }
 
     #[test]
-    fn remote_error_codes_keep_their_wire_exits_at_the_cli_boundary() {
-        use whalerein_proto::ErrorCode;
-        for (code, exit) in [
-            (ErrorCode::ApprovalExpired, 8),
-            (ErrorCode::ApprovalVersionMismatch, 8),
-            (ErrorCode::ApprovalAlreadyResolved, 8),
-            (ErrorCode::ApprovalUnavailable, 8),
-            (ErrorCode::RateLimited, 8),
-            (ErrorCode::SnapshotRequired, 8),
-            (ErrorCode::RevocationsPending, 8),
-            (ErrorCode::PayloadDigestMismatch, 8),
-            (ErrorCode::ProtocolVersionIncompatible, 9),
-            (ErrorCode::Expired, 7),
-            (ErrorCode::PayloadTooLarge, 5),
-        ] {
-            let outcome = core_error_outcome(
-                &Command::Hosts,
-                whalerein_core::CoreError::Api {
-                    code: Some(code),
-                    message: "remote".into(),
-                },
-            );
-            assert_eq!(outcome.exit, exit, "{code:?}");
-            assert_eq!(outcome.error.as_ref().unwrap().code, code.as_str_name());
-            assert_eq!(
-                outcome.error.as_ref().unwrap().layer.as_deref(),
-                Some("access")
-            );
-        }
-        // Local rejected is exit 6, which the audit found unasserted anywhere.
-        let outcome = core_error_outcome(&Command::Hosts, whalerein_core::CoreError::HostRejected);
-        assert_eq!(outcome.exit, 6);
-        assert_eq!(outcome.error.unwrap().code, "rejected");
-    }
-
-    #[test]
-    fn the_lifecycle_reason_golden_table_covers_plain_and_wrapped_codes() {
-        // Every plain reason the Host can put in a FAILED receipt.
-        for (reason, exit) in [
-            ("INVALID_ARGUMENT", 2),
-            ("WORKSPACE_NOT_FOUND", 3),
-            ("WORKSPACE_UNAVAILABLE", 8),
-            ("PRESET_NOT_FOUND", 3),
-            ("PRESET_UNAVAILABLE", 8),
-            ("SOURCE_NOT_FOUND", 3),
-            ("SOURCE_NO_COMPLETE_TURN", 8),
-            ("PROCESS_INTERRUPTED", 5),
-        ] {
-            assert_eq!(lifecycle_reason_exit_code(reason), exit, "{reason}");
-            let handle = lifecycle(reason);
-            assert_eq!(lifecycle_exit_code(&handle), exit, "{reason}");
-            assert_eq!(
-                error_exit_code(lifecycle_error_code(&handle)),
-                exit,
-                "{reason}: {}",
-                lifecycle_error_code(&handle)
-            );
-        }
+    fn lifecycle_reasons_preserve_wrapped_wire_codes() {
         // PROCESS_INTERRUPTED is an availability failure, never a silent
         // success and never a retry suggestion.
         let handle = lifecycle("PROCESS_INTERRUPTED");
+        assert_eq!(lifecycle_exit_code(&handle), 5);
         assert_eq!(lifecycle_error_code(&handle), "operation_failed");
         assert_eq!(error_action(lifecycle_error_code(&handle)), "retry");
         // Every wire code decodes through the PREFLIGHT_/NATIVE_ prefixes.
@@ -2247,13 +2135,6 @@ mod cli_contract_tests {
                 );
             }
         }
-        // The audit's contradiction: conflict is 8, not the generic 5.
-        assert_eq!(lifecycle_reason_exit_code("PREFLIGHT_CONFLICT"), 8);
-        assert_ne!(lifecycle_reason_exit_code("PREFLIGHT_CONFLICT"), 5);
-        assert_eq!(
-            lifecycle_reason_exit_code("PREFLIGHT_UNSUPPORTED_CAPABILITY"),
-            9
-        );
     }
 
     #[test]
@@ -2285,14 +2166,6 @@ mod cli_contract_tests {
             assert_eq!(lifecycle_reason_exit_code(reason), exit, "{reason}");
             let mut handle = lifecycle(reason);
             assert_eq!(lifecycle_exit_code(&handle), exit, "{reason}");
-            // The envelope's code and exit must agree for scripts that map one
-            // to the other.
-            assert_eq!(
-                error_exit_code(lifecycle_error_code(&handle)),
-                exit,
-                "{reason}: {}",
-                lifecycle_error_code(&handle)
-            );
             handle.lifecycle_receipt = None;
             assert_eq!(lifecycle_exit_code(&handle), 0);
         }

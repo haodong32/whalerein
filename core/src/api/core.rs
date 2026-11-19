@@ -28,6 +28,7 @@ use crate::access::{AccessClient, MqttSettings};
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
+use crate::diagnostics::journal::{DiagnosticContext, DiagnosticKind, DiagnosticSink, Diagnostics};
 use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, PairingInitiator};
 use crate::runtime::channel::{ensure_channel, ensure_channel_after, require_payload_capability};
 use crate::runtime::{ConnectionState, Runtime};
@@ -38,7 +39,7 @@ use crate::sync::SyncService;
 pub(super) mod cloud_pairing;
 pub(crate) mod revoked_commands;
 
-/// Injected Core options. `data_dir` is a path, not a second dependency seam.
+/// Internal options for selecting storage and credentials.
 #[derive(Clone)]
 pub struct CoreOptions {
     pub data_dir: PathBuf,
@@ -169,7 +170,7 @@ pub struct Core {
     options: CoreOptions,
     pub(crate) config: Arc<RwLock<Option<PersistedConfig>>>,
     pub(crate) runtime: Arc<Runtime>,
-    journal: Arc<diagnostics::journal::Journal>,
+    pub(crate) diagnostics: Arc<Diagnostics>,
     identity: Arc<Mutex<Option<Arc<crate::security::device::DeviceIdentity>>>>,
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
@@ -186,16 +187,50 @@ pub struct Core {
 impl Core {
     /// Open one platform-selected TOML configuration and validate existing state offline.
     pub fn open(config_path: &Path, secrets: Arc<dyn SecretStore>) -> CoreResult<Self> {
-        let instance = Arc::new(Instance::open(config_path)?);
-        let data_dir = instance.runtime_dir();
-        let config = ConfigStore::for_instance(&data_dir)
-            .load()
-            .map_err(|error| {
-                CoreError::Config(format!(
-                    "{}: {error}; choose a fresh data_dir",
-                    instance.root.display()
-                ))
-            })?;
+        Self::open_instance(config_path, secrets, Arc::default())
+    }
+
+    /// Open a client with an instance-local receiver, including configuration diagnostics.
+    pub fn open_with_diagnostic_sink(
+        config_path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        sink: Arc<dyn DiagnosticSink>,
+    ) -> CoreResult<Self> {
+        Self::open_with_diagnostics(config_path, secrets, DiagnosticContext::new(sink))
+    }
+
+    /// Open a client with a trace reserved before configuration is loaded.
+    pub fn open_with_diagnostics(
+        config_path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        diagnostics: DiagnosticContext,
+    ) -> CoreResult<Self> {
+        Self::open_instance(config_path, secrets, diagnostics.0)
+    }
+
+    fn open_instance(
+        config_path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        diagnostics: Arc<Diagnostics>,
+    ) -> CoreResult<Self> {
+        let loaded = Instance::open(config_path).and_then(|instance| {
+            let data_dir = instance.runtime_dir();
+            let config = ConfigStore::for_instance(&data_dir)
+                .load()
+                .map_err(|error| {
+                    CoreError::Config(format!(
+                        "{}: {error}; choose a fresh data_dir",
+                        instance.root.display()
+                    ))
+                })?;
+            Ok((instance, data_dir, config))
+        });
+        diagnostics.record(match &loaded {
+            Ok(_) => DiagnosticKind::ConfigurationLoaded,
+            Err(error) => DiagnosticKind::ConfigurationFailed { code: error.code() },
+        });
+        let (instance, data_dir, config) = loaded?;
+        let instance = Arc::new(instance);
         let secrets = Arc::new(InstanceSecrets {
             instance: instance.clone(),
             backend: secrets,
@@ -204,6 +239,7 @@ impl Core {
             CoreOptions { data_dir, secrets },
             config,
             Some(instance),
+            diagnostics,
         ))
     }
 
@@ -284,12 +320,13 @@ impl Core {
         options: CoreOptions,
         config: Option<PersistedConfig>,
         instance: Option<Arc<Instance>>,
+        diagnostics: Arc<Diagnostics>,
     ) -> Self {
         Self {
             options,
             config: Arc::new(RwLock::new(config)),
             runtime: Arc::new(Runtime::new()),
-            journal: Arc::new(diagnostics::journal::Journal::default()),
+            diagnostics,
             identity: Arc::new(Mutex::new(None)),
             identity_init: Arc::new(Mutex::new(())),
             cache: Arc::new(Mutex::new(None)),
@@ -468,7 +505,7 @@ impl Core {
             }
             Err(error) => return Err(error),
         };
-        let mut core = Self::from_parts(options, config, None);
+        let mut core = Self::from_parts(options, config, None, Arc::default());
         core.profile = Some(profile);
         core._activation = Some(activation);
         if startup_marker
@@ -550,7 +587,7 @@ impl Core {
 
     /// Ephemeral operation ID shared with Access and host logs.
     pub fn diagnostic_id(&self) -> &str {
-        self.journal.trace_id()
+        self.diagnostics.trace_id()
     }
 
     /// Persist only bounded diagnostic metadata, never the error message.
@@ -558,12 +595,12 @@ impl Core {
         if self.instance.is_some() && !self.options.data_dir.is_dir() {
             return Ok(());
         }
-        self.journal.save_failure(&self.options.data_dir, code)
-    }
-
-    /// Bounded operation history shared with the private observation owner.
-    pub(crate) fn record_journal(&self, layer: &str, action: &str, outcome: &str, code: &str) {
-        self.journal.record(layer, action, outcome, code);
+        self.diagnostics
+            .save_failure(&self.options.data_dir, code)
+            .inspect_err(|_| {
+                self.diagnostics
+                    .record(DiagnosticKind::DiagnosticSaveFailed)
+            })
     }
 
     /// Remove the previous failure record without contacting Access or DSH.
@@ -692,11 +729,13 @@ impl Core {
         base: Url,
         region: crate::account::native::RegionalSession,
     ) -> CoreResult<AccessClient> {
-        Ok(
-            AccessClient::with_ca(base, Some(region.token), self.ca_pem().as_deref())?
-                .with_cloud_session(region.id, self.options.secrets.clone())
-                .with_trace_id(self.diagnostic_id()),
-        )
+        Ok(AccessClient::with_ca(
+            base,
+            Some(region.token),
+            self.ca_pem().as_deref(),
+            self.diagnostics.clone(),
+        )?
+        .with_cloud_session(region.id, self.options.secrets.clone()))
     }
 
     async fn access_client(&self) -> CoreResult<AccessClient> {
@@ -722,8 +761,7 @@ impl Core {
         let token = load_device_token(&self.options.secrets, &config.device_id)?
             .ok_or(CoreError::NotPaired)?;
         let ca = self.ca_pem();
-        AccessClient::with_ca(base, Some(token), ca.as_deref())
-            .map(|access| access.with_trace_id(self.diagnostic_id()))
+        AccessClient::with_ca(base, Some(token), ca.as_deref(), self.diagnostics.clone())
             .map_err(Into::into)
     }
 
@@ -936,7 +974,7 @@ impl Core {
             }
         }
         #[cfg(unix)]
-        let _admission = {
+        let admission = {
             let guard = crate::security::device::ProfileLock::acquire_admission_shared_waiting(
                 &self.options.data_dir,
             )
@@ -974,19 +1012,24 @@ impl Core {
         let (cache, rebuilt) =
             Cache::open_recovering(&self.options.data_dir.join("cache.sqlite3"), key)?;
         if let Some(reason) = rebuilt {
-            self.record_cache_rebuild(reason);
+            self.write_cache_rebuild_marker(reason);
         }
         let cache = Arc::new(cache);
         *slot = Some(cache.clone());
+        #[cfg(unix)]
+        drop(admission);
+        drop(slot);
+        if let Some(reason) = rebuilt {
+            self.diagnostics
+                .record_stage("storage", "cache_rebuild", "succeeded", reason.reason());
+        }
         Ok(cache)
     }
 
     /// Leave a bounded, secret-free marker when a cache is quarantined and
     /// rebuilt. `doctor` and diagnostics can report the storage state without
     /// opening the cache, and the pairing identity is explicitly preserved.
-    fn record_cache_rebuild(&self, reason: crate::cache::CacheRebuild) {
-        self.journal
-            .record("storage", "cache_rebuild", "succeeded", reason.reason());
+    fn write_cache_rebuild_marker(&self, reason: crate::cache::CacheRebuild) {
         let marker = serde_json::json!({
             "reason": reason.reason(),
             "quarantine": "cache.sqlite3.quarantine",
@@ -1189,7 +1232,8 @@ impl Core {
         stale_channel_id: Option<&str>,
         transport: Option<Arc<crate::access::http::TransportObservation>>,
     ) -> CoreResult<crate::security::SecureChannel> {
-        self.journal.record("core", "handshake", "started", "none");
+        self.diagnostics
+            .record_stage("core", "handshake", "started", "none");
         let opened = async {
             let config = self.require_config()?;
             let identity = self.device_identity()?;
@@ -1225,7 +1269,7 @@ impl Core {
             }
         }
         .await;
-        self.journal.record(
+        self.diagnostics.record_stage(
             opened
                 .as_ref()
                 .err()
@@ -1250,7 +1294,7 @@ impl Core {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
-            require_payload_capability(&self.runtime, host_id, &payload)?;
+            require_payload_capability(&self.runtime, host_id, &payload, &self.diagnostics)?;
             let commands = self
                 .command_service_for_session(expected_session.as_deref())
                 .await?;
@@ -1265,7 +1309,7 @@ impl Core {
                 {
                     // A host reconnect discards its channels. Read-only queries
                     // may negotiate once more; control commands are never resent.
-                    self.journal.record(
+                    self.diagnostics.record_stage(
                         error.source_layer(),
                         "query_channel_recovery",
                         "retrying",
@@ -1274,7 +1318,12 @@ impl Core {
                     let fresh = self
                         .ensure_channel_after(host_id, channel.channel_id())
                         .await?;
-                    require_payload_capability(&self.runtime, host_id, &payload)?;
+                    require_payload_capability(
+                        &self.runtime,
+                        host_id,
+                        &payload,
+                        &self.diagnostics,
+                    )?;
                     commands
                         .query(host_id, &config.device_id, &fresh, payload)
                         .await
@@ -1283,7 +1332,7 @@ impl Core {
             }
         }
         .await;
-        self.journal.record(
+        self.diagnostics.record_stage(
             result
                 .as_ref()
                 .err()
@@ -1324,7 +1373,7 @@ impl Core {
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
-            require_payload_capability(&self.runtime, host_id, &payload)?;
+            require_payload_capability(&self.runtime, host_id, &payload, &self.diagnostics)?;
             let commands = self
                 .command_service_for_session(expected_session.as_deref())
                 .await?
@@ -1484,7 +1533,7 @@ impl Core {
     }
 
     fn uncertain_recovery_error(&self, error: CoreError) -> CoreError {
-        self.journal.record(
+        self.diagnostics.record_stage(
             error.source_layer(),
             "command_result_recovery",
             "unavailable",
@@ -1509,8 +1558,8 @@ impl Core {
         command_id: &str,
     ) -> CoreResult<CommandHandle> {
         let expected_session = self.cloud_session_id()?;
-        self.journal
-            .record("host", "command_result_recovery", "started", "none");
+        self.diagnostics
+            .record_stage("host", "command_result_recovery", "started", "none");
         let config = self.require_config()?;
         let mut channel = self
             .ensure_channel(host_id, true)
@@ -1684,8 +1733,12 @@ impl Core {
         )?;
 
         let ca = self.ca_pem();
-        let access = AccessClient::with_ca(parsed.access_url.clone(), None, ca.as_deref())?
-            .with_trace_id(self.diagnostic_id());
+        let access = AccessClient::with_ca(
+            parsed.access_url.clone(),
+            None,
+            ca.as_deref(),
+            self.diagnostics.clone(),
+        )?;
         let hello_response = access
             .pair_claim(&hello)
             .await
@@ -3192,12 +3245,16 @@ impl Core {
                 Some(id) => (None, id),
             }
         };
-        self.journal
-            .record("access", "authorization_check", "started", error.code());
+        self.diagnostics
+            .record_stage("access", "authorization_check", "started", error.code());
         match access.list_hosts().await {
             Err(denied) if CoreError::from(denied.clone()).device_authorization_lost() => {
-                self.journal
-                    .record("access", "authorization_check", "revoked", error.code());
+                self.diagnostics.record_stage(
+                    "access",
+                    "authorization_check",
+                    "revoked",
+                    error.code(),
+                );
                 #[cfg(feature = "protocol-testing")]
                 if let Some(path) = std::env::var_os("WHALEREIN_TEST_OBSERVED_REVOKED_BARRIER") {
                     let path = std::path::PathBuf::from(path);
@@ -3209,8 +3266,12 @@ impl Core {
                 }
             }
             Ok(_) => {
-                self.journal
-                    .record("access", "authorization_check", "pairing_preserved", "none");
+                self.diagnostics.record_stage(
+                    "access",
+                    "authorization_check",
+                    "pairing_preserved",
+                    "none",
+                );
                 let _admission = crate::security::device::ProfileLock::acquire_admission_async(
                     &self.options.data_dir,
                     std::time::Instant::now() + Duration::from_secs(30),
@@ -3224,7 +3285,7 @@ impl Core {
                 return Err(error);
             }
             Err(check) => {
-                self.journal.record(
+                self.diagnostics.record_stage(
                     "access",
                     "authorization_check",
                     "pairing_preserved",
@@ -3234,7 +3295,6 @@ impl Core {
             }
         }
         if let Some(config) = self.current_config() {
-            tracing::info!("device authorization lost; clearing local pairing");
             self.runtime.revoke();
             self.clear_local_pairing_async(&config.device_id, &observed_marker)
                 .await?;
