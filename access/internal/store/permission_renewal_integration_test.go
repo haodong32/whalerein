@@ -34,7 +34,9 @@ func boundWatch(t *testing.T, s *store.Store, ctx context.Context, requestID, ho
 func TestPermissionRenewalKeepsTheWatchAndInterruptionExpiresAtTheDeadline(t *testing.T) {
 	s, _ := storetest.New(t)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// PostgreSQL timestamps keep microsecond precision; keep the expected
+	// value at that precision so the round trip compares exactly.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	const workspace, host, device, revision, authority = "workspace", "host", "device", "1", "authority"
 	enrollCloudHost(t, s, workspace, host, revision, "enroll", now)
 	confirmCloudGrant(t, s, workspace, host, device, revision, "claim", now)
