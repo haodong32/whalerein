@@ -1520,3 +1520,35 @@ def test_attachment_configured_chunk_budget_transfers_multipart(scenario, paired
     stats = scenario.dsh.attachment_pull_state()
     assert stats["pulls"] >= 12, "configured chunk budget did not bound the transfer"
     assert stats["bytes"] == size
+
+
+def test_send_queued_behind_unrelated_input_never_claims_input(scenario, paired_device, session_id):
+    """A queued send behind another operation's pending approval reports pending or uncertain and never claims the foreign input."""
+    scenario.dsh.start_running(session_id)
+    approval = scenario.dsh.request_approval(session_id)
+    code, values = paired_device.invoke(
+        "session",
+        "send",
+        session_id,
+        "queued behind unrelated input",
+        "--delivery",
+        "enqueue-after-run",
+        "--timeout",
+        "5",
+        success=False,
+    )
+    assert code in (0, 7)
+    envelope = values[-1]
+    data = envelope.get("data") or {}
+    reply = data.get("reply") or {}
+    assert reply.get("state") in ("pending", "uncertain") or envelope.get("error", {}).get("code") in (
+        "unknown",
+        "uncertain",
+    )
+    assert not data.get("input_kinds")
+    assert not reply.get("input_kinds")
+    assert scenario.dsh.approval(approval["approval_id"])["state"] == "pending"
+    assert not any(
+        event["type"] == "user/message"
+        for event in scenario.dsh.snapshot(session_id)["events"]
+    )
