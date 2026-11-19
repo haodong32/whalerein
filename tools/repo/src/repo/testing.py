@@ -15,7 +15,8 @@ from .errors import RepoError, ToolMissingError, UsageError
 from .progress import Display
 from .reports.html import render
 from .reports.model import VERSION, atomic_write, read_report, summary, validate, validate_scope
-from .runners import integration
+from .runners import integration, rust
+from .runners.coverage import CoverageResult
 from .test_descriptions import describe
 from .toolchain import RUNNERS
 
@@ -187,7 +188,7 @@ def run(root, projects, runner, request, output=None):
                             )
                         runner.out.info(f"Coverage measurement (separate execution): {project.id}")
                         try:
-                            measured = RUNNERS[project.kind].measure(project, runner)
+                            measured = rust.measure(project, runner)
                         except (
                             RepoError,
                             OSError,
@@ -196,8 +197,6 @@ def run(root, projects, runner, request, output=None):
                             TypeError,
                             KeyboardInterrupt,
                         ) as exc:
-                            from .runners.coverage import CoverageResult
-
                             if isinstance(exc, KeyboardInterrupt):
                                 interrupted = True
                                 scope["exit_code"] = 130
@@ -207,16 +206,11 @@ def run(root, projects, runner, request, output=None):
                         if getattr(runner, "interrupted", False):
                             interrupted = True
                             scope["exit_code"] = 130
-                        measured = measured if isinstance(measured, list) else [measured]
-                        for value in measured:
-                            entry = value.as_dict()
-                            entry.update(
-                                unit="statements" if project.kind == "go" else "lines",
-                                phase="separate_measurement",
-                            )
-                            if entry.get("error"):
-                                entry["error"] = sanitize(entry["error"])
-                            scope["coverage"].append(entry)
+                        entry = measured.as_dict()
+                        entry.update(unit="lines", phase="separate_measurement")
+                        if entry.get("error"):
+                            entry["error"] = sanitize(entry["error"])
+                        scope["coverage"].append(entry)
                         scope["coverage_duration_ms"] = round(
                             (monotonic() - measure_started) * 1000, 3
                         )

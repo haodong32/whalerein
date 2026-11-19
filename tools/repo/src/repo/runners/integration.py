@@ -51,7 +51,6 @@ def collect(root, runner, request, directory):
             timeout=timeout,
             output=directory,
             configuration={
-                "suite": "integration",
                 "group": request.group,
                 "only": request.only,
                 "parallel": request.parallel or 1,
@@ -670,7 +669,7 @@ def run_platform(context, runner, request, paths):
         identities = {case["id"] for case in collected["tests"]}
         if not identities:
             raise VerificationError("invalid-integration-selection", 2)
-        context.record_collection(sorted(identities))
+        context.record_collection(identities)
         if request.list_only:
             for case in collected["tests"]:
                 case["status"] = "todo"
