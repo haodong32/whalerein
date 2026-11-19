@@ -88,9 +88,39 @@ export class WatchedEvents {
     }
   }
 
+  // A source error code that proves the session is gone ends every
+  // observation of it; transient failures stay with the caller to report or
+  // retry.
+  #closeIfGone(sessionId, code) {
+    if (!SESSION_FATAL_CODES.has(code)) return false
+    this.#closeSession(sessionId, sessionCloseReason(code))
+    return true
+  }
+
+  // Seal one watch event and wrap it for delivery. A missing key means the
+  // event cannot be delivered, so the caller drops it.
+  #envelope(watch, plaintext, at) {
+    const sealed = this.security.sealEvent({
+      deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at,
+    })
+    if (!sealed) return null
+    return this.codec.encode('whalerein.v1.EventEnvelope', {
+      host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId,
+      nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at,
+    })
+  }
+
+  // The outbox row is the durable copy of one watch event.
+  #addOutbox(watch, envelope, at) {
+    return this.store.addOutbox({
+      deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at,
+      perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100,
+      totalLimit: this.config.outboxTotalLimit ?? 1000,
+    })
+  }
+
   #enqueueClosed(watch, reason) {
-    const channel = this.security.getChannel(watch.channelId)
-    if (!channel) return
+    if (!this.security.getChannel(watch.channelId)) return
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', {
       watch_closed: {
         watch_id: watch.id,
@@ -99,21 +129,11 @@ export class WatchedEvents {
       },
     })
     const at = this.now()
-    const sealed = this.security.sealEvent({
-      deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at,
-    })
-    if (!sealed) return
-    const envelope = this.codec.encode('whalerein.v1.EventEnvelope', {
-      host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId,
-      nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at,
-    })
+    const envelope = this.#envelope(watch, plaintext, at)
+    if (!envelope) return
     // The durable copy is the delivery guarantee; the live copy is latency.
-    const row = this.store.addOutbox({
-      deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at,
-      perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100,
-      totalLimit: this.config.outboxTotalLimit ?? 1000,
-    })
-    if (row?.overflow) this.outboxSnapshotRequired.add(watch.deviceId)
+    const row = this.#addOutbox(watch, envelope, at)
+    if (row.overflow) this.outboxSnapshotRequired.add(watch.deviceId)
     if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
     this.#remove(watch.id)
   }
@@ -232,14 +252,10 @@ export class WatchedEvents {
         if (state.session?.session_id !== watch.sessionId || !state.history_head || !state.live_epoch) throw new PluginError('unavailable', 'source state unavailable')
         return state
       }).catch(error => {
-        const code = errorCode(error)
-        if (SESSION_FATAL_CODES.has(code)) {
-          // An authoritative read proved the session is gone. Close every
-          // observation of it with a Host-authored event before the client's
-          // own lease or timeout hides the reason.
-          this.#closeSession(watch.sessionId, sessionCloseReason(code))
-          throw new PluginError('not_found', 'session ended')
-        }
+        // An authoritative read proved the session is gone. Close every
+        // observation of it with a Host-authored event before the client's
+        // own lease or timeout hides the reason.
+        if (this.#closeIfGone(watch.sessionId, errorCode(error))) throw new PluginError('not_found', 'session ended')
         throw error
       })
       : null
@@ -294,10 +310,7 @@ export class WatchedEvents {
         catch (error) {
           if (source.controller.signal.aborted || this.#sources.get(sessionId) !== source) return
           const code = errorCode(error)
-          if (SESSION_FATAL_CODES.has(code)) {
-            this.#closeSession(sessionId, sessionCloseReason(code))
-            return
-          }
+          if (this.#closeIfGone(sessionId, code)) return
           descriptor = { availability: 'unavailable', code }
         }
         if (this.#sources.get(sessionId) !== source || source.controller.signal.aborted) return
@@ -341,8 +354,7 @@ export class WatchedEvents {
           this.#receive(sessionId, { session: { session_id: sessionId }, state })
         }).catch((error) => {
           const code = errorCode(error)
-          if (SESSION_FATAL_CODES.has(code)) this.#closeSession(sessionId, sessionCloseReason(code))
-          else this.logger?.warn('source_state_unavailable', { code })
+          if (!this.#closeIfGone(sessionId, code)) this.logger?.warn('source_state_unavailable', { code })
         }).finally(() => { source.stateTask = null })
       }
       return
@@ -362,13 +374,12 @@ export class WatchedEvents {
     }
   }
   #enqueue(watch, update) {
-    const channel = this.security.getChannel(watch.channelId); if (!channel) return
+    if (!this.security.getChannel(watch.channelId)) return
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
     if (update.live && plaintext.length > 256 * 1024) return
     const at = this.now()
-    const sealed = this.security.sealEvent({ deviceId: watch.deviceId, channelId: watch.channelId, plaintext, createdAt: at })
-    if (!sealed) return
-    const envelope = this.codec.encode('whalerein.v1.EventEnvelope', { host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId, nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at })
+    const envelope = this.#envelope(watch, plaintext, at)
+    if (!envelope) return
     let lane = this.#lanes.get(watch.deviceId)
     if (!lane) { lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }; this.#lanes.set(watch.deviceId, lane) }
     if (update.live) {
@@ -376,7 +387,7 @@ export class WatchedEvents {
       lane.count++; lane.bytes += envelope.length
       lane.live = lane.live.then(() => { if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) return this.access.publishEvent(envelope) }).catch(() => { }).finally(() => { lane.count--; lane.bytes -= envelope.length })
     } else {
-      const row = this.store.addOutbox({ deviceId: watch.deviceId, channelId: watch.channelId, payload: envelope, now: at, perDeviceLimit: this.config.outboxPerDeviceLimit ?? 100, totalLimit: this.config.outboxTotalLimit ?? 1000 })
+      const row = this.#addOutbox(watch, envelope, at)
       if (row.overflow) {
         // A dropped committed envelope is a cursor gap. Keep bounded drop
         // accounting and require a snapshot instead of silently continuing.

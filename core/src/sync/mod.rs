@@ -85,10 +85,6 @@ impl SyncService {
     }
 }
 
-/// Decrypt and scope-check one typed event without touching the cache.
-///
-/// Question-only observation uses this path, so a missing or failing local
-/// history cache cannot hide questions.
 /// One decrypted event is either a content update or a Host-authored terminal
 /// close for one observation.
 pub(crate) enum OpenedEvent {
@@ -96,6 +92,10 @@ pub(crate) enum OpenedEvent {
     Closed(whalerein_proto::WatchClosed),
 }
 
+/// Decrypt and scope-check one typed event without touching the cache.
+///
+/// Question-only observation uses this path, so a missing or failing local
+/// history cache cannot hide questions.
 pub(crate) fn open_event(
     channel: &SecureChannel,
     envelope: &EventEnvelope,

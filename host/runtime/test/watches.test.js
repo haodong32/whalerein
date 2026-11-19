@@ -570,18 +570,18 @@ test('a source that no longer has the session closes the watch with a terminal e
   const ctx = fixture()
   t.after(async () => { await ctx.events.stop(); ctx.store.close() })
   const watch = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
-  ctx.access.published.length = 0
   ctx.source.readState = async () => {
     const error = new Error('session gone')
     error.code = 'not_found'
     throw error
   }
-  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]))
+  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]), error => error.code === 'not_found')
   assert.equal(ctx.access.published.length, 1, 'the terminal close must be delivered')
   const outer = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
   const payload = openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
   assert.equal(payload.watch_closed.watch_id, watch.watch_id)
   assert.equal(payload.watch_closed.reason, 'session_deleted')
   assert.deepEqual(payload.watch_closed.session, { host_id: 'h', session_id: 's' })
-  assert.deepEqual(ctx.events.observingDeviceIds(), [])
+  assert.equal(ctx.events.describe().watches, 0, 'the terminal close removes the watch')
+  assert.equal(ctx.events.describe().sessions, 0, 'the terminal close releases the source')
 })

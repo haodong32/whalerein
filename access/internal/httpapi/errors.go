@@ -39,6 +39,7 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible,
 			"protocol version incompatible: unsupported value for " + enumErr.Field, ""}
 	}
+	denial := authorityDenial(err)
 	switch {
 	case err == nil:
 		return errorInfo{status: http.StatusOK, code: whalereinv1.ErrorCode_error_code_unspecified}
@@ -56,8 +57,7 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "request body is not valid JSON for this endpoint", ""}
 	case errors.Is(err, errMissingAuth), errors.Is(err, auth.ErrUnauthorized), errors.Is(err, pairing.ErrUnauthorized), errors.Is(err, errInternalToken):
 		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized", ""}
-	case authorityDenial(err) != nil:
-		denial := authorityDenial(err)
+	case denial != nil:
 		code := whalereinv1.ErrorCode_forbidden
 		if denial.StatusCode == http.StatusServiceUnavailable {
 			code = whalereinv1.ErrorCode_unavailable

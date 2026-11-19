@@ -479,7 +479,6 @@ constants, never free text:
 | `grant_revoked` | This Device's grant for the Host was revoked. |
 | `host_removed` | The Host enrollment no longer exists. |
 | `host_disabled` | The Host enrollment was disabled. |
-| `authority_advanced` | The authority revision moved; re-authorization is required. |
 | `authority_unavailable` | Authority could not be proven; the observation is closed rather than extended on stale state. |
 
 A Host-authored terminal close uses `EventPayload.watch_closed` with

@@ -16,7 +16,6 @@ const (
 	ReasonGrantRevoked         = "grant_revoked"
 	ReasonHostRemoved          = "host_removed"
 	ReasonHostDisabled         = "host_disabled"
-	ReasonAuthorityAdvanced    = "authority_advanced"
 	ReasonAuthorityUnavailable = "authority_unavailable"
 )
 
@@ -44,14 +43,6 @@ func (d *AuthorityDenial) Error() string {
 // care that the request must stop.
 func (d *AuthorityDenial) Is(target error) bool {
 	return target == ErrForbidden
-}
-
-func denialReason(err error) string {
-	var denial *AuthorityDenial
-	if errors.As(err, &denial) {
-		return denial.Reason
-	}
-	return ""
 }
 
 // enrollmentReader is the narrow capability used to explain why a Host is no

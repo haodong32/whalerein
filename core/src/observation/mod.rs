@@ -957,7 +957,6 @@ async fn conversation_loop(
                     generation,
                     interests,
                     &wire_key,
-                    &watch_id,
                     &epoch,
                     &mut state_revision,
                     conversation,
@@ -1060,8 +1059,7 @@ async fn conversation_loop(
                         }
                     }
                 }
-                if interests.conversation
-                    && state.revision > state_revision
+                if state.revision > state_revision
                     && !send_event(
                         events,
                         key,
@@ -1087,7 +1085,6 @@ async fn handle_update(
     generation: u64,
     interests: ObservationInterests,
     wire_key: &whalerein_proto::SessionKey,
-    watch_id: &str,
     epoch: &str,
     state_revision: &mut u64,
     conversation: &mut Conversation,
@@ -1096,7 +1093,6 @@ async fn handle_update(
     sync: Option<&crate::sync::SyncService>,
     payload: session_update::Payload,
 ) -> CoreResult<Flow> {
-    let _ = watch_id;
     match payload {
         session_update::Payload::Questions(descriptor) => {
             if interests.questions {

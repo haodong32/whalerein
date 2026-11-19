@@ -90,6 +90,7 @@ export class FakeDshAdapter extends DshAdapter {
     this.#sessions.delete(sessionId)
   }
 
+  /** Test-only: make authoritative reads fail not_found for a removed session. */
   async readState(sessionId, options) {
     if (!this.#sessions.has(sessionId)) {
       const error = new Error('session not found')
