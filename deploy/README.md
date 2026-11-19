@@ -18,7 +18,7 @@ Client (whalerein CLI)
 WhaleRein Access ── PostgreSQL
   │ MQTT 5 (data + private $CONTROL)
   ▼
-Mosquitto 2.1.2 + WhaleRein plugin ── DSH host (whalerein-dsh plugin + DSH)
+Mosquitto 2.1.4 + WhaleRein plugin ── DSH host (whalerein-dsh plugin + DSH)
 ```
 
 ## Layout
@@ -96,7 +96,7 @@ docker compose -f deploy/compose/stack.yaml stop postgres
 
 - MQTT 5 plaintext listener on 1883 with anonymous access disabled.
 - The WhaleRein broker plugin built from `deploy/mosquitto/plugin`, pinned to
-  Mosquitto 2.1.2 headers and image.
+  Mosquitto 2.1.4 headers and image.
 - Deferred CONNECT validation against `POST /internal/broker/connect`.
 - Broker-local ACL enforcement for publish, subscribe, delivery and Will.
 

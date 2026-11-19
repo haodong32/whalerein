@@ -11,7 +11,7 @@ iOS Simulator / XCTest
 WhaleRein Access (Go, built from this worktree) ── PostgreSQL 18 (Docker)
   │  MQTT 5 + private $CONTROL
   ▼
-Mosquitto 2.1.2 + repo broker plugin (Docker)
+Mosquitto 2.1.4 + repo broker plugin (Docker)
   │
   ▼
 Host plugin runtime + FakeDSH fixture (Node.js, repo fixtures)
@@ -25,7 +25,7 @@ Host plugin runtime + FakeDSH fixture (Node.js, repo fixtures)
   `up` creates a new container and database; an idempotent `up` reuses the
   current one; `down` removes the container, which removes the database. Nothing
   is written to a host volume.
-- Mosquitto runs the pinned `whalerein-mosquitto:local` image (Mosquitto 2.1.2
+- Mosquitto runs the pinned `whalerein-mosquitto:local` image (Mosquitto 2.1.4
   with the repository plugin and loop-tick patch). The image is built from
   `deploy/docker/mosquitto.Dockerfile` if it is missing.
 - The Host is the repository `tests/integration/fixtures/plugin.mjs` runtime
@@ -368,7 +368,7 @@ not apply, but the plaintext limitation still does.
 - Plain HTTP and plain MQTT on loopback only. There is no self-signed TLS option
   in this tool; production TLS behavior remains a separate release concern.
 - Requires a reachable Docker engine with host-gateway/file-sharing support. The
-  broker image is the pinned Mosquitto 2.1.2 + plugin build; a host Homebrew
+  broker image is the pinned Mosquitto 2.1.4 + plugin build; a host Homebrew
   Mosquitto is not used.
 - Access is built from the current worktree, including uncommitted changes. The
   tool does not build the repo CLI; build `whalerein-cli` separately.

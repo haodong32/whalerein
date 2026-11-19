@@ -308,7 +308,7 @@ class Fixture:
         )
 
     def start_broker(self):
-        """Start the pinned Mosquitto 2.1.2 line with the WhaleRein plugin."""
+        """Start the pinned Mosquitto 2.1.4 line with the WhaleRein plugin."""
         from environment import BROKER_PASSWORD, INTERNAL_TOKEN
 
         directory = REPORTS / "broker"
@@ -693,7 +693,7 @@ def document_for(run):
             "artifacts": artifacts(),
             "topology": {
                 "database": "postgres-18-local",
-                "broker": "mosquitto-2.1.2-local",
+                "broker": "mosquitto-2.1.4-local",
                 "network": "none",
                 "containers": 1,
             },

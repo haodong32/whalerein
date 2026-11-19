@@ -4,7 +4,7 @@
 #   make MOSQUITTO_INCLUDE=... # uses a pinned Mosquitto source/include tree
 #
 # The deployment image builds this file inside a stage with the pinned
-# Mosquitto 2.1.2 headers and copies only the shared object into the runtime.
+# Mosquitto 2.1.4 headers and copies only the shared object into the runtime.
 
 CC ?= cc
 MOSQUITTO_INCLUDE ?= /usr/include

@@ -1473,7 +1473,7 @@ static struct auth_result *result_parse(const char *client_id, const char *body,
 			snprintf(result->error, sizeof(result->error), "%.*s",
 				 (int)strcspn(line + 4, " "), line + 4);
 			/* Access distinguishes a policy projection outage ("unavailable")
-			 * from a credential decision ("unauthorized"). Mosquitto 2.1.2's
+			 * from a credential decision ("unauthorized"). Mosquitto 2.1.4's
 			 * deferred completion collapses every non-success result to
 			 * not-authorized, so this only takes effect if that broker path
 			 * preserves the reason. The synchronous stale-policy gate in

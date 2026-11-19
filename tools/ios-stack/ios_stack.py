@@ -5,7 +5,7 @@ The stack runs the real components over loopback on one macOS host:
 
 - WhaleRein Access built from this worktree (Go, stock server).
 - PostgreSQL 18 in an isolated disposable Docker container.
-- Mosquitto 2.1.2 with the repository broker plugin in a disposable Docker
+- Mosquitto 2.1.4 with the repository broker plugin in a disposable Docker
   container (the pinned `whalerein-mosquitto:local` image).
 - The repository FakeDSH fixture and the real Host plugin runtime (Node.js).
 

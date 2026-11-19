@@ -178,7 +178,7 @@ warning. Set it explicitly for self-hosted brokers and official 443/ALPN.
 ## Docker Compose
 
 The Access server image is built by `deploy/docker/access.Dockerfile` and is
-part of `deploy/compose/stack.yaml` together with PostgreSQL 18 and Mosquitto 2.1.2:
+part of `deploy/compose/stack.yaml` together with PostgreSQL 18 and Mosquitto 2.1.4:
 
 ```bash
 docker compose -f deploy/compose/stack.yaml up -d --build
@@ -309,7 +309,7 @@ contains `v`, `access`, optional `mqtt`, `host`, the one-time `token`, and `exp`
 
 ## Mosquitto line
 
-Access expects a Mosquitto 2.1.2 broker with the WhaleRein plugin described in
+Access expects a Mosquitto 2.1.4 broker with the WhaleRein plugin described in
 [the Mosquitto line architecture](../docs/architecture/mosquitto.md). The broker
 validates CONNECT, publish, subscribe, delivery and Will decisions locally; it
 does not ask Access per operation.

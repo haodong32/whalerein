@@ -94,7 +94,7 @@ replaces the cache with a snapshot. Offline operation is read-only.
 
 ## Deployment
 
-The [Compose stack](../deploy/README.md) runs Access, PostgreSQL 18, and Mosquitto 2.1.2
+The [Compose stack](../deploy/README.md) runs Access, PostgreSQL 18, and Mosquitto 2.1.4
 with loopback plaintext development ports. The plugin runs on the DSH host.
 Production TLS must be configured separately; clients use advertised endpoints.
 

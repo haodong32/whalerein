@@ -219,7 +219,7 @@ above it or a completed run exceeding it produces a warning, without cancelling
 tests, changing results, asking for approval, or automatically changing scope.
 
 For the Mosquitto line, two opt-in fixtures back the replacement acceptance
-record. The native broker fixture needs the pinned Mosquitto 2.1.2 headers and
+record. The native broker fixture needs the pinned Mosquitto 2.1.4 headers and
 broker binary:
 
 ```bash
