@@ -25,6 +25,19 @@ struct AppModelTests {
         return (app, preferences)
     }
 
+    @Test("paired launch state is seeded only for reset UI fixtures")
+    func pairedFixtureLaunchOptions() {
+        let paired = "-ui-fixture-paired"
+        let fixtures = "-ui-fixtures"
+        let reset = "-ui-test-reset"
+
+        #expect(testLaunchOptions([fixtures, reset, paired]).seedPairedFixture)
+        #expect(!testLaunchOptions([fixtures, paired]).seedPairedFixture)
+        #expect(!testLaunchOptions([reset, paired]).seedPairedFixture)
+        #expect(!testLaunchOptions([fixtures, reset]).seedPairedFixture)
+        #expect(!testLaunchOptions([fixtures, reset, paired, "-integration-fixtures"]).seedPairedFixture)
+    }
+
     @Test("confirming pairing marks the device paired and opens a conversation")
     func pairingWiring() async {
         let service = StubSessionService()

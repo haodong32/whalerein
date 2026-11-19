@@ -34,8 +34,7 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
     }
 
     func testUnreadCountMeaningWhileStreaming() {
-        launchApp(["-ui-stream-on-open"])
-        completePairing()
+        launchAndOpenConversation(["-ui-stream-on-open"])
         _ = waitFor("conversation.preview")
 
         scrollConversationUp(times: 4)
@@ -46,8 +45,7 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
     }
 
     func testHostQualifiedSessionRows() {
-        launchApp()
-        completePairing()
+        launchAndOpenConversation()
         openSwitcher()
         chooseHost(Self.hostId)
 

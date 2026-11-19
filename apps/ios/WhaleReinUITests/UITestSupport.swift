@@ -146,14 +146,8 @@ class WhaleReinUITestCase: XCTestCase {
     }
 
     func launchAndOpenConversation(_ extraArguments: [String] = []) {
-        launchApp(extraArguments)
-        completePairing()
-        // Pairing already restores the most recent conversation. Re-opening the
-        // same session would restart the watch and could discard a scripted
-        // stream that already started.
-        if !element("composer.field").exists {
-            openConversation()
-        }
+        launchApp(extraArguments + ["-ui-fixture-paired"])
+        waitFor("composer.field")
     }
 
     @discardableResult
