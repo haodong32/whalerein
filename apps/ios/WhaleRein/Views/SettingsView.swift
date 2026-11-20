@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: SettingsModel.Confirmation?
+    @State private var reasoningErrorKey: L10nKey?
 
     var body: some View {
         NavigationStack {
@@ -36,13 +37,25 @@ struct SettingsView: View {
                         L10n.settingsReasoning.key,
                         isOn: Binding(
                             get: { app.reasoningVisible },
-                            set: { _ = app.setReasoningVisible($0) }
+                            set: { visible in
+                                if let code = app.setReasoningVisible(visible) {
+                                    reasoningErrorKey = L10nKey.errorKey(for: code)
+                                } else {
+                                    reasoningErrorKey = nil
+                                }
+                            }
                         )
                     )
                     .accessibilityIdentifier("settings.reasoning")
                     Text(L10n.settingsReasoningNote.key)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let reasoningErrorKey {
+                        Text(reasoningErrorKey.key)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("settings.reasoningError")
+                    }
                 }
 
                 Section(L10n.settingsData.key) {

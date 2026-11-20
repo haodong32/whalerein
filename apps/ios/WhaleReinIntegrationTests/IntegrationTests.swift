@@ -310,6 +310,8 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .message: return "message"
         case .replace: return "replace"
         case .preview: return "preview"
+        case .reasoningPreview: return "reasoningPreview"
+        case .toolActivity: return "toolActivity"
         case .attemptEnded: return "attemptEnded"
         case .state: return "state"
         case .connection: return "connection"

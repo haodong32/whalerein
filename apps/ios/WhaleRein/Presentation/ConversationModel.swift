@@ -1356,7 +1356,6 @@ final class ConversationModel {
             && !historyComplete
             && !isLoadingOlderHistory
             && !historyNeedsFreshTraversal
-            && !watchEnded
     }
 
     var canLoadFreshHistory: Bool {

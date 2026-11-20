@@ -33,7 +33,7 @@ extension LiveSessionService: ConversationHistoryService {
 
     func historyMessage(_ reference: MessageReference) async throws -> ConversationMessage {
         let core = self.core
-        let binding = Self.map(reference: reference)
+        let binding = Self.bindingReference(reference)
         let view = try await call {
             try core.readHistoryMessage(reference: binding)
         }
@@ -98,18 +98,6 @@ extension LiveSessionService {
             messages: view.messages.map(map(message:)),
             activities: view.activities.map(map(toolActivity:)),
             continuation: view.continuation
-        )
-    }
-
-    static func map(reference: MessageReference) -> WhaleReinMobile.MessageReferenceView {
-        WhaleReinMobile.MessageReferenceView(
-            session: WhaleReinMobile.SessionKeyView(
-                hostId: reference.hostId,
-                sessionId: reference.sessionId
-            ),
-            messageId: reference.messageId,
-            sourceLocator: reference.sourceLocator,
-            projectionId: reference.projectionId
         )
     }
 

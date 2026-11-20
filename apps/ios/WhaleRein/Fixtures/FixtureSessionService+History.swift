@@ -54,10 +54,11 @@ extension FixtureSessionService: ConversationHistoryService {
 
     func historyMessage(_ reference: MessageReference) async throws -> ConversationMessage {
         try requirePaired()
-        guard reference.hostId == activeWatch?.hostId || activeWatch == nil else {
-            throw SessionServiceError(.security)
+        guard FixtureCatalog.hosts.contains(where: { $0.hostId == reference.hostId }) else {
+            throw SessionServiceError(.unavailable)
         }
-        guard reference.sessionId == activeWatch?.sessionId || activeWatch == nil else {
+        guard FixtureCatalog.sessions(hostId: reference.hostId)
+            .contains(where: { $0.sessionId == reference.sessionId }) else {
             throw SessionServiceError(.security)
         }
         guard reference.projectionId == fixtureProjection else {

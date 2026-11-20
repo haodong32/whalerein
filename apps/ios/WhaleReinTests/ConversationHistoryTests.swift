@@ -143,9 +143,18 @@ struct ConversationHistoryTests {
     func cacheProvenance() async {
         let service = HistoryStubService()
         let model = await startedModel(service, messages: [message("m2", "two")])
+        model.handle(
+            SessionEventEnvelope(
+                hostId: "studio-mac",
+                sessionId: "s-001",
+                sequence: 2,
+                event: .watchEnded(reason: "offline")
+            )
+        )
         service.historyPageHandler = { _ in
             page([message("m1", "one")], source: .cache, complete: true)
         }
+        #expect(model.canLoadOlderHistory)
         await model.loadOlderHistory(cacheFallback: true)
         #expect(model.historyProvenance == .cache)
         #expect(model.historyProvenanceKey == .conversationHistoryCache)
