@@ -69,17 +69,15 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
-/// Test-only file-backed secret store.
-///
-/// Unit tests exercise it through the SecretStore boundary.
-/// Files use 0600 permissions. Production clients use the OS keyring.
-#[cfg(test)]
+/// Explicit local alternative to the OS keyring on Unix.
+/// Secrets are stored unencrypted under a private directory.
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone)]
 pub struct FileSecretStore {
     directory: std::path::PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(unix, test))]
 impl FileSecretStore {
     pub fn new(directory: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -88,8 +86,20 @@ impl FileSecretStore {
     }
 
     fn path(&self, key: &str) -> std::path::PathBuf {
-        let encoded: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
-        self.directory.join(encoded)
+        self.directory.join(crate::util::sha256_hex(key.as_bytes()))
+    }
+
+    fn directory_exists(&self) -> Result<bool, SecretError> {
+        match std::fs::symlink_metadata(&self.directory) {
+            Ok(metadata) if metadata.is_dir() && is_private(&metadata) => Ok(true),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.missing_parent_is_valid() =>
+            {
+                Ok(false)
+            }
+            _ => Err(SecretError::Failed),
+        }
     }
 
     fn missing_parent_is_valid(&self) -> bool {
@@ -111,43 +121,79 @@ impl FileSecretStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+fn is_private(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions.
+    metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
+}
+
+#[cfg(all(not(unix), test))]
+fn is_private(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(any(unix, test))]
 impl SecretStore for FileSecretStore {
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, SecretError> {
-        match std::fs::read(self.path(key)) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && self.missing_parent_is_valid() =>
-            {
-                Ok(None)
-            }
-            Err(_) => Err(SecretError::Failed),
+        use std::io::{ErrorKind, Read};
+
+        if !self.directory_exists()? {
+            return Ok(None);
         }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = match options.open(self.path(key)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(SecretError::Failed),
+        };
+        let metadata = file.metadata().map_err(|_| SecretError::Failed)?;
+        if !metadata.is_file() || !is_private(&metadata) {
+            return Err(SecretError::Failed);
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| SecretError::Failed)?;
+        Ok(Some(bytes))
     }
 
     fn save(&self, key: &str, value: &[u8]) -> Result<(), SecretError> {
-        std::fs::create_dir_all(&self.directory).map_err(|_| SecretError::Unavailable)?;
-        let path = self.path(key);
-        std::fs::write(&path, value).map_err(|_| SecretError::Failed)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|_| SecretError::Failed)?;
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
         }
-        Ok(())
+        builder
+            .create(&self.directory)
+            .map_err(|_| SecretError::Unavailable)?;
+        if !self.directory_exists()? {
+            return Err(SecretError::Unavailable);
+        }
+        crate::configuration::writer::write_atomically(&self.path(key), value)
+            .map_err(|_| SecretError::Failed)
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
+        if !self.directory_exists()? {
+            return Ok(());
+        }
         match std::fs::remove_file(self.path(key)) {
-            Ok(()) => Ok(()),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && self.missing_parent_is_valid() =>
-            {
+            Ok(()) => {
+                #[cfg(unix)]
+                std::fs::File::open(&self.directory)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| SecretError::Failed)?;
                 Ok(())
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(SecretError::Failed),
         }
     }
@@ -290,6 +336,37 @@ mod tests {
         let missing = FileSecretStore::new(dir.path().join("missing/child"));
         assert!(missing.load("k").unwrap().is_none());
         missing.delete("k").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_secret_store_rejects_shared_directories_and_symlinked_secrets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("secrets");
+        let store = FileSecretStore::new(&directory);
+        store.save("key", b"fixture").unwrap();
+        let path = store.path("key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(store.load("key"), Err(SecretError::Failed));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(store.delete("key"), Err(SecretError::Failed));
+        assert_eq!(store.save("other", b"fixture"), Err(SecretError::Failed));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"outside").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        store.delete("key").unwrap();
+        symlink(&outside, &path).unwrap();
+        assert_eq!(store.load("key"), Err(SecretError::Failed));
+        store.save("key", b"replacement").unwrap();
+        assert_eq!(
+            store.load("key").unwrap().as_deref(),
+            Some(&b"replacement"[..])
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
     }
 
     #[test]

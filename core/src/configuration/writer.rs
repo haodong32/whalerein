@@ -108,9 +108,14 @@ fn write_with_fault(
         name.to_string_lossy(),
         crate::util::random_id(16)
     ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(&temporary)
         .map_err(|_| ConfigurationError::Storage)?;
     #[cfg(unix)]

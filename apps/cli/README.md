@@ -14,6 +14,25 @@ for first sign-in and Device pairing. Official production is the default.
 Developers can select the official `local` or `staging` catalog entry with
 `cloud_environment`. Local development requires the trusted development CA.
 
+### Optional local credential storage
+
+On macOS and other Unix platforms, pass `--secrets-dir PATH` to store CLI
+credentials in a local directory and avoid system keyring prompts. The
+directory is created on the first secret write with mode `0700`. Credential
+files use mode `0600` and are unencrypted on disk. Choose a private location
+under your home directory outside the instance's `data_dir`.
+
+Use a separate TOML file with a fresh `data_dir`, then sign in and connect
+again. System keyring entries are not migrated. Pass the same absolute
+secrets path on each invocation for that instance.
+
+```sh
+whalerein --config ~/.whalerein/staging-local.toml --secrets-dir ~/.whalerein/staging-secrets login
+whalerein --config ~/.whalerein/staging-local.toml --secrets-dir ~/.whalerein/staging-secrets host connect <host-id>
+```
+
+### Cloud commands
+
 ```sh
 whalerein status
 whalerein login
