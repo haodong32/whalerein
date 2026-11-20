@@ -30,6 +30,63 @@ enum FixtureCatalog {
         ),
     ]
 
+    static let cloudAccount = CloudAccount(
+        accountId: "acct-fixture",
+        email: "fixture@whalerein.test",
+        issuer: "https://login.whalerein.test/oidc",
+        subject: "subject-fixture",
+        workspaceId: "ws-fixture"
+    )
+
+    /// Deterministic Cloud directory covering authorized online/offline,
+    /// eligible and unavailable computer states.
+    static let cloudHosts: [CloudDirectoryHost] = [
+        CloudDirectoryHost(
+            hostId: "studio-mac",
+            displayName: "Studio Mac",
+            enrolled: true,
+            online: true,
+            presence: "online",
+            observation: "active",
+            enrollmentState: "enrolled",
+            pairingEligible: false,
+            deviceAccess: "granted"
+        ),
+        CloudDirectoryHost(
+            hostId: "travel-laptop",
+            displayName: "Travel Laptop",
+            enrolled: true,
+            online: false,
+            presence: "offline",
+            observation: "last seen yesterday",
+            enrollmentState: "enrolled",
+            pairingEligible: false,
+            deviceAccess: "granted"
+        ),
+        CloudDirectoryHost(
+            hostId: "new-laptop",
+            displayName: "New Laptop",
+            enrolled: false,
+            online: true,
+            presence: "online",
+            observation: "ready to connect",
+            enrollmentState: "eligible",
+            pairingEligible: true,
+            deviceAccess: "none"
+        ),
+        CloudDirectoryHost(
+            hostId: "old-server",
+            displayName: "Old Server",
+            enrolled: false,
+            online: false,
+            presence: "offline",
+            observation: "not eligible",
+            enrollmentState: "unavailable",
+            pairingEligible: false,
+            deviceAccess: "denied"
+        ),
+    ]
+
     static let sessionsByHost: [String: [SessionSummary]] = [
         "studio-mac": [
             SessionSummary(sessionId: "s-001", title: "Release checklist", updatedAtUnixMs: 1_761_000_300_000, cwd: "/work/whalerein"),

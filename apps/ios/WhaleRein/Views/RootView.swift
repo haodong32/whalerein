@@ -56,6 +56,11 @@ struct RootView: View {
             RevokedDeviceView()
         } else if model.isPaired {
             pairedRoot
+        } else if let cloud = model.cloudSignIn {
+            // Cloud instances use the official hosted sign-in and computer
+            // directory; the self-hosted invitation flow remains reachable
+            // from the welcome surface.
+            CloudSignInRootView(cloud: cloud)
         } else {
             InvitationView()
         }

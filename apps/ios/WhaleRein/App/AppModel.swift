@@ -55,6 +55,9 @@ final class AppModel {
     private(set) var settings: SettingsModel
     /// Shared retained-operation list and the one coalesced visible refresh.
     private(set) var operationRecovery: OperationRecoveryModel?
+    /// Cloud sign-in/directory presentation for the active instance. `nil` for
+    /// standalone instances and unavailable services.
+    private(set) var cloudSignIn: CloudSignInModel?
 
     private(set) var conversation: ConversationModel?
     private(set) var isPaired: Bool
@@ -130,6 +133,7 @@ final class AppModel {
             service: service,
             instanceId: activeInstance?.id ?? service.instanceId
         )
+        self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
         installCallbacks()
     }
 
@@ -348,6 +352,7 @@ final class AppModel {
             service: service,
             instanceId: instance?.id ?? service.instanceId
         )
+        self.cloudSignIn = makeCloudSignInModel(service: service, instance: instance)
         installCallbacks()
     }
 
@@ -357,6 +362,40 @@ final class AppModel {
     ) -> OperationRecoveryModel? {
         guard let recovery = service as? any OperationRecoveryService else { return nil }
         return OperationRecoveryModel(service: recovery, instanceId: instanceId)
+    }
+
+    /// Builds the Cloud model for the activation that owns `service`. Callbacks
+    /// capture both the instance ID and activation generation, so a late sheet
+    /// or deep link from a replaced runtime can never mutate the new one.
+    private func makeCloudSignInModel(
+        service: any SessionService,
+        instance: AppInstance?
+    ) -> CloudSignInModel? {
+        guard let cloud = service as? any CloudAccountService else { return nil }
+        let generation = activationGeneration
+        let instanceId = instance?.id ?? service.instanceId
+        let model = CloudSignInModel(
+            service: cloud,
+            fence: CloudSignInFence(
+                instanceId: instanceId,
+                activationGeneration: generation
+            ),
+            authenticator: WebAuthenticationSessionRunner(),
+            fenceIsCurrent: { [weak self] in
+                guard let self else { return false }
+                return self.activationGeneration == generation
+                    && (self.activeInstance?.id ?? self.service.instanceId) == instanceId
+            }
+        )
+        model.onOpenHost = { [weak self] hostId in
+            guard let self, self.activationGeneration == generation else { return }
+            Task { @MainActor in self.finishPairing(hostId: hostId) }
+        }
+        model.onSignedOut = { [weak self] in
+            guard let self, self.activationGeneration == generation else { return }
+            self.handleCloudSignedOut()
+        }
+        return model
     }
 
     @discardableResult
@@ -374,6 +413,13 @@ final class AppModel {
     func launchRestore() async {
         guard !isRevoked else { return }
         let generation = activationGeneration
+        if let cloudSignIn {
+            // Restore the locally verified Cloud session before deciding
+            // whether this instance has a computer to open. A paired instance
+            // still needs its account restored for Settings and sign-out.
+            await cloudSignIn.restore()
+            guard isCurrentActivation(generation) else { return }
+        }
         if !isPaired {
             await adoptExistingCorePairing()
         }
@@ -693,10 +739,44 @@ final class AppModel {
 
     func handleOpenURL(_ url: URL) async {
         guard !isRevoked else { return }
+        // The Cloud authorization callback is consumed by the Cloud model and
+        // must never be offered to the self-hosted invitation parser.
+        if CloudSignInModel.isCloudCallback(url) {
+            await cloudSignIn?.receiveCallback(url)
+            return
+        }
         if isPaired {
             showInvitationSheet = true
         }
         await pairing.handleOpenURL(url)
+    }
+
+    /// Local Cloud sign-out from Settings. Core keeps a scoped pending remote
+    /// revocation when Cloud is unreachable and retries it later.
+    func signOutCloud() async {
+        await cloudSignIn?.signOut()
+    }
+
+    /// Leaves the Cloud-authorized root after a local sign-out or a confirmed
+    /// remote revocation. The device identity is preserved.
+    private func handleCloudSignedOut() {
+        conversation?.close()
+        conversation = nil
+        isPaired = false
+        preferences.update {
+            $0.paired = false
+            $0.lastHostId = nil
+            $0.lastSessionId = nil
+            $0.lastSessionTitle = nil
+        }
+        selectedHostId = nil
+        isOfflineCached = false
+        resumeMarker = nil
+        didBootstrap = false
+        hostList.reset()
+        sessionList.reset()
+        pairing.reset()
+        rootState = .restoring
     }
 
     /// Entry point for pairing an additional Host while already paired, or for

@@ -453,6 +453,49 @@ impl Core {
             .await
     }
 
+    /// Begin the native iOS authorization-code flow. Core owns the attempt,
+    /// PKCE material, Cloud state and local credential material.
+    pub async fn cloud_auth_start(&self) -> CoreResult<crate::api::CloudAuthAttempt> {
+        self.account_client(true).await?.auth_start().await
+    }
+
+    /// Complete the exact pending iOS attempt from the callback URL. This is
+    /// the only path that binds an account for the native flow.
+    pub async fn cloud_auth_complete(
+        &self,
+        callback_url: &str,
+    ) -> CoreResult<crate::api::SignedInAccount> {
+        if callback_url.is_empty() || callback_url.len() > 8192 {
+            return Err(CoreError::InvalidInput(
+                "invalid Cloud sign-in callback".into(),
+            ));
+        }
+        self.account_client(false)
+            .await?
+            .auth_complete(callback_url)
+            .await
+    }
+
+    /// Drop the pending iOS attempt. A later callback cannot complete it.
+    pub async fn cloud_auth_cancel(&self) -> CoreResult<()> {
+        match self.account_client(false).await {
+            Ok(client) => client.auth_cancel().await,
+            Err(CoreError::Unauthorized) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Refresh the verified Cloud session against Cloud. A revoked or expired
+    /// session clears the local active session and reports re-authentication.
+    pub async fn refresh_account_status(&self) -> CoreResult<crate::api::SignedInAccount> {
+        self.account_client(false).await?.status().await
+    }
+
+    /// True when a local sign-out still needs remote confirmation.
+    pub fn account_logout_pending(&self) -> CoreResult<bool> {
+        crate::account::native::AccountClient::local_logout_pending(&self.options.secrets)
+    }
+
     async fn account_client(
         &self,
         create: bool,

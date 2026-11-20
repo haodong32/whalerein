@@ -18,6 +18,9 @@ final class FixtureSessionService: SessionService {
     private let clock: FixtureClock
     private let draftStore: any DraftStore
     let operationJournal = FixtureOperationJournal()
+    /// Deterministic Cloud sign-in/directory state; implemented by the Cloud
+    /// account extension in FixtureCloudAccount.swift.
+    let cloudState: FixtureCloudAccountState
 
     private var paired: Bool
     private var revoked = false
@@ -58,6 +61,7 @@ final class FixtureSessionService: SessionService {
         self.options = options
         self.clock = clock
         self.draftStore = draftStore
+        self.cloudState = FixtureCloudAccountState(options: options)
         self.paired = initiallyPaired
     }
 

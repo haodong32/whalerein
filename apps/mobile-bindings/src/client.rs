@@ -25,9 +25,11 @@ use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
     bounded_question_view, convert_update, message_view, operation_status_name,
     question_batch_view, question_guard, question_page_view, questions_view, ApprovalView,
-    CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView, HostSummary,
-    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionPageView, RetainedOperationView, SessionCapabilitiesView, SessionSummaryView,
+    CloudAccountSessionView, CloudAccountStatusView, CloudAccountView, CloudAuthAttemptView,
+    CloudConnectResultView, CloudDirectoryHostView, CommandView, ConversationEvent, DeliveryChoice,
+    DiagnosticsReportView, HostSummary, MessageReferenceView, MessageView, PairingPromptView,
+    QuestionAnswerView, QuestionBatchView, QuestionPageView, RetainedOperationView,
+    SessionCapabilitiesView, SessionSummaryView,
 };
 
 /// Request/response budget for listing and local operations.
@@ -52,6 +54,7 @@ const MAX_INVITATION_BYTES: usize = 16 * 1024;
 const MAX_FINGERPRINT_BYTES: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_APP_VERSION_BYTES: usize = 256;
+const MAX_CALLBACK_BYTES: usize = 8192;
 
 /// Build-time Core package version, recorded by `build.rs`.
 pub(crate) const CORE_VERSION: &str = env!("WHALERIN_CORE_VERSION");
@@ -1434,6 +1437,106 @@ impl MobileCore {
         self.stop_watch();
         Ok(())
     }
+
+    // MARK: - Cloud account
+
+    /// Begin the native iOS authorization-code flow. Core owns the attempt,
+    /// PKCE material and Cloud state; only the hosted URL crosses this seam.
+    pub fn cloud_auth_start(&self) -> Result<CloudAuthAttemptView, MobileError> {
+        let attempt = self.run(QUERY_TIMEOUT, self.core.cloud_auth_start())?;
+        Ok(CloudAuthAttemptView {
+            url: attempt.url,
+            attempt_id: attempt.attempt_id,
+        })
+    }
+
+    /// Complete the exact pending attempt from the callback URL. Only this
+    /// path establishes an account session for the native flow.
+    pub fn cloud_auth_complete(
+        &self,
+        callback_url: String,
+    ) -> Result<CloudAccountView, MobileError> {
+        if callback_url.is_empty() || callback_url.len() > MAX_CALLBACK_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        let account = self.run(QUERY_TIMEOUT, self.core.cloud_auth_complete(&callback_url))?;
+        Ok(account.into())
+    }
+
+    /// Drop the pending attempt. A late callback can no longer complete it.
+    pub fn cloud_auth_cancel(&self) -> Result<(), MobileError> {
+        self.run(QUERY_TIMEOUT, self.core.cloud_auth_cancel())
+    }
+
+    /// Locally retained verified account plus pending remote sign-out state.
+    pub fn cloud_status(&self) -> Result<CloudAccountStatusView, MobileError> {
+        let account = self
+            .core
+            .account_status()
+            .map_err(MobileError::from)?
+            .map(CloudAccountView::from);
+        let logout_pending = self
+            .core
+            .account_logout_pending()
+            .map_err(MobileError::from)?;
+        Ok(CloudAccountStatusView {
+            account,
+            logout_pending,
+        })
+    }
+
+    /// Verify the current session against Cloud and refresh its expiry.
+    pub fn cloud_refresh_status(&self) -> Result<CloudAccountView, MobileError> {
+        let account = self.run(QUERY_TIMEOUT, self.core.refresh_account_status())?;
+        Ok(account.into())
+    }
+
+    /// End this Cloud app session. `false` means the remote sign-out is still
+    /// pending and will be retried on the next account request.
+    pub fn cloud_sign_out(&self) -> Result<bool, MobileError> {
+        let complete = self.run(COMMAND_TIMEOUT, self.core.logout())?;
+        self.stop_watch();
+        Ok(complete)
+    }
+
+    /// Account app sessions. Only stable session metadata is returned.
+    pub fn cloud_account_sessions(&self) -> Result<Vec<CloudAccountSessionView>, MobileError> {
+        let sessions = self.run(QUERY_TIMEOUT, self.core.cloud_account_sessions())?;
+        Ok(sessions.into_iter().map(Into::into).collect())
+    }
+
+    /// Revoke one account app session and return its resulting state.
+    pub fn cloud_revoke_session(&self, session_id: String) -> Result<String, MobileError> {
+        validate_id(&session_id)?;
+        let state = self.run(
+            COMMAND_TIMEOUT,
+            self.core.revoke_cloud_account_session(&session_id),
+        )?;
+        Ok(state.as_str().to_owned())
+    }
+
+    /// Revoke every account app session and return the resulting state.
+    pub fn cloud_revoke_all_sessions(&self) -> Result<String, MobileError> {
+        let state = self.run(
+            COMMAND_TIMEOUT,
+            self.core.revoke_all_cloud_account_sessions(),
+        )?;
+        Ok(state.as_str().to_owned())
+    }
+
+    /// The account's Cloud computer directory.
+    pub fn cloud_hosts(&self) -> Result<Vec<CloudDirectoryHostView>, MobileError> {
+        let hosts = self.run(QUERY_TIMEOUT, self.core.account_hosts())?;
+        Ok(hosts.into_iter().map(Into::into).collect())
+    }
+
+    /// Connect one explicitly selected eligible Cloud computer. Core confirms
+    /// the grant and persists recovery state before this returns.
+    pub fn connect_cloud(&self, host_id: String) -> Result<CloudConnectResultView, MobileError> {
+        validate_id(&host_id)?;
+        let outcome = self.run(COMMAND_TIMEOUT, self.core.connect_cloud(&host_id))?;
+        Ok(outcome.into())
+    }
 }
 
 impl MobileCore {
@@ -1890,6 +1993,101 @@ mod tests {
             DeliveryChoice::Send.to_core(),
             whalerein_core::api::DeliveryMode::StartIfIdle
         );
+    }
+
+    #[test]
+    fn cloud_records_map_typed_state_without_exposing_credentials() {
+        use whalerein_core::api::{
+            AccountHost, AccountIdentity, AccountSessionInfo, AccountSessionState,
+            AccountWorkspace, PairingOutcome, SignedInAccount,
+        };
+        let account = CloudAccountView::from(SignedInAccount {
+            account: AccountIdentity {
+                id: "acct-1".into(),
+                email: "user@example.test".into(),
+                issuer: "https://login.whalerein.com/oidc".into(),
+                subject: "subject-1".into(),
+            },
+            workspace: AccountWorkspace { id: "ws-1".into() },
+        });
+        assert_eq!(account.account_id, "acct-1");
+        assert_eq!(account.email, "user@example.test");
+        assert_eq!(account.issuer, "https://login.whalerein.com/oidc");
+        assert_eq!(account.subject, "subject-1");
+        assert_eq!(account.workspace_id, "ws-1");
+        let status = CloudAccountStatusView {
+            account: Some(account.clone()),
+            logout_pending: true,
+        };
+        assert!(status.logout_pending);
+        assert_eq!(status.account.as_ref().unwrap().workspace_id, "ws-1");
+
+        let host = CloudDirectoryHostView::from(AccountHost {
+            host_id: "host-1".into(),
+            display_name: "Studio".into(),
+            enrolled: true,
+            online: false,
+            presence: "away".into(),
+            observation: "observed".into(),
+            enrollment_state: "enrolled".into(),
+            pairing_eligible: false,
+            device_access: "granted".into(),
+        });
+        assert_eq!(host.host_id, "host-1");
+        assert_eq!(host.display_name, "Studio");
+        assert!(host.enrolled && !host.online);
+        assert_eq!(host.enrollment_state, "enrolled");
+
+        let session = CloudAccountSessionView::from(AccountSessionInfo {
+            session_id: "sess-1".into(),
+            instance_id: "ios".into(),
+            expires_at: 1_780_000_000,
+            state: AccountSessionState::Active,
+        });
+        assert_eq!(session.session_id, "sess-1");
+        assert_eq!(session.instance_id, "ios");
+        assert_eq!(session.state, "active");
+
+        let connect = CloudConnectResultView::from(PairingOutcome {
+            operation_id: Some("op-1".into()),
+            host_id: "host-1".into(),
+            device_id: "device-1".into(),
+            fingerprint: "ab".repeat(32),
+            access_url: "https://host-1.access.example/secret-token".into(),
+        });
+        assert_eq!(connect.operation_id.as_deref(), Some("op-1"));
+        assert_eq!(connect.host_id, "host-1");
+        assert_eq!(connect.device_id, "device-1");
+        assert_eq!(connect.fingerprint, "ab".repeat(32));
+        let rendered = format!("{account:?} {host:?} {session:?} {connect:?} {status:?}");
+        for forbidden in [
+            "credential",
+            "revocation",
+            "token",
+            "secret-token",
+            "code_verifier",
+            "codeVerifier",
+            "access_url",
+            "accessUrl",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden} leaked into {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_auth_attempt_exposes_only_the_url_and_attempt_identity() {
+        let attempt = CloudAuthAttemptView {
+            url: "https://login.whalerein.com/oidc/auth?state=opaque".into(),
+            attempt_id: "ab".repeat(16),
+        };
+        assert_eq!(attempt.attempt_id.len(), 32);
+        assert!(attempt.url.starts_with("https://"));
+        let rendered = format!("{attempt:?}");
+        assert!(!rendered.contains("credential"));
+        assert!(!rendered.contains("verifier"));
     }
 
     #[test]

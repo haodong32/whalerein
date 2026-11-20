@@ -21,6 +21,8 @@ use crate::security::device::DeviceIdentity;
 const MAX_BODY: usize = 1024 * 1024;
 const MAX_LOGIN: u64 = 20 * 60;
 const ACCOUNT_SESSION: &str = "cloud-app-session";
+/// Fixed native callback registered for the iOS authorization-code flow.
+const IOS_REDIRECT_URI: &str = "whalerein://auth/callback";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SignedInAccount {
@@ -94,6 +96,14 @@ pub struct AccountLoginPrompt {
     pub user_code: String,
 }
 
+/// One native iOS authorization-code attempt. The URL is the official hosted
+/// sign-in page; the attempt identity, PKCE material, Cloud state and the
+/// locally generated credential material never leave Core's SecretStore.
+pub struct CloudAuthAttempt {
+    pub url: String,
+    pub attempt_id: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginPrompt {
@@ -110,6 +120,19 @@ struct ActiveSession {
     expires_at: u64,
     #[serde(flatten)]
     account: SignedInAccount,
+}
+
+/// iOS exchange success. This is the same native app-session shape the device
+/// grant returns, so Cloud never issues a token and the local credential stays
+/// in the SecretStore.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IOSSessionResponse {
+    state: String,
+    session_id: String,
+    expires_at: u64,
+    account: AccountIdentity,
+    workspace: AccountWorkspace,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -159,10 +182,27 @@ struct LoginAttempt {
     prompt: Option<LoginPrompt>,
 }
 
+/// Pending native iOS authorization-code attempt. `state` is the exact value
+/// Cloud embedded in the authorization URL; a callback carrying any other
+/// value belongs to a cancelled, expired or different attempt and is rejected.
+#[derive(Clone, Serialize, Deserialize)]
+struct IOSAttempt {
+    attempt_id: String,
+    credential: String,
+    revocation: String,
+    verifier: String,
+    challenge: String,
+    state: String,
+    expires: u64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct AccountState {
     active: Option<Session>,
     attempt: Option<LoginAttempt>,
+    /// Added after the device flow shipped; older stored states remain readable.
+    #[serde(default)]
+    ios: Option<IOSAttempt>,
     logouts: Vec<Logout>,
 }
 
@@ -656,6 +696,215 @@ impl AccountClient {
         Ok(verified)
     }
 
+    /// Begin one native iOS authorization-code attempt.
+    ///
+    /// Core generates the attempt ID, PKCE verifier/challenge and the local
+    /// credential/revocation pair, asks Cloud for the hosted URL, then retains
+    /// the URL's state and deadline with the attempt in the SecretStore. Any
+    /// previous pending attempt is replaced, so its late callback cannot win.
+    pub async fn auth_start(&self) -> CoreResult<CloudAuthAttempt> {
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        if state
+            .ios
+            .as_ref()
+            .is_some_and(|attempt| attempt.expires <= unix_now())
+        {
+            state.ios = None;
+        }
+        let attempt_id = hex::encode(crate::util::random_bytes(16));
+        let credential = new_token();
+        let revocation = new_token();
+        let verifier = new_token();
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Begin<'a> {
+            attempt_id: &'a str,
+            credential_digest: String,
+            revocation_digest: String,
+            code_challenge: &'a str,
+            code_challenge_method: &'a str,
+            redirect_uri: &'a str,
+        }
+        let response = self
+            .http
+            .post(self.endpoint("ios/attempts")?)
+            .json(&Begin {
+                attempt_id: &attempt_id,
+                credential_digest: token_digest(&credential),
+                revocation_digest: token_digest(&revocation),
+                code_challenge: &challenge,
+                code_challenge_method: "S256",
+                redirect_uri: IOS_REDIRECT_URI,
+            })
+            .send()
+            .await
+            .map_err(request_error)?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BeginResponse {
+            authorization_url: String,
+            expires_at: u64,
+        }
+        let begin: BeginResponse = decode_created(response).await?;
+        let url =
+            Url::parse(&begin.authorization_url).map_err(|_| CoreError::ProtocolIncompatible)?;
+        if !matches!(url.scheme(), "https" | "http")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        let cloud_state = single_query_value(&url, "state")
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .ok_or(CoreError::ProtocolIncompatible)?;
+        let now = unix_now();
+        if begin.expires_at <= now || begin.expires_at > now.saturating_add(MAX_LOGIN) {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        state.ios = Some(IOSAttempt {
+            attempt_id: attempt_id.clone(),
+            credential,
+            revocation,
+            verifier,
+            challenge,
+            state: cloud_state,
+            expires: begin.expires_at,
+        });
+        self.save(&state)?;
+        Ok(CloudAuthAttempt {
+            url: url.into(),
+            attempt_id,
+        })
+    }
+
+    /// Complete the exact pending iOS attempt from one callback URL.
+    ///
+    /// The attempt leaves the pending slot only after Cloud returns a valid
+    /// session, so an expired, cancelled, replayed or mismatched callback leaves
+    /// the instance signed out (or in its prior verified state) and can never
+    /// establish a session. The URL's raw code is never persisted or logged.
+    pub async fn auth_complete(&self, callback_url: &str) -> CoreResult<SignedInAccount> {
+        let parsed = Url::parse(callback_url)
+            .map_err(|_| CoreError::InvalidInput("invalid Cloud sign-in callback".into()))?;
+        if parsed.scheme() != "whalerein"
+            || parsed.host_str() != Some("auth")
+            || parsed.path() != "/callback"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(CoreError::Unauthorized);
+        }
+        if parsed
+            .query_pairs()
+            .any(|(key, _)| key == "error" || key == "error_description")
+        {
+            return Err(CoreError::Unauthorized);
+        }
+        let code = single_query_value(&parsed, "code")
+            .filter(|value| !value.is_empty() && value.len() <= 4096)
+            .ok_or(CoreError::Unauthorized)?;
+        let cloud_state = single_query_value(&parsed, "state")
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .ok_or(CoreError::Unauthorized)?;
+
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let Some(attempt) = state.ios.clone() else {
+            return Err(CoreError::Unauthorized);
+        };
+        if attempt.expires <= unix_now() {
+            state.ios = None;
+            self.save(&state)?;
+            return Err(CoreError::Unauthorized);
+        }
+        if !same_secret(&attempt.state, &cloud_state)
+            || URL_SAFE_NO_PAD.encode(Sha256::digest(attempt.verifier.as_bytes()))
+                != attempt.challenge
+        {
+            return Err(CoreError::Unauthorized);
+        }
+
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Exchange<'a> {
+            attempt_id: &'a str,
+            code: &'a str,
+            state: &'a str,
+            code_verifier: &'a str,
+        }
+        let response = self
+            .http
+            .post(self.endpoint("ios/exchange")?)
+            .json(&Exchange {
+                attempt_id: &attempt.attempt_id,
+                code: &code,
+                state: &cloud_state,
+                code_verifier: &attempt.verifier,
+            })
+            .send()
+            .await
+            .map_err(request_error)?;
+        let active: IOSSessionResponse = match decode_scoped(response).await {
+            Ok(session) => session,
+            Err(error) => {
+                // Cloud consumed the attempt even for a rejected exchange. Drop
+                // it so the same attempt can never be retried.
+                state.ios = None;
+                self.save(&state)?;
+                return Err(error);
+            }
+        };
+        if active.state != "active"
+            || active.expires_at <= unix_now()
+            || !valid_session_id(&active.session_id)
+            || active.account.id.is_empty()
+            || active.account.issuer.is_empty()
+            || active.account.subject.is_empty()
+            || active.workspace.id.is_empty()
+            || Url::parse(&active.account.issuer).is_err()
+        {
+            state.ios = None;
+            self.save(&state)?;
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        let verified = SignedInAccount {
+            account: active.account,
+            workspace: active.workspace,
+        };
+        // The instance manifest is the local scope authority. A response for a
+        // different account or workspace cannot replace an existing binding.
+        if let Err(error) = self.instance.bind_account(&verified.scope()) {
+            state.ios = None;
+            self.save(&state)?;
+            return Err(error);
+        }
+        state.ios = None;
+        state.active = Some(Session {
+            id: active.session_id,
+            credential: attempt.credential,
+            revocation: attempt.revocation,
+            expires: active.expires_at,
+            verified: verified.clone(),
+            regional: None,
+        });
+        self.save(&state)?;
+        Ok(verified)
+    }
+
+    /// Cancel the pending iOS attempt. A callback that arrives afterwards can
+    /// no longer complete the exchange locally.
+    pub async fn auth_cancel(&self) -> CoreResult<()> {
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        state.ios = None;
+        self.save(&state)
+    }
+
     pub async fn status(&self) -> CoreResult<SignedInAccount> {
         self.retry_remote_signout().await?;
         let session = load_state(&self.secrets)?
@@ -937,6 +1186,48 @@ fn new_token() -> String {
 
 fn token_digest(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Constant-time comparison of two callback/attempt values. Length differences
+/// are not secret for the fixed-format state and attempt values.
+fn same_secret(first: &str, second: &str) -> bool {
+    if first.len() != second.len() {
+        return false;
+    }
+    first
+        .bytes()
+        .zip(second.bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+/// Reads one query value, rejecting duplicates so an ambiguous callback cannot
+/// smuggle two different `state` or `code` values past validation.
+fn single_query_value(url: &Url, name: &str) -> Option<String> {
+    let mut value = None;
+    for (key, candidate) in url.query_pairs() {
+        if key != name {
+            continue;
+        }
+        if value.is_some() || candidate.chars().any(char::is_control) {
+            return None;
+        }
+        value = Some(candidate.into_owned());
+    }
+    value
+}
+
+/// Decodes a Cloud `201 Created` response. Other statuses map to the same
+/// stable families the native device flow uses.
+async fn decode_created<T: DeserializeOwned>(response: Response) -> CoreResult<T> {
+    match response.status() {
+        StatusCode::CREATED => decode(response).await,
+        StatusCode::BAD_REQUEST => Err(CoreError::InvalidInput(
+            "the Cloud sign-in request was rejected".into(),
+        )),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CoreError::Unauthorized),
+        _ => Err(unavailable()),
+    }
 }
 
 fn load_state(secrets: &Arc<dyn SecretStore>) -> CoreResult<AccountState> {
@@ -1775,5 +2066,440 @@ mod tests {
         ] {
             assert!(!same_authority(&Url::parse(invalid).unwrap(), &issuer));
         }
+    }
+
+    // MARK: - Native iOS authorization-code flow
+
+    const IOS_TEST_ISSUER: &str = "https://login.whalerein.com/oidc";
+
+    fn ios_active_body() -> serde_json::Value {
+        json!({
+            "state": "active",
+            "sessionId": "ios-session",
+            "expiresAt": unix_now() + 600,
+            "account": {
+                "id": "acct-ios",
+                "email": "user@example.test",
+                "issuer": IOS_TEST_ISSUER,
+                "subject": "subject-ios",
+            },
+            "workspace": {"id": "ws-ios"},
+        })
+    }
+
+    #[derive(Default)]
+    struct IOSFixture {
+        produced_state: Option<String>,
+        challenge: Option<String>,
+        begin: Option<serde_json::Value>,
+    }
+
+    #[tokio::test]
+    async fn native_ios_begin_and_exchange_create_a_session_and_clear_the_attempt() {
+        let fixture = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let recorded = fixture.clone();
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let counted = exchanges.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    assert_eq!(attempt_id.len(), 32);
+                    assert!(attempt_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                    assert_eq!(body["codeChallengeMethod"], "S256");
+                    assert_eq!(body["redirectUri"], "whalerein://auth/callback");
+                    assert_ne!(body["credentialDigest"], body["revocationDigest"]);
+                    let state = format!("state-{attempt_id}");
+                    let mut fixture = recorded.lock().unwrap();
+                    fixture.challenge = body["codeChallenge"].as_str().map(str::to_owned);
+                    fixture.begin = Some(body);
+                    fixture.produced_state = Some(state.clone());
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{IOS_TEST_ISSUER}/auth?client_id=ios&state={state}&code_challenge=x"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/exchange") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let fixture_state = recorded.lock().unwrap();
+                    assert_eq!(body["attemptId"], fixture_state.begin.as_ref().unwrap()["attemptId"]);
+                    assert_eq!(body["state"], fixture_state.produced_state.clone().unwrap());
+                    assert_eq!(body["code"], "code-ios");
+                    assert_eq!(
+                        token_digest(body["codeVerifier"].as_str().unwrap()),
+                        fixture_state.challenge.clone().unwrap()
+                    );
+                    drop(fixture_state);
+                    MockResponse::json(200, &ios_active_body())
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let attempt = client.auth_start().await.unwrap();
+        assert_eq!(attempt.attempt_id.len(), 32);
+        assert!(attempt.url.contains("state="));
+        let state = {
+            let stored = load_state(&secrets).unwrap();
+            let pending = stored.ios.expect("attempt retained");
+            assert_eq!(pending.attempt_id, attempt.attempt_id);
+            assert!(!pending.verifier.is_empty());
+            pending.state
+        };
+        assert!(secrets.load(ACCOUNT_SESSION).unwrap().is_some());
+
+        let callback = format!("whalerein://auth/callback?code=code-ios&state={state}");
+        let account = client.auth_complete(&callback).await.unwrap();
+        assert_eq!(account.account.id, "acct-ios");
+        assert_eq!(account.workspace.id, "ws-ios");
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("ios-session")
+        );
+        let manifest = instance.manifest().unwrap().unwrap();
+        assert_eq!(manifest.account.unwrap().workspace, "ws-ios");
+        // The callback carried no token and the returned value has none.
+        assert!(!serde_json::to_string(&account)
+            .unwrap()
+            .contains("credential"));
+    }
+
+    #[tokio::test]
+    async fn native_ios_state_mismatch_never_exchanges_and_keeps_the_real_attempt() {
+        let fixture = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let recorded = fixture.clone();
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let counted = exchanges.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let state = "expected-state".to_owned();
+                    recorded.lock().unwrap().begin = Some(body);
+                    recorded.lock().unwrap().produced_state = Some(state.clone());
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!("{IOS_TEST_ISSUER}/auth?state={state}"),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/exchange") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    MockResponse::json(200, &ios_active_body())
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        client.auth_start().await.unwrap();
+
+        for callback in [
+            "whalerein://auth/callback?code=code-ios&state=other-state",
+            "whalerein://auth/callback?code=code-ios&state=expected-state&state=other",
+            "whalerein://auth/callback?state=expected-state",
+            "whalerein://other/callback?code=code-ios&state=expected-state",
+            "https://auth/callback?code=code-ios&state=expected-state",
+        ] {
+            assert!(
+                matches!(
+                    client.auth_complete(callback).await,
+                    Err(CoreError::Unauthorized)
+                ),
+                "{callback}"
+            );
+        }
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+        assert!(load_state(&secrets).unwrap().ios.is_some());
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
+
+        let account = client
+            .auth_complete("whalerein://auth/callback?code=code-ios&state=expected-state")
+            .await
+            .unwrap();
+        assert_eq!(account.account.id, "acct-ios");
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_ios_expired_replayed_and_cancelled_callbacks_establish_nothing() {
+        let fixture = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let recorded = fixture.clone();
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let counted = exchanges.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    let state = format!("state-{attempt_id}");
+                    let mut fixture = recorded.lock().unwrap();
+                    fixture.begin = Some(body);
+                    fixture.produced_state = Some(state.clone());
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!("{IOS_TEST_ISSUER}/auth?state={state}"),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/exchange") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    MockResponse::json(200, &ios_active_body())
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+
+        // Expired attempt: mutate the stored deadline and then present its exact callback.
+        let attempt = client.auth_start().await.unwrap();
+        let state = load_state(&secrets).unwrap().ios.unwrap().state;
+        let mut expired = load_state(&secrets).unwrap();
+        let pending = expired.ios.as_mut().unwrap();
+        assert_eq!(pending.attempt_id, attempt.attempt_id);
+        pending.expires = unix_now() - 1;
+        client.save(&expired).unwrap();
+        let callback = format!("whalerein://auth/callback?code=code-ios&state={state}");
+        assert!(matches!(
+            client.auth_complete(&callback).await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+
+        // Replay: the first exchange succeeds, the second cannot create a session.
+        let second = client.auth_start().await.unwrap();
+        let state = format!("state-{}", second.attempt_id);
+        client
+            .auth_complete(&callback_with_state(&state))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.auth_complete(&callback_with_state(&state)).await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+
+        // Cancellation: a callback that arrives afterwards is rejected.
+        let third = client.auth_start().await.unwrap();
+        client.auth_cancel().await.unwrap();
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        assert!(matches!(
+            client
+                .auth_complete(&callback_with_state(&format!("state-{}", third.attempt_id)))
+                .await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    }
+
+    fn callback_with_state(state: &str) -> String {
+        format!("whalerein://auth/callback?code=code-ios&state={state}")
+    }
+
+    #[tokio::test]
+    async fn native_ios_wrong_scope_keeps_the_previous_binding_and_never_stores_a_session() {
+        let server = MockServer::start(Arc::new(|request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{IOS_TEST_ISSUER}/auth?state=state-{attempt_id}"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/exchange") => {
+                    let mut body = ios_active_body();
+                    body["workspace"]["id"] = json!("another-workspace");
+                    MockResponse::json(200, &body)
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        instance.prepare_runtime().unwrap();
+        instance
+            .bind_account(&crate::api::instance::AccountScope {
+                issuer: IOS_TEST_ISSUER.into(),
+                subject: "subject-ios".into(),
+                workspace: "ws-ios".into(),
+            })
+            .unwrap();
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let attempt = client.auth_start().await.unwrap();
+        assert!(matches!(
+            client
+                .auth_complete(&callback_with_state(&format!(
+                    "state-{}",
+                    attempt.attempt_id
+                )))
+                .await,
+            Err(CoreError::Conflict(_))
+        ));
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            instance
+                .manifest()
+                .unwrap()
+                .unwrap()
+                .account
+                .unwrap()
+                .workspace,
+            "ws-ios"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_ios_callback_for_another_instance_cannot_complete_this_attempt() {
+        let fixture = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let recorded = fixture.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    recorded.lock().unwrap().begin = Some(body);
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{IOS_TEST_ISSUER}/auth?state=state-{attempt_id}"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/exchange") => {
+                    MockResponse::json(200, &ios_active_body())
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let (first_instance, first_secrets, _) = native_test_instance(first_root.path());
+        let (second_instance, second_secrets, _) = native_test_instance(second_root.path());
+        let first = native_test_client(&first_instance, &first_secrets, &server, true).await;
+        let second = native_test_client(&second_instance, &second_secrets, &server, true).await;
+        let first_attempt = first.auth_start().await.unwrap();
+        let second_attempt = second.auth_start().await.unwrap();
+        assert_ne!(first_attempt.attempt_id, second_attempt.attempt_id);
+
+        // The first instance's callback (state and attempt id) is presented to
+        // the second instance while its own attempt is pending.
+        assert!(matches!(
+            second
+                .auth_complete(&callback_with_state(&format!(
+                    "state-{}",
+                    first_attempt.attempt_id
+                )))
+                .await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert!(load_state(&second_secrets).unwrap().ios.is_some());
+        assert!(
+            AccountClient::local_status(&second_instance, &second_secrets)
+                .unwrap()
+                .is_none()
+        );
+
+        // The originating instance still completes its own callback.
+        first
+            .auth_complete(&callback_with_state(&format!(
+                "state-{}",
+                first_attempt.attempt_id
+            )))
+            .await
+            .unwrap();
+        second
+            .auth_complete(&callback_with_state(&format!(
+                "state-{}",
+                second_attempt.attempt_id
+            )))
+            .await
+            .unwrap();
+        assert!(load_state(&first_secrets).unwrap().ios.is_none());
+        assert!(load_state(&second_secrets).unwrap().ios.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_ios_begin_rejects_a_provider_url_without_state_or_a_bad_deadline() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let expires = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        unix_now() + 600
+                    } else {
+                        // A URL without state or a past deadline is refused
+                        // instead of being retained as a usable attempt.
+                        unix_now() - 1
+                    };
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!("{IOS_TEST_ISSUER}/auth?client_id=ios"),
+                            "expiresAt": expires,
+                        }),
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        assert!(matches!(
+            client.auth_start().await,
+            Err(CoreError::ProtocolIncompatible)
+        ));
+        assert!(matches!(
+            client.auth_start().await,
+            Err(CoreError::ProtocolIncompatible)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        assert!(AccountClient::local_status(&instance, &secrets)
+            .unwrap()
+            .is_none());
     }
 }
