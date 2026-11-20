@@ -253,16 +253,14 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
-	row, err := s.deps.Requests.Get(r.Context(), identity.DeviceID, requestID)
+	// One durable decision authorizes ownership, the active grant revisions and
+	// the result bound. No second authorization call can race a revocation
+	// between the decision and the response write.
+	row, err := s.deps.Requests.Release(r.Context(), identity.DeviceID, identity.SessionID, requestID,
+		requests.ResultValueLimit(s.deps.MaxBodyBytes))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
-	}
-	if identity.SessionID != "" {
-		if err := s.deps.Auth.AuthorizeHost(r.Context(), identity, row.HostID); err != nil {
-			s.writeError(w, r, err)
-			return
-		}
 	}
 	// Renewal is best-effort for a read: the recorded outcome stays
 	// recoverable even when liveness bookkeeping fails, and a GET never

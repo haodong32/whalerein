@@ -39,6 +39,14 @@ CLI prints a suffix only when Core reports an exact UTF-8 prefix; otherwise it
 shows the complete corrected Message. GUI consumers replace content by identity.
 JSON output contains normalized block types and correlation, not native paths.
 
+Reasoning is a checked block kind ordered alongside answer text. Core reports a
+separate answer/reasoning preview prefix, so a reasoning prefix never offsets
+visible answer text. CLI hides reasoning by default and renders a distinct typed
+block only with `--show-reasoning`; default JSON omits hidden reasoning entirely.
+A hidden reasoning-only preview or committed message does not satisfy visible
+completion (`session watch --once`). This is a presentation choice; it never
+changes authorization.
+
 One active session observation per Core instance selects Conversation, Questions
 or both over one Watch and one device MQTT client. Question observation is
 independent of history readiness: a lost or unsupported history facet does not
@@ -60,12 +68,19 @@ and advances it atomically with committed changes, even across filtered native
 records. Duplicate batch identities are idempotent; conflicting canonical content
 fails integrity validation. Receipt fingerprints are encrypted at rest and bounded.
 
-HistoryRead opens/paginates a fixed cut. Snapshot pages stage in encrypted cache
-and replace a complete view only after the final page. Failed/partial snapshots
-leave the old view available. Branch/regression invalidates old positions and
-provisional state; it never revokes pairing. Current DSH native reads may still
-materialize a source snapshot. Page budgets do not claim to eliminate that native
-allocation; incomplete source ranges fail explicitly.
+HistoryRead opens/paginates a fixed cut. Every page and batch carries the active
+content projection; a page from another projection or cut cannot continue the
+traversal and requests a fresh snapshot. Snapshot pages stage in encrypted cache
+under one projection and replace a complete view only after the final page.
+Failed, interrupted or missing-range snapshots leave the old view and its
+receipts in place. A new projection fences old positions, receipts, cache rows
+and continuations; cached rows stay until an atomic replacement commits.
+Replacement and eviction advance the cache generation so stale continuations
+fail explicitly. Branch/regression invalidates old positions and provisional
+state; it never revokes pairing. Buffered live commits are reconciled once
+against the installed cut. Current DSH native reads may still materialize a
+source snapshot. Page budgets do not claim to eliminate that native allocation;
+incomplete source ranges fail explicitly.
 
 Core subscribes MQTT before WatchSession and synchronization. A bounded background
 pump continues handling receipts while HTTP queries execute. Typed updates wait
@@ -97,9 +112,11 @@ unreleased-v1 replacement. Explicit forget remains the identity deletion action.
 ## Verification
 
 Unit cases cover source-bound cursors, cut pagination, typed validation, live
-coalescing, slow-recipient isolation, pending approvals, encrypted Host-scoped
-cache staging, receipt conflicts, conversation reduction, pump cancellation and
-human/JSON output. Generated field contracts and Node/Rust vectors cover typed
+coalescing, reasoning visibility and hidden-preview completion, independent
+latest-first history/continuation/cache/exact reads, send confirmation with a
+later read failure, slow-recipient isolation, pending approvals, encrypted
+Host-scoped cache staging, receipt conflicts, conversation reduction, pump
+cancellation and human/JSON output. Generated field contracts and Node/Rust vectors cover typed
 history, state, Watch baselines, capabilities and live updates alongside security
 vectors. Isolated stack cases use real CLI/Core, Access, PostgreSQL, Mosquitto and the
 plugin with FakeDSH. Native DSH, OS keyring and deployment acceptance remain

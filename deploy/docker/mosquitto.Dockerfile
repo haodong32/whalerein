@@ -47,4 +47,4 @@ RUN ldconfig /usr/local/lib 2>/dev/null || true && \
 
 USER mosquitto
 ENTRYPOINT ["/usr/local/bin/whalerein-entrypoint.sh"]
-CMD ["/usr/local/sbin/mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+CMD ["/usr/local/sbin/mosquitto", "-c", "/run/whalerein/mosquitto.conf"]

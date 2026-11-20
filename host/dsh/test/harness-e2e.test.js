@@ -64,6 +64,7 @@ test('when a client pairs with FakeDSH, queries, commands, event replay, sync, a
     assert.deepEqual(Object.keys(harness.host.diagnostics()).sort(), [
       'access',
       'activeChannels',
+      'attachments',
       'commands',
       'cursors',
       'pendingCiphertext',
@@ -200,12 +201,12 @@ test('when a two MiB command crosses a 64 KiB broker frame limit, exact committe
     }
     assert.equal(delivered,2)
     assert.equal(new Set(messages.map(message=>message.message_id)).size,2)
-    // A single native message larger than the page budget cannot be split
-    // across history cursors, so history returns a bounded prefix and marks the
-    // truncation. Live event delivery above still carries the complete text.
+    // A single canonical message larger than the soft page target occupies its
+    // page alone and is never truncated: the Host owns the hard encoded bound.
     for(const message of messages) {
-      assert.ok(message.blocks.at(-1)?.notice?.text.includes('truncated'),'History marks the bounded fixture text')
-      assert.ok(message.blocks.some(block=>block.text?.text.startsWith('x')),'History keeps the fixture prefix')
+      assert.equal(message.blocks.length,1)
+      assert.equal(message.blocks[0].text.text,payload)
+      assert.equal(message.blocks.some(block=>block.notice),false)
     }
     const repeated=await device.send(sent.request)
     assert.equal(repeated.status,'succeeded')
@@ -215,4 +216,146 @@ test('when a two MiB command crosses a 64 KiB broker frame limit, exact committe
     assert.ok(harness.broker.messages.every(message=>message.payload.length<=64*1024))
     assert.equal(harness.host.access.describe().reconnects,0)
   } finally {await harness.stop()}
+})
+
+test('typed live reasoning, tool activity and notices traverse the Host watch with stable kinds and capabilities', async () => {
+  const harness = await startHarness({ sessions: [{ sessionId: 's', running: false }], behavior: crashFree })
+  try {
+    const device = await harness.newPairedDevice('typed-device')
+    const session = await device.query({ list_sessions: {} })
+    const capabilities = session.response.session_list.sessions[0].source_capabilities
+    assert.equal(capabilities.live_reasoning, true)
+    assert.equal(capabilities.tool_activity, true)
+    assert.equal(capabilities.conversation_notices, true)
+    assert.equal(capabilities.attachments, true)
+    assert.equal(capabilities.history_page, true)
+    assert.equal(capabilities.history_exact, true)
+    assert.equal(capabilities.send_followup, true)
+
+    const emit = data => harness.adapter.emit('s', { type: 'assistant/preview', kind: 'output', ephemeral: true, data: { stream_id: 'typed', ...data } })
+    emit({ phase: 'start', revision: 1, reply_id: '1:1' })
+    emit({ phase: 'chunk', revision: 2, block_id: 'reasoning-0', block_kind: 'BLOCK_KIND_REASONING', text: 'why' })
+    emit({ phase: 'chunk', revision: 3, block_id: 'text-1', block_kind: 'BLOCK_KIND_TEXT', text: 'answer' })
+    await waitFor(() => device.bufferedEvents.some(payload => payload.update.live?.delta?.kind === 'BLOCK_KIND_REASONING'))
+    await waitFor(() => device.bufferedEvents.some(payload => payload.update.live?.delta?.kind === 'BLOCK_KIND_TEXT'))
+    const live = (await device.events()).flatMap(payload => payload.update.live?.delta ? [payload.update.live.delta] : [])
+    assert.deepEqual(live.map(block => [block.kind, block.text]), [['BLOCK_KIND_REASONING', 'why'], ['BLOCK_KIND_TEXT', 'answer']])
+
+    harness.adapter.emit('s', { type: 'assistant/message', data: {
+      turn: 1, step: 1,
+      message: { id: 'a', role: 'assistant', content: [{ type: 'tool-call', id: 'call-typed', name: 'bash', arguments: '{"private":true}' }], source: { kind: 'model' } },
+    } })
+    harness.adapter.emit('s', { type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-typed', name: 'bash', arguments: '{"private":true}' } })
+    harness.adapter.emit('s', { type: 'tool/result', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'call-typed' }, isError: false } } })
+    harness.adapter.emit('s', { type: 'llm/retry', data: { retryId: 'retry-typed', turn: 2, step: 1, retry: 1, maxRetries: 1 } })
+    await waitFor(() => device.bufferedEvents.some(payload => (payload.update.history?.changes ?? []).some(change => change.message.blocks.some(block => block.tool_activity?.call_id === 'call-typed'))))
+    await waitFor(() => device.bufferedEvents.some(payload => (payload.update.history?.changes ?? []).some(change => change.message.blocks.some(block => block.notice?.category === 'NOTICE_CATEGORY_RETRY'))))
+    const staged = (await device.events()).flatMap(payload => payload.update.history?.changes ?? []).flatMap(change => change.message.blocks)
+    const activities = staged.filter(block => block.tool_activity).map(block => block.tool_activity)
+    assert.deepEqual(activities.map(activity => activity.call_id), ['call-typed', 'call-typed', 'call-typed'])
+    assert.deepEqual(activities.map(activity => activity.stages[0]), ['TOOL_STAGE_PREPARATION', 'TOOL_STAGE_EXECUTION', 'TOOL_STAGE_SETTLEMENT'])
+    assert.ok(staged.some(block => block.notice?.category === 'NOTICE_CATEGORY_RETRY' && block.notice.state === 'NOTICE_STATE_SCHEDULED'))
+    assert.doesNotMatch(JSON.stringify(staged), /private/)
+  } finally {
+    await harness.stop()
+  }
+})
+
+test('a confirmed send resolves through Host to a canonical exact history message', async () => {
+  const harness = await startHarness({ sessions: [{ sessionId: 's1', running: false }], behavior: crashFree })
+  try {
+    const device = await harness.newPairedDevice('reply-device')
+    const send = await device.command({ send_message: { session_id: 's1', text: 'host reply' } }, { commandId: 'reply-command' })
+    assert.equal(send.status, 'succeeded')
+    const submitted = send.response.command_accepted.message_id
+    const reply = await device.query({ read_message_reply: { session_id: 's1', submitted_message_id: submitted } })
+    assert.equal(reply.status, 'succeeded')
+    const value = reply.response.message_reply
+    assert.equal(value.state, 'MESSAGE_REPLY_COMMITTED')
+    assert.equal(value.submitted_message_id, submitted)
+    assert.equal(value.committed.session.host_id, 'host-1')
+    assert.equal(value.committed.session.session_id, 's1')
+
+    const exact = await device.query({ read_history: { session_id: 's1', exact: value.committed } })
+    assert.equal(exact.status, 'succeeded')
+    const message = exact.response.history_page.batch.changes[0].message
+    assert.equal(message.message_id, value.committed.message_id)
+    assert.equal(message.blocks[0].text.text, 'host reply')
+  } finally {
+    await harness.stop()
+  }
+})
+
+test('a committed attachment occurrence opens, pulls and closes through the Host encrypted path', async () => {
+  const harness = await startHarness({ sessions: [{ sessionId: 's1', running: false }], behavior: crashFree })
+  try {
+    const device = await harness.newPairedDevice('attachment-device')
+    const native = harness.adapter.saveFixtureAttachment({ kind: 'file', data: new Uint8Array([7, 8, 9]), name: 'fixture.bin' })
+    harness.adapter.emit('s1', {
+      type: 'user/message',
+      data: { id: 'u-attachment', role: 'user', content: [{ type: 'file', attachment: native }], source: { kind: 'user' } },
+    })
+    await waitFor(() => device.bufferedEvents.length >= 1)
+    const page = await device.query({ read_history: { session_id: 's1', page: {} } })
+    assert.equal(page.status, 'succeeded')
+    const content = page.response.history_page.batch.changes
+      .flatMap(change => change.message.blocks)
+      .find(block => block.attachment).attachment
+    assert.equal(content.available, true)
+    const session = { host_id: 'host-1', session_id: 's1' }
+
+    const opened = await device.query({ open_attachment: { session, attachment_ref: content.attachment_ref } })
+    assert.equal(opened.status, 'succeeded')
+    const metadata = opened.response.open_attachment_result.attachment
+    assert.equal(metadata.size, 3)
+    assert.equal(metadata.name, 'fixture.bin')
+    assert.equal(metadata.attachment_ref, content.attachment_ref)
+
+    const first = await device.query({
+      pull_attachment: { session, attachment_ref: content.attachment_ref, transfer_id: metadata.transfer_id, offset: 0, max_bytes: 2 },
+    })
+    assert.equal(first.status, 'succeeded')
+    assert.deepEqual([...first.response.attachment_part.data], [7, 8])
+    assert.ok(!first.response.attachment_part.final)
+    const second = await device.query({
+      pull_attachment: { session, attachment_ref: content.attachment_ref, transfer_id: metadata.transfer_id, offset: 2, max_bytes: 2 },
+    })
+    assert.equal(second.status, 'succeeded')
+    assert.deepEqual([...second.response.attachment_part.data], [9])
+    assert.equal(second.response.attachment_part.final, true)
+    assert.equal(second.response.attachment_part.total_size, 3)
+
+    const closed = await device.query({
+      close_attachment: { session, attachment_ref: content.attachment_ref, transfer_id: metadata.transfer_id },
+    })
+    assert.equal(closed.status, 'succeeded')
+    assert.equal(closed.response.close_attachment_result.closed, true)
+  } finally {
+    await harness.stop()
+  }
+})
+
+test('paged history crosses the Host latest-first with a usable continuation', async () => {
+  const harness = await startHarness({ sessions: [{ sessionId: 's1', running: false }], behavior: crashFree })
+  try {
+    for (const text of ['m0', 'm1', 'm2', 'm3', 'm4']) harness.adapter.output('s1', text)
+    const device = await harness.newPairedDevice('page-device')
+    const first = await device.query({ read_history: { session_id: 's1', page: {}, max_messages: 2 } })
+    assert.equal(first.status, 'succeeded')
+    const page = first.response.history_page
+    assert.deepEqual(page.batch.changes.map(change => change.message.blocks[0].text.text), ['m3', 'm4'])
+    assert.ok(!page.complete)
+    assert.ok(page.continuation)
+    assert.equal(page.source, 'HISTORY_SOURCE_ONLINE')
+
+    const second = await device.query({
+      read_history: { session_id: 's1', page: { before_cursor: page.continuation }, cut_cursor: page.cut_cursor, max_messages: 2 },
+    })
+    assert.equal(second.status, 'succeeded')
+    assert.deepEqual(second.response.history_page.batch.changes.map(change => change.message.blocks[0].text.text), ['m1', 'm2'])
+    assert.equal(second.response.history_page.cut_cursor, page.cut_cursor)
+    assert.equal(second.response.history_page.projection_id, page.projection_id)
+  } finally {
+    await harness.stop()
+  }
 })

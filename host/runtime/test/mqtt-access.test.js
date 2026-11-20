@@ -9,6 +9,7 @@ import { ConfigError } from '../src/config.js'
 import { codec } from '../src/protocol.js'
 import { FakeBroker } from './support/fake-mqtt.js'
 import { waitFor } from './support/harness.js'
+import { transportProfileBudget } from '../src/contracts/transport.js'
 
 const proto = codec()
 
@@ -305,4 +306,40 @@ test('when a device_offline presence event arrives, Access dispatches it without
   await waitFor(() => seen.length === 1)
   assert.deepEqual(seen[0], { event: 'device_offline', device_id: 'd1', reason: 'will' })
   await access.stop()
+})
+
+test('HostReady advertises the Host receive profile for the authenticated connection generation', async () => {
+  const { broker, access } = makeAccess()
+  access.start()
+  await access.waitForConnected(2000)
+  const ready = broker.messages.filter((message) => message.topic === 'whalerein/v1/h/host-1/result')
+  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.at(-1).payload).result_body)
+  assert.equal(body.receive.profile, 'TRANSPORT_PROFILE_DEFAULT')
+  assert.equal(body.receive.budget.packet_bytes, 65536)
+  assert.equal(body.receive.budget.fragment_payload_bytes, 61440)
+  assert.equal(body.receive.budget.envelope_bytes, 16 * 1024 * 1024)
+  assert.equal(body.receive.connection_generation, access.receiveAdvertisement().connection_generation)
+  assert.ok(body.receive.connection_generation >= 1)
+  await access.stop()
+})
+
+test('reconnect advances the advertised connection generation instead of reusing the old one', async () => {
+  const { broker, access } = makeAccess()
+  access.start({})
+  await access.waitForConnected(2000)
+  const first = access.receiveAdvertisement().connection_generation
+  broker.disconnectClientId('whalerein-host-host-1')
+  await waitFor(() => access.connected === false)
+  await waitFor(() => access.connected === true, 5000)
+  const second = access.receiveAdvertisement().connection_generation
+  assert.ok(second > first, `expected ${second} > ${first}`)
+  const ready = broker.messages.filter((message) => message.topic === 'whalerein/v1/h/host-1/result')
+  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.at(-1).payload).result_body)
+  assert.equal(body.receive.connection_generation, second)
+  await access.stop()
+})
+
+test('a receive budget that cannot fit required control envelopes fails configuration before readiness', () => {
+  const budget = { ...transportProfileBudget('default'), envelope_bytes: 64 }
+  assert.throws(() => makeAccess({ transportProfile: budget }), (error) => error.code === 'invalid_config')
 })

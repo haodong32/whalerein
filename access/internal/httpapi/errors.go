@@ -107,8 +107,12 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "conflict", ""}
 	case errors.Is(err, requests.ErrExpired), errors.Is(err, auth.ErrSignatureExpired):
 		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "request expired", ""}
-	case errors.Is(err, requests.ErrForbidden), errors.Is(err, requests.ErrResultMismatch), errors.Is(err, requests.ErrInvalidResult):
+	case errors.Is(err, requests.ErrForbidden), errors.Is(err, requests.ErrResultMismatch), errors.Is(err, requests.ErrInvalidResult), errors.Is(err, requests.ErrReleaseFenced):
 		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden", ""}
+	case errors.Is(err, requests.ErrResultTooLarge):
+		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "result body too large", ""}
+	case errors.Is(err, requests.ErrRequestTooLarge):
+		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "request body too large", ""}
 	case errors.Is(err, context.Canceled):
 		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "request canceled", ""}
 	case errors.Is(err, context.DeadlineExceeded):

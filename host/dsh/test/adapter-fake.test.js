@@ -50,8 +50,9 @@ test('when FakeDSH accepts a message, it returns a nonempty receipt and records 
   const events = (await adapter.getSessionSnapshot('s1')).events
   assert.deepEqual(events.map((event) => event.type), ['user/message', 'assistant/message', 'turn/end'])
   assert.ok(message.messageId.length > 0)
-  assert.equal(events[0].data.text, 'hello')
-  assert.equal(events[1].data.text, 'hello')
+  assert.equal(events[0].data.content[0].text, 'hello')
+  assert.equal(events[1].data.message.content[0].text, 'hello')
+  assert.equal(events[0].data.source.kind, 'user')
   await assert.rejects(adapter.sendUserMessage('s1', '  '), (error) => error.code === 'invalid_argument')
   await assert.rejects(adapter.sendUserMessage('missing', 'x'), (error) => error.code === 'not_found')
 

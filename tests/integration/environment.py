@@ -303,6 +303,59 @@ class Device:
     def interrupt(self, session):
         return self.call("session", "interrupt", session)
 
+    def invoke_captured(self, *commands, success=True, stdin_text=None, env=None):
+        """Run one CLI command and keep stdout/stderr separate.
+
+        Attachment downloads put progress on stderr and exactly one result
+        envelope on stdout; the ordinary invoke helper only reads stdout.
+        """
+        streams = {"stdin": subprocess.DEVNULL} if stdin_text is None else {"input": stdin_text}
+        try:
+            result = subprocess.run(
+                self.args(*commands),
+                cwd=ROOT,
+                env=self.env(**(env or {})),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+                **streams,
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("CLI operation timed out") from None
+        values = [
+            json.loads(line) for line in result.stdout.splitlines() if line.strip()
+        ]
+        assert values and all(v.get("schema") == "whalerein/client/v1" for v in values), (
+            "Missing selected-client CLI envelope"
+        )
+        if success and result.returncode != 0:
+            code = values[-1].get("error", {}).get("code", "unknown")
+            raise AssertionError(f"CLI {commands[:2]} failed with exit {result.returncode} ({code})")
+        return result.returncode, values, result.stderr
+
+    def history(self, session, *, cache=False, message=None):
+        args = ["session", "history", session]
+        if cache:
+            args.append("--cache")
+        if message is not None:
+            args.extend(["--message", message])
+        return self.call(*args)
+
+    def download(self, reference, destination, session, *, host=None, force=False,
+                 name=None, timeout=None, success=True):
+        args = ["session", "download", reference, "--to", str(destination),
+                "--session", session]
+        if host is not None:
+            args.extend(["--host", host])
+        if force:
+            args.append("--force")
+        if name is not None:
+            args.extend(["--name", name])
+        if timeout is not None:
+            args.extend(["--timeout", str(timeout)])
+        return self.invoke_captured(*args, success=success)
+
     def observe_history(self, session, host=None):
         """Wait for the selected watch to finish syncing its committed baseline."""
         scope = ["--host", host] if host is not None else []
@@ -519,6 +572,40 @@ class FakeDsh:
     def start_running(self, session_id):
         return self.process.control("running", session_id=session_id)
 
+    def save_attachment(self, *, kind="file", size=0, seed=0, media_type="", name=""):
+        """Store deterministic bytes in the authority and return the native ref."""
+        return self.process.control(
+            "save_attachment",
+            attachment_kind=kind,
+            size=int(size),
+            seed=int(seed),
+            media_type=media_type,
+            name=name,
+        )
+
+    def commit_attachment(self, session_id, attachment, *, kind="file", role="user", text=""):
+        """Emit one committed message carrying the occurrence."""
+        return self.process.control(
+            "commit_attachment",
+            session_id=session_id,
+            attachment=attachment,
+            attachment_kind=kind,
+            role=role,
+            text=text,
+        )
+
+    def attachment_pull_state(self):
+        return self.process.control("attachment_pull_state")
+
+    def reset_attachment_stats(self):
+        return self.process.control("reset_attachment_stats")
+
+    def set_attachment_pull_hold(self, hold=True):
+        return self.process.control("set_attachment_pull_hold", hold=hold)
+
+    def release_attachment_pull(self):
+        return self.process.control("release_attachment_pull")
+
 
 class Scenario:
     def __init__(self, directory, schema):
@@ -530,6 +617,8 @@ class Scenario:
         # collide with another case even when a warm broker is shared.
         self.host = "host-" + uuid.uuid4().hex[:16]
         self.access_client_id = "access-" + uuid.uuid4().hex[:16]
+        # Test-only Host attachment policy overrides, injected before start.
+        self.attachment_policy = None
         self.env = {
             "WHALEREIN_DATABASE_URL": f"postgres://postgres@127.0.0.1:55432/whalerein_test?sslmode=disable&search_path={schema}",
             "WHALEREIN_ADMIN_TOKEN": self.admin,
@@ -598,7 +687,7 @@ log:
         authority = Process(
             ["node", str(ROOT / "tests/integration/fixtures/dsh.mjs")],
             self.directory,
-            {"WHALEREIN_DSH_SOCKET": str(self.socket), **(extra_env or {})},
+            {"WHALEREIN_DSH_SOCKET": str(self.socket), "WHALEREIN_HOST_ID": self.host, **(extra_env or {})},
             control=True,
         )
         self.processes.append(authority)
@@ -635,6 +724,12 @@ log:
         self.wait_access_ready(listener_port=listener_port)
 
     def start_plugin(self, extra_env=None):
+        policy_env = {}
+        policy = self.attachment_policy or {}
+        if policy.get("total") is not None:
+            policy_env["WHALEREIN_ATTACHMENT_MAX_TOTAL_BYTES"] = str(int(policy["total"]))
+        if policy.get("chunk") is not None:
+            policy_env["WHALEREIN_ATTACHMENT_MAX_CHUNK_BYTES"] = str(int(policy["chunk"]))
         self.plugin = Process(
             ["node", str(ROOT / "tests/integration/fixtures/plugin.mjs")],
             self.directory,
@@ -647,6 +742,7 @@ log:
                 "WHALEREIN_HOST_CREDENTIAL_FILE": str(
                     self.directory / "credentials.json"
                 ),
+                **policy_env,
                 **(
                     {
                         "WHALEREIN_CA_FILE": self.tls_ca,

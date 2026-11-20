@@ -40,6 +40,12 @@ func (b *transportRaceBroker) PublishRequest(ctx context.Context, _ string, _ *w
 	return b.secondError
 }
 
+type transportRaceGrants struct{}
+
+func (transportRaceGrants) AdmissionGrantFor(context.Context, string, string) (store.AdmissionGrant, error) {
+	return store.AdmissionGrant{Active: true, GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1}, nil
+}
+
 type transportRacePresence struct{}
 
 func (transportRacePresence) IsHostOnline(context.Context, string) bool { return true }
@@ -59,7 +65,7 @@ func TestTransportPreflightCannotRejectConcurrentPublication(t *testing.T) {
 	}
 	transport := &transportRaceBroker{entered: make(chan struct{}), release: make(chan struct{}), firstError: broker.ErrPeerTransportUnsupported}
 	service := func(clock time.Time) *requests.Service {
-		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{},
+		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 			Now: func() time.Time { return clock }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 				ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 3, BatchSize: 10}})
 		if err != nil {
@@ -141,7 +147,7 @@ func TestTransportFailureDistinguishesFreshFromUncertainHistory(t *testing.T) {
 				}
 				now = now.Add(2 * time.Second)
 			}
-			service, err := requests.New(requests.Dependencies{Store: db, Broker: preflightFailureBroker{}, Presence: transportRacePresence{},
+			service, err := requests.New(requests.Dependencies{Store: db, Broker: preflightFailureBroker{}, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 				Now: func() time.Time { return now }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 					ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 3, BatchSize: 10}})
 			if err != nil {
@@ -197,7 +203,7 @@ func TestTransportPreflightCannotRejectAnInFlightEarlierLease(t *testing.T) {
 	}
 	transport := &transportRaceBroker{entered: make(chan struct{}), release: make(chan struct{}), secondError: broker.ErrMessageBudget}
 	service := func(clock time.Time) *requests.Service {
-		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{},
+		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 			Now: func() time.Time { return clock }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 				ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 3, BatchSize: 10}})
 		if err != nil {
@@ -246,7 +252,7 @@ func TestTransportAmbiguousFailureCannotAssertOfflineDuringEarlierPublication(t 
 	}
 	transport := &transportRaceBroker{entered: make(chan struct{}), release: make(chan struct{}), secondError: errors.New("ambiguous transport failure")}
 	service := func(clock time.Time) *requests.Service {
-		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{},
+		s, err := requests.New(requests.Dependencies{Store: db, Broker: transport, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 			Now: func() time.Time { return clock }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 				ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 2, BatchSize: 10}})
 		if err != nil {
@@ -300,7 +306,7 @@ func TestTransportAmbiguousFirstFailureAllowsLateSuccess(t *testing.T) {
 	if _, err := db.CreateRequest(ctx, row); err != nil {
 		t.Fatal(err)
 	}
-	service, err := requests.New(requests.Dependencies{Store: db, Broker: ambiguousFailureBroker{}, Presence: transportRacePresence{},
+	service, err := requests.New(requests.Dependencies{Store: db, Broker: ambiguousFailureBroker{}, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 		Now: func() time.Time { return now }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 			ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 1, BatchSize: 10}})
 	if err != nil {
@@ -341,7 +347,7 @@ func TestTransportPreflightDoesNotAbandonPairingCommit(t *testing.T) {
 		t.Fatal("pairing commit failed")
 	}
 	clock := at
-	service, err := requests.New(requests.Dependencies{Store: db, Broker: preflightFailureBroker{}, Presence: transportRacePresence{},
+	service, err := requests.New(requests.Dependencies{Store: db, Broker: preflightFailureBroker{}, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 		Now: func() time.Time { return clock }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 			ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 1, BatchSize: 10}})
 	if err != nil {
@@ -369,7 +375,7 @@ func TestTransportUnknownPreservesLateResultTransitionContract(t *testing.T) {
 	if _, err := db.CreateRequest(ctx, row); err != nil {
 		t.Fatal(err)
 	}
-	service, err := requests.New(requests.Dependencies{Store: db, Broker: ambiguousFailureBroker{}, Presence: transportRacePresence{},
+	service, err := requests.New(requests.Dependencies{Store: db, Broker: ambiguousFailureBroker{}, Presence: transportRacePresence{}, Grants: transportRaceGrants{},
 		Now: func() time.Time { return now }, Config: requests.Config{ProtocolVersion: 1, MaxTTL: time.Hour,
 			ForwardInterval: time.Second, Lease: time.Second, RetryInterval: time.Second, MaxAttempts: 1, BatchSize: 10}})
 	if err != nil {

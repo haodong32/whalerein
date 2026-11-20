@@ -29,6 +29,8 @@ type Metrics struct {
 	ConnectedDevices      prometheus.Gauge
 	RevocationLatency     prometheus.Histogram
 	RequestForwardRetries prometheus.Counter
+	ResultBoundRejected   prometheus.Counter
+	ReleaseFenced         prometheus.Counter
 
 	DevicePresenceEvents      *prometheus.CounterVec
 	PresenceDuplicatesIgnored prometheus.Counter
@@ -49,6 +51,15 @@ type Metrics struct {
 	CleanupBatches      *prometheus.CounterVec
 	CleanupRows         prometheus.Counter
 	CleanupBacklogTotal prometheus.Counter
+	CleanupLastRun      *prometheus.GaugeVec
+
+	TransportRejections      *prometheus.CounterVec
+	TransportRejectedBytes   *prometheus.CounterVec
+	TransportFrames          *prometheus.CounterVec
+	TransportBytes           *prometheus.CounterVec
+	TransportIncoming        prometheus.Gauge
+	TransportReserved        prometheus.Gauge
+	TransportBudgetFallbacks *prometheus.CounterVec
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -99,6 +110,14 @@ func NewMetrics() *Metrics {
 		RequestForwardRetries: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "request_forward_retries_total",
 			Help: "Request forwarding attempts after the first attempt.",
+		}),
+		ResultBoundRejected: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "result_bound_rejected_total",
+			Help: "Host result bodies rejected before storage because they exceeded a stored or current bound.",
+		}),
+		ReleaseFenced: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "request_release_fenced_total",
+			Help: "Result GETs whose ciphertext was fenced by grant revisions or retention.",
 		}),
 		DevicePresenceEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "device_presence_events_total",
@@ -152,6 +171,38 @@ func NewMetrics() *Metrics {
 			Name: "cleanup_backlog_detected_total",
 			Help: "Cleanup batches that filled their bound and left work behind.",
 		}),
+		CleanupLastRun: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "cleanup_last_run_timestamp_seconds",
+			Help: "Unix timestamp of the last completed cleanup pass by bounded operation.",
+		}, []string{"operation"}),
+		TransportRejections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_rejections_total",
+			Help: "Logical transport rejections by bounded stable code.",
+		}, []string{"code"}),
+		TransportRejectedBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_rejected_bytes_total",
+			Help: "Payload bytes seen by logical transport rejections by bounded stable code.",
+		}, []string{"code"}),
+		TransportFrames: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_frames_total",
+			Help: "Completed logical transport transfers by direction.",
+		}, []string{"direction"}),
+		TransportBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_bytes_total",
+			Help: "Completed logical transport bytes by direction.",
+		}, []string{"direction"}),
+		TransportIncoming: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "transport_incoming_transfers",
+			Help: "Inbound partial transfers currently holding a reassembly reservation.",
+		}),
+		TransportReserved: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "transport_reserved_bytes",
+			Help: "Inbound payload plus per-fragment bookkeeping currently reserved.",
+		}),
+		TransportBudgetFallbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_budget_fallbacks_total",
+			Help: "Routes that used the local budget because an end-to-end peer advertisement is not observable by Access.",
+		}, []string{"route"}),
 	}
 	registry.MustRegister(
 		m.HostResults,
@@ -165,6 +216,8 @@ func NewMetrics() *Metrics {
 		m.ConnectedDevices,
 		m.RevocationLatency,
 		m.RequestForwardRetries,
+		m.ResultBoundRejected,
+		m.ReleaseFenced,
 		m.DevicePresenceEvents,
 		m.PresenceDuplicatesIgnored,
 		m.PresenceInvalidPayloads,
@@ -178,6 +231,14 @@ func NewMetrics() *Metrics {
 		m.CleanupBatches,
 		m.CleanupRows,
 		m.CleanupBacklogTotal,
+		m.CleanupLastRun,
+		m.TransportRejections,
+		m.TransportRejectedBytes,
+		m.TransportFrames,
+		m.TransportBytes,
+		m.TransportIncoming,
+		m.TransportReserved,
+		m.TransportBudgetFallbacks,
 	)
 	return m
 }
@@ -238,6 +299,20 @@ func (m *Metrics) ObserveRevocation(duration time.Duration) {
 		return
 	}
 	m.RevocationLatency.Observe(float64(duration.Milliseconds()))
+}
+
+// ResultRejected records a host result body rejected before storage.
+func (m *Metrics) ResultRejected() {
+	if m != nil && m.ResultBoundRejected != nil {
+		m.ResultBoundRejected.Inc()
+	}
+}
+
+// ReleaseFenced records a ciphertext read denied by the release policy.
+func (m *Metrics) ReleaseDenied() {
+	if m != nil && m.ReleaseFenced != nil {
+		m.ReleaseFenced.Inc()
+	}
 }
 
 // PresenceEvent records one accepted broker/device presence event. Labels are
@@ -328,4 +403,80 @@ func (m *Metrics) CleanupBacklog() {
 	if m != nil {
 		m.CleanupBacklogTotal.Inc()
 	}
+}
+
+// TransportRejected records one bounded transport rejection. code is restricted
+// to the stable transport rejection vocabulary so a caller cannot grow metric
+// cardinality; bytes and limit are aggregate sizes only.
+func (m *Metrics) TransportRejected(code string, bytes, limit int64) {
+	if m == nil || m.TransportRejections == nil {
+		return
+	}
+	switch code {
+	case "frame_packet", "frame_header", "frame_width", "frame_geometry",
+		"envelope_budget", "fragment_count", "reassembly_budget", "frame_integrity",
+		"frame_topic", "receipt", "bulk_admission", "budget_missing", "budget_invalid":
+	default:
+		code = "frame_header"
+	}
+	m.TransportRejections.WithLabelValues(code).Inc()
+	if bytes > 0 {
+		m.TransportRejectedBytes.WithLabelValues(code).Add(float64(bytes))
+	}
+	_ = limit
+}
+
+// TransportFrame counts one completed logical transfer.
+func (m *Metrics) TransportFrame(direction string, bytes int64) {
+	if m == nil || m.TransportFrames == nil {
+		return
+	}
+	switch direction {
+	case "in", "out":
+	default:
+		direction = "in"
+	}
+	m.TransportFrames.WithLabelValues(direction).Inc()
+	if bytes > 0 {
+		m.TransportBytes.WithLabelValues(direction).Add(float64(bytes))
+	}
+}
+
+// TransportReservations publishes the current inbound reassembly reservation.
+func (m *Metrics) TransportReservations(transfers int, reserved int64) {
+	if m == nil || m.TransportIncoming == nil {
+		return
+	}
+	m.TransportIncoming.Set(float64(transfers))
+	if reserved < 0 {
+		reserved = 0
+	}
+	m.TransportReserved.Set(float64(reserved))
+}
+
+// CleanupCompleted records the completion instant of one cleanup operation.
+func (m *Metrics) CleanupCompleted(operation string) {
+	if m == nil || m.CleanupLastRun == nil {
+		return
+	}
+	switch operation {
+	case "bodies", "tokens", "queries":
+	default:
+		operation = "unknown"
+	}
+	m.CleanupLastRun.WithLabelValues(operation).SetToCurrentTime()
+}
+
+// TransportBudgetFallback records a route that used the local budget because
+// the peer receive advertisement is not observable by Access.
+func (m *Metrics) TransportBudgetFallback(route string) {
+	if m == nil || m.TransportBudgetFallbacks == nil {
+		return
+	}
+	switch route {
+	case "device":
+	default:
+		route = "device"
+	}
+	m.TransportBudgetFallbacks.WithLabelValues(route).Inc()
 }

@@ -108,6 +108,7 @@ func TestRevokedPermissionStopsForwardingAndPreservesExactCancellation(t *testin
 		PayloadDigest: digest[:], Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
 		Status: whalereinv1.OnlineStatus_received, ProtocolVersion: 1,
 		ExpiresAt: now.Add(time.Minute),
+		Stamp:     &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 16 << 20},
 	}
 	if _, err := s.CreateRequest(ctx, request); err != nil {
 		t.Fatal(err)

@@ -14,7 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/whalerein/whalerein/access/internal/broker"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
@@ -34,12 +37,21 @@ var (
 	ErrResultMismatch  = errors.New("host result mismatch")
 	ErrInvalidResult   = errors.New("invalid host result")
 	ErrUnavailable     = errors.New("unavailable")
+	// ErrReleaseFenced denies ciphertext whose grant revision or retention no
+	// longer authorizes release. Metadata-only kinds keep their recovery path.
+	ErrReleaseFenced = errors.New("ciphertext release fenced")
+	// ErrResultTooLarge rejects a host result before it is buffered or stored.
+	ErrResultTooLarge = errors.New("host result exceeds request bound")
+	// ErrRequestTooLarge rejects an admitted request whose forwarded envelope
+	// (including Access-bound metadata) cannot fit the configured budget.
+	ErrRequestTooLarge = errors.New("request exceeds forwarded transport budget")
 )
 
 // Store is the request persistence boundary.
 type Store interface {
 	CreateRequest(ctx context.Context, req store.Request) (store.CreateOutcome, error)
 	GetRequest(ctx context.Context, requestID string) (store.Request, error)
+	ReleaseRequest(ctx context.Context, scope store.ReleaseScope) (store.ReleaseOutcome, error)
 	ClaimDueRequests(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]store.Request, error)
 	RequeueDuePublished(ctx context.Context, now time.Time, maxAttempts int) (int64, error)
 	MarkPublished(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration) error
@@ -79,6 +91,21 @@ type Config struct {
 	RetryInterval            time.Duration
 	MaxAttempts              int
 	BatchSize                int
+	// MaxResultBytes is the raw ciphertext cap Access retains for one result.
+	// MaxDeliveryBytes is the current HTTP response body budget used to derive
+	// the encoded result allowance on both admission and release.
+	MaxResultBytes   int64
+	MaxDeliveryBytes int64
+	// EnvelopeBytes is the effective logical envelope budget for one forwarded
+	// HostRequest, including Access-bound transport metadata.
+	EnvelopeBytes int64
+}
+
+// GrantAuthority reads durable grant revisions. It is deliberately a store
+// read, never the realtime admission cache, so a stamp cannot be refreshed
+// from stale local state.
+type GrantAuthority interface {
+	AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (store.AdmissionGrant, error)
 }
 
 // Dependencies wires the request service.
@@ -92,6 +119,7 @@ type Dependencies struct {
 	Store    Store
 	Broker   Broker
 	Presence Presence
+	Grants   GrantAuthority
 	Config   Config
 	Metrics  *diagnostics.Metrics
 	Masker   *diagnostics.Masker
@@ -105,6 +133,7 @@ type Service struct {
 	store    Store
 	broker   Broker
 	presence Presence
+	grants   GrantAuthority
 	cfg      Config
 	metrics  *diagnostics.Metrics
 	masker   *diagnostics.Masker
@@ -140,8 +169,20 @@ func New(deps Dependencies) (*Service, error) {
 	if deps.Presence == nil {
 		return nil, errors.New("requests: presence is required")
 	}
+	if deps.Grants == nil {
+		return nil, errors.New("requests: grant authority is required")
+	}
 	if deps.Now == nil {
 		deps.Now = func() time.Time { return time.Now().UTC() }
+	}
+	if deps.Config.MaxResultBytes <= 0 {
+		deps.Config.MaxResultBytes = 16 << 20
+	}
+	if deps.Config.MaxDeliveryBytes <= 0 {
+		deps.Config.MaxDeliveryBytes = 24 << 20
+	}
+	if deps.Config.EnvelopeBytes <= 0 {
+		deps.Config.EnvelopeBytes = 16 << 20
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -157,6 +198,7 @@ func New(deps Dependencies) (*Service, error) {
 		sessions: deps.Sessions,
 		broker:   deps.Broker,
 		presence: deps.Presence,
+		grants:   deps.Grants,
 		cfg:      deps.Config,
 		metrics:  deps.Metrics,
 		masker:   deps.Masker,
@@ -175,6 +217,19 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 	if validationErr != nil {
 		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
 		return store.Request{}, false, validationErr
+	}
+	// Read the durable revisions exactly once for this admission. The request's
+	// own wire metadata is never trusted for the stamp, and a replay only
+	// returns the already persisted row without rewriting it.
+	stamp, stampErr := s.admissionStamp(ctx, input)
+	if stampErr != nil {
+		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		return store.Request{}, false, stampErr
+	}
+	req.Stamp = stamp
+	if sizeErr := s.checkForwardedSize(req); sizeErr != nil {
+		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		return store.Request{}, false, sizeErr
 	}
 	switch {
 	case !s.presence.Available():
@@ -235,6 +290,89 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		"status", store.StatusName(outcome.Request.Status),
 		"trace_id", outcome.Request.TraceID)
 	return outcome.Request, true, nil
+}
+
+// resultEnvelopeOverheadBytes reserves the non-body protojson envelope and
+// field overhead so both the encoded bound and the raw allowance are derivable
+// from one number without inspecting the encrypted body.
+const resultEnvelopeOverheadBytes int64 = 2048
+
+// ResultValueLimit converts an encoded HTTPS result-body bound to the raw
+// ciphertext bytes it can carry. It never inspects the body.
+func ResultValueLimit(encodedBytes int64) int64 {
+	if encodedBytes <= 0 {
+		return 0
+	}
+	if encodedBytes <= resultEnvelopeOverheadBytes {
+		return 0
+	}
+	return (encodedBytes - resultEnvelopeOverheadBytes) / 4 * 3
+}
+
+// EncodedResultLimit converts a raw ciphertext allowance to the encoded HTTPS
+// result-body bound that carries it (base64 plus the bounded envelope).
+func EncodedResultLimit(rawBytes int64) int64 {
+	if rawBytes <= 0 {
+		return resultEnvelopeOverheadBytes
+	}
+	groups := rawBytes / 3
+	if rawBytes%3 != 0 {
+		groups++
+	}
+	if groups > (math.MaxInt64-resultEnvelopeOverheadBytes)/4 {
+		return math.MaxInt64
+	}
+	return groups*4 + resultEnvelopeOverheadBytes
+}
+
+func (s *Service) admissionStamp(ctx context.Context, input SubmitInput) (*store.GrantStamp, error) {
+	grant, err := s.grants.AdmissionGrantFor(ctx, input.HostID, input.DeviceID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, fmt.Errorf("read admission grant: %w", err)
+	}
+	if !grant.Active {
+		return nil, ErrForbidden
+	}
+	return &store.GrantStamp{
+		GrantGeneration:            grant.GrantGeneration,
+		RevocationGeneration:       grant.RevocationGeneration,
+		DeviceRevocationGeneration: grant.DeviceRevocationGeneration,
+		ResultLimitBytes:           s.resultLimitFor(input.Request),
+	}, nil
+}
+
+// resultLimitFor validates the device's declared encoded result bound against
+// Access's retained ciphertext cap and its current HTTP delivery budget. It
+// clamps rather than trusts, and it ignores any device-supplied generation.
+// resultLimitBase is the raw ciphertext allowance implied by Access's own
+// retention and HTTP delivery bounds, independent of the device declaration.
+func (s *Service) resultLimitBase() int64 {
+	limit := s.cfg.MaxResultBytes
+	if delivery := ResultValueLimit(s.cfg.MaxDeliveryBytes); delivery < limit {
+		limit = delivery
+	}
+	return limit
+}
+
+func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
+	limit := s.resultLimitBase()
+	declared := request.GetTransport().GetResultMaxBytes()
+	if declared > 0 {
+		declaredLimit := int64(math.MaxInt64)
+		if declared < uint64(math.MaxInt64) {
+			declaredLimit = int64(declared)
+		}
+		if raw := ResultValueLimit(declaredLimit); raw < limit {
+			limit = raw
+		}
+	}
+	if limit < 0 {
+		return 0
+	}
+	return limit
 }
 
 func (s *Service) validate(input SubmitInput) (store.Request, error) {
@@ -310,6 +448,49 @@ func leaseDeadline(expiresAt *time.Time, now time.Time, lease time.Duration) *ti
 
 // ForwardDue leases due rows with FOR UPDATE SKIP LOCKED, publishes outside the
 // lease transaction and records the publish outcome on the same row.
+// envelopeFor builds the exact HostRequest Access forwards. Admission uses the
+// same function so the size it accepts is the size the broker later publishes.
+func (s *Service) envelopeFor(row store.Request) *whalereinv1.HostRequest {
+	envelope := &whalereinv1.HostRequest{
+		RequestId:              row.RequestID,
+		HostId:                 row.HostID,
+		DeviceId:               row.DeviceID,
+		Kind:                   row.Kind,
+		CommandId:              row.CommandID,
+		PayloadDigest:          row.PayloadDigest,
+		ExpiresAtUnixMs:        row.ExpiresAt.UnixMilli(),
+		TraceId:                row.TraceID,
+		ProtocolVersion:        row.ProtocolVersion,
+		ClientTransportVersion: row.ClientTransportVersion,
+		RelayTransportVersion:  2,
+		ChannelId:              row.ChannelID,
+		Body:                   row.RequestBody,
+	}
+	if row.Stamp != nil {
+		// Forward only durable metadata captured at admission. The device's
+		// own grant_generation is overwritten, never relayed.
+		envelope.Transport = &whalereinv1.RequestTransportMetadata{
+			ResultMaxBytes:       uint64(EncodedResultLimit(row.Stamp.ResultLimitBytes)),
+			GrantGeneration:      row.Stamp.GrantGeneration,
+			RevocationGeneration: row.Stamp.RevocationGeneration,
+		}
+	}
+	return envelope
+}
+
+// checkForwardedSize rejects an admission that cannot fit the forwarded
+// envelope budget. It runs before the request is journaled so the caller gets a
+// definitive payload_too_large instead of an uncertain forward outcome.
+func (s *Service) checkForwardedSize(row store.Request) error {
+	if s.cfg.EnvelopeBytes <= 0 {
+		return nil
+	}
+	if int64(proto.Size(s.envelopeFor(row))) > s.cfg.EnvelopeBytes {
+		return ErrRequestTooLarge
+	}
+	return nil
+}
+
 func (s *Service) ForwardDue(ctx context.Context) error {
 	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	now := s.now()
@@ -355,20 +536,7 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 				"trace_id", row.TraceID)
 			continue
 		}
-		envelope := &whalereinv1.HostRequest{
-			RequestId:              row.RequestID,
-			HostId:                 row.HostID,
-			DeviceId:               row.DeviceID,
-			Kind:                   row.Kind,
-			CommandId:              row.CommandID,
-			PayloadDigest:          row.PayloadDigest,
-			ExpiresAtUnixMs:        row.ExpiresAt.UnixMilli(),
-			TraceId:                row.TraceID,
-			ProtocolVersion:        row.ProtocolVersion,
-			ClientTransportVersion: row.ClientTransportVersion,
-			ChannelId:              row.ChannelID,
-			Body:                   row.RequestBody,
-		}
+		envelope := s.envelopeFor(row)
 		publish := func() error { return s.broker.PublishRequest(ctx, row.HostID, envelope) }
 		var err error
 		if s.sessions != nil {
@@ -618,8 +786,79 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 	return req, nil
 }
 
+// Release authorizes one ciphertext read in a single durable decision and
+// applies the per-kind release policy. QUERY ciphertext fails closed with
+// ErrReleaseFenced; COMMAND and Access-authored rows keep their metadata-only
+// recovery semantics while their body is withheld.
+func (s *Service) Release(ctx context.Context, deviceID, sessionID, requestID string, deliveryLimitBytes int64) (store.Request, error) {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
+	outcome, err := s.store.ReleaseRequest(ctx, store.ReleaseScope{
+		DeviceID:           deviceID,
+		SessionID:          sessionID,
+		RequestID:          requestID,
+		DeliveryLimitBytes: deliveryLimitBytes,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Request{}, ErrNotFound
+		}
+		return store.Request{}, fmt.Errorf("release request: %w", err)
+	}
+	req := outcome.Request
+	if !outcome.SessionValid {
+		return store.Request{}, ErrForbidden
+	}
+	if !terminalStatus(req.Status) && !s.now().Before(req.ExpiresAt) {
+		return req, ErrExpired
+	}
+	allowed := outcome.StampPresent && outcome.GrantActive && outcome.StampCurrent &&
+		!outcome.BodiesCleared && outcome.WithinResultBound && outcome.WithinDelivery
+	fencedKind := req.Kind == whalereinv1.RequestKind_REQUEST_KIND_QUERY ||
+		req.Kind == whalereinv1.RequestKind_REQUEST_KIND_COMMAND
+	if fencedKind && !allowed {
+		s.metrics.ReleaseDenied()
+		s.logger.Warn("ciphertext release fenced",
+			"host", s.masker.Host(req.HostID), "device", s.masker.Device(req.DeviceID),
+			"request", s.masker.Request(req.RequestID), "kind", req.Kind,
+			"stamp_present", outcome.StampPresent, "grant_active", outcome.GrantActive,
+			"stamp_current", outcome.StampCurrent, "bodies_cleared", outcome.BodiesCleared,
+			"within_bound", outcome.WithinResultBound, "within_delivery", outcome.WithinDelivery,
+			"bytes", len(req.ResultBody))
+	}
+	switch req.Kind {
+	case whalereinv1.RequestKind_REQUEST_KIND_QUERY:
+		// Attachment pulls are queries too: an unfenced query never releases
+		// ciphertext, including after a later re-grant. A query without its
+		// stamp fails closed even when no body was stored yet.
+		if !allowed {
+			return store.Request{}, ErrReleaseFenced
+		}
+	case whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
+		if !allowed {
+			req.ResultBody = nil
+		}
+	}
+	return req, nil
+}
+
+// resultIngestLimit bounds an incoming result by the stored request stamp, the
+// retained ciphertext cap and the current HTTP delivery budget. A legacy row
+// without a stamp falls back to the current Access limits; it can never widen
+// beyond them.
+func (s *Service) resultIngestLimit(row store.Request) int64 {
+	limit := s.resultLimitBase()
+	if row.Stamp != nil && row.Stamp.ResultLimitBytes < limit {
+		limit = row.Stamp.ResultLimitBytes
+	}
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
 // HandleHostResult validates a host result against the topic host and updates
 // only the matching request row using the allowed conditional transitions.
+
 func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result *whalereinv1.HostResult) error {
 	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	if result == nil || topicHost == "" || result.GetRequestId() == "" {
@@ -656,6 +895,14 @@ func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result
 	if !store.ValidStatus(result.GetStatus()) || result.GetStatus() == whalereinv1.OnlineStatus_online_status_unspecified ||
 		result.GetStatus() == whalereinv1.OnlineStatus_received {
 		return fmt.Errorf("%w: status %s", ErrInvalidResult, whalereinv1.OnlineStatus_name[int32(result.GetStatus())])
+	}
+	if limit := s.resultIngestLimit(row); int64(len(result.GetResultBody())) > limit {
+		s.metrics.ResultRejected()
+		s.logger.Warn("host result rejected before storage",
+			"host", s.masker.Host(topicHost), "device", s.masker.Device(row.DeviceID),
+			"request", s.masker.Request(row.RequestID), "kind", row.Kind,
+			"bytes", len(result.GetResultBody()), "limit", limit, "trace_id", row.TraceID)
+		return fmt.Errorf("%w: result body %d bytes exceeds limit %d", ErrResultTooLarge, len(result.GetResultBody()), limit)
 	}
 	applied, err := s.store.ApplyHostResult(ctx, store.HostResultUpdate{
 		RequestID:    row.RequestID,

@@ -10,7 +10,7 @@ import { assertRequestIdentity, validateId } from './contracts/ids.js'
 import { isExpired } from './contracts/time.js'
 import { lockInstance } from './state/instance-lock.js'
 import { StateStore } from './state/store.js'
-import { SecurityManager } from './security/manager.js'
+import { SecurityManager, defaultReceiveAdvertisement } from './security/manager.js'
 import { authorizationPublicKey } from './security/host-auth.js'
 import { bytesEqual } from './security/digest.js'
 import { CommandService } from './commands/service.js'
@@ -19,6 +19,7 @@ import { WatchedEvents } from './events/watches.js'
 import { MqttAccess } from './access/mqtt.js'
 import { MESSAGE_BYTES } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
+import { validateRequestTransportMetadata } from './contracts/transport.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -157,6 +158,7 @@ export class HostRuntime {
           this.#events?.onChannelsCleared(channels)
           for (const deviceId of deviceIds) this.#commands?.revokeDevice(deviceId)
         },
+        receiveAdvertisement: () => this.#access?.receiveAdvertisement?.() ?? defaultReceiveAdvertisement(1),
       })
       this.#access = this.injectedAccess ?? new MqttAccess({
         url: this.#config.mqttUrl,
@@ -169,6 +171,7 @@ export class HostRuntime {
         logger: this.#logger,
         now: this.now,
         codec: this.#codec,
+        transportProfile: this.#config.transportProfile ?? 'default',
       })
       this.#events = new WatchedEvents({
         hostId: this.#config.hostId,
@@ -189,6 +192,9 @@ export class HostRuntime {
         logger: this.#logger,
         now: this.now,
         codec: this.#codec,
+        security: this.#security,
+        attachmentPolicy: this.#config.attachmentPolicy ?? null,
+        transportProfile: this.#config.transportProfile ?? 'default',
         onAccepted: (request) => this.#reply(request, { status: 'host_accepted' }),
       })
       // Crash recovery happens before any request is accepted.
@@ -360,6 +366,7 @@ export class HostRuntime {
     this.#commands?.closeWaits()
     this.#commands?.closeQuestionAnswers()
     this.#commands?.closeModelQueries()
+    this.#commands?.closeAttachments()
     try {
       await this.#access?.stop()
     } catch {
@@ -470,7 +477,18 @@ export class HostRuntime {
       }
       if (kind === 'REQUEST_KIND_HANDSHAKE') return await this.#handleHandshake(request)
       if (kind === 'REQUEST_KIND_QUERY' || kind === 'REQUEST_KIND_COMMAND') {
-        return await this.#security.withRequest(request, opened => this.#handleEncrypted(request, opened))
+        // Request metadata is outside the encrypted body. Validate its shape
+        // before forwarding so the result bound and grant stamp cannot be
+        // reinterpreted. The values stay untouched for Access authority.
+        let requestTransport = null
+        if (request.transport !== undefined) {
+          try { requestTransport = validateRequestTransportMetadata(request.transport) }
+          catch (error) {
+            this.#logger?.warn('request_transport_rejected', { code: 'invalid_argument', kind, layer: 'host' })
+            return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'request transport metadata invalid' })
+          }
+        }
+        return await this.#security.withRequest(request, opened => this.#handleEncrypted(request, opened, requestTransport))
       }
       if (kind === 'REQUEST_KIND_HOST_CLIENTS') {
         if (request.host_id !== this.#config.hostId || request.device_id || request.relay_transport_version !== 2) {
@@ -549,7 +567,7 @@ export class HostRuntime {
     }
   }
 
-  async #handleEncrypted(request, opened) {
+  async #handleEncrypted(request, opened, requestTransport = null) {
     if (!opened.ok) {
       this.#logger?.warn('request_frame_rejected', { trace: request.trace_id, request: request.request_id, device: request.device_id, channel: request.channel_id, code: opened.code, reason: opened.reason, layer: 'host', scope: 'channel' })
       return await this.#reply(request, { status: 'rejected', errorCode: opened.code })
@@ -595,7 +613,11 @@ export class HostRuntime {
       status: result.status,
       resultBody: responseBody ?? undefined,
       errorCode: result.errorCode,
-      enforceResponseBudget: Boolean(payload.list_models || payload.read_session_model || payload.read_pending_queue || payload.list_questions || payload.get_question || payload.wait_session || payload.read_wait_state || payload.read_message_reply),
+      // Canonical packing: a complete query result, including the sealed
+      // envelope, is admitted whole or reported payload_too_large. A durable
+      // command outcome keeps its journal semantics.
+      enforceResponseBudget: request.kind === 'REQUEST_KIND_QUERY',
+      resultMaxBytes: requestTransport?.result_max_bytes,
       completedAt,
     })
   }
@@ -617,7 +639,7 @@ export class HostRuntime {
     return null
   }
 
-  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, completedAt, errorDetail }) {
+  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, resultMaxBytes, completedAt, errorDetail }) {
     const known = isErrorCode(errorCode)
     if (!known && errorCode !== 'error_code_unspecified') {
       this.#logger?.warn('unknown_error_code', { code: typeof errorCode === 'string' ? errorCode.slice(0, 32) : 'non_string' })
@@ -638,8 +660,15 @@ export class HostRuntime {
       protocol_version: PROTOCOL_VERSION,
       channel_id: request.channel_id ?? '',
     }
+    // The encoded HostResult, including the sealed result framing, is the hard
+    // ceiling. The request metadata bound can only lower the local envelope.
+    const localLimit = MESSAGE_BYTES
+    const hardLimit = Number.isSafeInteger(resultMaxBytes) && resultMaxBytes > 0
+      ? Math.min(localLimit, resultMaxBytes)
+      : localLimit
     let encoded = this.#codec.encode('whalerein.v1.HostResult', result)
-    if (enforceResponseBudget && encoded.length > MESSAGE_BYTES) {
+    if (enforceResponseBudget && encoded.length > hardLimit) {
+      this.#logger?.warn('host_result_oversize', { code: 'payload_too_large', kind: request.kind, bytes: encoded.length, limit: hardLimit, layer: 'host' })
       result.status = 'failed'
       result.result_body = EMPTY
       result.error_code = 'payload_too_large'
@@ -692,6 +721,7 @@ export class HostRuntime {
         dropped: conversation?.outboxDrops ?? 0,
       },
       activeChannels: channelIds.length,
+      attachments: this.#commands?.attachments?.describe?.() ?? null,
     }
   }
 }

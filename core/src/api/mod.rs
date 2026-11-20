@@ -38,6 +38,10 @@ mod proto_compat;
 pub mod test_support;
 mod types;
 
+pub use crate::access::transport::{
+    resolve_transport_settings, TransportBudget, TransportOverrides, TransportProfile,
+    TransportSettings,
+};
 pub use crate::account::native::{
     AccountHost, AccountIdentity, AccountLoginPrompt, AccountSessionInfo, AccountSessionState,
     AccountWorkspace, SignedInAccount,
@@ -46,6 +50,9 @@ pub use crate::account::Environment;
 #[cfg(test)]
 pub use crate::account::{
     AccountBinding, CustomServiceInput, ProfileMode, ServiceDescriptor, ServiceKind,
+};
+pub use crate::attachments::{
+    AttachmentLimits, AttachmentReference, DownloadOutcome, DownloadProgress, DownloadRequest,
 };
 pub use crate::diagnostics::journal::{
     DiagnosticContext, DiagnosticEvent, DiagnosticKind, DiagnosticLevel, DiagnosticSink,
@@ -68,7 +75,8 @@ pub use core::cloud_pairing::{CloudRevocationOutcome, CloudRevocationState};
 #[cfg(test)]
 pub use core::CoreOptions;
 pub use core::{
-    AccountState, ClientStatus, Core, DeviceAccess, ForkOutcome, MessageReply, SendOperation,
+    AccountState, ClientStatus, Core, DeviceAccess, ForkOutcome, SendFollowUp, SendOperation,
+    SendReply,
 };
 pub use error::{error_code_action, error_code_exit_code, error_code_name, CoreError, CoreResult};
 pub use instance::{ClientConfig, ClientService};
@@ -77,13 +85,13 @@ pub use proto_compat::{
 };
 pub use types::{
     ApprovalInfo, Cancellation, CommandDiagnostics, CommandHandle, CreateSessionInput,
-    DoctorReport, ExportManifest, HostCapabilities, HostInfo, LifecycleReceipt, ModelCatalog,
-    ModelChoice, ModelSelectionReceipt, ObservationInterests, OnlineStatus, PairingHistoryRecord,
-    PairingOutcome, PairingPrompt, PendingCommand, PendingQueue, PendingQueueAction,
-    QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo, QuestionOptionInfo,
-    QuestionPageInfo, QuestionReceiptInfo, QuestionStamp, QuestionView, RevocationOutcome,
-    RevocationRetention, SessionCapabilities, SessionEvent, SessionEventPayload, SessionList,
-    SessionModel, SessionSummary, WaitInput, WaitObservation, WaitReason, WaitState,
+    DoctorReport, ExportManifest, HostCapabilities, HostInfo, InputKind, LifecycleReceipt,
+    ModelCatalog, ModelChoice, ModelSelectionReceipt, ObservationInterests, OnlineStatus,
+    PairingHistoryRecord, PairingOutcome, PairingPrompt, PendingCommand, PendingQueue,
+    PendingQueueAction, QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo,
+    QuestionOptionInfo, QuestionPageInfo, QuestionReceiptInfo, QuestionStamp, QuestionView,
+    RevocationOutcome, RevocationRetention, SessionCapabilities, SessionEvent, SessionEventPayload,
+    SessionList, SessionModel, SessionSummary, WaitInput, WaitObservation, WaitReason, WaitState,
 };
 
 // Delivery choices are Core-owned; wire conversion stays internal.

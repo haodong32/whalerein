@@ -324,7 +324,7 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     if native:
         from native_environment import NativeScenario
 
-        value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None)
+        value = NativeScenario(tmp_path, schema, timed_questions=request.node.get_closest_marker("timed_questions") is not None, short_approvals=request.node.get_closest_marker("short_approvals") is not None, debug_logging=request.node.get_closest_marker("privacy_debug_logging") is not None, wrapper_launcher=request.node.get_closest_marker("wrapper_launcher") is not None, external_launcher=request.node.get_closest_marker("external_launcher") is not None, reasoning=request.node.get_closest_marker("native_reasoning") is not None, compactable=request.node.get_closest_marker("native_compaction") is not None)
         if "host_mqtt_relay" in request.fixturenames:
             value.mqtt_port = request.getfixturevalue("host_mqtt_relay").port
     else:
@@ -344,6 +344,9 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
         config = value.config.read_text()
         assert config.count("log:\n  level: error") == 1
         value.config.write_text(config.replace("log:\n  level: error", "log:\n  level: info", 1))
+    policy = request.node.get_closest_marker("attachment_policy")
+    if policy is not None and not native:
+        value.attachment_policy = dict(policy.kwargs)
     try:
         from integration_report import progress
 

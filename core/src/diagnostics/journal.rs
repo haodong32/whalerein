@@ -125,6 +125,20 @@ pub enum DiagnosticKind {
     CapabilityMissing { capability: &'static str },
     #[serde(rename = "diagnostic_save_failed")]
     DiagnosticSaveFailed,
+    /// Redacted attachment transfer evidence: stable stage, outcome, code and
+    /// counts only. Never a filename, local path, occurrence, cursor or digest.
+    #[serde(rename = "attachment_transfer")]
+    AttachmentTransfer {
+        stage: &'static str,
+        outcome: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'static str>,
+        bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parts: Option<u32>,
+    },
 }
 
 impl DiagnosticKind {
@@ -141,6 +155,10 @@ impl DiagnosticKind {
             Self::HttpCompleted { .. }
             | Self::AccessRequestSubmitting { .. }
             | Self::CapabilityMissing { .. } => DiagnosticLevel::Debug,
+            Self::AttachmentTransfer { code, .. } => match code {
+                Some(_) => DiagnosticLevel::Warn,
+                None => DiagnosticLevel::Info,
+            },
             Self::ConfigurationLoaded
             | Self::ConfigurationFailed { .. }
             | Self::OperationStage { .. }

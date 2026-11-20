@@ -47,7 +47,7 @@ impl Fixture {
         self.run_with_interrupt(args, std::future::pending()).await
     }
 
-    async fn run_with_interrupt(
+    pub(super) async fn run_with_interrupt(
         &self,
         args: &[&str],
         signal: impl std::future::Future<Output = ()>,
@@ -64,13 +64,13 @@ impl Fixture {
         )
         .unwrap();
         let diagnostics = CliDiagnosticSink::disabled();
-        run_with_signal(
+        Box::pin(run_with_signal(
             cli,
             self.secrets.clone(),
             signal,
             &diagnostics,
             DiagnosticContext::new(diagnostics.clone()),
-        )
+        ))
         .await
     }
 }

@@ -14,6 +14,7 @@ export class FixtureAdapter extends DshAdapter {
   pending = new Map()
   events = new Set()
   approvals = new Set()
+  attachmentSources = new Map()
   next = 0
   waitRecords = []
   recordWait() {
@@ -117,6 +118,66 @@ export class FixtureAdapter extends DshAdapter {
   }
   async describeHostCapabilities() { return {session_create:true,session_fork:true, model_catalog:true, model_read:true} }
   async executeHost(command, context = {}) { return this.callScoped('executeHost', [command], context?.signal) }
+}
+
+// Attachment occurrence resolution and history projection share this adapter's
+// local view, so a client-visible occurrence reference resolves locally to the
+// native object. Only bounded bytes cross the socket. The Host passes its
+// effective chunk to pullAttachment, so the authority sees the configured
+// chunking directly and a test control can hold the first part for revocation.
+FixtureAdapter.prototype.attachmentsAvailable = function() { return true }
+FixtureAdapter.prototype.openAttachment = async function(sessionId, attachmentRef, {signal} = {}) {
+  if (signal?.aborted) throw new AdapterError('unavailable')
+  const occurrence = await this.resolveAttachment(sessionId, attachmentRef, {signal})
+  if (signal?.aborted) throw new AdapterError('unavailable')
+  if (!occurrence) throw new AdapterError('not_found')
+  const native = occurrence.attachment
+  const size = Number.isSafeInteger(native?.bytes) && native.bytes >= 0 ? native.bytes : null
+  if (size === null) throw new AdapterError('invalid_argument')
+  const mediaType = typeof native?.mediaType === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(native.mediaType)
+    ? native.mediaType : 'application/octet-stream'
+  const name = typeof native?.name === 'string' && !/[\\/]/.test(native.name) ? native.name : ''
+  const digest = occurrence.kind === 'file' ? /^sha256:([0-9a-f]{64})$/.exec(native?.attachmentId ?? '') : null
+  const key = `${sessionId}:${attachmentRef}`
+  if (occurrence.kind === 'image') {
+    const value = await this.callScoped('read_fixture_image', [native], signal)
+    this.attachmentSources.set(key, {kind: 'image', bytes: new Uint8Array(Buffer.from(value.data, 'base64')), offset: 0})
+  } else {
+    const opened = await this.callScoped('open_fixture_file', [native], signal)
+    this.attachmentSources.set(key, {kind: 'file', transfer: opened.transfer})
+  }
+  const hostId = process.env.WHALEREIN_HOST_ID
+  return {attachment: {
+    ...(hostId ? {session: {host_id: hostId, session_id: sessionId}} : {}),
+    attachment_ref: attachmentRef,
+    media_type: mediaType,
+    ...(name === '' ? {} : {name}),
+    size,
+    ...(digest ? {sha256: Uint8Array.from(Buffer.from(digest[1], 'hex'))} : {}),
+  }}
+}
+FixtureAdapter.prototype.pullAttachment = async function(sessionId, attachmentRef, {offset = 0, maxBytes, signal} = {}) {
+  const source = this.attachmentSources.get(`${sessionId}:${attachmentRef}`)
+  if (!source) throw new AdapterError('not_found')
+  if (signal?.aborted) throw new AdapterError('unavailable')
+  if (source.kind === 'image') {
+    const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : source.offset
+    const end = Math.min(source.bytes.length, start + maxBytes)
+    const bytes = source.bytes.subarray(start, end)
+    source.offset = end
+    return {bytes, eof: end >= source.bytes.length}
+  }
+  const part = await this.callScoped('pull_fixture_file', [source.transfer, maxBytes], signal)
+  return {bytes: new Uint8Array(Buffer.from(part.data, 'base64')), eof: part.eof === true}
+}
+FixtureAdapter.prototype.closeAttachment = async function(sessionId, attachmentRef, {cancel = false} = {}) {
+  const key = `${sessionId}:${attachmentRef}`
+  const source = this.attachmentSources.get(key)
+  if (!source) return
+  this.attachmentSources.delete(key)
+  if (source.kind === 'file') {
+    try { await this.call('close_fixture_file', source.transfer) } catch { /* cleanup is best effort */ }
+  }
 }
 // Signals belong to the local Host process. The test RPC carries only data;
 // callers stop waiting on local abort, while a late source reply is drained by

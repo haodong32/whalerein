@@ -19,8 +19,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::api::{HostInfo, OnlineStatus, PendingCommand, SessionSummary};
 use crate::session::SessionKey;
 
+pub(crate) use conversation::HistoryView;
+
 pub const CACHE_NONCE_LEN: usize = 12;
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 const HISTORY_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// How long an unknown send keeps its idempotency record. It is deliberately
 /// longer than one command request lifetime so a retry after reconnecting can
@@ -38,6 +40,8 @@ pub enum CacheError {
     InvalidKey,
     #[error("history cursor does not continue the applied view")]
     HistoryGap,
+    #[error("cache content projection does not match the active projection")]
+    ProjectionMismatch,
     #[error("conversation history exceeds the cache budget")]
     HistoryBudget,
     #[error("cache payload is corrupt")]
@@ -417,7 +421,7 @@ impl Cache {
             match version {
                 "1" => conn
                     .execute_batch("DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS sessions;")?,
-                "2" => {}
+                "2" | "3" => {}
                 _ => return Err(CacheError::Corrupt),
             }
         }
@@ -1138,7 +1142,8 @@ impl Cache {
         }
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(
-            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts;",
+            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts;
+             UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='cache_generation';",
         )?;
         #[cfg(test)]
         conn.execute_batch("DELETE FROM send_intents;")?;

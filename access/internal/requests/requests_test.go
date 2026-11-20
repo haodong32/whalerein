@@ -18,6 +18,24 @@ import (
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
+type fakeGrantAuthority struct {
+	grants map[string]store.AdmissionGrant
+	err    error
+	calls  []string
+}
+
+func (f *fakeGrantAuthority) AdmissionGrantFor(_ context.Context, hostID, deviceID string) (store.AdmissionGrant, error) {
+	f.calls = append(f.calls, hostID+"|"+deviceID)
+	if f.err != nil {
+		return store.AdmissionGrant{}, f.err
+	}
+	grant, ok := f.grants[hostID+"|"+deviceID]
+	if !ok {
+		return store.AdmissionGrant{}, store.ErrNotFound
+	}
+	return grant, nil
+}
+
 type fakeStore struct {
 	rows           map[string]store.Request
 	createOverride func(store.Request) (store.CreateOutcome, error)
@@ -47,6 +65,10 @@ type fakeStore struct {
 	cancelMarkErr error
 	attemptMarked []string
 	attemptErr    error
+
+	releaseOutcome store.ReleaseOutcome
+	releaseErr     error
+	releaseScopes  []store.ReleaseScope
 }
 
 type renewCall struct {
@@ -69,6 +91,21 @@ func (f *fakeStore) CreateRequest(_ context.Context, req store.Request) (store.C
 	}
 	f.rows[req.RequestID] = req
 	return store.CreateOutcome{Request: req, Created: true}, nil
+}
+
+func (f *fakeStore) ReleaseRequest(_ context.Context, scope store.ReleaseScope) (store.ReleaseOutcome, error) {
+	f.releaseScopes = append(f.releaseScopes, scope)
+	if f.releaseErr != nil {
+		return store.ReleaseOutcome{}, f.releaseErr
+	}
+	if f.releaseOutcome.Request.RequestID == "" {
+		row, ok := f.rows[scope.RequestID]
+		if !ok || row.DeviceID != scope.DeviceID {
+			return store.ReleaseOutcome{}, store.ErrNotFound
+		}
+		return store.ReleaseOutcome{Request: row, SessionValid: true, StampPresent: true, GrantActive: true, StampCurrent: true, WithinResultBound: true, WithinDelivery: true}, nil
+	}
+	return f.releaseOutcome, nil
 }
 
 func (f *fakeStore) GetRequest(_ context.Context, requestID string) (store.Request, error) {
@@ -207,6 +244,7 @@ type fixture struct {
 	store    *fakeStore
 	broker   *fakeBroker
 	presence *fakePresence
+	grants   *fakeGrantAuthority
 	now      time.Time
 }
 
@@ -215,10 +253,13 @@ func newFixture(t *testing.T) *fixture {
 	fs := newFakeStore()
 	broker := &fakeBroker{}
 	presence := &fakePresence{online: map[string]bool{"h1": true}}
+	grants := &fakeGrantAuthority{grants: map[string]store.AdmissionGrant{
+		"h1|d1": {HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 7, RevocationGeneration: 3, DeviceRevocationGeneration: 2},
+	}}
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-	ref := &fixture{store: fs, broker: broker, presence: presence, now: now}
+	ref := &fixture{store: fs, broker: broker, presence: presence, grants: grants, now: now}
 	service, err := New(Dependencies{
-		Store: fs, Broker: broker, Presence: presence,
+		Store: fs, Broker: broker, Presence: presence, Grants: grants,
 		Config: Config{
 			ProtocolVersion: 1, MaxTTL: time.Hour, ForwardInterval: time.Second,
 			Lease: 30 * time.Second, RetryInterval: 5 * time.Second, MaxAttempts: 3, BatchSize: 10,
@@ -264,6 +305,9 @@ func TestNewRejectsMissingRequiredDependencies(t *testing.T) {
 	}
 	if _, err := New(Dependencies{Store: newFakeStore(), Broker: &fakeBroker{}}); err == nil {
 		t.Fatal("expected presence error")
+	}
+	if _, err := New(Dependencies{Store: newFakeStore(), Broker: &fakeBroker{}, Presence: &fakePresence{online: map[string]bool{}}}); err == nil {
+		t.Fatal("expected grant authority error")
 	}
 }
 
@@ -680,7 +724,7 @@ func TestHandleHostResultAppliesOnlyValidStatusTransitions(t *testing.T) {
 
 func TestSubmitWithoutOptionalMetricsRecordsOfflineAcceptanceAndInvalidRequestFailure(t *testing.T) {
 	f := newFixture(t)
-	service, err := New(Dependencies{Store: f.store, Broker: f.broker, Presence: f.presence, Config: f.service.cfg, Logger: f.service.logger, Masker: f.service.masker, Now: func() time.Time { return f.now }})
+	service, err := New(Dependencies{Store: f.store, Broker: f.broker, Presence: f.presence, Grants: f.grants, Config: f.service.cfg, Logger: f.service.logger, Masker: f.service.masker, Now: func() time.Time { return f.now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,5 +1198,284 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 		if _, err := New(tc.deps); err == nil {
 			t.Fatalf("missing %s accepted", tc.name)
 		}
+	}
+}
+
+func TestResultLimitConversionsStayBounded(t *testing.T) {
+	cases := []struct {
+		raw, encoded, decoded int64
+	}{
+		{0, resultEnvelopeOverheadBytes, 0},
+		{1, resultEnvelopeOverheadBytes + 4, 3},
+		{3, resultEnvelopeOverheadBytes + 4, 3},
+		{3000, resultEnvelopeOverheadBytes + 4000, 3000},
+		{16 << 20, resultEnvelopeOverheadBytes + ((16<<20+2)/3)*4, 16<<20 + 2},
+	}
+	for _, tc := range cases {
+		if got := EncodedResultLimit(tc.raw); got != tc.encoded {
+			t.Fatalf("EncodedResultLimit(%d) = %d, want %d", tc.raw, got, tc.encoded)
+		}
+		if got := ResultValueLimit(tc.encoded); got != tc.decoded {
+			t.Fatalf("ResultValueLimit(%d) = %d, want %d", tc.encoded, got, tc.decoded)
+		}
+	}
+	if ResultValueLimit(-1) != 0 || ResultValueLimit(0) != 0 {
+		t.Fatal("nonpositive encoded limits must allow no ciphertext")
+	}
+}
+
+func TestSubmitCapturesDurableStampAndIgnoresCallerGeneration(t *testing.T) {
+	f := newFixture(t)
+	request := validRequest(f.now, "c1")
+	request.Transport = &whalereinv1.RequestTransportMetadata{
+		ResultMaxBytes:       1 << 20,
+		GrantGeneration:      999,
+		RevocationGeneration: 999,
+	}
+	row, created, err := f.service.Submit(context.Background(), input(request))
+	if err != nil || !created {
+		t.Fatalf("row=%+v created=%v err=%v", row, created, err)
+	}
+	if row.Stamp == nil {
+		t.Fatal("admission did not capture a grant stamp")
+	}
+	if row.Stamp.GrantGeneration != 7 || row.Stamp.RevocationGeneration != 3 || row.Stamp.DeviceRevocationGeneration != 2 {
+		t.Fatalf("stamp did not come from durable grant state: %+v", row.Stamp)
+	}
+	wantLimit := ResultValueLimit(1 << 20)
+	if row.Stamp.ResultLimitBytes != wantLimit {
+		t.Fatalf("result limit = %d, want %d", row.Stamp.ResultLimitBytes, wantLimit)
+	}
+	if len(f.grants.calls) != 1 || f.grants.calls[0] != "h1|d1" {
+		t.Fatalf("grant reads = %v", f.grants.calls)
+	}
+	f.store.claimRows = []store.Request{row}
+	if err := f.service.ForwardDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.published) != 1 {
+		t.Fatalf("published = %d", len(f.broker.published))
+	}
+	forwarded := f.broker.published[0].GetTransport()
+	if forwarded.GetGrantGeneration() != 7 || forwarded.GetRevocationGeneration() != 3 {
+		t.Fatalf("forwarded metadata did not carry durable revisions: %+v", forwarded)
+	}
+	if forwarded.GetResultMaxBytes() != uint64(EncodedResultLimit(wantLimit)) {
+		t.Fatalf("forwarded result bound = %d", forwarded.GetResultMaxBytes())
+	}
+
+	f.grants.grants["h1|d1"] = store.AdmissionGrant{HostID: "h1", DeviceID: "d1", Active: false, GrantGeneration: 7}
+	if _, _, err := f.service.Submit(context.Background(), input(validRequest(f.now, "c2"))); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("inactive grant = %v", err)
+	}
+	f.grants.err = errors.New("db down")
+	if _, _, err := f.service.Submit(context.Background(), input(validRequest(f.now, "c3"))); err == nil {
+		t.Fatal("expected durable grant read failure")
+	}
+	delete(f.grants.grants, "h1|d1")
+	f.grants.err = nil
+	if _, _, err := f.service.Submit(context.Background(), input(validRequest(f.now, "c4"))); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("missing grant = %v", err)
+	}
+}
+
+func TestSubmitReplayDoesNotRefreshStoredStamp(t *testing.T) {
+	f := newFixture(t)
+	existing := store.Request{
+		RequestID: "req-old", HostID: "h1", DeviceID: "d1", CommandID: "c1",
+		Status: whalereinv1.OnlineStatus_succeeded, ExpiresAt: f.now.Add(time.Hour),
+		Stamp: &store.GrantStamp{GrantGeneration: 2, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 10},
+	}
+	f.store.createOverride = func(store.Request) (store.CreateOutcome, error) {
+		return store.CreateOutcome{Request: existing}, nil
+	}
+	f.grants.grants["h1|d1"] = store.AdmissionGrant{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 9, RevocationGeneration: 9, DeviceRevocationGeneration: 9}
+	request := validRequest(f.now, "c1")
+	request.RequestId = "req-new"
+	request.Transport = &whalereinv1.RequestTransportMetadata{ResultMaxBytes: 1 << 20}
+	row, created, err := f.service.Submit(context.Background(), input(request))
+	if err != nil || created || row.RequestID != "req-old" {
+		t.Fatalf("row=%+v created=%v err=%v", row, created, err)
+	}
+	if row.Stamp == nil || row.Stamp.GrantGeneration != 2 || row.Stamp.ResultLimitBytes != 10 {
+		t.Fatalf("replay refreshed the stored stamp: %+v", row.Stamp)
+	}
+	if len(f.broker.published) != 0 {
+		t.Fatal("replay republished the request")
+	}
+}
+
+func TestReleaseAppliesFenceByKind(t *testing.T) {
+	baseRow := func(kind whalereinv1.RequestKind) store.Request {
+		return store.Request{
+			RequestID: "r1", HostID: "h1", DeviceID: "d1", CommandID: "c1", PayloadDigest: []byte("digest"),
+			Kind: kind, Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("ciphertext"),
+			ErrorCode: whalereinv1.ErrorCode_internal, ErrorMessage: "host failure",
+			ExpiresAt: time.Date(2026, 11, 9, 12, 30, 0, 0, time.UTC),
+			Stamp:     &store.GrantStamp{GrantGeneration: 7, RevocationGeneration: 3, DeviceRevocationGeneration: 2, ResultLimitBytes: 1 << 20},
+		}
+	}
+	allowed := func() store.ReleaseOutcome {
+		return store.ReleaseOutcome{
+			Request:      baseRow(whalereinv1.RequestKind_REQUEST_KIND_QUERY),
+			SessionValid: true, StampPresent: true, GrantActive: true, StampCurrent: true,
+			WithinResultBound: true, WithinDelivery: true,
+		}
+	}
+	cases := []struct {
+		name     string
+		mutate   func(*store.ReleaseOutcome)
+		err      error
+		wantBody string
+		twice    bool
+	}{
+		{"query current grant", func(*store.ReleaseOutcome) {}, nil, "ciphertext", false},
+		{"stored before revoke first get", func(o *store.ReleaseOutcome) { o.GrantActive = false; o.StampCurrent = false }, ErrReleaseFenced, "", false},
+		{"repeat get after revoke", func(o *store.ReleaseOutcome) { o.GrantActive = false; o.StampCurrent = false }, ErrReleaseFenced, "", true},
+		{"old result after regrant", func(o *store.ReleaseOutcome) { o.StampCurrent = false }, ErrReleaseFenced, "", false},
+		{"missing stamp", func(o *store.ReleaseOutcome) { o.StampPresent = false; o.StampCurrent = false }, ErrReleaseFenced, "", false},
+		{"body cleared", func(o *store.ReleaseOutcome) { o.BodiesCleared = true }, ErrReleaseFenced, "", false},
+		{"oversized under stored bound", func(o *store.ReleaseOutcome) { o.WithinResultBound = false }, ErrReleaseFenced, "", false},
+		{"lowered delivery cap", func(o *store.ReleaseOutcome) { o.WithinDelivery = false }, ErrReleaseFenced, "", false},
+		{"foreign device", func(o *store.ReleaseOutcome) { o.Request = store.Request{} }, ErrNotFound, "", false},
+		{"invalid session", func(o *store.ReleaseOutcome) { o.SessionValid = false }, ErrForbidden, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			outcome := allowed()
+			tc.mutate(&outcome)
+			f.store.releaseOutcome = outcome
+			if tc.name == "foreign device" {
+				f.store.releaseErr = store.ErrNotFound
+			}
+			row, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want %v", err, tc.err)
+			}
+			if tc.err != nil && len(row.ResultBody) != 0 {
+				t.Fatal("fenced response carried ciphertext")
+			}
+			if string(row.ResultBody) != tc.wantBody {
+				t.Fatalf("body = %q, want %q", row.ResultBody, tc.wantBody)
+			}
+			if tc.twice {
+				if _, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20); !errors.Is(err, ErrReleaseFenced) {
+					t.Fatalf("repeat release = %v", err)
+				}
+			}
+		})
+	}
+
+	t.Run("command metadata-only when fenced", func(t *testing.T) {
+		f := newFixture(t)
+		outcome := allowed()
+		outcome.Request = baseRow(whalereinv1.RequestKind_REQUEST_KIND_COMMAND)
+		outcome.StampCurrent = false
+		outcome.GrantActive = false
+		f.store.releaseOutcome = outcome
+		row, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(row.ResultBody) != 0 {
+			t.Fatal("fenced command response carried ciphertext")
+		}
+		if row.Status != whalereinv1.OnlineStatus_succeeded || row.ErrorCode != whalereinv1.ErrorCode_internal ||
+			row.CommandID != "c1" || !bytes.Equal(row.PayloadDigest, []byte("digest")) {
+			t.Fatalf("command metadata was not preserved: %+v", row)
+		}
+	})
+
+	t.Run("access-authored result keeps existing release", func(t *testing.T) {
+		f := newFixture(t)
+		outcome := allowed()
+		outcome.Request = baseRow(whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE)
+		outcome.StampPresent = false
+		outcome.StampCurrent = false
+		outcome.GrantActive = false
+		f.store.releaseOutcome = outcome
+		row, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20)
+		if err != nil || string(row.ResultBody) != "ciphertext" {
+			t.Fatalf("access-authored release changed: %+v, %v", row, err)
+		}
+	})
+
+	f := newFixture(t)
+	outcome := allowed()
+	outcome.Request.Status = whalereinv1.OnlineStatus_received
+	outcome.Request.ExpiresAt = f.now.Add(-time.Second)
+	f.store.releaseOutcome = outcome
+	if _, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20); !errors.Is(err, ErrExpired) {
+		t.Fatalf("expired pending release = %v", err)
+	}
+
+	f = newFixture(t)
+	outcome = allowed()
+	outcome.Request.ResultBody = nil
+	outcome.StampPresent = false
+	outcome.StampCurrent = false
+	f.store.releaseOutcome = outcome
+	if _, err := f.service.Release(context.Background(), "d1", "", "r1", 1<<20); !errors.Is(err, ErrReleaseFenced) {
+		t.Fatalf("missing stamp query without a body = %v", err)
+	}
+	if testutil.ToFloat64(f.service.metrics.ReleaseFenced) == 0 {
+		t.Fatal("release fence was not counted")
+	}
+}
+
+func TestHandleHostResultRejectsOversizedResultBeforeStorage(t *testing.T) {
+	f := newFixture(t)
+	f.store.rows["r1"] = store.Request{
+		RequestID: "r1", HostID: "h1", DeviceID: "d1", Kind: whalereinv1.RequestKind_REQUEST_KIND_QUERY,
+		Status: whalereinv1.OnlineStatus_received,
+		Stamp:  &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 4},
+	}
+	result := &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("12345")}
+	err := f.service.HandleHostResult(context.Background(), "h1", result)
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("oversized result = %v", err)
+	}
+	if len(f.store.applyCalls) != 0 {
+		t.Fatal("oversized result reached durable storage")
+	}
+	if testutil.ToFloat64(f.service.metrics.ResultBoundRejected) != 1 {
+		t.Fatal("result bound rejection was not counted")
+	}
+
+	// A row retained from before the stamp still obeys the current Access cap.
+	f = newFixture(t)
+	f.service.cfg.MaxResultBytes = 4
+	f.store.rows["r1"] = store.Request{RequestID: "r1", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
+	if err := f.service.HandleHostResult(context.Background(), "h1", result); !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("legacy oversized result = %v", err)
+	}
+}
+
+func TestSubmitClampsDeclaredResultBoundToAccessBudgets(t *testing.T) {
+	f := newFixture(t)
+	f.service.cfg.MaxResultBytes = 1000
+	request := validRequest(f.now, "c1")
+	request.Transport = &whalereinv1.RequestTransportMetadata{ResultMaxBytes: 1 << 30}
+	row, _, err := f.service.Submit(context.Background(), input(request))
+	if err != nil || row.Stamp == nil || row.Stamp.ResultLimitBytes != 1000 {
+		t.Fatalf("retained cap was not enforced: %+v, %v", row.Stamp, err)
+	}
+
+	f = newFixture(t)
+	f.service.cfg.MaxResultBytes = 1 << 20
+	f.service.cfg.MaxDeliveryBytes = resultEnvelopeOverheadBytes + 4000 // room for 3000 raw bytes
+	request = validRequest(f.now, "c2")
+	request.Transport = &whalereinv1.RequestTransportMetadata{ResultMaxBytes: 1 << 30}
+	row, _, err = f.service.Submit(context.Background(), input(request))
+	if err != nil || row.Stamp == nil || row.Stamp.ResultLimitBytes != 3000 {
+		t.Fatalf("delivery budget was not enforced: %+v, %v", row.Stamp, err)
+	}
+
+	f = newFixture(t)
+	request = validRequest(f.now, "c3")
+	row, _, err = f.service.Submit(context.Background(), input(request))
+	if err != nil || row.Stamp == nil || row.Stamp.ResultLimitBytes != f.service.cfg.MaxResultBytes {
+		t.Fatalf("unset declaration did not use the Access cap: %+v, %v", row.Stamp, err)
 	}
 }

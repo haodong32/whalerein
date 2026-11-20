@@ -365,10 +365,17 @@ fn sessions_send_stop_and_approvals_reach_the_fixture_host() {
     assert_eq!(recovered.operation_id, sent.request_id);
     assert_eq!(recovered.host_id, host_id);
     assert_eq!(recovered.session_id, "session-1");
+    let expected_message_id = sent
+        .message_id
+        .clone()
+        .expect("send receipt names a message");
     assert!(matches!(
         recovered.reply,
-        Some(whalerein_mobile::MessageReplyView::Committed { ref attempt_id, .. })
-            if attempt_id == "fixture-attempt"
+        Some(whalerein_mobile::MessageReplyView::Committed { ref reference })
+            if reference.message_id == expected_message_id
+                && reference.session.host_id == host_id
+                && reference.session.session_id == "session-1"
+                && !reference.projection_id.is_empty()
     ));
     // The same result is queued for observers.
     assert!(core.poll_events(0).iter().any(|event| matches!(

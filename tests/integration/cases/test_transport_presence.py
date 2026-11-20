@@ -303,6 +303,7 @@ def test_two_host_presence_fanout_and_scoped_revocation(scenario, paired_device)
             "revoked",
             "host_offline",
             "forbidden",
+            "authority_closed",
         )
     finally:
         second_plugin.close()

@@ -3297,3 +3297,475 @@ def test_native_question_multiple_continued_answers_are_atomic(scenario, paired_
     finally:
         scenario.model.release.set()
     wait(lambda: scenario.request("question-projected", sessionId=session)["count"] == 0, timeout=15, process=scenario.native)
+
+
+def digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def event_types(shape):
+    return [event["type"] for event in shape["events"]]
+
+
+@pytest.mark.native_reasoning
+def test_w8_reasoning_interleaved_blocks(scenario, paired_device):
+    """When the native route runs with reasoning enabled and interleaved thinking/text deltas, the committed message keeps both blocks in index order and only structural metadata is exported."""
+    session = scenario.create()
+    scenario.model.plan("interleaved")
+    paired_device.send(session, "native reasoning fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    shape = scenario.request("events-shape", sessionId=session)
+    header = [event for event in shape["events"] if event["type"] == "request/header"][-1]
+    assert header["reasoningEffort"] == "high"
+    assert header["thinking"] is None
+    assistant = [event for event in shape["events"] if event["type"] == "assistant/message"][-1]
+    assert [block["type"] for block in assistant["blocks"]] == ["reasoning", "text"]
+    assert assistant["blocks"][0]["textDigest"] == digest("native reasoning")
+    assert assistant["blocks"][1]["textDigest"] == digest("native fixture response")
+    assert assistant["interrupted"] is False
+    frames = scenario.request("stream-shape", sessionId=session)["frames"]
+    reasoning = [frame for frame in frames if frame.get("chunkType") == "reasoning-delta"]
+    text = [frame for frame in frames if frame.get("chunkType") == "text-delta"]
+    assert reasoning and text
+    assert reasoning[0]["chunkIndex"] != text[0]["chunkIndex"]
+    assert {
+        frame["blockType"]
+        for frame in frames
+        if frame.get("phase") == "chunk" and frame.get("blockType")
+    } == {"reasoning", "text"}
+    exported = json.dumps({"shape": shape, "frames": frames})
+    assert "native reasoning" not in exported
+    assert "fixture response" not in exported
+
+
+def test_w8_reasoning_disabled_is_text_only(scenario, paired_device):
+    """When the native route disables thinking, the request header records the disabled policy and the committed message carries only a text block."""
+    session = scenario.create()
+    scenario.model.plan()
+    paired_device.send(session, "native disabled reasoning fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    shape = scenario.request("events-shape", sessionId=session)
+    header = [event for event in shape["events"] if event["type"] == "request/header"][-1]
+    assert header["reasoningEffort"] == "off"
+    assert header["thinking"] is None
+    assistant = [event for event in shape["events"] if event["type"] == "assistant/message"][-1]
+    assert [block["type"] for block in assistant["blocks"]] == ["text"]
+    assert assistant["blocks"][0]["textDigest"] == digest("native fixture response")
+
+
+def test_w8_block_end_correction_is_authoritative(scenario):
+    """When the pinned native assembler receives a block-end after deltas, the block-end text wins and later deltas are ignored."""
+    result = scenario.request("block-assembler-probe")
+    corrected = result["corrected"]
+    assert [block["type"] for block in corrected] == ["text"]
+    assert corrected[0]["textDigest"] == digest("native corrected block")
+    ordered = result["ordered"]
+    assert [block["type"] for block in ordered] == ["reasoning", "text"]
+    assert ordered[0]["textDigest"] == digest("native reasoning")
+    assert ordered[1]["textDigest"] == digest("native answer")
+
+
+def test_w8_tool_parallel_out_of_order_and_failure(scenario, paired_device):
+    """When one step requests two concurrent calls and the faster call fails, execution overlaps, durable results keep model order against their call identities, and no execution-progress event exists."""
+    session = scenario.create()
+    scenario.model.plan("tool-parallel")
+    paired_device.send(session, "native parallel tool fixture", delivery="start-if-idle")
+    scenario.wait_idle(session, assistant_count=2)
+    shape = scenario.request("events-shape", sessionId=session)
+    calls = [event for event in shape["events"] if event["type"] == "tool/call"]
+    results = [event for event in shape["events"] if event["type"] == "tool/result"]
+    assert {call["name"] for call in calls} == {
+        "native_fixture_parallel_a",
+        "native_fixture_parallel_b",
+    }
+    assert len(results) == 2
+    failing = next(call for call in calls if call["name"].endswith("_b"))
+    succeeding = next(call for call in calls if call["name"].endswith("_a"))
+    by_call = {result["callDigest"]: result for result in results}
+    assert by_call[failing["callDigest"]]["isError"] is True
+    assert by_call[succeeding["callDigest"]]["isError"] is False
+    # Native DSH commits results in model order even when execution overlaps.
+    assert by_call[succeeding["callDigest"]]["seq"] < by_call[failing["callDigest"]]["seq"]
+    overlap = scenario.request("tool-overlap")["runs"]
+    assert {run["name"] for run in overlap} == {"parallel_a", "parallel_b"}
+    first = next(run for run in overlap if run["name"] == "parallel_a")
+    second = next(run for run in overlap if run["name"] == "parallel_b")
+    assert second["startedMs"] < first["finishedMs"]
+    assistant = [event for event in shape["events"] if event["type"] == "assistant/message"]
+    assert assistant[-1]["seq"] > max(result["seq"] for result in results)
+    frames = scenario.request("stream-shape", sessionId=session)["frames"]
+    assert any(frame.get("chunkType") == "tool-call-delta" for frame in frames)
+    assert not any("progress" in event_type for event_type in event_types(shape))
+    exported = json.dumps({"shape": shape, "frames": frames})
+    assert "native fixture failure" not in exported
+
+
+def test_w8_tool_result_attachment_hot_and_cold(scenario, paired_device):
+    """When a tool result carries a stored image and an exact file, both resolve from hot and cold history, image bytes match the reference, and streamed file bytes match the source digest."""
+    session = scenario.create()
+    scenario.model.plan("tool-attachment")
+    paired_device.send(session, "native attachment result fixture", delivery="start-if-idle")
+    scenario.wait_idle(session, assistant_count=2)
+    shape = scenario.request("events-shape", sessionId=session)
+    result = [event for event in shape["events"] if event["type"] == "tool/result"][-1]
+    assert {"image", "file"} <= {block["type"] for block in result["blocks"]}
+    image = scenario.request(
+        "attachment-occurrence", sessionId=session, occurrenceKind="image"
+    )
+    assert image["source"] == "hot"
+    assert image["ref"]["mediaType"] == "image/png"
+    read = scenario.request("attachment-read-image", sessionId=session)
+    assert read["available"] and read["isUint8Array"]
+    assert read["dataLen"] == image["ref"]["bytes"] == read["ref"]["bytes"]
+    file = scenario.request(
+        "attachment-occurrence", sessionId=session, occurrenceKind="file"
+    )
+    assert file["source"] == "hot" and file["ref"]["bytes"] > 0
+    file_read = scenario.request("attachment-read-file", sessionId=session)
+    assert file_read["available"] and file_read["bytes"] == file["ref"]["bytes"]
+    assert file_read["digest"] == digest("whalerein native fixture file bytes")
+    scenario.native.close()
+    scenario.start_native()
+    cold_image = scenario.request(
+        "attachment-occurrence", sessionId=session, occurrenceKind="image", cold=True
+    )
+    assert cold_image["source"] == "cold" and cold_image["pages"] >= 1
+    cold_read = scenario.request("attachment-read-image", sessionId=session, cold=True)
+    assert cold_read["available"] and cold_read["digest"] == read["digest"]
+    cold_file = scenario.request("attachment-read-file", sessionId=session, cold=True)
+    assert cold_file["available"] and cold_file["digest"] == file_read["digest"]
+
+
+def test_w8_attachment_empty_and_exact_file(scenario):
+    """When files are stored through the pinned native seam, an empty file reads as zero chunks and a fixed file reads back byte-identical."""
+    session = scenario.create()
+    result = scenario.request(
+        "attachment-file-facts",
+        sessionId=session,
+        bytes=list(b"native exact fixture bytes"),
+    )
+    assert result["empty"]["ref"]["bytes"] == 0
+    assert result["empty"]["chunks"] == 0 and result["empty"]["bytes"] == 0
+    assert result["exact"]["bytes"] == len(b"native exact fixture bytes")
+    assert result["digestMatches"] is True
+    assert result["exact"]["digest"] == digest("native exact fixture bytes")
+
+
+def test_w8_attachment_deleted_source_fails_closed(scenario, paired_device):
+    """When the stored source objects are removed after the committed reference, subsequent native reads fail instead of returning fabricated bytes."""
+    session = scenario.create()
+    scenario.model.plan("tool-attachment")
+    paired_device.send(session, "native attachment removal fixture", delivery="start-if-idle")
+    scenario.wait_idle(session, assistant_count=2)
+    result = scenario.request("attachment-remove-source", sessionId=session)
+    assert result["imageRemoved"] and result["fileRemoved"]
+    assert result["imageError"] and result["fileError"]
+
+
+def test_w8_context_authorship_shapes(scenario, paired_device):
+    """When native injected context and an unknown plugin source join the surface, their user-role records keep a non-user source classification and a missing source is rejected."""
+    session = scenario.create()
+    scenario.model.plan()
+    paired_device.send(session, "native authorship fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    scenario.request("queue-context-add", sessionId=session)
+    scenario.model.plan()
+    paired_device.send(session, "native authorship follow-up", delivery="start-if-idle")
+    scenario.wait_idle(session, assistant_count=2)
+    probe = scenario.request("synthetic-source-probe", sessionId=session)
+    assert probe["unknown"]["accepted"] is True
+    # Live append accepts an empty source; classification must treat it as missing.
+    assert probe["missing"]["accepted"] is True
+    shape = scenario.request("events-shape", sessionId=session)
+    users = [event for event in shape["events"] if event["type"] == "user/message"]
+    assert any(event["sourceKind"] == "user" for event in users)
+    assert any(event["sourceKind"] is None for event in users)
+    injected = [
+        event
+        for event in users
+        if event["sourceKind"] in {"time-context", "fixture-unknown-context"}
+    ]
+    assert {event["sourceKind"] for event in injected} == {
+        "time-context",
+        "fixture-unknown-context",
+    }
+    assert any(event["sourceForm"] == "snapshot" for event in injected)
+    systems = [event for event in shape["events"] if event["type"] == "system/message"]
+    assert systems and systems[0]["sourceKind"] == "system-prompt"
+    assert all(event["sourceKind"] != "system-prompt" for event in users)
+
+
+def test_w8_max_tokens_turn_notice(scenario, paired_device):
+    """When the provider stops at its output cap, the committed turn records the native max-tokens reason beside the partial assistant message."""
+    session = scenario.create()
+    scenario.model.plan("max-tokens")
+    paired_device.send(session, "native max tokens fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    shape = scenario.request("events-shape", sessionId=session)
+    ends = [event for event in shape["events"] if event["type"] == "turn/end"]
+    assert ends[-1]["reasonKind"] == "max-tokens"
+    assistant = [event for event in shape["events"] if event["type"] == "assistant/message"][-1]
+    assert [block["type"] for block in assistant["blocks"]] == ["text"]
+
+
+def test_w8_model_retry_lifecycle(scenario, paired_device):
+    """When the first provider request fails retryably, the durable log records a scheduled retry, its started transition, and the final committed answer."""
+    session = scenario.create()
+    scenario.model.plan("retry")
+    paired_device.send(session, "native retry fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    shape = scenario.request("events-shape", sessionId=session)
+    types = event_types(shape)
+    assert "llm/retry" in types and "llm/retry-started" in types
+    scheduled = [event for event in shape["events"] if event["type"] == "llm/retry"][0]
+    assert scheduled["retry"] == 1
+    assert scheduled["mode"] == "normal" and scheduled["maxRetries"] >= 1
+    assert scheduled["delayMs"] > 0
+    assert scheduled["failureCode"]
+    started = [event for event in shape["events"] if event["type"] == "llm/retry-started"][0]
+    assert started["retry"] == 1 and started["seq"] > scheduled["seq"]
+    assert any(event["type"] == "assistant/message" for event in shape["events"])
+    assert [event for event in shape["events"] if event["type"] == "turn/end"][-1][
+        "reasonKind"
+    ] == "completed"
+
+
+def test_w8_command_lifecycle_and_missing_predecessor(scenario):
+    """When slash commands execute natively, each run and settlement pair is logged, failure and success stay distinct, and an exact window can exclude the run."""
+    session = scenario.create()
+    result = scenario.request("command-probe", sessionId=session)
+    assert result["available"] is True
+    assert result["failureKind"] == "error" and result["successKind"] == "success"
+    types = [event["type"] for event in result["added"]]
+    assert types.count("command/run") == 2 and types.count("command/done") == 2
+    runs = [event for event in result["added"] if event["type"] == "command/run"]
+    assert {run["name"] for run in runs} == {"compact"}
+    done = [event for event in result["added"] if event["type"] == "command/done"][0]
+    window = scenario.request(
+        "native-range",
+        sessionId=session,
+        fromSeq=done["seq"],
+        toSeq=done["seq"] + 1,
+    )
+    assert window["types"] == ["command/done"]
+
+
+def test_w8_fixed_cut_history_beyond_former_tail(scenario, paired_device):
+    """When a real native Session holds more than the former 5,000-event tail, exact ranges and passive pages cover the full hot and cold log at a fixed cut, cancellation is explicit, and the adapter snapshot materializes the whole log once."""
+    session = scenario.create()
+    turns = 30
+    for index in range(turns):
+        scenario.model.plan("bulk-tools")
+        paired_device.send(
+            session, f"native long history turn {index}", delivery="start-if-idle"
+        )
+        scenario.wait_idle(session, assistant_count=(index + 1) * 2)
+    shape = scenario.request("events-shape", sessionId=session)
+    total = shape["count"]
+    assert total > 5000
+    materialized = scenario.request("history-materialization", sessionId=session)
+    assert materialized["calls"] == 1
+    assert materialized["materialized"] == materialized["totalEvents"] == total
+    # The adapter no longer truncates the snapshot to the former 5,000-event
+    # tail; it stages the complete passive pages at one pinned cut.
+    assert materialized["complete"] is True
+    assert materialized["normalized"] == total
+    for start in (0, 4990, total - 10):
+        window = scenario.request(
+            "native-range", sessionId=session, fromSeq=start, toSeq=start + 10
+        )
+        assert window["records"] == 10
+        assert window["firstSeq"] == start and window["lastSeq"] == start + 9
+    cancelled = scenario.request(
+        "native-page", sessionId=session, maxMessages=200, cancel=True
+    )
+    assert cancelled["errorCode"] == "aborted"
+    first_page = scenario.request("native-page", sessionId=session, maxMessages=500)
+    assert first_page["records"] > 0
+    cut = first_page["cursor"]
+    scenario.model.plan("bulk-tools")
+    paired_device.send(session, "native long history append", delivery="start-if-idle")
+    scenario.wait_idle(session, assistant_count=(turns + 1) * 2)
+    frozen = scenario.request(
+        "native-page",
+        sessionId=session,
+        maxMessages=500,
+        maxPages=100,
+        throughSeq=cut,
+    )
+    assert frozen["maxSeq"] <= cut and frozen["hasMore"] is False
+    moving = scenario.request("native-page", sessionId=session, maxMessages=500)
+    assert moving["maxSeq"] > cut
+    full = scenario.request(
+        "native-page", sessionId=session, maxMessages=500, maxPages=100
+    )
+    assert full["minSeq"] == 0 and full["hasMore"] is False
+    assert full["records"] >= total and full["stagedBytes"] > 0
+    Path("/reports/w8-fixed-cut.json").write_text(
+        json.dumps(
+            {
+                "total": total,
+                "turns": turns,
+                "materialized": materialized,
+                "first_page": first_page,
+                "frozen": frozen,
+                "moving": moving,
+                "full": full,
+            }
+        )
+    )
+    scenario.native.close()
+    scenario.start_native()
+    cold_first = scenario.request("native-page", sessionId=session, maxMessages=500)
+    cold_full = scenario.request(
+        "native-page", sessionId=session, maxMessages=500, maxPages=100
+    )
+    Path("/reports/w8-fixed-cut-cold.json").write_text(
+        json.dumps({"cold_first": cold_first, "cold_full": cold_full})
+    )
+    assert cold_first["records"] > 0
+    assert cold_full["minSeq"] == 0 and cold_full["hasMore"] is False
+    assert cold_full["records"] >= total
+
+
+def test_w8_interrupted_prefix_shape(scenario, paired_device):
+    """When a streaming native turn is interrupted mid-answer, the committed assistant message carries only the delivered prefix with the native interrupted marker and no fabricated suffix."""
+    session = scenario.create()
+    scenario.model.plan(hold=True)
+    paired_device.send(session, "native interrupted prefix fixture", delivery="start-if-idle")
+    assert scenario.model.started.wait(timeout=15)
+    paired_device.interrupt(session)
+    wait(
+        lambda: not scenario.request("state", sessionId=session)["running"],
+        process=scenario.native,
+    )
+    scenario.model.release.set()
+    shape = scenario.request("events-shape", sessionId=session)
+    assistant = [event for event in shape["events"] if event["type"] == "assistant/message"]
+    assert assistant and assistant[-1]["interrupted"] is True
+    assert assistant[-1]["blocks"][0]["textLen"] > 0
+    ends = [event for event in shape["events"] if event["type"] == "turn/end"]
+    assert ends[-1]["reasonKind"] == "aborted"
+
+
+def test_w8_abandoned_attempt_shape(scenario, paired_device):
+    """When the provider stream truncates before settlement, the failed attempt is retained without a fabricated surface message while the turn recovers or ends explicitly."""
+    session = scenario.create()
+    scenario.model.plan("attempt-error")
+    paired_device.send(session, "native abandoned attempt fixture", delivery="start-if-idle")
+    wait(
+        lambda: not scenario.request("state", sessionId=session)["running"],
+        process=scenario.native,
+    )
+    shape = scenario.request("events-shape", sessionId=session)
+    attempts = [event for event in shape["events"] if event["type"] == "assistant/attempt"]
+    assert attempts, "abandoned attempt was not retained"
+    assert attempts[0]["streamTypes"]
+    assert not any(
+        block["type"] == "text"
+        for event in shape["events"]
+        if event["type"] == "assistant/message"
+        for block in event["blocks"]
+        if block["textDigest"] == digest("native partial")
+    )
+    ends = [event for event in shape["events"] if event["type"] == "turn/end"]
+    assert ends[-1]["reasonKind"] in {"completed", "error"}
+
+
+@pytest.mark.native_compaction
+def test_w8_compaction_lifecycle_and_missing_summary(scenario, paired_device):
+    """When manual compaction runs over a long native history, the durable compaction lifecycle lands next to its replacement surface message and an exact window can exclude the summary."""
+    session = scenario.create()
+    scenario.model.plan()
+    paired_device.send(session, "native compaction fixture", delivery="start-if-idle")
+    scenario.wait_idle(session)
+    bulk = scenario.request("bulk-append", sessionId=session, count=400, turns=True)
+    assert bulk["events"] == 2400
+    result = scenario.request("command-probe", sessionId=session)
+    assert result["available"] is True
+    assert result["failureKind"] == "error" and result["successKind"] == "success"
+    types = [event["type"] for event in result["added"]]
+    assert types.count("command/run") == 2 and types.count("command/done") == 2
+    assert "compaction/start" in types and "compaction/summary" in types
+    assert "compaction/end" in types
+    summary = next(
+        event for event in result["added"] if event["type"] == "compaction/summary"
+    )
+    assert summary["summaryPresent"] is True and summary["blockTypes"]
+    assert summary["shadowedCount"] and summary["shadowedCount"] > 0
+    replacement = next(
+        event
+        for event in result["added"]
+        if event["type"] == "user/message" and event["surface"] == "replace"
+    )
+    window = scenario.request(
+        "native-range",
+        sessionId=session,
+        fromSeq=replacement["seq"],
+        toSeq=replacement["seq"] + 1,
+    )
+    assert window["types"] == ["user/message"]
+    summary_window = scenario.request(
+        "native-range",
+        sessionId=session,
+        fromSeq=summary["seq"],
+        toSeq=summary["seq"] + 1,
+    )
+    assert summary_window["types"] == ["compaction/summary"]
+
+
+def test_w8_cold_history_continuations(scenario, paired_device):
+    """When a cold native session holds more than one message-aligned page, repeated passive pages continue toward older turns with bounded per-page staging and complete coverage."""
+    session = scenario.create()
+    turns = 520
+    scenario.model.plan("bulk-tools", bulk_calls=2)
+    scenario.request(
+        "native-prompt-turns", sessionId=session, count=turns, timeout=900
+    )
+    shape = scenario.request("events-shape", sessionId=session)
+    total = shape["count"]
+    assert total > 5000
+    scenario.native.close()
+    scenario.start_native()
+    first = scenario.request("native-page", sessionId=session, maxMessages=500)
+    assert first["records"] > 0 and first["hasMore"] is True
+    rest = scenario.request(
+        "native-page", sessionId=session, maxMessages=500, maxPages=100
+    )
+    assert rest["pages"] >= 2
+    assert rest["minSeq"] == 0 and rest["hasMore"] is False
+    assert rest["records"] == total
+    assert rest["maxPageBytes"] <= rest["stagedBytes"]
+    Path("/reports/w8-cold-continuations.json").write_text(
+        json.dumps({"total": total, "turns": turns, "first": first, "rest": rest})
+    )
+
+
+def test_w8_send_reply_ownership(scenario, paired_device):
+    """When a native prompt is submitted with a client operation id, the durable user message keeps that id only as its rpcId while the settled assistant reply is a distinct ordered message with its own identity and provider metadata."""
+    session = scenario.create()
+    receipt = scenario.request("send-request-id", sessionId=session)
+    assert receipt["messageId"] == "native-fixture-request-id"
+    assert receipt["deliveryId"] == "native-fixture-request-id"
+    scenario.wait_idle(session)
+    shape = scenario.request("events-shape", sessionId=session)
+    submitted = [
+        event
+        for event in shape["events"]
+        if event["type"] == "user/message"
+        and event["rpcIdDigest"] == digest("native-fixture-request-id")
+    ]
+    assert submitted
+    user = submitted[-1]
+    assert user["rpcIdPresent"] is True
+    assert user["messageIdDigest"] != digest("native-fixture-request-id")
+    assistant = next(
+        event
+        for event in shape["events"]
+        if event["type"] == "assistant/message" and event["seq"] > user["seq"]
+    )
+    assert assistant["seq"] > user["seq"]
+    assert assistant["messageIdDigest"] not in {"", digest("native-fixture-request-id")}
+    assert assistant["provider"] and assistant["model"]
+    assert isinstance(assistant["turn"], int) and assistant["turn"] >= 1
+    assert isinstance(assistant["step"], int) and assistant["step"] >= 1

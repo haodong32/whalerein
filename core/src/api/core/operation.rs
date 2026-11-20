@@ -302,12 +302,35 @@ impl Core {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Proof-backed outcome of following one submitted message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum MessageReply {
-    Committed { attempt_id: String, text: String },
-    InputRequired,
+pub enum SendReply {
+    /// No association or settlement evidence yet.
+    Pending,
+    /// The Source associated the exact submission with a canonical message.
+    Committed {
+        reference: crate::history::MessageReference,
+    },
+    /// The owning active work waits for evidenced kinds.
+    InputRequired {
+        kinds: Vec<crate::api::types::InputKind>,
+        operation: String,
+        session: SessionKey,
+    },
+    /// Evidence cannot bind the submission to one reply.
     Uncertain,
+}
+
+fn input_kind(value: i32) -> Option<crate::api::types::InputKind> {
+    use crate::api::types::InputKind;
+    use whalerein_proto::InputKind as Wire;
+    match Wire::try_from(value).ok()? {
+        Wire::InputApproval => Some(InputKind::Approval),
+        Wire::InputQuestion => Some(InputKind::Question),
+        Wire::InputOther => Some(InputKind::Other),
+        Wire::Unspecified => None,
+    }
 }
 
 impl Core {
@@ -315,16 +338,16 @@ impl Core {
         &self,
         mut operation: SendOperation,
         timeout: Duration,
-    ) -> CoreResult<MessageReply> {
+    ) -> CoreResult<SendReply> {
         let follow = async {
             loop {
                 let Some(receipt) = &operation.receipt else {
-                    return Ok(MessageReply::Uncertain);
+                    return Ok(SendReply::Uncertain);
                 };
                 let Some(message_id) = receipt.message_id.as_deref().filter(|id| !id.is_empty())
                 else {
                     if receipt.status.is_terminal() {
-                        return Ok(MessageReply::Uncertain);
+                        return Ok(SendReply::Uncertain);
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     operation = self.recover_send_operation(&operation.operation_id).await?;
@@ -339,7 +362,7 @@ impl Core {
                                 whalerein_proto::request_payload::Payload::ReadMessageReply(
                                     whalerein_proto::ReadMessageReply {
                                         session_id: target.session_id.clone(),
-                                        message_id: message_id.to_owned(),
+                                        submitted_message_id: message_id.to_owned(),
                                     },
                                 ),
                             ),
@@ -351,23 +374,58 @@ impl Core {
                 else {
                     return Err(CoreError::Security("invalid message reply".into()));
                 };
-                if reply.session_id != target.session_id || reply.message_id != message_id {
+                if reply.session_id != target.session_id || reply.submitted_message_id != message_id
+                {
                     return Err(CoreError::Security("message reply scope mismatch".into()));
                 }
                 match whalerein_proto::MessageReplyState::try_from(reply.state) {
-                    Ok(whalerein_proto::MessageReplyState::MessageReplyCommitted)
-                        if !reply.attempt_id.is_empty() && !reply.text.is_empty() =>
-                    {
-                        return Ok(MessageReply::Committed {
-                            attempt_id: reply.attempt_id,
-                            text: reply.text,
-                        });
+                    Ok(whalerein_proto::MessageReplyState::MessageReplyCommitted) => {
+                        let committed = reply.committed.as_ref().ok_or_else(|| {
+                            CoreError::Security("committed reply has no reference".into())
+                        })?;
+                        let reference =
+                            crate::history::MessageReference::from_committed(target, committed)?;
+                        self.diagnostics.record_stage(
+                            "core",
+                            "send_reply_confirmed",
+                            "confirmed",
+                            "none",
+                        );
+                        return Ok(SendReply::Committed { reference });
                     }
                     Ok(whalerein_proto::MessageReplyState::MessageReplyInputRequired) => {
-                        return Ok(MessageReply::InputRequired);
+                        let kinds: Vec<_> = reply
+                            .pending_input
+                            .iter()
+                            .filter_map(|kind| input_kind(*kind))
+                            .collect();
+                        if kinds.is_empty() {
+                            return Ok(SendReply::Uncertain);
+                        }
+                        for _ in &kinds {
+                            self.diagnostics.record_stage(
+                                "core",
+                                "send_input",
+                                "required",
+                                "input_required",
+                            );
+                        }
+                        return Ok(SendReply::InputRequired {
+                            kinds,
+                            operation: operation.operation_id.clone(),
+                            session: target.clone(),
+                        });
                     }
                     Ok(whalerein_proto::MessageReplyState::MessageReplyPending) => {}
-                    _ => return Ok(MessageReply::Uncertain),
+                    _ => {
+                        self.diagnostics.record_stage(
+                            "core",
+                            "send_reply_confirmed",
+                            "unconfirmed",
+                            "unknown",
+                        );
+                        return Ok(SendReply::Uncertain);
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -379,8 +437,88 @@ impl Core {
                 | CoreError::HostOffline
                 | CoreError::Unavailable(_),
             ))
-            | Err(_) => Ok(MessageReply::Uncertain),
+            | Err(_) => {
+                self.diagnostics.record_stage(
+                    "core",
+                    "send_reply_confirmed",
+                    "unconfirmed",
+                    "timeout",
+                );
+                Ok(SendReply::Uncertain)
+            }
             Ok(result) => result,
+        }
+    }
+}
+
+/// Confirmed send reply together with an optional canonical content read.
+///
+/// The confirmation is retained even when the later read fails; callers must
+/// never resubmit because content was unavailable.
+#[derive(Debug)]
+pub struct SendFollowUp {
+    pub reply: SendReply,
+    pub message: Option<crate::conversation::ConversationMessage>,
+    pub read_error: Option<CoreError>,
+}
+
+impl SendFollowUp {
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self.reply, SendReply::Committed { .. })
+    }
+
+    /// Stable redacted read-failure code, when content could not be read.
+    pub fn read_error_code(&self) -> Option<&'static str> {
+        self.read_error.as_ref().map(CoreError::code)
+    }
+}
+
+impl Core {
+    /// Follow a submitted message and, for a proven reference, read its
+    /// canonical content through the same history interface within the
+    /// remaining deadline. A failed read keeps the confirmation intact.
+    pub async fn follow_send_operation_with_content(
+        &self,
+        operation: SendOperation,
+        timeout: Duration,
+    ) -> CoreResult<SendFollowUp> {
+        let started = tokio::time::Instant::now();
+        let reply = self.follow_send_operation(operation, timeout).await?;
+        let SendReply::Committed { reference } = &reply else {
+            return Ok(SendFollowUp {
+                reply,
+                message: None,
+                read_error: None,
+            });
+        };
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let read = if remaining.is_zero() {
+            Err(CoreError::Timeout)
+        } else {
+            match tokio::time::timeout(remaining, self.history_message(reference)).await {
+                Ok(result) => result,
+                Err(_) => Err(CoreError::Timeout),
+            }
+        };
+        match read {
+            Ok(message) => {
+                self.diagnostics
+                    .record_stage("core", "send_reply_read", "succeeded", "none");
+                Ok(SendFollowUp {
+                    reply,
+                    message: Some(message),
+                    read_error: None,
+                })
+            }
+            Err(error) => {
+                self.diagnostics
+                    .record_stage("core", "send_reply_read", "failed", error.code());
+                Ok(SendFollowUp {
+                    reply,
+                    message: None,
+                    read_error: Some(error),
+                })
+            }
         }
     }
 }
@@ -566,9 +704,11 @@ mod tests {
             .follow_send_operation(first, Duration::from_secs(5))
             .await
             .unwrap();
-        assert!(
-            matches!(reply, MessageReply::Committed {attempt_id, ..} if attempt_id == "fixture-attempt")
-        );
+        assert!(matches!(
+            reply,
+            SendReply::Committed { reference }
+                if reference.message_id() == "message-1"
+        ));
         assert!(matches!(
             core.submit_message_operation(
                 &id,
@@ -580,6 +720,124 @@ mod tests {
             Err(CoreError::Conflict(_))
         ));
         assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+    }
+
+    #[tokio::test]
+    async fn committed_follow_resolves_the_canonical_message_through_history() {
+        let (_directory, _path, core, _access, _secrets) = paired_instance().await;
+        let target = core.operation_session_key(None, "session-1").await.unwrap();
+        let id = Core::new_command_id();
+        let sent = core
+            .submit_message_operation(&id, &target, "fixture-input", DeliveryMode::EnqueueAfterRun)
+            .await
+            .unwrap();
+        let followed = core
+            .follow_send_operation_with_content(sent, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(followed.is_confirmed());
+        assert!(followed.read_error_code().is_none());
+        let message = followed.message.expect("canonical content");
+        assert_eq!(message.message_id, "message-1");
+        assert_eq!(crate::conversation::message_text(&message), "x");
+        assert_eq!(core.send_operation(&id).unwrap().target, target);
+    }
+
+    #[tokio::test]
+    async fn content_read_failure_keeps_the_confirmation_and_records_redacted_stages() {
+        use crate::diagnostics::journal::CapturingSink;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("client.toml");
+        Core::write_config(
+            &path,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingSink::default());
+        let core = Core::open_with_diagnostic_sink(
+            &path,
+            Arc::new(MemorySecretStore::new()),
+            sink.clone(),
+        )
+        .unwrap();
+        let access = FakeAccess::start().await;
+        core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+            .await
+            .unwrap();
+        let target = core.operation_session_key(None, "session-1").await.unwrap();
+        let id = Core::new_command_id();
+        let sent = core
+            .submit_message_operation(&id, &target, "fixture-input", DeliveryMode::EnqueueAfterRun)
+            .await
+            .unwrap();
+        access.host.lock().unwrap().history_messages.clear();
+        let followed = core
+            .follow_send_operation_with_content(sent, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(followed.is_confirmed());
+        assert!(followed.message.is_none());
+        assert_eq!(followed.read_error_code(), Some("not_found"));
+        // Recovery never resubmits the message.
+        assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+        let events = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(events.contains("send_reply_confirmed"));
+        assert!(events.contains("send_reply_read"));
+        assert!(events.contains("not_found"));
+        // No body, token, locator, path or credential reaches diagnostics.
+        assert!(!events.contains("fixture-input"));
+        assert!(!events.contains("whr1."));
+        assert!(!events.contains("locator:"));
+        assert!(!events.contains("cache.sqlite3"));
+    }
+
+    #[tokio::test]
+    async fn pending_input_reports_every_evidenced_kind_for_the_original_operation() {
+        let (_directory, _path, core, access, _secrets) = paired_instance().await;
+        let target = core.operation_session_key(None, "session-1").await.unwrap();
+        let id = Core::new_command_id();
+        let sent = core
+            .submit_message_operation(&id, &target, "fixture-input", DeliveryMode::EnqueueAfterRun)
+            .await
+            .unwrap();
+        {
+            let mut host = access.host.lock().unwrap();
+            host.message_reply_state =
+                Some(whalerein_proto::MessageReplyState::MessageReplyInputRequired);
+            host.message_reply_input = vec![
+                whalerein_proto::InputKind::InputQuestion,
+                whalerein_proto::InputKind::InputOther,
+            ];
+        }
+        let reply = core
+            .follow_send_operation(sent, Duration::from_secs(5))
+            .await
+            .unwrap();
+        match reply {
+            SendReply::InputRequired {
+                kinds,
+                operation,
+                session,
+            } => {
+                assert_eq!(
+                    kinds,
+                    vec![
+                        crate::api::InputKind::Question,
+                        crate::api::InputKind::Other
+                    ]
+                );
+                assert_eq!(operation, id);
+                assert_eq!(session, target);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -687,7 +945,13 @@ mod tests {
             .follow_send_operation(sent.clone(), Duration::from_secs(5))
             .await
             .unwrap();
-        assert!(matches!(input, MessageReply::InputRequired));
+        assert!(matches!(
+            input,
+            SendReply::InputRequired { kinds, operation, session }
+                if kinds == vec![crate::api::InputKind::Approval]
+                    && operation == id
+                    && session == target
+        ));
 
         access.host.lock().unwrap().message_reply_state =
             Some(whalerein_proto::MessageReplyState::MessageReplyPending);
@@ -695,7 +959,7 @@ mod tests {
             .follow_send_operation(sent.clone(), Duration::from_millis(50))
             .await
             .unwrap();
-        assert!(matches!(timed_out, MessageReply::Uncertain));
+        assert!(matches!(timed_out, SendReply::Uncertain));
         assert_eq!(core.send_operation(&id).unwrap().target, target);
         assert_eq!(access.host.lock().unwrap().commands_seen, 1);
     }

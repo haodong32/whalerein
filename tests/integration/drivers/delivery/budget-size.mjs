@@ -4,6 +4,11 @@ import { codec } from '../../../../host/runtime/src/protocol.js'
 import { MESSAGE_BYTES } from '../../../../host/runtime/src/access/transport.js'
 const [hostId, deviceId, sessionId, itemId] = process.argv.slice(2)
 const wire = codec()
+// Access rewrites the result bound to its encoded allowance and stamps the
+// durable grant generation before forwarding. Model the forwarded envelope,
+// which is the real broker budget boundary.
+const resultEnvelopeOverheadBytes = 2048
+const encodedResultLimit = (raw) => Math.ceil(raw / 3) * 4 + resultEnvelopeOverheadBytes
 function encodedSize(size) {
   const request = itemId ? {update_pending_queue:{session_id:sessionId,item_id:itemId,action:'EDIT',text:'x'.repeat(size)}} : {send_message:{session_id:sessionId,text:'x'.repeat(size),delivery_mode:'ENQUEUE_AFTER_RUN'}}
   const payload = wire.encode('whalerein.v1.RequestPayload', request)
@@ -15,6 +20,10 @@ function encodedSize(size) {
     kind: 'REQUEST_KIND_COMMAND', command_id: 'b'.repeat(32), payload_digest: Buffer.alloc(32),
     expires_at_unix_ms: Date.now() + 30000, trace_id: 'c'.repeat(32), protocol_version: 1,
     channel_id: 'a'.repeat(32), body: frame, client_transport_version: 2, relay_transport_version: 2,
+    // Core sends the validated device result bound with the request; Access
+    // overwrites the grant generations at admission, so only field 1 is on the
+    // encoded request here. Keep this in the size model.
+    transport: { result_max_bytes: encodedResultLimit(MESSAGE_BYTES), grant_generation: 1 },
   }).length
 }
 const probe = MESSAGE_BYTES - 4096

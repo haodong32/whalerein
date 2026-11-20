@@ -9,7 +9,7 @@ export { waitFor, pairingTokenHash }
 
 export function startHarness(options = {}) {
   const now = options.now ?? Date.now
-  const adapter = new FakeDshAdapter({ now, sessions: options.sessions ?? [], behavior: options.behavior ?? {}, logger: silentLogger })
+  const adapter = new FakeDshAdapter({ now, sessions: options.sessions ?? [], behavior: options.behavior ?? {}, logger: silentLogger, hostId: options.hostId ?? 'host-1' })
   const config = resolveConfig({
     adapter: 'fake',
     mqtt_url: 'mqtts://fake-broker.test:8883',

@@ -77,6 +77,7 @@ async function main() {
   const adapter = new FakeDshAdapter({
     sessions: seed.sessions,
     behavior,
+    hostId: config.hostId,
     credentialFile: join(config.stateDir, 'fake-credentials.json'),
   })
   // The host creates a logger whose diagnostic salt is persisted in SQLite.

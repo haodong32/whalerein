@@ -62,6 +62,20 @@
         "number": 4
       }
     ],
+    "BlockKind": [
+      {
+        "name": "BLOCK_KIND_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "BLOCK_KIND_TEXT",
+        "number": 1
+      },
+      {
+        "name": "BLOCK_KIND_REASONING",
+        "number": 2
+      }
+    ],
     "Capability": [
       {
         "name": "capability_unspecified",
@@ -230,6 +244,20 @@
         "number": 220
       }
     ],
+    "HistorySource": [
+      {
+        "name": "HISTORY_SOURCE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "HISTORY_SOURCE_ONLINE",
+        "number": 1
+      },
+      {
+        "name": "HISTORY_SOURCE_CACHE",
+        "number": 2
+      }
+    ],
     "InputKind": [
       {
         "name": "INPUT_KIND_UNSPECIFIED",
@@ -312,6 +340,74 @@
       {
         "name": "NOTICE",
         "number": 4
+      },
+      {
+        "name": "MESSAGE_ROLE_CONTEXT",
+        "number": 5
+      },
+      {
+        "name": "MESSAGE_ROLE_UNKNOWN",
+        "number": 6
+      }
+    ],
+    "NoticeCategory": [
+      {
+        "name": "NOTICE_CATEGORY_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "NOTICE_CATEGORY_RETRY",
+        "number": 1
+      },
+      {
+        "name": "NOTICE_CATEGORY_MAX_OUTPUT",
+        "number": 2
+      },
+      {
+        "name": "NOTICE_CATEGORY_COMPACTION",
+        "number": 3
+      },
+      {
+        "name": "NOTICE_CATEGORY_COMMAND",
+        "number": 4
+      },
+      {
+        "name": "NOTICE_CATEGORY_CONTEXT",
+        "number": 5
+      },
+      {
+        "name": "NOTICE_CATEGORY_OMISSION",
+        "number": 6
+      }
+    ],
+    "NoticeState": [
+      {
+        "name": "NOTICE_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "NOTICE_STATE_SCHEDULED",
+        "number": 1
+      },
+      {
+        "name": "NOTICE_STATE_STARTED",
+        "number": 2
+      },
+      {
+        "name": "NOTICE_STATE_CANCELLED",
+        "number": 3
+      },
+      {
+        "name": "NOTICE_STATE_COMPLETED",
+        "number": 4
+      },
+      {
+        "name": "NOTICE_STATE_FAILED",
+        "number": 5
+      },
+      {
+        "name": "NOTICE_STATE_REACHED",
+        "number": 6
       }
     ],
     "OnlineStatus": [
@@ -524,6 +620,68 @@
         "number": 4
       }
     ],
+    "ToolOutcome": [
+      {
+        "name": "TOOL_OUTCOME_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "TOOL_OUTCOME_SUCCEEDED",
+        "number": 1
+      },
+      {
+        "name": "TOOL_OUTCOME_FAILED",
+        "number": 2
+      },
+      {
+        "name": "TOOL_OUTCOME_INTERRUPTED",
+        "number": 3
+      },
+      {
+        "name": "TOOL_OUTCOME_UNKNOWN",
+        "number": 4
+      }
+    ],
+    "ToolStage": [
+      {
+        "name": "TOOL_STAGE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "TOOL_STAGE_PREPARATION",
+        "number": 1
+      },
+      {
+        "name": "TOOL_STAGE_EXECUTION",
+        "number": 2
+      },
+      {
+        "name": "TOOL_STAGE_PROGRESS",
+        "number": 3
+      },
+      {
+        "name": "TOOL_STAGE_SETTLEMENT",
+        "number": 4
+      }
+    ],
+    "TransportProfile": [
+      {
+        "name": "TRANSPORT_PROFILE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "TRANSPORT_PROFILE_DEFAULT",
+        "number": 1
+      },
+      {
+        "name": "TRANSPORT_PROFILE_COMPACT",
+        "number": 2
+      },
+      {
+        "name": "TRANSPORT_PROFILE_ROOMY",
+        "number": 3
+      }
+    ],
     "WaitReason": [
       {
         "name": "WAIT_REASON_UNSPECIFIED",
@@ -717,6 +875,182 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "AttachmentMetadata": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "mediaType",
+          "name": "media_type",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "name",
+          "name": "name",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "size",
+          "name": "size",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "policy",
+          "name": "policy",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttachmentPolicy"
+        },
+        {
+          "json_name": "transferId",
+          "name": "transfer_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "AttachmentPart": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "transferId",
+          "name": "transfer_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "offset",
+          "name": "offset",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "length",
+          "name": "length",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "data",
+          "name": "data",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "final",
+          "name": "final",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "totalSize",
+          "name": "total_size",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sha256",
+          "name": "sha256",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "AttachmentPolicy": {
+      "fields": [
+        {
+          "json_name": "maxTotalBytes",
+          "name": "max_total_bytes",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "maxChunkBytes",
+          "name": "max_chunk_bytes",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "maxConcurrent",
+          "name": "max_concurrent",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "idleTimeoutMs",
+          "name": "idle_timeout_ms",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "overallTimeoutMs",
+          "name": "overall_timeout_ms",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -845,6 +1179,14 @@
           "number": 5,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "receive",
+          "name": "receive",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReceiveAdvertisement"
         }
       ]
     },
@@ -885,6 +1227,65 @@
           "number": 5,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "receive",
+          "name": "receive",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReceiveAdvertisement"
+        }
+      ]
+    },
+    "CloseAttachment": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "transferId",
+          "name": "transfer_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "cancel",
+          "name": "cancel",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "CloseAttachmentResult": {
+      "fields": [
+        {
+          "json_name": "closed",
+          "name": "closed",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "cancelled",
+          "name": "cancelled",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_BOOL"
         }
       ]
     },
@@ -940,6 +1341,39 @@
         }
       ]
     },
+    "CommittedMessageRef": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "messageId",
+          "name": "message_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sourceLocator",
+          "name": "source_locator",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "ContentBlock": {
       "fields": [
         {
@@ -959,24 +1393,6 @@
           "type_name": "whalerein.v1.TextContent"
         },
         {
-          "json_name": "toolCall",
-          "name": "tool_call",
-          "number": 3,
-          "oneof": "content",
-          "repeated": false,
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ToolCallContent"
-        },
-        {
-          "json_name": "toolResult",
-          "name": "tool_result",
-          "number": 4,
-          "oneof": "content",
-          "repeated": false,
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.ToolResultContent"
-        },
-        {
           "json_name": "notice",
           "name": "notice",
           "number": 5,
@@ -993,6 +1409,24 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.AttachmentContent"
+        },
+        {
+          "json_name": "reasoning",
+          "name": "reasoning",
+          "number": 7,
+          "oneof": "content",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReasoningContent"
+        },
+        {
+          "json_name": "toolActivity",
+          "name": "tool_activity",
+          "number": 8,
+          "oneof": "content",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ToolActivity"
         }
       ]
     },
@@ -1443,6 +1877,13 @@
           "repeated": true,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.MessageUpsert"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1484,6 +1925,39 @@
           "number": 5,
           "repeated": false,
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "continuation",
+          "name": "continuation",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "source",
+          "name": "source",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.HistorySource"
+        }
+      ]
+    },
+    "HistoryPageSelection": {
+      "fields": [
+        {
+          "json_name": "beforeCursor",
+          "name": "before_cursor",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1530,6 +2004,37 @@
           "number": 6,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "page",
+          "name": "page",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HistoryPageSelection"
+        },
+        {
+          "json_name": "exact",
+          "name": "exact",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CommittedMessageRef"
+        },
+        {
+          "json_name": "continuation",
+          "name": "continuation",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "source",
+          "name": "source",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.HistorySource"
         }
       ]
     },
@@ -1831,6 +2336,14 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "receive",
+          "name": "receive",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ReceiveAdvertisement"
         }
       ]
     },
@@ -1927,6 +2440,14 @@
           "number": 13,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "transport",
+          "name": "transport",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.RequestTransportMetadata"
         }
       ]
     },
@@ -2163,6 +2684,44 @@
     "ListSessions": {
       "fields": []
     },
+    "LiveBlockDelta": {
+      "fields": [
+        {
+          "json_name": "kind",
+          "name": "kind",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.BlockKind"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "LiveBlockReset": {
+      "fields": [
+        {
+          "json_name": "kind",
+          "name": "kind",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.BlockKind"
+        },
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "LiveFrame": {
       "fields": [
         {
@@ -2210,7 +2769,7 @@
           "oneof": "payload",
           "repeated": false,
           "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.TextContent"
+          "type_name": "whalerein.v1.LiveBlockDelta"
         },
         {
           "json_name": "reset",
@@ -2219,7 +2778,7 @@
           "oneof": "payload",
           "repeated": false,
           "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.TextContent"
+          "type_name": "whalerein.v1.LiveBlockReset"
         },
         {
           "json_name": "ended",
@@ -2242,8 +2801,8 @@
           "type": "TYPE_STRING"
         },
         {
-          "json_name": "messageId",
-          "name": "message_id",
+          "json_name": "submittedMessageId",
+          "name": "submitted_message_id",
           "number": 2,
           "repeated": false,
           "type": "TYPE_STRING"
@@ -2257,18 +2816,20 @@
           "type_name": "whalerein.v1.MessageReplyState"
         },
         {
-          "json_name": "attemptId",
-          "name": "attempt_id",
-          "number": 4,
+          "json_name": "committed",
+          "name": "committed",
+          "number": 6,
           "repeated": false,
-          "type": "TYPE_STRING"
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CommittedMessageRef"
         },
         {
-          "json_name": "text",
-          "name": "text",
-          "number": 5,
-          "repeated": false,
-          "type": "TYPE_STRING"
+          "json_name": "pendingInput",
+          "name": "pending_input",
+          "number": 7,
+          "repeated": true,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.InputKind"
         }
       ]
     },
@@ -2496,12 +3057,22 @@
           "name": "category",
           "number": 1,
           "repeated": false,
-          "type": "TYPE_STRING"
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.NoticeCategory"
         },
         {
-          "json_name": "text",
-          "name": "text",
+          "json_name": "state",
+          "name": "state",
           "number": 2,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.NoticeState"
+        },
+        {
+          "json_name": "summary",
+          "name": "summary",
+          "number": 3,
+          "optional": true,
           "repeated": false,
           "type": "TYPE_STRING"
         }
@@ -2522,6 +3093,37 @@
           "number": 2,
           "repeated": false,
           "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "OpenAttachment": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "OpenAttachmentResult": {
+      "fields": [
+        {
+          "json_name": "attachment",
+          "name": "attachment",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttachmentMetadata"
         }
       ]
     },
@@ -3137,6 +3739,46 @@
         }
       ]
     },
+    "PullAttachment": {
+      "fields": [
+        {
+          "json_name": "session",
+          "name": "session",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.SessionKey"
+        },
+        {
+          "json_name": "attachmentRef",
+          "name": "attachment_ref",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "transferId",
+          "name": "transfer_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "offset",
+          "name": "offset",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "maxBytes",
+          "name": "max_bytes",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
     "QuestionAnswerItem": {
       "fields": [
         {
@@ -3544,8 +4186,8 @@
           "type": "TYPE_STRING"
         },
         {
-          "json_name": "messageId",
-          "name": "message_id",
+          "json_name": "submittedMessageId",
+          "name": "submitted_message_id",
           "number": 2,
           "repeated": false,
           "type": "TYPE_STRING"
@@ -3582,6 +4224,44 @@
           "number": 1,
           "repeated": false,
           "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ReasoningContent": {
+      "fields": [
+        {
+          "json_name": "text",
+          "name": "text",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ReceiveAdvertisement": {
+      "fields": [
+        {
+          "json_name": "profile",
+          "name": "profile",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.TransportProfile"
+        },
+        {
+          "json_name": "budget",
+          "name": "budget",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.TransportBudget"
+        },
+        {
+          "json_name": "connectionGeneration",
+          "name": "connection_generation",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
         }
       ]
     },
@@ -3858,6 +4538,33 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ForkSession"
+        },
+        {
+          "json_name": "openAttachment",
+          "name": "open_attachment",
+          "number": 320,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.OpenAttachment"
+        },
+        {
+          "json_name": "pullAttachment",
+          "name": "pull_attachment",
+          "number": 321,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PullAttachment"
+        },
+        {
+          "json_name": "closeAttachment",
+          "name": "close_attachment",
+          "number": 322,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CloseAttachment"
         }
       ]
     },
@@ -3981,6 +4688,31 @@
           "number": 12,
           "repeated": false,
           "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "RequestTransportMetadata": {
+      "fields": [
+        {
+          "json_name": "resultMaxBytes",
+          "name": "result_max_bytes",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "grantGeneration",
+          "name": "grant_generation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "revocationGeneration",
+          "name": "revocation_generation",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
         }
       ]
     },
@@ -4240,6 +4972,33 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.PendingQueue"
+        },
+        {
+          "json_name": "openAttachmentResult",
+          "name": "open_attachment_result",
+          "number": 320,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.OpenAttachmentResult"
+        },
+        {
+          "json_name": "attachmentPart",
+          "name": "attachment_part",
+          "number": 321,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttachmentPart"
+        },
+        {
+          "json_name": "closeAttachmentResult",
+          "name": "close_attachment_result",
+          "number": 322,
+          "oneof": "payload",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.CloseAttachmentResult"
         }
       ]
     },
@@ -4494,6 +5253,13 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.QuestionDescriptor"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -4789,6 +5555,55 @@
           "type_name": "whalerein.v1.DeliveryMode"
         },
         {
+          "json_name": "liveReasoning",
+          "name": "live_reasoning",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "toolActivity",
+          "name": "tool_activity",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "conversationNotices",
+          "name": "conversation_notices",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "attachments",
+          "name": "attachments",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "historyPage",
+          "name": "history_page",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "historyExact",
+          "name": "history_exact",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "sendFollowup",
+          "name": "send_followup",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
           "json_name": "modelSelection",
           "name": "model_selection",
           "number": 200,
@@ -4864,7 +5679,7 @@
         }
       ]
     },
-    "ToolCallContent": {
+    "ToolActivity": {
       "fields": [
         {
           "json_name": "callId",
@@ -4874,43 +5689,141 @@
           "type": "TYPE_STRING"
         },
         {
+          "json_name": "stages",
+          "name": "stages",
+          "number": 2,
+          "repeated": true,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ToolStage"
+        },
+        {
           "json_name": "name",
           "name": "name",
-          "number": 2,
+          "number": 3,
           "repeated": false,
           "type": "TYPE_STRING"
         },
         {
           "json_name": "summary",
           "name": "summary",
-          "number": 3,
+          "number": 4,
+          "optional": true,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "result",
+          "name": "result",
+          "number": 5,
+          "repeated": true,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ToolResultPart"
+        },
+        {
+          "json_name": "outcome",
+          "name": "outcome",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ToolOutcome"
+        },
+        {
+          "json_name": "progress",
+          "name": "progress",
+          "number": 7,
+          "optional": true,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "failureCode",
+          "name": "failure_code",
+          "number": 8,
+          "optional": true,
           "repeated": false,
           "type": "TYPE_STRING"
         }
       ]
     },
-    "ToolResultContent": {
+    "ToolResultPart": {
       "fields": [
-        {
-          "json_name": "callId",
-          "name": "call_id",
-          "number": 1,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
         {
           "json_name": "text",
           "name": "text",
-          "number": 2,
+          "number": 1,
+          "oneof": "content",
           "repeated": false,
-          "type": "TYPE_STRING"
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.TextContent"
         },
         {
-          "json_name": "isError",
-          "name": "is_error",
+          "json_name": "attachment",
+          "name": "attachment",
+          "number": 2,
+          "oneof": "content",
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.AttachmentContent"
+        }
+      ]
+    },
+    "TransportBudget": {
+      "fields": [
+        {
+          "json_name": "packetBytes",
+          "name": "packet_bytes",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "fragmentPayloadBytes",
+          "name": "fragment_payload_bytes",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "fragmentCount",
+          "name": "fragment_count",
           "number": 3,
           "repeated": false,
-          "type": "TYPE_BOOL"
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "envelopeBytes",
+          "name": "envelope_bytes",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "bulkConcurrency",
+          "name": "bulk_concurrency",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "reservedBytes",
+          "name": "reserved_bytes",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "fragmentIdleTimeoutMs",
+          "name": "fragment_idle_timeout_ms",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "transferTimeoutMs",
+          "name": "transfer_timeout_ms",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -4992,6 +5905,21 @@
           "number": 11,
           "repeated": false,
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "fragmentPayloadBytes",
+          "name": "fragment_payload_bytes",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "profile",
+          "name": "profile",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.TransportProfile"
         }
       ]
     },

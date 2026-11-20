@@ -616,6 +616,11 @@ func TestCleanupDrainsABacklogImmediatelyWithAlertEvidence(t *testing.T) {
 	if got := testutil.ToFloat64(metrics.CleanupBatches.WithLabelValues("bodies")); got != 2 {
 		t.Fatalf("body batches metric = %v", got)
 	}
+	for _, operation := range []string{"bodies", "tokens", "queries"} {
+		if got := testutil.ToFloat64(metrics.CleanupLastRun.WithLabelValues(operation)); got <= 0 {
+			t.Fatalf("%s completion timestamp metric = %v", operation, got)
+		}
+	}
 	if !strings.Contains(logs.String(), "more work remains") {
 		t.Fatalf("backlog warning missing: %s", logs.String())
 	}

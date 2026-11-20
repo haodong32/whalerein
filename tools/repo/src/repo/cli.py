@@ -83,7 +83,7 @@ Full reference: tools/repo/README.md""",
         "bench-compare": "Compare saved benchmark runs under the predeclared protocol.",
         "report": "Render saved JSON test results as offline HTML without running tests.",
         "recover": "Clean up resources still owned by an abandoned verification run.",
-        "proto": "Generate committed Go/JS protocol bindings.",
+        "proto": "Generate committed Go/JS protobuf bindings and Go/Node/Rust transport profiles.",
     }
     examples = {
         "projects": "  ./repo projects\n  ./repo projects --json",

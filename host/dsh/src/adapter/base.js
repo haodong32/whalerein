@@ -6,6 +6,7 @@ import { mapAdapterError } from './errors.js'
 
 import { SourceAdapter } from 'whalerein-host/contracts/source.js'
 import { DshConversation } from './conversation.js'
+import { attachmentOccurrence } from './projection.js'
 import { AdapterError, DefinitiveExecutionError, PluginError } from 'whalerein-host/errors.js'
 
 export * from './native.js'
@@ -15,15 +16,19 @@ export class DshAdapter extends SourceAdapter {
   #watchers = new Map()
   #committed = []
   #scheduled = false
+  #replyEvidence = new Map()
+  #openAttachments = new Map()
   /**
    * @param {object} options
    * @param {() => number} [options.now]
    * @param {object} [options.logger]
+   * @param {string} [options.hostId]
    */
-  constructor({ now = Date.now, logger = null } = {}) {
+  constructor({ now = Date.now, logger = null, hostId = '' } = {}) {
     super()
     this.now = now
     this.logger = logger
+    this.hostId = typeof hostId === 'string' ? hostId : ''
     this.opened = false
     this.deliveryModes = ['START_IF_IDLE']
     this.conversation = new DshConversation(this)
@@ -40,6 +45,12 @@ export class DshAdapter extends SourceAdapter {
     this.#watchers.clear()
     this.#committed=[]
     this.#scheduled=false
+    this.#replyEvidence.clear()
+    this.#replyOutcomes.clear()
+    for (const reader of this.#openAttachments.values()) {
+      try { await reader.close({ cancel: true }) } catch { /* cleanup is best effort */ }
+    }
+    this.#openAttachments.clear()
   }
 
   async describeHostCapabilities() {
@@ -49,7 +60,13 @@ export class DshAdapter extends SourceAdapter {
 
   async listSessions(options = {}) {
     const source = this.describe().capabilities ?? []
-    const capabilities = {history:source.includes('snapshot'),resumable_history:source.includes('sync'),live_text:source.includes('events'),interrupt:source.includes('interrupt'),approvals:source.includes('approvals')&&this.approvalMode!=='delegate',model_selection:source.includes('model-select'),delivery_modes:this.supportedDeliveryModes(),pending_queue_read:source.includes('pending-queue-read'),pending_queue_edit:source.includes('pending-queue-edit'),pending_queue_remove:source.includes('pending-queue-remove'),pending_queue_steer:source.includes('pending-queue-steer'),questions_read:source.includes('questions-read'),questions_answer_open:source.includes('questions-answer-open'),questions_answer_continued:source.includes('questions-answer-continued'),session_fork:source.includes('session-fork')}
+    const snapshot = source.includes('snapshot')
+    const events = source.includes('events')
+    // Optional expanded-conversation capabilities are advertised only where the
+    // adapter really produces the typed data. Each Source declares its own
+    // native support; an absent marker stays explicitly unavailable rather than
+    // being simulated or silently downgraded.
+    const capabilities = {history:snapshot,resumable_history:source.includes('sync'),live_text:events,live_reasoning:events,tool_activity:snapshot,conversation_notices:snapshot,attachments:source.includes('attachments'),history_page:source.includes('history-page'),history_exact:source.includes('history-exact'),send_followup:source.includes('send-followup'),interrupt:source.includes('interrupt'),approvals:source.includes('approvals')&&this.approvalMode!=='delegate',model_selection:source.includes('model-select'),delivery_modes:this.supportedDeliveryModes(),pending_queue_read:source.includes('pending-queue-read'),pending_queue_edit:source.includes('pending-queue-edit'),pending_queue_remove:source.includes('pending-queue-remove'),pending_queue_steer:source.includes('pending-queue-steer'),questions_read:source.includes('questions-read'),questions_answer_open:source.includes('questions-answer-open'),questions_answer_continued:source.includes('questions-answer-continued'),session_fork:source.includes('session-fork')}
     const sessions=await this.listNativeSessions(options)
     if(options.signal?.aborted) throw new AdapterError('unavailable')
     return sessions.map(({cursor,...session})=>({...session,historyCursor:'',sourceCapabilities:capabilities}))
@@ -171,6 +188,337 @@ export class DshAdapter extends SourceAdapter {
   readHistory(sessionId, read, options) { return this.conversation.history.read(sessionId, read, options) }
   readState(sessionId, options) { return this.conversation.state(sessionId, options) }
 
+  // --- bounded native observation ----------------------------------------
+  // Every native history/attachment/reply path consumes these hooks. The base
+  // implementation is the deterministic snapshot used by FakeDSH; a real
+  // Source overrides them with the passive native page API and exact ranges.
+  // No hook may materialize the full native log for one bounded read.
+  attachmentsAvailable() { return false }
+
+  async nativeEventsPage(sessionId, { throughSeq, beforeSeq, maxMessages = 200 } = {}) {
+    const snapshot = await this.getSessionSnapshot(sessionId)
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : []
+    const eligible = events.filter(event => Number.isSafeInteger(event.dshSeq) &&
+      (throughSeq === undefined || event.dshSeq <= throughSeq) &&
+      (beforeSeq === undefined || event.dshSeq < beforeSeq))
+    const page = eligible.slice(-Math.max(1, maxMessages))
+    return { events: page, hasMore: eligible.length > page.length, cursor: page.at(-1)?.dshSeq ?? null }
+  }
+
+  async nativeEventWindow(sessionId, seq, { before = 256 } = {}) {
+    const snapshot = await this.getSessionSnapshot(sessionId)
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : []
+    return events.filter(event => Number.isSafeInteger(event.dshSeq) && event.dshSeq <= seq).slice(-Math.max(1, before))
+  }
+
+  async nativeEventsRange(sessionId, fromSeq, toSeqExclusive) {
+    const snapshot = await this.getSessionSnapshot(sessionId)
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : []
+    return events.filter(event => Number.isSafeInteger(event.dshSeq) && event.dshSeq >= fromSeq && event.dshSeq < toSeqExclusive)
+  }
+
+  async nativeReadImage() { throw new AdapterError('unsupported_capability', 'image reads unavailable') }
+  async nativeReadFileStream() { throw new AdapterError('unsupported_capability', 'file reads unavailable') }
+
+  // --- typed send follow-up -----------------------------------------------
+  // Evidence comes from the original submitted identity and the bounded
+  // observation around it. Bodies stay in canonical history; only a scoped
+  // reference or evidenced input kinds cross the seam.
+  #replyOutcomes = new Map()
+
+  async readMessageReply(sessionId, submittedMessageId, signal) {
+    if (typeof sessionId !== 'string' || sessionId === '' ||
+        typeof submittedMessageId !== 'string' || submittedMessageId === '' || submittedMessageId.length > 512) {
+      throw new AdapterError('invalid_argument', 'submission identity invalid')
+    }
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    const pending = (state, pendingInput = []) => ({
+      session_id: sessionId,
+      submitted_message_id: submittedMessageId,
+      state,
+      pending_input: pendingInput,
+    })
+    const view = await this.conversation.history.ensureView(sessionId, { signal })
+    const outcomeKey = `${sessionId}:${submittedMessageId}:${view.id}`
+    const cached = this.#replyOutcomes.get(outcomeKey)
+    if (cached) return { ...cached, session_id: sessionId, submitted_message_id: submittedMessageId }
+    const submitted = await this.#submissionEvidence(sessionId, submittedMessageId, view.id, { signal })
+    if (submitted.ambiguous) return pending('MESSAGE_REPLY_UNCERTAIN')
+    if (!submitted.seq && submitted.seq !== 0) {
+      const wait = await this.#safeWaitState(sessionId, signal)
+      return pending(wait?.running === true ? 'MESSAGE_REPLY_PENDING' : 'MESSAGE_REPLY_UNCERTAIN')
+    }
+    const head = typeof this.nativeHead === 'function' ? await this.nativeHead(sessionId, { signal }) : submitted.seq
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    if (!Number.isSafeInteger(head) || head < submitted.seq) return pending('MESSAGE_REPLY_PENDING')
+    const events = await this.nativeEventsRange(sessionId, submitted.seq, head + 1, { signal })
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    if (!Array.isArray(events)) return pending('MESSAGE_REPLY_UNCERTAIN')
+    const start = events.findIndex(event => event.dshSeq === submitted.seq && isSubmissionEvent(event, submittedMessageId))
+    if (start < 0) return pending('MESSAGE_REPLY_PENDING')
+    let finalAssistant = null
+    let ended = false
+    let competing = false
+    for (const event of events.slice(start + 1)) {
+      if (event.type === 'user/message') { competing = true; break }
+      if (event.type === 'assistant/message') finalAssistant = event
+      if (event.type === 'turn/end' || event.type === 'session/interrupted') {
+        // Any terminal turn outcome settles the submitted operation; an
+        // interrupted prefix still commits a valid visible Message.
+        ended = true
+        if (finalAssistant) break
+      }
+    }
+    const wait = await this.#safeWaitState(sessionId, signal)
+    if (!ended && wait?.running === true && !competing) {
+      const kinds = await this.pendingInputKinds(sessionId, signal)
+      if (kinds.length > 0) return pending('MESSAGE_REPLY_INPUT_REQUIRED', kinds)
+    }
+    if (competing && !ended) return pending('MESSAGE_REPLY_UNCERTAIN')
+    if (!ended) return pending(wait?.running === true ? 'MESSAGE_REPLY_PENDING' : 'MESSAGE_REPLY_UNCERTAIN')
+    if (!finalAssistant) return pending('MESSAGE_REPLY_UNCERTAIN')
+    const projected = this.#projectEvent(sessionId, view.id, finalAssistant)
+    if (!projected) return pending('MESSAGE_REPLY_UNCERTAIN')
+    if (!this.hostId) throw new AdapterError('unavailable', 'host identity unavailable for a committed reference')
+    const reference = this.conversation.history.locatorFor(sessionId, view.id, finalAssistant.dshSeq)
+    if (!reference || !projected.message_id) return pending('MESSAGE_REPLY_UNCERTAIN')
+    const committed = {
+      session_id: sessionId,
+      submitted_message_id: submittedMessageId,
+      state: 'MESSAGE_REPLY_COMMITTED',
+      committed: {
+        session: { host_id: this.hostId, session_id: sessionId },
+        message_id: projected.message_id,
+        source_locator: reference.source_locator,
+        projection_id: reference.projection_id,
+      },
+      pending_input: [],
+    }
+    // A settled reply is terminal for its operation/view; subsequent polls reuse
+    // this scoped evidence instead of re-reading the turn each time.
+    if (this.#replyOutcomes.size >= 128) this.#replyOutcomes.delete(this.#replyOutcomes.keys().next().value)
+    this.#replyOutcomes.set(outcomeKey, committed)
+    return committed
+  }
+
+  #projectEvent(sessionId, view, event) {
+    const projector = this.conversation.history.newProjector()
+    return projector.project(sessionId, view, event)
+  }
+
+  async pendingInputKinds(sessionId, signal) {
+    let state = null
+    try { state = await this.readWaitState(sessionId, signal) } catch { state = null }
+    const kinds = new Set()
+    if (state && Array.isArray(state.pendingInput)) {
+      for (const kind of state.pendingInput) {
+        if (kind === 'approval') kinds.add('INPUT_APPROVAL')
+        else if (kind === 'question') kinds.add('INPUT_QUESTION')
+        else kinds.add('INPUT_OTHER')
+      }
+    }
+    if (state && state.running === false && kinds.size === 0) return []
+    if (kinds.size === 0 && typeof this.listApprovals === 'function') {
+      try {
+        const approvals = await this.listApprovals(sessionId)
+        if (Array.isArray(approvals) && approvals.length > 0) kinds.add('INPUT_APPROVAL')
+      } catch { /* evidence stays absent */ }
+    }
+    return [...kinds]
+  }
+
+  async #safeWaitState(sessionId, signal) {
+    try { return await this.readWaitState(sessionId, signal) } catch { return null }
+  }
+
+  async #submissionEvidence(sessionId, submittedMessageId, view, { signal } = {}) {
+    const key = `${sessionId}:${submittedMessageId}`
+    const cached = this.#replyEvidence.get(key)
+    if (cached && cached.view === view) return cached
+    const matches = []
+    let beforeSeq
+    // A queued or just-started submission is near the tail. This scan is
+    // bounded and reused across polls; an older submission still resolves from
+    // the cached locator without re-reading the whole log.
+    for (let page = 0; page < 8; page++) {
+      const value = await this.nativeEventsPage(sessionId, { beforeSeq, maxMessages: 200, signal })
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      for (const event of value?.events ?? []) {
+        if (isSubmissionEvent(event, submittedMessageId)) matches.push(event.dshSeq)
+      }
+      if (matches.length > 1) {
+        const result = { view, seq: matches[0], ambiguous: true }
+        this.#rememberSubmission(key, result)
+        return result
+      }
+      if (!value?.hasMore) break
+      const first = value.events?.[0]?.dshSeq
+      if (!Number.isSafeInteger(first) || first === beforeSeq) break
+      beforeSeq = first
+    }
+    if (matches.length === 1) {
+      const result = { view, seq: matches[0], ambiguous: false }
+      this.#rememberSubmission(key, result)
+      return result
+    }
+    // A queued submission has not started yet: do not cache the absence, so a
+    // later poll can observe its first committed user Message.
+    this.#replyEvidence.delete(key)
+    return { view, seq: null, ambiguous: false }
+  }
+
+  #rememberSubmission(key, result) {
+    if (this.#replyEvidence.size >= 128) this.#replyEvidence.delete(this.#replyEvidence.keys().next().value)
+    this.#replyEvidence.set(key, result)
+  }
+
+  // --- attachment occurrence reads ---------------------------------------
+  // Resolution proves committed membership first; no native byte is read until
+  // the returned reader is advanced. The reader is cancellable and idempotent.
+  async openAttachment(sessionId, attachmentRef, { signal } = {}) {
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    if (typeof sessionId !== 'string' || sessionId === '') throw new AdapterError('invalid_argument', 'attachment session invalid')
+    if (typeof attachmentRef !== 'string' || attachmentRef === '' || attachmentRef.length > 4096) throw new AdapterError('invalid_argument', 'attachment occurrence invalid')
+    const occurrence = await this.resolveAttachment(sessionId, attachmentRef, { signal })
+    if (signal?.aborted) throw new AdapterError('unavailable')
+    if (!occurrence) throw new AdapterError('not_found', 'attachment occurrence unavailable')
+    const native = occurrence.attachment
+    const size = Number.isSafeInteger(native?.bytes) && native.bytes >= 0 ? native.bytes : null
+    if (size === null) throw new AdapterError('invalid_argument', 'attachment size invalid')
+    const mediaType = typeof native?.mediaType === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(native.mediaType) ? native.mediaType : 'application/octet-stream'
+    const name = typeof native?.name === 'string' && !/[\\/]/.test(native.name) ? native.name : ''
+    const digest = occurrence.kind === 'file' ? sha256FromAttachmentId(native?.attachmentId) : null
+    const controller = new AbortController()
+    const onAbort = () => controller.abort(signal?.reason)
+    if (signal) {
+      if (signal.aborted) controller.abort(signal.reason)
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
+    const reader = occurrence.kind === 'image'
+      ? this.#imageReader(native, size, controller)
+      : this.#fileReader(native, size, controller)
+    const close = async ({ cancel = false } = {}) => {
+      try { await reader.close({ cancel }) } finally {
+        signal?.removeEventListener?.('abort', onAbort)
+        this.#openAttachments.delete(`${sessionId}:${attachmentRef}`)
+      }
+    }
+    const wrapped = { read: (maxBytes, options) => reader.read(maxBytes, options), close }
+    this.#openAttachments.set(`${sessionId}:${attachmentRef}`, wrapped)
+    return {
+      attachment: {
+        ...(this.hostId ? { session: { host_id: this.hostId, session_id: sessionId } } : {}),
+        attachment_ref: attachmentRef,
+        media_type: mediaType,
+        ...(name === '' ? {} : { name }),
+        size,
+        ...(digest ? { sha256: digest } : {}),
+      },
+      reader: wrapped,
+    }
+  }
+
+  async closeAttachment(sessionId, attachmentRef, { cancel = false } = {}) {
+    const reader = this.#openAttachments.get(`${sessionId}:${attachmentRef}`)
+    if (!reader) return
+    await reader.close({ cancel })
+  }
+
+  // Prove committed occurrence membership from bounded hot/cold observation
+  // before any native byte read. A Source that cannot read bytes never scans.
+  async resolveAttachment(sessionId, attachmentRef, { signal } = {}) {
+    if (!this.attachmentsAvailable()) throw new AdapterError('unsupported_capability', 'attachment occurrence reads unavailable')
+    const view = await this.conversation.history.ensureView(sessionId, { signal })
+    let beforeSeq
+    for (let page = 0; page < 64; page++) {
+      const value = await this.nativeEventsPage(sessionId, { beforeSeq, maxMessages: 500, signal })
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      const occurrence = attachmentOccurrence(sessionId, view.id, value?.events ?? [], attachmentRef)
+      if (occurrence) return occurrence
+      if (!value?.hasMore) return null
+      const first = value.events?.[0]?.dshSeq
+      if (!Number.isSafeInteger(first) || first === beforeSeq) return null
+      beforeSeq = first
+    }
+    return null
+  }
+
+  #imageReader(native, size, controller) {
+    let buffer = null
+    let offset = 0
+    let closed = false
+    return {
+      read: async (maxBytes) => {
+        if (closed) throw new AdapterError('not_found')
+        if (controller.signal.aborted) throw new AdapterError('unavailable')
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new AdapterError('invalid_argument')
+        if (buffer === null) {
+          const data = await this.nativeReadImage(native, controller.signal)
+          if (!(data instanceof Uint8Array) || data.length !== size) throw new AdapterError('payload_digest_mismatch', 'image size mismatch')
+          buffer = data
+        }
+        const end = Math.min(size, offset + maxBytes)
+        const bytes = buffer.subarray(offset, end)
+        offset = end
+        return { bytes, eof: offset >= size }
+      },
+      close: async () => {
+        closed = true
+        buffer = null
+        if (!controller.signal.aborted) controller.abort()
+      },
+    }
+  }
+
+  #fileReader(native, size, controller) {
+    let iterator = null
+    let pending = null
+    let offset = 0
+    let closed = false
+    const pull = async () => {
+      if (iterator === null) iterator = await this.nativeReadFileStream(native, controller.signal)
+      return iterator
+    }
+    return {
+      read: async (maxBytes) => {
+        if (closed) throw new AdapterError('not_found')
+        if (controller.signal.aborted) throw new AdapterError('unavailable')
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new AdapterError('invalid_argument')
+        if (size === 0) return { bytes: new Uint8Array(0), eof: true }
+        const chunks = []
+        let produced = 0
+        let eof = false
+        for (;;) {
+          if (produced >= maxBytes) break
+          if (!pending) {
+            const stream = await pull()
+            let next
+            try { next = await stream.next() } catch (error) {
+              throw new AdapterError(mapAdapterError(error))
+            }
+            if (next.done) { eof = true; break }
+            pending = next.value instanceof Uint8Array ? next.value : Uint8Array.from(next.value ?? [])
+            if (pending.length === 0) { pending = null; continue }
+          }
+          const take = Math.min(maxBytes - produced, pending.length)
+          chunks.push(pending.subarray(0, take))
+          produced += take
+          pending = take === pending.length ? null : pending.subarray(take)
+        }
+        const bytes = concatBytes(chunks, produced)
+        offset += produced
+        if (eof && offset !== size) throw new AdapterError('payload_digest_mismatch', 'file size mismatch')
+        return { bytes, eof }
+      },
+      close: async () => {
+        closed = true
+        pending = null
+        if (!controller.signal.aborted) controller.abort()
+        try { await iterator?.return?.() } catch { /* native cleanup is best effort */ }
+      },
+    }
+  }
+
   async listNativeSessions() {
     throw new AdapterError('unsupported_capability', 'sessions unavailable')
   }
@@ -220,6 +568,31 @@ export class DshAdapter extends SourceAdapter {
   describe() {
     return { mode: 'abstract', available: false }
   }
+}
+
+function isSubmissionEvent(event, submittedMessageId) {
+  if (event?.type !== 'user/message') return false
+  const data = event.data ?? {}
+  const source = data.source ?? data.message?.source
+  return data.id === submittedMessageId ||
+    data.message?.id === submittedMessageId ||
+    source?.rpcId === submittedMessageId
+}
+
+function sha256FromAttachmentId(attachmentId) {
+  if (typeof attachmentId !== 'string') return null
+  const match = /^sha256:([0-9a-f]{64})$/.exec(attachmentId)
+  if (!match) return null
+  const bytes = new Uint8Array(32)
+  for (let index = 0; index < 32; index++) bytes[index] = Number.parseInt(match[1].slice(index * 2, index * 2 + 2), 16)
+  return bytes
+}
+
+function concatBytes(chunks, length) {
+  const out = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length }
+  return out
 }
 
 /** Wrap an arbitrary adapter rejection into a stable wire error. */

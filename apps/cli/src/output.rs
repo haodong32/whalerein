@@ -2,79 +2,694 @@
 
 use serde_json::{json, Value};
 use whalerein_core::api::{
-    CommandHandle, DoctorReport, ExportManifest, HostInfo, ModelCatalog, PairingHistoryRecord,
-    PendingQueue, QuestionPageInfo, SessionList, SessionModel,
+    CommandHandle, DoctorReport, DownloadOutcome, DownloadProgress, ExportManifest, HostInfo,
+    ModelCatalog, PairingHistoryRecord, PendingQueue, QuestionPageInfo, SessionKey, SessionList,
+    SessionModel,
 };
+
+use std::cell::Cell;
 
 use crate::cli::{Command, ModelAction};
 
+use whalerein_core::attachments::{attachment_extension, default_attachment_name};
 use whalerein_core::conversation::{
-    content_block, AttemptOutcome, ConversationMessage, RunPhase, ViewUpdate,
+    content_block, AttemptOutcome, BlockKind, ConversationMessage, NoticeCategory, NoticeState,
+    PreviewPrefix, RunPhase, ToolActivity, ToolResultPart, ViewUpdate,
 };
+use whalerein_core::history::{HistoryPage, HistorySource, MessageReference};
 
 /// Render one committed message's blocks in source order.
 ///
-/// A preview prefix skips bytes the live stream already printed; it applies to
-/// the text-like run (text, tool result, notice) exactly as Core's
-/// `message_text` concatenates it. Tool calls and attachments are actionable
-/// structure, so they are always shown even after a preview.
-fn render_message_blocks(message: &ConversationMessage, skip: usize) -> String {
+/// A preview prefix skips bytes the live stream already printed. Core reports
+/// answer and reasoning prefixes separately, so hidden reasoning never offsets
+/// visible answer text. Reasoning is omitted unless the caller opted in.
+fn render_message_blocks(
+    message: &ConversationMessage,
+    prefix: Option<PreviewPrefix>,
+    show_reasoning: bool,
+) -> String {
     let mut lines = Vec::new();
-    let mut consumed = 0usize;
+    let mut text_consumed = 0usize;
+    let mut reasoning_consumed = 0usize;
+    let text_skip = prefix.map_or(0, |prefix| prefix.text_bytes);
+    let reasoning_skip = prefix.map_or(0, |prefix| prefix.reasoning_bytes);
     for block in &message.blocks {
-        let line = match &block.content {
+        match &block.content {
             Some(content_block::Content::Text(text)) => {
-                let kept = suffix_after(&text.text, &mut consumed, skip);
-                if kept.is_empty() {
-                    continue;
+                let kept = suffix_after(&text.text, &mut text_consumed, text_skip);
+                if !kept.is_empty() {
+                    lines.push(kept);
                 }
-                kept
             }
-            Some(content_block::Content::ToolResult(result)) => {
-                let kept = suffix_after(&result.text, &mut consumed, skip);
-                if kept.is_empty() {
+            Some(content_block::Content::Reasoning(reasoning)) => {
+                // Count the prefix even when hidden so a later visible message
+                // is not offset by reasoning the user never saw.
+                let continued = reasoning_consumed < reasoning_skip;
+                let kept = suffix_after(&reasoning.text, &mut reasoning_consumed, reasoning_skip);
+                if !show_reasoning || kept.is_empty() {
                     continue;
                 }
-                format!(
-                    "[tool {}] {}",
-                    if result.is_error { "error" } else { "result" },
-                    kept
-                )
+                if continued {
+                    // This block is already on screen; append only its suffix
+                    // without repeating the typed marker.
+                    lines.push(kept);
+                } else {
+                    lines.push(format!("[reasoning] {kept}"));
+                }
             }
             Some(content_block::Content::Notice(notice)) => {
-                let kept = suffix_after(&notice.text, &mut consumed, skip);
-                if kept.is_empty() {
-                    continue;
-                }
-                if notice.category.is_empty() {
-                    format!("[notice] {kept}")
-                } else {
-                    format!("[notice {}] {kept}", sanitize_field(&notice.category))
+                let label = notice_label(notice.category, notice.state);
+                match notice
+                    .summary
+                    .as_deref()
+                    .filter(|summary| !summary.is_empty())
+                {
+                    Some(summary) => lines.push(format!("{label} {}", sanitize_field(summary))),
+                    None => lines.push(label),
                 }
             }
-            Some(content_block::Content::ToolCall(tool)) => format!(
-                "[tool] {} {}",
-                sanitize_field(&tool.name),
-                sanitize_field(&tool.summary)
-            ),
-            Some(content_block::Content::Attachment(attachment)) => format!(
-                "[attachment {} ({}, {} bytes{})]",
-                sanitize_field(&attachment.name),
-                sanitize_field(&attachment.media_type),
-                attachment.size,
-                if attachment.available {
-                    ""
-                } else {
-                    ", unavailable"
-                }
-            ),
+            Some(content_block::Content::ToolActivity(activity)) => {
+                lines.push(render_tool_activity(activity));
+            }
+            Some(content_block::Content::Attachment(attachment)) => {
+                lines.push(render_attachment(attachment));
+            }
             None => continue,
-        };
-        lines.push(line);
+        }
     }
     // Text blocks can carry internal newlines; joining keeps source order and
     // does not insert a blank line between structured blocks.
     lines.join("\n")
+}
+
+/// Committed message body for human output under the reasoning policy.
+pub fn render_committed_blocks(message: &ConversationMessage, show_reasoning: bool) -> String {
+    render_message_blocks(message, None, show_reasoning)
+}
+
+fn notice_category_label(category: NoticeCategory) -> &'static str {
+    match category {
+        NoticeCategory::Unspecified => "unspecified",
+        NoticeCategory::Retry => "retry",
+        NoticeCategory::MaxOutput => "max-output",
+        NoticeCategory::Compaction => "compaction",
+        NoticeCategory::Command => "command",
+        NoticeCategory::Context => "context",
+        NoticeCategory::Omission => "omission",
+    }
+}
+
+fn notice_state_label(state: NoticeState) -> &'static str {
+    match state {
+        NoticeState::Unspecified => "unspecified",
+        NoticeState::Scheduled => "scheduled",
+        NoticeState::Started => "started",
+        NoticeState::Cancelled => "cancelled",
+        NoticeState::Completed => "completed",
+        NoticeState::Failed => "failed",
+        NoticeState::Reached => "reached",
+    }
+}
+
+fn notice_label(category: NoticeCategory, state: NoticeState) -> String {
+    format!(
+        "[notice {}/{}]",
+        notice_category_label(category),
+        notice_state_label(state)
+    )
+}
+
+fn attachment_display_name(attachment: &content_block::AttachmentContent) -> String {
+    if !attachment.name.trim().is_empty() {
+        return attachment.name.clone();
+    }
+    default_attachment_name(&attachment.media_type)
+}
+
+fn render_attachment(attachment: &content_block::AttachmentContent) -> String {
+    format!(
+        "[attachment {} ({}, {} bytes{})]",
+        sanitize_field(&attachment_display_name(attachment)),
+        sanitize_field(&attachment.media_type),
+        attachment.size,
+        if attachment.available {
+            ""
+        } else {
+            ", unavailable"
+        }
+    )
+}
+
+thread_local! {
+    static FULL_TOOL_OUTPUT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set by the CLI before dispatch; human tool-result rendering only.
+pub fn set_full_tool_output(full: bool) {
+    FULL_TOOL_OUTPUT.with(|value| value.set(full));
+}
+
+fn full_tool_output() -> bool {
+    FULL_TOOL_OUTPUT.with(Cell::get)
+}
+
+/// Human display keeps a tool result bounded. Machine output stays complete.
+const TOOL_RESULT_DISPLAY_BYTES: usize = 8 * 1024;
+
+fn bounded_tool_text(text: &str) -> String {
+    if full_tool_output() || text.len() <= TOOL_RESULT_DISPLAY_BYTES {
+        return text.to_owned();
+    }
+    let mut end = 0;
+    for (index, _) in text.char_indices() {
+        if index > TOOL_RESULT_DISPLAY_BYTES {
+            break;
+        }
+        end = index;
+    }
+    let hidden = text.len().saturating_sub(end);
+    format!(
+        "{}\n… [{} bytes hidden; use --full to show complete tool output]",
+        &text[..end],
+        hidden
+    )
+}
+
+/// One typed tool activity, including the evidenced state and settled result.
+fn render_tool_activity(activity: &ToolActivity) -> String {
+    let mut header = format!(
+        "[tool {} {}]",
+        sanitize_field(&activity.name),
+        activity.state.as_str()
+    );
+    if let Some(summary) = activity
+        .summary
+        .as_deref()
+        .filter(|summary| !summary.is_empty())
+    {
+        header.push(' ');
+        header.push_str(&sanitize_field(summary));
+    }
+    if activity.call_missing {
+        header.push_str(" (call record outside the read window)");
+    }
+    let mut out = header;
+    if let Some(progress) = activity
+        .progress
+        .as_deref()
+        .filter(|progress| !progress.is_empty())
+    {
+        out.push_str(&format!("\n[tool progress] {}", sanitize_field(progress)));
+    }
+    if let Some(code) = activity
+        .failure_code
+        .as_deref()
+        .filter(|code| !code.is_empty())
+    {
+        out.push_str(&format!("\n[tool failure] {}", sanitize_field(code)));
+    }
+    for part in &activity.result {
+        match part {
+            ToolResultPart::Text(text) if !text.is_empty() => {
+                out.push_str(&format!(
+                    "\n[tool result] {}",
+                    sanitize_field(&bounded_tool_text(text))
+                ));
+            }
+            ToolResultPart::Text(_) => {}
+            ToolResultPart::Attachment(attachment) => {
+                out.push('\n');
+                out.push_str(&render_attachment(attachment));
+            }
+        }
+    }
+    out
+}
+
+fn tool_result_json(part: &ToolResultPart) -> Value {
+    match part {
+        ToolResultPart::Text(text) => json!({"type": "text", "text": text}),
+        ToolResultPart::Attachment(attachment) => attachment_json(attachment),
+    }
+}
+
+fn tool_activity_json(activity: &ToolActivity) -> Value {
+    let stages: Vec<&str> = activity
+        .stages
+        .iter()
+        .map(|stage| stage.as_str_name())
+        .collect();
+    json!({
+        "call_id": activity.id.call_id,
+        "name": activity.name,
+        "summary": activity.summary,
+        "state": activity.state.as_str(),
+        "stages": stages,
+        "progress": activity.progress,
+        "failure_code": activity.failure_code,
+        "result": activity.result.iter().map(tool_result_json).collect::<Vec<_>>(),
+        "call_missing": activity.call_missing,
+    })
+}
+
+fn attachment_json(attachment: &content_block::AttachmentContent) -> Value {
+    json!({
+        "name": attachment.name,
+        "media_type": attachment.media_type,
+        "size": attachment.size,
+        "available": attachment.available,
+        "reference": attachment.attachment_ref,
+    })
+}
+
+fn content_block_json(
+    block: &whalerein_core::conversation::ContentBlock,
+    show_reasoning: bool,
+) -> Option<Value> {
+    Some(match &block.content {
+        Some(content_block::Content::Text(text)) => {
+            json!({"block_id": block.block_id, "type": "text", "text": text.text})
+        }
+        Some(content_block::Content::Reasoning(reasoning)) if show_reasoning => json!({
+            "block_id": block.block_id,
+            "type": "reasoning",
+            "text": reasoning.text,
+        }),
+        // Hidden reasoning is omitted entirely so default JSON cannot leak it
+        // or even its position.
+        Some(content_block::Content::Reasoning(_)) => return None,
+        Some(content_block::Content::ToolActivity(activity)) => {
+            let mut value = tool_activity_json(activity);
+            value["block_id"] = json!(block.block_id);
+            value["type"] = json!("tool_activity");
+            value
+        }
+        Some(content_block::Content::Notice(notice)) => json!({
+            "block_id": block.block_id,
+            "type": "notice",
+            "category": notice.category.as_str_name(),
+            "state": notice.state.as_str_name(),
+            "summary": notice.summary,
+        }),
+        Some(content_block::Content::Attachment(attachment)) => {
+            let mut value = attachment_json(attachment);
+            value["block_id"] = json!(block.block_id);
+            value["type"] = json!("attachment");
+            value
+        }
+        None => json!({"block_id": block.block_id, "type": "unavailable"}),
+    })
+}
+
+/// Core-owned message value for JSON output. Reasoning is present only when
+/// the caller opted in.
+pub fn message_json(message: &ConversationMessage, show_reasoning: bool) -> Value {
+    json!({
+        "message_id": message.message_id,
+        "role": message.role.as_str_name(),
+        "authored_at_unix_ms": message.authored_at_unix_ms,
+        "blocks": message
+            .blocks
+            .iter()
+            .filter_map(|block| content_block_json(block, show_reasoning))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Shell-safe quoting for values a user will paste into a supported shell.
+///
+/// Single quotes preserve every byte; an embedded quote is closed, escaped and
+/// reopened. Control characters and command substitutions therefore stay
+/// literal arguments instead of becoming shell syntax.
+pub fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".into();
+    }
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@".contains(&byte))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn history_source_label(source: HistorySource) -> &'static str {
+    match source {
+        HistorySource::Online => "online",
+        HistorySource::Cache => "cache",
+    }
+}
+
+fn attachment_save_command(key: &SessionKey, reference: &str, name: Option<&str>) -> String {
+    let name = name
+        .map(|name| format!(" --name {}", shell_quote(name)))
+        .unwrap_or_default();
+    format!(
+        "whalerein session download {} --host {} --session {} --to <DIR>{name}",
+        shell_quote(reference),
+        shell_quote(&key.host_id),
+        shell_quote(&key.session_id)
+    )
+}
+
+/// Duplicate display names would make two save commands collide in one
+/// directory. The first keeps the Source suggestion; later ones get a stable
+/// media-derived name so each printed command is directly usable.
+fn attachment_name_overrides(
+    attachments: &[content_block::AttachmentContent],
+) -> Vec<Option<String>> {
+    let mut counts = std::collections::HashMap::new();
+    let mut overrides = Vec::with_capacity(attachments.len());
+    let mut position = 0usize;
+    for attachment in attachments {
+        if !attachment.available || attachment.attachment_ref.is_empty() {
+            overrides.push(None);
+            continue;
+        }
+        let display = attachment_display_name(attachment);
+        let count = counts.entry(display).or_insert(0usize);
+        *count += 1;
+        position += 1;
+        if *count == 1 {
+            overrides.push(None);
+        } else {
+            overrides.push(Some(format!(
+                "attachment-{position}.{}",
+                attachment_extension(&attachment.media_type)
+            )));
+        }
+    }
+    overrides
+}
+
+/// One verified attachment save as machine data.
+///
+/// `target` is added by the command runner when it is not already present. The
+/// opaque reference is echoed so a caller can correlate the save with the
+/// history attachment row.
+pub fn download_data(key: &SessionKey, reference: &str, outcome: &DownloadOutcome) -> Value {
+    json!({
+        "target": key,
+        "reference": reference,
+        "path": outcome.path.to_string_lossy(),
+        "name": outcome.name,
+        "bytes": outcome.bytes,
+        "sha256": outcome.sha256,
+        "media_type": outcome.media_type,
+        "verified": outcome.verified,
+    })
+}
+
+/// Human success for one committed save. It is rendered only after Core
+/// returned a verified outcome, never while a transfer is still running.
+pub fn render_download(outcome: &DownloadOutcome) -> String {
+    format!(
+        "Saved: {}\nBytes: {}\nMedia type: {}\nSHA-256: {}\nVerified: {}\n",
+        outcome.path.to_string_lossy(),
+        outcome.bytes,
+        sanitize_field(&outcome.media_type),
+        outcome.sha256,
+        if outcome.verified { "yes" } else { "no" }
+    )
+}
+
+/// Throttled progress presentation for the stderr stream.
+///
+/// Emits the declared total once at the start, then at most about ten updates
+/// plus the final declaration. It never carries a local path, filename or
+/// attachment content. `--json` yields one structured event per line; human
+/// mode yields one line with byte counts and a percentage.
+#[derive(Debug)]
+pub struct DownloadProgressRenderer {
+    json: bool,
+    started: bool,
+    last_received: u64,
+    last_total: u64,
+    next_received: u64,
+}
+
+impl DownloadProgressRenderer {
+    pub fn new(json: bool) -> Self {
+        Self {
+            json,
+            started: false,
+            last_received: 0,
+            last_total: 0,
+            next_received: 0,
+        }
+    }
+
+    /// Return the next bounded progress line, or `None` when this update is
+    /// below the throttle threshold or repeats the previous event.
+    pub fn report(&mut self, progress: DownloadProgress) -> Option<String> {
+        let total = progress.total;
+        let step = progress_step(total);
+        let repeated =
+            self.started && progress.received == self.last_received && total == self.last_total;
+        let final_declaration =
+            total > 0 && progress.received >= total && self.last_received < total;
+        if repeated
+            || (self.started && progress.received < self.next_received && !final_declaration)
+        {
+            return None;
+        }
+        if !self.started {
+            self.started = true;
+            self.next_received = step;
+        } else {
+            self.next_received = progress.received.saturating_add(step).max(step);
+        }
+        self.last_received = progress.received;
+        self.last_total = total;
+        Some(self.render(progress))
+    }
+
+    fn render(&self, progress: DownloadProgress) -> String {
+        if self.json {
+            let mut line = json!({
+                "event": "download_progress",
+                "received": progress.received,
+                "total": progress.total,
+            })
+            .to_string();
+            line.push('\n');
+            line
+        } else if progress.total == 0 {
+            "Progress: 0/0 bytes (complete)\n".to_owned()
+        } else {
+            let percent = progress
+                .received
+                .saturating_mul(100)
+                .checked_div(progress.total)
+                .unwrap_or(100);
+            format!(
+                "Progress: {}/{} bytes ({}%)\n",
+                progress.received, progress.total, percent
+            )
+        }
+    }
+}
+
+fn progress_step(total: u64) -> u64 {
+    const MIN_STEP: u64 = 1024 * 1024;
+    (total / 10).max(MIN_STEP).max(1)
+}
+
+fn attachment_rows(messages: &[ConversationMessage]) -> Vec<content_block::AttachmentContent> {
+    let mut attachments = Vec::new();
+    for message in messages {
+        for block in &message.blocks {
+            match &block.content {
+                Some(content_block::Content::Attachment(attachment)) => {
+                    attachments.push(attachment.clone());
+                }
+                Some(content_block::Content::ToolActivity(activity)) => {
+                    for part in &activity.result {
+                        if let ToolResultPart::Attachment(attachment) = part {
+                            attachments.push(attachment.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    attachments
+}
+
+fn attachments_json(
+    key: &SessionKey,
+    attachments: &[content_block::AttachmentContent],
+) -> Vec<Value> {
+    let overrides = attachment_name_overrides(attachments);
+    attachments
+        .iter()
+        .zip(overrides)
+        .map(|(attachment, override_name)| {
+            let mut value = attachment_json(attachment);
+            value["save_command"] = if attachment.available && !attachment.attachment_ref.is_empty()
+            {
+                json!(attachment_save_command(
+                    key,
+                    &attachment.attachment_ref,
+                    override_name.as_deref()
+                ))
+            } else {
+                Value::Null
+            };
+            value
+        })
+        .collect()
+}
+
+fn render_attachment_rows(
+    key: &SessionKey,
+    attachments: &[content_block::AttachmentContent],
+) -> String {
+    let mut out = String::new();
+    let overrides = attachment_name_overrides(attachments);
+    for (attachment, override_name) in attachments.iter().zip(overrides) {
+        out.push_str(&format!(
+            "Attachment: {} ({}, {} bytes{})\n",
+            sanitize_field(&attachment_display_name(attachment)),
+            sanitize_field(&attachment.media_type),
+            attachment.size,
+            if attachment.available {
+                ""
+            } else {
+                ", unavailable"
+            }
+        ));
+        if attachment.available && !attachment.attachment_ref.is_empty() {
+            out.push_str(&format!(
+                "  Save: {}\n",
+                attachment_save_command(key, &attachment.attachment_ref, override_name.as_deref())
+            ));
+            if attachment.media_type.starts_with("image/") && attachment.size > 32 * 1024 * 1024 {
+                out.push_str(&format!(
+                    "  Large image: decoding may use about {} MiB of memory.\n",
+                    attachment.size.div_ceil(1024 * 1024)
+                ));
+            }
+        } else {
+            out.push_str(
+                "  The Source did not expose readable bytes for this occurrence; no save action is available.\n",
+            );
+        }
+    }
+    out
+}
+
+fn history_continue_command(key: &SessionKey, continuation: &str) -> String {
+    format!(
+        "whalerein session history {} --host {} --continuation {}",
+        shell_quote(&key.session_id),
+        shell_quote(&key.host_id),
+        shell_quote(continuation)
+    )
+}
+
+/// Human output for one independent history page. Messages are chronological
+/// within the page; a continuation points toward older history.
+pub fn render_history_page(key: &SessionKey, page: &HistoryPage, show_reasoning: bool) -> String {
+    let mut out = format!(
+        "Source: {}\nProjection: {}\nSession: {} / {}\n",
+        history_source_label(page.source),
+        sanitize_field(&page.projection),
+        sanitize_field(&key.host_id),
+        sanitize_field(&key.session_id)
+    );
+    if page.messages.is_empty() {
+        out.push_str(if page.source == HistorySource::Cache {
+            "No committed messages in the local cache.\n"
+        } else {
+            "No committed messages in this page.\n"
+        });
+    }
+    for message in &page.messages {
+        let body = render_message_blocks(message, None, show_reasoning);
+        if body.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("[{}] {body}\n", message.role.as_str_name()));
+    }
+    out.push_str(&render_attachment_rows(
+        key,
+        &attachment_rows(&page.messages),
+    ));
+    match &page.continuation {
+        Some(continuation) if !page.complete => {
+            let token = continuation.to_string();
+            out.push_str(&format!(
+                "Continuation: {token}\nContinue older history:\n  {}\n",
+                history_continue_command(key, &token)
+            ));
+        }
+        _ => out.push_str("End of history: the oldest message in this cut was reached.\n"),
+    }
+    out
+}
+
+/// JSON data for one independent history page.
+pub fn history_page_data(key: &SessionKey, page: &HistoryPage, show_reasoning: bool) -> Value {
+    let attachments = attachment_rows(&page.messages);
+    json!({
+        "target": key,
+        "source": history_source_label(page.source),
+        "projection": page.projection,
+        "complete": page.complete,
+        "messages": page
+            .messages
+            .iter()
+            .map(|message| message_json(message, show_reasoning))
+            .collect::<Vec<_>>(),
+        "activities": page.activities.iter().map(tool_activity_json).collect::<Vec<_>>(),
+        "attachments": attachments_json(key, &attachments),
+        "continuation": page.continuation.as_ref().map(ToString::to_string),
+    })
+}
+
+/// Human output for one exact committed-message read.
+pub fn render_history_message(
+    key: &SessionKey,
+    reference: &MessageReference,
+    message: &ConversationMessage,
+    show_reasoning: bool,
+) -> String {
+    let mut out = format!(
+        "Source: online\nProjection: {}\nMessage: {}\n",
+        sanitize_field(reference.projection_id()),
+        sanitize_field(&message.message_id)
+    );
+    let body = render_message_blocks(message, None, show_reasoning);
+    if !body.is_empty() {
+        out.push_str(&format!("[{}] {body}\n", message.role.as_str_name()));
+    }
+    out.push_str(&render_attachment_rows(
+        key,
+        &attachment_rows(std::slice::from_ref(message)),
+    ));
+    out.push_str(&format!("Reference: {}\n", reference.to_token()));
+    out
+}
+
+/// JSON data for one exact committed-message read.
+pub fn history_message_data(
+    key: &SessionKey,
+    reference: &MessageReference,
+    message: &ConversationMessage,
+    show_reasoning: bool,
+) -> Value {
+    let attachments = attachment_rows(std::slice::from_ref(message));
+    json!({
+        "target": key,
+        "source": "online",
+        "projection": reference.projection_id(),
+        "message": message_json(message, show_reasoning),
+        "attachments": attachments_json(key, &attachments),
+        "reference": reference.to_token(),
+    })
 }
 
 /// Consume one text-like block against a byte prefix already streamed.
@@ -308,10 +923,16 @@ pub fn lifecycle_reason_exit_code(reason_code: &str) -> u8 {
 pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -> CliOutcome {
     let code = error.code().to_owned();
     let exit = error.exit_code();
+    // Attachment failures name the preserved destination state and the exact
+    // recovery step. Read the diagnostic detail before the typed error moves.
+    let detail = error.to_string();
     // Guidance follows the shared action contract. `upgrade` is terminal: the
     // message names the side to upgrade and never suggests retrying the same
     // request.
     let message = match (code.as_str(), command) {
+        (_, Command::SessionDownload { session, .. }) => {
+            download_failure_message(&detail, &code, session)
+        }
         ("authentication_required", _) => "Cloud sign-in must be refreshed. Run `whalerein login`.".into(),
         ("authorization_expired", _) => "The pairing authorization expired. Run `whalerein login` and recover the original operation.".into(),
         ("unauthorized", Command::Hosts | Command::Connect { .. }) => {
@@ -368,6 +989,48 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
             "{}; question pagination state changed across a restart — re-run `whalerein session question list --session <session-id>` without --cursor",
             error
         ),
+        (
+            "snapshot_required" | "invalid_argument",
+            Command::History {
+                session,
+                cache: true,
+                continuation: Some(_),
+                ..
+            },
+        ) => format!(
+            "{}; the history continuation is stale, expired, or belongs to another session — restart traversal with `whalerein session history {} --cache` (without --continuation)",
+            error,
+            shell_quote(session)
+        ),
+        (
+            "snapshot_required" | "invalid_argument",
+            Command::History {
+                session,
+                continuation: Some(_),
+                ..
+            },
+        ) => format!(
+            "{}; the history continuation is stale, expired, or belongs to another session — restart traversal with `whalerein session history {}` (without --continuation)",
+            error,
+            shell_quote(session)
+        ),
+        (
+            "snapshot_required" | "invalid_argument" | "not_found",
+            Command::History {
+                session,
+                message: Some(_),
+                ..
+            },
+        ) => format!(
+            "{}; the committed message reference is stale or unavailable — refresh history with `whalerein session history {}` and retry the exact read. Do not resend the message",
+            error,
+            shell_quote(session)
+        ),
+        ("snapshot_required", Command::History { session, .. }) => format!(
+            "{}; the content projection changed — re-run `whalerein session history {}` to start a new traversal",
+            error,
+            shell_quote(session)
+        ),
         ("protocol_version_incompatible", _) => format!(
             "{}; upgrade WhaleRein so the CLI, Host plugin, and Access share a supported protocol version (do not retry the same request)",
             error
@@ -394,6 +1057,70 @@ pub fn core_error_outcome(command: &Command, error: whalerein_core::CoreError) -
         }),
         human: String::new(),
         exit,
+    }
+}
+
+/// Actionable guidance for one failed attachment download.
+///
+/// Every branch states whether a file was written. Retry language means a new
+/// transfer from offset zero; integrity and interruption failures never resume
+/// a partial transfer. The history hint re-reads the attachment row that owns
+/// the opaque reference.
+fn download_failure_message(detail: &str, code: &str, session: &str) -> String {
+    let history = format!("`whalerein session history {}`", shell_quote(session));
+    let name_rejected = detail.contains("file name") || detail.contains("filename");
+    match code {
+        "unsupported_capability" => format!(
+            "{detail}; this Host cannot read attachments. No bytes were read and no file was written. Upgrade the Host plugin or client (do not retry this request). Inspect the attachment row with {history}."
+        ),
+        "protocol_version_incompatible" => format!(
+            "{detail}; the CLI and Host plugin do not share a supported protocol version, so no file was written. Upgrade both sides (do not retry this request). Inspect the attachment row with {history}."
+        ),
+        "unauthorized" | "forbidden" => format!(
+            "{detail}; the Host rejected this attachment read and no file was written. Verify Device access with `whalerein status`, then inspect the attachment row with {history}."
+        ),
+        "payload_too_large" => format!(
+            "{detail}; the attachment exceeds the effective download limit before transfer and no file was written. Raise the configured limit or choose another attachment. Inspect {history}."
+        ),
+        "rate_limited" => format!(
+            "{detail}; the download concurrency or reservation budget is exhausted and no file was written. Wait for active downloads to finish, then run the same download command again for a fresh transfer. Inspect {history}."
+        ),
+        "timeout" => format!(
+            "{detail}; the download deadline expired and no completed file was saved. Temporary data was removed. Run the same download command again to start a fresh transfer. Inspect {history}."
+        ),
+        "cancelled" => format!(
+            "{detail}; no completed file was saved and temporary data was removed. Run the same download command again to start a fresh transfer."
+        ),
+        "payload_digest_mismatch" => format!(
+            "{detail}; integrity verification failed and no completed file was saved. Temporary data was removed. Run the same download command again for a fresh transfer; if it fails again the stored attachment may be corrupt. Inspect {history}."
+        ),
+        "conflict" => format!(
+            "{detail}; an existing file was preserved and nothing was replaced. Re-run with `--force` to replace it explicitly, or choose another `--to` directory."
+        ),
+        "invalid_argument" if name_rejected => format!(
+            "{detail}; the Source-suggested name is not safe for a local file and no file was written. Pass an explicit safe name with `--name <NAME>` and retry the download. Inspect {history}."
+        ),
+        "invalid_argument" if detail.contains("destination") => format!(
+            "{detail}; choose an existing destination directory with `--to <DIR>`. No file was written. Inspect {history}."
+        ),
+        "invalid_argument" => format!(
+            "{detail}; verify the attachment reference, Host and session from the history save action, then retry. No file was written. Inspect {history}."
+        ),
+        "not_found" => format!(
+            "{detail}; the attachment occurrence is no longer available. Refresh the attachment row with {history} and use its current save action."
+        ),
+        "internal" if detail.contains("free space") => format!(
+            "{detail}; the destination has no free space. No completed file was saved and temporary data was removed. Free space, then run the same download command again for a fresh transfer."
+        ),
+        "internal" if detail.contains("not writable") => format!(
+            "{detail}; the destination is not writable. Choose a writable directory with `--to <DIR>`; no completed file was saved and temporary data was removed."
+        ),
+        "security_error" => format!(
+            "{detail}; the attachment scope did not match this Host or session and no file was written. Refresh the attachment row with {history} and retry its save action."
+        ),
+        _ => format!(
+            "{detail}; no completed file was saved and temporary data was removed. Inspect the attachment row with {history} and retry the same download command for a fresh transfer."
+        ),
     }
 }
 
@@ -1035,40 +1762,64 @@ pub fn render_pairing_history(records: &[PairingHistoryRecord]) -> String {
 }
 
 /// Render only the typed normalized view. Native event JSON is never available.
-pub fn tail_event_json(update: &ViewUpdate) -> Value {
+///
+/// A hidden reasoning preview returns `None` so default JSON cannot carry it.
+pub fn tail_event_json(update: &ViewUpdate, show_reasoning: bool) -> Option<Value> {
     let event = match update {
         ViewUpdate::Preview {
             attempt,
             block_id,
+            kind,
             text,
             replace,
             incomplete,
         } => {
-            json!({"type":"preview","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"block_id":block_id,"text":text,"replace":replace,"incomplete":incomplete})
+            if *kind == BlockKind::Reasoning && !show_reasoning {
+                return None;
+            }
+            json!({"type":"preview","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"block_id":block_id,"kind":kind.as_str_name(),"text":text,"replace":replace,"incomplete":incomplete})
         }
         ViewUpdate::Message {
-            message, origin, ..
+            message,
+            origin,
+            preview_prefix,
         } => {
-            let blocks:Vec<Value>=message.blocks.iter().map(|b|match &b.content {
-                Some(content_block::Content::Text(t))=>json!({"block_id":b.block_id,"type":"text","text":t.text}),
-                Some(content_block::Content::ToolCall(t))=>json!({"block_id":b.block_id,"type":"tool_call","call_id":t.call_id,"name":t.name,"summary":t.summary}),
-                Some(content_block::Content::ToolResult(t))=>json!({"block_id":b.block_id,"type":"tool_result","call_id":t.call_id,"text":t.text,"is_error":t.is_error}),
-                Some(content_block::Content::Notice(t))=>json!({"block_id":b.block_id,"type":"notice","category":t.category,"text":t.text}),
-                Some(content_block::Content::Attachment(t))=>json!({"block_id":b.block_id,"type":"attachment","name":t.name,"media_type":t.media_type,"size":t.size,"available":t.available}),
-                None=>json!({"block_id":b.block_id,"type":"unavailable"}),
-            }).collect();
-            json!({"type":"message","message_id":message.message_id,"role":message.role.as_str_name(),"blocks":blocks,"authored_at_unix_ms":message.authored_at_unix_ms,"origin":origin.as_ref().map(|a|json!({"live_epoch":a.live_epoch,"attempt_id":a.attempt_id}))})
+            let blocks: Vec<Value> = message
+                .blocks
+                .iter()
+                .filter_map(|block| content_block_json(block, show_reasoning))
+                .collect();
+            json!({
+                "type": "message",
+                "message_id": message.message_id,
+                "role": message.role.as_str_name(),
+                "blocks": blocks,
+                "authored_at_unix_ms": message.authored_at_unix_ms,
+                "origin": origin.as_ref().map(|attempt| json!({
+                    "live_epoch": attempt.live_epoch,
+                    "attempt_id": attempt.attempt_id,
+                })),
+                "preview_prefix": preview_prefix.map(|prefix| json!({
+                    "text_bytes": prefix.text_bytes,
+                    "reasoning_bytes": prefix.reasoning_bytes,
+                })),
+            })
+        }
+        ViewUpdate::ToolActivity(activity) => {
+            let mut value = tool_activity_json(activity);
+            value["type"] = json!("tool_activity");
+            value
         }
         ViewUpdate::AttemptEnded { attempt, outcome } => {
             json!({"type":"attempt_ended","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"outcome":outcome.as_str_name()})
         }
         ViewUpdate::State(state) => {
-            let approvals:Vec<Value>=state.approvals.iter().map(|a|json!({"approval_id":a.approval_id,"session_id":a.session_id,"tool_name":a.tool_name,"call_id":a.call_id,"reason":a.reason,"digest":hex::encode(&a.digest),"version":a.version,"expires_at_unix_ms":a.expires_at_unix_ms,"state":a.state.as_str_name()})).collect();
-            json!({"type":"state","run_phase":state.run_phase.as_str_name(),"approvals":approvals})
+            let approvals: Vec<Value> = state.approvals.iter().map(|approval| json!({"approval_id":approval.approval_id,"session_id":approval.session_id,"tool_name":approval.tool_name,"call_id":approval.call_id,"reason":approval.reason,"digest":hex::encode(&approval.digest),"version":approval.version,"expires_at_unix_ms":approval.expires_at_unix_ms,"state":approval.state.as_str_name()})).collect();
+            json!({"type":"state","run_phase":state.run_phase.as_str_name(),"projection_id":state.projection_id,"approvals":approvals})
         }
         ViewUpdate::Reset => json!({"type":"reset"}),
     };
-    json!({"schema":"whalerein/client/v1","command":"session.watch","data":{"event":event}})
+    Some(json!({"schema":"whalerein/client/v1","command":"session.watch","data":{"event":event}}))
 }
 
 /// Formatting owns terminal boundaries only; Core owns preview ordering and completion.
@@ -1077,21 +1828,36 @@ pub struct TailRenderer {
     line_open: bool,
     attempt: Option<String>,
     block: Option<String>,
+    kind: Option<BlockKind>,
     last_state: Option<String>,
+    show_reasoning: bool,
 }
 impl TailRenderer {
+    pub fn new(show_reasoning: bool) -> Self {
+        Self {
+            show_reasoning,
+            ..Self::default()
+        }
+    }
+
     pub fn render(&mut self, update: &ViewUpdate) -> String {
         match update {
             ViewUpdate::Preview {
                 attempt,
                 block_id,
+                kind,
                 text,
                 replace,
                 ..
             } => {
+                if *kind == BlockKind::Reasoning && !self.show_reasoning {
+                    // Hidden reasoning is presentation-only: it must not open a
+                    // line, terminate a previous one, or complete `--once`.
+                    return String::new();
+                }
                 // Each preview block is its own line. A block-level reset
                 // closes and reprints only that block, never the message.
-                let new_block = self.block.as_deref() != Some(block_id);
+                let new_block = self.block.as_deref() != Some(block_id) || self.kind != Some(*kind);
                 let prefix = if self.attempt.as_deref() != Some(&attempt.attempt_id)
                     || *replace
                     || new_block
@@ -1100,38 +1866,72 @@ impl TailRenderer {
                 } else {
                     String::new()
                 };
+                let marker = if *kind == BlockKind::Reasoning && (new_block || *replace) {
+                    "[reasoning] "
+                } else {
+                    ""
+                };
                 self.attempt = Some(attempt.attempt_id.clone());
                 self.block = Some(block_id.clone());
+                self.kind = Some(*kind);
                 self.line_open |= !text.is_empty();
-                format!("{prefix}{text}")
+                format!("{prefix}{marker}{text}")
             }
             ViewUpdate::Message {
                 message,
-                preview_prefix_bytes,
+                preview_prefix,
                 ..
             } => {
-                if let Some(offset) = preview_prefix_bytes {
-                    // The previewed prefix is already on screen. Emit only the
-                    // suffix on the same line, then terminate that line.
+                if let Some(prefix) = preview_prefix {
+                    let visible_prefix = prefix.text_bytes > 0
+                        || (self.show_reasoning && prefix.reasoning_bytes > 0);
+                    if visible_prefix {
+                        // The previewed prefix is already on screen. Emit only
+                        // the suffix on the same line, then terminate it.
+                        self.line_open = false;
+                        self.attempt = None;
+                        self.block = None;
+                        self.kind = None;
+                        let body =
+                            render_message_blocks(message, Some(*prefix), self.show_reasoning);
+                        if body.is_empty() {
+                            return "\n".into();
+                        }
+                        return format!("{body}\n");
+                    }
+                    // The commit did not continue any visible preview (for
+                    // example a hidden reasoning prefix). Close the provisional
+                    // line and render the message as new visible output.
+                    let closed = self.finish_line();
                     self.line_open = false;
                     self.attempt = None;
                     self.block = None;
-                    let body = render_message_blocks(message, *offset);
+                    self.kind = None;
+                    let body = render_message_blocks(message, Some(*prefix), self.show_reasoning);
                     if body.is_empty() {
-                        return "\n".into();
+                        return if closed.is_empty() {
+                            "\n".into()
+                        } else {
+                            closed
+                        };
                     }
-                    return format!("{body}\n");
+                    return format!("{closed}[{}] {body}\n", message.role.as_str_name());
                 }
                 let prefix = self.finish_line();
                 self.attempt = None;
                 self.block = None;
-                let body = render_message_blocks(message, 0);
+                self.kind = None;
+                let body = render_message_blocks(message, None, self.show_reasoning);
                 let role = message.role.as_str_name();
                 if body.is_empty() {
                     format!("{prefix}[{role}]\n")
                 } else {
                     format!("{prefix}[{role}] {body}\n")
                 }
+            }
+            ViewUpdate::ToolActivity(activity) => {
+                let prefix = self.finish_line();
+                format!("{prefix}{}\n", render_tool_activity(activity))
             }
             ViewUpdate::State(state) => {
                 let phase = state.run_phase;
@@ -1157,11 +1957,13 @@ impl TailRenderer {
             ViewUpdate::Reset => {
                 self.attempt = None;
                 self.block = None;
+                self.kind = None;
                 self.finish_line()
             }
             ViewUpdate::AttemptEnded { outcome, .. } if *outcome != AttemptOutcome::Committed => {
                 self.attempt = None;
                 self.block = None;
+                self.kind = None;
                 let prefix = self.finish_line();
                 let label = attempt_outcome_label(*outcome);
                 format!("{prefix}[attempt {label}]\n")
@@ -1187,12 +1989,30 @@ fn run_phase_label(phase: RunPhase) -> &'static str {
     }
 }
 
-pub fn is_tail_output(update: &ViewUpdate) -> bool {
-    matches!(update, ViewUpdate::Message { .. })
-        || matches!(update,ViewUpdate::Preview{text,..} if !text.is_empty())
+/// True when an update carries user-visible content under the presentation
+/// policy. State/reset metadata and hidden reasoning never finish `--once`.
+pub fn is_tail_output(update: &ViewUpdate, show_reasoning: bool) -> bool {
+    match update {
+        ViewUpdate::Message { message, .. } => {
+            message.blocks.iter().any(|block| match &block.content {
+                Some(content_block::Content::Text(text)) => !text.text.is_empty(),
+                Some(content_block::Content::Reasoning(reasoning)) => {
+                    show_reasoning && !reasoning.text.is_empty()
+                }
+                Some(content_block::Content::ToolActivity(_))
+                | Some(content_block::Content::Attachment(_))
+                | Some(content_block::Content::Notice(_)) => true,
+                None => false,
+            })
+        }
+        ViewUpdate::Preview { kind, text, .. } => {
+            !text.is_empty() && (*kind != BlockKind::Reasoning || show_reasoning)
+        }
         // An interrupted/abandoned turn is the only output of that attempt:
         // `tail --once` must surface it instead of timing out silently.
-        || matches!(update, ViewUpdate::AttemptEnded { outcome, .. } if *outcome != AttemptOutcome::Committed)
+        ViewUpdate::AttemptEnded { outcome, .. } => *outcome != AttemptOutcome::Committed,
+        _ => false,
+    }
 }
 
 pub fn render_pair(outcome: &whalerein_core::api::PairingOutcome) -> String {
@@ -1634,6 +2454,7 @@ mod tests {
 mod typed_output_tests {
     use super::*;
     use whalerein_core::conversation::{AttemptRef, ConversationMessage, MessageRole};
+
     fn attempt() -> AttemptRef {
         AttemptRef {
             live_epoch: "epoch".into(),
@@ -1648,30 +2469,68 @@ mod typed_output_tests {
             authored_at_unix_ms: 1,
         }
     }
+    fn text_preview(text: &str, replace: bool) -> ViewUpdate {
+        ViewUpdate::Preview {
+            attempt: attempt(),
+            block_id: "text".into(),
+            kind: BlockKind::Text,
+            text: text.into(),
+            replace,
+            incomplete: false,
+        }
+    }
+    fn reasoning_preview(text: &str) -> ViewUpdate {
+        ViewUpdate::Preview {
+            attempt: attempt(),
+            block_id: "reasoning".into(),
+            kind: BlockKind::Reasoning,
+            text: text.into(),
+            replace: false,
+            incomplete: false,
+        }
+    }
+    fn reasoning_message() -> ConversationMessage {
+        use whalerein_core::conversation::content_block::{Content, ReasoningContent, TextContent};
+        use whalerein_core::conversation::ContentBlock;
+        ConversationMessage {
+            message_id: "m".into(),
+            role: MessageRole::Assistant,
+            blocks: vec![
+                ContentBlock {
+                    block_id: "reasoning".into(),
+                    content: Some(Content::Reasoning(ReasoningContent {
+                        text: "private chain".into(),
+                    })),
+                },
+                ContentBlock {
+                    block_id: "text".into(),
+                    content: Some(Content::Text(TextContent {
+                        text: "answer".into(),
+                    })),
+                },
+            ],
+            authored_at_unix_ms: 1,
+        }
+    }
+
     #[test]
     fn human_output_uses_core_prefix_decisions_and_closes_provisional_lines() {
         let mut renderer = TailRenderer::default();
-        let preview = ViewUpdate::Preview {
-            attempt: attempt(),
-            block_id: "text".into(),
-            text: "x".into(),
-            replace: false,
-            incomplete: false,
-        };
+        let preview = text_preview("x", false);
         assert_eq!(renderer.render(&preview).len(), 1);
-        assert!(is_tail_output(&preview));
+        assert!(is_tail_output(&preview, false));
         assert_eq!(
             renderer.render(&ViewUpdate::Message {
                 message: message(),
                 origin: Some(attempt()),
-                preview_prefix_bytes: Some(0)
+                preview_prefix: Some(PreviewPrefix::default())
             }),
             "\n"
         );
         assert!(renderer.finish_line().is_empty());
         renderer.render(&preview);
         assert_eq!(renderer.render(&ViewUpdate::Reset), "\n");
-        assert!(!is_tail_output(&ViewUpdate::Reset));
+        assert!(!is_tail_output(&ViewUpdate::Reset, false));
         renderer.render(&preview);
         assert_eq!(
             renderer.render(&ViewUpdate::AttemptEnded {
@@ -1697,17 +2556,190 @@ mod typed_output_tests {
             .render(&ViewUpdate::Message {
                 message: message(),
                 origin: None,
-                preview_prefix_bytes: None
+                preview_prefix: None
             })
             .contains("ASSISTANT"));
     }
+
     #[test]
-    fn human_tail_renders_blocks_in_source_order_with_attachments_and_notices() {
-        use whalerein_core::conversation::content_block::{
-            AttachmentContent, Content, NoticeContent, TextContent, ToolCallContent,
-            ToolResultContent,
-        };
+    fn reasoning_is_hidden_by_default_and_shown_only_on_request() {
+        let mut hidden = TailRenderer::default();
+        assert_eq!(hidden.render(&reasoning_preview("private")), "");
+        assert!(!is_tail_output(&reasoning_preview("private"), false));
+        assert!(is_tail_output(&reasoning_preview("private"), true));
+        let mut shown = TailRenderer::new(true);
+        assert_eq!(
+            shown.render(&reasoning_preview("private")),
+            "[reasoning] private"
+        );
+        assert_eq!(shown.render(&text_preview("answer", false)), "\nanswer");
+        // Hidden reasoning must not terminate or join a visible line.
+        let mut hidden = TailRenderer::default();
+        assert_eq!(hidden.render(&text_preview("one", false)), "one");
+        assert_eq!(hidden.render(&reasoning_preview("secret")), "");
+        assert_eq!(hidden.render(&text_preview("two", false)), "two");
+    }
+
+    #[test]
+    fn hidden_reasoning_does_not_leak_into_default_json() {
+        let mut hidden = TailRenderer::default();
+        assert!(tail_event_json(&reasoning_preview("secret"), false).is_none());
+        assert!(hidden.render(&reasoning_preview("secret")).is_empty());
+        let value = tail_event_json(&reasoning_preview("secret"), true).unwrap();
+        assert_eq!(value["data"]["event"]["kind"], "REASONING");
+        assert_eq!(value["data"]["event"]["text"], "secret");
+
+        let hidden_message = tail_event_json(
+            &ViewUpdate::Message {
+                message: reasoning_message(),
+                origin: None,
+                preview_prefix: None,
+            },
+            false,
+        )
+        .unwrap();
+        let text = serde_json::to_string(&hidden_message).unwrap();
+        assert!(!text.contains("private chain"), "{text}");
+        assert!(text.contains("answer"), "{text}");
+        let shown_message = tail_event_json(
+            &ViewUpdate::Message {
+                message: reasoning_message(),
+                origin: None,
+                preview_prefix: None,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            shown_message["data"]["event"]["blocks"][0]["type"],
+            "reasoning"
+        );
+        assert_eq!(
+            shown_message["data"]["event"]["blocks"][0]["text"],
+            "private chain"
+        );
+    }
+
+    #[test]
+    fn a_hidden_reasoning_only_message_does_not_satisfy_once() {
+        use whalerein_core::conversation::content_block::{Content, ReasoningContent};
         use whalerein_core::conversation::ContentBlock;
+        let update = ViewUpdate::Message {
+            message: ConversationMessage {
+                message_id: "m".into(),
+                role: MessageRole::Assistant,
+                blocks: vec![ContentBlock {
+                    block_id: "reasoning".into(),
+                    content: Some(Content::Reasoning(ReasoningContent {
+                        text: "private".into(),
+                    })),
+                }],
+                authored_at_unix_ms: 1,
+            },
+            origin: None,
+            preview_prefix: None,
+        };
+        assert!(!is_tail_output(&update, false));
+        assert!(is_tail_output(&update, true));
+    }
+
+    #[test]
+    fn the_reasoning_prefix_never_offsets_answer_text() {
+        use whalerein_core::conversation::content_block::{Content, ReasoningContent, TextContent};
+        use whalerein_core::conversation::ContentBlock;
+        let message = ConversationMessage {
+            message_id: "m".into(),
+            role: MessageRole::Assistant,
+            blocks: vec![
+                ContentBlock {
+                    block_id: "reasoning".into(),
+                    content: Some(Content::Reasoning(ReasoningContent { text: "abc".into() })),
+                },
+                ContentBlock {
+                    block_id: "text".into(),
+                    content: Some(Content::Text(TextContent { text: "xyz".into() })),
+                },
+            ],
+            ..Default::default()
+        };
+        let prefix = PreviewPrefix {
+            text_bytes: 2,
+            reasoning_bytes: 0,
+        };
+        let out = render_message_blocks(&message, Some(prefix), true);
+        assert_eq!(out, "[reasoning] abc\nz", "{out}");
+        let previewed = PreviewPrefix {
+            text_bytes: 0,
+            reasoning_bytes: 1,
+        };
+        let out = render_message_blocks(&message, Some(previewed), true);
+        assert_eq!(out, "bc\nxyz", "{out}");
+        let out = render_message_blocks(&message, Some(prefix), false);
+        assert_eq!(out, "z", "{out}");
+    }
+
+    #[test]
+    fn an_unmatched_preview_prefix_closes_the_line_before_the_committed_message() {
+        use whalerein_core::conversation::content_block::{Content, ReasoningContent, TextContent};
+        use whalerein_core::conversation::ContentBlock;
+        let mut renderer = TailRenderer::default();
+        assert_eq!(
+            renderer.render(&text_preview("provisional", false)),
+            "provisional"
+        );
+        let message = ConversationMessage {
+            message_id: "m".into(),
+            role: MessageRole::Assistant,
+            blocks: vec![
+                ContentBlock {
+                    block_id: "reasoning".into(),
+                    content: Some(Content::Reasoning(ReasoningContent {
+                        text: "private".into(),
+                    })),
+                },
+                ContentBlock {
+                    block_id: "text".into(),
+                    content: Some(Content::Text(TextContent {
+                        text: "answer".into(),
+                    })),
+                },
+            ],
+            ..Default::default()
+        };
+        let out = renderer.render(&ViewUpdate::Message {
+            message,
+            origin: Some(attempt()),
+            preview_prefix: Some(PreviewPrefix::default()),
+        });
+        assert_eq!(out, "\n[ASSISTANT] answer\n", "{out}");
+        assert!(!out.contains("provisionalanswer"), "{out}");
+    }
+
+    #[test]
+    fn human_tail_renders_blocks_in_source_order_with_typed_activity_and_notices() {
+        use whalerein_core::conversation::content_block::{
+            AttachmentContent, Content, NoticeContent, TextContent,
+        };
+        use whalerein_core::conversation::{
+            ContentBlock, NoticeCategory, NoticeState, ToolActivity, ToolActivityId, ToolOutcome,
+            ToolResultPart, ToolStage, ToolState,
+        };
+        let activity = ToolActivity {
+            id: ToolActivityId {
+                call_id: "c".into(),
+            },
+            name: "Read".into(),
+            summary: Some("src/main.rs".into()),
+            order: 1,
+            state: ToolState::Succeeded,
+            stages: vec![ToolStage::Preparation, ToolStage::Settlement],
+            progress: None,
+            failure_code: None,
+            result: vec![ToolResultPart::Text("done".into())],
+            outcome: ToolOutcome::Succeeded,
+            attempt: Some(attempt()),
+            call_missing: false,
+        };
         let message = ConversationMessage {
             message_id: "m".into(),
             role: MessageRole::Assistant,
@@ -1720,11 +2752,7 @@ mod typed_output_tests {
                 },
                 ContentBlock {
                     block_id: "call".into(),
-                    content: Some(Content::ToolCall(ToolCallContent {
-                        call_id: "c".into(),
-                        name: "Read".into(),
-                        summary: "src/main.rs".into(),
-                    })),
+                    content: Some(Content::ToolActivity(activity)),
                 },
                 ContentBlock {
                     block_id: "file".into(),
@@ -1733,21 +2761,15 @@ mod typed_output_tests {
                         name: "shot.png".into(),
                         size: 42,
                         available: true,
+                        attachment_ref: "ref-1".into(),
                     })),
                 },
                 ContentBlock {
                     block_id: "notice".into(),
                     content: Some(Content::Notice(NoticeContent {
-                        category: "activity".into(),
-                        text: "source resumed".into(),
-                    })),
-                },
-                ContentBlock {
-                    block_id: "result".into(),
-                    content: Some(Content::ToolResult(ToolResultContent {
-                        call_id: "c".into(),
-                        text: "done".into(),
-                        is_error: false,
+                        category: NoticeCategory::Retry,
+                        state: NoticeState::Started,
+                        summary: Some("source resumed".into()),
                     })),
                 },
             ],
@@ -1757,14 +2779,14 @@ mod typed_output_tests {
         let out = renderer.render(&ViewUpdate::Message {
             message,
             origin: None,
-            preview_prefix_bytes: None,
+            preview_prefix: None,
         });
         let positions = [
             out.find("hello").unwrap(),
-            out.find("[tool] Read").unwrap(),
-            out.find("[attachment shot.png").unwrap(),
-            out.find("[notice activity]").unwrap(),
+            out.find("[tool Read succeeded] src/main.rs").unwrap(),
             out.find("[tool result] done").unwrap(),
+            out.find("[attachment shot.png").unwrap(),
+            out.find("[notice retry/started] source resumed").unwrap(),
         ];
         assert!(
             positions.windows(2).all(|pair| pair[0] < pair[1]),
@@ -1780,13 +2802,16 @@ mod typed_output_tests {
             attempt: attempt(),
             outcome: AttemptOutcome::Interrupted,
         };
-        assert!(is_tail_output(&interrupted));
+        assert!(is_tail_output(&interrupted, false));
         assert_eq!(renderer.render(&interrupted), "[attempt interrupted]\n");
         // A committed attempt is described by its Message, not a synthetic line.
-        assert!(!is_tail_output(&ViewUpdate::AttemptEnded {
-            attempt: attempt(),
-            outcome: AttemptOutcome::Committed,
-        }));
+        assert!(!is_tail_output(
+            &ViewUpdate::AttemptEnded {
+                attempt: attempt(),
+                outcome: AttemptOutcome::Committed,
+            },
+            false
+        ));
     }
 
     #[test]
@@ -1824,26 +2849,37 @@ mod typed_output_tests {
         let preview = ViewUpdate::Preview {
             attempt: attempt(),
             block_id: "text".into(),
+            kind: BlockKind::Text,
             text: "x".into(),
             replace: false,
             incomplete: true,
         };
-        let value = tail_event_json(&preview);
+        let value = tail_event_json(&preview, false).unwrap();
         assert_eq!(value["data"]["event"]["type"], "preview");
+        assert_eq!(value["data"]["event"]["kind"], "TEXT");
         assert!(value["data"]["event"]["incomplete"].as_bool().unwrap());
-        let value = tail_event_json(&ViewUpdate::Message {
-            message: message(),
-            origin: Some(attempt()),
-            preview_prefix_bytes: None,
-        });
+        let value = tail_event_json(
+            &ViewUpdate::Message {
+                message: message(),
+                origin: Some(attempt()),
+                preview_prefix: None,
+            },
+            false,
+        )
+        .unwrap();
         assert_eq!(value["data"]["event"]["origin"]["attempt_id"], "a");
         assert!(value["data"]["event"].get("data_json").is_none());
-        let ended = tail_event_json(&ViewUpdate::AttemptEnded {
-            attempt: attempt(),
-            outcome: AttemptOutcome::Committed,
-        });
+        let ended = tail_event_json(
+            &ViewUpdate::AttemptEnded {
+                attempt: attempt(),
+                outcome: AttemptOutcome::Committed,
+            },
+            false,
+        )
+        .unwrap();
         assert_eq!(ended["data"]["event"]["outcome"], "COMMITTED");
     }
+
     #[test]
     fn state_reset_and_empty_preview_do_not_satisfy_visible_tail_output() {
         let mut renderer = TailRenderer::default();
@@ -1855,20 +2891,18 @@ mod typed_output_tests {
             "",
             "identical states are deduplicated"
         );
-        assert!(!is_tail_output(&state));
-        assert_eq!(tail_event_json(&state)["data"]["event"]["type"], "state");
+        assert!(!is_tail_output(&state, false));
         assert_eq!(
-            tail_event_json(&ViewUpdate::Reset)["data"]["event"]["type"],
+            tail_event_json(&state, false).unwrap()["data"]["event"]["type"],
+            "state"
+        );
+        assert_eq!(
+            tail_event_json(&ViewUpdate::Reset, false).unwrap()["data"]["event"]["type"],
             "reset"
         );
-        assert!(!is_tail_output(&ViewUpdate::Preview {
-            attempt: attempt(),
-            block_id: "text".into(),
-            text: String::new(),
-            replace: false,
-            incomplete: false
-        }));
+        assert!(!is_tail_output(&text_preview("", false), false));
     }
+
     #[test]
     fn pairing_and_approval_formatting_reveal_only_the_requested_public_details() {
         let pair = whalerein_core::api::PairingOutcome {
@@ -1891,9 +2925,13 @@ mod typed_output_tests {
 mod typed_content_tests {
     use super::*;
     use whalerein_core::conversation::{ApprovalState, ConversationMessage, MessageRole};
+
     #[test]
     fn json_formats_every_declared_content_family_without_native_payloads() {
-        use content_block::Content;
+        use content_block::{Content, ReasoningContent};
+        use whalerein_core::conversation::{
+            NoticeCategory, NoticeState, ToolActivity, ToolActivityId, ToolOutcome, ToolState,
+        };
         let mut message = ConversationMessage {
             message_id: "m".into(),
             role: MessageRole::Assistant,
@@ -1901,10 +2939,27 @@ mod typed_content_tests {
         };
         for content in [
             Some(Content::Text(Default::default())),
-            Some(Content::ToolCall(Default::default())),
-            Some(Content::ToolResult(Default::default())),
+            Some(Content::ToolActivity(ToolActivity {
+                id: ToolActivityId {
+                    call_id: "c".into(),
+                },
+                name: "Read".into(),
+                summary: None,
+                order: 1,
+                state: ToolState::Running,
+                stages: vec![],
+                progress: None,
+                failure_code: None,
+                result: vec![],
+                outcome: ToolOutcome::Unspecified,
+                attempt: None,
+                call_missing: false,
+            })),
             Some(Content::Notice(Default::default())),
             Some(Content::Attachment(Default::default())),
+            Some(Content::Reasoning(ReasoningContent {
+                text: "private".into(),
+            })),
             None,
         ] {
             message.blocks.push(Default::default());
@@ -1913,17 +2968,29 @@ mod typed_content_tests {
             block.block_id = id;
             block.content = content;
         }
-        let value = tail_event_json(&ViewUpdate::Message {
-            message,
-            origin: None,
-            preview_prefix_bytes: None,
-        });
+        let value = tail_event_json(
+            &ViewUpdate::Message {
+                message,
+                origin: None,
+                preview_prefix: None,
+            },
+            false,
+        )
+        .unwrap();
+        // Hidden reasoning is omitted rather than represented as a block.
         assert_eq!(
             value["data"]["event"]["blocks"].as_array().unwrap().len(),
-            6
+            5
         );
-        assert_eq!(value["data"]["event"]["blocks"][1]["type"], "tool_call");
+        assert_eq!(value["data"]["event"]["blocks"][1]["type"], "tool_activity");
+        // Notice defaults carry explicit categories rather than free text.
+        let _ = (
+            NoticeCategory::Retry,
+            NoticeState::Started,
+            ToolOutcome::Succeeded,
+        );
     }
+
     #[test]
     fn state_json_carries_approval_digest_version_and_typed_status() {
         let mut state = whalerein_core::conversation::ViewUpdate::State(Default::default());
@@ -1935,9 +3002,11 @@ mod typed_content_tests {
             a.version = 3;
             a.state = ApprovalState::Pending;
             s.run_phase = RunPhase::Idle;
+            s.projection_id = "projection-1".into();
         }
-        let value = tail_event_json(&state);
+        let value = tail_event_json(&state, false).unwrap();
         assert_eq!(value["data"]["event"]["run_phase"], "IDLE");
+        assert_eq!(value["data"]["event"]["projection_id"], "projection-1");
         assert_eq!(
             value["data"]["event"]["approvals"][0]["state"],
             "APPROVAL_STATE_PENDING"
@@ -2520,7 +3589,7 @@ mod cli_contract_tests {
             "repeated state is not reprinted"
         );
         assert!(
-            !is_tail_output(&state),
+            !is_tail_output(&state, false),
             "state alone does not satisfy --once"
         );
         let idle = whalerein_core::conversation::ViewUpdate::State(Default::default());
@@ -2619,9 +3688,10 @@ mod cli_contract_tests {
 #[cfg(test)]
 mod block_preview_tests {
     use super::*;
-    use whalerein_core::conversation::content_block::{Content, TextContent, ToolCallContent};
+    use whalerein_core::conversation::content_block::{Content, TextContent};
     use whalerein_core::conversation::{
-        AttemptRef, ContentBlock, ConversationMessage, MessageRole,
+        AttemptRef, ContentBlock, ConversationMessage, MessageRole, ToolActivity, ToolActivityId,
+        ToolOutcome, ToolState,
     };
 
     fn attempt() -> AttemptRef {
@@ -2634,6 +3704,7 @@ mod block_preview_tests {
         ViewUpdate::Preview {
             attempt: attempt(),
             block_id: block.into(),
+            kind: BlockKind::Text,
             text: text.into(),
             replace,
             incomplete: false,
@@ -2661,10 +3732,21 @@ mod block_preview_tests {
                 },
                 ContentBlock {
                     block_id: "tool".into(),
-                    content: Some(Content::ToolCall(ToolCallContent {
-                        call_id: "c".into(),
+                    content: Some(Content::ToolActivity(ToolActivity {
+                        id: ToolActivityId {
+                            call_id: "c".into(),
+                        },
                         name: "Read".into(),
-                        summary: "file".into(),
+                        summary: Some("file".into()),
+                        order: 1,
+                        state: ToolState::Succeeded,
+                        stages: vec![],
+                        progress: None,
+                        failure_code: None,
+                        result: vec![],
+                        outcome: ToolOutcome::Succeeded,
+                        attempt: None,
+                        call_missing: false,
                     })),
                 },
             ],
@@ -2673,10 +3755,397 @@ mod block_preview_tests {
         let out = renderer.render(&ViewUpdate::Message {
             message,
             origin: Some(attempt()),
-            preview_prefix_bytes: Some(6),
+            preview_prefix: Some(PreviewPrefix {
+                text_bytes: 6,
+                reasoning_bytes: 0,
+            }),
         });
         assert!(!out.contains("one"), "delivered text was reprinted: {out}");
         assert!(!out.contains("TWO"), "delivered text was reprinted: {out}");
-        assert!(out.contains("[tool] Read file"), "{out}");
+        assert!(out.contains("[tool Read succeeded] file"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod history_output_tests {
+    use super::*;
+    use whalerein_core::conversation::content_block::{
+        AttachmentContent, Content, ReasoningContent, TextContent,
+    };
+    use whalerein_core::conversation::{ContentBlock, ConversationMessage, MessageRole};
+    use whalerein_core::history::HistoryContinuation;
+
+    fn key() -> SessionKey {
+        SessionKey::new("host-1", "session-1").unwrap()
+    }
+
+    fn message(id: &str, text: &str, reasoning: Option<&str>) -> ConversationMessage {
+        let mut blocks = Vec::new();
+        if let Some(reasoning) = reasoning {
+            blocks.push(ContentBlock {
+                block_id: "reasoning".into(),
+                content: Some(Content::Reasoning(ReasoningContent {
+                    text: reasoning.into(),
+                })),
+            });
+        }
+        blocks.push(ContentBlock {
+            block_id: "text".into(),
+            content: Some(Content::Text(TextContent { text: text.into() })),
+        });
+        ConversationMessage {
+            message_id: id.into(),
+            role: MessageRole::Assistant,
+            blocks,
+            authored_at_unix_ms: 1,
+        }
+    }
+
+    fn page() -> HistoryPage {
+        HistoryPage {
+            source: HistorySource::Online,
+            projection: "projection-1".into(),
+            complete: false,
+            messages: vec![
+                message("m-2", "second", Some("private reasoning")),
+                message("m-3", "third", None),
+            ],
+            activities: vec![],
+            continuation: Some("continuation-token".parse::<HistoryContinuation>().unwrap()),
+        }
+    }
+
+    #[test]
+    fn history_human_defaults_to_text_and_labels_its_source_and_continuation() {
+        let text = render_history_page(&key(), &page(), false);
+        assert!(text.contains("Source: online"), "{text}");
+        assert!(text.contains("Projection: projection-1"), "{text}");
+        assert!(text.contains("[ASSISTANT] second"), "{text}");
+        assert!(text.contains("[ASSISTANT] third"), "{text}");
+        assert!(!text.contains("private reasoning"), "{text}");
+        assert!(!text.contains("[reasoning]"), "{text}");
+        assert!(text.contains("Continuation: continuation-token"), "{text}");
+        assert!(text.contains("--continuation continuation-token"), "{text}");
+        let shown = render_history_page(&key(), &page(), true);
+        assert!(shown.contains("[reasoning] private reasoning"), "{shown}");
+    }
+
+    #[test]
+    fn history_json_identifies_source_continuation_and_attachment_save_action() {
+        let mut page = page();
+        page.messages[0].blocks.push(ContentBlock {
+            block_id: "file".into(),
+            content: Some(Content::Attachment(AttachmentContent {
+                media_type: "image/png".into(),
+                name: "shot.png".into(),
+                size: 42,
+                available: true,
+                attachment_ref: "opaque-ref".into(),
+            })),
+        });
+        let value = history_page_data(&key(), &page, false);
+        assert_eq!(value["source"], "online");
+        assert_eq!(value["projection"], "projection-1");
+        assert_eq!(value["complete"], false);
+        assert_eq!(value["continuation"], "continuation-token");
+        assert_eq!(value["messages"][0]["message_id"], "m-2");
+        assert_eq!(value["messages"][0]["blocks"].as_array().unwrap().len(), 2);
+        assert_eq!(value["messages"][0]["blocks"][1]["type"], "attachment");
+        assert_eq!(value["attachments"][0]["name"], "shot.png");
+        assert_eq!(value["attachments"][0]["reference"], "opaque-ref");
+        let save = value["attachments"][0]["save_command"].as_str().unwrap();
+        assert!(
+            save.starts_with("whalerein session download opaque-ref"),
+            "{save}"
+        );
+        assert!(save.contains("--host host-1"), "{save}");
+        assert!(save.contains("--session session-1"), "{save}");
+        assert!(!value.to_string().contains("private reasoning"));
+    }
+
+    #[test]
+    fn exact_history_output_uses_the_same_reasoning_policy() {
+        let reference = MessageReference::new(key(), "m-2", "locator:m-2", "projection-1").unwrap();
+        let message = message("m-2", "second", Some("private reasoning"));
+        let value = history_message_data(&key(), &reference, &message, false);
+        assert_eq!(value["source"], "online");
+        assert_eq!(value["message"]["message_id"], "m-2");
+        assert!(!value.to_string().contains("private reasoning"));
+        let text = render_history_message(&key(), &reference, &message, false);
+        assert!(text.contains("Source: online"), "{text}");
+        assert!(!text.contains("private reasoning"), "{text}");
+        assert!(text.contains("Reference: "), "{text}");
+        let shown = history_message_data(&key(), &reference, &message, true);
+        assert!(shown.to_string().contains("private reasoning"));
+    }
+
+    #[test]
+    fn shell_quoting_neutralizes_hostile_scoped_arguments() {
+        assert_eq!(shell_quote("plain-value_1"), "plain-value_1");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_quote("x; echo pwned"), "'x; echo pwned'");
+        assert_eq!(shell_quote("line\nbreak"), "'line\nbreak'");
+    }
+
+    #[test]
+    fn an_expired_history_continuation_points_at_a_restart() {
+        let command = Command::History {
+            session: "session-1".into(),
+            cache: false,
+            continuation: Some("stale".into()),
+            message: None,
+            max_messages: None,
+            max_bytes: None,
+        };
+        let outcome = core_error_outcome(
+            &command,
+            whalerein_core::CoreError::Api {
+                code: Some(whalerein_proto::ErrorCode::SnapshotRequired),
+                message: "history changed".into(),
+            },
+        );
+        assert_eq!(outcome.exit, 8);
+        let error = outcome.error.unwrap();
+        assert_eq!(error.code, "snapshot_required");
+        assert!(
+            error.message.contains("without --continuation"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("whalerein session history session-1"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_stale_exact_reference_points_at_a_refresh_without_resubmission() {
+        let command = Command::History {
+            session: "session-1".into(),
+            cache: false,
+            continuation: None,
+            message: Some("stale".into()),
+            max_messages: None,
+            max_bytes: None,
+        };
+        let outcome = core_error_outcome(
+            &command,
+            whalerein_core::CoreError::Api {
+                code: Some(whalerein_proto::ErrorCode::SnapshotRequired),
+                message: "stale".into(),
+            },
+        );
+        let message = outcome.error.unwrap().message;
+        assert!(message.contains("refresh history"), "{message}");
+        assert!(message.contains("Do not resend"), "{message}");
+    }
+    #[test]
+    fn download_progress_is_bounded_and_keeps_json_structured() {
+        let mut json = DownloadProgressRenderer::new(true);
+        let mut lines = Vec::new();
+        for part in 0..=(100 * 1024 * 1024 / 4096) {
+            let received = part * 4096;
+            if let Some(line) = json.report(DownloadProgress {
+                received,
+                total: 100 * 1024 * 1024,
+            }) {
+                lines.push(line);
+            }
+        }
+        // The commit notification repeats the final count and must not add a line.
+        assert!(json
+            .report(DownloadProgress {
+                received: 100 * 1024 * 1024,
+                total: 100 * 1024 * 1024,
+            })
+            .is_none());
+        assert!(lines.len() <= 12, "{}", lines.len());
+        let first: Value = serde_json::from_str(lines.first().unwrap()).unwrap();
+        assert_eq!(first["event"], "download_progress");
+        assert_eq!(first["received"], 0);
+        assert_eq!(first["total"], 100 * 1024 * 1024);
+        let last: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        assert_eq!(last["received"], 100 * 1024 * 1024);
+        assert!(lines.iter().all(|line| line.ends_with('\n')));
+
+        let mut human = DownloadProgressRenderer::new(false);
+        let start = human
+            .report(DownloadProgress {
+                received: 0,
+                total: 3,
+            })
+            .unwrap();
+        assert_eq!(start, "Progress: 0/3 bytes (0%)\n");
+        let done = human
+            .report(DownloadProgress {
+                received: 3,
+                total: 3,
+            })
+            .unwrap();
+        assert_eq!(done, "Progress: 3/3 bytes (100%)\n");
+        assert!(human
+            .report(DownloadProgress {
+                received: 3,
+                total: 3,
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn empty_download_progress_declares_one_event() {
+        let mut human = DownloadProgressRenderer::new(false);
+        assert_eq!(
+            human
+                .report(DownloadProgress {
+                    received: 0,
+                    total: 0
+                })
+                .unwrap(),
+            "Progress: 0/0 bytes (complete)\n"
+        );
+        assert!(human
+            .report(DownloadProgress {
+                received: 0,
+                total: 0
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn download_failure_guidance_names_recovery_and_preserved_data() {
+        let cases = [
+            ("conflict", "existing file was preserved", "--force"),
+            ("timeout", "fresh transfer", "session history session-1"),
+            (
+                "invalid_argument",
+                "attachment file name is not safe",
+                "--name",
+            ),
+            (
+                "internal",
+                "attachment destination has no free space",
+                "no free space",
+            ),
+            (
+                "payload_digest_mismatch",
+                "integrity verification failed",
+                "corrupt",
+            ),
+            (
+                "unsupported_capability",
+                "cannot read attachments",
+                "Upgrade",
+            ),
+            ("rate_limited", "budget is exhausted", "Wait"),
+            ("cancelled", "no completed file", "fresh transfer"),
+        ];
+        for (code, detail, expected) in cases {
+            let message = download_failure_message(detail, code, "session-1");
+            assert!(
+                message.contains(expected),
+                "{code}: expected {expected:?} in {message:?}"
+            );
+            assert!(!message.contains("/tmp/private"), "{code}: {message}");
+        }
+        let destination = download_failure_message(
+            "attachment destination does not exist",
+            "invalid_argument",
+            "s",
+        );
+        assert!(destination.contains("--to <DIR>"), "{destination}");
+        let unauthorized = download_failure_message("unauthorized", "unauthorized", "s");
+        assert!(unauthorized.contains("whalerein status"), "{unauthorized}");
+    }
+
+    #[test]
+    fn an_unnamed_attachment_displays_and_saves_under_a_media_derived_name() {
+        let attachment = content_block::AttachmentContent {
+            media_type: "image/png".into(),
+            name: String::new(),
+            size: 3,
+            available: true,
+            attachment_ref: "ref-1".into(),
+        };
+        assert!(render_attachment(&attachment).contains("attachment.png"));
+        let key = SessionKey::new("host-1", "session-1").unwrap();
+        let rows = render_attachment_rows(&key, &[attachment]);
+        assert!(rows.contains("Attachment: attachment.png"), "{rows}");
+        assert!(rows.contains("Save:"), "{rows}");
+    }
+
+    #[test]
+    fn long_tool_results_are_bounded_unless_full_output_is_requested() {
+        let text = "x".repeat(TOOL_RESULT_DISPLAY_BYTES + 100);
+        let activity = ToolActivity {
+            id: whalerein_core::conversation::ToolActivityId {
+                call_id: "c".into(),
+            },
+            name: "Read".into(),
+            summary: None,
+            order: 1,
+            state: whalerein_core::conversation::ToolState::Succeeded,
+            stages: vec![whalerein_core::conversation::ToolStage::Settlement],
+            progress: None,
+            failure_code: None,
+            result: vec![ToolResultPart::Text(text.clone())],
+            outcome: whalerein_core::conversation::ToolOutcome::Succeeded,
+            attempt: None,
+            call_missing: false,
+        };
+        set_full_tool_output(false);
+        let bounded = render_tool_activity(&activity);
+        assert!(bounded.contains("bytes hidden"), "{bounded}");
+        assert!(
+            !bounded.contains(&text),
+            "bounded output must not contain the full result"
+        );
+        set_full_tool_output(true);
+        let complete = render_tool_activity(&activity);
+        assert!(complete.contains(&text));
+        set_full_tool_output(false);
+    }
+
+    #[test]
+    fn duplicate_attachment_names_get_distinct_saves_and_unavailable_rows_explain() {
+        let key = SessionKey::new("host-1", "session-1").unwrap();
+        let first = content_block::AttachmentContent {
+            media_type: "application/octet-stream".into(),
+            name: "report.bin".into(),
+            size: 4,
+            available: true,
+            attachment_ref: "ref-1".into(),
+        };
+        let mut second = first.clone();
+        second.attachment_ref = "ref-2".into();
+        let unavailable = content_block::AttachmentContent {
+            media_type: "application/octet-stream".into(),
+            name: "gone.bin".into(),
+            size: 4,
+            available: false,
+            attachment_ref: "ref-3".into(),
+        };
+        let rows = render_attachment_rows(&key, &[first.clone(), second, unavailable]);
+        assert!(rows.contains("--name attachment-2.bin"), "{rows}");
+        assert!(rows.contains("did not expose readable bytes"), "{rows}");
+        let values = attachments_json(&key, &[first]);
+        assert!(values[0]["save_command"]
+            .as_str()
+            .unwrap()
+            .contains("session download"));
+        let large = content_block::AttachmentContent {
+            media_type: "image/png".into(),
+            name: "huge.png".into(),
+            size: 40 * 1024 * 1024,
+            available: true,
+            attachment_ref: "ref-4".into(),
+        };
+        let rows = render_attachment_rows(&key, &[large]);
+        assert!(rows.contains("Large image"), "{rows}");
     }
 }

@@ -217,7 +217,8 @@ export function resolveConfig(raw = {}) {
     eventBatchMs: integer(raw.event_batch_ms, 20, { min: 1, max: 60_000, name: 'event_batch_ms' }),
     outboxPerDeviceLimit: integer(raw.outbox_per_device_limit, 100, { min: 1, max: 100_000, name: 'outbox_per_device_limit' }),
     outboxTotalLimit: integer(raw.outbox_total_limit, 1000, { min: 1, max: 1_000_000, name: 'outbox_total_limit' }),
-    // Snapshots
+    // Snapshots. Retained as a validated compatibility key only: committed
+    // history now pages over a fixed cut and never truncates to this count.
     snapshotMaxEvents: integer(raw.snapshot_max_events, 5000, { min: 1, max: 200_000, name: 'snapshot_max_events' }),
     // Approvals
     approvalMode,

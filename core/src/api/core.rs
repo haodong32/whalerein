@@ -175,6 +175,7 @@ pub struct Core {
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
     pub(crate) watch_active: Arc<AtomicBool>,
+    pub(crate) attachments: Arc<crate::attachments::Downloads>,
     instance: Option<Arc<Instance>>,
     #[cfg(test)]
     profile: Option<crate::profiles::ProfileContext>,
@@ -322,15 +323,20 @@ impl Core {
         instance: Option<Arc<Instance>>,
         diagnostics: Arc<Diagnostics>,
     ) -> Self {
+        let runtime = Arc::new(Runtime::new());
+        if let Some(instance) = &instance {
+            runtime.set_transport_budget(instance.transport);
+        }
         Self {
             options,
             config: Arc::new(RwLock::new(config)),
-            runtime: Arc::new(Runtime::new()),
+            runtime,
             diagnostics,
             identity: Arc::new(Mutex::new(None)),
             identity_init: Arc::new(Mutex::new(())),
             cache: Arc::new(Mutex::new(None)),
             watch_active: Arc::new(AtomicBool::new(false)),
+            attachments: Arc::new(crate::attachments::Downloads::new()),
             instance,
             #[cfg(test)]
             profile: None,
@@ -669,6 +675,17 @@ impl Core {
         &self.options.secrets
     }
 
+    pub(crate) fn transport_budget(&self) -> crate::access::transport::TransportBudget {
+        self.runtime.transport_budget()
+    }
+
+    fn outbound_envelope_bytes(&self, host_id: &str) -> u64 {
+        let local = self.transport_budget().envelope_bytes;
+        self.runtime
+            .host_receive(host_id)
+            .map_or(local, |peer| local.min(peer.envelope_bytes))
+    }
+
     fn current_config(&self) -> Option<PersistedConfig> {
         self.config.read().expect("config lock").clone()
     }
@@ -735,6 +752,7 @@ impl Core {
             self.ca_pem().as_deref(),
             self.diagnostics.clone(),
         )?
+        .with_transport_budget(self.transport_budget())
         .with_cloud_session(region.id, self.options.secrets.clone()))
     }
 
@@ -762,6 +780,7 @@ impl Core {
             .ok_or(CoreError::NotPaired)?;
         let ca = self.ca_pem();
         AccessClient::with_ca(base, Some(token), ca.as_deref(), self.diagnostics.clone())
+            .map(|access| access.with_transport_budget(self.transport_budget()))
             .map_err(Into::into)
     }
 
@@ -938,7 +957,7 @@ impl Core {
         }
     }
 
-    fn cache(&self) -> CoreResult<Arc<Cache>> {
+    pub(crate) fn cache(&self) -> CoreResult<Arc<Cache>> {
         if self.instance.is_some() && !self.options.data_dir.is_dir() {
             return Err(CoreError::NotPaired);
         }
@@ -1123,11 +1142,13 @@ impl Core {
         if access.cloud_session_id() != expected {
             return Err(CoreError::AuthenticationRequired);
         }
-        Ok(CommandService::new(access, self.cache()?).with_admission(
-            self.config_store(),
-            self.options.data_dir.clone(),
-            self.options.secrets.clone(),
-        ))
+        Ok(CommandService::new(access, self.cache()?)
+            .with_transport_budget(self.transport_budget())
+            .with_admission(
+                self.config_store(),
+                self.options.data_dir.clone(),
+                self.options.secrets.clone(),
+            ))
     }
 
     fn cache_or_empty(&self) -> CoreResult<Arc<Cache>> {
@@ -1297,7 +1318,8 @@ impl Core {
             require_payload_capability(&self.runtime, host_id, &payload, &self.diagnostics)?;
             let commands = self
                 .command_service_for_session(expected_session.as_deref())
-                .await?;
+                .await?
+                .with_outbound_envelope(self.outbound_envelope_bytes(host_id));
             match commands
                 .query(host_id, &config.device_id, &channel, payload.clone())
                 .await
@@ -1377,6 +1399,7 @@ impl Core {
             let commands = self
                 .command_service_for_session(expected_session.as_deref())
                 .await?
+                .with_outbound_envelope(self.outbound_envelope_bytes(host_id))
                 .with_host_fingerprint(Some(self.confirmed_host_fingerprint(host_id)?));
             let submitted = match (command_id, request_id) {
                 (None, None) => {
@@ -3850,8 +3873,15 @@ impl Core {
     pub async fn sync_session(&self, key: &SessionKey) -> CoreResult<u64> {
         self.authorized_session(key)?;
         let mut conversation = crate::conversation::Conversation::default();
-        self.sync_conversation(key, &mut conversation, true, true, &mut watch::AcceptAll)
-            .await
+        self.sync_conversation(
+            key,
+            &mut conversation,
+            true,
+            true,
+            "",
+            &mut watch::AcceptAll,
+        )
+        .await
     }
 
     pub(crate) fn mqtt_settings(&self, config: &PersistedConfig) -> CoreResult<MqttSettings> {
@@ -3864,7 +3894,9 @@ impl Core {
                 MqttSettings::from_access_url(&access)?
             }
         };
-        Ok(settings.with_ca(self.ca_pem()))
+        Ok(settings
+            .with_ca(self.ca_pem())
+            .with_transport_budget(self.transport_budget()))
     }
 
     // -----------------------------------------------------------------
@@ -4098,7 +4130,9 @@ mod tail_tests;
 pub(crate) mod watch;
 
 mod operation;
-pub use operation::{AccountState, ClientStatus, DeviceAccess, MessageReply, SendOperation};
+pub use operation::{
+    AccountState, ClientStatus, DeviceAccess, SendFollowUp, SendOperation, SendReply,
+};
 mod pairing_recovery;
 
 #[path = "wait.rs"]

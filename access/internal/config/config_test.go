@@ -54,7 +54,7 @@ func TestParseMinimalConfigurationAppliesDefaults(t *testing.T) {
 	if cfg.Pairing.InvitationTTL.D() != 10*time.Minute || cfg.Requests.Lease.D() != 30*time.Second {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
-	if cfg.HTTP.MaxBodyBytes != 24<<20 || cfg.Protocol.Version != 1 || cfg.Log.Level != "info" {
+	if cfg.HTTP.MaxBodyBytes != 24<<20 || cfg.Requests.MaxResultBytes != 16<<20 || cfg.Protocol.Version != 1 || cfg.Log.Level != "info" {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
 	if cfg.Line.PolicyTTL.D() != 10*time.Second || cfg.Line.HeartbeatInterval.D() != 5*time.Second {
@@ -153,7 +153,7 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects missing broker password", func(c *Config) { c.Broker.Password = "" }, "broker.password is required"},
 		{"rejects missing internal callback token", func(c *Config) { c.Internal.CallbackToken = "" }, "internal.callback_token is required"},
 		{"rejects callback token matching admin token", func(c *Config) { c.Internal.CallbackToken = c.AdminToken }, "must differ from admin_token"},
-		{"rejects nonpositive HTTP body limit", func(c *Config) { c.HTTP.MaxBodyBytes = 0 }, "max_body_bytes"},
+		{"rejects negative HTTP body limit", func(c *Config) { c.HTTP.MaxBodyBytes = -1 }, "max_body_bytes"},
 		{"rejects nonpositive HTTP timeout", func(c *Config) { c.HTTP.ReadTimeout = 0 }, "http timeouts"},
 		{"rejects nonpositive line policy TTL", func(c *Config) { c.Line.PolicyTTL = 0 }, "line durations"},
 		{"rejects nonpositive line reconcile interval", func(c *Config) { c.Line.ReconcileInterval = 0 }, "line durations"},
@@ -164,6 +164,7 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects nonpositive background loads", func(c *Config) { c.Admission.MaxBackgroundLoads = 0 }, "admission tunables"},
 		{"rejects nonpositive pairing failure limit", func(c *Config) { c.Pairing.MaxFailures = 0 }, "max_failures"},
 		{"rejects nonpositive request batch size", func(c *Config) { c.Requests.BatchSize = 0 }, "requests tunables"},
+		{"rejects negative retained result bound", func(c *Config) { c.Requests.MaxResultBytes = -1 }, "max_result_bytes"},
 		{"rejects nonpositive revocation acknowledgement timeout", func(c *Config) { c.Revocation.AckTimeout = 0 }, "ack_timeout"},
 		{"rejects nonpositive presence cache TTL", func(c *Config) { c.Presence.CacheTTL = 0 }, "presence.cache_ttl"},
 		{"rejects nonpositive cleanup interval", func(c *Config) { c.Cleanup.Interval = 0 }, "cleanup durations"},

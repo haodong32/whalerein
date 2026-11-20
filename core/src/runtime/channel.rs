@@ -125,12 +125,27 @@ async fn ensure_channel_guarded(
     runtime.set_state(host_id, ConnectionState::Handshaking)?;
     runtime.set_handshake_phase(host_id, HandshakePhase::Msg1Sent);
 
-    match handshake(access, identity, host_id, device_id, expected_fingerprint).await {
+    let receive_generation = runtime.next_receive_generation();
+    match handshake(
+        access,
+        identity,
+        host_id,
+        device_id,
+        expected_fingerprint,
+        receive_generation,
+    )
+    .await
+    {
         Ok(established) => {
             runtime.set_channel(host_id, established.channel.clone());
             // The capability set is read from `ChannelReady` once, next to the
             // channel it belongs to; gating reads it back from the Runtime.
             runtime.set_capabilities(host_id, established.capabilities);
+            runtime.set_channel_receive(
+                host_id,
+                established.receive,
+                established.receive_generation,
+            );
             runtime.set_handshake_phase(host_id, HandshakePhase::Complete);
             runtime.set_state(host_id, ConnectionState::Syncing)?;
             runtime.set_sync_state(host_id, SyncState::Idle);
@@ -160,8 +175,8 @@ struct Established {
     /// The capability set the Host advertised in `ChannelReady`. An absent
     /// field decodes to the empty set, which advertises nothing.
     capabilities: CapabilitySet,
-    #[allow(dead_code)]
-    host_public_key: [u8; 32],
+    receive: crate::access::transport::TransportBudget,
+    receive_generation: u64,
 }
 
 async fn handshake(
@@ -170,6 +185,7 @@ async fn handshake(
     host_id: &str,
     device_id: &str,
     expected_fingerprint: Option<&str>,
+    receive_generation: u64,
 ) -> CoreResult<Established> {
     // The negotiation id is random and bound into the prologue. The derived
     // application channel id is different and is used for encrypted frames.
@@ -177,12 +193,17 @@ async fn handshake(
     let prologue = channel_prologue(host_id, device_id, &negotiation_id);
     let mut noise = NoiseSession::initiator(identity, &prologue)?;
 
+    let local_receive = access.transport_budget();
+    let device_receive = local_receive
+        .advertisement(receive_generation)
+        .map_err(|_| CoreError::Config("invalid local transport receive budget".into()))?;
     let hello = ChannelHello {
         device_id: device_id.to_owned(),
         host_id: host_id.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         capabilities: Some(default_capabilities()),
         client_nonce: random_id(16),
+        receive: Some(device_receive),
     };
     let msg1 = noise.write(&hello.encode_to_vec())?;
     let msg2 = send_handshake(access, host_id, device_id, &negotiation_id, msg1).await?;
@@ -200,6 +221,14 @@ async fn handshake(
         return Err(CoreError::Unauthorized);
     }
     let capabilities = ready.capabilities.unwrap_or_default();
+    let (host_receive, host_receive_generation) = ready
+        .receive
+        .as_ref()
+        .ok_or(CoreError::ProtocolIncompatible)
+        .and_then(|advertisement| {
+            crate::access::transport::TransportBudget::from_advertisement(advertisement)
+                .map_err(|_| CoreError::ProtocolIncompatible)
+        })?;
 
     // XX message 2 authenticates the responder static key. Check its pairing
     // pin before message 3 discloses the device identity to the responder.
@@ -232,7 +261,8 @@ async fn handshake(
     Ok(Established {
         channel,
         capabilities,
-        host_public_key,
+        receive: host_receive,
+        receive_generation: host_receive_generation,
     })
 }
 
@@ -272,6 +302,9 @@ pub fn required_capability(payload: &RequestPayload) -> Option<Capability> {
             Some(Capability::Sync)
         }
         Payload::ReadMessageReply(_) => None,
+        Payload::OpenAttachment(_) | Payload::PullAttachment(_) | Payload::CloseAttachment(_) => {
+            Some(Capability::Messages)
+        }
         Payload::Ping(_) | Payload::GetHostCapabilities(_) => None,
     }
 }
@@ -320,6 +353,7 @@ async fn send_handshake(
         protocol_version: PROTOCOL_VERSION,
         channel_id: negotiation_id.to_owned(),
         body,
+        transport: None,
     };
     let receipt = access.submit_request(host_id, &request).await?;
     match OnlineStatus::from_proto(receipt.status) {
@@ -394,6 +428,201 @@ mod fake_host_tests {
             second.channel_id()
         );
         assert_eq!(runtime.reconnect_count("host-1"), 0);
+    }
+
+    #[tokio::test]
+    async fn handshake_carries_a_validated_receive_advertisement_in_both_directions() {
+        use crate::access::transport::{TransportBudget, TransportProfile, TransportSettings};
+
+        let access = FakeAccess::start().await;
+        let compact = TransportBudget::resolve(&TransportSettings {
+            profile: TransportProfile::Compact,
+            overrides: None,
+        })
+        .unwrap();
+        access.host.lock().unwrap().channel_receive = Some(compact.advertisement(4).unwrap());
+        let client = AccessClient::new(access.url(), Some("device-token".into()))
+            .unwrap()
+            .with_transport_budget(compact);
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        runtime.set_transport_budget(compact);
+        let _channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+        let hello = access
+            .host
+            .lock()
+            .unwrap()
+            .last_hello_receive
+            .expect("device receive advertisement");
+        assert_eq!(hello.profile, compact.profile.wire() as i32);
+        assert_eq!(hello.connection_generation, 1);
+        assert_eq!(
+            hello.budget.as_ref().unwrap().envelope_bytes,
+            compact.envelope_bytes
+        );
+        let installed = runtime.host_receive("host-1").unwrap();
+        assert_eq!(installed, compact);
+        assert_eq!(runtime.host_receive_generation("host-1"), Some(4));
+    }
+
+    #[tokio::test]
+    async fn relation_valid_host_overrides_and_independent_generations_are_accepted() {
+        use crate::access::transport::{TransportBudget, TransportProfile};
+
+        let access = FakeAccess::start().await;
+        let mut host_receive = TransportBudget::default().advertisement(9).unwrap();
+        {
+            let budget = host_receive.budget.as_mut().unwrap();
+            budget.packet_bytes = 48 * 1024;
+            budget.fragment_payload_bytes = 40 * 1024;
+            budget.fragment_count = 205;
+            budget.envelope_bytes = 8 * 1024 * 1024;
+            budget.bulk_concurrency = 3;
+            budget.reserved_bytes = 8 * 1024 * 1024;
+            budget.fragment_idle_timeout_ms = 10_000;
+            budget.transfer_timeout_ms = 60_000;
+        }
+        access.host.lock().unwrap().channel_receive = Some(host_receive);
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        let _first = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+
+        // The local Hello leg is scoped to the Noise channel and starts its own
+        // monotonic generation. The Host's ChannelReady leg is independent.
+        let hello = access
+            .host
+            .lock()
+            .unwrap()
+            .last_hello_receive
+            .expect("device receive advertisement");
+        assert_eq!(hello.connection_generation, 1);
+        assert_eq!(hello.profile, TransportProfile::Default.wire() as i32);
+        let installed = runtime.host_receive("host-1").unwrap();
+        assert_eq!(installed.envelope_bytes, 8 * 1024 * 1024);
+        assert_eq!(installed.fragment_payload_bytes, 40 * 1024);
+        assert_eq!(runtime.host_receive_generation("host-1"), Some(9));
+
+        // Reconnect on the same Host broker connection: the local generation
+        // advances while the Host channel advertisement keeps generation 9.
+        let _second = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
+            .await
+            .unwrap();
+        let hello = access
+            .host
+            .lock()
+            .unwrap()
+            .last_hello_receive
+            .expect("device receive advertisement");
+        assert_eq!(hello.connection_generation, 2);
+        assert_eq!(runtime.host_receive_generation("host-1"), Some(9));
+        assert_eq!(
+            runtime.host_receive("host-1").unwrap().envelope_bytes,
+            8 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_clears_a_stale_channel_receive_advertisement() {
+        let access = FakeAccess::start().await;
+        let budget = crate::access::transport::TransportBudget::default();
+        access.host.lock().unwrap().channel_receive = Some(budget.advertisement(4).unwrap());
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        let _ = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+        assert_eq!(runtime.host_receive_generation("host-1"), Some(4));
+
+        // The replacement channel advertises nothing. The prior channel's
+        // receive budget and generation must not carry over to it.
+        access.host.lock().unwrap().omit_channel_receive = true;
+        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ProtocolIncompatible));
+        assert!(runtime.host_receive("host-1").is_none());
+        assert!(runtime.host_receive_generation("host-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn local_overrides_are_advertised_with_the_base_profile() {
+        use crate::access::transport::{
+            TransportBudget, TransportOverrides, TransportProfile, TransportSettings,
+        };
+
+        let settings = TransportSettings {
+            profile: TransportProfile::Default,
+            overrides: Some(TransportOverrides {
+                packet_bytes: Some(48 * 1024),
+                fragment_payload_bytes: Some(40 * 1024),
+                fragment_count: Some(205),
+                envelope_bytes: Some(8 * 1024 * 1024),
+                bulk_concurrency: Some(3),
+                reserved_bytes: Some(8 * 1024 * 1024),
+                fragment_idle_timeout_ms: Some(10_000),
+                transfer_timeout_ms: Some(60_000),
+                ..Default::default()
+            }),
+        };
+        let local = TransportBudget::resolve(&settings).unwrap();
+
+        let access = FakeAccess::start().await;
+        let client = AccessClient::new(access.url(), Some("device-token".into()))
+            .unwrap()
+            .with_transport_budget(local);
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        runtime.set_transport_budget(local);
+        let _ = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap();
+
+        let hello = access
+            .host
+            .lock()
+            .unwrap()
+            .last_hello_receive
+            .expect("device receive advertisement");
+        assert_eq!(hello.profile, TransportProfile::Default.wire() as i32);
+        assert_eq!(hello.budget, Some(local.wire_budget()));
+        assert_eq!(
+            hello.budget.as_ref().unwrap().envelope_bytes,
+            8 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_invalid_host_receive_advertisement_fails_the_handshake() {
+        let access = FakeAccess::start().await;
+        access.host.lock().unwrap().omit_channel_receive = true;
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let identity = StaticIdentity::generate();
+        let runtime = Runtime::new();
+        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ProtocolIncompatible));
+        assert!(runtime.host_receive("host-1").is_none());
+
+        let access = FakeAccess::start().await;
+        let mut invalid = crate::access::transport::TransportBudget::default()
+            .advertisement(1)
+            .unwrap();
+        // A positive envelope increment is now a relation-valid override; a
+        // contradictory fragment count remains invalid.
+        invalid.budget.as_mut().unwrap().fragment_count = 1;
+        access.host.lock().unwrap().channel_receive = Some(invalid);
+        let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
+        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ProtocolIncompatible));
     }
 
     #[tokio::test]

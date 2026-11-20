@@ -1,6 +1,6 @@
 //! WhaleRein client core.
 //!
-//! The client interface lives in [`api`] and [`conversation`]; other modules
+//! The client interface lives in [`api`], [`conversation`] and [`history`]; other modules
 //! are internal implementation details. Clients provide a `SecretStore` and
 //! can receive redacted events through a `DiagnosticSink`.
 
@@ -28,7 +28,9 @@ pub use api::{Core, CoreError, MemorySecretStore, SecretError, SecretStore};
 #[cfg(test)]
 pub use api::{CoreOptions, Profiles};
 
+pub mod attachments;
 pub mod conversation;
+pub mod history;
 
 /// Low-level protocol drivers for repository tests; not a client interface.
 #[cfg(feature = "protocol-testing")]

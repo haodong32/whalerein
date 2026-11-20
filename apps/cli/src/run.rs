@@ -4,24 +4,28 @@ use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use whalerein_core::api::{
-    Cancellation, ClientService, CreateSessionInput, DiagnosticContext, MessageReply,
-    ObservationInterests, PairingDecision, PendingQueueAction, SecretStore, SessionEventPayload,
-    SessionKey, SessionModel, WaitReason,
+    AttachmentLimits, AttachmentReference, Cancellation, ClientService, CreateSessionInput,
+    DiagnosticContext, DownloadRequest, InputKind, ObservationInterests, PairingDecision,
+    PendingQueueAction, SecretStore, SendFollowUp, SendReply, SessionEventPayload, SessionKey,
+    SessionModel, WaitReason,
 };
 use whalerein_core::conversation::ViewUpdate;
+use whalerein_core::history::{HistoryPageRequest, MessageReference};
 use whalerein_core::{Core, CoreError};
 
 use crate::cli::{Cli, Command, ModelAction, QueueCommand};
 use crate::diagnostics::CliDiagnosticSink;
 use crate::output::{
-    approval_data, command_data, core_error_outcome, doctor_data, hosts_data, is_tail_output,
-    lifecycle_error_code, lifecycle_exit_code, manifest_data, render_approval, render_approvals,
-    render_command, render_doctor, render_hosts, render_lifecycle_outcome, render_manifest,
-    render_models, render_pair, render_pairing_history, render_questions, render_queue,
-    render_session_model, render_sessions, sanitize_field, sessions_data, tail_event_json,
-    CliError, CliOutcome, TailRenderer,
+    approval_data, command_data, core_error_outcome, doctor_data, download_data,
+    history_message_data, history_page_data, hosts_data, is_tail_output, lifecycle_error_code,
+    lifecycle_exit_code, manifest_data, message_json, render_approval, render_approvals,
+    render_command, render_doctor, render_download, render_history_message, render_history_page,
+    render_hosts, render_lifecycle_outcome, render_manifest, render_models, render_pair,
+    render_pairing_history, render_questions, render_queue, render_session_model, render_sessions,
+    sanitize_field, sessions_data, shell_quote, tail_event_json, CliError, CliOutcome,
+    DownloadProgressRenderer, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -62,6 +66,51 @@ fn parse_timeout_seconds(value: &str) -> Result<Duration, &'static str> {
         return Err(invalid);
     }
     Ok(Duration::from_millis(total))
+}
+
+/// Parse the download deadline and derive bounded local limits.
+///
+/// `--timeout` is the overall transfer budget. The idle budget follows it down
+/// so a short deadline never yields an invalid limit relation.
+fn download_limits(value: Option<&str>) -> Result<AttachmentLimits, CoreError> {
+    let mut limits = AttachmentLimits::default();
+    if let Some(value) = value {
+        let timeout = parse_timeout_seconds(value)
+            .map_err(|message| CoreError::InvalidInput(format!("--timeout {message}")))?;
+        limits.overall_timeout = timeout;
+        if limits.idle_timeout > timeout {
+            limits.idle_timeout = timeout;
+        }
+    }
+    Ok(limits)
+}
+
+/// Build one download request from the exact history save action.
+///
+/// The positional reference is opaque and never carries authorization scope, so
+/// the owning Host-qualified session travels alongside it. An empty reference is
+/// rejected before any Core or network work.
+fn download_request(
+    target: &SessionKey,
+    reference: &str,
+    destination: std::path::PathBuf,
+    force: bool,
+    name: Option<&str>,
+) -> Result<DownloadRequest, CoreError> {
+    if reference.trim().is_empty() {
+        return Err(CoreError::InvalidInput(
+            "attachment reference is empty; use the save action shown by `session history`".into(),
+        ));
+    }
+    let mut request = DownloadRequest::new(
+        AttachmentReference::new(target.clone(), reference),
+        destination,
+    )
+    .overwrite(force);
+    if let Some(name) = name {
+        request = request.file_name(name);
+    }
+    Ok(request)
 }
 
 async fn queue_change(
@@ -152,6 +201,7 @@ struct Execution {
     host: Option<String>,
     json: bool,
     yes: bool,
+    show_reasoning: bool,
 }
 
 fn default_config_path() -> Result<std::path::PathBuf, CoreError> {
@@ -198,6 +248,8 @@ where
     let config = parsed.config.take();
     let json = parsed.json;
     let yes = parsed.yes;
+    let show_reasoning = parsed.show_reasoning;
+    crate::output::set_full_tool_output(parsed.full);
     let (mut command, host) = parsed.into_command();
     diagnostics.cli_event(context.trace_id(), || {
         json!({
@@ -209,7 +261,12 @@ where
     if let Command::Send { operation_id, .. } = &mut command {
         operation_id.get_or_insert_with(Core::new_command_id);
     }
-    let cli = Execution { host, json, yes };
+    let cli = Execution {
+        host,
+        json,
+        yes,
+        show_reasoning,
+    };
     let config = match config.map_or_else(default_config_path, Ok) {
         Ok(path) => path,
         Err(error) => {
@@ -280,13 +337,52 @@ where
         Vec::new()
     };
     let mut signal = std::pin::pin!(signal);
+    let cancellation = Cancellation::new();
     let result = if matches!(command, Command::Answer { .. }) {
-        dispatch(&core, &cli, &command, key, deadline).await
+        dispatch(&core, &cli, &command, key, deadline, &cancellation).await
+    } else if matches!(command, Command::SessionDownload { .. }) {
+        // A download owns a local cancellation token so Core drops its Host
+        // transfer, releases reservations and removes staging before the
+        // process reports cancellation. Dropping the future would skip those
+        // bounded cleanup stages.
+        let mut work = Box::pin(dispatch(
+            &core,
+            &cli,
+            &command,
+            key,
+            deadline,
+            &cancellation,
+        ));
+        let interrupted = tokio::select! {
+            result = &mut work => Some(result),
+            _ = &mut signal => None,
+        };
+        match interrupted {
+            Some(result) => result,
+            None => {
+                cancellation.cancel();
+                match tokio::time::timeout(Duration::from_secs(5), &mut work).await {
+                    Ok(result) => result,
+                    Err(_) => Ok(finish_core_result(
+                        &core,
+                        &command,
+                        Err(CoreError::Cancelled),
+                    )),
+                }
+            }
+        }
     } else {
         // The dispatch future is boxed so the interrupt branch can drop it
         // *before* the cleanup window: dropping a `wait` future runs Core's
         // observation guard, which sends CancelSessionWait from a spawned task.
-        let mut work = Box::pin(dispatch(&core, &cli, &command, key, deadline));
+        let mut work = Box::pin(dispatch(
+            &core,
+            &cli,
+            &command,
+            key,
+            deadline,
+            &cancellation,
+        ));
         tokio::select! {
             result = &mut work => result,
             _ = &mut signal => {
@@ -471,6 +567,7 @@ async fn dispatch(
     command: &Command,
     key: Option<&SessionKey>,
     deadline: Option<tokio::time::Instant>,
+    cancellation: &Cancellation,
 ) -> Result<CliOutcome, CoreError> {
     let result = match command {
         Command::Login
@@ -767,6 +864,7 @@ async fn dispatch(
                         operation,
                         false,
                         Some(Duration::from_secs(120)),
+                        cli.show_reasoning,
                     )
                     .await
                 }
@@ -789,7 +887,16 @@ async fn dispatch(
             // Resolution already ran inside the same budget, so tail gets only
             // what is left of the original deadline.
             let timeout = remaining_budget(deadline)?;
-            tail(core, command, cli.json, key, *once, timeout).await
+            tail(
+                core,
+                command,
+                cli.json,
+                cli.show_reasoning,
+                key,
+                *once,
+                timeout,
+            )
+            .await
         }
         Command::Wait {
             fail_on_timeout, ..
@@ -840,6 +947,90 @@ async fn dispatch(
                 ),
             ))
         }
+        Command::History {
+            cache,
+            continuation,
+            message,
+            max_messages,
+            max_bytes,
+            ..
+        } => {
+            let target = resolved_key(key)?;
+            if let Some(reference) = message {
+                let reference: MessageReference = reference.parse()?;
+                if reference.session() != target {
+                    return Err(CoreError::InvalidInput(
+                        "message reference belongs to another session; use the session that owns it".into(),
+                    ));
+                }
+                let message = core.history_message(&reference).await?;
+                Ok(CliOutcome::success(
+                    command,
+                    history_message_data(target, &reference, &message, cli.show_reasoning),
+                    render_history_message(target, &reference, &message, cli.show_reasoning),
+                ))
+            } else {
+                let mut request = HistoryPageRequest::new(target.clone());
+                if *cache {
+                    request = request.cache();
+                }
+                if let Some(value) = continuation {
+                    request.continuation = Some(value.parse()?);
+                }
+                if let Some(value) = max_messages {
+                    if *value == 0 {
+                        return Err(CoreError::InvalidInput(
+                            "--max-messages must be at least 1".into(),
+                        ));
+                    }
+                    request.max_messages = *value;
+                }
+                if let Some(value) = max_bytes {
+                    if *value == 0 {
+                        return Err(CoreError::InvalidInput(
+                            "--max-bytes must be at least 1".into(),
+                        ));
+                    }
+                    request.max_bytes = *value;
+                }
+                let page = core.history_page(&request).await?;
+                Ok(CliOutcome::success(
+                    command,
+                    history_page_data(target, &page, cli.show_reasoning),
+                    render_history_page(target, &page, cli.show_reasoning),
+                ))
+            }
+        }
+        Command::SessionDownload {
+            reference,
+            to,
+            force,
+            name,
+            timeout,
+            session: _,
+        } => {
+            let target = key.ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "session download requires the --session scope shown by the history save action"
+                        .into(),
+                )
+            })?;
+            let limits = download_limits(timeout.as_deref())?;
+            let request = download_request(target, reference, to.clone(), *force, name.as_deref())?;
+            let mut progress = DownloadProgressRenderer::new(cli.json);
+            let result = core
+                .download_attachment_with_limits(request, limits, cancellation, |update| {
+                    if let Some(line) = progress.report(update) {
+                        let _ = crate::stream::to_stderr(line.as_bytes());
+                    }
+                })
+                .await?;
+            Ok(CliOutcome::success(
+                command,
+                download_data(target, reference, &result),
+                render_download(&result),
+            ))
+        }
         Command::Send {
             text,
             delivery,
@@ -866,6 +1057,7 @@ async fn dispatch(
                         operation,
                         *detach,
                         remaining_budget(deadline).ok().flatten(),
+                        cli.show_reasoning,
                     )
                     .await
                 }
@@ -1263,17 +1455,151 @@ fn uncertain_send(
     outcome
 }
 
+/// Wire-ready next-step commands for the evidenced pending-input kinds.
+///
+/// Only the kinds the Source proved are shown. Approval and question commands
+/// are scoped to the original Host and session and safely quoted.
+fn send_input_commands(target: &SessionKey, kinds: &[InputKind]) -> Vec<String> {
+    let host = shell_quote(&target.host_id);
+    let session = shell_quote(&target.session_id);
+    let mut commands = Vec::new();
+    for kind in kinds {
+        match kind {
+            InputKind::Approval => commands.push(format!(
+                "whalerein session approval list --session {session} --host {host}"
+            )),
+            InputKind::Question => commands.push(format!(
+                "whalerein session question list --session {session} --host {host}"
+            )),
+            InputKind::Other => {}
+        }
+    }
+    commands
+}
+
+fn send_recovery_command(target: &SessionKey, reference: &str) -> String {
+    format!(
+        "whalerein session history {} --host {} --message {}",
+        shell_quote(&target.session_id),
+        shell_quote(&target.host_id),
+        shell_quote(reference)
+    )
+}
+
+fn send_followup_data(
+    operation: &whalerein_core::api::SendOperation,
+    follow: &SendFollowUp,
+    show_reasoning: bool,
+) -> Value {
+    let mut data = json!({
+        "operation_id": &operation.operation_id,
+        "target": &operation.target,
+        "reply": &follow.reply,
+    });
+    match &follow.reply {
+        SendReply::Committed { reference } => {
+            data["reference"] = json!(reference.to_token());
+        }
+        SendReply::InputRequired { kinds, .. } => {
+            // Keep the typed kinds at the top level for scripts while the
+            // canonical reply object keeps its own tag and fields.
+            data["input_kinds"] = json!(kinds);
+        }
+        SendReply::Pending | SendReply::Uncertain => {}
+    }
+    if let Some(message) = &follow.message {
+        data["message"] = message_json(message, show_reasoning);
+    }
+    data["read_error"] = match follow.read_error_code() {
+        Some(code) => json!(code),
+        None => Value::Null,
+    };
+    data
+}
+
+fn send_followup_human(
+    operation: &whalerein_core::api::SendOperation,
+    follow: &SendFollowUp,
+    show_reasoning: bool,
+) -> String {
+    let target = &operation.target;
+    let header = format!(
+        "Host {} · Session {}\n",
+        sanitize_field(&target.host_id),
+        sanitize_field(&target.session_id)
+    );
+    match &follow.reply {
+        SendReply::Committed { reference } => {
+            let mut out = format!(
+                "{}Confirmed committed message {} (operation {}).\n",
+                header,
+                sanitize_field(reference.message_id()),
+                sanitize_field(&operation.operation_id)
+            );
+            if let Some(message) = &follow.message {
+                let body = crate::output::render_committed_blocks(message, show_reasoning);
+                if !body.is_empty() {
+                    out.push_str(&format!("[{}] {body}\n", message.role.as_str_name()));
+                }
+                return out;
+            }
+            let recovery = send_recovery_command(target, &reference.to_token());
+            let code = follow.read_error_code().unwrap_or("unavailable");
+            if code == "snapshot_required" {
+                out.push_str(&format!(
+                    "The confirmed message reference is stale ({code}), so its content could not be read. Refresh history and retry the exact read:\n  {recovery}\nDo not resend the message; the submission is already committed.\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "The reply content could not be read ({code}). The confirmation above still holds; retry the exact read:\n  {recovery}\nDo not resend the message because content was unavailable.\n"
+                ));
+            }
+            out
+        }
+        SendReply::InputRequired { kinds, session, .. } => {
+            let mut out = format!(
+                "{}The submitted message is confirmed and requires input (operation {}).\n",
+                header,
+                sanitize_field(&operation.operation_id)
+            );
+            let commands = send_input_commands(session, kinds);
+            if commands.is_empty() {
+                out.push_str(
+                    "Review the session's pending input, then continue in the source client. Do not resubmit the message.\n",
+                );
+            } else {
+                out.push_str("Inspect the pending input:\n");
+                for command in commands {
+                    out.push_str(&format!("  {command}\n"));
+                }
+                out.push_str("Do not resubmit the message; answer the pending request instead.\n");
+            }
+            out
+        }
+        SendReply::Pending => format!(
+            "{}Submission {} is confirmed, but the reply is not settled yet. Do not resend it.\nInspect progress with `whalerein session watch {} --host {}` or recover the original operation with `whalerein operation recover {}`.\n",
+            header,
+            sanitize_field(&operation.operation_id),
+            shell_quote(&target.session_id),
+            shell_quote(&target.host_id),
+            sanitize_field(&operation.operation_id)
+        ),
+        SendReply::Uncertain => String::new(),
+    }
+}
+
 async fn render_send(
     core: &Core,
     command: &Command,
     operation: whalerein_core::api::SendOperation,
     detach: bool,
     budget: Option<Duration>,
+    show_reasoning: bool,
 ) -> Result<CliOutcome, CoreError> {
     let mut data = json!({
-        "operation_id": operation.operation_id,
-        "target": operation.target,
-        "receipt": operation.receipt,
+        "operation_id": &operation.operation_id,
+        "target": &operation.target,
+        "receipt": &operation.receipt,
     });
     if detach {
         data["state"] = json!("submission");
@@ -1283,31 +1609,24 @@ async fn render_send(
             .map_or_else(String::new, render_command);
         return Ok(CliOutcome::success(command, data, human));
     }
-    let reply = core
-        .follow_send_operation(operation.clone(), budget.unwrap_or_default())
+    let follow = core
+        .follow_send_operation_with_content(operation.clone(), budget.unwrap_or_default())
         .await?;
-    let human = match &reply {
-        MessageReply::Committed { text, .. } => format!(
-            "Host {} · Session {}\n{text}\n",
-            sanitize_field(&operation.target.host_id),
-            sanitize_field(&operation.target.session_id),
-        ),
-        MessageReply::InputRequired => {
-            "The submitted message requires input. Inspect session approval or session question.\n"
-                .into()
-        }
-        MessageReply::Uncertain => {
-            return Ok(uncertain_send(
-                core,
-                command,
-                &operation.operation_id,
-                Some(&operation.target),
-            ))
-        }
-    };
+    if matches!(follow.reply, SendReply::Uncertain) {
+        return Ok(uncertain_send(
+            core,
+            command,
+            &operation.operation_id,
+            Some(&operation.target),
+        ));
+    }
     // Following the reply can recover and persist a newer delivery receipt.
     data["receipt"] = json!(core.send_operation(&operation.operation_id)?.receipt);
-    data["reply"] = json!(reply);
+    let follow_data = send_followup_data(&operation, &follow, show_reasoning);
+    for (key, value) in follow_data.as_object().into_iter().flatten() {
+        data[key] = value.clone();
+    }
+    let human = send_followup_human(&operation, &follow, show_reasoning);
     Ok(CliOutcome::success(command, data, human))
 }
 
@@ -1460,9 +1779,13 @@ fn render_tail_event(
     renderer: &mut TailRenderer,
     key: &SessionKey,
     update: &ViewUpdate,
+    show_reasoning: bool,
 ) -> String {
     if json_output {
-        let mut value = tail_event_json(update);
+        let Some(mut value) = tail_event_json(update, show_reasoning) else {
+            // Hidden reasoning never enters default JSON.
+            return String::new();
+        };
         value["data"]["event"]["session"] =
             json!({"host_id": key.host_id, "session_id": key.session_id});
         format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
@@ -1475,12 +1798,13 @@ async fn tail(
     core: &Core,
     command: &Command,
     json_output: bool,
+    show_reasoning: bool,
     key: &SessionKey,
     once: bool,
     timeout: Option<Duration>,
 ) -> Result<CliOutcome, CoreError> {
     let session = key.session_id.as_str();
-    let mut renderer = TailRenderer::default();
+    let mut renderer = TailRenderer::new(show_reasoning);
     let mut visible = false;
     let mut closed = false;
     let mut stopped = false;
@@ -1505,8 +1829,8 @@ async fn tail(
             ) {
                 emitted += 1;
             }
-            let text = render_tail_event(json_output, &mut renderer, key, &update);
-            visible |= is_tail_output(&update);
+            let text = render_tail_event(json_output, &mut renderer, key, &update, show_reasoning);
+            visible |= is_tail_output(&update, show_reasoning);
             match crate::stream::to_stdout(text.as_bytes()) {
                 Ok(()) => {
                     if once && visible {
@@ -2193,7 +2517,9 @@ mod instance_command_tests {
         assert_eq!(sent.exit, 0, "{sent:?}");
         let data = sent.to_json()["data"].clone();
         assert_eq!(data["reply"]["state"], "committed");
-        assert_eq!(data["reply"]["attempt_id"], "fixture-attempt");
+        assert!(data["reply"]["reference"].is_string(), "{data}");
+        assert_eq!(data["message"]["message_id"], "message-1");
+        assert_eq!(data["read_error"], serde_json::Value::Null);
         assert_eq!(data["receipt"]["message_id"], "message-1");
         let operation = data["operation_id"].as_str().unwrap();
         let commands_seen = access.host.lock().unwrap().commands_seen;
@@ -2204,7 +2530,11 @@ mod instance_command_tests {
         )
         .await;
         assert_eq!(recovered.exit, 0, "{recovered:?}");
-        assert_eq!(recovered.to_json()["data"]["reply"], data["reply"]);
+        assert_eq!(recovered.to_json()["data"]["reply"]["state"], "committed");
+        assert_eq!(
+            recovered.to_json()["data"]["message"]["message_id"],
+            "message-1"
+        );
         assert_eq!(recovered.to_json()["data"]["receipt"], data["receipt"]);
         assert_eq!(access.host.lock().unwrap().commands_seen, commands_seen);
 
@@ -2780,6 +3110,7 @@ mod instance_command_tests {
             host: None,
             json: true,
             yes: true,
+            show_reasoning: false,
         };
         let command = Command::Connect {
             host: None,
@@ -2935,7 +3266,7 @@ mod session_observation_cli_tests {
                 authored_at_unix_ms: 1,
             },
             origin: Some(attempt()),
-            preview_prefix_bytes: None,
+            preview_prefix: None,
         }
     }
 
@@ -2945,9 +3276,9 @@ mod session_observation_cli_tests {
     fn cli_session_observation_ac_13_tail_human_and_json_shape_is_unchanged() {
         let key = session_key();
         let update = text_message("hello");
-        let human = render_tail_event(false, &mut TailRenderer::default(), &key, &update);
+        let human = render_tail_event(false, &mut TailRenderer::default(), &key, &update, false);
         assert_eq!(human, "[ASSISTANT] hello\n");
-        let line = render_tail_event(true, &mut TailRenderer::default(), &key, &update);
+        let line = render_tail_event(true, &mut TailRenderer::default(), &key, &update, false);
         assert!(line.ends_with('\n'), "{line:?}");
         let value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(value["schema"], "whalerein/client/v1");
@@ -2968,32 +3299,46 @@ mod session_observation_cli_tests {
         let key = session_key();
         let mut renderer = TailRenderer::default();
         let state = ViewUpdate::State(Default::default());
-        assert!(!render_tail_event(false, &mut renderer, &key, &state).is_empty());
-        assert!(!is_tail_output(&state));
-        assert!(!is_tail_output(&ViewUpdate::Reset));
-        assert!(!is_tail_output(&ViewUpdate::Preview {
-            attempt: attempt(),
-            block_id: "text".into(),
-            text: String::new(),
-            replace: false,
-            incomplete: false,
-        }));
-        assert!(is_tail_output(&text_message("done")));
-        assert!(is_tail_output(&ViewUpdate::Preview {
-            attempt: attempt(),
-            block_id: "text".into(),
-            text: "live".into(),
-            replace: false,
-            incomplete: false,
-        }));
-        assert!(is_tail_output(&ViewUpdate::AttemptEnded {
-            attempt: attempt(),
-            outcome: AttemptOutcome::Abandoned,
-        }));
-        assert!(!is_tail_output(&ViewUpdate::AttemptEnded {
-            attempt: attempt(),
-            outcome: AttemptOutcome::Committed,
-        }));
+        assert!(!render_tail_event(false, &mut renderer, &key, &state, false).is_empty());
+        assert!(!is_tail_output(&state, false));
+        assert!(!is_tail_output(&ViewUpdate::Reset, false));
+        assert!(!is_tail_output(
+            &ViewUpdate::Preview {
+                attempt: attempt(),
+                block_id: "text".into(),
+                kind: whalerein_core::conversation::BlockKind::Text,
+                text: String::new(),
+                replace: false,
+                incomplete: false,
+            },
+            false
+        ));
+        assert!(is_tail_output(&text_message("done"), false));
+        assert!(is_tail_output(
+            &ViewUpdate::Preview {
+                attempt: attempt(),
+                block_id: "text".into(),
+                kind: whalerein_core::conversation::BlockKind::Text,
+                text: "live".into(),
+                replace: false,
+                incomplete: false,
+            },
+            false
+        ));
+        assert!(is_tail_output(
+            &ViewUpdate::AttemptEnded {
+                attempt: attempt(),
+                outcome: AttemptOutcome::Abandoned,
+            },
+            false
+        ));
+        assert!(!is_tail_output(
+            &ViewUpdate::AttemptEnded {
+                attempt: attempt(),
+                outcome: AttemptOutcome::Committed,
+            },
+            false
+        ));
     }
 
     // AC-13 tail-once: an observation with no visible output reaches the
@@ -3083,5 +3428,738 @@ mod session_observation_cli_tests {
             .unwrap()
             .contains("question changed"));
         assert_eq!(fixture.access.host.lock().unwrap().commands_seen, before);
+    }
+}
+
+#[cfg(test)]
+mod history_send_cli_tests {
+    use super::coverage_tests::Fixture;
+    use super::*;
+    use whalerein_core::api::SendOperation;
+    use whalerein_core::conversation::ConversationMessage;
+    use whalerein_core::history::MessageReference;
+
+    fn wire_message(
+        id: &str,
+        role: whalerein_proto::MessageRole,
+        blocks: Vec<whalerein_proto::ContentBlock>,
+    ) -> whalerein_proto::ConversationMessage {
+        whalerein_proto::ConversationMessage {
+            message_id: id.into(),
+            role: role as i32,
+            blocks,
+            authored_at_unix_ms: 1,
+        }
+    }
+
+    fn text_block(block_id: &str, text: &str) -> whalerein_proto::ContentBlock {
+        whalerein_proto::ContentBlock {
+            block_id: block_id.into(),
+            content: Some(whalerein_proto::content_block::Content::Text(
+                whalerein_proto::TextContent { text: text.into() },
+            )),
+        }
+    }
+
+    fn reasoning_block(block_id: &str, text: &str) -> whalerein_proto::ContentBlock {
+        whalerein_proto::ContentBlock {
+            block_id: block_id.into(),
+            content: Some(whalerein_proto::content_block::Content::Reasoning(
+                whalerein_proto::ReasoningContent { text: text.into() },
+            )),
+        }
+    }
+
+    fn reference_token(session: &str, message: &str) -> String {
+        MessageReference::new(
+            SessionKey::new("host-1", session).unwrap(),
+            message,
+            format!("locator:{message}"),
+            "projection-1",
+        )
+        .unwrap()
+        .to_token()
+    }
+
+    fn operation(host: &str, session: &str) -> SendOperation {
+        SendOperation {
+            operation_id: "op-1".into(),
+            target: SessionKey::new(host, session).unwrap(),
+            receipt: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn history_latest_page_first_and_continuations_walk_older_without_gaps() {
+        let f = Fixture::paired().await;
+        {
+            let mut host = f.access.host.lock().unwrap();
+            host.history_messages = (1..=5)
+                .map(|index| {
+                    wire_message(
+                        &format!("m-{index}"),
+                        whalerein_proto::MessageRole::Assistant,
+                        vec![text_block("text", &format!("message {index}"))],
+                    )
+                })
+                .collect();
+            host.history_page_size = 2;
+        }
+        let first = f
+            .run(&["session", "history", "session-1", "--max-messages", "2"])
+            .await;
+        assert_eq!(first.exit, 0, "{first:?}");
+        let value = first.to_json();
+        assert_eq!(value["command"], "session.history");
+        assert_eq!(value["data"]["source"], "online");
+        assert_eq!(value["data"]["projection"], "projection-1");
+        assert_eq!(value["data"]["messages"][0]["message_id"], "m-4");
+        assert_eq!(value["data"]["messages"][1]["message_id"], "m-5");
+        assert_eq!(value["data"]["complete"], false);
+        assert!(first.human.contains("Source: online"), "{}", first.human);
+        let continuation = value["data"]["continuation"].as_str().unwrap().to_owned();
+
+        let second = f
+            .run(&[
+                "session",
+                "history",
+                "session-1",
+                "--continuation",
+                &continuation,
+            ])
+            .await;
+        assert_eq!(second.exit, 0, "{second:?}");
+        let value = second.to_json();
+        assert_eq!(value["data"]["messages"][0]["message_id"], "m-2");
+        assert_eq!(value["data"]["messages"][1]["message_id"], "m-3");
+        let continuation = value["data"]["continuation"].as_str().unwrap().to_owned();
+        let third = f
+            .run(&[
+                "session",
+                "history",
+                "session-1",
+                "--continuation",
+                &continuation,
+            ])
+            .await;
+        assert_eq!(third.exit, 0, "{third:?}");
+        let value = third.to_json();
+        assert_eq!(value["data"]["messages"][0]["message_id"], "m-1");
+        assert_eq!(value["data"]["complete"], true);
+        assert!(value["data"]["continuation"].is_null());
+        assert!(third.human.contains("End of history"), "{}", third.human);
+
+        // One traversal sees every message exactly once, oldest page last.
+        let mut ids: Vec<String> = [&first, &second, &third]
+            .iter()
+            .flat_map(|outcome| {
+                outcome.to_json()["data"]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|message| message["message_id"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["m-1", "m-2", "m-3", "m-4", "m-5"]);
+    }
+
+    #[tokio::test]
+    async fn history_cache_read_is_explicit_and_never_creates_a_watch_lease() {
+        let f = Fixture::paired().await;
+        let cached = f.run(&["session", "history", "session-1", "--cache"]).await;
+        assert_eq!(cached.exit, 0, "{cached:?}");
+        let value = cached.to_json();
+        assert_eq!(value["data"]["source"], "cache");
+        assert_eq!(value["data"]["messages"], serde_json::json!([]));
+        assert_eq!(value["data"]["complete"], true);
+        assert!(cached.human.contains("Source: cache"), "{}", cached.human);
+        // A page read never acquires an observation lease and is repeatable.
+        let again = f.run(&["session", "history", "session-1", "--cache"]).await;
+        assert_eq!(again.exit, 0, "{again:?}");
+        assert_eq!(again.to_json()["data"]["source"], "cache");
+    }
+
+    #[tokio::test]
+    async fn history_exact_read_and_stale_or_wrong_scope_failures_are_actionable() {
+        let f = Fixture::paired().await;
+        let token = reference_token("session-1", "message-1");
+        let exact = f
+            .run(&["session", "history", "session-1", "--message", &token])
+            .await;
+        assert_eq!(exact.exit, 0, "{exact:?}");
+        let value = exact.to_json();
+        assert_eq!(value["data"]["source"], "online");
+        assert_eq!(value["data"]["message"]["message_id"], "message-1");
+        let returned = value["data"]["reference"].as_str().unwrap();
+        let parsed: MessageReference = returned.parse().unwrap();
+        assert_eq!(
+            parsed.session(),
+            &SessionKey::new("host-1", "session-1").unwrap()
+        );
+        assert_eq!(parsed.message_id(), "message-1");
+        assert!(
+            exact.human.contains("Message: message-1"),
+            "{}",
+            exact.human
+        );
+
+        // A reference for another session is rejected before any read.
+        let foreign = reference_token("session-2", "message-1");
+        let wrong_scope = f
+            .run(&["session", "history", "session-1", "--message", &foreign])
+            .await;
+        assert_eq!(wrong_scope.to_json()["error"]["code"], "invalid_argument");
+        assert!(
+            wrong_scope.to_json()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("refresh history"),
+            "{wrong_scope:?}"
+        );
+
+        let garbage = f
+            .run(&[
+                "session",
+                "history",
+                "session-1",
+                "--continuation",
+                "whr1.not-a-token.invalid",
+            ])
+            .await;
+        assert_eq!(garbage.exit, 8, "{garbage:?}");
+        let value = garbage.to_json();
+        assert_eq!(value["error"]["code"], "snapshot_required");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("without --continuation"),
+            "{value}"
+        );
+
+        // A real continuation from session-1 cannot be replayed for session-2.
+        {
+            let mut host = f.access.host.lock().unwrap();
+            host.history_messages = vec![
+                wire_message(
+                    "message-1",
+                    whalerein_proto::MessageRole::Assistant,
+                    vec![text_block("text", "one")],
+                ),
+                wire_message(
+                    "message-2",
+                    whalerein_proto::MessageRole::Assistant,
+                    vec![text_block("text", "two")],
+                ),
+            ];
+            host.history_page_size = 1;
+        }
+        let first = f
+            .run(&["session", "history", "session-1", "--max-messages", "1"])
+            .await;
+        let continuation = first.to_json()["data"]["continuation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let wrong_session = f
+            .run(&[
+                "session",
+                "history",
+                "session-2",
+                "--continuation",
+                &continuation,
+            ])
+            .await;
+        assert_eq!(
+            wrong_session.to_json()["error"]["code"],
+            "snapshot_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_reasoning_is_hidden_by_default_and_opt_in_in_human_and_json() {
+        let f = Fixture::paired().await;
+        f.access.host.lock().unwrap().history_messages = vec![wire_message(
+            "m-1",
+            whalerein_proto::MessageRole::Assistant,
+            vec![
+                reasoning_block("reasoning", "private reasoning"),
+                text_block("text", "visible answer"),
+            ],
+        )];
+        let hidden = f.run(&["session", "history", "session-1"]).await;
+        assert_eq!(hidden.exit, 0, "{hidden:?}");
+        assert!(
+            !hidden.human.contains("private reasoning"),
+            "{}",
+            hidden.human
+        );
+        let value = hidden.to_json();
+        assert!(!value.to_string().contains("private reasoning"), "{value}");
+        assert!(value.to_string().contains("visible answer"), "{value}");
+
+        let shown = f
+            .run(&["--show-reasoning", "session", "history", "session-1"])
+            .await;
+        assert_eq!(shown.exit, 0, "{shown:?}");
+        assert!(
+            shown.human.contains("[reasoning] private reasoning"),
+            "{}",
+            shown.human
+        );
+        let value = shown.to_json();
+        assert_eq!(
+            value["data"]["messages"][0]["blocks"][0]["type"],
+            "reasoning"
+        );
+        assert_eq!(
+            value["data"]["messages"][0]["blocks"][0]["text"],
+            "private reasoning"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_confirmed_reply_is_read_once_and_never_resubmitted() {
+        let f = Fixture::paired().await;
+        let sent = f
+            .run(&["session", "send", "session-1", "hello", "--timeout", "5"])
+            .await;
+        assert_eq!(sent.exit, 0, "{sent:?}");
+        let value = sent.to_json();
+        assert_eq!(value["data"]["reply"]["state"], "committed");
+        assert_eq!(value["data"]["message"]["message_id"], "message-1");
+        assert_eq!(value["data"]["read_error"], serde_json::Value::Null);
+        assert!(sent.human.contains("Confirmed committed message message-1"));
+        assert_eq!(f.access.host.lock().unwrap().commands_seen, 1);
+    }
+
+    #[tokio::test]
+    async fn a_later_content_read_failure_keeps_the_confirmation_and_shows_the_exact_command() {
+        let f = Fixture::paired().await;
+        f.access.host.lock().unwrap().history_messages.clear();
+        let submitted = f
+            .run(&["session", "send", "session-1", "hello", "--timeout", "5"])
+            .await;
+        assert_eq!(submitted.exit, 0, "{submitted:?}");
+        let value = submitted.to_json();
+        assert_eq!(value["data"]["reply"]["state"], "committed");
+        assert!(value["data"]["message"].is_null());
+        assert_eq!(value["data"]["read_error"], "not_found");
+        assert!(
+            submitted.human.contains("could not be read"),
+            "{}",
+            submitted.human
+        );
+        assert!(
+            submitted.human.contains("Do not resend"),
+            "{}",
+            submitted.human
+        );
+        assert!(
+            submitted.human.contains("--message") && submitted.human.contains("session history"),
+            "{}",
+            submitted.human
+        );
+        // Reading content failed; the original send was not repeated.
+        assert_eq!(f.access.host.lock().unwrap().commands_seen, 1);
+    }
+
+    #[test]
+    fn pending_input_guidance_is_scoped_to_the_original_host_and_session() {
+        let target = SessionKey::new("host-1", "session-1").unwrap();
+        let follow = SendFollowUp {
+            reply: SendReply::InputRequired {
+                kinds: vec![InputKind::Approval, InputKind::Question],
+                operation: "op-1".into(),
+                session: target.clone(),
+            },
+            message: None,
+            read_error: None,
+        };
+        let human = send_followup_human(&operation("host-1", "session-1"), &follow, false);
+        assert!(
+            human.contains("whalerein session approval list --session session-1 --host host-1"),
+            "{human}"
+        );
+        assert!(
+            human.contains("whalerein session question list --session session-1 --host host-1"),
+            "{human}"
+        );
+        assert!(human.contains("Do not resubmit"), "{human}");
+    }
+
+    #[test]
+    fn pending_and_stale_guidance_never_resubmits_and_quotes_hostile_scope() {
+        let target = SessionKey::new("h'; rm -rf /", "s$(id)").unwrap();
+        let operation = operation("h'; rm -rf /", "s$(id)");
+        let pending = send_followup_human(
+            &operation,
+            &SendFollowUp {
+                reply: SendReply::Pending,
+                message: None,
+                read_error: None,
+            },
+            false,
+        );
+        assert!(pending.contains("Do not resend"), "{pending}");
+        assert!(pending.contains("session watch 's$(id)'"), "{pending}");
+        assert!(pending.contains("--host 'h'\\''; rm -rf /'"), "{pending}");
+        assert!(!pending.contains("--host h'; rm"), "{pending}");
+
+        let reference =
+            MessageReference::new(target.clone(), "m-1", "locator", "projection-1").unwrap();
+        let stale = send_followup_human(
+            &operation,
+            &SendFollowUp {
+                reply: SendReply::Committed { reference },
+                message: None,
+                read_error: Some(CoreError::Api {
+                    code: Some(whalerein_proto::ErrorCode::SnapshotRequired),
+                    message: "stale".into(),
+                }),
+            },
+            false,
+        );
+        assert!(stale.contains("stale"), "{stale}");
+        assert!(stale.contains("Do not resend"), "{stale}");
+        assert!(stale.contains("--message"), "{stale}");
+        assert!(stale.contains(r"--host 'h'\''; rm -rf /'"), "{stale}");
+    }
+
+    #[test]
+    fn send_json_keeps_typed_reply_fields_and_reasoning_policy() {
+        use whalerein_core::conversation::content_block::{Content, ReasoningContent, TextContent};
+        use whalerein_core::conversation::{ContentBlock, MessageRole};
+        let operation = operation("host-1", "session-1");
+        let message = ConversationMessage {
+            message_id: "m-1".into(),
+            role: MessageRole::Assistant,
+            blocks: vec![
+                ContentBlock {
+                    block_id: "reasoning".into(),
+                    content: Some(Content::Reasoning(ReasoningContent {
+                        text: "private reasoning".into(),
+                    })),
+                },
+                ContentBlock {
+                    block_id: "text".into(),
+                    content: Some(Content::Text(TextContent {
+                        text: "answer".into(),
+                    })),
+                },
+            ],
+            ..Default::default()
+        };
+        let follow = SendFollowUp {
+            reply: SendReply::Committed {
+                reference: MessageReference::new(
+                    operation.target.clone(),
+                    "m-1",
+                    "locator",
+                    "projection-1",
+                )
+                .unwrap(),
+            },
+            message: Some(message),
+            read_error: None,
+        };
+        let hidden = send_followup_data(&operation, &follow, false);
+        assert_eq!(hidden["reply"]["state"], "committed");
+        assert!(hidden["reply"]["reference"].is_string());
+        assert_eq!(hidden["message"]["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(hidden["message"]["blocks"][0]["type"], "text");
+        assert!(!hidden.to_string().contains("private reasoning"));
+        let shown = send_followup_data(&operation, &follow, true);
+        assert_eq!(shown["message"]["blocks"][0]["type"], "reasoning");
+        assert!(shown.to_string().contains("private reasoning"));
+        assert_eq!(shown["read_error"], serde_json::Value::Null);
+        assert!(shown["reference"].is_string());
+        let human_hidden = send_followup_human(&operation, &follow, false);
+        assert!(
+            !human_hidden.contains("private reasoning"),
+            "{human_hidden}"
+        );
+        let human_shown = send_followup_human(&operation, &follow, true);
+        assert!(
+            human_shown.contains("[reasoning] private reasoning"),
+            "{human_shown}"
+        );
+        assert!(human_shown.contains("[ASSISTANT]"), "{human_shown}");
+    }
+
+    #[tokio::test]
+    async fn verbose_history_keeps_one_stdout_envelope_and_emits_stderr_stages() {
+        let f = Fixture::paired().await;
+        let outcome = f
+            .run(&["--verbose", "session", "history", "session-1"])
+            .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        // Fixture disables capture; the binary-level test verifies stream
+        // isolation. Here the command still returns exactly one envelope.
+        let value = outcome.to_json();
+        assert_eq!(value["schema"], "whalerein/client/v1");
+        assert_eq!(value["command"], "session.history");
+    }
+}
+
+#[cfg(test)]
+mod download_cli_tests {
+    use super::coverage_tests::Fixture;
+    use super::*;
+    use whalerein_core::api::test_support::FakeAttachmentObject;
+
+    fn attachment(reference: &str, name: &str, bytes: &[u8]) -> FakeAttachmentObject {
+        FakeAttachmentObject::new("session-1", reference, name, bytes.to_vec())
+    }
+
+    async fn run_download(
+        fixture: &Fixture,
+        reference: &str,
+        destination: &std::path::Path,
+        extra: &[&str],
+    ) -> CliOutcome {
+        let destination = destination.to_str().unwrap();
+        let mut args = vec![
+            "session",
+            "download",
+            reference,
+            "--to",
+            destination,
+            "--session",
+            "session-1",
+            "--host",
+            "host-1",
+        ];
+        args.extend_from_slice(extra);
+        fixture.run(&args).await
+    }
+
+    #[test]
+    fn download_reference_preserves_scope_and_rejects_an_empty_value() {
+        let target = SessionKey::new("host-1", "session-1").unwrap();
+        let request = download_request(
+            &target,
+            "attachment-1",
+            std::path::PathBuf::from("downloads"),
+            true,
+            Some("chosen.bin"),
+        )
+        .unwrap();
+        assert_eq!(request.reference.session, target);
+        assert_eq!(request.reference.attachment_ref, "attachment-1");
+        assert_eq!(request.destination, std::path::PathBuf::from("downloads"));
+        assert_eq!(request.file_name.as_deref(), Some("chosen.bin"));
+        assert!(request.overwrite);
+        let suggested = download_request(
+            &target,
+            "attachment-2",
+            std::path::PathBuf::from("d"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(suggested.file_name.is_none());
+        assert!(!suggested.overwrite);
+        for empty in ["", " ", "\t"] {
+            let error =
+                download_request(&target, empty, std::path::PathBuf::from("d"), false, None)
+                    .unwrap_err();
+            assert_eq!(error.code(), "invalid_argument");
+        }
+    }
+
+    #[test]
+    fn download_limits_follow_the_overall_deadline() {
+        assert_eq!(download_limits(None).unwrap(), AttachmentLimits::default());
+        let short = download_limits(Some("0.5")).unwrap();
+        assert_eq!(short.overall_timeout, Duration::from_millis(500));
+        assert_eq!(short.idle_timeout, Duration::from_millis(500));
+        assert!(download_limits(Some("0")).is_err());
+        assert!(download_limits(Some("-1")).is_err());
+        assert!(download_limits(Some("soon")).is_err());
+    }
+
+    #[tokio::test]
+    async fn download_saves_verified_bytes_and_maps_each_failure_without_partial_files() {
+        let f = Fixture::paired().await;
+        let directory = f.directory.path().join("downloads");
+        std::fs::create_dir(&directory).unwrap();
+        f.access.host.lock().unwrap().put_attachment(attachment(
+            "attachment-1",
+            "hello.txt",
+            b"hello",
+        ));
+
+        let saved = run_download(&f, "attachment-1", &directory, &[]).await;
+        assert_eq!(saved.exit, 0, "{saved:?}");
+        let value = saved.to_json();
+        let path = directory.join("hello.txt");
+        assert_eq!(value["data"]["reference"], "attachment-1");
+        assert_eq!(value["data"]["name"], "hello.txt");
+        assert_eq!(value["data"]["bytes"], 5);
+        assert_eq!(value["data"]["verified"], true);
+        assert_eq!(value["data"]["path"], path.to_str().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        assert!(saved.human.contains("Verified: yes"));
+        assert!(!saved.human.contains("attachment-1"));
+
+        // A collision preserves the existing bytes until --force is explicit.
+        std::fs::write(&path, b"preserved").unwrap();
+        let collision = run_download(&f, "attachment-1", &directory, &[]).await;
+        assert_eq!(collision.exit, 8, "{collision:?}");
+        assert_eq!(collision.to_json()["error"]["code"], "conflict");
+        assert!(collision.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--force"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserved");
+        let forced = run_download(&f, "attachment-1", &directory, &["--force"]).await;
+        assert_eq!(forced.exit, 0, "{forced:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+
+        // An explicit name replaces only the user-selected final component.
+        let named = run_download(
+            &f,
+            "attachment-1",
+            &directory,
+            &["--name", "renamed.bin", "--force"],
+        )
+        .await;
+        assert_eq!(named.exit, 0, "{named:?}");
+        assert_eq!(
+            std::fs::read(directory.join("renamed.bin")).unwrap(),
+            b"hello"
+        );
+
+        // Unsupported and oversize reads fail before any staging file exists.
+        f.access.host.lock().unwrap().attachment_unsupported = true;
+        let unsupported = run_download(&f, "attachment-1", &directory, &[]).await;
+        assert_eq!(unsupported.exit, 9, "{unsupported:?}");
+        assert_eq!(
+            unsupported.to_json()["error"]["code"],
+            "unsupported_capability"
+        );
+        assert!(unsupported.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("session history"));
+        f.access.host.lock().unwrap().attachment_unsupported = false;
+
+        let mut oversized = attachment("attachment-big", "big.bin", b"abcdef");
+        oversized.policy.max_total_bytes = 2;
+        f.access.host.lock().unwrap().put_attachment(oversized);
+        let over = run_download(&f, "attachment-big", &directory, &[]).await;
+        assert_eq!(over.exit, 5, "{over:?}");
+        assert_eq!(over.to_json()["error"]["code"], "payload_too_large");
+        assert!(!directory.join("big.bin").exists());
+
+        // The reference belongs to one session; reuse from another session fails
+        // closed with no local write.
+        let wrong_scope = f
+            .run(&[
+                "session",
+                "download",
+                "attachment-1",
+                "--to",
+                directory.to_str().unwrap(),
+                "--session",
+                "session-2",
+                "--host",
+                "host-1",
+            ])
+            .await;
+        assert_eq!(wrong_scope.exit, 4, "{wrong_scope:?}");
+        assert_eq!(wrong_scope.to_json()["error"]["code"], "forbidden");
+        assert!(wrong_scope.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("whalerein status"));
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+
+        // A Source-suggested unsafe name is rejected before staging and names --name.
+        f.access.host.lock().unwrap().put_attachment(attachment(
+            "attachment-unsafe",
+            "../escape.txt",
+            b"escape",
+        ));
+        let unsafe_name = run_download(&f, "attachment-unsafe", &directory, &[]).await;
+        assert_eq!(unsafe_name.exit, 2, "{unsafe_name:?}");
+        assert_eq!(unsafe_name.to_json()["error"]["code"], "invalid_argument");
+        assert!(unsafe_name.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--name"));
+        assert!(!directory.join("escape.txt").exists());
+        assert!(!f.directory.path().join("escape.txt").exists());
+
+        // Missing destination and empty references are local argument failures.
+        let missing =
+            run_download(&f, "attachment-1", &f.directory.path().join("missing"), &[]).await;
+        assert_eq!(missing.exit, 2, "{missing:?}");
+        assert!(missing.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--to <DIR>"));
+        let empty = run_download(&f, " ", &directory, &[]).await;
+        assert_eq!(empty.exit, 2, "{empty:?}");
+        assert_eq!(empty.to_json()["error"]["code"], "invalid_argument");
+
+        // A short overall deadline fails with no completed file.
+        f.access.host.lock().unwrap().attachment_open_delay_ms = 500;
+        let timed_out = run_download(&f, "attachment-1", &directory, &["--timeout", "0.1"]).await;
+        assert_eq!(timed_out.exit, 7, "{timed_out:?}");
+        assert_eq!(timed_out.to_json()["error"]["code"], "timeout");
+        assert!(timed_out.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fresh transfer"));
+        f.access.host.lock().unwrap().attachment_open_delay_ms = 0;
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_cancels_core_and_removes_staging() {
+        let f = Fixture::paired().await;
+        let directory = f.directory.path().join("downloads");
+        std::fs::create_dir(&directory).unwrap();
+        f.access.host.lock().unwrap().put_attachment(attachment(
+            "attachment-1",
+            "hello.txt",
+            b"hello",
+        ));
+        f.access.host.lock().unwrap().attachment_open_delay_ms = 500;
+
+        let cancelled = Box::pin(f.run_with_interrupt(
+            &[
+                "session",
+                "download",
+                "attachment-1",
+                "--to",
+                directory.to_str().unwrap(),
+                "--session",
+                "session-1",
+                "--host",
+                "host-1",
+            ],
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            },
+        ))
+        .await;
+        assert_eq!(cancelled.exit, 2, "{cancelled:?}");
+        assert_eq!(cancelled.to_json()["error"]["code"], "cancelled");
+        assert!(cancelled.to_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fresh transfer"));
+        assert!(!directory.join("hello.txt").exists());
+        assert_eq!(
+            std::fs::read_dir(&directory).unwrap().count(),
+            0,
+            "staging data must be removed"
+        );
+        assert_eq!(f.access.host.lock().unwrap().attachment_close_calls, 0);
     }
 }

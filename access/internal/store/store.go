@@ -31,6 +31,10 @@ var ErrConflict = errors.New("conflict")
 // ErrPairingFenced proves an unfinished pairing intent cannot commit.
 var ErrPairingFenced = errors.New("pairing intent invalidated")
 
+// ErrMissingGrantStamp proves a newly admitted encrypted request did not bind
+// the active grant revisions. The row must not be stored without one.
+var ErrMissingGrantStamp = errors.New("missing grant stamp")
+
 // Pairing deadlines are distinguished so callers do not confuse expiration
 // with a consumed invitation or a proven revocation fence.
 var ErrPairingInvitationExpired = errors.New("pairing invitation expired")
@@ -335,6 +339,18 @@ const (
 	ClientLeaseClosed  ClientLeaseState = "closed"
 )
 
+// GrantStamp is the durable grant revision bound to a request at submission.
+// All four values are written together; a partially written stamp cannot be
+// interpreted as current authority.
+type GrantStamp struct {
+	GrantGeneration            uint64
+	RevocationGeneration       uint64
+	DeviceRevocationGeneration uint64
+	// ResultLimitBytes is the validated raw ciphertext allowance for this
+	// request. The encoded HTTPS bound is derived when forwarding.
+	ResultLimitBytes int64
+}
+
 // Request is the Access-side state copy for one HostRequest.
 type Request struct {
 	DeviceSessionID        string // Used when admitting a new managed request.
@@ -360,6 +376,9 @@ type Request struct {
 	PublishedOnce          bool
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+	// Stamp is nil for rows retained from before migration 019 and for
+	// Access-authored control rows that never carried device grant metadata.
+	Stamp *GrantStamp
 	// ClientLeaseUntil is the HTTP liveness deadline. NULL means a historical
 	// row whose liveness was never recorded; it is never treated as elapsed.
 	ClientLeaseUntil  *time.Time
@@ -402,55 +421,84 @@ var requestColumns = `request_id, host_id, device_id, command_id, payload_digest
 	protocol_version, status, request_body, result_body, error_code, error_message,
 	channel_id, trace_id, expires_at, forward_state, forward_after, forward_attempts,
 	published_once, created_at, updated_at, client_transport_version,
-	client_lease_until, client_lease_state, cancel_pending, cancel_published_at, cancel_attempts`
+	client_lease_until, client_lease_state, cancel_pending, cancel_published_at, cancel_attempts,
+	grant_generation, revocation_generation, device_revocation_generation, result_limit_bytes`
+
+// requestScan holds the temporary wire-typed columns while a request row is
+// scanned, so callers can append release-decision columns to the same scan.
+type requestScan struct {
+	req                        Request
+	kind                       int32
+	status                     string
+	errorCode                  int32
+	forwardState               string
+	clientLeaseState           string
+	grantGeneration            *int64
+	revocationGeneration       *int64
+	deviceRevocationGeneration *int64
+	resultLimitBytes           *int64
+}
+
+func (s *requestScan) targets() []any {
+	return []any{
+		&s.req.RequestID,
+		&s.req.HostID,
+		&s.req.DeviceID,
+		&s.req.CommandID,
+		&s.req.PayloadDigest,
+		&s.kind,
+		&s.req.ProtocolVersion,
+		&s.status,
+		&s.req.RequestBody,
+		&s.req.ResultBody,
+		&s.errorCode,
+		&s.req.ErrorMessage,
+		&s.req.ChannelID,
+		&s.req.TraceID,
+		&s.req.ExpiresAt,
+		&s.forwardState,
+		&s.req.ForwardAfter,
+		&s.req.ForwardAttempts,
+		&s.req.PublishedOnce,
+		&s.req.CreatedAt,
+		&s.req.UpdatedAt,
+		&s.req.ClientTransportVersion,
+		&s.req.ClientLeaseUntil,
+		&s.clientLeaseState,
+		&s.req.CancelPending,
+		&s.req.CancelPublishedAt,
+		&s.req.CancelAttempts,
+		&s.grantGeneration,
+		&s.revocationGeneration,
+		&s.deviceRevocationGeneration,
+		&s.resultLimitBytes,
+	}
+}
+
+func (s *requestScan) finish() Request {
+	req := s.req
+	req.Kind = whalereinv1.RequestKind(s.kind)
+	req.Status = parseStatus(s.status)
+	req.ErrorCode = whalereinv1.ErrorCode(s.errorCode)
+	req.ForwardState = ForwardState(s.forwardState)
+	req.ClientLeaseState = ClientLeaseState(s.clientLeaseState)
+	if s.grantGeneration != nil && s.revocationGeneration != nil && s.deviceRevocationGeneration != nil && s.resultLimitBytes != nil {
+		req.Stamp = &GrantStamp{
+			GrantGeneration:            uint64(*s.grantGeneration),
+			RevocationGeneration:       uint64(*s.revocationGeneration),
+			DeviceRevocationGeneration: uint64(*s.deviceRevocationGeneration),
+			ResultLimitBytes:           *s.resultLimitBytes,
+		}
+	}
+	return req
+}
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
-	var (
-		req              Request
-		kind             int32
-		status           string
-		errorCode        int32
-		forwardState     string
-		clientLeaseState string
-	)
-	err := row.Scan(
-		&req.RequestID,
-		&req.HostID,
-		&req.DeviceID,
-		&req.CommandID,
-		&req.PayloadDigest,
-		&kind,
-		&req.ProtocolVersion,
-		&status,
-		&req.RequestBody,
-		&req.ResultBody,
-		&errorCode,
-		&req.ErrorMessage,
-		&req.ChannelID,
-		&req.TraceID,
-		&req.ExpiresAt,
-		&forwardState,
-		&req.ForwardAfter,
-		&req.ForwardAttempts,
-		&req.PublishedOnce,
-		&req.CreatedAt,
-		&req.UpdatedAt,
-		&req.ClientTransportVersion,
-		&req.ClientLeaseUntil,
-		&clientLeaseState,
-		&req.CancelPending,
-		&req.CancelPublishedAt,
-		&req.CancelAttempts,
-	)
-	if err != nil {
+	var target requestScan
+	if err := row.Scan(target.targets()...); err != nil {
 		return Request{}, err
 	}
-	req.Kind = whalereinv1.RequestKind(kind)
-	req.Status = parseStatus(status)
-	req.ErrorCode = whalereinv1.ErrorCode(errorCode)
-	req.ForwardState = ForwardState(forwardState)
-	req.ClientLeaseState = ClientLeaseState(clientLeaseState)
-	return req, nil
+	return target.finish(), nil
 }
 
 func parseStatus(value string) whalereinv1.OnlineStatus {

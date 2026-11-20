@@ -388,6 +388,12 @@ pub enum IdKind {
     Block,
     Batch,
     Item,
+    Call,
+    Attachment,
+    Transfer,
+    Projection,
+    Locator,
+    Continuation,
     Cursor,
 }
 
@@ -410,6 +416,12 @@ impl IdKind {
             Self::Block => "block_id",
             Self::Batch => "batch_id",
             Self::Item => "item_id",
+            Self::Call => "call_id",
+            Self::Attachment => "attachment_ref",
+            Self::Transfer => "transfer_id",
+            Self::Projection => "projection_id",
+            Self::Locator => "source_locator",
+            Self::Continuation => "continuation",
             Self::Cursor => "cursor",
         }
     }
@@ -418,8 +430,8 @@ impl IdKind {
     /// and AAD inputs without constraining native session identifiers.
     pub fn max_bytes(self) -> usize {
         match self {
-            Self::Session => 512,
-            Self::Cursor => 4096,
+            Self::Session | Self::Attachment => 512,
+            Self::Cursor | Self::Locator | Self::Continuation => 4096,
             Self::Host | Self::Device => 200,
             Self::Trace | Self::Watch | Self::Wait => 64,
             Self::Request
@@ -431,7 +443,10 @@ impl IdKind {
             | Self::Message
             | Self::Block
             | Self::Batch
-            | Self::Item => 128,
+            | Self::Item
+            | Self::Call
+            | Self::Transfer
+            | Self::Projection => 128,
         }
     }
 
@@ -451,7 +466,10 @@ impl IdKind {
     /// Opaque routing identifiers are printable ASCII. Native session ids and
     /// opaque cursors may be UTF-8 but still cannot contain control bytes.
     pub fn ascii_only(self) -> bool {
-        !matches!(self, Self::Session | Self::Cursor)
+        !matches!(
+            self,
+            Self::Session | Self::Cursor | Self::Attachment | Self::Locator | Self::Continuation
+        )
     }
 }
 
@@ -711,6 +729,12 @@ mod tests {
             IdKind::Block,
             IdKind::Batch,
             IdKind::Item,
+            IdKind::Call,
+            IdKind::Attachment,
+            IdKind::Transfer,
+            IdKind::Projection,
+            IdKind::Locator,
+            IdKind::Continuation,
             IdKind::Cursor,
         ] {
             assert!(!kind.name().is_empty());

@@ -386,6 +386,12 @@ func newRequest(id, hostID, deviceID, commandID string, digest []byte, status wh
 		ForwardAfter:    now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		Stamp: &store.GrantStamp{
+			GrantGeneration:            1,
+			RevocationGeneration:       1,
+			DeviceRevocationGeneration: 1,
+			ResultLimitBytes:           16 << 20,
+		},
 	}
 }
 

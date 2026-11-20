@@ -1250,3 +1250,33 @@ async fn selecting_the_effective_model_is_a_core_noop_without_a_command() {
     assert_eq!(other.status, OnlineStatus::Succeeded);
     assert_eq!(access.host.lock().unwrap().commands_seen, before + 2);
 }
+
+#[test]
+fn outbound_envelope_takes_the_minimum_of_local_and_peer_overrides() {
+    use crate::access::transport::{TransportBudget, TransportProfile, TransportSettings};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let local = TransportBudget::resolve(&TransportSettings {
+        profile: TransportProfile::Roomy,
+        overrides: None,
+    })
+    .unwrap();
+    core.runtime.set_transport_budget(local);
+    assert_eq!(core.outbound_envelope_bytes("host-1"), local.envelope_bytes);
+
+    // A relation-valid smaller peer override lowers the outbound limit.
+    let mut smaller = local;
+    smaller.envelope_bytes = 8 * 1024 * 1024;
+    core.runtime.set_channel_receive("host-1", smaller, 3);
+    assert_eq!(
+        core.outbound_envelope_bytes("host-1"),
+        smaller.envelope_bytes
+    );
+
+    // A larger peer advertisement cannot raise the local limit.
+    let mut larger = local;
+    larger.envelope_bytes = 64 * 1024 * 1024;
+    core.runtime.set_channel_receive("host-1", larger, 4);
+    assert_eq!(core.outbound_envelope_bytes("host-1"), local.envelope_bytes);
+}

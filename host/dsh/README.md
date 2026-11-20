@@ -524,8 +524,9 @@ Still requiring target-environment acceptance:
 - Production MQTT/HTTPS TLS, CA/ACL deployment, and platform credential-store policy.
 - Historical restoration of actual endpoint journals and model/provider failures
   beyond deterministic loopback fixtures.
-- Very large cold histories beyond the configured snapshot bound and production
-  memory/throughput limits. A bounded source read does not bound DSH's native
+- Very large cold histories and production memory/throughput limits. Pages bound
+  protocol output, but a synchronization snapshot may still stage the complete
+  authorized range; a bounded source read does not bound DSH's native
   full-snapshot allocation.
 
 Private acceptance records live under `.local-docs/acceptance/`; passing isolated

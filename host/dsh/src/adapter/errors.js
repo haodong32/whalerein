@@ -21,6 +21,9 @@ export function mapAdapterError(error) {
   if (raw.includes('expired') || raw.includes('timeout')) return 'expired'
   if (raw.includes('unauthorized') || raw.includes('not authenticated')) return 'unauthorized'
   if (raw.includes('forbidden') || raw.includes('denied')) return 'forbidden'
+  // Native attachment storage rejects corrupted objects while streaming. This
+  // is an integrity failure, never a generic internal error.
+  if (raw.includes('corrupt') || raw.includes('digest_mismatch') || raw.includes('digest mismatch')) return 'payload_digest_mismatch'
   if (raw.includes('credentials') || raw.includes('unavailable')) return 'unavailable'
   if (raw.includes('invalid')) return 'invalid_argument'
   return 'internal'

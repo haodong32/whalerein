@@ -53,7 +53,29 @@ http:
   read_timeout: 30s
   write_timeout: 30s
   idle_timeout: 60s
-  max_body_bytes: 25165824
+  # Encoded HTTPS result-body bound. When omitted it derives from the selected
+  # transport profile as base64 expansion plus JSON framing (default 24 MiB,
+  # compact 13 MiB, roomy 45 MiB). A smaller explicit value fails startup.
+  # max_body_bytes: 25165824
+
+transport:
+  # Shared encoded transport vocabulary from proto/v1/transport_profiles.json.
+  # Profile names are default, compact and roomy. Every override below is
+  # optional and must satisfy the same relations; invalid settings fail before
+  # /readyz. Configuration changes take effect on process restart only.
+  profile: default
+  # packet_bytes: 65536
+  # packet_overhead_bytes: 4096
+  # fragment_payload_bytes: 61440
+  # fragment_count: 274
+  # envelope_bytes: 16777216
+  # bulk_concurrency: 4
+  # reserved_bytes: 33554432
+  # fragment_idle_timeout: 30s
+  # transfer_timeout: 120s
+  # Raw ciphertext retained per encrypted result. Omitted derives from the
+  # profile envelope and may not exceed it.
+  # result_limit_bytes: 16777216
 
 pairing:
   invitation_ttl: 10m
@@ -68,6 +90,10 @@ requests:
   retry_interval: 10s
   max_attempts: 5
   batch_size: 50
+  # Raw ciphertext retained per encrypted result. When omitted it derives from
+  # the transport profile envelope; the encoded HTTPS response is separately
+  # bounded by http.max_body_bytes.
+  # max_result_bytes: 16777216
 
 revocation:
   ack_timeout: 10s

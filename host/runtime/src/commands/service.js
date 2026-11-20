@@ -7,10 +7,13 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { bytesEqual, sha256Bytes, sha256Text, hex } from '../security/digest.js'
 import { summaryToProto } from '../contracts/serialization.js'
+import { validateMessageReply } from '../contracts/source.js'
 import { AdapterError, DefinitiveExecutionError, PluginError, publicMessage } from '../errors.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import { MESSAGE_BYTES } from '../access/transport.js'
 import { QuestionPager } from './question-pager.js'
+import { AttachmentService } from '../attachments/service.js'
+import { transportProfileBudget, DEFAULT_TRANSPORT_PROFILE } from '../contracts/transport.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -163,8 +166,15 @@ export class CommandService {
    * @param {() => number} [options.now]
    * @param {(request: object) => Promise<void>} [options.onAccepted] publish host_accepted.
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
+   * @param {object} [options.security] authenticated channel authority for attachments.
+   * @param {object} [options.attachmentPolicy] Host attachment policy overrides.
+   * @param {object} [options.attachments] injected transfer service (tests).
    */
-  constructor({ store, adapter, events, hostId, logger, now = Date.now, onAccepted = async () => {}, codec = defaultCodec }) {
+  constructor({
+    store, adapter, events, hostId, logger, now = Date.now, onAccepted = async () => {},
+    codec = defaultCodec, security = null, attachmentPolicy = null, attachments = null,
+    transportProfile = DEFAULT_TRANSPORT_PROFILE,
+  }) {
     this.hostId = hostId
     this.store = store
     this.adapter = adapter
@@ -179,6 +189,28 @@ export class CommandService {
     this.modelQueries = new Map()
     this.sendGates = new Map()
     this.requests = new Set()
+    let envelopeBytes = 0
+    if (transportProfile && typeof transportProfile === 'object'
+      && Number.isSafeInteger(transportProfile.envelope_bytes)) {
+      envelopeBytes = transportProfile.envelope_bytes
+    } else {
+      try {
+        envelopeBytes = transportProfileBudget(
+          typeof transportProfile === 'string' ? transportProfile : DEFAULT_TRANSPORT_PROFILE,
+        ).envelope_bytes
+      } catch { envelopeBytes = 0 }
+    }
+    this.attachments = attachments ?? new AttachmentService({
+      hostId,
+      adapter,
+      security,
+      store,
+      logger,
+      now,
+      policy: attachmentPolicy,
+      transportProfile,
+      envelopeBytes,
+    })
   }
 
   // Native prompt modes are only queue/steer; there is no atomic
@@ -219,11 +251,13 @@ export class CommandService {
 
   cancelChannel(deviceId, channelId, reason = 'unavailable') {
     this.#cancelScopes(entry => entry.deviceId === deviceId && entry.channelId === channelId, reason)
+    this.attachments.cancelChannel(deviceId, channelId, reason)
   }
 
   /** Abort all executions and reads owned by a revoked Device. */
   revokeDevice(deviceId) {
     this.#cancelScopes(entry => entry.deviceId === deviceId, 'revoked')
+    this.attachments.revokeDevice(deviceId)
   }
 
   #cancelScopes(matches, reason) {
@@ -304,6 +338,10 @@ export class CommandService {
 
   closeWaits() {
     for (const wait of this.waits.values()) wait.controller.abort()
+  }
+
+  closeAttachments() {
+    return this.attachments.disposeAll('host_stop')
   }
 
   /** Crash recovery is intentionally idempotent. */
@@ -504,16 +542,81 @@ export class CommandService {
       }
       if (payload.read_message_reply) {
         const read = payload.read_message_reply
-        if (!read.session_id || !read.message_id || read.message_id.length > 512) return failed('invalid_argument')
+        const submittedId = read.submitted_message_id
+        if (!read.session_id || !submittedId || submittedId.length > 512) return failed('invalid_argument')
         if (typeof this.adapter.readMessageReply !== 'function') return failed('unsupported_capability')
-        const result = await this.adapter.readMessageReply(read.session_id, read.message_id, scope.controller.signal)
+        const result = await this.adapter.readMessageReply(read.session_id, submittedId, scope.controller.signal)
         this.#assertScope(scope)
-        return { status: 'succeeded', response: { message_reply: {
-          session_id: read.session_id, message_id: read.message_id, ...result,
-        } } }
+        // The request scope owns the submitted identity. A Source may only
+        // report the typed state/reference/evidenced input kinds.
+        let reply
+        try {
+          reply = validateMessageReply({
+            ...result,
+            session_id: read.session_id,
+            submitted_message_id: submittedId,
+          })
+        } catch (error) {
+          const code = error?.code === 'payload_too_large' ? 'payload_too_large' : 'invalid_argument'
+          return failed(code)
+        }
+        return { status: 'succeeded', response: { message_reply: reply } }
       }
       if (payload.read_history) {
         return { status: 'succeeded', response: { history_page: await this.events.readHistory(payload.read_history.session_id, payload.read_history, scope.controller.signal) } }
+      }
+      // Attachment transfers are ordinary encrypted queries. The transfer
+      // service resolves the occurrence through the Source seam, binds the
+      // handle to this device/channel/session/occurrence and enforces the part
+      // and result budgets.
+      if (payload.open_attachment) {
+        const open = payload.open_attachment
+        if (!request.device_id || !request.channel_id || !open?.session) return failed('invalid_argument')
+        if (open.session.host_id && open.session.host_id !== this.hostId) return failed('forbidden')
+        const metadata = await this.attachments.open({
+          request,
+          deviceId: request.device_id,
+          channelId: request.channel_id,
+          sessionId: open.session.session_id,
+          attachmentRef: open.attachment_ref,
+          signal: scope.controller.signal,
+        })
+        this.#assertScope(scope)
+        return { status: 'succeeded', response: { open_attachment_result: { attachment: metadata } } }
+      }
+      if (payload.pull_attachment) {
+        const pull = payload.pull_attachment
+        if (!request.device_id || !request.channel_id || !pull?.session) return failed('invalid_argument')
+        if (pull.session.host_id && pull.session.host_id !== this.hostId) return failed('forbidden')
+        const part = await this.attachments.pull({
+          request,
+          deviceId: request.device_id,
+          channelId: request.channel_id,
+          sessionId: pull.session.session_id,
+          attachmentRef: pull.attachment_ref,
+          transferId: pull.transfer_id,
+          offset: Number(pull.offset ?? 0),
+          maxBytes: pull.max_bytes === undefined ? undefined : Number(pull.max_bytes),
+          signal: scope.controller.signal,
+        })
+        this.#assertScope(scope)
+        return { status: 'succeeded', response: { attachment_part: part } }
+      }
+      if (payload.close_attachment) {
+        const close = payload.close_attachment
+        if (!request.device_id || !request.channel_id || !close?.session) return failed('invalid_argument')
+        if (close.session.host_id && close.session.host_id !== this.hostId) return failed('forbidden')
+        const result = await this.attachments.close({
+          request,
+          deviceId: request.device_id,
+          channelId: request.channel_id,
+          sessionId: close.session.session_id,
+          attachmentRef: close.attachment_ref,
+          transferId: close.transfer_id,
+          cancel: close.cancel === true,
+        })
+        this.#assertScope(scope)
+        return { status: 'succeeded', response: { close_attachment_result: result } }
       }
       if (payload.watch_session) {
         const watch = payload.watch_session

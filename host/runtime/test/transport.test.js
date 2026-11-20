@@ -159,3 +159,59 @@ test('logical transport accepts envelopes at and immediately below its encoded l
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(delivered, [MESSAGE_BYTES - 1, MESSAGE_BYTES])
 })
+
+test('a receiver rejects a declared fragment width above its negotiated budget or inconsistent geometry', async () => {
+  const receiver = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 28672 })
+  const wide = frame({ fragment_payload_bytes: 61440 })
+  await assert.rejects(receiver.receive('data', encodeFrame(wide), 'ack', () => {}), error => error.code === 'payload_too_large')
+  const badCount = frame({ fragment_payload_bytes: 28672, count: 1, total_bytes: 28672 * 2, payload: Buffer.alloc(28672) })
+  await assert.rejects(receiver.receive('data', encodeFrame(badCount), 'ack', () => {}), error => error.code === 'invalid_argument')
+  const first = frame({ fragment_payload_bytes: 28672, count: 2, total_bytes: 28672 + 1, payload: Buffer.alloc(28672) })
+  await receiver.receive('data', encodeFrame(first), 'ack', () => {})
+  const changed = frame({ fragment_payload_bytes: 1024, count: 2, total_bytes: 28672 + 1, index: 1, payload: Buffer.alloc(1) })
+  await assert.rejects(receiver.receive('data', encodeFrame(changed), 'ack', () => {}), error => error.code === 'invalid_argument')
+  receiver.reset()
+})
+
+test('the sender encodes the selected profile width and every part keeps it', async () => {
+  const packets = []
+  const sender = new LogicalTransport({
+    publish: async (topic, bytes) => { packets.push(decodeFrame(bytes)) },
+    fragmentPayloadBytes: 28672,
+    profile: 'TRANSPORT_PROFILE_COMPACT',
+  })
+  // The sender requires receipts; stub the pending resolution by receiving from a peer.
+  const peer = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 28672 })
+  const originalPublish = sender.publish
+  sender.publish = async (topic, bytes) => {
+    const decoded = decodeFrame(bytes)
+    if (decoded.ack) return originalPublish(topic, bytes)
+    packets.push(decoded)
+    queueMicrotask(() => peer.receive(topic, bytes, 'ack', () => {}))
+  }
+  const payload = Buffer.alloc(28672 * 2 + 7, 1)
+  const sending = sender.send('data', payload, 'ack', true)
+  // The peer's acknowledgement is published back with the sender's own publish seam.
+  peer.publish = async (topic, bytes) => sender.receive(topic, bytes, 'ack', () => {})
+  await sending
+  assert.ok(packets.length >= 3)
+  for (const packet of packets) {
+    assert.equal(packet.fragment_payload_bytes, 28672)
+    assert.equal(packet.profile, 'TRANSPORT_PROFILE_COMPACT')
+    assert.ok(packet.payload.length <= 28672)
+  }
+})
+
+test('size and reassembly rejection diagnostics carry stable codes and safe counts only', async () => {
+  const records = []
+  const logger = { warn: (event, fields) => records.push({ event, ...fields }) }
+  const receiver = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 1024, logger })
+  await assert.rejects(
+    receiver.receive('data', encodeFrame(frame({ fragment_payload_bytes: 61440, secret: 'private-body' })), 'ack', () => {}),
+    error => error.code === 'payload_too_large',
+  )
+  assert.ok(records.some(record => record.event === 'transport_frame_rejected' && record.code === 'payload_too_large'))
+  assert.equal(JSON.stringify(records).includes('private-body'), false)
+  assert.ok(records.some(record => Number.isSafeInteger(record.limit) && Number.isSafeInteger(record.bytes)))
+  receiver.reset()
+})

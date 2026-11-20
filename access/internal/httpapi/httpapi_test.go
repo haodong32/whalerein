@@ -136,22 +136,38 @@ func (f *fakePairing) Claim(context.Context, *whalereinv1.PairingClaimRequest) (
 }
 
 type fakeRequests struct {
-	row          store.Request
-	created      bool
-	submitErr    error
-	getErr       error
-	touchErr     error
-	touchRenewed bool
-	submitted    []requests.SubmitInput
-	gotDevice    string
-	gotRequest   string
-	touchDevice  string
-	touchRequest string
+	row            store.Request
+	created        bool
+	submitErr      error
+	getErr         error
+	releaseErr     error
+	touchErr       error
+	touchRenewed   bool
+	submitted      []requests.SubmitInput
+	gotDevice      string
+	gotRequest     string
+	releaseDevice  string
+	releaseSession string
+	releaseLimit   int64
+	touchDevice    string
+	touchRequest   string
 }
 
 func (f *fakeRequests) Submit(_ context.Context, input requests.SubmitInput) (store.Request, bool, error) {
 	f.submitted = append(f.submitted, input)
 	return f.row, f.created, f.submitErr
+}
+
+func (f *fakeRequests) Release(_ context.Context, deviceID, sessionID, requestID string, deliveryLimitBytes int64) (store.Request, error) {
+	f.gotDevice = deviceID
+	f.gotRequest = requestID
+	f.releaseDevice = deviceID
+	f.releaseSession = sessionID
+	f.releaseLimit = deliveryLimitBytes
+	if f.releaseErr != nil {
+		return store.Request{}, f.releaseErr
+	}
+	return f.row, f.getErr
 }
 
 func (f *fakeRequests) Get(_ context.Context, deviceID, requestID string) (store.Request, error) {
@@ -419,6 +435,9 @@ func TestGetRequestRouteReturnsAuthorizedRequest(t *testing.T) {
 	if f.requests.touchDevice != "d1" || f.requests.touchRequest != "r1" {
 		t.Fatalf("get renewed %q %q instead of the exact request", f.requests.touchDevice, f.requests.touchRequest)
 	}
+	if f.requests.releaseDevice != "d1" || f.requests.releaseLimit != requests.ResultValueLimit(1<<20) {
+		t.Fatalf("release args = device %q limit %d", f.requests.releaseDevice, f.requests.releaseLimit)
+	}
 	// Read-only recovery: a failed renewal must not hide the recorded outcome
 	// and a read never reopens an expired lease.
 	f.requests.touchErr = errors.New("lease update failed")
@@ -433,6 +452,33 @@ func TestGetRequestRouteReturnsAuthorizedRequest(t *testing.T) {
 	f.requests.getErr = requests.ErrExpired
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
 	assertError(t, recorder, http.StatusGone, whalereinv1.ErrorCode_expired)
+}
+
+func TestGetRequestDeniesFencedCiphertextAndKeepsMetadata(t *testing.T) {
+	f := newAPIFixture(t)
+	f.requests.releaseErr = requests.ErrReleaseFenced
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
+	assertError(t, recorder, http.StatusForbidden, whalereinv1.ErrorCode_forbidden)
+	if f.requests.touchRequest != "" {
+		t.Fatal("a fenced read renewed the client lease")
+	}
+
+	// COMMAND recovery is metadata-only: the body is withheld without turning
+	// the recorded outcome into an error.
+	f = newAPIFixture(t)
+	f.requests.row.Kind = whalereinv1.RequestKind_REQUEST_KIND_COMMAND
+	f.requests.row.ResultBody = nil
+	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("command metadata status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var state whalereinv1.RequestState
+	if err := protojson.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.GetRequestId() != "r1" || state.GetCommandId() != "c1" || len(state.GetResultBody()) != 0 {
+		t.Fatalf("command metadata = %+v", &state)
+	}
 }
 
 func TestDeleteDeviceRouteRevokesAuthorizedDevice(t *testing.T) {

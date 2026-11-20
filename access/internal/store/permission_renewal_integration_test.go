@@ -21,6 +21,7 @@ func boundWatch(t *testing.T, s *store.Store, ctx context.Context, requestID, ho
 		RequestID: requestID, HostID: host, DeviceID: device, DeviceSessionID: session,
 		PayloadDigest: bytes.Repeat([]byte{2}, 32), Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
 		Status: whalereinv1.OnlineStatus_received, ProtocolVersion: 1, ExpiresAt: now.Add(time.Minute),
+		Stamp: &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 16 << 20},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,9 @@ func boundWatch(t *testing.T, s *store.Store, ctx context.Context, requestID, ho
 func TestPermissionRenewalKeepsTheWatchAndInterruptionExpiresAtTheDeadline(t *testing.T) {
 	s, _ := storetest.New(t)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// PostgreSQL timestamps keep microsecond precision; keep the expected
+	// value at that precision so the round trip compares exactly.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	const workspace, host, device, revision, authority = "workspace", "host", "device", "1", "authority"
 	enrollCloudHost(t, s, workspace, host, revision, "enroll", now)
 	confirmCloudGrant(t, s, workspace, host, device, revision, "claim", now)

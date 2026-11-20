@@ -105,6 +105,82 @@
                 "QUESTION_AVAILABILITY_AVAILABLE": 3
               }
             },
+            "TransportProfile": {
+              "values": {
+                "TRANSPORT_PROFILE_UNSPECIFIED": 0,
+                "TRANSPORT_PROFILE_DEFAULT": 1,
+                "TRANSPORT_PROFILE_COMPACT": 2,
+                "TRANSPORT_PROFILE_ROOMY": 3
+              }
+            },
+            "TransportBudget": {
+              "fields": {
+                "packet_bytes": {
+                  "type": "uint32",
+                  "id": 1
+                },
+                "fragment_payload_bytes": {
+                  "type": "uint32",
+                  "id": 2
+                },
+                "fragment_count": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "envelope_bytes": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "bulk_concurrency": {
+                  "type": "uint32",
+                  "id": 5
+                },
+                "reserved_bytes": {
+                  "type": "uint64",
+                  "id": 6
+                },
+                "fragment_idle_timeout_ms": {
+                  "type": "uint32",
+                  "id": 7
+                },
+                "transfer_timeout_ms": {
+                  "type": "uint32",
+                  "id": 8
+                }
+              }
+            },
+            "ReceiveAdvertisement": {
+              "fields": {
+                "profile": {
+                  "type": "TransportProfile",
+                  "id": 1
+                },
+                "budget": {
+                  "type": "TransportBudget",
+                  "id": 2
+                },
+                "connection_generation": {
+                  "type": "uint64",
+                  "id": 3
+                }
+              }
+            },
+            "RequestTransportMetadata": {
+              "fields": {
+                "result_max_bytes": {
+                  "type": "uint64",
+                  "id": 1
+                },
+                "grant_generation": {
+                  "type": "uint64",
+                  "id": 2
+                },
+                "revocation_generation": {
+                  "type": "uint64",
+                  "id": 3
+                }
+              }
+            },
             "CapabilitySet": {
               "fields": {
                 "capabilities": {
@@ -171,6 +247,10 @@
                 "relay_transport_version": {
                   "type": "uint32",
                   "id": 13
+                },
+                "transport": {
+                  "type": "RequestTransportMetadata",
+                  "id": 14
                 }
               }
             },
@@ -603,6 +683,10 @@
                 "transport_version": {
                   "type": "uint32",
                   "id": 4
+                },
+                "receive": {
+                  "type": "ReceiveAdvertisement",
+                  "id": 5
                 }
               }
             },
@@ -655,6 +739,10 @@
                 "client_nonce": {
                   "type": "string",
                   "id": 5
+                },
+                "receive": {
+                  "type": "ReceiveAdvertisement",
+                  "id": 6
                 }
               }
             },
@@ -679,6 +767,10 @@
                 "host_nonce": {
                   "type": "string",
                   "id": 5
+                },
+                "receive": {
+                  "type": "ReceiveAdvertisement",
+                  "id": 6
                 }
               }
             },
@@ -790,7 +882,10 @@
                     "get_question",
                     "answer_question",
                     "cancel_question_answer",
-                    "fork_session"
+                    "fork_session",
+                    "open_attachment",
+                    "pull_attachment",
+                    "close_attachment"
                   ]
                 }
               },
@@ -910,6 +1005,18 @@
                 "fork_session": {
                   "type": "ForkSession",
                   "id": 300
+                },
+                "open_attachment": {
+                  "type": "OpenAttachment",
+                  "id": 320
+                },
+                "pull_attachment": {
+                  "type": "PullAttachment",
+                  "id": 321
+                },
+                "close_attachment": {
+                  "type": "CloseAttachment",
+                  "id": 322
                 }
               }
             },
@@ -939,7 +1046,10 @@
                     "question_page",
                     "question_batch",
                     "question_receipt",
-                    "question_cancel_receipt"
+                    "question_cancel_receipt",
+                    "open_attachment_result",
+                    "attachment_part",
+                    "close_attachment_result"
                   ]
                 }
               },
@@ -1035,6 +1145,18 @@
                 "question_cancel_receipt": {
                   "type": "QuestionCancelReceipt",
                   "id": 263
+                },
+                "open_attachment_result": {
+                  "type": "OpenAttachmentResult",
+                  "id": 320
+                },
+                "attachment_part": {
+                  "type": "AttachmentPart",
+                  "id": 321
+                },
+                "close_attachment_result": {
+                  "type": "CloseAttachmentResult",
+                  "id": 322
                 },
                 "error_code": {
                   "type": "ErrorCode",
@@ -2148,6 +2270,14 @@
                 "complete": {
                   "type": "bool",
                   "id": 11
+                },
+                "fragment_payload_bytes": {
+                  "type": "uint32",
+                  "id": 12
+                },
+                "profile": {
+                  "type": "TransportProfile",
+                  "id": 13
                 }
               }
             },
@@ -2189,6 +2319,34 @@
                   "rule": "repeated",
                   "type": "DeliveryMode",
                   "id": 6
+                },
+                "live_reasoning": {
+                  "type": "bool",
+                  "id": 7
+                },
+                "tool_activity": {
+                  "type": "bool",
+                  "id": 8
+                },
+                "conversation_notices": {
+                  "type": "bool",
+                  "id": 9
+                },
+                "attachments": {
+                  "type": "bool",
+                  "id": 10
+                },
+                "history_page": {
+                  "type": "bool",
+                  "id": 11
+                },
+                "history_exact": {
+                  "type": "bool",
+                  "id": 12
+                },
+                "send_followup": {
+                  "type": "bool",
+                  "id": 13
                 },
                 "model_selection": {
                   "type": "bool",
@@ -2242,7 +2400,9 @@
                 "USER": 1,
                 "ASSISTANT": 2,
                 "TOOL": 3,
-                "NOTICE": 4
+                "NOTICE": 4,
+                "MESSAGE_ROLE_CONTEXT": 5,
+                "MESSAGE_ROLE_UNKNOWN": 6
               }
             },
             "RunPhase": {
@@ -2283,47 +2443,192 @@
                 }
               }
             },
-            "ToolCallContent": {
+            "ReasoningContent": {
+              "fields": {
+                "text": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "BlockKind": {
+              "values": {
+                "BLOCK_KIND_UNSPECIFIED": 0,
+                "BLOCK_KIND_TEXT": 1,
+                "BLOCK_KIND_REASONING": 2
+              }
+            },
+            "LiveBlockDelta": {
+              "fields": {
+                "kind": {
+                  "type": "BlockKind",
+                  "id": 1
+                },
+                "text": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "LiveBlockReset": {
+              "fields": {
+                "kind": {
+                  "type": "BlockKind",
+                  "id": 1
+                },
+                "text": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "ToolStage": {
+              "values": {
+                "TOOL_STAGE_UNSPECIFIED": 0,
+                "TOOL_STAGE_PREPARATION": 1,
+                "TOOL_STAGE_EXECUTION": 2,
+                "TOOL_STAGE_PROGRESS": 3,
+                "TOOL_STAGE_SETTLEMENT": 4
+              }
+            },
+            "ToolOutcome": {
+              "values": {
+                "TOOL_OUTCOME_UNSPECIFIED": 0,
+                "TOOL_OUTCOME_SUCCEEDED": 1,
+                "TOOL_OUTCOME_FAILED": 2,
+                "TOOL_OUTCOME_INTERRUPTED": 3,
+                "TOOL_OUTCOME_UNKNOWN": 4
+              }
+            },
+            "ToolResultPart": {
+              "oneofs": {
+                "content": {
+                  "oneof": [
+                    "text",
+                    "attachment"
+                  ]
+                }
+              },
+              "fields": {
+                "text": {
+                  "type": "TextContent",
+                  "id": 1
+                },
+                "attachment": {
+                  "type": "AttachmentContent",
+                  "id": 2
+                }
+              }
+            },
+            "ToolActivity": {
+              "oneofs": {
+                "_summary": {
+                  "oneof": [
+                    "summary"
+                  ]
+                },
+                "_progress": {
+                  "oneof": [
+                    "progress"
+                  ]
+                },
+                "_failure_code": {
+                  "oneof": [
+                    "failure_code"
+                  ]
+                }
+              },
               "fields": {
                 "call_id": {
                   "type": "string",
                   "id": 1
                 },
+                "stages": {
+                  "rule": "repeated",
+                  "type": "ToolStage",
+                  "id": 2
+                },
                 "name": {
                   "type": "string",
+                  "id": 3
+                },
+                "summary": {
+                  "type": "string",
+                  "id": 4,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "result": {
+                  "rule": "repeated",
+                  "type": "ToolResultPart",
+                  "id": 5
+                },
+                "outcome": {
+                  "type": "ToolOutcome",
+                  "id": 6
+                },
+                "progress": {
+                  "type": "string",
+                  "id": 7,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                },
+                "failure_code": {
+                  "type": "string",
+                  "id": 8,
+                  "options": {
+                    "proto3_optional": true
+                  }
+                }
+              }
+            },
+            "NoticeCategory": {
+              "values": {
+                "NOTICE_CATEGORY_UNSPECIFIED": 0,
+                "NOTICE_CATEGORY_RETRY": 1,
+                "NOTICE_CATEGORY_MAX_OUTPUT": 2,
+                "NOTICE_CATEGORY_COMPACTION": 3,
+                "NOTICE_CATEGORY_COMMAND": 4,
+                "NOTICE_CATEGORY_CONTEXT": 5,
+                "NOTICE_CATEGORY_OMISSION": 6
+              }
+            },
+            "NoticeState": {
+              "values": {
+                "NOTICE_STATE_UNSPECIFIED": 0,
+                "NOTICE_STATE_SCHEDULED": 1,
+                "NOTICE_STATE_STARTED": 2,
+                "NOTICE_STATE_CANCELLED": 3,
+                "NOTICE_STATE_COMPLETED": 4,
+                "NOTICE_STATE_FAILED": 5,
+                "NOTICE_STATE_REACHED": 6
+              }
+            },
+            "NoticeContent": {
+              "oneofs": {
+                "_summary": {
+                  "oneof": [
+                    "summary"
+                  ]
+                }
+              },
+              "fields": {
+                "category": {
+                  "type": "NoticeCategory",
+                  "id": 1
+                },
+                "state": {
+                  "type": "NoticeState",
                   "id": 2
                 },
                 "summary": {
                   "type": "string",
-                  "id": 3
-                }
-              }
-            },
-            "ToolResultContent": {
-              "fields": {
-                "call_id": {
-                  "type": "string",
-                  "id": 1
-                },
-                "text": {
-                  "type": "string",
-                  "id": 2
-                },
-                "is_error": {
-                  "type": "bool",
-                  "id": 3
-                }
-              }
-            },
-            "NoticeContent": {
-              "fields": {
-                "category": {
-                  "type": "string",
-                  "id": 1
-                },
-                "text": {
-                  "type": "string",
-                  "id": 2
+                  "id": 3,
+                  "options": {
+                    "proto3_optional": true
+                  }
                 }
               }
             },
@@ -2344,6 +2649,10 @@
                 "available": {
                   "type": "bool",
                   "id": 4
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 5
                 }
               }
             },
@@ -2352,10 +2661,10 @@
                 "content": {
                   "oneof": [
                     "text",
-                    "tool_call",
-                    "tool_result",
+                    "tool_activity",
                     "notice",
-                    "attachment"
+                    "attachment",
+                    "reasoning"
                   ]
                 }
               },
@@ -2368,13 +2677,9 @@
                   "type": "TextContent",
                   "id": 2
                 },
-                "tool_call": {
-                  "type": "ToolCallContent",
-                  "id": 3
-                },
-                "tool_result": {
-                  "type": "ToolResultContent",
-                  "id": 4
+                "tool_activity": {
+                  "type": "ToolActivity",
+                  "id": 8
                 },
                 "notice": {
                   "type": "NoticeContent",
@@ -2383,8 +2688,24 @@
                 "attachment": {
                   "type": "AttachmentContent",
                   "id": 6
+                },
+                "reasoning": {
+                  "type": "ReasoningContent",
+                  "id": 7
                 }
-              }
+              },
+              "reserved": [
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                "tool_call",
+                "tool_result"
+              ]
             },
             "ConversationMessage": {
               "fields": {
@@ -2437,6 +2758,45 @@
                   "rule": "repeated",
                   "type": "MessageUpsert",
                   "id": 4
+                },
+                "projection_id": {
+                  "type": "string",
+                  "id": 5
+                }
+              }
+            },
+            "HistoryPageSelection": {
+              "fields": {
+                "before_cursor": {
+                  "type": "string",
+                  "id": 1
+                }
+              }
+            },
+            "HistorySource": {
+              "values": {
+                "HISTORY_SOURCE_UNSPECIFIED": 0,
+                "HISTORY_SOURCE_ONLINE": 1,
+                "HISTORY_SOURCE_CACHE": 2
+              }
+            },
+            "CommittedMessageRef": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "message_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "source_locator": {
+                  "type": "string",
+                  "id": 3
+                },
+                "projection_id": {
+                  "type": "string",
+                  "id": 4
                 }
               }
             },
@@ -2465,6 +2825,22 @@
                 "max_messages": {
                   "type": "uint32",
                   "id": 6
+                },
+                "page": {
+                  "type": "HistoryPageSelection",
+                  "id": 7
+                },
+                "exact": {
+                  "type": "CommittedMessageRef",
+                  "id": 8
+                },
+                "continuation": {
+                  "type": "string",
+                  "id": 9
+                },
+                "source": {
+                  "type": "HistorySource",
+                  "id": 10
                 }
               }
             },
@@ -2489,6 +2865,194 @@
                 "snapshot": {
                   "type": "bool",
                   "id": 5
+                },
+                "continuation": {
+                  "type": "string",
+                  "id": 6
+                },
+                "projection_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "source": {
+                  "type": "HistorySource",
+                  "id": 8
+                }
+              }
+            },
+            "AttachmentPolicy": {
+              "fields": {
+                "max_total_bytes": {
+                  "type": "uint64",
+                  "id": 1
+                },
+                "max_chunk_bytes": {
+                  "type": "uint32",
+                  "id": 2
+                },
+                "max_concurrent": {
+                  "type": "uint32",
+                  "id": 3
+                },
+                "idle_timeout_ms": {
+                  "type": "uint32",
+                  "id": 4
+                },
+                "overall_timeout_ms": {
+                  "type": "uint32",
+                  "id": 5
+                }
+              }
+            },
+            "AttachmentMetadata": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 2
+                },
+                "media_type": {
+                  "type": "string",
+                  "id": 3
+                },
+                "name": {
+                  "type": "string",
+                  "id": 4
+                },
+                "size": {
+                  "type": "uint64",
+                  "id": 5
+                },
+                "policy": {
+                  "type": "AttachmentPolicy",
+                  "id": 6
+                },
+                "transfer_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 8
+                }
+              }
+            },
+            "OpenAttachment": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 2
+                }
+              }
+            },
+            "OpenAttachmentResult": {
+              "fields": {
+                "attachment": {
+                  "type": "AttachmentMetadata",
+                  "id": 1
+                }
+              }
+            },
+            "PullAttachment": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 2
+                },
+                "transfer_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "offset": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "max_bytes": {
+                  "type": "uint32",
+                  "id": 5
+                }
+              }
+            },
+            "AttachmentPart": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 2
+                },
+                "transfer_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "offset": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "length": {
+                  "type": "uint32",
+                  "id": 5
+                },
+                "data": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "final": {
+                  "type": "bool",
+                  "id": 7
+                },
+                "total_size": {
+                  "type": "uint64",
+                  "id": 8
+                },
+                "sha256": {
+                  "type": "bytes",
+                  "id": 9
+                }
+              }
+            },
+            "CloseAttachment": {
+              "fields": {
+                "session": {
+                  "type": "SessionKey",
+                  "id": 1
+                },
+                "attachment_ref": {
+                  "type": "string",
+                  "id": 2
+                },
+                "transfer_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "cancel": {
+                  "type": "bool",
+                  "id": 4
+                }
+              }
+            },
+            "CloseAttachmentResult": {
+              "fields": {
+                "closed": {
+                  "type": "bool",
+                  "id": 1
+                },
+                "cancelled": {
+                  "type": "bool",
+                  "id": 2
                 }
               }
             },
@@ -2498,7 +3062,7 @@
                   "type": "string",
                   "id": 1
                 },
-                "message_id": {
+                "submitted_message_id": {
                   "type": "string",
                   "id": 2
                 }
@@ -2519,7 +3083,7 @@
                   "type": "string",
                   "id": 1
                 },
-                "message_id": {
+                "submitted_message_id": {
                   "type": "string",
                   "id": 2
                 },
@@ -2527,15 +3091,28 @@
                   "type": "MessageReplyState",
                   "id": 3
                 },
-                "attempt_id": {
-                  "type": "string",
-                  "id": 4
+                "committed": {
+                  "type": "CommittedMessageRef",
+                  "id": 6
                 },
-                "text": {
-                  "type": "string",
-                  "id": 5
+                "pending_input": {
+                  "rule": "repeated",
+                  "type": "InputKind",
+                  "id": 7
                 }
-              }
+              },
+              "reserved": [
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ],
+                "attempt_id",
+                "text"
+              ]
             },
             "AttemptStarted": {
               "fields": {}
@@ -2581,11 +3158,11 @@
                   "id": 5
                 },
                 "delta": {
-                  "type": "TextContent",
+                  "type": "LiveBlockDelta",
                   "id": 6
                 },
                 "reset": {
-                  "type": "TextContent",
+                  "type": "LiveBlockReset",
                   "id": 7
                 },
                 "ended": {
@@ -2624,6 +3201,10 @@
                 "questions": {
                   "type": "QuestionDescriptor",
                   "id": 7
+                },
+                "projection_id": {
+                  "type": "string",
+                  "id": 8
                 }
               }
             },

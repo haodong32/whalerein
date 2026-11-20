@@ -48,9 +48,11 @@ type DeviceHosts func(ctx context.Context, deviceID string) ([]string, error)
 // Dependencies wires a broker service.
 type Dependencies struct {
 	Config      config.BrokerConfig
+	Transport   config.TransportEffective
 	Presence    *Presence
 	Connector   Connector
 	DeviceHosts DeviceHosts
+	Receivers   *ReceiverBudgets
 	Metrics     *diagnostics.Metrics
 	Masker      *diagnostics.Masker
 	Logger      *slog.Logger
@@ -59,8 +61,10 @@ type Dependencies struct {
 // Service owns the Access MQTT session and routes inbound broker messages.
 type Service struct {
 	cfg         config.BrokerConfig
+	transport   config.TransportEffective
 	presence    *Presence
 	connector   Connector
+	receivers   *ReceiverBudgets
 	control     *Control
 	readyHook   func(ctx context.Context) error
 	deviceHosts DeviceHosts
@@ -105,10 +109,19 @@ func New(deps Dependencies) (*Service, error) {
 	if deps.Masker == nil {
 		deps.Masker = diagnostics.NewMasker()
 	}
+	if deps.Transport.EnvelopeBytes == 0 {
+		deps.Transport = config.DefaultTransportEffective()
+	}
+	receivers := deps.Receivers
+	if receivers == nil {
+		receivers = NewReceiverBudgets()
+	}
 	service := &Service{
 		cfg:         deps.Config,
+		transport:   deps.Transport,
 		presence:    deps.Presence,
 		connector:   deps.Connector,
+		receivers:   receivers,
 		deviceHosts: deps.DeviceHosts,
 		metrics:     deps.Metrics,
 		masker:      deps.Masker,
@@ -116,12 +129,15 @@ func New(deps Dependencies) (*Service, error) {
 		transient:   make(map[string]chan *whalereinv1.HostResult),
 		now:         func() time.Time { return time.Now().UTC() },
 	}
+	if registrar, ok := deps.Connector.(interface{ SetReceiverBudgets(*ReceiverBudgets) }); ok {
+		registrar.SetReceiverBudgets(receivers)
+	}
 	control, err := NewControl(service.publishControl)
 	if err != nil {
 		return nil, err
 	}
 	service.control = control
-	control.SetNotification(deps.Presence.HandleNotification)
+	control.SetNotification(service.handleNotification)
 	deps.Presence.SetDeviceOfflineHandler(service.handleDeviceOffline)
 	return service, nil
 }
@@ -156,6 +172,30 @@ func (s *Service) SetHostKeyHandler(handler HostKeyHandler) {
 
 // Presence returns the broker-derived presence source.
 func (s *Service) Presence() *Presence { return s.presence }
+
+// Receivers returns the authenticated receive-advertisement registry.
+func (s *Service) Receivers() *ReceiverBudgets { return s.receivers }
+
+// handleNotification applies one ordered broker connection notification and
+// invalidates the receive advertisement of a superseded connection before any
+// delayed readiness proof can arrive.
+func (s *Service) handleNotification(notification *Notification) {
+	s.presence.HandleNotification(notification)
+	if notification == nil {
+		return
+	}
+	online := notification.Event == "connected"
+	switch notification.Kind {
+	case "host":
+		if notification.HostID != "" {
+			s.receivers.NoteConnection(receiverRoute{kind: "host", hostID: notification.HostID}, notification.ConnID, online)
+		}
+	case "device":
+		if notification.DeviceID != "" {
+			s.receivers.NoteConnection(receiverRoute{kind: "device", deviceID: notification.DeviceID}, notification.ConnID, online)
+		}
+	}
+}
 
 // Control returns the authenticated management client for the broker policy,
 // snapshot and disconnect operations.
@@ -398,6 +438,37 @@ func (s *Service) rememberHostKey(hostID string, publicKey []byte) {
 	}
 }
 
+// registerHostAdvertisement binds one HostReady receive advertisement to the
+// authenticated Host and its current broker connection generation. The
+// advertisement's connection_generation is the Host's authenticated generation
+// for that broker connection; Access scopes it through the broker-derived
+// connection and never compares it with a device-leg generation. Missing,
+// invalid, replayed or stale-generation metadata fails explicitly and leaves no
+// stale entry behind.
+func (s *Service) registerHostAdvertisement(hostID string, advertisement *whalereinv1.ReceiveAdvertisement) {
+	route := receiverRoute{kind: "host", hostID: hostID}
+	connID, _, ready, known := s.presence.HostConnection(hostID)
+	if known && !ready {
+		return
+	}
+	if advertisement == nil {
+		s.receivers.Clear(route)
+		s.metrics.TransportRejected(transportCodeBudget, 0, 0)
+		s.logger.Warn("host receive advertisement missing", "host", s.masker.Host(hostID), "code", transportCodeBudget)
+		return
+	}
+	budget, generation, err := validateAdvertisement(advertisement)
+	if err != nil {
+		s.receivers.Clear(route)
+		s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
+		s.logger.Warn("host receive advertisement rejected", "host", s.masker.Host(hostID), "code", transportCodeOf(err))
+		return
+	}
+	if !s.receivers.Register(route, connID, generation, budget) {
+		s.logger.Warn("stale host receive advertisement ignored", "host", s.masker.Host(hostID), "code", transportCodeBudgetBad)
+	}
+}
+
 func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	if result.GetStatus() != whalereinv1.OnlineStatus_succeeded {
 		s.metrics.RouteError()
@@ -425,9 +496,12 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	if ready.GetConnectedAtUnixMs() > 0 {
 		readyAt = time.UnixMilli(ready.GetConnectedAtUnixMs()).UTC()
 	}
-	s.presence.MarkHostReady(hostID, readyAt)
+	accepted := s.presence.MarkHostReady(hostID, readyAt)
 	s.logger.Info("host ready", "host", s.masker.Host(hostID))
 	s.rememberHostKey(hostID, ready.GetAuthorizationPublicKey())
+	if accepted {
+		s.registerHostAdvertisement(hostID, ready.GetReceive())
+	}
 
 	s.handlersMu.RLock()
 	handler := s.readyHandler

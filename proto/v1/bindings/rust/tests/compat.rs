@@ -90,6 +90,28 @@ fn binary_readers_skip_unknown_tags() {
 }
 
 #[test]
+fn retired_content_block_tag_and_json_name_are_ignored() {
+    let entry = vector("content-block-retired-tag-is-ignored");
+    let bytes = hex_decode(entry["hex"].as_str().expect("hex"));
+    let block =
+        whalerein_proto::ContentBlock::decode(bytes.as_slice()).expect("retired tag is additive");
+    assert_eq!(block.block_id, "b");
+    match block.content {
+        Some(whalerein_proto::content_block::Content::Text(text)) => assert_eq!(text.text, "x"),
+        other => panic!("retired tag replaced the text variant: {other:?}"),
+    }
+
+    let entry = vector("content-block-retired-json-name-is-ignored");
+    let block: whalerein_proto::ContentBlock =
+        serde_json::from_value(entry["json"].clone()).expect("retired JSON name is additive");
+    assert_eq!(block.block_id, "b");
+    match block.content {
+        Some(whalerein_proto::content_block::Content::Text(text)) => assert_eq!(text.text, "x"),
+        other => panic!("retired JSON name replaced the text variant: {other:?}"),
+    }
+}
+
+#[test]
 fn unknown_enum_names_and_numbers_are_explicit_errors() {
     for id in [
         "json-unknown-enum-name-is-explicit",
@@ -587,6 +609,202 @@ fn parse_enums(value: &Value) -> BTreeMap<String, Vec<(String, i32)>> {
         enums.insert(name.clone(), values);
     }
     enums
+}
+
+#[test]
+fn expanded_conversation_attachment_and_transport_shapes_are_typed() {
+    use whalerein_proto::*;
+
+    let text = ContentBlock {
+        block_id: "b-text".into(),
+        content: Some(content_block::Content::Text(TextContent {
+            text: "answer".into(),
+        })),
+    };
+    let reasoning = ContentBlock {
+        block_id: "b-reasoning".into(),
+        content: Some(content_block::Content::Reasoning(ReasoningContent {
+            text: "reason".into(),
+        })),
+    };
+    assert!(whalerein_proto::require_content_block(text).is_ok());
+    assert!(whalerein_proto::require_content_block(reasoning).is_ok());
+    assert_eq!(
+        whalerein_proto::require_content_block(ContentBlock {
+            block_id: "b-empty".into(),
+            content: None,
+        })
+        .unwrap_err()
+        .code(),
+        whalerein_proto::ErrorCode::InvalidArgument
+    );
+
+    let activity = ToolActivity {
+        call_id: "call-1".into(),
+        stages: vec![
+            ToolStage::Preparation as i32,
+            ToolStage::Execution as i32,
+            ToolStage::Settlement as i32,
+        ],
+        name: "read_file".into(),
+        summary: Some("Read a file".into()),
+        result: vec![ToolResultPart {
+            content: Some(tool_result_part::Content::Attachment(AttachmentContent {
+                media_type: "text/plain".into(),
+                name: "note.txt".into(),
+                size: 4,
+                available: true,
+                attachment_ref: "occurrence-1".into(),
+            })),
+        }],
+        outcome: ToolOutcome::Succeeded as i32,
+        progress: Some("completed".into()),
+        failure_code: None,
+    };
+    assert_eq!(activity.call_id, "call-1");
+    assert_eq!(activity.stages.len(), 3);
+    assert!(matches!(
+        activity.result[0].content,
+        Some(tool_result_part::Content::Attachment(_))
+    ));
+
+    let live = LiveFrame {
+        attempt: Some(AttemptRef {
+            live_epoch: "epoch".into(),
+            attempt_id: "attempt".into(),
+        }),
+        block_id: "b-reasoning".into(),
+        first_seq: 1,
+        last_seq: 2,
+        payload: Some(live_frame::Payload::Delta(LiveBlockDelta {
+            kind: BlockKind::Reasoning as i32,
+            text: "reason".into(),
+        })),
+    };
+    assert!(matches!(
+        whalerein_proto::require_live_frame(live).unwrap(),
+        live_frame::Payload::Delta(_)
+    ));
+    assert_eq!(
+        whalerein_proto::require_live_frame(LiveFrame {
+            attempt: Some(AttemptRef {
+                live_epoch: "epoch".into(),
+                attempt_id: "attempt".into(),
+            }),
+            block_id: "b".into(),
+            first_seq: 1,
+            last_seq: 1,
+            payload: None,
+        })
+        .unwrap_err()
+        .code(),
+        whalerein_proto::ErrorCode::InvalidArgument
+    );
+
+    let reference = CommittedMessageRef {
+        session: Some(SessionKey {
+            host_id: "host-1".into(),
+            session_id: "session-1".into(),
+        }),
+        message_id: "message-1".into(),
+        source_locator: "source-locator".into(),
+        projection_id: "projection-1".into(),
+    };
+    let committed = MessageReply {
+        session_id: "session-1".into(),
+        submitted_message_id: "submitted-1".into(),
+        state: MessageReplyState::MessageReplyCommitted as i32,
+        committed: Some(reference.clone()),
+        pending_input: Vec::new(),
+    };
+    assert_eq!(
+        committed.state,
+        MessageReplyState::MessageReplyCommitted as i32
+    );
+    assert!(committed.committed.is_some());
+    let input_required = MessageReply {
+        session_id: "session-1".into(),
+        submitted_message_id: "submitted-1".into(),
+        state: MessageReplyState::MessageReplyInputRequired as i32,
+        committed: None,
+        pending_input: vec![InputKind::InputApproval as i32],
+    };
+    assert_eq!(
+        input_required.pending_input,
+        vec![InputKind::InputApproval as i32]
+    );
+
+    let page_read = HistoryRead {
+        session_id: "session-1".into(),
+        snapshot: false,
+        after_cursor: String::new(),
+        cut_cursor: String::new(),
+        max_bytes: 262_144,
+        max_messages: 100,
+        page: Some(HistoryPageSelection {
+            before_cursor: String::new(),
+        }),
+        exact: None,
+        continuation: String::new(),
+        source: HistorySource::Online as i32,
+    };
+    assert!(page_read.page.is_some());
+    assert!(page_read.exact.is_none());
+    let exact_read = HistoryRead {
+        page: None,
+        exact: Some(reference),
+        ..page_read
+    };
+    assert!(exact_read.exact.is_some());
+    assert!(exact_read.page.is_none());
+
+    let part = AttachmentPart {
+        session: exact_read.exact.and_then(|reference| reference.session),
+        attachment_ref: "occurrence-1".into(),
+        transfer_id: "transfer-1".into(),
+        offset: 0,
+        length: 4,
+        data: vec![1, 2, 3, 4],
+        r#final: true,
+        total_size: 4,
+        sha256: vec![0; 32],
+    };
+    assert!(part.r#final);
+    assert_eq!(part.data.len(), part.length as usize);
+    assert_eq!(part.sha256.len(), 32);
+
+    let transport = RequestTransportMetadata {
+        result_max_bytes: 16 * 1024 * 1024,
+        grant_generation: 7,
+        revocation_generation: 2,
+    };
+    let request = HostRequest {
+        request_id: "request-1".into(),
+        transport: Some(transport),
+        ..Default::default()
+    };
+    let stamps = request.transport.unwrap();
+    assert_eq!(
+        (stamps.grant_generation, stamps.revocation_generation),
+        (7, 2)
+    );
+
+    let advertisement = ReceiveAdvertisement {
+        profile: TransportProfile::Default as i32,
+        budget: Some(TransportBudget {
+            packet_bytes: 65_536,
+            fragment_payload_bytes: 61_440,
+            fragment_count: 274,
+            envelope_bytes: 16 * 1024 * 1024,
+            bulk_concurrency: 4,
+            reserved_bytes: 32 * 1024 * 1024,
+            fragment_idle_timeout_ms: 30_000,
+            transfer_timeout_ms: 120_000,
+        }),
+        connection_generation: 3,
+    };
+    assert_eq!(advertisement.connection_generation, 3);
+    assert!(advertisement.budget.is_some());
 }
 
 fn descriptor_schema() -> Schema {

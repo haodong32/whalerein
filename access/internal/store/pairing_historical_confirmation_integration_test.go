@@ -335,26 +335,6 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 			if err := s.CreatePairedDevice(ctx, "host", "device", hex.EncodeToString(keyHash[:]), authHash, now); err != nil {
 				t.Fatal(err)
 			}
-			var generation int64
-			if err := s.Pool().QueryRow(ctx, `SELECT grant_generation FROM grants WHERE host_id='host' AND device_id='device'`).Scan(&generation); err != nil {
-				t.Fatal(err)
-			}
-			claimBody, err := proto.Marshal(&whalereinv1.PairingClaim{
-				ClaimId: "claim", DeviceId: "device", DevicePublicKey: publicKey,
-				Phase:           whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT,
-				ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli(), GrantGeneration: uint64(generation),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ackBody, err := proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "device"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			requestBody := claimBody
-			if missingBody {
-				requestBody = []byte{}
-			}
 			// Keep the later Cloud-session schema. Restore its trigger after the
 			// 010 rewind recreates the Host confirmation columns.
 			var activationTrigger string
@@ -371,6 +351,13 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
                 ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified;
                 ALTER TABLE requests DROP COLUMN bodies_cleared;
                 DELETE FROM schema_migrations WHERE name IN ('010_pairing_commit_binding.sql','016_external_device_revocations.sql')`); err != nil {
+				t.Fatal(err)
+			}
+			legacyEmptyID := "legacy-empty"
+			if _, err := s.Pool().Exec(ctx, `INSERT INTO requests
+				(request_id,host_id,device_id,kind,status,request_body,expires_at)
+				VALUES ($1,'host','device',3,'received',''::bytea,$2)`,
+				legacyEmptyID, now.Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Migrate(ctx); err != nil {

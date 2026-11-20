@@ -89,7 +89,6 @@ http:
   read_timeout: 5s
   write_timeout: 5s
   idle_timeout: 5s
-  max_body_bytes: 1048576
 pairing:
   invitation_ttl: 1m
   claim_timeout: 100ms

@@ -12,6 +12,15 @@ import {
   open,
 } from '../../src/security/noise.js'
 import { codec as createCodec } from '../../src/protocol.js'
+import { transportProfileBudget } from '../../src/contracts/transport.js'
+
+export function defaultReceive(generation = 1) {
+  return {
+    profile: 'TRANSPORT_PROFILE_DEFAULT',
+    budget: transportProfileBudget('default'),
+    connection_generation: generation,
+  }
+}
 
 const sharedCodec = createCodec()
 
@@ -24,6 +33,8 @@ export function establishChannel({
   channelId = randomBytes(8).toString('hex'),
   codec = sharedCodec,
   persistPeer = true,
+  receive = defaultReceive(1),
+  omitReceive = false,
 }) {
   if (persistPeer) {
     store.upsertPeerKey({
@@ -42,6 +53,7 @@ export function establishChannel({
     protocol_version: 1,
     capabilities: { capabilities: ['sessions', 'events'], protocol_version: 1 },
     client_nonce: 'client-nonce',
+    ...(omitReceive ? {} : { receive }),
   })
   const reply = security.handleChannelHandshake({
     channel_id: channelId, device_id: deviceId, protocol_version: 1,

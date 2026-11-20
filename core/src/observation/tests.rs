@@ -98,7 +98,7 @@ fn seal(core: &Core, update: SessionUpdate) -> EventEnvelope {
 }
 
 fn preview_event(core: &Core, session: &str, watch: &str, text: &str) -> EventEnvelope {
-    use whalerein_proto::{live_frame, AttemptRef, LiveFrame, TextContent};
+    use whalerein_proto::{live_frame, AttemptRef, LiveFrame};
     seal(
         core,
         SessionUpdate {
@@ -115,9 +115,12 @@ fn preview_event(core: &Core, session: &str, watch: &str, text: &str) -> EventEn
                 block_id: "text".into(),
                 first_seq: 1,
                 last_seq: 1,
-                payload: Some(live_frame::Payload::Delta(TextContent {
-                    text: text.into(),
-                })),
+                payload: Some(live_frame::Payload::Delta(
+                    whalerein_proto::LiveBlockDelta {
+                        kind: whalerein_proto::BlockKind::Text as i32,
+                        text: text.into(),
+                    },
+                )),
             })),
         },
     )

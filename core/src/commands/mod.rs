@@ -13,11 +13,12 @@ use tokio::time::Instant;
 use prost::Message;
 use whalerein_proto::{
     CommandAccepted, CommandResult, ErrorCode, GetCommandResult, HostRequest, RequestKind,
-    RequestPayload, RequestReceipt, RequestState, ResponsePayload,
+    RequestPayload, RequestReceipt, RequestState, RequestTransportMetadata, ResponsePayload,
 };
 
 use crate::access::{
     http::{receipt_matches_request, TransportObservation},
+    transport::TransportBudget,
     AccessClient,
 };
 use crate::api::{
@@ -87,16 +88,34 @@ pub struct CommandService {
     cache: Arc<Cache>,
     host_fingerprint: Option<String>,
     admission: Option<Admission>,
+    transport: TransportBudget,
+    outbound_envelope_bytes: u64,
 }
 
 impl CommandService {
     pub fn new(access: Arc<AccessClient>, cache: Arc<Cache>) -> Self {
+        let transport = TransportBudget::default();
         Self {
             access,
             cache,
             host_fingerprint: None,
             admission: None,
+            transport,
+            outbound_envelope_bytes: transport.envelope_bytes,
         }
+    }
+
+    pub(crate) fn with_transport_budget(mut self, transport: TransportBudget) -> Self {
+        self.transport = transport;
+        // Locally valid overrides take effect; the peer minimum is applied by
+        // `with_outbound_envelope` once the channel advertisement is known.
+        self.outbound_envelope_bytes = transport.envelope_bytes;
+        self
+    }
+
+    pub(crate) fn with_outbound_envelope(mut self, envelope_bytes: u64) -> Self {
+        self.outbound_envelope_bytes = envelope_bytes.min(self.transport.envelope_bytes);
+        self
     }
 
     pub(crate) fn with_admission(
@@ -213,6 +232,15 @@ impl CommandService {
             encode_frame(&frame),
         );
         request.trace_id = self.access.trace_id().to_owned();
+        // This field is the encoded HTTPS result bound, not the raw logical
+        // envelope; Access converts it back to a raw ciphertext allowance.
+        request.transport = Some(RequestTransportMetadata {
+            result_max_bytes: crate::access::http::https_body_limit(self.transport.envelope_bytes)
+                as u64,
+            grant_generation: 0,
+            revocation_generation: 0,
+        });
+        self.ensure_forwardable(&request)?;
         let receipt = self
             .submit_observed(&request, transport)
             .await
@@ -343,7 +371,15 @@ impl CommandService {
             body,
         );
         request.trace_id = self.access.trace_id().to_owned();
-        ensure_forwardable(&request)?;
+        // This field is the encoded HTTPS result bound, not the raw logical
+        // envelope; Access converts it back to a raw ciphertext allowance.
+        request.transport = Some(RequestTransportMetadata {
+            result_max_bytes: crate::access::http::https_body_limit(self.transport.envelope_bytes)
+                as u64,
+            grant_generation: 0,
+            revocation_generation: 0,
+        });
+        self.ensure_forwardable(&request)?;
         let admission_guard = if let Some(admission) = &self.admission {
             #[cfg(feature = "protocol-testing")]
             if let Some(path) = std::env::var_os("WHALEREIN_TEST_ADMISSION_READY") {
@@ -449,7 +485,8 @@ impl CommandService {
             self.project(&request_id, &command_id, status, error_code_of(&state))?;
         }
 
-        let decrypted = decrypt_response(channel, &aad, &state);
+        let decrypted = check_result_bound(&state, self.transport.envelope_bytes)
+            .and_then(|()| decrypt_response(channel, &aad, &state));
         match status {
             DomainStatus::HostAccepted | DomainStatus::Succeeded => {
                 let (message_id, delivery_id, model_selection, lifecycle_receipt, question_receipt) =
@@ -789,7 +826,17 @@ impl CommandService {
                     definitely_unsent = false;
                     // The previous attempt may have reached Access before the
                     // connection failed. Read the same request id back.
-                    if let Ok(state) = self.access.get_request(&request.request_id).await {
+                    let result_limit = request
+                        .transport
+                        .as_ref()
+                        .map_or(self.transport.envelope_bytes, |value| {
+                            value.result_max_bytes
+                        });
+                    if let Ok(state) = self
+                        .access
+                        .get_request_with_limit(&request.request_id, result_limit)
+                        .await
+                    {
                         if let Err(error) = self.access.validate_request_state(request, &state) {
                             return Err(SubmitFailure {
                                 error,
@@ -852,18 +899,43 @@ fn build_request(
         protocol_version: PROTOCOL_VERSION,
         channel_id: channel_id.to_owned(),
         body,
+        transport: None,
     }
 }
 
 // Access adds its relay transport version before forwarding the complete
 // authenticated envelope. Reject the actual encoded size before journaling or I/O.
-fn ensure_forwardable(request: &HostRequest) -> CoreResult<()> {
+fn ensure_forwardable_with(request: &HostRequest, limit: u64) -> CoreResult<()> {
     let mut forwarded = request.clone();
     forwarded.relay_transport_version = 2;
-    if forwarded.encoded_len() > crate::access::transport::MESSAGE_BYTES {
+    if forwarded.encoded_len() as u64 > limit {
         return Err(CoreError::Api {
             code: Some(ErrorCode::PayloadTooLarge),
             message: "logical request exceeds transport budget".into(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn ensure_forwardable(request: &HostRequest) -> CoreResult<()> {
+    ensure_forwardable_with(
+        request,
+        crate::access::transport::TransportBudget::default().envelope_bytes,
+    )
+}
+
+impl CommandService {
+    fn ensure_forwardable(&self, request: &HostRequest) -> CoreResult<()> {
+        ensure_forwardable_with(request, self.outbound_envelope_bytes)
+    }
+}
+
+fn check_result_bound(state: &RequestState, result_max_bytes: u64) -> CoreResult<()> {
+    if state.result_body.len() as u64 > result_max_bytes {
+        return Err(CoreError::Api {
+            code: Some(ErrorCode::PayloadTooLarge),
+            message: "logical result exceeds transport budget".into(),
         });
     }
     Ok(())
@@ -2354,6 +2426,15 @@ mod host_tests {
         assert_eq!(requests.len(), MAX_SUBMIT_ATTEMPTS as usize);
         assert!(!requests[0].command_id.is_empty());
         for request in requests.iter() {
+            // The wire field is the encoded HTTPS result bound, not the raw
+            // logical envelope. Access converts it back to a raw allowance.
+            assert_eq!(
+                request.transport.as_ref().unwrap().result_max_bytes,
+                crate::access::http::https_body_limit(
+                    crate::access::transport::TransportBudget::default().envelope_bytes
+                ) as u64
+            );
+            assert_eq!(request.transport.as_ref().unwrap().grant_generation, 0);
             assert!(
                 request.request_id == requests[0].request_id,
                 "retry changed request identity"
@@ -2596,5 +2677,79 @@ fn model_selection_of(payload: &ResponsePayload) -> Option<crate::api::ModelSele
             Some(receipt.clone().into())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod directional_budget_tests {
+    use super::*;
+
+    #[test]
+    fn outbound_request_is_bounded_by_the_lower_directional_envelope() {
+        let request = build_request(
+            "request",
+            "host",
+            "device",
+            RequestKind::Query,
+            "",
+            Vec::new(),
+            now_unix_ms() + 1_000,
+            "channel",
+            vec![7; 2048],
+        );
+        let encoded = request.encoded_len() as u64;
+        assert!(ensure_forwardable_with(&request, encoded + 16).is_ok());
+        let error = ensure_forwardable_with(&request, encoded).unwrap_err();
+        assert_eq!(error.code(), "payload_too_large");
+        assert!(matches!(
+            error,
+            CoreError::Api {
+                code: Some(ErrorCode::PayloadTooLarge),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_larger_local_override_is_not_clamped_before_the_peer_minimum() {
+        use crate::access::transport::{TransportProfile, TransportSettings};
+
+        let roomy = TransportBudget::resolve(&TransportSettings {
+            profile: TransportProfile::Roomy,
+            overrides: None,
+        })
+        .unwrap();
+        let access = Arc::new(
+            AccessClient::new(
+                url::Url::parse("http://127.0.0.1:1").unwrap(),
+                Some("token".into()),
+            )
+            .unwrap(),
+        );
+        let cache = Arc::new(Cache::open_in_memory([1u8; 32]).unwrap());
+        let service =
+            CommandService::new(access.clone(), cache.clone()).with_transport_budget(roomy);
+        assert_eq!(service.outbound_envelope_bytes, roomy.envelope_bytes);
+        let smaller = service
+            .with_outbound_envelope(8 * 1024 * 1024)
+            .outbound_envelope_bytes;
+        assert_eq!(smaller, 8 * 1024 * 1024);
+
+        // The peer minimum also applies to a re-created service.
+        let service = CommandService::new(access, cache)
+            .with_transport_budget(roomy)
+            .with_outbound_envelope(roomy.envelope_bytes + 1);
+        assert_eq!(service.outbound_envelope_bytes, roomy.envelope_bytes);
+    }
+
+    #[test]
+    fn stored_result_body_is_checked_before_decryption() {
+        let state = RequestState {
+            result_body: vec![0; 3],
+            ..Default::default()
+        };
+        assert!(check_result_bound(&state, 3).is_ok());
+        let error = check_result_bound(&state, 2).unwrap_err();
+        assert_eq!(error.code(), "payload_too_large");
     }
 }

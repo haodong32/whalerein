@@ -18,18 +18,28 @@ golden artifacts and `tests/integration/drivers/protobuf/proto_compat.py`
 fails a build that removes a field, reuses a tag number, changes a type or
 JSON name, changes oneof membership, or reuses an enum number.
 
-This revision intentionally replaces the observation contract inside version 1:
-`WatchSession.interests` is required, `WatchReady.questions`,
+This revision is the single revised conversation and transport contract inside
+version 1. It intentionally replaces the earlier text-only live frame, flattened
+tool/notice blocks, flattened send reply, cursor-only history read and compiled
+transport ceilings. `WatchSession.interests` is required, `WatchReady.questions`,
 `SessionState.questions`, `SessionUpdate.questions` and the `QuestionDescriptor`
-and `QuestionStamp` payloads are part of the only supported contract. There is
-no old-contract reader, compatibility fallback or hidden second version. A
-matching Access/Host/Core/CLI/mobile set is deployed together; the unchanged
+and `QuestionStamp` payloads remain part of the only supported contract, and the
+expanded content, attachment and budget families below are now mandatory where
+their capability is advertised. There is no old-contract reader, compatibility
+fallback, dual projection or hidden second version. A matching
+Access/Host/Core/CLI/mobile artifact set is deployed together. The unchanged
 numeric version is not evidence that arbitrary older version-1 builds remain
-compatible. Missing required observation fields fail explicitly instead of
-becoming an empty question collection. Keys, pins, grants, Source sessions,
-pager keys and command recovery identities are retained across the cut; an old
-client must be stopped rather than handed uninterpreted queued or signed
+compatible; installed iOS builds on the prior contract cannot use the upgraded
+endpoints and must be stopped rather than handed uninterpreted queued or signed
 material.
+
+The immutable protobuf baseline records this hard cut through the repository
+compatibility path (`--update-baseline --rationale`) because fields and message
+shapes are replaced, not added. Keys, pins, grants, Source sessions, pager keys
+and durable command recovery identities are retained. Content positions,
+cursors and receipt namespaces are bound to a projection identity: Core fences
+old projected rows from readable history and atomically installs a rebuilt
+snapshot over a fixed Source cut before it serves the new projection.
 
 Readers follow one policy:
 
@@ -81,11 +91,17 @@ AAD inputs ambiguous. The shared validator is `whalerein_proto::validate_id`.
 
 | Field | Maximum encoded bytes | Allowed content |
 |---|---|---|
-| `request_id`, `command_id`, `channel_id`, `claim_id`, `approval_id`, `delivery_id`, `message_id`, `block_id`, `batch_id`, `item_id` | 128 | printable ASCII, no `|`; `command_id` may be empty |
+| `request_id`, `command_id`, `channel_id`, `claim_id`, `approval_id`, `delivery_id`, `message_id`, `block_id`, `batch_id`, `item_id`, `call_id`, `transfer_id`, `projection_id` | 128 | printable ASCII, no `|`; `command_id` may be empty |
 | `host_id`, `device_id` | 200 | printable ASCII, no `|` |
 | `trace_id`, `watch_id`, `wait_id` | 64 | printable ASCII, no `|` |
-| `session_id` | 512 | UTF-8 without control characters or `|` |
-| History cursor | 4096 | UTF-8 without control characters or `|`; may be empty at the origin |
+| `session_id`, `attachment_ref` | 512 | UTF-8 without control characters or `|` |
+| History cursor, `source_locator`, `continuation` | 4096 | UTF-8 without control characters or `|`; a cursor may be empty at the origin |
+
+`attachment_ref` is an opaque Source occurrence identity, not a path or digest.
+`source_locator` and `continuation` are opaque Core/Source evidence and are never
+parsed by a client. A transfer is additionally bound to the authenticated
+device, Host, session, channel and occurrence by the Host; the transfer handle
+alone is never authority.
 
 A request whose identifier violates these bounds is `invalid_argument` and is
 not forwarded. An identifier near the limit is never truncated on the wire.
@@ -425,14 +441,29 @@ observation lease. An offline Host has no connected Devices. Missing Host
 observation returns `presence: unavailable` with the confirmed grants.
 Device request submission cannot invoke the internal request kind.
 
-### Correlated message reply
+### Typed send follow-up
 
-The encrypted `ReadMessageReply` query uses the session ID and the message ID
-from the authenticated submission receipt. A `MessageReply` echoes that scope.
-A committed result carries a source attempt identity and bounded visible text.
-Pending, input-required and uncertain results carry no text. An adapter reports
-uncertainty when source evidence cannot bind the submitted message to an
-attempt. A query does not admit a new message.
+The encrypted `ReadMessageReply` query uses the session ID and the submitted
+message identity from the authenticated submission receipt.
+`MessageReply.submittedMessageId` echoes that scope. The result is a typed state,
+never flattened content:
+
+| State | Payload | Meaning |
+|---|---|---|
+| `MESSAGE_REPLY_PENDING` | none | No association or settlement evidence yet. |
+| `MESSAGE_REPLY_COMMITTED` | `committed` | The Source associated the exact submission with a canonical committed message. |
+| `MESSAGE_REPLY_INPUT_REQUIRED` | `pending_input` | The owning active work waits for one or more evidenced `InputKind` values. |
+| `MESSAGE_REPLY_UNCERTAIN` | none | Evidence cannot bind the submission to one reply. |
+
+`CommittedMessageRef` carries the Host-qualified `SessionKey`, canonical
+`message_id`, opaque `source_locator` and `projection_id`. Resolve it through the
+exact `HistoryRead` selection; the reply body stays in history. `committed` is
+present exactly for `COMMITTED`, and `pending_input` is present exactly for
+`INPUT_REQUIRED`. Pending and uncertain results carry neither. The kinds use the
+same `InputKind` vocabulary as `WaitSession`; they are informational and never
+answer an approval or question. An input claim belongs to the same active
+submitted operation, and a late reply from another send cannot satisfy it. A
+query never admits a new message and never resubmits one.
 
 ## HTTP surface
 
@@ -596,18 +627,96 @@ including the genuinely empty collection. Mixed or partial pages are never
 presented as complete. The authenticated mutable list cursor remains a
 continuation cursor for explicit listing, not a future-event cursor.
 
-HistoryRead returns a fixed-cut HistoryPage. Cursor tokens belong to their Source,
-session and view; clients compare continuity, not numeric/lexical order. Batches
-may advance across filtered records without a visible Message. Snapshot pages
-stage until the final complete page and never silently replace a complete cache
-with a truncated view. Repeated batch IDs with conflicting canonical content are
-rejected. Message origin is transient correlation metadata, not a second authority.
+### Committed content, reasoning and notices
+
+`ConversationMessage` is committed content with stable identity, authorship and
+ordered `ContentBlock` values. A block carries exactly one typed variant:
+`text`, `reasoning`, `tool_activity`, `notice` or `attachment`. `ContentBlock`
+reserves retired tags 3 and 4 together with the names `tool_call` and
+`tool_result`; `tool_activity` uses tag 8. An old peer therefore skips an
+unknown field instead of silently decoding the retired message type.
+Reasoning is displayable content ordered beside answers; a reasoning-disabled
+model emits no
+synthetic reasoning block. `MessageRole` distinguishes genuine `USER` input,
+`ASSISTANT`, `TOOL`, `NOTICE`, recognized `MESSAGE_ROLE_CONTEXT` and
+`MESSAGE_ROLE_UNKNOWN`/missing authorship. A context or unknown message projects
+only a `NOTICE_CATEGORY_CONTEXT` or `NOTICE_CATEGORY_OMISSION` notice and never a
+user body. Private prompts, provider replay state, raw tool arguments and
+unmapped payload bodies never appear in a normalized block.
+
+`SourceCapabilities` independently declares `live_reasoning`, `tool_activity`,
+`conversation_notices`, `attachments`, `history_page`, `history_exact` and
+`send_followup`; an absent field means that feature is unsupported and must be
+reported explicitly rather than simulated. Reasoning still follows the existing
+conversation read authorization; a display preference never changes authority.
+
+`NoticeContent` carries a typed `NoticeCategory` and known `NoticeState`, with an
+optional Source-approved `summary`. Categories cover retry
+(`SCHEDULED`/`STARTED`/`CANCELLED`), max output (`REACHED`), compaction
+(`STARTED`/`COMPLETED`/`FAILED`), slash commands (`STARTED`/`COMPLETED`/`FAILED`),
+recognized context and omission. Its Source position is its ordered block
+position in the Message (or live block sequence); state is present only when the
+Source established it. A missing predecessor or summary leaves a truthful
+partial view. Raw command arguments and compaction input are never carried.
+
+`ToolActivity` is one session-scoped `call_id` activity. It carries only
+evidenced `ToolStage` values in ascending order (`PREPARATION`, `EXECUTION`,
+`PROGRESS`, `SETTLEMENT`), an optional display-safe `summary`/`progress`, an
+ordered `ToolResultPart` list, a `ToolOutcome`, and an optional stable failure
+code. Result parts may carry text or an attachment occurrence reference, never
+bytes. A prep/dispatch/result sequence for the same `call_id` describes one
+activity: Core merges repeated occurrences by `(SessionKey, call_id)` across
+live output, history and combined pages with no native correlation. A committed
+result takes precedence over delayed progress or dispatch; abandoning an
+Attempt clears only its unexecuted preparation.
+
+### Live frames
 
 LiveFrame carries an epoch, Attempt ID, block ID and inclusive normalized sequence
-interval. Start/delta/reset/end are separate typed payloads. TextDelta appends;
-reset replaces a provisional block. Adjacent text can coalesce for 20 ms / 8 KiB.
-Preview loss marks an incomplete overlay; it never advances the committed cursor.
-The final Message links to its origin Attempt and supersedes provisional content.
+interval. Start/end are separate typed payloads. `delta` is a `LiveBlockDelta`
+that appends one block; `reset` is a `LiveBlockReset` that replaces that same
+provisional block. Both carry a checked `BlockKind`, and only `BLOCK_KIND_TEXT` or
+`BLOCK_KIND_REASONING` is valid for live output. A reader never merges reasoning
+into an answer block or the reverse. Adjacent deltas can coalesce for 20 ms /
+8 KiB without crossing Attempt, block, kind or order boundaries. Preview loss
+marks an incomplete overlay; it never advances the committed cursor. The final
+Message links to its origin Attempt and supersedes provisional content.
+
+### Independent history reads
+
+`HistoryRead` selects exactly one mode:
+
+- `page` is a latest-first bounded selection. An empty `page.before_cursor`
+  starts at the most recent authorized committed message at the fixed cut and
+  later pages step toward older history.
+- `exact` is one `CommittedMessageRef` resolved with the same scope, content and
+  resource policy as paged history.
+- `after_cursor` is forward traversal for synchronization. It is mutually
+  exclusive with `page`, `exact` and `continuation`.
+- `continuation` resumes a Core-owned traversal. It binds the validated scope,
+  projection, fixed cut, next position and read source; a caller never parses it.
+
+An empty selection is a forward read from the origin. `source` selects online or
+local cache history; cache reads use the same selection semantics and never
+reach a Host. `HistoryPage` returns `continuation` (empty when no next page
+exists at the cut), `projection_id` and the concrete `source`. Messages within a
+page are in Source order even when pages step backward. A wrong-scope, expired,
+projection-mismatched or non-progressing continuation fails with
+`snapshot_required`; an individually oversized canonical message fails with
+`payload_too_large` before the cursor or receipt advances. Cursor tokens belong to
+their Source, session, projection and view; clients compare continuity, not
+numeric/lexical order. Batches may advance across filtered records without a
+visible Message. Snapshot pages stage until the final complete page and never
+silently replace a complete cache with a truncated view. Repeated batch IDs with
+conflicting canonical content are rejected. Message origin is transient
+correlation metadata, not a second authority.
+
+A public page read owns its HTTPS request budget, has no watch lease or MQTT
+subscription and does not write the synchronized cache. A cached read uses the
+eligible local cache and takes a fixed local cut; replacement or eviction
+invalidates its continuation explicitly. `HistoryBatch.projection_id` and
+`SessionState.projection_id` bind cursor, receipt and live namespaces to the same
+content projection.
 
 Core subscribes MQTT before WatchSession and baseline synchronization. Watch IDs
 are channel-scoped; leases last 30 seconds. RefreshWatches every five seconds
@@ -620,6 +729,48 @@ Approvals and runtime state are current-state projections outside history cursor
 arithmetic. Approval execution always revalidates the native pending action.
 The complete schema and Source invariants are in
 [the Harness contract](../../docs/architecture/harness-contract.md).
+
+### Attachment reads
+
+Committed `AttachmentContent` carries a display name, media type, declared size,
+availability and an opaque `attachment_ref` occurrence identity scoped to the
+session. Bytes never travel in conversation events, history pages or the
+encrypted transcript cache. An explicit read uses the existing encrypted
+query/result path:
+
+| Query | Result | Purpose |
+|---|---|---|
+| `OpenAttachment{session, attachment_ref}` | `OpenAttachmentResult{attachment}` | Authorize the exact occurrence and return authoritative metadata plus a short-lived transfer handle. |
+| `PullAttachment{session, attachment_ref, transfer_id, offset, max_bytes}` | `AttachmentPart` | Read one contiguous bounded part. |
+| `CloseAttachment{session, attachment_ref, transfer_id, cancel}` | `CloseAttachmentResult` | Dispose or cancel the transfer. |
+
+`AttachmentMetadata` returns `SessionKey`, `attachment_ref`, `media_type`, a
+display-only `name`, authoritative `size`, the effective `AttachmentPolicy`
+(total bytes, chunk bytes, concurrent reads, idle and overall time) and the
+expires-at timestamp of the opaque `transfer_id`. The effective chunk is the
+smallest of attachment policy and the directional encoded transport, relay,
+HTTP representation and receiver limits. A declared size above the effective
+total fails with `payload_too_large` before any native byte read; unsupported or
+missing native storage is `unsupported_capability` or `not_found`.
+
+Each `AttachmentPart` echoes the session, occurrence and transfer, and carries
+`offset`, declared `length` and `data`. Only one read is in flight per transfer.
+A duplicate of the last completed offset is the only idempotent retry; every
+other gap, overlap or conflicting part is `conflict`, and an offset or length
+outside the effective budget is `invalid_argument`. The final part carries
+terminal `total_size` and `sha256`; before final those fields are absent. A
+duplicate, gap, wrong length or wrong digest is `payload_digest_mismatch` and the
+client publishes no completed file. Cancel, channel loss, revocation, idle
+expiry or deadline disposes the iterator and releases reservations; an explicit
+fresh read starts again at offset zero.
+
+The transfer is scoped to the authenticated device, Host, session, channel and
+occurrence. Substituting any of them fails with a stable scoped error and reaches
+no native byte read. The Host-verified occurrence is resolved in hot or cold
+session history before the reader opens. Filenames are display suggestions; the
+client validates a safe local name, stages data under its own temporary file and
+only publishes the final name after a successful save. A failed save preserves
+existing data and removes only the download's temporary data.
 
 ### Contract surface snapshot
 
@@ -674,11 +825,14 @@ Legacy small envelopes remain raw protobuf; large messages require a capable pee
 
 Framed packets start with `WRMQTT2` followed by protobuf `TransportFrame`.
 A frame identifies the logical topic, transfer ID, index/count, total bytes,
-SHA-256 digest, payload, or receipt/rejection. Receivers check bounds and metadata,
-reassemble the entire envelope, and verify the digest before application dispatch.
-AEAD verification remains the security boundary; transport receipts acknowledge
-transfer, not command execution. Part receipts alone do not confirm success: the
-sender also requires `complete=true` after whole-envelope integrity verification.
+SHA-256 digest and payload, or receipt/rejection. It also carries the selected
+`fragment_payload_bytes` width and named `profile`; the width must stay identical
+for every part of a transfer and must not exceed the negotiated receive budget.
+Receivers check bounds and metadata, reassemble the entire envelope, and verify
+the digest before application dispatch. AEAD verification remains the security
+boundary; transport receipts acknowledge transfer, not command execution. Part
+receipts alone do not confirm success: the sender also requires `complete=true`
+after whole-envelope integrity verification.
 
 | Data topic | Receipt topic |
 |---|---|
@@ -690,15 +844,94 @@ Senders retry missing receipts within bounded attempts/time. Disconnect clears
 partial transfers. Completed-transfer tracking suppresses duplicate delivery;
 command IDs and event sequences still enforce application idempotency.
 
-## Transport size budget
+## Transport budgets and configuration
 
-| Limit | Current source/configuration |
-|---|---|
-| Framed transport packet | 64 KiB budget; 60 KiB payload chunks. |
-| Logical envelope | 16 MiB maximum. |
-| Concurrent inbound reassembly | Four transfers, 32 MiB reserved bytes, 30-second retention. |
-| Access default HTTP request body | 24 MiB, allowing base64 expansion and envelope overhead. |
-| Compose broker packet ceiling | 1 MiB; larger live overrides are not required by framing. |
+`proto/v1/transport_profiles.json` is the single packaged profile vocabulary
+shared by Access, Host and Core. `default` preserves the measured operating
+profile: 64 KiB packet, 60 KiB fragment payload and 16 MiB logical envelope.
+`compact` and `roomy` are valid alternate profiles. Each profile records packet
+bytes, packet overhead, fragment payload bytes, derived fragment count, envelope
+bytes, bulk concurrency, reserved bytes, fragment idle timeout and transfer
+timeout. A budget is valid only when the fragment payload plus the named
+profile's packet overhead fits the packet budget, the fragment count covers the
+envelope at that width, reserved bytes cover one envelope, and reserved bytes
+also cover the configured in-flight fragments. Timeouts are positive and the
+fragment idle timeout stays below the transfer timeout, and each value stays
+representable in its wire field. A budget may carry validated operator overrides
+instead of matching a packaged profile exactly; the profile label selects the
+base vocabulary and its packet overhead, and the relations above are checked
+against the advertised values. Values are never clamped: a sender takes the
+minimum of its local limit and every advertised limit. Invalid or contradictory
+settings fail before readiness or connection use, and a tiny fragment width
+cannot bypass aggregate resource accounting.
+
+`proto/v1/transport_profiles.json` is authoritative. `./repo proto` generates
+three committed runtime artifacts from it, and `./repo check proto` fails on any
+drift:
+
+| Runtime | Committed artifact | Loaded through |
+|---|---|---|
+| Access (Go) | `proto/v1/bindings/go/transport_profiles_gen.go` | `whalereinv1.TransportProfileValuesFor` and `ValidateTransportProfiles` |
+| Host (Node) | `host/runtime/src/generated/transport-profiles.js` | `host/runtime/src/contracts/transport.js`, which re-exports the generated values |
+| Core (Rust) | `proto/v1/bindings/rust/src/transport_profiles.rs` | `transport_profile_values` and `validate_transport_profiles` |
+
+Edit the JSON, then run `./repo proto`; never hand-edit a generated profile
+artifact.
+
+`ReceiveAdvertisement` is the only exchange of event receive limits. It carries
+a named `profile`, the validated `budget` and an authenticated
+`connection_generation`. It appears in HostReady and in the authenticated
+ChannelHello/ChannelReady handshakes. `connection_generation` is scoped to the
+leg that carries the advertisement: in HostReady it is the Host's broker
+connection generation as seen by Access, while in ChannelHello and ChannelReady
+it is scoped to that authenticated Noise channel. Generations from different
+legs are never compared. Each new channel handshake carries a fresh
+advertisement and freezes it on that channel; reconnect starts a new channel
+generation, delayed readiness cannot refresh a newer broker connection, and
+replayed requests never update the connection budget. Access registers
+HostReady limits against the broker-derived receiver identity. A shared event
+route uses the minimum for its eligible receivers, and this entry stays out of
+the request-forwarding loop. A peer cannot raise local limits.
+
+`HostRequest.transport` binds three request-scoped values at submission:
+`result_max_bytes` is the device's validated HTTPS result bound, while
+`grant_generation` and `revocation_generation` are the two durable Access
+revisions for the `(host_id, device_id)` grant. Access captures both revisions
+from its durable grant row when it admits the request and keeps all three
+values attached to the exact durable request across restarts.
+
+At ciphertext release Access requires exact equality of both revisions against
+the current durable grant row, and the grant must still be active. It applies
+that rule on every release path: a first GET, a repeat GET, a GET after
+revocation, and a GET after a later re-grant. A stored request admitted before
+a revoke stays fenced after that Host-scoped revoke, which bumps only
+`revocation_generation`, and it stays fenced through any re-grant that bumps
+`grant_generation`; a request admitted after the re-grant carries the new stamp
+and can release. No positive release decision is cached, and the comparison
+uses the two integer revisions rather than a packed or cached revision.
+
+A QUERY, including attachment parts, whose request metadata is missing either
+revision fails closed and releases no ciphertext. A COMMAND applies the same
+no-body rule on a missing or unequal stamp but keeps metadata-only recovery:
+status, error code, command ID and payload digest stay readable so
+deduplication and durable command recovery continue to work. Access never
+inspects the encrypted body; the revisions and the result bound are metadata
+only. Previously delivered bytes are outside revocation's reach.
+
+A complete canonical message that cannot fit an effective result or event budget
+fails explicitly with `payload_too_large`; the last cursor and receipt stay
+valid, the batch does not advance, and a later read with sufficient capacity can
+progress. Packing and admission never truncate canonical content or rewrite a
+committed message.
+
+| Limit | Default profile | Validation |
+|---|---|---|
+| Framed transport packet | 64 KiB budget, 60 KiB fragment payload | Packet must exceed fragment payload; width is encoded per transfer. |
+| Logical envelope | 16 MiB | Fragment count must cover the envelope. |
+| Concurrent inbound reassembly | 4 transfers, 32 MiB reserved bytes, 30-second idle | Reserved bytes cover in-flight fragments and one envelope. |
+| Transfer timeout | 120 seconds | Positive duration. |
+| Access default HTTP request body | 24 MiB, allowing base64 expansion and envelope overhead | Independent of profile bytes. |
+| Compose broker packet ceiling | 1 MiB; larger live overrides are not required by framing | Broker/ingress limits remain independently enforced. |
 
 Oversized messages fail explicitly; snapshots must not silently become successful
 partial results. Keep clients, broker ACLs, and HTTP/reverse-proxy limits aligned.

@@ -528,6 +528,10 @@ func (stubRequests) Get(context.Context, string, string) (store.Request, error) 
 	return store.Request{}, errors.New("unused")
 }
 
+func (stubRequests) Release(context.Context, string, string, string, int64) (store.Request, error) {
+	return store.Request{}, errors.New("unused")
+}
+
 func (stubRequests) Touch(context.Context, string, string) (bool, error) { return false, nil }
 
 // TestHostProofStatusReadsTheEnrollmentWithoutACredential proves that the

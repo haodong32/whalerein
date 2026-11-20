@@ -9,6 +9,13 @@ import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
 import { LogicalTransport, MESSAGE_BYTES, TRANSPORT_VERSION, PACKET_BYTES } from './transport.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
+import {
+  resolveTransportProfile,
+  transportProfileBudget,
+  validateReceiveAdvertisement,
+  validateTransportBudget,
+  validateTransportProfiles,
+} from '../contracts/transport.js'
 
 // Leave room for protobuf/MQTT headers and HTTP base64 wrapping in Access.
 export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
@@ -45,6 +52,7 @@ export class MqttAccess {
    * @param {() => number} [options.now]
    * @param {Uint8Array} [options.authorizationPublicKey] Ed25519 public key announced in HostReady.
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
+   * @param {string|object} [options.transportProfile] packaged profile id or budget.
    */
   constructor({
     url,
@@ -59,6 +67,7 @@ export class MqttAccess {
     logger,
     now = Date.now,
     codec = defaultCodec,
+    transportProfile = 'default',
   }) {
     this.authorizationPublicKey = authorizationPublicKey instanceof Uint8Array && authorizationPublicKey.length === 32
       ? authorizationPublicKey
@@ -74,7 +83,23 @@ export class MqttAccess {
     this.logger = logger
     this.now = now
     this.codec = resolveCodec(codec)
-    this.#transport = new LogicalTransport({ codec: this.codec, onDeliveryError: () => this.logger?.error('logical_delivery_failed',{code:'internal'}), publish: (topic, bytes) => this.#publish(topic, bytes), now })
+    validateTransportProfiles()
+    const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
+    this.profile = resolved.wireName
+    this.budget = typeof transportProfile === 'object' && transportProfile !== null
+      ? validateTransportBudget(transportProfile)
+      : transportProfileBudget(resolved.name)
+    this.#transport = new LogicalTransport({
+      codec: this.codec,
+      onDeliveryError: () => this.logger?.error('logical_delivery_failed', { code: 'internal' }),
+      publish: (topic, bytes) => this.#publish(topic, bytes),
+      now,
+      fragmentPayloadBytes: this.budget.fragment_payload_bytes,
+      envelopeBytes: this.budget.envelope_bytes,
+      profile: this.profile,
+      logger: this.logger,
+    })
+    this.#verifyControlEnvelopes()
     this.#backoffMs = reconnectMinMs
     if (caFile) {
       try {
@@ -89,6 +114,61 @@ export class MqttAccess {
 
   get connected() {
     return this.#connected
+  }
+
+  /**
+   * Host receive limits for the authenticated broker connection generation.
+   * It is rebuilt from the live access generation so a reconnect or a delayed
+   * readiness cannot advertise limits for an older connection.
+   */
+  receiveAdvertisement() {
+    const generation = this.#generation > 0 ? this.#generation : 1
+    return validateReceiveAdvertisement({
+      profile: this.profile,
+      budget: this.budget,
+      connection_generation: generation,
+    })
+  }
+
+  #verifyControlEnvelopes() {
+    const limit = this.budget.envelope_bytes
+    const samples = [
+      ['host_ready', 'whalerein.v1.HostReady', {
+        host_id: this.hostId, connected_at_unix_ms: 1, transport_version: TRANSPORT_VERSION,
+        receive: { profile: this.profile, budget: this.budget, connection_generation: 1 },
+      }],
+      ['channel_ready', 'whalerein.v1.ChannelReady', {
+        host_id: this.hostId, device_id: 'device', protocol_version: PROTOCOL_VERSION,
+        capabilities: { capabilities: ['sessions', 'events'], protocol_version: PROTOCOL_VERSION },
+        host_nonce: 'nonce',
+        receive: { profile: this.profile, budget: this.budget, connection_generation: 1 },
+      }],
+      ['watch_ready', 'whalerein.v1.WatchReady', {
+        watch_id: 'watch', lease_ms: 30000,
+        state: { session: { host_id: this.hostId, session_id: 'session' }, live_epoch: 'epoch', revision: 1, history_head: 'head', projection_id: 'projection' },
+      }],
+      ['watch_closed', 'whalerein.v1.WatchClosed', {
+        watch_id: 'watch', session: { host_id: this.hostId, session_id: 'session' }, reason: 'session_deleted',
+      }],
+      ['history_reset', 'whalerein.v1.HistoryReset', { reason: 'snapshot_required' }],
+      ['result_too_large', 'whalerein.v1.HostResult', {
+        request_id: 'request', host_id: this.hostId, device_id: 'device', status: 'failed',
+        error_code: 'payload_too_large', protocol_version: PROTOCOL_VERSION, channel_id: 'channel',
+      }],
+      ['attachment_control', 'whalerein.v1.OpenAttachmentResult', {
+        session: { host_id: this.hostId, session_id: 'session' }, attachment_ref: 'attachment',
+        media_type: 'application/octet-stream', size: 0, transfer_id: 'transfer', expires_at_unix_ms: 1,
+        policy: { max_total_bytes: 0, max_chunk_bytes: 1, max_concurrent: 1, idle_timeout_ms: 1, overall_timeout_ms: 1 },
+      }],
+    ]
+    for (const [kind, type, value] of samples) {
+      let size
+      try { size = this.codec.encode(type, value).length } catch { throw new ConfigError('invalid_config', `control envelope ${kind} is not encodable`) }
+      if (size > limit) {
+        this.logger?.warn('transport_control_too_large', { code: 'invalid_config', kind, bytes: size, limit })
+        throw new ConfigError('invalid_config', `control envelope ${kind} exceeds the receive budget`)
+      }
+    }
   }
 
   get requestTopic() {
@@ -286,10 +366,12 @@ export class MqttAccess {
   }
 
   async #publishReady() {
+    const receive = this.receiveAdvertisement()
     const ready = {
       host_id: this.hostId,
       connected_at_unix_ms: this.now(),
       transport_version: TRANSPORT_VERSION,
+      receive,
     }
     if (this.authorizationPublicKey) ready.authorization_public_key = this.authorizationPublicKey
     const body = this.codec.encode('whalerein.v1.HostReady', ready)
@@ -316,7 +398,12 @@ export class MqttAccess {
     if (topic !== this.topics.request) return
     this.#transport.receive(topic, payload, this.topics.result, (bytes) => this.#dispatchRequest(bytes))
       .then((consumed) => { if (!consumed) this.#dispatchRequest(payload) })
-      .catch(() => this.logger?.warn('transport_receive_failed', { code: 'invalid_argument' }))
+      .catch((error) => this.logger?.warn('transport_receive_failed', {
+        code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
+        bytes: payload?.length ?? 0,
+        limit: PACKET_BYTES,
+        generation: this.#generation,
+      }))
   }
 
   #dispatchRequest(payload) {

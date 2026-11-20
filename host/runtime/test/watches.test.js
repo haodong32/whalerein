@@ -4,6 +4,7 @@ import { SourceAdapter } from '../src/contracts/source.js'
 import { WatchedEvents } from '../src/events/watches.js'
 import { StateStore } from '../src/state/store.js'
 import { SecurityManager } from '../src/security/manager.js'
+import { transportProfileBudget } from '../src/contracts/transport.js'
 import { generateKeypair } from '../src/security/noise.js'
 import { codec } from '../src/protocol.js'
 import { establishChannel, openEventEnvelope } from './support/channel.js'
@@ -77,7 +78,7 @@ function bounded(promise, message, timeoutMs = 5000) {
   })
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
-function live(seq=1){return {session:{session_id:'s'},live:{attempt:{live_epoch:'run-native',attempt_id:'generation'},block_id:'visible',first_seq:seq,last_seq:seq,delta:{text:'x'}}}}
+function live(seq=1,delta={kind:'BLOCK_KIND_TEXT',text:'x'}){return {session:{session_id:'s'},live:{attempt:{live_epoch:'run-native',attempt_id:'generation'},block_id:'visible',first_seq:seq,last_seq:seq,delta}}}
 
 test('watch registration precedes the baseline, shares native watches, and delivers only to interested recipients',async()=>{
  const ctx=fixture()
@@ -584,4 +585,213 @@ test('a source that no longer has the session closes the watch with a terminal e
   assert.deepEqual(payload.watch_closed.session, { host_id: 'h', session_id: 's' })
   assert.equal(ctx.events.describe().watches, 0, 'the terminal close removes the watch')
   assert.equal(ctx.events.describe().sessions, 0, 'the terminal close releases the source')
+})
+
+function deliveredUpdates(ctx, deviceId = 'd') {
+  const out = []
+  for (const bytes of ctx.access.published) {
+    const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    if (outer.device_id !== deviceId) continue
+    const channel = deviceId === 'd'
+      ? ctx.channel
+      : { channelId: outer.channel_id, h2c: ctx.otherChannels?.get(deviceId)?.h2c }
+    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId })
+    if (payload?.update) out.push(payload.update)
+  }
+  return out
+}
+
+test('a preview retired by AttemptEnded or an authoritative commit is never reopened', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  const sink = ctx.source.sinks.get('s')
+  sink(live(1))
+  await settle()
+  assert.equal(deliveredUpdates(ctx).filter(update => update.live).length, 1)
+
+  sink({ session: { session_id: 's' }, live: {
+    attempt: { live_epoch: 'run-native', attempt_id: 'generation' },
+    block_id: 'visible', first_seq: 2, last_seq: 2, ended: { outcome: 'COMMITTED' },
+  } })
+  await settle()
+  const afterEnd = deliveredUpdates(ctx).length
+  sink(live(3))
+  await settle()
+  assert.equal(deliveredUpdates(ctx).length, afterEnd, 'a late delta after AttemptEnded is dropped')
+
+  // A committed origin retires its Attempt as well.
+  sink({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'commit-batch',
+    changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'answer' } }] },
+      origin: { live_epoch: 'run-native', attempt_id: 'committed' } }],
+  } })
+  await settle()
+  const afterCommit = deliveredUpdates(ctx).length
+  sink({ session: { session_id: 's' }, live: {
+    attempt: { live_epoch: 'run-native', attempt_id: 'committed' },
+    block_id: 't', first_seq: 1, last_seq: 1, delta: { kind: 'BLOCK_KIND_TEXT', text: 'late' },
+  } })
+  await settle()
+  assert.equal(deliveredUpdates(ctx).length, afterCommit, 'a late delta after a commit origin is dropped')
+  // A replayed start cannot reopen a settled Attempt either.
+  sink({ session: { session_id: 's' }, live: {
+    attempt: { live_epoch: 'run-native', attempt_id: 'committed' },
+    first_seq: 1, last_seq: 1, started: {},
+  } })
+  await settle()
+  assert.equal(deliveredUpdates(ctx).length, afterCommit)
+})
+
+test('an exact duplicate committed batch is delivered once', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  const batch = { session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'same-batch',
+    changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'answer' } }] } }],
+  } }
+  ctx.source.sinks.get('s')(batch)
+  await settle()
+  ctx.source.sinks.get('s')(batch)
+  await settle()
+  assert.equal(deliveredUpdates(ctx).filter(update => update.history).length, 1)
+  assert.equal(ctx.store.countOutbox(), 0)
+})
+
+test('an event that cannot fit the shared receive budget becomes a HistoryReset, never a partial frame', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.security.getChannelReceive = () => ({ budget: { envelope_bytes: 1024 } })
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'too-large',
+    changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'x'.repeat(4096) } }] } }],
+  } })
+  await settle()
+  const updates = deliveredUpdates(ctx)
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].history, undefined, 'no partial committed batch is published')
+  assert.equal(updates[0].reset.reason, 'snapshot_required')
+  assert.equal(ctx.events.describe().snapshotRequired, 1)
+})
+
+test('a shared event route uses the smallest authenticated receiver budget', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  ctx.security.getChannelReceive = (channelId) => ({ budget: { envelope_bytes: channelId === other.channelId ? 1024 : 16 * 1024 * 1024 } })
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'route-min',
+    changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'x'.repeat(4096) } }] } }],
+  } })
+  await settle()
+  for (const bytes of ctx.access.published) {
+    const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    const channel = outer.channel_id === ctx.channel.channelId ? ctx.channel : other
+    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId: outer.device_id })
+    assert.equal(payload.update.history, undefined)
+    assert.equal(payload.update.reset.reason, 'snapshot_required')
+  }
+  assert.equal(ctx.access.published.length, 2)
+})
+
+test('a shared event route uses a relation-valid overridden receive budget as its minimum', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  // This budget carries an operator override that matches no packaged profile
+  // exactly. It is still relation-valid and must bound the shared route.
+  const override = { ...transportProfileBudget('default'), envelope_bytes: 2048 }
+  const other = establishChannel({
+    hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
+    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9 },
+  })
+  assert.equal(ctx.security.getChannelReceive(other.channelId).budget.envelope_bytes, 2048)
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'override-min',
+    changes: [{ message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 't', text: { text: 'x'.repeat(4096) } }] } }],
+  } })
+  await settle()
+  assert.equal(ctx.access.published.length, 2)
+  for (const bytes of ctx.access.published) {
+    const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    const channel = outer.channel_id === ctx.channel.channelId ? ctx.channel : other
+    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId: outer.device_id })
+    assert.equal(payload.update.history, undefined)
+    assert.equal(payload.update.reset.reason, 'snapshot_required')
+  }
+})
+
+test('a cleared channel cannot replay a parked preview into the next observation', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1))
+  ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
+  await settle()
+  assert.equal(ctx.access.published.length, 0, 'the cleared channel has no pending preview')
+  assert.equal(ctx.store.countOutbox(), 0, 'live previews are never durable replays')
+  const next = establishChannel({ hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store })
+  ctx.channel = next
+  await ctx.events.watch('d', next.channelId, 's', undefined, CONV)
+  assert.equal(await ctx.events.flushOutbox(), 0)
+  assert.equal(ctx.access.published.length, 0)
+  assert.equal(deliveredUpdates(ctx).length, 0)
+})
+
+test('tool activity, notices and context authorship are carried unchanged and never merged', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  const preparation = {
+    call_id: 'call-1', stages: ['TOOL_STAGE_PREPARATION'], name: 'read_file', summary: 'Read a file',
+    outcome: 'TOOL_OUTCOME_UNSPECIFIED',
+  }
+  const settlement = {
+    call_id: 'call-1', stages: ['TOOL_STAGE_SETTLEMENT'], name: 'read_file',
+    result: [{ text: { text: 'ok' } }], outcome: 'TOOL_OUTCOME_SUCCEEDED',
+  }
+  const notice = { category: 'NOTICE_CATEGORY_RETRY', state: 'NOTICE_STATE_SCHEDULED', summary: 'Retry scheduled' }
+  const context = { category: 'NOTICE_CATEGORY_CONTEXT', state: 'NOTICE_STATE_COMPLETED', summary: 'Workspace context' }
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'typed-content',
+    changes: [
+      { message: { message_id: 'm1', role: 'TOOL', blocks: [
+        { block_id: 'tool-a', tool_activity: preparation },
+        { block_id: 'tool-b', tool_activity: settlement },
+      ] } },
+      { message: { message_id: 'm2', role: 'NOTICE', blocks: [{ block_id: 'notice', notice }] } },
+      { message: { message_id: 'm3', role: 'MESSAGE_ROLE_CONTEXT', blocks: [{ block_id: 'context', notice: context }] } },
+    ],
+  } })
+  await settle()
+  const [update] = deliveredUpdates(ctx).filter(item => item.history)
+  assert.deepEqual(update.history.changes[0].message.blocks.map(block => block.tool_activity.call_id), ['call-1', 'call-1'])
+  assert.deepEqual(update.history.changes[0].message.blocks.map(block => block.tool_activity.stages), [['TOOL_STAGE_PREPARATION'], ['TOOL_STAGE_SETTLEMENT']])
+  assert.deepEqual(update.history.changes[1].message.blocks[0].notice, notice)
+  assert.deepEqual(update.history.changes[2].message.blocks[0].notice, context)
+  assert.equal(update.history.changes[2].message.role, 'MESSAGE_ROLE_CONTEXT')
+})
+
+test('context or unknown authorship cannot smuggle a user body into a watch', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  for (const [role, block] of [
+    ['MESSAGE_ROLE_CONTEXT', { block_id: 't', text: { text: 'private context' } }],
+    ['MESSAGE_ROLE_UNKNOWN', { block_id: 't', text: { text: 'private context' } }],
+    ['USER', { block_id: 'n', notice: { category: 'NOTICE_CATEGORY_CONTEXT', state: 'NOTICE_STATE_COMPLETED' } }],
+  ]) {
+    ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+      from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: `bad-${role}`,
+      changes: [{ message: { message_id: 'm1', role, blocks: [block] } }],
+    } })
+  }
+  await settle()
+  assert.equal(deliveredUpdates(ctx).filter(item => item.history).length, 0)
+  assert.equal(ctx.access.published.length, 0)
 })

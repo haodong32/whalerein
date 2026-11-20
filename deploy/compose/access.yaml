@@ -41,6 +41,25 @@ pairing:
   claim_ttl: 5m
   max_failures: 5
 
+# Shared encoded transport budget. The profile vocabulary lives in
+# proto/v1/transport_profiles.json; every value below is an optional override
+# that must satisfy the same relations. Invalid settings fail startup with a
+# config error before /readyz can turn green. Changes require a restart.
+transport:
+  # Render the profile from the deployment environment. Both Access and the
+  # Host/client profile must select the same packaged name.
+  profile: "${WHALEREIN_TRANSPORT_PROFILE:-default}"
+  # packet_bytes: 65536
+  # packet_overhead_bytes: 4096
+  # fragment_payload_bytes: 61440
+  # fragment_count: 274
+  # envelope_bytes: 16777216
+  # bulk_concurrency: 4
+  # reserved_bytes: 33554432
+  # fragment_idle_timeout: 30s
+  # transfer_timeout: 120s
+  # result_limit_bytes: 16777216
+
 requests:
   max_ttl: 1h
   forward_interval: 200ms
@@ -48,6 +67,8 @@ requests:
   retry_interval: 1s
   max_attempts: 5
   batch_size: 50
+  # max_result_bytes derives from the transport profile envelope when omitted.
+  # http.max_body_bytes derives from the encoded result bound when omitted.
 
 revocation:
   ack_timeout: 5s

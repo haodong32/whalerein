@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{CoreError, CoreResult, Environment, SecretError, SecretStore};
+use super::{
+    CoreError, CoreResult, Environment, SecretError, SecretStore, TransportBudget,
+    TransportSettings,
+};
 use crate::configuration::{
     document::catalog, writer, DefinitionSource, EnvironmentDefinition, EnvironmentMode,
     EnvironmentResolution, SelectionSource, TlsConfig, TlsProvider, TrustResolver,
@@ -35,6 +38,9 @@ pub struct ClientConfig {
     pub cloud_environment: Option<Environment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_ca_certificate: Option<PathBuf>,
+    /// Validated packaged transport profile and optional local overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportSettings>,
 }
 
 impl ClientConfig {
@@ -45,6 +51,7 @@ impl ClientConfig {
             data_dir: data_dir.into(),
             cloud_environment: None,
             standalone_ca_certificate: None,
+            transport: None,
         }
     }
 }
@@ -75,6 +82,7 @@ pub(crate) struct Instance {
     pub root: PathBuf,
     pub cloud: Option<EnvironmentResolution>,
     pub ca_pem: Option<Vec<u8>>,
+    pub transport: TransportBudget,
 }
 
 fn config_error(path: &Path, reason: &str) -> CoreError {
@@ -167,6 +175,15 @@ impl Instance {
         if configuration.data_dir.as_os_str().is_empty() {
             return Err(error("data_dir must be a nonempty path"));
         }
+        let transport = match &configuration.transport {
+            Some(settings) => TransportBudget::resolve(settings).map_err(|reason| {
+                config_error(
+                    &config_path,
+                    &format!("invalid transport configuration: {reason}"),
+                )
+            })?,
+            None => TransportBudget::default(),
+        };
         let parent = config_path
             .parent()
             .ok_or_else(|| path_error(&config_path))?;
@@ -257,6 +274,7 @@ impl Instance {
             root,
             cloud,
             ca_pem,
+            transport,
         };
         instance.manifest()?;
         Ok(instance)
@@ -663,6 +681,51 @@ mod tests {
         .is_err());
         assert!(!alternate.exists());
         assert_eq!(fs::read(&manifest).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn client_instance_validates_transport_profiles_before_connection_use() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let mut config = ClientConfig::new(ClientService::Standalone, "instance");
+        config.transport = Some(crate::api::TransportSettings {
+            profile: crate::api::TransportProfile::Compact,
+            overrides: Some(crate::api::TransportOverrides {
+                envelope_bytes: Some(4 * 1024 * 1024),
+                fragment_idle_timeout_ms: Some(5_000),
+                ..Default::default()
+            }),
+        });
+        Core::write_config(&path, &config).unwrap();
+        let core = Core::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        assert_eq!(
+            core.client_config().transport.as_ref().unwrap().profile,
+            crate::api::TransportProfile::Compact
+        );
+        assert_eq!(
+            core.transport_budget().profile,
+            crate::api::TransportProfile::Compact
+        );
+        // Local overrides are validated and effective for this instance.
+        assert_eq!(core.transport_budget().envelope_bytes, 4 * 1024 * 1024);
+        assert_eq!(core.transport_budget().fragment_idle_timeout_ms, 5_000);
+
+        // Invalid relations fail during open, before any channel or cache is
+        // created, and leave the selected file readable for correction.
+        let invalid = root.path().join("invalid.toml");
+        fs::write(
+            &invalid,
+            "version = 1\nservice = 'standalone'\ndata_dir = 'other'\n[transport]\nprofile = 'roomy'\n[transport.overrides]\nfragment_count = 1\n",
+        )
+        .unwrap();
+        let error = match Core::open(&invalid, Arc::new(MemorySecretStore::new())) {
+            Ok(_) => panic!("invalid transport configuration was accepted"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("invalid transport configuration"));
+        assert!(!root.path().join("other").exists());
     }
 
     #[test]
