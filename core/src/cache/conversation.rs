@@ -1114,6 +1114,7 @@ mod projection_tests {
         );
         assert!(cache.get_command("legacy").unwrap().is_some());
         cache.clear().unwrap();
+        drop(cache);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1239,6 +1240,7 @@ mod projection_tests {
         );
         reopened.discard_history_stage(&key()).unwrap();
         reopened.clear().unwrap();
+        drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
 }

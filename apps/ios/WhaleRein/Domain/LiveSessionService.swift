@@ -188,11 +188,16 @@ final class LiveSessionService: SessionService {
             }
             broadcast(.message(mapped), scope: scope)
 
-        case .preview(let attemptId, let text, let replace, let incomplete):
+        case .preview(let attemptId, let kind, let text, let replace, let incomplete):
+            // This presenter has a single answer preview. Other block kinds arrive through history.
+            guard kind == "text" else { return }
             broadcast(
                 .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
                 scope: scope
             )
+
+        case .toolActivity:
+            break
 
         case .attemptEnded(let attemptId, let outcome):
             broadcast(
