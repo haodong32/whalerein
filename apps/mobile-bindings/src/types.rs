@@ -17,7 +17,8 @@ use whalerein_core::conversation::{
     NoticeCategory, NoticeState, RunPhase, ToolActivity, ToolResultPart, ToolStage, ToolState,
     ViewUpdate,
 };
-use whalerein_core::history::MessageReference;
+use whalerein_core::attachments::{AttachmentReference, DownloadOutcome, DownloadProgress};
+use whalerein_core::history::{HistoryPage, HistorySource as CoreHistorySource, MessageReference};
 
 /// A paired Host as reported by Access. `fingerprint` is the confirmed pin.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -227,6 +228,9 @@ pub enum ToolResultPartView {
         name: String,
         size: u64,
         available: bool,
+        /// Opaque Source occurrence reference used to request a verified
+        /// download. It is never bytes or an authorization token.
+        attachment_ref: String,
     },
 }
 
@@ -239,6 +243,7 @@ impl From<&ToolResultPart> for ToolResultPartView {
                 name: attachment.name.clone(),
                 size: attachment.size,
                 available: attachment.available,
+                attachment_ref: attachment.attachment_ref.clone(),
             },
         }
     }
@@ -343,8 +348,9 @@ fn notice_state_name(value: NoticeState) -> String {
 /// One content block of a committed message. `kind` is stable text:
 /// `text`, `reasoning`, `tool`, `notice`, `attachment` or `unknown`.
 ///
-/// `tool_activity` is present for tool blocks and `notice` for notice blocks;
-/// `text` stays the display body so existing clients keep rendering.
+/// `tool_activity` is present for tool blocks, `notice` for notice blocks and
+/// `attachment` for attachment blocks; `text` stays the display body so
+/// existing clients keep rendering.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BlockView {
     pub block_id: String,
@@ -353,6 +359,30 @@ pub struct BlockView {
     pub tool_name: Option<String>,
     pub tool_activity: Option<ToolActivityView>,
     pub notice: Option<NoticeView>,
+    pub attachment: Option<AttachmentView>,
+}
+
+/// One canonical committed attachment occurrence. `attachment_ref` is opaque
+/// Source evidence, not a path, digest or authorization token.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentView {
+    pub media_type: String,
+    pub name: String,
+    pub size: u64,
+    pub available: bool,
+    pub attachment_ref: String,
+}
+
+impl From<&content_block::AttachmentContent> for AttachmentView {
+    fn from(value: &content_block::AttachmentContent) -> Self {
+        Self {
+            media_type: value.media_type.clone(),
+            name: value.name.clone(),
+            size: value.size,
+            available: value.available,
+            attachment_ref: value.attachment_ref.clone(),
+        }
+    }
 }
 
 /// A committed conversation message.
@@ -393,6 +423,7 @@ fn block_view(block_id: &str, content: Option<&content_block::Content>) -> Block
         tool_name: None,
         tool_activity: None,
         notice: None,
+        attachment: None,
     };
     match content {
         Some(content_block::Content::Text(text)) => {
@@ -419,6 +450,7 @@ fn block_view(block_id: &str, content: Option<&content_block::Content>) -> Block
         Some(content_block::Content::Attachment(attachment)) => {
             view.kind = "attachment".into();
             view.text = attachment.name.clone();
+            view.attachment = Some(AttachmentView::from(attachment));
         }
         None => {}
     }
@@ -599,6 +631,155 @@ impl From<&MessageReference> for MessageReferenceView {
             projection_id: value.projection_id().to_owned(),
         }
     }
+}
+
+impl MessageReferenceView {
+    /// Rebuild the Core reference from its typed fields.
+    pub(crate) fn to_core(&self) -> Result<MessageReference, ()> {
+        if self.message_id.is_empty()
+            || self.message_id.len() > 512
+            || self.source_locator.is_empty()
+            || self.source_locator.len() > 4096
+            || self.projection_id.is_empty()
+            || self.projection_id.len() > 128
+        {
+            return Err(());
+        }
+        let session = SessionKey::new(
+            self.session.host_id.clone(),
+            self.session.session_id.clone(),
+        )
+        .map_err(|_| ())?;
+        MessageReference::new(
+            session,
+            self.message_id.clone(),
+            self.source_locator.clone(),
+            self.projection_id.clone(),
+        )
+        .map_err(|_| ())
+    }
+}
+
+/// One bounded committed-history page. `source` is `online` or `cache`; the
+/// opaque `continuation` is only valid for the original Host/session scope and
+/// content projection. Messages are chronological within the page; later pages
+/// step toward older history.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryPageView {
+    pub source: String,
+    pub projection: String,
+    pub complete: bool,
+    pub messages: Vec<MessageView>,
+    pub activities: Vec<ToolActivityView>,
+    pub continuation: Option<String>,
+}
+
+impl From<&HistoryPage> for HistoryPageView {
+    fn from(value: &HistoryPage) -> Self {
+        Self {
+            source: match value.source {
+                CoreHistorySource::Online => "online".into(),
+                CoreHistorySource::Cache => "cache".into(),
+            },
+            projection: value.projection.clone(),
+            complete: value.complete,
+            messages: value.messages.iter().map(message_view).collect(),
+            activities: value
+                .activities
+                .iter()
+                .map(ToolActivityView::from)
+                .collect(),
+            continuation: value
+                .continuation
+                .as_ref()
+                .map(std::string::ToString::to_string),
+        }
+    }
+}
+
+/// Scoped committed attachment occurrence used to request a verified save.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentReferenceView {
+    pub session: SessionKeyView,
+    pub attachment_ref: String,
+}
+
+impl AttachmentReferenceView {
+    pub(crate) fn to_core(&self) -> Result<AttachmentReference, ()> {
+        let session = SessionKey::new(
+            self.session.host_id.clone(),
+            self.session.session_id.clone(),
+        )
+        .map_err(|_| ())?;
+        Ok(AttachmentReference::new(session, self.attachment_ref.clone()))
+    }
+}
+
+/// One verified attachment save into an app-owned destination directory.
+/// `file_name` absent uses the Source suggestion or a media-derived name.
+/// `overwrite` false preserves an existing final file.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentDownloadRequestView {
+    pub reference: AttachmentReferenceView,
+    pub destination: String,
+    pub file_name: Option<String>,
+    pub overwrite: bool,
+}
+
+/// Bounded transfer progress. The first event declares the total with
+/// `received == 0`; the final verified commit is only reported through the
+/// download result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentProgressView {
+    pub received: u64,
+    pub total: u64,
+}
+
+impl From<DownloadProgress> for AttachmentProgressView {
+    fn from(value: DownloadProgress) -> Self {
+        Self {
+            received: value.received,
+            total: value.total,
+        }
+    }
+}
+
+/// One verified local save. `path` exists only after verification and an
+/// atomic commit; `verified` is always true for a returned download.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentDownloadView {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub media_type: String,
+    pub verified: bool,
+}
+
+impl From<DownloadOutcome> for AttachmentDownloadView {
+    fn from(value: DownloadOutcome) -> Self {
+        Self {
+            path: value.path.to_string_lossy().into_owned(),
+            name: value.name,
+            bytes: value.bytes,
+            sha256: value.sha256,
+            media_type: value.media_type,
+            verified: value.verified,
+        }
+    }
+}
+
+/// State of one app-started attachment transfer. `state` is `running`,
+/// `succeeded`, `failed` or `cancelled`. `error_code` is a stable mobile error
+/// code and never carries Core text.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentTransferView {
+    pub download_id: String,
+    pub state: String,
+    pub progress: AttachmentProgressView,
+    pub download: Option<AttachmentDownloadView>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 /// Proof-backed outcome of following one submitted message. `Committed` names
@@ -1484,6 +1665,7 @@ mod tests {
                         tool_name: None,
                         tool_activity: None,
                         notice: None,
+                    attachment: None,
                     }],
                     created_at_unix_ms: 7,
                 }

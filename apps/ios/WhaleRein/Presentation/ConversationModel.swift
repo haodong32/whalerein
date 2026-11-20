@@ -87,6 +87,37 @@ final class ConversationModel {
     private(set) var approvalRefreshCount = 0
     private(set) var eventSubscriptionCount = 0
 
+    // Older committed history is an independent one-shot read; it never
+    // replaces the single live watch.
+    private(set) var historyProvenance: HistoryProvenance?
+    private(set) var isLoadingOlderHistory = false
+    private(set) var historyComplete = false
+    private(set) var historyNeedsFreshTraversal = false
+    private(set) var historyErrorKey: L10nKey?
+    /// Increments after a page is prepended so the view can restore the row
+    /// that was visible before the insertion.
+    private(set) var historyPrepend: HistoryPrepend?
+    private(set) var reasoningPreviewText: String?
+    /// Live typed activity rows that preview their committed replacement.
+    private(set) var liveToolActivities: [ToolActivity] = []
+    /// Verified attachment transfers for committed attachment blocks.
+    let attachments: AttachmentTransferModel
+
+    struct HistoryPrepend: Equatable, Sendable {
+        let id: Int
+        let anchorMessageId: String?
+    }
+
+    private var historyContinuation: String?
+    private var historyProjection: String?
+    private var historySource: HistorySource?
+    private var historyGeneration = 0
+    private var isClosed = false
+    private var pagedMessageIds: Set<String> = []
+    private var liveMessageIds: Set<String> = []
+    private let historyPageMessages = 50
+    private let historyPageBytes = 256 * 1024
+
     var draft: String = ""
     var delivery: DeliveryChoice = .send
 
@@ -161,6 +192,9 @@ final class ConversationModel {
         self.onReconnected = onReconnected
         self.now = now
         self.approvalClock = now()
+        self.attachments = AttachmentTransferModel(
+            service: service as? any AttachmentTransferService
+        )
     }
 
     // MARK: - Derived state
@@ -379,6 +413,9 @@ final class ConversationModel {
     }
 
     func close() {
+        isClosed = true
+        historyGeneration &+= 1
+        attachments.cancelAll()
         consumeTask?.cancel()
         consumeTask = nil
         stopApprovalTimer()
@@ -431,6 +468,12 @@ final class ConversationModel {
         switch envelope.event {
         case .reset(let messages, let approvals):
             self.messages = messages
+            liveMessageIds = Set(messages.map(\.messageId))
+            pagedMessageIds.removeAll()
+            historyGeneration &+= 1
+            isLoadingOlderHistory = false
+            liveToolActivities.removeAll()
+            reasoningPreviewText = nil
             trustedPendingApprovalIds.removeAll()
             mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
             optimisticMessages.removeAll()
@@ -445,6 +488,9 @@ final class ConversationModel {
             restartApprovalTimer()
 
         case .message(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
             // A committed message identity is idempotent: a replay must not
             // touch (or consume) any optimistic row.
             guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
@@ -463,6 +509,9 @@ final class ConversationModel {
             }
 
         case .replace(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
                 messages[index] = message
             } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
@@ -485,9 +534,20 @@ final class ConversationModel {
                 requestScroll(animated: false)
             }
 
+        case .reasoningPreview(_, let text, _, _):
+            reasoningPreviewText = text.isEmpty ? nil : text
+
+        case .toolActivity(let activity):
+            if let index = liveToolActivities.firstIndex(where: { $0.callId == activity.callId }) {
+                liveToolActivities[index] = activity
+            } else {
+                liveToolActivities.append(activity)
+            }
+
         case .attemptEnded:
             previewText = nil
             previewAttemptId = nil
+            reasoningPreviewText = nil
             authoritativeRunEpoch += 1
             updateCapabilities(running: false)
 
@@ -1190,6 +1250,206 @@ final class ConversationModel {
     func jumpToLatest() {
         scroll.jumpToLatest()
         requestScroll(animated: true)
+    }
+
+    // MARK: - Committed history
+
+    var canLoadOlderHistory: Bool {
+        capabilities.supportsHistoryPage
+            && loadState == .loaded
+            && !historyComplete
+            && !isLoadingOlderHistory
+            && !historyNeedsFreshTraversal
+            && !watchEnded
+    }
+
+    var canLoadFreshHistory: Bool {
+        capabilities.supportsHistoryPage
+            && historyNeedsFreshTraversal
+            && !isLoadingOlderHistory
+            && loadState == .loaded
+    }
+
+    var historyProvenanceKey: L10nKey? {
+        switch historyProvenance {
+        case .online: return .conversationHistoryOnline
+        case .cache: return .conversationHistoryCache
+        case .unavailable: return .conversationHistoryUnavailable
+        case nil: return nil
+        }
+    }
+
+    /// Live tool previews stay until their authoritative committed block
+    /// arrives; a committed identity always wins.
+    var visibleLiveToolActivities: [ToolActivity] {
+        let committed = Set(
+            messages.flatMap { message in
+                message.blocks.compactMap { $0.toolActivity?.callId }
+            }
+        )
+        return liveToolActivities.filter { !committed.contains($0.callId) }
+    }
+
+    /// Loads one older bounded page. `cacheFallback` explicitly serves the
+    /// encrypted local cache when the Host is unreachable, with cache
+    /// provenance shown to the reader.
+    func loadOlderHistory(cacheFallback: Bool = false) async {
+        guard canLoadOlderHistory,
+              let history = service as? any ConversationHistoryService else {
+            if !capabilities.supportsHistoryPage {
+                historyErrorKey = .errorUnsupportedCapability
+            }
+            return
+        }
+        let useCache = cacheFallback || historySource == .cache || !connection.isOnline
+        // Switching source requires a fresh traversal; a continuation belongs
+        // to one source, projection and scope.
+        if let historySource, historySource != (useCache ? .cache : .online) {
+            historyContinuation = nil
+            historyProjection = nil
+        }
+        let generation = historyGeneration
+        let anchor = scroll.anchorMessageId ?? messages.first?.messageId
+        scroll.capturePrependAnchor(anchor)
+        isLoadingOlderHistory = true
+        historyErrorKey = nil
+        defer {
+            if generation == historyGeneration {
+                isLoadingOlderHistory = false
+            }
+        }
+        do {
+            let page = try await history.historyPage(
+                hostId: hostId,
+                sessionId: sessionId,
+                source: useCache ? .cache : .online,
+                continuation: historyContinuation,
+                maxMessages: historyPageMessages,
+                maxBytes: historyPageBytes
+            )
+            // A replaced session/instance invalidates this late page.
+            guard generation == historyGeneration, !isClosed else { return }
+            applyHistoryPage(page, anchor: anchor)
+        } catch {
+            guard generation == historyGeneration, !isClosed else { return }
+            handleHistoryFailure(error)
+        }
+    }
+
+    /// Drops paged-only rows and starts a fresh latest-first traversal after a
+    /// stale continuation or content projection. Live rows are preserved.
+    func loadFreshHistory() async {
+        guard canLoadFreshHistory else { return }
+        historyGeneration &+= 1
+        messages.removeAll { message in
+            pagedMessageIds.contains(message.messageId)
+                && !liveMessageIds.contains(message.messageId)
+        }
+        pagedMessageIds.removeAll()
+        historyContinuation = nil
+        historyProjection = nil
+        historySource = nil
+        historyComplete = false
+        historyNeedsFreshTraversal = false
+        historyErrorKey = nil
+        await loadOlderHistory()
+    }
+
+    /// Resolve one exact scoped committed message. Stale or foreign content is
+    /// never applied: the model offers a fresh traversal instead.
+    func rereadMessage(_ reference: MessageReference) async {
+        guard reference.hostId == hostId, reference.sessionId == sessionId else {
+            historyErrorKey = .errorSecurity
+            return
+        }
+        guard capabilities.supportsHistoryExact,
+              let history = service as? any ConversationHistoryService else {
+            historyErrorKey = .errorUnsupportedCapability
+            return
+        }
+        if let historyProjection, reference.projectionId != historyProjection {
+            historyNeedsFreshTraversal = true
+            historyErrorKey = nil
+            return
+        }
+        do {
+            let message = try await history.historyMessage(reference)
+            guard !isClosed,
+                  reference.hostId == hostId,
+                  reference.sessionId == sessionId else { return }
+            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+                messages[index] = message
+            } else {
+                messages.append(message)
+            }
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
+            historyErrorKey = nil
+        } catch {
+            handleHistoryFailure(error)
+        }
+    }
+
+    private func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
+        if let historyProjection, historyProjection != page.projection {
+            historyNeedsFreshTraversal = true
+            historyContinuation = nil
+            return
+        }
+        historyProjection = page.projection
+        historySource = page.source
+        historyProvenance = page.source == .cache
+            ? .cache
+            : (connection.isOnline ? .online : .unavailable)
+        let existing = Set(messages.map(\.messageId))
+        var prepended: [ConversationMessage] = []
+        for message in page.messages where !existing.contains(message.messageId) {
+            prepended.append(message)
+            pagedMessageIds.insert(message.messageId)
+        }
+        if !prepended.isEmpty {
+            messages.insert(contentsOf: prepended, at: 0)
+        }
+        historyContinuation = page.complete ? nil : page.continuation
+        historyComplete = page.complete
+        historyErrorKey = nil
+        if !prepended.isEmpty {
+            historyPrepend = HistoryPrepend(
+                id: (historyPrepend?.id ?? 0) + 1,
+                anchorMessageId: anchor
+            )
+        }
+    }
+
+    private func handleHistoryFailure(_ error: Error) {
+        let code = (error as? SessionServiceError)?.code ?? .internalError
+        if code == .staleHistory {
+            historyNeedsFreshTraversal = true
+            historyContinuation = nil
+            historyProjection = nil
+            historyErrorKey = nil
+            return
+        }
+        historyErrorKey = L10nKey.errorKey(for: code)
+        if code == .unavailable || code == .hostOffline {
+            historyProvenance = .unavailable
+        }
+    }
+
+    /// Settles any live preview whose authoritative committed identity arrived.
+    private func settleAuthoritativeContent(_ message: ConversationMessage) {
+        let settledCallIds = Set(
+            message.blocks.compactMap { $0.toolActivity?.callId }
+        )
+        if !settledCallIds.isEmpty {
+            liveToolActivities.removeAll { settledCallIds.contains($0.callId) }
+        }
+        if message.role == .assistant {
+            previewText = nil
+            previewAttemptId = nil
+            reasoningPreviewText = nil
+        }
     }
 
     // MARK: - Internals

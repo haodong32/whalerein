@@ -38,6 +38,14 @@ struct ScrollAnchorState: Equatable, Sendable {
         return false
     }
 
+    /// Captures the row that must stay visually stable when older messages are
+    /// prepended. Unlike `noteTopVisibleMessage`, this also applies while the
+    /// transcript is at the latest row, because loading older content implies
+    /// the reader is at the top.
+    mutating func capturePrependAnchor(_ messageId: String?) {
+        anchorMessageId = messageId
+    }
+
     mutating func jumpToLatest() {
         isAtLatest = true
         unreadCount = 0

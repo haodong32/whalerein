@@ -31,6 +31,20 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.languageNote")
                 }
 
+                Section(L10n.settingsAppSection.key) {
+                    Toggle(
+                        L10n.settingsReasoning.key,
+                        isOn: Binding(
+                            get: { app.reasoningVisible },
+                            set: { _ = app.setReasoningVisible($0) }
+                        )
+                    )
+                    .accessibilityIdentifier("settings.reasoning")
+                    Text(L10n.settingsReasoningNote.key)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section(L10n.settingsData.key) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.settingsStorage.key)

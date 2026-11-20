@@ -24,10 +24,12 @@ pub use client::{
 pub use error::MobileError;
 pub use secret::{MemorySecretStore, SecretStore, SecretStoreError};
 pub use types::{
-    ApprovalView, BlockView, ClientStatusView, CommandView, ConversationEvent, DeliveryChoice,
-    DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
-    NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView, QuestionIntentView,
-    QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView,
-    QuestionsView, RetainedOperationView, SendOperationView, SessionCapabilitiesView,
-    SessionKeyView, SessionSummaryView, ToolActivityView, ToolResultPartView,
+    ApprovalView, AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
+    AttachmentReferenceView, AttachmentTransferView, AttachmentView, BlockView, ClientStatusView,
+    CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView,
+    HostSummary, MessageReferenceView, MessageReplyView, MessageView, NoticeView,
+    PairingPromptView, QuestionAnswerView, QuestionBatchView, QuestionIntentView, QuestionItemView,
+    QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
+    RetainedOperationView, SendOperationView, SessionCapabilitiesView, SessionKeyView,
+    SessionSummaryView, ToolActivityView, ToolResultPartView,
 };
