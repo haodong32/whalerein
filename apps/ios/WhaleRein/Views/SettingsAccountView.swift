@@ -13,12 +13,14 @@ struct SettingsAccountView: View {
 
     @ViewBuilder
     var body: some View {
+        // Diagnostics are a production support surface; keep them reachable
+        // without scrolling past the account and sign-in sections.
+        diagnosticsSection
         statusSection
         defaultComputerSection
         if let model = app.accountSettings, model.canManageSessions {
             appSessionsSection(model)
         }
-        diagnosticsSection
     }
 
     // MARK: - Status
