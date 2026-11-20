@@ -293,7 +293,7 @@ export class ConnectionManager {
       // Connect resumes an established binding instead of requesting approval
       // again. A removed profile must instead obtain fresh approval.
       const existing = this.#readIntent(record)
-      if (!readd && this.#hasBinding(record) && (!existing || existing.state === 'enrolled')) {
+      if (!readd && this.#hasBinding(record) && record.bindings?.operationId && (!existing || existing.state === 'enrolled')) {
         return this.#reconnect(this.#activeRecord())
       }
       this.#activation.acquire()
