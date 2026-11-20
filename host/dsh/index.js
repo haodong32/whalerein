@@ -306,9 +306,11 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
       expectedIssuer: config.expectedIssuer,
       runtimeConfig: config.runtimeConfig,
     })
-  } catch {
-    // Runtime diagnostic text may contain private state or paths.
-    throw Object.assign(new Error('connection manager unavailable'), { code: 'manager_unavailable' })
+  } catch (error) {
+    // Runtime diagnostic text may contain private state or paths. Keep only a
+    // stable conflict code so settings can report a competing owner.
+    const code = error?.code === 'conflict' ? 'conflict' : 'manager_unavailable'
+    throw Object.assign(new Error(code === 'conflict' ? 'connection manager conflict' : 'connection manager unavailable'), { code })
   }
   if (!manager || typeof manager.snapshot !== 'function') {
     throw Object.assign(new Error('connection manager contract missing'), { code: 'manager_unavailable' })
@@ -316,9 +318,10 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
   if (manager.ready && typeof manager.ready.then === 'function') {
     try {
       await manager.ready
-    } catch {
+    } catch (error) {
       await manager.dispose?.()
-      throw Object.assign(new Error('connection manager initialization failed'), { code: 'manager_unavailable' })
+      const code = error?.code === 'conflict' ? 'conflict' : 'manager_unavailable'
+      throw Object.assign(new Error(code === 'conflict' ? 'connection manager conflict' : 'connection manager initialization failed'), { code })
     }
   }
   if (manager.snapshot()?.configError) {
@@ -364,20 +367,42 @@ async function applyManaged(ctx, rawConfig, options) {
   } catch (error) {
     // This is an integration state, not a user configuration problem. Do not
     // log paths, credentials or manager internals.
-    fallbackLog(typeof error?.code === 'string' ? error.code : 'manager_unavailable')
+    const code = typeof error?.code === 'string' ? error.code : 'manager_unavailable'
+    fallbackLog(code)
     registerSettings(ctx, {
       managed: true,
       manager: null,
       config,
-      configError: error?.configError ?? (error instanceof ConfigError ? configFailure(error) : { code: typeof error?.code === 'string' ? error.code : 'manager_unavailable', field: '', reason: 'the connection manager is unavailable in this runtime' }),
+      configError: error?.configError ?? (error instanceof ConfigError
+        ? configFailure(error)
+        : { code, field: '', reason: code === 'conflict' ? 'another Host process owns the active profile' : 'the connection manager is unavailable in this runtime' }),
     })
     return undefined
   }
+  // Register the settings surface before the effect runs so a manager that
+  // cannot activate still reports that state instead of only logging it.
   registerSettings(ctx, host)
-  const dispose = () => host.stop().catch(() => {})
+  let stopped = false
+  const dispose = async () => {
+    if (stopped) return
+    stopped = true
+    try {
+      await host.stop()
+    } catch (error) {
+      fallbackLog(typeof error?.code === 'string' ? error.code : 'internal')
+    }
+  }
+  // Managed startup and reconnect live in the Host runtime. The plugin's
+  // existing Cordis effect owns the lifecycle and releases the manager on
+  // unload, so a reload cannot leave a second active owner.
   if (ctx && typeof ctx.effect === 'function') {
     ctx.effect(() => {
-      host.start()
+      try {
+        host.start()
+      } catch (error) {
+        host.configError = { code: typeof error?.code === 'string' ? error.code : 'manager_unavailable', field: '', reason: 'managed activation failed' }
+        fallbackLog(host.configError.code)
+      }
       return dispose
     }, 'whalerein-dsh')
   }
@@ -408,7 +433,8 @@ function applyStandalone(ctx, rawConfig) {
     const failure = configFailure(error)
     fallbackLog(failure.code, failure.reason)
     // Keep the settings surface available while the Host is stopped so the
-    // page can name the invalid field and still test a corrected draft.
+    // page can name the invalid field and still test a corrected draft. An
+    // invalid Standalone profile never starts managed enrollment.
     if (ctx && typeof ctx.get === 'function' && ctx.get('typertGateway')) {
       createSettingsService(ctx, {
         started: false,
@@ -422,32 +448,75 @@ function applyStandalone(ctx, rawConfig) {
     }
     return
   }
-  const activation = new ActivationOwner({ stateRoot: config.stateRoot })
-  activation.acquire()
   let host
-  try { host = createRuntime(config, { ctx }) }
-  catch (error) { activation.release(); throw error }
-  const stop = host.stop.bind(host)
-  host.stop = async () => {
-    await stop()
+  try {
+    host = createRuntime(config, { ctx })
+  } catch (error) {
+    const failure = configFailure(error)
+    fallbackLog(failure.code, failure.reason)
+    registerSettings(ctx, {
+      started: false,
+      config,
+      security: null,
+      store: null,
+      access: null,
+      diagnostics: () => null,
+      configError: failure,
+    })
+    // An invalid Standalone profile stays Standalone; it must never fall back
+    // to managed enrollment or use the managed credential namespace.
+    return undefined
+  }
+  // Settings is registered before activation so an activation conflict can be
+  // reported on the settings surface instead of thrown out of `apply`.
+  registerSettings(ctx, host)
+  const activation = new ActivationOwner({ stateRoot: config.stateRoot })
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
     activation.release()
   }
-  if (ctx && typeof ctx.get === 'function' && ctx.get('typertGateway')) {
-    createSettingsService(ctx, host)
+  // Acquire synchronously so an activation conflict is reported on the
+  // settings surface instead of being thrown out of `apply`. The lock is
+  // released when the runtime stops and again on plugin disposal (idempotent).
+  try {
+    activation.acquire()
+  } catch (error) {
+    const code = typeof error?.code === 'string' ? error.code : 'conflict'
+    host.configError = {
+      code,
+      field: '',
+      reason: code === 'conflict' ? 'another Host process owns the active profile' : 'activation failed',
+    }
+    fallbackLog(code)
+    return host
   }
-  const start = () => {
-    host.start().catch((error) => {
+  const starting = host.start()
+  if (starting && typeof starting.catch === 'function') {
+    starting.catch((error) => {
       fallbackLog(typeof error?.code === 'string' ? error.code : 'internal')
     })
   }
-  const dispose = () => host.stop().catch(() => {})
+  const originalStop = host.stop.bind(host)
+  host.stop = async () => {
+    try {
+      await originalStop()
+    } finally {
+      release()
+    }
+  }
+  const dispose = async () => {
+    try {
+      await host.stop()
+    } catch (error) {
+      fallbackLog(typeof error?.code === 'string' ? error.code : 'internal')
+    } finally {
+      release()
+    }
+  }
   if (ctx && typeof ctx.effect === 'function') {
-    ctx.effect(() => {
-      start()
-      return dispose
-    }, 'whalerein-dsh')
-  } else {
-    start()
+    ctx.effect(() => dispose, 'whalerein-dsh')
   }
   return host
 }

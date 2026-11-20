@@ -20,6 +20,23 @@ import {
 // Leave room for protobuf/MQTT headers and HTTP base64 wrapping in Access.
 export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
 
+
+const TLS_TRUST_CODES = new Set([
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_UNTRUSTED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA', 'ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE',
+])
+
+/** Classify a transport failure for honest status and retry policy. */
+export function classifyTransportFailure(errorCode, reasonCode) {
+  const reason = Number(reasonCode)
+  // MQTT 5 CONNACK: bad user name/password (4/134) or not authorized (5/135).
+  if ([4, 5, 134, 135].includes(reason)) return 'unauthorized'
+  if (TLS_TRUST_CODES.has(String(errorCode))) return 'tls_trust'
+  return 'unavailable'
+}
+
 export class MqttAccess {
   #client = null
   #generation = 0
@@ -286,12 +303,18 @@ export class MqttAccess {
     })
     client.on('error', (error) => {
       if (generation !== this.#generation) return
-      this.#lastErrorCode = 'unavailable'
+      const code = classifyTransportFailure(error?.code, this.#disconnectReason)
+      this.#lastErrorCode = code
       this.logger?.warn('mqtt_error', {
-        code: this.#lastErrorCode,
+        code,
         reason: ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE'].includes(error?.code) ? error.code : 'transport_error',
         generation,
       })
+      if (code !== 'unavailable') {
+        // A definitive credential or trust failure must not retry forever.
+        this.#failDefinitive(code, generation)
+        return
+      }
       // A CONNACK refusal can surface as `error` without a following `close`.
       // Keep the reconnect loop alive; otherwise waitForConnected can hang
       // while the broker's auth resource is temporarily down.
@@ -304,11 +327,37 @@ export class MqttAccess {
       this.#transport.reset()
       this.#peerCapable = false
       if (wasConnected) {
-        this.logger?.warn('mqtt_disconnected', { code: 'unavailable', reasonCode: this.#disconnectReason, reason: this.#disconnectReason < 0 ? 'transport_closed' : 'broker_disconnect', generation, ...this.#lastPublish })
+        const code = classifyTransportFailure(undefined, this.#disconnectReason)
+        this.logger?.warn('mqtt_disconnected', { code, reasonCode: this.#disconnectReason, reason: this.#disconnectReason < 0 ? 'transport_closed' : 'broker_disconnect', generation, ...this.#lastPublish })
         this.#handlers.onDisconnected?.()
+        if (code !== 'unavailable') {
+          this.#failDefinitive(code, generation)
+          return
+        }
+      }
+      if (!this.#connected) {
+        const code = classifyTransportFailure(undefined, this.#disconnectReason)
+        if (code !== 'unavailable') {
+          this.#failDefinitive(code, generation)
+          return
+        }
       }
       this.#scheduleReconnect()
     })
+  }
+
+  #failDefinitive(code, generation) {
+    if (generation !== this.#generation) return
+    this.#stopped = true
+    this.#connected = false
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer)
+      this.#reconnectTimer = null
+    }
+    for (const waiter of this.#connectWaiters) waiter.reject?.(new PluginError(code, 'transport refused the saved credential or trust configuration'))
+    this.#connectWaiters.clear()
+    this.#handlers.onFailure?.(code)
+    try { this.#client?.end(true) } catch { /* contained */ }
   }
 
   async #onConnected(client, generation, connack) {

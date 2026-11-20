@@ -326,6 +326,7 @@ async function createSettingsRuntime({
       retry: managerAction('retry'),
       disconnect: managerAction('disconnect'),
       reconnect: managerAction('reconnect'),
+      recoverCredential: managerAction('recoverCredential'),
       removeComputer: managerAction('removeComputer'),
     },
     settings: {
@@ -387,9 +388,15 @@ async function createSettingsRuntime({
   const injected = entry.options.inject()
   assert.ok(injected.status, 'status store injected')
   assert.ok(injected.developerTools, 'developer tools injected')
-  const render = () => react.render(entry.Component, {
+  const render = (extra = {}) => react.render(entry.Component, {
     t: ctx.locale.bind('settings.whalerein'),
     ...injected,
+    ...extra,
+  })
+  const renderEntry = (candidate, extra = {}) => react.render(candidate.Component, {
+    t: ctx.locale.bind('settings.whalerein'),
+    ...injected,
+    ...extra,
   })
   const settle = async () => {
     await new Promise((resolve) => setImmediate(resolve))
@@ -402,6 +409,7 @@ async function createSettingsRuntime({
     locales,
     entry,
     render,
+    renderEntry,
     settle,
     remote,
     secrets: injected.secrets,
@@ -461,7 +469,7 @@ test('remote descriptors keep the gateway contract: unique endpoints, no reserve
     assert.deepEqual(contribution.descriptors.map((descriptor) => descriptor.method), [
       'snapshot', 'invite', 'revoke', 'testConnection',
       'details', 'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect',
-      'removeComputer',
+      'recoverCredential', 'removeComputer',
     ])
     const endpoints = contribution.descriptors.map((descriptor) => `${descriptor.namespace}/${descriptor.method}`)
     assert.equal(new Set(endpoints).size, endpoints.length, 'remote endpoints must be unique')
@@ -1569,6 +1577,21 @@ async function createManagedRuntime(options = {}) {
 const managedButton = (runtime, label) => find(runtime.render(), (node) => node.type === UI.Button && text(node) === label)
 const managedDisclosure = (runtime, title) => find(runtime.render(), (node) => node.type === UI.DisclosureRow && node.props.title === title)
 
+test('the setup action stays reachable from both the plugin row card and the settings section', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    const section = runtime.registered.find((item) => item?.options?.name === 'settings.section')
+    const card = runtime.registered.find((item) => item?.options?.name === 'plugins.row.config')
+    assert.ok(section, 'settings.section registration')
+    assert.ok(card, 'plugins.row.config registration')
+    assert.equal(card.Component, section.Component)
+    const row = runtime.renderEntry(card, { view: 'full' })
+    assert.match(text(row), /连接到 WhaleRein Cloud/)
+    assert.equal(find(row, (node) => node.type === UI.Button && text(node) === '连接到 WhaleRein Cloud').props.variant, 'primary')
+    assert.deepEqual(runtime.calls, [], 'a plugin row card never starts enrollment')
+  } finally { await runtime.dispose() }
+})
+
 test('a fresh managed install shows one cloud action and no technical fields or automatic enrollment', async () => {
   const opened = []
   const originalWindow = globalThis.window
@@ -2190,4 +2213,178 @@ test('a Cloud deployment change invalidates old callbacks even when the service 
     assert.deepEqual(runtime.calls, [])
     assert.match(text(runtime.render()), /内部测试 · staging/)
   } finally { await runtime.dispose() }
+})
+
+
+test('an explicit Resume action reconnects with the original authority instead of starting approval', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('disconnected', {
+      connected: false,
+      pendingOperation: true,
+      action: { kind: 'resume' },
+    })
+    await runtime.refresh()
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud'), undefined, 'resume is preferred for a paused binding')
+    const resume = findAll(runtime.render(), (node) => node.type === UI.Button && text(node) === runtime.locales.dictionaries.zh.cloudResume)[0]
+    assert.ok(resume, 'resume action is rendered even while an operation is pending')
+    assert.equal(resume.props.disabled, false, 'a pending persisted operation never disables its action')
+    await resume.props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([method]) => method === 'reconnect'), [['reconnect']])
+    assert.equal(runtime.calls.some(([method]) => method === 'startConnect'), false)
+    assert.doesNotMatch(text(runtime.render()), /正在准备连接/)
+  } finally { await runtime.dispose() }
+})
+
+test('a pending operation does not disable the action the runtime says it requires', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('action_required', {
+      pendingOperation: true,
+      action: { kind: 'connect' },
+    })
+    await runtime.refresh()
+    const connect = managedButton(runtime, '连接到 WhaleRein Cloud')
+    assert.ok(connect)
+    assert.equal(connect.props.disabled, false)
+    await connect.props.onClick()
+    await runtime.settle()
+    assert.deepEqual(runtime.calls.filter(([method]) => method === 'startConnect'), [['startConnect']])
+  } finally { await runtime.dispose() }
+})
+
+test('a resumable setup intent shows Continue, Open browser and Cancel without starting a new intent', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('action_required', {
+      pendingOperation: true,
+      action: { kind: 'open-approval', url: 'https://app.example/approve/request-1' },
+    })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.match(text(tree), new RegExp(runtime.locales.dictionaries.zh.cloudContinueSetup))
+    assert.match(text(tree), /打开浏览器/)
+    assert.ok(managedButton(runtime, '取消'))
+    assert.equal(managedButton(runtime, '连接到 WhaleRein Cloud'), undefined)
+    assert.deepEqual(runtime.calls, [], 'opening the saved intent never starts a second approval')
+  } finally { await runtime.dispose() }
+})
+
+test('recovery action is rendered only for the runtime action and keeps state after an ambiguous denial', async () => {
+  const runtime = await createManagedRuntime()
+  try {
+    runtime.setCloudState('action_required', {
+      connected: false,
+      action: { kind: 'recover-credential' },
+    })
+    await runtime.refresh()
+    const recover = findAll(runtime.render(), (node) => node.type === UI.Button
+      && text(node) === runtime.locales.dictionaries.zh.cloudRecoverCredential)[0]
+    assert.ok(recover)
+    assert.equal(recover.props.disabled, false)
+    // A native DSH Button keeps the action keyboard reachable; it also names
+    // the status hint it belongs to.
+    assert.equal(recover.type, UI.Button)
+    assert.match(recover.props['aria-describedby'], /-state-hint$/)
+    runtime.setActionResult('recoverCredential', new Error('private credential material'))
+    await recover.props.onClick()
+    await runtime.settle()
+    const tree = runtime.render()
+    assert.match(text(tree), /无法完成连接操作/)
+    assert.doesNotMatch(text(tree), /private credential material|secret/)
+    assert.equal(runtime.getStatus().state, 'action_required', 'ambiguous denial retains the recoverable state')
+    assert.deepEqual(runtime.calls.filter(([method]) => method === 'recoverCredential'), [['recoverCredential']])
+  } finally { await runtime.dispose() }
+})
+
+test('removal is not marked pending before the service accepts the intent', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  let finish
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.remote.whalerein.removeComputer = () => new Promise((resolve) => { finish = resolve })
+    const remove = managedButton(runtime, '移除这台电脑')
+    const pending = remove.props.onClick()
+    // While the RPC is unresolved the saved connection policy is unchanged.
+    runtime.render()
+    assert.match(text(runtime.render()), /已连接到 WhaleRein Cloud/)
+    assert.doesNotMatch(text(runtime.render()), /请在浏览器中确认移除/)
+    assert.equal(text(runtime.render()).includes('正在移除这台电脑'), false)
+    // Acceptance returns the verified confirmation target; the page keeps it.
+    finish({ ok: true, value: { action: { url: 'https://app.example/hosts/host-1?removal=1' } } })
+    await pending
+    await runtime.settle()
+    const accepted = text(runtime.render())
+    assert.match(accepted, /请在浏览器中确认移除/)
+    assert.match(accepted, /打开浏览器/)
+    assert.ok(managedButton(runtime, '取消移除'))
+    assert.equal(tab.location.href, 'https://app.example/hosts/host-1?removal=1&locale=zh-CN')
+    // Verified enforcement is projected by the runtime; completion only after
+    // the service confirms it.
+    runtime.setCloudState('removing', { connected: true })
+    await runtime.refresh()
+    assert.match(text(runtime.render()), /移除正在等待服务确认执行/)
+    runtime.setCloudState('removed', { connected: false })
+    await runtime.refresh()
+    const removed = text(runtime.render())
+    assert.match(removed, /服务已确认移除生效/)
+    assert.equal(managedButton(runtime, '取消移除'), undefined)
+    assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+  } finally {
+    finish?.({ ok: false })
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('a cancelled removal handoff clears the local link and keeps the original connection usable', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  const tab = { location: {}, close() { this.closed = true } }
+  try {
+    globalThis.window = { ...originalWindow, open: () => tab }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('removeComputer', { ok: true, value: { action: { url: 'https://app.example/hosts/host-1?removal=1' } } })
+    await managedButton(runtime, '移除这台电脑').props.onClick()
+    await runtime.settle()
+    const cancel = managedButton(runtime, '取消移除')
+    assert.ok(cancel)
+    await cancel.props.onClick()
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    const tree = runtime.render()
+    assert.doesNotMatch(text(tree), /取消移除/)
+    assert.match(text(tree), /已连接到 WhaleRein Cloud/)
+    assert.ok(managedButton(runtime, '断开连接'))
+    assert.ok(managedButton(runtime, '移除这台电脑'))
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
+})
+
+test('a browser-blocked removal exposes a manual verification link', async () => {
+  const runtime = await createManagedRuntime()
+  const originalWindow = globalThis.window
+  try {
+    globalThis.window = { ...originalWindow, open: () => null }
+    runtime.setCloudState('connected', { connected: true })
+    await runtime.refresh()
+    runtime.setActionResult('removeComputer', { ok: true, value: { action: { url: 'https://app.example/hosts/host-1?removal=1' } } })
+    await managedButton(runtime, '移除这台电脑').props.onClick()
+    await runtime.settle()
+    const tree = runtime.render()
+    const link = find(tree, (node) => node.type === 'a' && text(node) === '打开浏览器')
+    assert.equal(link.props.href, 'https://app.example/hosts/host-1?removal=1&locale=zh-CN')
+    assert.match(text(tree), /浏览器阻止了新标签页/)
+  } finally {
+    globalThis.window = originalWindow
+    await runtime.dispose()
+  }
 })

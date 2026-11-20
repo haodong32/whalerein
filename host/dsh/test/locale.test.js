@@ -86,3 +86,33 @@ test('every literal and dynamic settings key has both dictionary entries', async
     assert.ok(key in zh, `missing Chinese key ${key}`)
   }
 })
+
+
+test('managed action labels and terminal reasons are localized in both languages', async () => {
+  const { en, zh } = await dictionaries()
+  const keys = [
+    // Actions and setup entry.
+    'cloudConnect', 'connectCustom', 'cloudResume', 'cloudResuming', 'cloudRecoverCredential',
+    'cloudRecoveringCredential', 'cloudVerifyStatus', 'cloudOpenBrowser', 'cloudCancel',
+    'cloudTryAgain', 'cloudCancelRemoval', 'cloudContinueSetup',
+    // Setup and removal progress.
+    'cloudConfirmationRequired', 'cloudRemovalVerified', 'cloudEnforcementConfirmed',
+    'cloudBrowserBlocked',
+    // Transport, credential and TLS terminal reasons.
+    'errorHint_transport', 'errorHint_credential', 'errorHint_unauthorized',
+    'errorHint_tls_trust', 'errorHint_invalid_config', 'errorHint_recovery_required',
+    'errorHint_removal_pending',
+    'configurationConflict',
+  ]
+  for (const key of keys) {
+    assert.ok(en[key]?.length > 0, `missing English ${key}`)
+    assert.ok(zh[key]?.length > 0, `missing Chinese ${key}`)
+  }
+  // Recovery and TLS wording names the correct setting in both languages.
+  assert.match(en.errorHint_tls_trust, /CA provider|CA file/)
+  assert.match(zh.errorHint_tls_trust, /CA/)
+  assert.match(en.errorHint_credential, /Host Token|credential recovery/)
+  assert.match(zh.errorHint_credential, /主机 Token|凭据恢复/)
+  assert.match(en.configurationConflict, /process|identity/)
+  assert.match(zh.configurationConflict, /进程|身份/)
+})

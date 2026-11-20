@@ -249,6 +249,7 @@ export class ConnectionManager {
       connected: this.#connected,
       devices: this.#runtime?.clientDevices?.() ?? null,
       pendingOperation: this.#pendingOperation(record, intent),
+      action: this.#actionFor(record, intent),
       profiles,
       capabilities: record ? this.#capabilitiesFor(record) : [],
     }
@@ -369,14 +370,16 @@ export class ConnectionManager {
       this.#generation += 1
       this.#abortPolling()
       this.#operation = null
-      await this.#stopRuntime()
+      // Persist the explicit pause before teardown so a crash mid-stop cannot
+      // reconnect on the next start, then stop transport before acknowledging.
+      await this.#registry.setPending(record.id, { paused: true })
+      await this.#registry.clearPendingPhase(record.id)
       const intent = this.#readIntent(record)
       if (intent && record.pending?.phase === 'approval') {
         await this.#clearPollCredential(record)
         this.#intentJournal(record)?.clear()
       }
-      await this.#registry.setPending(record.id, { paused: true })
-      await this.#registry.clearPendingPhase(record.id)
+      await this.#stopRuntime()
       this.#activation.release()
       this.#connected = false
       this.#setState('disconnected', null)
@@ -395,20 +398,39 @@ export class ConnectionManager {
 
   /**
    * Finish a lost enrollment reply with a fresh browser-authorized
-   * `host_credential_recovery` authorization. Never re-sends the enrollment.
+   * `host_credential_recovery` authorization. Without a supplied authorization,
+   * create the durable Cloud recovery intent and open its approval URL; the
+   * same Host polls it with a one-time token and performs the replacement.
    */
   async recoverCredential({ authorization } = {}) {
     return this.#run(async () => {
       this.#assertUsable()
       const record = this.#activeRecord()
       if (!record || record.mode !== 'managed') throw this.#failFast('unsupported_capability', 'credential recovery requires a managed profile')
-      // A Host whose removal is pending or already enforced must not regain a
-      // live transport credential. Only fresh approval after re-add may.
       if (record.pending?.removal === 'removing' || record.pending?.removal === 'removed') {
         throw this.#refuse('removal_pending', 'removal is pending; credential recovery is fenced')
       }
+      const apiOrigin = record.service?.apiOrigin
       const accessOrigin = record.bindings?.accessOrigin
       if (typeof accessOrigin !== 'string' || accessOrigin === '') throw this.#failFast('not_found', 'this profile has no enrolled Access route')
+      if (!authorization) {
+        if (typeof apiOrigin !== 'string' || apiOrigin === '') throw this.#failFast('unavailable', 'service origin is unavailable')
+        this.#activation.acquire()
+        this.#generation += 1
+        const generation = this.#generation
+        this.#setState('recovering', null)
+        try {
+          const prepared = await this.#prepareProfile(record, { allowCreate: false })
+          const metadata = await this.#metadataFor(record)
+          const client = this.#createClient(record, prepared, metadata)
+          const intent = await client.createRecoveryIntent({ apiOrigin })
+          this.#continueRecovery(record, generation, client, intent, accessOrigin)
+          return { ...this.snapshot(), url: intent.approvalUrl, recoveryIntentId: intent.intentId }
+        } catch (error) {
+          this.#handleOperationFailure(error)
+          throw error
+        }
+      }
       this.#activation.acquire()
       this.#generation += 1
       const generation = this.#generation
@@ -432,6 +454,42 @@ export class ConnectionManager {
     })
   }
 
+  #continueRecovery(record, generation, client, intent, accessOrigin) {
+    if (this.#operation !== null) return this.#operation
+    const controller = new AbortController()
+    this.#pollAbort = controller
+    const task = (async () => {
+      try {
+        const approved = await client.pollRecovery({
+          apiOrigin: record.service?.apiOrigin,
+          intentId: intent.intentId,
+          pollToken: intent.pollToken,
+          isActive: () => generation === this.#generation && !this.#disposed,
+          signal: controller.signal,
+          deadlineMs: intent.expiresAtUnixMs ? Math.max(0, intent.expiresAtUnixMs - this.#now()) : 10 * 60_000,
+        })
+        if (generation !== this.#generation) return
+        const credential = await client.replaceCredential({ accessOrigin, authorization: approved.authorization })
+        await this.#registry.setBindings(record.id, {
+          enrollmentRevision: credential.enrollmentRevision || record.bindings?.enrollmentRevision,
+          accessOrigin,
+        })
+        await this.#registry.setPending(record.id, { uncertain: false, phase: 'credential' })
+        await this.#startManagedRuntime(record, credential, generation)
+      } catch (error) {
+        if (generation !== this.#generation) return
+        if (error instanceof EnrollmentError && error.code === 'cancelled') return
+        this.#handleOperationFailure(error)
+      }
+    })()
+    this.#operation = task
+    task.finally(() => {
+      if (this.#operation === task) this.#operation = null
+      if (generation === this.#generation) this.#pollAbort = null
+    })
+    return task
+  }
+
   async remove() {
     return this.#run(async () => {
       this.#assertUsable()
@@ -442,10 +500,49 @@ export class ConnectionManager {
       if (typeof hostId !== 'string' || hostId === '') throw this.#failFast('not_found', 'this profile has no bound Host')
       const apiOrigin = record.service?.apiOrigin
       if (typeof apiOrigin !== 'string' || apiOrigin === '') throw this.#failFast('unavailable', 'service origin is unavailable')
-      await this.#registry.setPending(record.id, { removal: 'removing' })
-      this.#setState('removing', null)
-      const url = `${apiOrigin}/hosts/${encodeURIComponent(hostId)}`
-      return { state: 'removing', url, remoteRevocation: 'pending' }
+      // Do not claim removal locally before Cloud accepts the intent. The
+      // browser confirmation creates the durable intent; `refreshRemoval`
+      // observes it and fences activation only after that proof.
+      const url = `${apiOrigin}/hosts/${encodeURIComponent(hostId)}?removal=1`
+      return { state: 'confirm_removal', url, remoteRevocation: 'unconfirmed' }
+    })
+  }
+
+  /** Observe the durable Cloud/Access removal lifecycle without a browser. */
+  async refreshRemoval() {
+    return this.#run(async () => {
+      this.#assertUsable()
+      const record = this.#activeRecord()
+      if (!record || record.mode !== 'managed') return this.snapshot()
+      let observed
+      try {
+        if (typeof this.#options.removalStatus === 'function') {
+          observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+        } else {
+          const metadata = await this.#metadataFor(record)
+          const prepared = await this.#prepareProfile(record, { allowCreate: false })
+          const client = this.#createClient(record, prepared, metadata)
+          observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+        }
+      } catch {
+        return this.snapshot()
+      }
+      const state = typeof observed === 'string' ? observed : observed?.state
+      if (state === 'pending' || state === 'disabled' || state === 'removing') {
+        await this.#registry.setPending(record.id, { removal: 'removing' })
+        this.#generation += 1
+        this.#abortPolling()
+        await this.#stopRuntime()
+        this.#setState('removing', null)
+      } else if (state === 'enforced' || state === 'removed') {
+        this.#generation += 1
+        this.#abortPolling()
+        await this.#stopRuntime()
+        await this.#registry.setPending(record.id, { removal: 'removed' })
+        await this.#clearTransportCredential(record)
+        this.#setState('removed', null)
+      }
+      return this.snapshot()
     })
   }
 
@@ -454,17 +551,22 @@ export class ConnectionManager {
     return this.#run(async () => {
       this.#assertUsable()
       const record = this.#activeRecord()
-      if (!record || record.pending?.removal === undefined) return this.snapshot()
-      const observe = this.#options.removalStatus
-      if (typeof observe !== 'function') return this.snapshot()
+      if (!record || record.mode !== 'managed') return this.snapshot()
       let observed
       try {
-        observed = await observe({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+        if (typeof this.#options.removalStatus === 'function') {
+          observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+        } else {
+          const metadata = await this.#metadataFor(record)
+          const prepared = await this.#prepareProfile(record, { allowCreate: false })
+          const client = this.#createClient(record, prepared, metadata)
+          observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+        }
       } catch {
         return this.snapshot()
       }
       const state = typeof observed === 'string' ? observed : observed?.state
-      if (state === 'removed') {
+      if (state === 'enforced' || state === 'removed') {
         this.#generation += 1
         this.#abortPolling()
         await this.#stopRuntime()
@@ -474,7 +576,10 @@ export class ConnectionManager {
       } else if (state === 'failed') {
         await this.#registry.setPending(record.id, { removal: 'failed' })
         this.#setState('action_required', 'unavailable')
-      } else if (state === 'removing') {
+      } else if (state === 'pending' || state === 'disabled' || state === 'removing') {
+        this.#generation += 1
+        this.#abortPolling()
+        await this.#stopRuntime()
         await this.#registry.setPending(record.id, { removal: 'removing' })
         this.#setState('removing', null)
       }
@@ -1010,7 +1115,10 @@ export class ConnectionManager {
       return
     }
     if (!record) return
-    if (record.pending?.removal === 'removed' || record.pending?.removal === 'removing') return
+    if (record.pending?.removal === 'removed' || record.pending?.removal === 'removing') {
+      await this.#refreshRemovalOnStart(record)
+      return
+    }
     const intent = this.#readIntent(record)
     if (intent && ['awaiting_approval', 'creating', 'create_uncertain'].includes(intent.state)) {
       this.#state = record.pending?.uncertain ? 'action_required' : 'awaiting_approval'
@@ -1033,14 +1141,38 @@ export class ConnectionManager {
           this.#generation += 1
           await this.#continuePersisted(record, this.#generation)
         })
-      } else if (this.#hasBinding(record) && record.pending?.paused !== true
-        && record.pending?.uncertain !== true
-        && record.pending?.phase !== 'enrollment'
-        && record.pending?.phase !== 'credential') {
+      } else if (record.pending?.uncertain || record.pending?.phase === 'enrollment'
+        || record.pending?.phase === 'credential') {
+        await this.#run(async () => {
+          const reconciled = await this.#reconcileUncertain(record)
+          if (reconciled && this.#hasBinding(record) && record.pending?.paused !== true) {
+            await this.#reconnect(record)
+          }
+        })
+      } else if (this.#hasBinding(record) && record.pending?.paused !== true) {
         await this.#run(() => this.#reconnect(record))
       }
     } catch (error) {
       this.#handleOperationFailure(error)
+    }
+  }
+
+  async #refreshRemovalOnStart(record) {
+    if (typeof this.#options.removalStatus !== 'function') return
+    try {
+      const observed = await this.#options.removalStatus({
+        apiOrigin: record.service?.apiOrigin,
+        hostId: record.bindings?.hostId,
+      })
+      const state = typeof observed === 'string' ? observed : observed?.state
+      if (state === 'none' || state === 'absent') {
+        // The browser confirmation never created an intent; keep the original
+        // connection policy and let the user reopen the correct confirmation.
+        await this.#registry.setPending(record.id, { removal: null })
+        this.#refreshDerivedState()
+      }
+    } catch {
+      // unavailable status preserves the original state and link
     }
   }
 
@@ -1192,6 +1324,14 @@ export class ConnectionManager {
       await runtime.start()
       await this.#waitReady(access)
     } catch (error) {
+      // A transient readiness/transport failure keeps the existing MQTT retry
+      // loop; onReady promotes the connection later. Terminal credential, TLS
+      // or configuration refusals are still surfaced and torn down.
+      if (codeOf(error) === 'unavailable') {
+        this.#connected = false
+        this.#setState('reconnecting', null)
+        return
+      }
       await this.#stopRuntime()
       throw error
     }
@@ -1244,6 +1384,7 @@ export class ConnectionManager {
     if (record.pending?.removal === 'removing' || record.pending?.removal === 'removed') {
       throw this.#refuse('removal_pending', 'removal is pending')
     }
+    if (this.#runtime !== null) return this.snapshot()
     if (!this.#source) throw this.#failFast('invalid_argument', 'a source adapter is required to connect')
     this.#activation.acquire()
     this.#generation += 1
@@ -1254,9 +1395,9 @@ export class ConnectionManager {
       const prepared = await this.#prepareProfile(record, { allowCreate: false })
       const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
       if (!credential) throw this.#failFast('not_found', 'this profile is not enrolled')
-      if (credential.routeExpiresAt && this.#now() >= credential.routeExpiresAt) {
-        throw this.#failFast('expired', 'the assigned route expired; connect again')
-      }
+      // `routeExpiresAt` is legacy approval metadata. Access confirms the
+      // enrollment and the credential; an established Host reconnects without
+      // a new approval even after the original authorization deadline.
       await this.#startManagedRuntime(record, credential, generation)
       return this.snapshot()
     } catch (error) {
@@ -1266,6 +1407,14 @@ export class ConnectionManager {
   }
 
   async #resumeManaged(record) {
+    if (this.#runtime !== null) return this.snapshot()
+    if (record.pending?.removal === 'removing' || record.pending?.removal === 'removed') {
+      throw this.#refuse('removal_pending', 'removal is pending')
+    }
+    if (record.pending?.paused === true) {
+      this.#setState('disconnected', null)
+      return this.snapshot()
+    }
     const prepared = await this.#prepareProfile(record, { allowCreate: false })
     const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
     if (!credential) return this.snapshot()
@@ -1309,6 +1458,13 @@ export class ConnectionManager {
                 }
               }
               handlers.onDisconnected?.()
+            },
+            onFailure: (code) => {
+              if (generation === this.#generation && !this.#disposed) {
+                this.#connected = false
+                this.#setState('action_required', code)
+              }
+              handlers.onFailure?.(code)
             },
           })
         }
@@ -1504,6 +1660,30 @@ export class ConnectionManager {
     return 'idle'
   }
 
+  #actionFor(record, intent) {
+    if (record?.pending?.removal === 'removed') return null
+    if (record?.pending?.removal === 'removing') return { kind: 'verify' }
+    if (this.#desiredError || this.#configError) return { kind: 'fix-config' }
+    if (record?.pending?.paused === true) {
+      return this.#hasBinding(record) ? { kind: 'resume' } : { kind: 'connect' }
+    }
+    if (this.#state === 'awaiting_approval' || this.#state === 'requesting') {
+      const url = intent?.approveUrl ?? null
+      return url ? { kind: 'open-approval', url } : { kind: 'retry' }
+    }
+    if (this.#state === 'idle' || this.#state === 'disconnected') return { kind: 'connect' }
+    if (this.#state === 'action_required' || this.#state === 'denied' || this.#state === 'expired') {
+      if (this.#errorCode === 'unauthorized' || this.#errorCode === 'tls_trust' || this.#errorCode === 'invalid_config') {
+        return { kind: 'fix-config' }
+      }
+      if (this.#errorCode === 'recovery_required') {
+        return this.#hasBinding(record) ? { kind: 'recover-credential' } : { kind: 'retry' }
+      }
+      return this.#hasBinding(record) ? { kind: 'retry' } : { kind: 'connect' }
+    }
+    return { kind: 'wait' }
+  }
+
   #hasBinding(record) {
     return typeof record?.bindings?.hostId === 'string' && record.bindings.hostId !== ''
   }
@@ -1578,25 +1758,57 @@ export class ConnectionManager {
   }
 
   async #reconcileUncertain(record) {
+    const intent = this.#readIntent(record)
+    const operationId = record.pending?.operationId ?? intent?.operationId ?? record.bindings?.operationId ?? ''
+    const accessOrigin = record.bindings?.accessOrigin
+    if (!operationId || !accessOrigin) return false
     try {
       const metadata = await this.#metadataFor(record)
       const prepared = await this.#prepareProfile(record, { allowCreate: false })
       const client = this.#createClient(record, prepared, metadata)
-      const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
-      if (credential) {
+      const status = await client.readOperation({
+        accessOrigin,
+        operationId,
+        authorizationExpiresAtUnixMs: intent?.authorizationExpiresAtUnixMs ?? intent?.expiresAtUnixMs ?? 0,
+      })
+      if (status.outcome === 'committed') {
+        const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
+        if (!credential) {
+          // The enrollment committed but its one-time credential was lost. Keep
+          // the exact operation actionable; a fresh recovery operation is required.
+          await this.#registry.setPending(record.id, { uncertain: true, phase: 'credential', operationId })
+          this.#setState('action_required', 'recovery_required')
+          return false
+        }
+        await this.#registry.setBindings(record.id, {
+          operationId,
+          enrollmentRevision: credential.enrollmentRevision || record.bindings?.enrollmentRevision,
+        })
+        await this.#registry.setPending(record.id, { uncertain: false })
         await this.#registry.clearPendingPhase(record.id)
+        try { this.#intentJournal(record)?.clear() } catch { /* contained */ }
         this.#lastErrorCode = null
         return true
       }
-      const intent = client.journal.read()
-      const accessOrigin = record.bindings?.accessOrigin
-      if (!accessOrigin) return false
-      const status = await client.readStatus({ accessOrigin, operationId: record.bindings?.operationId ?? '' })
-      if (['enrollment_ready', 'enrollment_pending', 'ENROLLMENT_STATE_PENDING', 'ENROLLMENT_STATE_READY'].includes(status.state)) {
-        return false
+      if (['refused', 'fenced', 'absent', 'expired'].includes(status.outcome)) {
+        // A definitive no-effect outcome proves the newer attempt did not
+        // register. Repair the local binding to the confirmed credential and
+        // settle the rejected journal without a new enrollment.
+        const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
+        if (!credential) return false
+        await this.#registry.setPending(record.id, { uncertain: false })
+        await this.#registry.clearPendingPhase(record.id)
+        try {
+          const journal = this.#intentJournal(record)
+          if (journal) journal.write({ ...(journal.read() ?? {}), state: 'rejected', operationId, settledAt: this.#now() })
+        } catch { /* contained */ }
+        this.#lastErrorCode = null
+        return true
       }
+      // admitted/pending/unknown: retain the original operation across restart.
       return false
-    } catch {
+    } catch (error) {
+      if (process.env.WR_DEBUG_RECONCILE) console.error('RECONCILE', error)
       return false
     }
   }

@@ -3696,6 +3696,26 @@
                 "host_noise_public_key": {
                   "type": "bytes",
                   "id": 7
+                },
+                "current_credential_operation_id": {
+                  "type": "string",
+                  "id": 8
+                },
+                "credential_generation": {
+                  "type": "uint64",
+                  "id": 9
+                },
+                "removal_state": {
+                  "type": "string",
+                  "id": 10
+                },
+                "removal_operation_id": {
+                  "type": "string",
+                  "id": 11
+                },
+                "removal_enforced_at_unix_ms": {
+                  "type": "int64",
+                  "id": 12
                 }
               }
             },
@@ -3757,6 +3777,30 @@
                 "committed_at_unix_ms": {
                   "type": "int64",
                   "id": 9
+                },
+                "outcome": {
+                  "type": "string",
+                  "id": 10
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 11
+                },
+                "updated_at_unix_ms": {
+                  "type": "int64",
+                  "id": 12
+                },
+                "credential_generation": {
+                  "type": "uint64",
+                  "id": 13
+                },
+                "credential_issued": {
+                  "type": "bool",
+                  "id": 14
+                },
+                "credential_operation_id": {
+                  "type": "string",
+                  "id": 15
                 }
               }
             },

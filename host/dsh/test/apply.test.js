@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import plugin, { name, inject, Config, apply, configFailure, createHost, createManagedHost } from '../index.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { ConfigError } from '../src/config.js'
+import { ActivationOwner } from 'whalerein-host/activation.js'
 
 test('when a profile has a host ID, apply preserves it; otherwise it generates one', async () => {
   const dirs = [0, 1, 2].map((index) => mkdtempSync(join(tmpdir(), `whalerein-apply-host-${index}-`)))
@@ -302,7 +303,7 @@ test('apply keeps the settings surface available when the runtime manager cannot
     const snapshot = root.whalereinSettings.snapshot()
     assert.equal(snapshot.managed, true)
     assert.equal(snapshot.available, false)
-    assert.deepEqual(snapshot.error, { code: 'unavailable' })
+    assert.deepEqual(snapshot.error, { code: 'manager_unavailable' })
     assert.equal(snapshot.configError.code, 'manager_unavailable')
   } finally {
     process.stderr.write = original
@@ -338,6 +339,150 @@ test('a pinned issuer key becomes the manager authorization verifier', async () 
     assert.equal(captured.verifyAuthorization({ issuer: 'https://issuer.example', signature }, `${canonical}x`), false)
     await host.stop()
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+async function createGatewayRoot() {
+  const root = new Context()
+  class TypertGateway extends Service {
+    constructor(ctx) { super(ctx, 'typertGateway') }
+  }
+  await root.plugin({ name: 'fixtures', apply(ctx) { new TypertGateway(ctx) } })
+  return root
+}
+
+function standaloneConfig(stateDir) {
+  return {
+    adapter: 'fake',
+    service: 'standalone',
+    mqtt_url: 'mqtts://127.0.0.1:1',
+    host_id: 'host-standalone',
+    host_token: 'token',
+    state_dir: stateDir,
+    reconnect_min_ms: 50,
+    reconnect_max_ms: 100,
+  }
+}
+
+test('a competing activation owner is reported as settings state and never starts a second host', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-competing-'))
+  const first = new ActivationOwner({ stateRoot: dir }).acquire()
+  const root = await createGatewayRoot()
+  const original = process.stderr.write.bind(process.stderr)
+  let written = ''
+  process.stderr.write = (chunk) => { written += String(chunk); return true }
+  try {
+    const host = apply(root, standaloneConfig(dir))
+    assert.equal(host instanceof HostRuntime, true)
+    assert.equal(host.started, false)
+    assert.match(written, /"code":"conflict"/)
+    assert.equal(root.whalereinSettings.snapshot().configError.code, 'conflict')
+    assert.equal(written.includes('token'), false, 'activation conflict never logs credentials')
+  } finally {
+    process.stderr.write = original
+    first.release()
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('cold start acquires the activation owner inside the plugin effect and starts the host', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-cold-start-'))
+  const root = await createGatewayRoot()
+  try {
+    const host = apply(root, standaloneConfig(dir))
+    assert.equal(host.started, false)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    assert.equal(host.started, true)
+    assert.throws(() => new ActivationOwner({ stateRoot: dir }).acquire(), (error) => error.code === 'conflict')
+    await root.fiber.dispose()
+    assert.equal(host.started, false)
+    // Disposal released the lock.
+    const next = new ActivationOwner({ stateRoot: dir }).acquire()
+    next.release()
+  } finally {
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('plugin disposal releases the activation owner even when host stop throws', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-reload-race-'))
+  const root = await createGatewayRoot()
+  try {
+    const host = apply(root, standaloneConfig(dir))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    host.stop = async () => { throw Object.assign(new Error('private teardown detail'), { code: 'internal' }) }
+    await root.fiber.dispose()
+    const next = new ActivationOwner({ stateRoot: dir })
+    next.acquire()
+    next.release()
+  } finally {
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an invalid Standalone configuration never starts managed enrollment or another mode', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-invalid-standalone-'))
+  const root = await createGatewayRoot()
+  let managerCalls = 0
+  const original = process.stderr.write.bind(process.stderr)
+  let written = ''
+  process.stderr.write = (chunk) => { written += String(chunk); return true }
+  try {
+    const result = apply(root, {
+      service: 'standalone', adapter: 'fake', mqtt_url: 'not-a-url', host_id: 'host-invalid', host_token: 'private-token', state_dir: dir,
+    }, { managerFactory: async () => { managerCalls += 1; throw new Error('should not be called') } })
+    assert.equal(result, undefined)
+    assert.equal(managerCalls, 0, 'Standalone configuration never falls back to managed enrollment')
+    const snapshot = root.whalereinSettings.snapshot()
+    assert.notEqual(snapshot.managed, true)
+    assert.equal(snapshot.configError.code, 'invalid_config')
+    assert.equal(written.includes('private-token'), false)
+  } finally {
+    process.stderr.write = original
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failed managed startup never falls back to Standalone settings or transport', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-no-fallback-'))
+  const root = await createGatewayRoot()
+  try {
+    const result = await apply(root, { service: 'whalerein_cloud', state_root: dir }, {
+      managerFactory: async () => { throw Object.assign(new Error('private manager path'), { code: 'manager_unavailable' }) },
+    })
+    assert.equal(result, undefined)
+    const snapshot = root.whalereinSettings.snapshot()
+    assert.equal(snapshot.managed, true)
+    assert.equal(snapshot.service, 'whalerein_cloud')
+    assert.equal(snapshot.available, false)
+    assert.equal(snapshot.configError.code, 'manager_unavailable')
+    assert.equal(existsSync(join(dir, 'host-id')), false, 'no Standalone identity is generated for a managed profile')
+  } finally {
+    await root.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a managed activation conflict surfaces on settings instead of throwing out of apply', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-managed-conflict-'))
+  const root = await createGatewayRoot()
+  try {
+    const result = await apply(root, { service: 'whalerein_cloud', state_root: dir }, {
+      managerFactory: async () => { throw Object.assign(new Error('private lock detail'), { code: 'conflict' }) },
+    })
+    assert.equal(result, undefined)
+    const snapshot = root.whalereinSettings.snapshot()
+    assert.equal(snapshot.configError.code, 'conflict')
+    assert.deepEqual(snapshot.error, { code: 'conflict' })
+    assert.equal(JSON.stringify(snapshot).includes('private lock detail'), false)
+  } finally {
+    await root.fiber.dispose()
     rmSync(dir, { recursive: true, force: true })
   }
 })
