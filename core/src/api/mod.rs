@@ -65,6 +65,8 @@ pub use crate::profiles::{
     ActivationOutcome, ProfileContext, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome,
 };
 pub use crate::runtime::ConnectionState;
+#[cfg(unix)]
+pub use crate::security::FileSecretStore;
 #[cfg(feature = "keyring")]
 pub use crate::security::KeyringSecretStore;
 pub use crate::security::{MemorySecretStore, SecretError, SecretStore};

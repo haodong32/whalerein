@@ -681,13 +681,26 @@ fn paired_binary() -> (
     PathBuf,
     whalerein_core::api::test_support::FakeAccess,
 ) {
+    paired_binary_with(|_, _| {})
+}
+
+fn paired_binary_with(
+    configure: impl FnOnce(&mut Command, &Path),
+) -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    PathBuf,
+    whalerein_core::api::test_support::FakeAccess,
+) {
     use whalerein_core::api::test_support::FakeAccess;
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
     let temp = tempfile::tempdir().unwrap();
     let config = selected(temp.path(), "standalone");
-    let mut pairing = invocation(&config)
+    let mut command = invocation(&config);
+    configure(&mut command, temp.path());
+    let mut pairing = command
         .args(["--yes", "host", "connect", "--invite-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -703,6 +716,38 @@ fn paired_binary() -> (
     let paired = pairing.wait_with_output().unwrap();
     assert_eq!(paired.status.code(), Some(0), "{paired:?}");
     (runtime, temp, config, access)
+}
+
+#[cfg(unix)]
+#[test]
+fn secrets_dir_persists_credentials_across_cli_processes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_runtime, temp, config, _access) = paired_binary_with(|command, root| {
+        command.arg("--secrets-dir").arg(root.join("credentials"));
+    });
+    let directory = temp.path().join("credentials");
+    let result = invocation(&config)
+        .args(["session", "history", "session-1", "--secrets-dir"])
+        .arg(&directory)
+        .output()
+        .unwrap();
+    assert_eq!(outcome(&result, 0)["data"]["source"], "online");
+
+    assert_eq!(
+        directory.metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let files: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect();
+    assert!(!files.is_empty());
+    for file in files {
+        let metadata = file.metadata().unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
 }
 
 #[test]
