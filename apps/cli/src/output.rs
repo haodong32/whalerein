@@ -11,6 +11,7 @@ use std::cell::Cell;
 
 use crate::cli::{Command, ModelAction};
 
+use whalerein_core::attachments::{attachment_extension, default_attachment_name};
 use whalerein_core::conversation::{
     content_block, AttemptOutcome, BlockKind, ConversationMessage, NoticeCategory, NoticeState,
     PreviewPrefix, RunPhase, ToolActivity, ToolResultPart, ViewUpdate,
@@ -118,27 +119,11 @@ fn notice_label(category: NoticeCategory, state: NoticeState) -> String {
     )
 }
 
-fn attachment_extension(media_type: &str) -> &'static str {
-    match media_type {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        "image/svg+xml" => "svg",
-        "application/pdf" => "pdf",
-        "text/plain" => "txt",
-        _ => "bin",
-    }
-}
-
 fn attachment_display_name(attachment: &content_block::AttachmentContent) -> String {
     if !attachment.name.trim().is_empty() {
         return attachment.name.clone();
     }
-    format!(
-        "attachment.{}",
-        attachment_extension(&attachment.media_type)
-    )
+    default_attachment_name(&attachment.media_type)
 }
 
 fn render_attachment(attachment: &content_block::AttachmentContent) -> String {

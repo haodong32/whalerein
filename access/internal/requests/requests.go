@@ -347,11 +347,18 @@ func (s *Service) admissionStamp(ctx context.Context, input SubmitInput) (*store
 // resultLimitFor validates the device's declared encoded result bound against
 // Access's retained ciphertext cap and its current HTTP delivery budget. It
 // clamps rather than trusts, and it ignores any device-supplied generation.
-func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
+// resultLimitBase is the raw ciphertext allowance implied by Access's own
+// retention and HTTP delivery bounds, independent of the device declaration.
+func (s *Service) resultLimitBase() int64 {
 	limit := s.cfg.MaxResultBytes
 	if delivery := ResultValueLimit(s.cfg.MaxDeliveryBytes); delivery < limit {
 		limit = delivery
 	}
+	return limit
+}
+
+func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
+	limit := s.resultLimitBase()
 	declared := request.GetTransport().GetResultMaxBytes()
 	if declared > 0 {
 		declaredLimit := int64(math.MaxInt64)
@@ -839,10 +846,7 @@ func (s *Service) Release(ctx context.Context, deviceID, sessionID, requestID st
 // without a stamp falls back to the current Access limits; it can never widen
 // beyond them.
 func (s *Service) resultIngestLimit(row store.Request) int64 {
-	limit := s.cfg.MaxResultBytes
-	if delivery := ResultValueLimit(s.cfg.MaxDeliveryBytes); delivery < limit {
-		limit = delivery
-	}
+	limit := s.resultLimitBase()
 	if row.Stamp != nil && row.Stamp.ResultLimitBytes < limit {
 		limit = row.Stamp.ResultLimitBytes
 	}

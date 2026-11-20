@@ -592,10 +592,9 @@ fn validate_destination(path: &Path) -> CoreResult<()> {
 /// used. Absolute paths, `..`, control characters and reserved device names
 /// never become a local name. Explicit names are stricter: separators are
 /// rejected rather than normalized.
-/// A stable default filename when the Source supplies no display name. The
-/// media type chooses a conventional extension; everything else stays `.bin`.
-pub(crate) fn default_attachment_name(media_type: &str) -> String {
-    let extension = match media_type {
+/// Conventional extension for a display-safe attachment filename.
+pub fn attachment_extension(media_type: &str) -> &'static str {
+    match media_type {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
@@ -604,8 +603,12 @@ pub(crate) fn default_attachment_name(media_type: &str) -> String {
         "application/pdf" => "pdf",
         "text/plain" => "txt",
         _ => "bin",
-    };
-    format!("attachment.{extension}")
+    }
+}
+
+/// A stable default filename when the Source supplies no display name.
+pub fn default_attachment_name(media_type: &str) -> String {
+    format!("attachment.{}", attachment_extension(media_type))
 }
 
 pub(crate) fn safe_file_name(value: &str, explicit: bool) -> CoreResult<String> {
@@ -2343,5 +2346,4 @@ mod download_tests {
         assert_eq!(outcome.path, destination.join("attachment.png"));
         assert_eq!(std::fs::read(&outcome.path).unwrap(), bytes);
     }
-
 }

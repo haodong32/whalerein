@@ -175,8 +175,6 @@ struct Established {
     /// The capability set the Host advertised in `ChannelReady`. An absent
     /// field decodes to the empty set, which advertises nothing.
     capabilities: CapabilitySet,
-    #[allow(dead_code)]
-    host_public_key: [u8; 32],
     receive: crate::access::transport::TransportBudget,
     receive_generation: u64,
 }
@@ -263,7 +261,6 @@ async fn handshake(
     Ok(Established {
         channel,
         capabilities,
-        host_public_key,
         receive: host_receive,
         receive_generation: host_receive_generation,
     })

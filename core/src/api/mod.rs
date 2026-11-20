@@ -75,8 +75,8 @@ pub use core::cloud_pairing::{CloudRevocationOutcome, CloudRevocationState};
 #[cfg(test)]
 pub use core::CoreOptions;
 pub use core::{
-    AccountState, ClientStatus, Core, DeviceAccess, ForkOutcome, MessageReply, SendFollowUp,
-    SendOperation, SendReply,
+    AccountState, ClientStatus, Core, DeviceAccess, ForkOutcome, SendFollowUp, SendOperation,
+    SendReply,
 };
 pub use error::{error_code_action, error_code_exit_code, error_code_name, CoreError, CoreResult};
 pub use instance::{ClientConfig, ClientService};

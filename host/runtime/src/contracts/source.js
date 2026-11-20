@@ -378,38 +378,6 @@ export function validateHistoryRead(read) {
   return read
 }
 
-export function validateHistoryPage(page) {
-  if (!page || typeof page !== 'object' || Array.isArray(page)) {
-    throw new AdapterError('invalid_argument', 'history page missing')
-  }
-  if (!page.session || typeof page.session !== 'object') {
-    throw new AdapterError('invalid_argument', 'history page session missing')
-  }
-  requireId('host_id', page.session.host_id, 'history page host invalid')
-  requireId('session_id', page.session.session_id, 'history page session invalid')
-  if (!page.batch || typeof page.batch !== 'object') {
-    throw new AdapterError('invalid_argument', 'history page batch missing')
-  }
-  requireId('cursor', page.batch.from_cursor, 'history page from cursor invalid')
-  requireId('cursor', page.batch.to_cursor, 'history page to cursor invalid')
-  requireId('batch_id', page.batch.batch_id, 'history page batch invalid')
-  if (page.batch.projection_id !== undefined) {
-    requireId('projection_id', page.batch.projection_id, 'history batch projection invalid')
-  }
-  for (const change of page.batch.changes ?? []) validateConversationMessage(change.message)
-  requireId('cursor', page.cut_cursor, 'history page cut invalid')
-  requireId('projection_id', page.projection_id, 'history page projection invalid')
-  knownEnum(page.source, HISTORY_SOURCES, 'history page source invalid')
-  if (page.continuation !== undefined && page.continuation !== '') {
-    requireId('continuation', page.continuation, 'history continuation invalid')
-  }
-  for (const key of ['complete', 'snapshot']) {
-    if (page[key] !== undefined && typeof page[key] !== 'boolean') {
-      throw new AdapterError('invalid_argument', `history page ${key} invalid`)
-    }
-  }
-  return page
-}
 
 // ---------------------------------------------------------------------------
 // Typed send follow-up

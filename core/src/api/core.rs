@@ -4131,7 +4131,7 @@ pub(crate) mod watch;
 
 mod operation;
 pub use operation::{
-    AccountState, ClientStatus, DeviceAccess, MessageReply, SendFollowUp, SendOperation, SendReply,
+    AccountState, ClientStatus, DeviceAccess, SendFollowUp, SendOperation, SendReply,
 };
 mod pairing_recovery;
 

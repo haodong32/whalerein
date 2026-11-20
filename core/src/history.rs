@@ -900,14 +900,6 @@ impl Core {
         }
         result
     }
-
-    /// Alias for [`Self::history_message`].
-    pub async fn read_message(
-        &self,
-        reference: &MessageReference,
-    ) -> CoreResult<ConversationMessage> {
-        self.history_message(reference).await
-    }
 }
 
 #[cfg(test)]

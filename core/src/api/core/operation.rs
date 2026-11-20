@@ -322,9 +322,6 @@ pub enum SendReply {
     Uncertain,
 }
 
-/// Previous public name for the typed send follow-up result.
-pub type MessageReply = SendReply;
-
 fn input_kind(value: i32) -> Option<crate::api::types::InputKind> {
     use crate::api::types::InputKind;
     use whalerein_proto::InputKind as Wire;
@@ -709,7 +706,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             reply,
-            MessageReply::Committed { reference }
+            SendReply::Committed { reference }
                 if reference.message_id() == "message-1"
         ));
         assert!(matches!(
@@ -824,7 +821,7 @@ mod tests {
             .await
             .unwrap();
         match reply {
-            MessageReply::InputRequired {
+            SendReply::InputRequired {
                 kinds,
                 operation,
                 session,
@@ -950,7 +947,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             input,
-            MessageReply::InputRequired { kinds, operation, session }
+            SendReply::InputRequired { kinds, operation, session }
                 if kinds == vec![crate::api::InputKind::Approval]
                     && operation == id
                     && session == target
@@ -962,7 +959,7 @@ mod tests {
             .follow_send_operation(sent.clone(), Duration::from_millis(50))
             .await
             .unwrap();
-        assert!(matches!(timed_out, MessageReply::Uncertain));
+        assert!(matches!(timed_out, SendReply::Uncertain));
         assert_eq!(core.send_operation(&id).unwrap().target, target);
         assert_eq!(access.host.lock().unwrap().commands_seen, 1);
     }
