@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { createConnectionManager } from '../src/manager.js'
 import { MemoryHostCredentials } from '../src/security/credentials.js'
 import { ProfileCredentialStore, CREDENTIAL_PURPOSES } from '../src/credentials.js'
-import { HostProfileRegistry } from '../src/registry.js'
+import { HostProfileRegistry, RegistryError } from '../src/registry.js'
+import { INTENT_SCHEMA, IntentJournal } from '../src/enrollment.js'
 import { OFFICIAL_SERVICES } from '../src/services.js'
 
 
@@ -1837,5 +1838,1065 @@ test('an unbound profile whose stored service differs from the file needs a new 
   } finally {
     rmSync(stateRoot, { recursive: true, force: true })
     rmSync(configDir, { recursive: true, force: true })
+  }
+})
+
+function recoveryAuthorization(hostId) {
+  return {
+    authVersion: 'whalerein/v1/ext-auth-v1',
+    authorizationId: 'recovery-1',
+    issuer: 'https://issuer.example',
+    audience: 'https://access.example',
+    purpose: 'host_credential_recovery',
+    hostId,
+    issuedAtUnixMs: NOW - 1000,
+    expiresAtUnixMs: NOW + 60_000,
+    nonce: b64(Buffer.alloc(16, 1)),
+  }
+}
+
+test('credential recovery opens a recovery intent, watches it and replaces the credential once', async () => {
+  const base = createFetch()
+  let hostId = ''
+  const recovery = { creates: 0, polls: 0 }
+  const fetch = async (url, options = {}) => {
+    if (url.endsWith('/api/hosts/recovery-intents') && options.method === 'POST') {
+      recovery.creates += 1
+      return json(201, {
+        intent_id: 'intent-1',
+        approval_url: 'https://app.whalerein.com/recover/intent-1',
+        poll_token: 'poll-1',
+        expires_at_unix_ms: NOW + 120_000,
+      })
+    }
+    if (url.includes('/api/hosts/recovery-intents/')) {
+      recovery.polls += 1
+      return json(200, { state: 'approved', authorization: recoveryAuthorization(hostId) })
+    }
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    hostId = registry.get(profileId).bindings.hostId
+    const opened = await f.manager.recoverCredential()
+    assert.equal(opened.url, 'https://app.whalerein.com/recover/intent-1')
+    assert.equal(opened.recoveryIntentId, 'intent-1')
+    assert.equal(opened.state, 'recovering')
+    assert.equal(recovery.creates, 1)
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    assert.equal(recovery.polls, 1)
+    assert.equal(f.mqtts.at(-1).options.token, 'recovered-password')
+    assert.equal(f.manager.snapshot().pendingOperation, false)
+    assert.equal(registry.get(profileId).pending?.uncertain, undefined)
+    assert.equal(f.manager.snapshot().error, null)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('recovery intent creation failure and a denied poll stay actionable', async () => {
+  const base = createFetch()
+  let createReply = json(500, {})
+  let pollReply = json(200, { state: 'denied' })
+  const fetch = async (url, options = {}) => {
+    if (url.endsWith('/api/hosts/recovery-intents') && options.method === 'POST') return createReply
+    if (url.includes('/api/hosts/recovery-intents/')) return pollReply
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    await assert.rejects(f.manager.recoverCredential(), (error) => error.code === 'unavailable')
+    assert.equal(f.manager.snapshot().state, 'action_required')
+    assert.equal(f.manager.snapshot().error.code, 'unavailable')
+
+    createReply = json(201, {
+      intent_id: 'intent-1',
+      approval_url: 'https://app.whalerein.com/recover/intent-1',
+      poll_token: 'poll-1',
+    })
+    const opened = await f.manager.recoverCredential()
+    assert.equal(opened.state, 'recovering')
+    await waitFor(() => f.manager.snapshot().state === 'denied')
+    assert.equal(f.manager.snapshot().error.code, 'forbidden')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('removal lifecycle is observed through the scoped Cloud removal read', async () => {
+  const base = createFetch()
+  let removalReply = json(500, {})
+  let throwRemoval = true
+  const fetch = async (url, options = {}) => {
+    if (url.includes('/api/hosts/') && url.endsWith('/removal')) {
+      if (throwRemoval) throw new TypeError('offline')
+      return removalReply
+    }
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const confirmation = await f.manager.remove()
+    assert.equal(confirmation.state, 'confirm_removal')
+    assert.equal(confirmation.remoteRevocation, 'unconfirmed')
+    assert.match(confirmation.url, /^https:\/\/app\.whalerein\.com\/hosts\/[^/]+\?removal=1$/)
+
+    // An unavailable status read never claims local removal.
+    const unchanged = await f.manager.refreshRemoval()
+    assert.equal(unchanged.state, 'connected')
+    assert.equal(unchanged.pendingOperation, false)
+
+    throwRemoval = false
+    for (const state of ['pending', 'disabled', 'removing']) {
+      removalReply = json(200, { state, removal_operation_id: 'removal-1' })
+      const observed = await f.manager.refreshRemoval()
+      assert.equal(observed.state, 'removing', state)
+      assert.equal(observed.connected, false)
+      assert.equal(observed.pendingOperation, true)
+    }
+    const profileId = f.manager.snapshot().profileId
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'removing')
+    assert.equal(f.runtimes[0].stopped > 0, true)
+
+    removalReply = json(200, { state: 'enforced' })
+    const removed = await f.manager.reconcileRemoval()
+    assert.equal(removed.state, 'removed')
+    assert.equal(removed.action, null)
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'removed')
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    assert.equal(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('startup reconciles a persisted removal intent through the removal status provider', async () => {
+  const f = fixture()
+  let profileId
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    profileId = f.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry.setPending(profileId, { removal: 'removing', paused: false })
+    await f.manager.dispose()
+
+    const openManager = (removalStatus) => createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: f.network.fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+      removalStatus,
+    })
+
+    // A browser confirmation that never created a durable intent is cleared.
+    const cleared = openManager(async () => ({ state: 'none' }))
+    await cleared.ready
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending?.removal, undefined)
+    assert.equal(cleared.snapshot().pendingOperation, false)
+    assert.equal(cleared.snapshot().state, 'disconnected')
+    await cleared.dispose()
+
+    // The same state is retained when the status provider is unavailable.
+    const registry2 = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry2.setPending(profileId, { removal: 'removed', paused: false })
+    const unavailable = openManager(async () => { throw new TypeError('offline') })
+    await unavailable.ready
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'removed')
+    await unavailable.dispose()
+
+    // Without a provider the persisted removal intent is left untouched.
+    const noProvider = openManager(undefined)
+    await noProvider.ready
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'removed')
+    await noProvider.dispose()
+  } finally {
+    if (f) f.cleanup()
+  }
+})
+
+test('a failed removal observation is actionable and keeps the credential', async () => {
+  const f = fixture({ removalStatus: async () => ({ state: 'failed' }) })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const observed = await f.manager.refreshRemoval()
+    assert.equal(observed.state, 'action_required')
+    assert.equal(observed.error.code, 'unavailable')
+    const profileId = observed.profileId
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'failed')
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    assert.notEqual(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null,
+      'a failed removal never clears the transport credential')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('reconnect without a transport credential requires recovery and keeps the binding', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    await store.remove(CREDENTIAL_PURPOSES.transportCredential)
+    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'recovery_required')
+    const failed = f.manager.snapshot()
+    assert.equal(failed.state, 'action_required')
+    assert.equal(failed.error.code, 'recovery_required')
+    assert.equal(failed.action.kind, 'resume', 'a paused profile resumes instead of recovering immediately')
+    const pending = new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending
+    assert.equal(pending.uncertain, true)
+    assert.equal(pending.phase, 'enrollment')
+
+    // An unbound profile has nothing to recover and is reported as absent.
+    const staging = await f.manager.enableStaging()
+    await f.manager.switchProfile(staging.id)
+    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'not_found')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a failed credential replacement keeps recovery actionable', async () => {
+  const base = createFetch()
+  const fetch = async (url, options = {}) => {
+    if (url.endsWith('/credential')) return json(401, {})
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const hostId = new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).bindings.hostId
+    await assert.rejects(
+      f.manager.recoverCredential({ authorization: recoveryAuthorization(hostId) }),
+      (error) => error.code === 'forbidden',
+    )
+    assert.equal(f.manager.snapshot().state, 'action_required')
+    assert.equal(f.manager.snapshot().error.code, 'forbidden')
+    assert.equal(f.mqtts.at(-1).options.token, 'broker-password',
+      'a refused replacement never swaps the saved credential')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('resuming a switched profile refuses pending removal and honours a paused target', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const productionId = f.manager.snapshot().profileId
+    const staging = await f.manager.enableStaging()
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    // Bind the staged profile so resuming it reaches the removal fence.
+    registry.setBindings(staging.id, { hostId: 'staging-host-1', accessOrigin: 'https://access.example', operationId: 'op-1' })
+    registry.setPending(staging.id, { removal: 'removing' })
+    const fenced = await f.manager.switchProfile(staging.id)
+    assert.equal(fenced.profileId, staging.id)
+    assert.equal(fenced.state, 'action_required')
+    assert.equal(fenced.error.code, 'removal_pending')
+
+    const resumed = await f.manager.switchProfile(productionId)
+    assert.equal(resumed.profileId, productionId)
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+
+    registry.setPending(productionId, { paused: true })
+    registry.setPending(staging.id, { removal: undefined, paused: true })
+    const paused = await f.manager.switchProfile(staging.id)
+    assert.equal(paused.profileId, staging.id)
+    assert.equal(paused.state, 'disconnected')
+    assert.equal(paused.connected, false)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a terminal transport failure reports action-required with a configuration action', async () => {
+  let handlers = null
+  const access = {
+    connected: false,
+    start(received) {
+      handlers = received
+      access.connected = true
+      return access
+    },
+    async waitForConnected() {
+      access.connected = true
+    },
+    async stop() {
+      access.connected = false
+    },
+  }
+  const runtimeFactory = ({ access: injected }) => ({
+    async start() {
+      injected.start({})
+    },
+    async stop() {},
+  })
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: createFetch().fetch,
+      mqtt: () => access,
+      runtimeFactory,
+      installationId: 'test-install',
+    })
+    await manager.startConnect()
+    await waitFor(() => manager.snapshot().state === 'connected')
+    handlers.onFailure('tls_trust')
+    const failed = manager.snapshot()
+    assert.equal(failed.state, 'action_required')
+    assert.equal(failed.connected, false)
+    assert.equal(failed.error.code, 'tls_trust')
+    assert.equal(failed.action.kind, 'fix-config')
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('startup settles a refused uncertain enrollment without re-enrolling', async () => {
+  const f = fixture({ fetchOptions: { operationOutcome: 'refused' } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const createsBefore = f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry.setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
+    await f.manager.dispose()
+
+    const reopened = createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: f.network.fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await reopened.ready
+    await waitFor(() => reopened.snapshot().state === 'connected')
+    assert.equal(reopened.snapshot().pendingOperation, false)
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length, createsBefore,
+      'a refused operation settles locally without a new approval')
+    await reopened.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+function metadataResponse() {
+  return json(200, metadataDocument())
+}
+
+function patched(object, method, replacement) {
+  const original = object[method]
+  object[method] = replacement
+  return () => { object[method] = original }
+}
+
+function intentJournalFor(stateRoot, profileId) {
+  return new IntentJournal({ stateDir: join(stateRoot, 'profiles', profileId) })
+}
+
+test('profile configuration without a snapshot is refused before any state is created', () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  try {
+    assert.throws(
+      () => createConnectionManager({
+        stateRoot,
+        configFile: ensureConfig(stateRoot),
+        credentials: new MemoryHostCredentials(),
+        profileConfiguration: true,
+        installationId: 'test-install',
+      }),
+      (error) => error.code === 'invalid_argument',
+    )
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('retry reconciles an uncertain operation and rejects while it is still pending', async () => {
+  let pendingStart = true
+  const pending = fixture({
+    runtimeOptions: { failStartFor: () => pendingStart },
+    fetchOptions: { operationOutcome: 'pending' },
+  })
+  try {
+    await pending.manager.startConnect()
+    await waitFor(() => pending.manager.snapshot().state === 'action_required')
+    const profileId = pending.manager.snapshot().profileId
+    new HostProfileRegistry({ stateRoot: pending.stateRoot }).setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
+    await assert.rejects(pending.manager.retry(), (error) => error.code === 'recovery_required')
+    assert.equal(pending.manager.snapshot().state, 'action_required')
+    assert.equal(pending.manager.snapshot().error.code, 'recovery_required')
+    await pending.manager.dispose()
+  } finally {
+    pending.cleanup()
+  }
+
+  let settledStart = true
+  const settled = fixture({ runtimeOptions: { failStartFor: () => settledStart } })
+  try {
+    await settled.manager.startConnect()
+    await waitFor(() => settled.manager.snapshot().state === 'action_required')
+    const profileId = settled.manager.snapshot().profileId
+    new HostProfileRegistry({ stateRoot: settled.stateRoot }).setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
+    // Reconnect succeeds once the transport starts, so retry settles the
+    // uncertain operation and reconnects without a new approval.
+    settledStart = false
+    await settled.manager.retry()
+    assert.equal(settled.manager.snapshot().state, 'connected')
+    assert.equal(settled.manager.snapshot().pendingOperation, false)
+    await settled.manager.dispose()
+  } finally {
+    settled.cleanup()
+  }
+})
+
+test('retry from a disconnected paused approval and from an in-flight approval stays stable', async () => {
+  const paused = fixture()
+  try {
+    await paused.manager.startConnect()
+    await waitFor(() => paused.manager.snapshot().state === 'connected')
+    await paused.manager.disconnect()
+    const profileId = paused.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: paused.stateRoot })
+    registry.setPending(profileId, { paused: true, phase: 'approval' })
+    const reconnected = await paused.manager.retry()
+    assert.equal(reconnected.state, 'connected')
+    await paused.manager.dispose()
+  } finally {
+    paused.cleanup()
+  }
+
+  const inflight = fixture({ fetchOptions: { onPoll: async () => json(200, { id: 'request-1', state: 'pending' }) } })
+  try {
+    await inflight.manager.startConnect()
+    await waitFor(() => inflight.manager.snapshot().state === 'awaiting_approval')
+    const unchanged = await inflight.manager.retry()
+    assert.equal(unchanged.state, 'awaiting_approval')
+    await inflight.manager.dispose()
+  } finally {
+    inflight.cleanup()
+  }
+})
+
+test('disconnect clears a pending approval journal and tolerates a blocked poll credential store', async () => {
+  const base = new MemoryHostCredentials()
+  let blocked = false
+  const credentials = {
+    async getCredential(name) { return base.getCredential(name) },
+    async setCredential(name, value) {
+      if (blocked) throw new Error('credential store blocked')
+      return base.setCredential(name, value)
+    },
+  }
+  const f = fixture({
+    credentials,
+    fetchOptions: { onPoll: async () => json(200, { id: 'request-1', state: 'pending' }) },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'awaiting_approval')
+    blocked = true
+    const disconnected = await f.manager.disconnect()
+    assert.equal(disconnected.state, 'disconnected')
+    assert.equal(f.manager.snapshot().pendingOperation, false)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('registry failure while committing a switch is contained and the selection is unchanged', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const before = f.manager.snapshot().profileId
+    const staging = await f.manager.enableStaging()
+    const restoreCommit = patched(HostProfileRegistry.prototype, 'commitActivation', () => {
+      throw new Error('commit failed')
+    })
+    const restoreAbort = patched(HostProfileRegistry.prototype, 'abortActivation', () => {
+      throw new Error('abort failed')
+    })
+    try {
+      await assert.rejects(f.manager.switchProfile(staging.id), /commit failed/)
+    } finally {
+      restoreCommit()
+      restoreAbort()
+    }
+    assert.equal(f.manager.snapshot().profileId, before)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('registry failure while applying an environment is contained', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const restoreCommit = patched(HostProfileRegistry.prototype, 'commitActivation', () => {
+      throw new Error('environment commit failed')
+    })
+    const restoreAbort = patched(HostProfileRegistry.prototype, 'abortActivation', () => {
+      throw new Error('environment abort failed')
+    })
+    try {
+      await assert.rejects(f.manager.applyEnvironment('staging'), /environment commit failed/)
+    } finally {
+      restoreCommit()
+      restoreAbort()
+    }
+    assert.equal(f.manager.snapshot().environment, 'production')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a prepared activation marker that cannot be recovered is ignored at startup', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  const restore = patched(HostProfileRegistry.prototype, 'recoverPrepared', () => {
+    throw new Error('prepared unreadable')
+  })
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: async () => { throw new Error('no network expected') },
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    restore()
+    await manager.ready
+    assert.equal(manager.snapshot().state, 'idle')
+    await manager.dispose()
+  } finally {
+    restore()
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('cancel tolerates a failing registry phase write and a throwing poll abort', async () => {
+  const f = fixture({ fetchOptions: { onPoll: async () => json(200, { id: 'request-1', state: 'pending' }) } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'awaiting_approval')
+    const restoreClear = patched(HostProfileRegistry.prototype, 'clearPendingPhase', () => {
+      throw new Error('phase write failed')
+    })
+    const restoreAbort = patched(AbortController.prototype, 'abort', () => {
+      throw new Error('abort failed')
+    })
+    try {
+      const cancelled = await f.manager.cancel()
+      assert.equal(cancelled.connected, false)
+      assert.equal(cancelled.error, null)
+    } finally {
+      restoreClear()
+      restoreAbort()
+    }
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a corrupt persisted intent is ignored instead of failing the snapshot', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const profileId = f.manager.snapshot().profileId
+    const path = intentJournalFor(f.stateRoot, profileId).path
+    writeFileSync(path, '{"broken"')
+    const snapshot = f.manager.snapshot()
+    assert.equal(snapshot.profileId, profileId)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('retry ignores an unclearable approval journal and mints a fresh intent', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const restoreClear = patched(IntentJournal.prototype, 'clear', () => {
+      throw new Error('journal clear failed')
+    })
+    try {
+      const started = await f.manager.retry()
+      assert.equal(started.state, 'awaiting_approval')
+    } finally {
+      restoreClear()
+    }
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a persisted uncertain intent resumes recovery state without a new request', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const profileId = f.manager.snapshot().profileId
+    intentJournalFor(f.stateRoot, profileId).write({ schema: INTENT_SCHEMA, intentId: 'intent-u', state: 'uncertain' })
+    const snapshot = await f.manager.startConnect()
+    assert.equal(snapshot.state, 'recovering')
+    assert.equal(snapshot.error.code, 'recovery_required')
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length, 0)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a persisted approved intent resumes enrollment without polling again', async () => {
+  const base = createFetch()
+  const fetch = async (url, options = {}) => {
+    if (url.endsWith('/v1/enrollments/hosts')) {
+      const body = JSON.parse(options.body)
+      return json(200, {
+        status: {
+          hostId: body.hostId,
+          hostSigningPublicKey: body.hostSigningPublicKey,
+          hostNoisePublicKey: body.hostNoisePublicKey,
+        },
+        credential: {
+          hostId: body.hostId,
+          mqttUrl: 'mqtts://broker.example:8883',
+          username: `host:${body.hostId}`,
+          password: 'persisted-password',
+        },
+      })
+    }
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.ready
+    const profileId = f.manager.snapshot().profileId
+    intentJournalFor(f.stateRoot, profileId).write({
+      schema: INTENT_SCHEMA,
+      intentId: 'intent-a',
+      state: 'approved',
+      operationId: 'op-persisted',
+      authorization: {
+        authorizationId: 'auth-persisted',
+        hostId: '',
+        nonce: b64(Buffer.alloc(16, 1)),
+        expiresAtUnixMs: NOW + 60_000,
+      },
+      route: { region: 'r1', accessOrigin: 'https://access.example', expiresAt: NOW + 60_000 },
+    })
+    const snapshot = await f.manager.startConnect()
+    assert.equal(snapshot.state, 'connected')
+    assert.equal(f.mqtts.at(-1).options.token, 'persisted-password')
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length, 0)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('deleting an inactive profile tolerates a blocked credential store', async () => {
+  const base = new MemoryHostCredentials()
+  let blocked = false
+  const credentials = {
+    async getCredential(name) { return base.getCredential(name) },
+    async setCredential(name, value) {
+      if (blocked) throw new Error('credential store blocked')
+      return base.setCredential(name, value)
+    },
+  }
+  const f = fixture({ credentials })
+  try {
+    await f.manager.ready
+    const staging = await f.manager.enableStaging()
+    blocked = true
+    const outcome = await f.manager.deleteProfile(staging.id)
+    assert.equal(outcome.deleted, staging.id)
+    assert.equal(outcome.remoteRegistration, 'not_revoked')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a removed Host tolerates a blocked transport credential store', async () => {
+  const base = new MemoryHostCredentials()
+  let blocked = false
+  const credentials = {
+    async getCredential(name) { return base.getCredential(name) },
+    async setCredential(name, value) {
+      if (blocked) throw new Error('credential store blocked')
+      return base.setCredential(name, value)
+    },
+  }
+  const f = fixture({ credentials, removalStatus: async () => ({ state: 'enforced' }) })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    blocked = true
+    const removed = await f.manager.refreshRemoval()
+    assert.equal(removed.state, 'removed')
+    assert.equal(removed.connected, false)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a missing credential marks recovery required even when the pending write fails', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    await store.remove(CREDENTIAL_PURPOSES.transportCredential)
+    const restore = patched(HostProfileRegistry.prototype, 'setPending', () => {
+      throw new Error('pending write failed')
+    })
+    try {
+      await assert.rejects(f.manager.reconnect(), (error) => error.code === 'recovery_required')
+    } finally {
+      restore()
+    }
+    assert.equal(f.manager.snapshot().state, 'action_required')
+    assert.equal(f.manager.snapshot().error.code, 'recovery_required')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a registry error during enrollment is surfaced as an actionable state', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const restore = patched(HostProfileRegistry.prototype, 'setPending', () => {
+      throw new RegistryError('registry_write_failed', 'pending write failed')
+    })
+    try {
+      await assert.rejects(f.manager.startConnect(), (error) => error.code === 'registry_write_failed')
+    } finally {
+      restore()
+    }
+    assert.equal(f.manager.snapshot().state, 'action_required')
+    assert.equal(f.manager.snapshot().error.code, 'registry_write_failed')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a profile identity registry error is wrapped before leaving the manager', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const restore = patched(HostProfileRegistry.prototype, 'setBindings', () => {
+      throw new RegistryError('registry_write_failed', 'binding write failed')
+    })
+    try {
+      await assert.rejects(f.manager.startConnect(), (error) => error.code === 'registry_write_failed')
+    } finally {
+      restore()
+    }
+    assert.equal(f.manager.snapshot().state, 'action_required')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('startup keeps an uncertain operation unresolved when the status read fails', async () => {
+  const base = createFetch()
+  const fetch = async (url, options = {}) => {
+    if (url.includes('/operations/')) throw new TypeError('status unavailable')
+    return base.fetch(url, options)
+  }
+  const f = fixture({ fetch })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    new HostProfileRegistry({ stateRoot: f.stateRoot }).setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
+    await f.manager.dispose()
+
+    const reopened = createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await reopened.ready
+    assert.equal(reopened.snapshot().state, 'recovering')
+    assert.equal(reopened.snapshot().error.code, 'recovery_required')
+    await reopened.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('switching profiles tolerates a failing uncertain-state persistence', async () => {
+  const f = fixture()
+  try {
+    await f.manager.ready
+    const profileId = f.manager.snapshot().profileId
+    const staging = await f.manager.enableStaging()
+    new HostProfileRegistry({ stateRoot: f.stateRoot }).setPending(profileId, { uncertain: true })
+    const restore = patched(HostProfileRegistry.prototype, 'setPending', () => {
+      throw new Error('uncertain persistence failed')
+    })
+    try {
+      const switched = await f.manager.switchProfile(staging.id)
+      assert.equal(switched.profileId, staging.id)
+    } finally {
+      restore()
+    }
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('applying an environment whose bound target has pending removal stays actionable', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const staging = await f.manager.enableStaging()
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry.setBindings(staging.id, { hostId: 'staging-host-1', accessOrigin: 'https://access.example', operationId: 'op-1' })
+    registry.setPending(staging.id, { removal: 'removing' })
+    const applied = await f.manager.applyEnvironment('staging')
+    assert.equal(applied.environment, 'staging')
+    assert.equal(applied.state, 'action_required')
+    assert.equal(applied.error.code, 'removal_pending')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a profile configuration snapshot drives resolution and a bad snapshot is actionable', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  const options = {
+    stateRoot,
+    credentials: new MemoryHostCredentials(),
+    profileConfiguration: true,
+    source: {},
+    now: () => NOW,
+    hostName: HOST_NAME,
+    fetch: async () => { throw new Error('no network expected') },
+    mqtt: createMqtt([]),
+    runtimeFactory: createRuntimes().factory,
+    installationId: 'test-install',
+  }
+  try {
+    const resolved = createConnectionManager({
+      ...options,
+      configSnapshot: { document: { version: 1, environment: 'production', environments: {} } },
+    })
+    await resolved.ready
+    assert.equal(resolved.snapshot().configError, null)
+    assert.equal(resolved.snapshot().environment, 'production')
+    await resolved.dispose()
+
+    const broken = createConnectionManager({
+      ...options,
+      configSnapshot: { document: { version: 1, environment: 'not-defined', environments: {} } },
+    })
+    await broken.ready
+    assert.equal(broken.snapshot().state, 'action_required')
+    assert.equal(broken.snapshot().error.code, 'invalid_argument')
+    assert.equal(broken.snapshot().configError.code, 'unknown_environment')
+    await broken.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('a registry that becomes unreadable during initialization is reported as actionable', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  const original = HostProfileRegistry.prototype.active
+  let calls = 0
+  HostProfileRegistry.prototype.active = function active(...args) {
+    calls += 1
+    if (calls === 4) throw new RegistryError('registry_corrupt', 'registry became unreadable')
+    return original.apply(this, args)
+  }
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: async () => { throw new Error('no network expected') },
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await manager.ready
+    assert.equal(manager.snapshot().state, 'action_required')
+    assert.equal(manager.snapshot().error.code, 'registry_corrupt')
+    await manager.dispose()
+  } finally {
+    HostProfileRegistry.prototype.active = original
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('disposing during a managed start fences the late transport start', async () => {
+  let releaseStart
+  const access = {
+    connected: false,
+    start() { return access },
+    async waitForConnected() { access.connected = true },
+    async stop() { access.connected = false },
+  }
+  const runtimeFactory = () => ({
+    async start() {
+      await new Promise((resolve) => { releaseStart = resolve })
+    },
+    async stop() {},
+  })
+  const f = fixture({ mqtt: () => access, runtimeFactory })
+  try {
+    const connecting = f.manager.startConnect()
+    await waitFor(() => typeof releaseStart === 'function')
+    const disposing = f.manager.dispose()
+    releaseStart()
+    await disposing
+    await connecting
+    assert.equal(f.manager.snapshot().connected, false)
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('disposing during a standalone start fences the late runtime', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-legacy-'))
+  writeFileSync(join(stateRoot, 'state.sqlite'), 'legacy')
+  let releaseStart
+  const runtimeFactory = () => ({
+    async start() {
+      await new Promise((resolve) => { releaseStart = resolve })
+    },
+    async stop() {},
+  })
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: async () => { throw new Error('legacy mode must not call Cloud') },
+      mqtt: () => { throw new Error('legacy mode builds its own transport') },
+      runtimeFactory,
+      installationId: 'test-install',
+      standalone: { config: { hostId: 'legacy-host', hostToken: 'legacy-token', mqttUrl: 'mqtts://legacy.example', stateDir: stateRoot } },
+    })
+    // Standalone initialize resumes the runtime immediately; fence that start.
+    await waitFor(() => typeof releaseStart === 'function')
+    const disposing = manager.dispose()
+    releaseStart()
+    await disposing
+    await manager.ready
+    assert.equal(manager.snapshot().connected, false)
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('a standalone runtime start failure stops the runtime and stays actionable', async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-legacy-'))
+  writeFileSync(join(stateRoot, 'state.sqlite'), 'legacy')
+  const runtimes = createRuntimes({ failStartFor: () => true })
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: async () => { throw new Error('legacy mode must not call Cloud') },
+      mqtt: () => { throw new Error('legacy mode builds its own transport') },
+      runtimeFactory: runtimes.factory,
+      installationId: 'test-install',
+      standalone: { config: { hostId: 'legacy-host', hostToken: 'legacy-token', mqttUrl: 'mqtts://legacy.example', stateDir: stateRoot } },
+    })
+    // Standalone initialize resumes the runtime; its failure is reported.
+    await manager.ready
+    assert.equal(manager.snapshot().state, 'action_required')
+    assert.equal(runtimes.runtimes[0].stopped > 0, true)
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
   }
 })

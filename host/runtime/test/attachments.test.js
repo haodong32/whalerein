@@ -748,3 +748,27 @@ test('bulk buffering stays within the derived chunk and reservation budget for t
   assert.ok(encodedBound > effectiveChunk)
   assert.equal(service.describe().active, 0)
 })
+
+test('pull combines signals through the compatibility fallback when AbortSignal.any is absent', async () => {
+  const { service, adapter } = makeService()
+  adapter.attach({ ref: 'a1', bytes: Buffer.from('abc') })
+  const opened = await service.open(openArgs())
+  const original = AbortSignal.any
+  AbortSignal.any = undefined
+  try {
+    const part = await service.pull({
+      request: openRequest(),
+      deviceId: 'device-1',
+      channelId: 'channel-1',
+      sessionId: 's1',
+      attachmentRef: 'a1',
+      transferId: opened.transfer_id,
+      offset: 0,
+      maxBytes: 3,
+      signal: new AbortController().signal,
+    })
+    assert.equal(Buffer.from(part.data).toString(), 'abc')
+  } finally {
+    AbortSignal.any = original
+  }
+})

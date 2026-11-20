@@ -340,3 +340,11 @@ test('config-env/AC-05/user entries reject the reserved environment token', () =
     { code: 'authority_override' },
   )
 })
+
+test('content revision hashes buffers and other byte inputs identically', async () => {
+  const { revisionOf } = await import('../src/configuration/revision.js')
+  const bytes = Buffer.from('revision-input')
+  assert.equal(revisionOf(bytes), revisionOf(new Uint8Array(bytes)))
+  assert.equal(revisionOf(new Uint8Array(bytes)), revisionOf('revision-input'))
+  assert.match(revisionOf(bytes), /^sha256:[a-f0-9]{64}$/)
+})
