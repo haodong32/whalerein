@@ -510,81 +510,50 @@ export class ConnectionManager {
 
   /** Observe the durable Cloud/Access removal lifecycle without a browser. */
   async refreshRemoval() {
-    return this.#run(async () => {
-      this.#assertUsable()
-      const record = this.#activeRecord()
-      if (!record || record.mode !== 'managed') return this.snapshot()
-      let observed
-      try {
-        if (typeof this.#options.removalStatus === 'function') {
-          observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
-        } else {
-          const metadata = await this.#metadataFor(record)
-          const prepared = await this.#prepareProfile(record, { allowCreate: false })
-          const client = this.#createClient(record, prepared, metadata)
-          observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
-        }
-      } catch {
-        return this.snapshot()
-      }
-      const state = typeof observed === 'string' ? observed : observed?.state
-      if (state === 'pending' || state === 'disabled' || state === 'removing') {
-        await this.#registry.setPending(record.id, { removal: 'removing' })
-        this.#generation += 1
-        this.#abortPolling()
-        await this.#stopRuntime()
-        this.#setState('removing', null)
-      } else if (state === 'enforced' || state === 'removed') {
-        this.#generation += 1
-        this.#abortPolling()
-        await this.#stopRuntime()
-        await this.#registry.setPending(record.id, { removal: 'removed' })
-        await this.#clearTransportCredential(record)
-        this.#setState('removed', null)
-      }
-      return this.snapshot()
-    })
+    return this.#run(() => this.#syncRemoval())
   }
 
   /** Reconcile a browser-authorized removal without claiming it locally. */
   async reconcileRemoval() {
-    return this.#run(async () => {
-      this.#assertUsable()
-      const record = this.#activeRecord()
-      if (!record || record.mode !== 'managed') return this.snapshot()
-      let observed
-      try {
-        if (typeof this.#options.removalStatus === 'function') {
-          observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
-        } else {
-          const metadata = await this.#metadataFor(record)
-          const prepared = await this.#prepareProfile(record, { allowCreate: false })
-          const client = this.#createClient(record, prepared, metadata)
-          observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
-        }
-      } catch {
-        return this.snapshot()
+    return this.#run(() => this.#syncRemoval())
+  }
+
+  async #syncRemoval() {
+    this.#assertUsable()
+    const record = this.#activeRecord()
+    if (!record || record.mode !== 'managed') return this.snapshot()
+    let observed
+    try {
+      if (typeof this.#options.removalStatus === 'function') {
+        observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
+      } else {
+        const metadata = await this.#metadataFor(record)
+        const prepared = await this.#prepareProfile(record, { allowCreate: false })
+        const client = this.#createClient(record, prepared, metadata)
+        observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
       }
-      const state = typeof observed === 'string' ? observed : observed?.state
-      if (state === 'enforced' || state === 'removed') {
-        this.#generation += 1
-        this.#abortPolling()
-        await this.#stopRuntime()
-        await this.#registry.setPending(record.id, { removal: 'removed' })
-        await this.#clearTransportCredential(record)
-        this.#setState('removed', null)
-      } else if (state === 'failed') {
-        await this.#registry.setPending(record.id, { removal: 'failed' })
-        this.#setState('action_required', 'unavailable')
-      } else if (state === 'pending' || state === 'disabled' || state === 'removing') {
-        this.#generation += 1
-        this.#abortPolling()
-        await this.#stopRuntime()
-        await this.#registry.setPending(record.id, { removal: 'removing' })
-        this.#setState('removing', null)
-      }
+    } catch {
       return this.snapshot()
-    })
+    }
+    const state = typeof observed === 'string' ? observed : observed?.state
+    if (state === 'enforced' || state === 'removed') {
+      this.#generation += 1
+      this.#abortPolling()
+      await this.#stopRuntime()
+      await this.#registry.setPending(record.id, { removal: 'removed' })
+      await this.#clearTransportCredential(record)
+      this.#setState('removed', null)
+    } else if (state === 'failed') {
+      await this.#registry.setPending(record.id, { removal: 'failed' })
+      this.#setState('action_required', 'unavailable')
+    } else if (state === 'pending' || state === 'disabled' || state === 'removing') {
+      this.#generation += 1
+      this.#abortPolling()
+      await this.#stopRuntime()
+      await this.#registry.setPending(record.id, { removal: 'removing' })
+      this.#setState('removing', null)
+    }
+    return this.snapshot()
   }
 
   async switchProfile(id) {
