@@ -12,12 +12,12 @@ use whalerein_core::api::{
     QuestionBatchInfo, QuestionFreshness, QuestionPageInfo, SendReply, SessionCapabilities,
     SessionKey, SessionSummary,
 };
+use whalerein_core::attachments::{AttachmentReference, DownloadOutcome, DownloadProgress};
 use whalerein_core::conversation::{
     content_block, ApprovalState, AttemptOutcome, BlockKind, ConversationMessage, MessageRole,
     NoticeCategory, NoticeState, RunPhase, ToolActivity, ToolResultPart, ToolStage, ToolState,
     ViewUpdate,
 };
-use whalerein_core::attachments::{AttachmentReference, DownloadOutcome, DownloadProgress};
 use whalerein_core::history::{HistoryPage, HistorySource as CoreHistorySource, MessageReference};
 
 /// A paired Host as reported by Access. `fingerprint` is the confirmed pin.
@@ -711,7 +711,10 @@ impl AttachmentReferenceView {
             self.session.session_id.clone(),
         )
         .map_err(|_| ())?;
-        Ok(AttachmentReference::new(session, self.attachment_ref.clone()))
+        Ok(AttachmentReference::new(
+            session,
+            self.attachment_ref.clone(),
+        ))
     }
 }
 
@@ -1665,7 +1668,7 @@ mod tests {
                         tool_name: None,
                         tool_activity: None,
                         notice: None,
-                    attachment: None,
+                        attachment: None,
                     }],
                     created_at_unix_ms: 7,
                 }

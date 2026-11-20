@@ -104,7 +104,7 @@ final class AttachmentTransferModel {
                     overwrite: overwrite
                 )
             )
-            var started = state(for: attachment.attachmentRef)
+            var started = self.state(for: attachment.attachmentRef)
             started.downloadId = id
             states[attachment.attachmentRef] = started
             startPolling(attachmentRef: attachment.attachmentRef, downloadId: id, service: service)

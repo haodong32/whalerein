@@ -1402,12 +1402,23 @@ fn history_pages_preserve_provenance_order_and_continuation() {
     }
 
     let first = core
-        .history_page(host_id.clone(), "session-1".into(), false, None, 2, 256 * 1024)
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
         .unwrap();
     assert_eq!(first.source, "online");
     assert!(!first.complete);
     assert_eq!(
-        first.messages.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+        first
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
         ["m4", "m5"]
     );
     let projection = first.projection.clone();
@@ -1427,7 +1438,11 @@ fn history_pages_preserve_provenance_order_and_continuation() {
     assert_eq!(second.projection, projection);
     assert!(!second.complete);
     assert_eq!(
-        second.messages.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+        second
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
         ["m2", "m3"]
     );
 
@@ -1444,7 +1459,11 @@ fn history_pages_preserve_provenance_order_and_continuation() {
     assert!(third.complete);
     assert!(third.continuation.is_none());
     assert_eq!(
-        third.messages.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(),
+        third
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
         ["m1"]
     );
 }
@@ -1465,7 +1484,14 @@ fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
         host.history_page_size = 2;
     }
     let first = core
-        .history_page(host_id.clone(), "session-1".into(), false, None, 2, 256 * 1024)
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
         .unwrap();
     let continuation = first.continuation.clone().expect("continuation");
 
@@ -1525,14 +1551,18 @@ fn cache_history_is_local_and_explicitly_empty_or_populated() {
     let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
     {
         let mut host = access.host.lock().unwrap();
-        host.history_messages = vec![
-            history_message("m1", "one"),
-            history_message("m2", "two"),
-        ];
+        host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
     }
 
     let empty = core
-        .history_page(host_id.clone(), "session-1".into(), true, None, 10, 256 * 1024)
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            true,
+            None,
+            10,
+            256 * 1024,
+        )
         .unwrap();
     assert_eq!(empty.source, "cache");
     assert!(empty.complete);
@@ -1570,13 +1600,24 @@ fn exact_read_resolves_the_paged_message_and_rejects_a_changed_projection() {
         host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
     }
     let page = core
-        .history_page(host_id.clone(), "session-1".into(), false, None, 10, 256 * 1024)
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            10,
+            256 * 1024,
+        )
         .unwrap();
     let reference = history_reference(&host_id, "session-1", "m2", &page.projection);
     let message = core.read_history_message(reference.clone()).unwrap();
     assert_eq!(message.message_id, "m2");
     assert_eq!(
-        message.blocks.iter().map(|block| block.text.as_str()).collect::<Vec<_>>(),
+        message
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
         ["two"]
     );
 
@@ -1622,13 +1663,11 @@ fn verified_attachment_download_reports_progress_and_commits_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     let host_id = pair(&core, &access);
-    let bytes = (0..200 * 1024).map(|index| (index % 251) as u8).collect::<Vec<_>>();
-    let mut object = FakeAttachmentObject::new(
-        "session-1",
-        "attachment-1",
-        "report.bin",
-        bytes.clone(),
-    );
+    let bytes = (0..200 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut object =
+        FakeAttachmentObject::new("session-1", "attachment-1", "report.bin", bytes.clone());
     object.policy.max_chunk_bytes = 32 * 1024;
     access.host.lock().unwrap().put_attachment(object);
     let destination = dir.path().join("downloads");
@@ -1651,7 +1690,10 @@ fn verified_attachment_download_reports_progress_and_commits_the_file() {
     assert_eq!(download.bytes, bytes.len() as u64);
     assert_eq!(download.name, "report.bin");
     assert_eq!(download.media_type, "application/octet-stream");
-    assert_eq!(download.path, destination.join("report.bin").to_string_lossy());
+    assert_eq!(
+        download.path,
+        destination.join("report.bin").to_string_lossy()
+    );
     assert_eq!(std::fs::read(&download.path).unwrap(), bytes);
     assert!(no_staging_files(&destination));
     // Progress never exceeds the declared total.

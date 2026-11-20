@@ -222,16 +222,6 @@ struct ConversationMessage: Identifiable, Hashable, Sendable {
 
 // MARK: - Committed history
 
-/// Scoped reference to one canonical committed message. Resolve its body with
-/// an exact Core read; the reference itself never carries content.
-struct MessageReference: Hashable, Sendable {
-    let hostId: String
-    let sessionId: String
-    let messageId: String
-    let sourceLocator: String
-    let projectionId: String
-}
-
 enum HistorySource: String, Codable, Sendable {
     case online
     case cache

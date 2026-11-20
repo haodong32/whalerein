@@ -28,11 +28,11 @@ use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
     bounded_question_view, convert_update, message_view, operation_status_name,
     question_batch_view, question_guard, question_page_view, questions_view, ApprovalView,
-    CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView, HostSummary,
-    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionPageView, RetainedOperationView, SessionCapabilitiesView, SessionSummaryView,
     AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
-    AttachmentTransferView, HistoryPageView,
+    AttachmentTransferView, CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView,
+    HistoryPageView, HostSummary, MessageReferenceView, MessageView, PairingPromptView,
+    QuestionAnswerView, QuestionBatchView, QuestionPageView, RetainedOperationView,
+    SessionCapabilitiesView, SessionSummaryView,
 };
 
 /// Request/response budget for listing and local operations.
@@ -1351,7 +1351,9 @@ impl MobileCore {
 
         let id = format!(
             "attachment-{:08x}",
-            self.attachment_transfers.next.fetch_add(1, Ordering::SeqCst)
+            self.attachment_transfers
+                .next
+                .fetch_add(1, Ordering::SeqCst)
         );
         let state = Arc::new(AttachmentTransferState::new(id.clone()));
         self.attachment_transfers.insert(Arc::clone(&state))?;
