@@ -105,6 +105,54 @@ fn create_returns_the_native_identity_and_forwards_inputs_unchanged() {
     );
 }
 
+// AC-01 workspace/preset path forwarding
+#[test]
+fn create_forwards_workspace_path_and_preset_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, access, host_id) = paired_core(&dir);
+    access.host.lock().unwrap().session_create_supported = true;
+
+    let workspace = core
+        .create_session(
+            host_id.clone(),
+            SessionCreateInputView {
+                cwd: None,
+                workspace_id: Some("workspace-1".into()),
+                agent_preset: Some("reviewer".into()),
+                preferred_session_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(workspace.disposition, "READY");
+    {
+        let host = access.host.lock().unwrap();
+        let input = host.last_create_input.as_ref().unwrap();
+        assert_eq!(input.workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(input.agent_preset.as_deref(), Some("reviewer"));
+        assert_eq!(input.cwd, None);
+    }
+
+    let path = core
+        .create_session(
+            host_id,
+            SessionCreateInputView {
+                cwd: Some("/work/tree".into()),
+                workspace_id: None,
+                agent_preset: None,
+                preferred_session_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(path.disposition, "READY");
+    let host = access.host.lock().unwrap();
+    assert_eq!(
+        host.last_create_input
+            .as_ref()
+            .and_then(|input| input.cwd.as_deref()),
+        Some("/work/tree")
+    );
+}
+
 // AC-01 warning
 #[test]
 fn create_warning_stays_a_warning_with_its_identity() {
