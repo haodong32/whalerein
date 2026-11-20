@@ -633,6 +633,16 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
+    // MARK: - Feature extension access
+
+    /// Binding access for feature adapters that live in separate files.
+    var bindingCore: MobileCore { core }
+
+    /// Runs one binding call with this service's typed error mapping.
+    func bindingCall<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await call(body)
+    }
+
     func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value

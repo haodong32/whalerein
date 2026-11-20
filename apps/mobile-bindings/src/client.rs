@@ -704,6 +704,118 @@ impl MobileCore {
     }
 
     // -----------------------------------------------------------------
+    // Session management
+    // -----------------------------------------------------------------
+
+    /// Whether the Host advertises native session creation.
+    ///
+    /// A peer that predates the capability reports `false`; the caller must
+    /// hide or disable creation instead of submitting a lifecycle command.
+    pub fn session_create_supported(&self, host_id: String) -> Result<bool, MobileError> {
+        validate_id(&host_id)?;
+        self.run(QUERY_TIMEOUT, self.core.session_create_supported(&host_id))
+    }
+
+    /// Create one Host session. Every optional input is forwarded unchanged;
+    /// Core and the Host choose defaults, validate combinations and report the
+    /// actual returned session identity.
+    pub fn create_session(
+        &self,
+        host_id: String,
+        input: crate::session_management::SessionCreateInputView,
+    ) -> Result<crate::session_management::SessionCreateResultView, MobileError> {
+        validate_id(&host_id)?;
+        let input = crate::session_management::create_input(input)?;
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::create_session(&self.core, &host_id, input),
+        )
+    }
+
+    /// Read one Host-qualified session summary.
+    pub fn session_details(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::SessionDetailView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::session_details(&self.core, &host_id, &key),
+        )
+    }
+
+    /// Fork the latest complete native turn and resolve the child directory.
+    pub fn fork_session_outcome(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::ForkResultView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::fork_session_outcome(&self.core, &key),
+        )
+    }
+
+    /// Read the current source model catalog. Offline values are never cached.
+    pub fn model_catalog(
+        &self,
+        host_id: String,
+    ) -> Result<crate::session_management::ModelCatalogView, MobileError> {
+        validate_id(&host_id)?;
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::model_catalog(&self.core, &host_id),
+        )
+    }
+
+    /// Read the passive session model observation without activating the
+    /// session.
+    pub fn read_session_model(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::SessionModelView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::read_session_model(&self.core, &key),
+        )
+    }
+
+    /// Submit exactly one native model selection. No prompt is sent.
+    pub fn select_session_model(
+        &self,
+        host_id: String,
+        session_id: String,
+        provider: String,
+        model: String,
+        effort: Option<String>,
+    ) -> Result<crate::session_management::ModelSelectionResultView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&provider)?;
+        validate_id(&model)?;
+        if let Some(effort) = &effort {
+            validate_id(effort)?;
+        }
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::select_session_model(
+                &self.core, &key, &provider, &model, effort,
+            ),
+        )
+    }
+
+    // -----------------------------------------------------------------
     // Watch and events
     // -----------------------------------------------------------------
 

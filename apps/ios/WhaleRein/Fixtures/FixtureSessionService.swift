@@ -20,6 +20,8 @@ final class FixtureSessionService: SessionService {
     /// Deterministic Cloud sign-in/directory state; implemented by the Cloud
     /// account extension in FixtureCloudAccount.swift.
     let cloudState: FixtureCloudAccountState
+    /// Deterministic state and outcomes for the session-management adapter.
+    let sessionManagement: FixtureSessionManagementState
     let operationJournal = FixtureOperationJournal()
 
     private var paired: Bool
@@ -55,7 +57,8 @@ final class FixtureSessionService: SessionService {
         clock: FixtureClock = SystemFixtureClock(),
         draftStore: any DraftStore,
         initiallyPaired: Bool = false,
-        instanceId: String = "fixtures"
+        instanceId: String = "fixtures",
+        sessionManagement: FixtureSessionManagementState? = nil
     ) {
         self.instanceId = instanceId
         self.options = options
@@ -63,6 +66,7 @@ final class FixtureSessionService: SessionService {
         self.draftStore = draftStore
         self.cloudState = FixtureCloudAccountState(options: options)
         self.paired = initiallyPaired
+        self.sessionManagement = sessionManagement ?? FixtureSessionManagementState()
     }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {

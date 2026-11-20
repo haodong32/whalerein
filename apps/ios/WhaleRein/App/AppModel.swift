@@ -56,6 +56,9 @@ final class AppModel {
     /// Cloud sign-in/directory presentation for the active instance. `nil` for
     /// standalone instances and unavailable services.
     private(set) var cloudSignIn: CloudSignInModel?
+    /// Host-scoped create/details/fork/model presentation. It reads through the
+    /// active service adapter and keeps no session cache of its own.
+    private(set) var sessionManagement: SessionManagementModel
     /// Shared retained-operation list and the one coalesced visible refresh.
     private(set) var operationRecovery: OperationRecoveryModel?
 
@@ -131,6 +134,7 @@ final class AppModel {
         self.settings = models.settings
         self.cloudSignIn = nil
         self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
+        self.sessionManagement = Self.makeManagementModel(service: service)
         self.operationRecovery = Self.makeOperationRecovery(
             service: service,
             instanceId: activeInstance?.id ?? service.instanceId
@@ -164,6 +168,16 @@ final class AppModel {
                 isFixtureBacked: service is FixtureSessionService,
                 onDeviceReset: {}
             )
+        )
+    }
+
+    /// Builds the management adapter from the active service. A service that
+    /// does not implement the adapter (a stub or an older composition) gets an
+    /// explicit unavailable implementation instead of invented data.
+    private static func makeManagementModel(service: any SessionService) -> SessionManagementModel {
+        SessionManagementModel(
+            service: (service as? any SessionManagementService)
+                ?? UnavailableSessionManagementService()
         )
     }
 
@@ -350,6 +364,7 @@ final class AppModel {
             onDeviceReset: {}
         )
         self.cloudSignIn = makeCloudSignInModel(service: service, instance: instance)
+        self.sessionManagement = Self.makeManagementModel(service: service)
         self.operationRecovery = Self.makeOperationRecovery(
             service: service,
             instanceId: instance?.id ?? service.instanceId
