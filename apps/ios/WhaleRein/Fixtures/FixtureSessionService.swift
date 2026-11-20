@@ -394,8 +394,17 @@ final class FixtureSessionService: SessionService {
             case .steer, .queue:
                 break
             }
-        } else if delivery != .send {
-            throw SessionServiceError(.unsupportedDelivery)
+        } else {
+            // The native queue is the ordinary Send default, including while
+            // idle; start-if-idle and steer remain explicit alternatives.
+            switch delivery {
+            case .steer where !capabilities.supportsSteer:
+                throw SessionServiceError(.unsupportedDelivery)
+            case .queue where !capabilities.supportsQueue:
+                throw SessionServiceError(.unsupportedDelivery)
+            case .send, .steer, .queue:
+                break
+            }
         }
 
         commandCounter += 1
