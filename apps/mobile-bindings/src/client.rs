@@ -21,6 +21,9 @@ use whalerein_core::api::{
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
+use crate::queue::{
+    action_is_advertised, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
+};
 use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
     bounded_question_view, convert_update, message_view, operation_status_name,
@@ -28,9 +31,10 @@ use crate::types::{
     CloudAccountSessionView, CloudAccountStatusView, CloudAccountView, CloudAuthAttemptView,
     CloudConnectResultView, CloudDirectoryHostView, CommandView, ConversationEvent, DeliveryChoice,
     DiagnosticsReportView, HostSummary, MessageReferenceView, MessageView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionPageView, RetainedOperationView,
-    SessionCapabilitiesView, SessionSummaryView,
+    QuestionAnswerView, QuestionBatchView, QuestionCancelReceiptView, QuestionPageView,
+    RetainedOperationView, SessionCapabilitiesView, SessionSummaryView,
 };
+use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
 /// Request/response budget for listing and local operations.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -417,6 +421,7 @@ pub struct MobileCore {
     pairing_generation: Arc<AtomicU64>,
     watch: Arc<Mutex<WatchState>>,
     watch_generation: Arc<AtomicU64>,
+    wait_attempts: WaitAttempts,
 }
 
 #[uniffi::export]
@@ -451,6 +456,7 @@ impl MobileCore {
             pairing_generation: Arc::new(AtomicU64::new(0)),
             watch: Arc::new(Mutex::new(WatchState::default())),
             watch_generation: Arc::new(AtomicU64::new(0)),
+            wait_attempts: WaitAttempts::default(),
         }))
     }
 
@@ -1290,6 +1296,130 @@ impl MobileCore {
         Ok(self.publish_command(handle))
     }
 
+    // -----------------------------------------------------------------
+    // Pending queue
+    // -----------------------------------------------------------------
+
+    /// Read the ordered pending queue from the Source.
+    ///
+    /// `available == false` is not an empty queue: the Source did not confirm a
+    /// readable listing. Queue contents are never cached here.
+    pub fn pending_queue(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<PendingQueueView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let queue = self.run(QUERY_TIMEOUT, self.core.pending_queue(&key))?;
+        Ok(PendingQueueView::from(queue))
+    }
+
+    /// Apply one targeted source-owned queue action.
+    ///
+    /// When the fresh listing still contains the item, the action must be one
+    /// the Source advertises for it. If the item disappeared in the same
+    /// window, the mutation is still submitted so the Host's native receipt
+    /// owns the consumed-before-mutation outcome.
+    pub fn update_pending_queue(
+        &self,
+        host_id: String,
+        session_id: String,
+        item_id: String,
+        action: QueueAction,
+        text: String,
+    ) -> Result<QueueMutationView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&item_id)?;
+        match action {
+            QueueAction::Edit => validate_text(&text)?,
+            QueueAction::Remove | QueueAction::Promote if !text.is_empty() => {
+                return Err(MobileError::invalid_input());
+            }
+            QueueAction::Remove | QueueAction::Promote => {}
+        }
+        let key = SessionKey {
+            host_id: host_id.clone(),
+            session_id: session_id.clone(),
+        };
+        if let Ok(queue) = self.run(QUERY_TIMEOUT, self.core.pending_queue(&key)) {
+            if queue.available {
+                if let Some(item) = queue.items.iter().find(|item| item.item_id == item_id) {
+                    if !action_is_advertised(&PendingQueueItemView::from(item.clone()), action) {
+                        return Err(MobileError::invalid_input());
+                    }
+                }
+            }
+        }
+        let handle = self.run(
+            COMMAND_TIMEOUT,
+            self.core
+                .update_pending_queue(&key, &item_id, action.to_core(), &text),
+        )?;
+        let receipt = self.publish_command(handle);
+        Ok(QueueMutationView {
+            operation_id: receipt.command_id.clone(),
+            host_id,
+            session_id,
+            item_id,
+            action: action.as_str().to_owned(),
+            receipt,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Wait
+    // -----------------------------------------------------------------
+
+    /// Start one background state-only wait and return its attempt identity.
+    ///
+    /// The conversation watch is independent: cancelling this attempt aborts
+    /// only the wait task.
+    pub fn begin_wait(
+        &self,
+        host_id: String,
+        session_id: String,
+        timeout_ms: u64,
+    ) -> Result<String, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        if timeout_ms == 0 || timeout_ms > MAX_WAIT_TIMEOUT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        Ok(self
+            .wait_attempts
+            .begin(self.core.clone(), &self.runtime.handle, key, timeout_ms))
+    }
+
+    /// Wait up to `wait_ms` for one attempt to settle.
+    ///
+    /// `None` means the native attempt is still running; the same attempt
+    /// identity remains valid for a later take.
+    pub fn take_wait_result(
+        &self,
+        wait_id: String,
+        wait_ms: u64,
+    ) -> Result<Option<WaitResultView>, MobileError> {
+        validate_id(&wait_id)?;
+        self.wait_attempts.take(&wait_id, wait_ms)
+    }
+
+    /// Abort only this wait attempt. Returns whether an unsettled attempt was
+    /// cancelled.
+    pub fn cancel_wait(&self, wait_id: String) -> Result<bool, MobileError> {
+        validate_id(&wait_id)?;
+        Ok(self.wait_attempts.cancel(&wait_id))
+    }
+
     /// List pending approvals for one session.
     pub fn approvals(
         &self,
@@ -1303,6 +1433,24 @@ impl MobileCore {
             self.core.list_approvals(&host_id, &session_id),
         )?;
         Ok(approvals.into_iter().map(ApprovalView::from).collect())
+    }
+
+    /// Read one approval's exact scoped state by identity.
+    ///
+    /// The Host is never guessed: the caller's original scope is used and the
+    /// returned state/version/digest/expiry is authoritative for the card.
+    pub fn get_approval(
+        &self,
+        host_id: String,
+        approval_id: String,
+    ) -> Result<ApprovalView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&approval_id)?;
+        let approval = self.run(
+            QUERY_TIMEOUT,
+            self.core.get_approval(&host_id, &approval_id),
+        )?;
+        Ok(ApprovalView::from(approval))
     }
 
     /// Resolve exactly the approval version and digest the user reviewed.
@@ -1438,6 +1586,32 @@ impl MobileCore {
             QUERY_TIMEOUT,
             self.core.cancel_question_answer(&key, &command_id),
         )
+    }
+
+    /// Cancel an in-flight open answer and return the original command identity
+    /// alongside the request outcome. A `false` request does not establish that
+    /// no native answer occurred; the caller retains the identity for recovery.
+    pub fn request_question_answer_cancel(
+        &self,
+        host_id: String,
+        session_id: String,
+        command_id: String,
+    ) -> Result<QuestionCancelReceiptView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&command_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let cancellation_requested = self.run(
+            QUERY_TIMEOUT,
+            self.core.cancel_question_answer(&key, &command_id),
+        )?;
+        Ok(QuestionCancelReceiptView {
+            command_id,
+            cancellation_requested,
+        })
     }
 
     // -----------------------------------------------------------------
@@ -1711,6 +1885,7 @@ impl MobileCore {
 
 impl Drop for MobileCore {
     fn drop(&mut self) {
+        self.wait_attempts.cancel_all();
         self.watch_generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut state = self.lock_watch();
