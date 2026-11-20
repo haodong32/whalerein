@@ -78,6 +78,10 @@ final class AppModel {
     /// The device was revoked remotely. The root blocks conversation content
     /// and offers re-pair/forget instead of a generic error or stale transcript.
     private(set) var isRevoked = false
+    /// After an explicit forget/revoke, return to the invitation flow even for
+    /// a Cloud instance so the local identity reset is visible and re-pairing
+    /// (or Cloud onboarding) starts from an explicit choice.
+    private(set) var prefersInvitationAfterDeviceReset = false
 
     /// Authoritative configuration document. `nil` for the direct unit-test
     /// composition that only owns one service.
@@ -353,6 +357,7 @@ final class AppModel {
         self.isPaired = preferences.value.paired
         self.selectedHostId = preferences.value.lastHostId
         self.isRevoked = false
+        self.prefersInvitationAfterDeviceReset = false
         self.isOfflineCached = false
         self.isPrivacyShieldVisible = false
         self.resumeMarker = nil
@@ -788,6 +793,7 @@ final class AppModel {
         }
         isPaired = true
         isRevoked = false
+        prefersInvitationAfterDeviceReset = false
         showInvitationSheet = false
         showSwitcher = false
         pairing.reset()
@@ -982,6 +988,7 @@ final class AppModel {
         conversation = nil
         isPaired = false
         isRevoked = false
+        prefersInvitationAfterDeviceReset = true
         showSwitcher = false
         selectedHostId = nil
         isOfflineCached = false

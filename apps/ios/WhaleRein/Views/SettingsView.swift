@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: SettingsModel.Confirmation?
     @State private var reasoningErrorKey: L10nKey?
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -95,6 +96,24 @@ struct SettingsView: View {
                     }
                 }
 
+                Section {
+                    Button(role: .destructive) {
+                        confirmation = .forget
+                    } label: {
+                        Text(L10n.settingsForget.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.forget")
+
+                    Button(role: .destructive) {
+                        confirmation = .revoke
+                    } label: {
+                        Text(L10n.settingsRevoke.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.revoke")
+                }
+
                 SettingsOperationsView()
 
                 Section {
@@ -137,7 +156,7 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsAccountView()
+                SettingsAccountView(showDiagnostics: $showDiagnostics)
 
                 Section(L10n.hostsTitle.key) {
                     Button {
@@ -154,23 +173,6 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.addHost")
                 }
 
-                Section {
-                    Button(role: .destructive) {
-                        confirmation = .forget
-                    } label: {
-                        Text(L10n.settingsForget.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.forget")
-
-                    Button(role: .destructive) {
-                        confirmation = .revoke
-                    } label: {
-                        Text(L10n.settingsRevoke.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.revoke")
-                }
             }
             .navigationTitle(L10n.settingsTitle.key)
             .inlineNavigationTitle()
@@ -181,6 +183,9 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.done")
                 }
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsView()
             }
             .alert(
                 confirmation == .revoke ? L10n.settingsRevokeConfirm.string : L10n.settingsForgetConfirm.string,

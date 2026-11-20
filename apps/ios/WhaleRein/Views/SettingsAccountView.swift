@@ -8,7 +8,7 @@ import SwiftUI
 
 struct SettingsAccountView: View {
     @Environment(AppModel.self) private var app
-    @Environment(\.dismiss) private var dismiss
+    @Binding var showDiagnostics: Bool
     @State private var pendingScope: AccountSessionScope?
 
     @ViewBuilder
@@ -331,24 +331,14 @@ struct SettingsAccountView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Button {
-                // The root owns the diagnostics sheet. Dismiss Settings first,
-                // then present it from the same root that serves the toolbar
-                // entry; two sheets cannot present from one view at once.
-                dismiss()
-                Task {
-                    try? await Task.sleep(for: .milliseconds(350))
-                    app.showDiagnostics = true
-                }
+                // SettingsView owns the diagnostics sheet so it stays inside
+                // the current Settings presentation.
+                showDiagnostics = true
             } label: {
                 Label(L10n.settingsDiagnosticsOpen.key, systemImage: "stethoscope")
             }
             .accessibilityIdentifier("settings.diagnostics.open")
         }
-    }
-
-    private func isSessionsFailed(_ state: AccountSettingsModel.LoadState) -> Bool {
-        if case .failed = state { return true }
-        return false
     }
 
     private func row(_ label: L10nKey, value: String, identifier: String) -> some View {
