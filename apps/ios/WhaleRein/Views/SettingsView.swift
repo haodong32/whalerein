@@ -72,6 +72,42 @@ struct SettingsView: View {
                     ServiceSelectionView(showsStandaloneCA: true)
                 }
 
+                if let cloud = app.cloudSignIn {
+                    Section(L10n.cloudSettingsTitle.key) {
+                        if let account = cloud.account {
+                            LabeledContent(L10n.cloudSignedInAs.key) {
+                                Text(verbatim: account.email)
+                                    .accessibilityIdentifier("settings.cloudAccount")
+                            }
+                            if cloud.logoutPending {
+                                Text(L10n.cloudSignOutPending.key)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("settings.cloudLogoutPending")
+                            }
+                            Button(role: .destructive) {
+                                Task { await app.signOutCloud() }
+                            } label: {
+                                Text(L10n.cloudSignOut.key)
+                            }
+                            .accessibilityIdentifier("settings.cloudSignOut")
+                        } else {
+                            Text(L10n.cloudSignedOut.key)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("settings.cloudSignedOut")
+                            Button(L10n.cloudSignIn.key) {
+                                dismiss()
+                                Task {
+                                    try? await Task.sleep(for: .milliseconds(350))
+                                    await cloud.signIn()
+                                }
+                            }
+                            .accessibilityIdentifier("settings.cloudSignIn")
+                        }
+                    }
+                }
+
                 Section(L10n.hostsTitle.key) {
                     Button {
                         // Dismiss this sheet first: two sheets cannot be

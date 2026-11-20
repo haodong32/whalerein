@@ -19,6 +19,116 @@ use whalerein_core::conversation::{
 };
 use whalerein_core::history::MessageReference;
 
+/// One pending native iOS sign-in attempt. Only the hosted URL and the
+/// attempt identity cross the boundary; state, PKCE material and the local
+/// credential stay in Core's SecretStore.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAuthAttemptView {
+    pub url: String,
+    pub attempt_id: String,
+}
+
+/// The verified Cloud account and workspace bound to this instance.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountView {
+    pub account_id: String,
+    pub email: String,
+    pub issuer: String,
+    pub subject: String,
+    pub workspace_id: String,
+}
+
+impl From<core_api::SignedInAccount> for CloudAccountView {
+    fn from(value: core_api::SignedInAccount) -> Self {
+        Self {
+            account_id: value.account.id,
+            email: value.account.email,
+            issuer: value.account.issuer,
+            subject: value.account.subject,
+            workspace_id: value.workspace.id,
+        }
+    }
+}
+
+/// Local account state: the verified account (if any) and whether a prior
+/// local sign-out still needs remote confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountStatusView {
+    pub account: Option<CloudAccountView>,
+    pub logout_pending: bool,
+}
+
+/// One Cloud app session visible to the signed-in account. No token is exposed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountSessionView {
+    pub session_id: String,
+    pub instance_id: String,
+    pub expires_at: u64,
+    pub state: String,
+}
+
+impl From<core_api::AccountSessionInfo> for CloudAccountSessionView {
+    fn from(value: core_api::AccountSessionInfo) -> Self {
+        Self {
+            session_id: value.session_id,
+            instance_id: value.instance_id,
+            expires_at: value.expires_at,
+            state: value.state.as_str().to_owned(),
+        }
+    }
+}
+
+/// One computer in the signed-in account's Cloud directory.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudDirectoryHostView {
+    pub host_id: String,
+    pub display_name: String,
+    pub enrolled: bool,
+    pub online: bool,
+    pub presence: String,
+    pub observation: String,
+    pub enrollment_state: String,
+    pub pairing_eligible: bool,
+    pub device_access: String,
+}
+
+impl From<core_api::AccountHost> for CloudDirectoryHostView {
+    fn from(value: core_api::AccountHost) -> Self {
+        Self {
+            host_id: value.host_id,
+            display_name: value.display_name,
+            enrolled: value.enrolled,
+            online: value.online,
+            presence: value.presence,
+            observation: value.observation,
+            enrollment_state: value.enrollment_state,
+            pairing_eligible: value.pairing_eligible,
+            device_access: value.device_access,
+        }
+    }
+}
+
+/// The result of connecting one eligible Cloud computer. The access URL and
+/// any device token remain inside Core.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudConnectResultView {
+    pub operation_id: Option<String>,
+    pub host_id: String,
+    pub device_id: String,
+    pub fingerprint: String,
+}
+
+impl From<core_api::PairingOutcome> for CloudConnectResultView {
+    fn from(value: core_api::PairingOutcome) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            host_id: value.host_id,
+            device_id: value.device_id,
+            fingerprint: value.fingerprint,
+        }
+    }
+}
+
 /// A paired Host as reported by Access. `fingerprint` is the confirmed pin.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HostSummary {

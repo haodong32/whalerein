@@ -12,7 +12,7 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    private let core: MobileCore
+    let core: MobileCore
     let instanceId: String
     let appVersion: String
 
@@ -633,7 +633,7 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
-    private func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value
         } catch let error as MobileError {

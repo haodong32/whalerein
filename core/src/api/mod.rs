@@ -44,7 +44,7 @@ pub use crate::access::transport::{
 };
 pub use crate::account::native::{
     AccountHost, AccountIdentity, AccountLoginPrompt, AccountSessionInfo, AccountSessionState,
-    AccountWorkspace, SignedInAccount,
+    AccountWorkspace, CloudAuthAttempt, SignedInAccount,
 };
 pub use crate::account::Environment;
 #[cfg(test)]
