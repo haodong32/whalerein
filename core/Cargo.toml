@@ -36,7 +36,6 @@ snow = { workspace = true }
 toml_edit = { version = "0.25", features = ["serde"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 url = { version = "2", features = ["serde"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 

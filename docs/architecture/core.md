@@ -2,13 +2,13 @@
 
 [Overview](../architecture.md) · [CLI](cli.md) · [Contract](harness-contract.md)
 
-Core is the self-contained Rust client endpoint. SecretStore is its only external
-injection interface; Harness adapters run on Hosts and never enter Core.
+Core is the self-contained Rust client endpoint. Clients provide a `SecretStore`
+and can register a `DiagnosticSink`. Harness adapters run on Hosts.
 
 Consumers use `api` and the normalized `conversation` types. Transport, cache,
 security, pairing, command, synchronization and runtime modules are private.
-`api` re-exports the supported secret stores, connection state and metric types;
-clients do not construct internal protocol services. Repository-only protocol
+`api` re-exports the supported secret stores, diagnostic events, connection state
+and metric types. Repository-only protocol
 drivers opt into `protocol-testing` and use the explicit `testing` exports.
 
 Client-facing values are Core-owned. Conversation messages, content blocks,
@@ -36,7 +36,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `conversation` | Bounded provisional Attempts, order, resets and final-message precedence. |
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
 | `access` | HTTPS and device MQTT, including opaque fragmentation. |
-| `diagnostics` | Bounded redacted operation history and exports. |
+| `diagnostics` | Redacted live events, bounded operation history and exports. |
 | `account` | Cloud App sessions, verified account scope, regional permission renewal, and durable sign-out retries. |
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
 
@@ -269,6 +269,14 @@ SQLite; the database and `SecretStore` never hold draft plaintext. Empty text
 deletes the row, the accepted size is bounded at 256 KiB, and the profile must
 be paired. Confirmed revocation and explicit forget delete the cache file, so
 they remove drafts and their key with the rest of the local conversation store.
+
+`Core::open_with_diagnostic_sink` registers a receiver for one client instance.
+Callers can reserve the trace ID for initialization events with `DiagnosticContext`
+and pass that context to `Core::open_with_diagnostics`.
+`Diagnostics::record` assigns the time, trace ID and severity. The same event
+feeds the sink and, for operation stages, the bounded failure history. The
+sink receives an immutable event on the producing thread and may be called
+concurrently. The caller controls delivery and formatting.
 
 `diagnostics_preview()` renders the same local, redacted evidence as
 `export_diagnostics` without writing a file or opening a channel. It keeps the

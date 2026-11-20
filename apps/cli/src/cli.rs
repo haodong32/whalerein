@@ -34,6 +34,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Show detailed, redacted diagnostics on stderr.
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic export).
     #[arg(long, global = true)]
     pub yes: bool,

@@ -51,16 +51,6 @@ pub fn to_stderr(bytes: &[u8]) -> Result<(), WriteFailure> {
     write_all(&mut lock, bytes)
 }
 
-/// Process exit code for a completed command whose output could not be
-/// written. A closed consumer is success from the process's point of view.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn exit_code_for(failure: &WriteFailure) -> u8 {
-    match failure {
-        WriteFailure::Closed => 0,
-        WriteFailure::Failed(_) => 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,14 +95,18 @@ mod tests {
     fn a_closed_pipe_is_reported_as_closed_and_exits_zero() {
         let failure = write_all(&mut ClosedPipe, b"{}\n").unwrap_err();
         assert!(failure.is_closed());
-        assert_eq!(exit_code_for(&failure), 0);
+        let written = Err(failure);
+        assert_eq!(crate::exit_for(7, &written, true), 0);
+        assert_eq!(crate::exit_for(7, &written, false), 7);
     }
 
     #[test]
     fn other_write_failures_are_internal_failures() {
         let failure = write_all(&mut FailingSink, b"{}\n").unwrap_err();
         assert!(!failure.is_closed());
-        assert_eq!(exit_code_for(&failure), 1);
+        let written = Err(failure);
+        assert_eq!(crate::exit_for(7, &written, true), 1);
+        assert_eq!(crate::exit_for(7, &written, false), 7);
     }
 
     #[test]
@@ -120,6 +114,5 @@ mod tests {
         let mut buffer = Buffer::default();
         write_all(&mut buffer, b"line\n").unwrap();
         assert_eq!(buffer.0, b"line\n");
-        assert_eq!(exit_code_for(&WriteFailure::Closed), 0);
     }
 }

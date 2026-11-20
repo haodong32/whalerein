@@ -651,13 +651,13 @@ async fn run_connection(
         None => load_device_token(core.secret_store(), &config.device_id)?
             .ok_or(CoreError::NotPaired)?,
     };
-    let mut client = DeviceMqttClient::new(
+    let mut client = DeviceMqttClient::with_diagnostics(
         core.mqtt_settings(&config)?,
         &key.host_id,
         &config.device_id,
         token,
-    )
-    .with_trace_id(core.diagnostic_id());
+        core.diagnostics.clone(),
+    );
     let session_id = regional.map(|session| session.id);
     if let Some(id) = &session_id {
         client = client.with_cloud_session(id.clone());
@@ -802,7 +802,8 @@ async fn run_connection(
             .ok_or_else(|| CoreError::Security("missing question descriptor".into()))?;
         signal_descriptor(questions, descriptor);
     }
-    core.record_journal("core", "watch_ready", "succeeded", "none");
+    core.diagnostics
+        .record_stage("core", "watch_ready", "succeeded", "none");
     let epoch = initial
         .as_ref()
         .map(|state| state.live_epoch.clone())

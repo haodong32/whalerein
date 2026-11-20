@@ -17,8 +17,8 @@ in independent managed regions. Allow a private account and commerce program to
 authorize automatic pairing and manage regional policy. Automate replacement
 of compute instances without making them owners of durable identity or state.
 
-The initial implementation remains Go and PostgreSQL with Mosquitto. Core remains
-self-contained Rust with SecretStore as its only injected capability. Source
+The initial implementation remains Go and PostgreSQL with Mosquitto. The
+[Core client](core.md) remains self-contained Rust. Source
 operations remain behind the Host adapter. Neither Access nor management gains
 access to conversation plaintext or endpoint private keys.
 

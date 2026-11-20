@@ -489,8 +489,8 @@ impl Core {
                 .map_err(|_| CoreError::Config("invalid pending endpoint".into()))?,
             None,
             ca.as_deref(),
-        )?
-        .with_trace_id(self.diagnostic_id());
+            self.diagnostics.clone(),
+        )?;
         let reply = match access.pair_claim(&pending.finish).await {
             Ok(reply) => reply,
             Err(error) => {
@@ -653,7 +653,8 @@ impl Core {
                 .secrets
                 .delete(&keys::pending_pairing(device_id));
         }
-        tracing::info!(trace_id=%self.diagnostic_id(),"pairing completed");
+        self.diagnostics
+            .record_stage("core", "pairing", "succeeded", "none");
         Ok(())
     }
 }

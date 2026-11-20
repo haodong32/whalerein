@@ -19,6 +19,7 @@ use url::Url;
 use whalerein_proto::EventEnvelope;
 
 use super::AccessError;
+use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 
 pub const EVENT_TOPIC_PREFIX: &str = "whalerein/v1/h";
 pub const PRESENCE_TOPIC_PREFIX: &str = "whalerein/v1/presence/device";
@@ -256,7 +257,7 @@ pub struct DeviceMqttClient {
     host_id: String,
     device_id: String,
     token: String,
-    trace_id: String,
+    diagnostics: Arc<Diagnostics>,
     /// Per-connection MQTT identity. Two processes for the same device must not
     /// replace each other's broker session; the device id still scopes topics,
     /// credentials and presence.
@@ -265,11 +266,22 @@ pub struct DeviceMqttClient {
 }
 
 impl DeviceMqttClient {
+    #[cfg(any(test, feature = "protocol-testing"))]
     pub fn new(
         settings: MqttSettings,
         host_id: impl Into<String>,
         device_id: impl Into<String>,
         token: impl Into<String>,
+    ) -> Self {
+        Self::with_diagnostics(settings, host_id, device_id, token, Arc::default())
+    }
+
+    pub(crate) fn with_diagnostics(
+        settings: MqttSettings,
+        host_id: impl Into<String>,
+        device_id: impl Into<String>,
+        token: impl Into<String>,
+        diagnostics: Arc<Diagnostics>,
     ) -> Self {
         let device_id = device_id.into();
         Self {
@@ -283,18 +295,13 @@ impl DeviceMqttClient {
             device_id,
             token: token.into(),
             session_id: None,
-            trace_id: crate::util::random_id(16),
+            diagnostics,
         }
     }
 
     pub(crate) fn with_cloud_session(mut self, id: String) -> Self {
         self.client_id = format!("whalerein-session-{id}-{}", crate::util::random_id(6));
         self.session_id = Some(id);
-        self
-    }
-
-    pub fn with_trace_id(mut self, trace_id: &str) -> Self {
-        self.trace_id = trace_id.to_owned();
         self
     }
 
@@ -357,7 +364,7 @@ impl DeviceMqttClient {
                     {
                         return Err(AccessError::protocol("MQTT subscription rejected"));
                     }
-                    tracing::info!(event = "mqtt_subscribed",trace_id = %self.trace_id,layer = "mqtt");
+                    self.diagnostics.record(DiagnosticKind::MqttSubscribed);
                     on_state(MqttConnectionEvent::Subscribed);
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -411,16 +418,26 @@ impl DeviceMqttClient {
                 Ok(_) => {}
                 Err(error) => {
                     let (reason, reason_code, bytes, limit) = connection_failure(&error);
-                    tracing::warn!(event = "mqtt_disconnected", trace_id = %self.trace_id, layer = "mqtt", reason, reason_code, bytes, limit);
                     subscribed = false;
                     receiver.clear();
                     queued_receipts = 0;
                     on_state(MqttConnectionEvent::Disconnected);
-                    if should_stop() {
+                    let delay = if should_stop() {
+                        None
+                    } else {
+                        Some(backoff_delay(attempt, rand::random()))
+                    };
+                    self.diagnostics.record(DiagnosticKind::MqttDisconnected {
+                        reason,
+                        reason_code,
+                        bytes,
+                        limit,
+                        retry_in_ms: delay.map(|delay| delay.as_millis() as u64),
+                    });
+                    let Some(delay) = delay else {
                         return Ok(());
-                    }
-                    let jitter: f64 = rand::random();
-                    tokio::time::sleep(backoff_delay(attempt, jitter)).await;
+                    };
+                    tokio::time::sleep(delay).await;
                     attempt = attempt.saturating_add(1);
                 }
             }
