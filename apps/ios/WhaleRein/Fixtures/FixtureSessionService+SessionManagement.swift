@@ -323,7 +323,7 @@ extension FixtureSessionService: SessionManagementService {
         default:
             break
         }
-        let childId = "\(sessionId)-fork-\(state.forkCount + 1)"
+        let childId = "\(sessionId)-fork-\(state.forkCount)"
         let directoryError = state.forkDirectoryErrorCode
             .map { LiveSessionService.map(code: $0) }
         var directory = state.forkDirectory
