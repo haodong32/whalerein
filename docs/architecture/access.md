@@ -24,6 +24,7 @@ Unknown modes fail configuration validation; there is no external-account fallba
 | `internal/events/` | Route opaque events by outer device ID. |
 | `internal/broker/` | MQTT, topics, transient correlation, presence, disconnect. |
 | `internal/store/` | SQL, transactions, migrations, cleanup. |
+| `internal/clientaddr/` | Ingress client address resolution, windowed pseudonyms, log redaction. |
 | `internal/config/`, `internal/diagnostics/` | Validated configuration, redacted logs, metrics. |
 
 ```text
@@ -35,6 +36,22 @@ broker -> Mosquitto plugin
 
 Handlers do not access SQL/MQTT directly. `cmd/server` wires callbacks;
 `auth` and `broker` do not import each other.
+
+## Client address
+
+The public TLS ingress establishes the client address once and writes the
+single-valued `X-Whalerein-Client-IP` header, overwriting any inbound value.
+Access trusts that header only when `RemoteAddr` is inside an explicitly configured
+trusted proxy prefix; an empty prefix list is a direct deployment and the header
+is ignored. Access never parses `X-Forwarded-For` or `X-Real-IP`.
+
+`internal/httpapi` resolves one identity per request and keeps the raw address in
+memory only. Access records carry a windowed HMAC pseudonym (`client_ref`),
+its window (`client_ref_window`), and how the address was selected
+(`client_addr_status`). The log sink additionally redacts any address literal
+written through it, so a later handler or library error cannot leak one. The
+master key is an environment secret; without it, records still omit the address
+and use the `[client]` placeholder.
 
 ## Persistence
 

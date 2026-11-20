@@ -166,10 +166,43 @@ Configuration summary:
 | `presence.cache_ttl` | broker presence cache |
 | `cleanup.*` | cleanup interval and token retention |
 | `protocol.version` | supported wire version; only 1-1 is accepted, and any other value fails startup with the supported range |
+| `http.client_address.trusted_proxies` | CIDRs allowed to set `X-Whalerein-Client-IP`; empty means direct deployment |
+| `http.client_reference.key` / `window` | 256-bit master key (standard base64) and `monthly`/`daily` pseudonym window; the key is a secret and no reference is emitted without it |
 | `log.level` | `debug`, `info`, `warn`, `error` |
 
 Tokens, passwords, API keys and database URLs are never logged. `Redacted()`
 is the only startup summary.
+
+### Client address and pseudonyms
+
+The public TLS ingress is the only authority for the client address. It writes
+the single-valued `X-Whalerein-Client-IP` header and overwrites any value a
+client supplied. Access reads that header only when the TCP peer is inside
+`http.client_address.trusted_proxies`; otherwise it uses the peer address
+(direct deployment) and ignores the header. It never reads `X-Forwarded-For`
+or `X-Real-IP`.
+
+Keep `trusted_proxies` to a small, fixed network containing only the ingress and
+Access. A broad CIDR or the whole RFC1918 range would let other containers
+forge the header.
+
+Access records do not contain the address. It computes a windowed HMAC:
+
+```text
+window = "2026-11"            # monthly, UTC; or "2026-11-20" for daily
+client_ref = "c1_" + hex(HMAC-SHA256(master, "whalerein/client/v1\n" + window + "\n" + address))[:32]
+```
+
+The access record carries `client_ref`, `client_ref_window` and
+`client_addr_status` (`forwarded`, `direct`, or `unavailable`). The log sink
+also wraps the writer so an accidental `RemoteAddr` or library error is
+rewritten to the same pseudonym; without a key it becomes `[client]`.
+
+Generate one master key per environment with `openssl rand -base64 32`, store
+it in the deployment secret store, and never share it between environments.
+The window changes automatically; the master key changes only on compromise or
+an explicit annual rotation. Old logs can be correlated only with the master
+key and the `client_ref_window` they recorded.
 
 If `broker.public_url` is omitted, Access derives `mqtts://<public-host>:443`
 from an `https` `public_url` (or `mqtt://<host>:1883` from `http`) and logs a
@@ -487,8 +520,10 @@ is stored verbatim while the row has not expired. A late result may still advanc
   `connected_devices`, `revocation_latency_ms`,
   `request_forward_retries_total`.
 - Logs are JSON with `trace_id`, request diagnostic id, status and duration.
-  Host/device/request ids are masked with a per-process random HMAC salt. No
-  token, password, body, ciphertext or private key is logged.
+  Host/device/request ids are masked with a per-process random HMAC salt,
+  client addresses become `client_ref`/`client_ref_window`, and no plaintext
+  address is logged. No token, password, body, ciphertext or private key is
+  logged.
 
 ## Tests
 

@@ -57,6 +57,17 @@ http:
   # transport profile as base64 expansion plus JSON framing (default 24 MiB,
   # compact 13 MiB, roomy 45 MiB). A smaller explicit value fails startup.
   # max_body_bytes: 25165824
+  # The public ingress establishes the client address in
+  # X-Whalerein-Client-IP and overwrites any inbound value. Access trusts it
+  # only from these CIDRs; an empty list is a direct deployment.
+  # client_address:
+  #   trusted_proxies: ["172.28.0.0/24"]
+  # Access logs a windowed HMAC pseudonym, never the address. Generate a
+  # 256-bit key with `openssl rand -base64 32` and keep it out of files and
+  # logs. Without a key, access records carry only the address status.
+  # client_reference:
+  #   key: "${WHALEREIN_CLIENT_REF_KEY}"
+  #   window: monthly   # or daily
 
 transport:
   # Shared encoded transport vocabulary from proto/v1/transport_profiles.json.

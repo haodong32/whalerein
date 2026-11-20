@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/clientaddr"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"gopkg.in/yaml.v3"
 )
@@ -174,11 +175,26 @@ type InternalConfig struct {
 
 // HTTPConfig holds public/internal HTTP server tunables.
 type HTTPConfig struct {
-	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
-	ReadTimeout       Duration `yaml:"read_timeout"`
-	WriteTimeout      Duration `yaml:"write_timeout"`
-	IdleTimeout       Duration `yaml:"idle_timeout"`
-	MaxBodyBytes      int64    `yaml:"max_body_bytes"`
+	ReadHeaderTimeout Duration              `yaml:"read_header_timeout"`
+	ReadTimeout       Duration              `yaml:"read_timeout"`
+	WriteTimeout      Duration              `yaml:"write_timeout"`
+	IdleTimeout       Duration              `yaml:"idle_timeout"`
+	MaxBodyBytes      int64                 `yaml:"max_body_bytes"`
+	ClientAddress     ClientAddressConfig   `yaml:"client_address"`
+	ClientReference   ClientReferenceConfig `yaml:"client_reference"`
+}
+
+// ClientAddressConfig selects the trusted proxies allowed to set the dedicated
+// client-address header. An empty list is a direct deployment.
+type ClientAddressConfig struct {
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+// ClientReferenceConfig controls windowed pseudonyms in access records. The
+// key is a secret read from the environment; it is never logged.
+type ClientReferenceConfig struct {
+	Key    string `yaml:"key"`
+	Window string `yaml:"window"`
 }
 
 // PairingConfig holds one-time invitation and claim tunables.
@@ -292,7 +308,8 @@ func Default() Config {
 			WriteTimeout:      Duration(30 * time.Second),
 			IdleTimeout:       Duration(60 * time.Second),
 			// Zero means "derive from the selected transport profile".
-			MaxBodyBytes: 0,
+			MaxBodyBytes:    0,
+			ClientReference: ClientReferenceConfig{Window: string(clientaddr.WindowMonthly)},
 		},
 		Pairing: PairingConfig{
 			InvitationTTL: Duration(10 * time.Minute),
@@ -537,6 +554,19 @@ func (c Config) Validate() error {
 		c.HTTP.WriteTimeout.D() <= 0 || c.HTTP.IdleTimeout.D() <= 0 {
 		problems = append(problems, "http timeouts must be positive")
 	}
+	if len(c.HTTP.ClientAddress.TrustedProxies) > 0 {
+		if _, err := clientaddr.ParseTrustedProxies(c.HTTP.ClientAddress.TrustedProxies); err != nil {
+			problems = append(problems, "http.client_address.trusted_proxies: "+err.Error())
+		}
+	}
+	if _, err := clientaddr.ParseWindow(c.HTTP.ClientReference.Window); err != nil {
+		problems = append(problems, "http.client_reference.window: "+err.Error())
+	}
+	if c.HTTP.ClientReference.Key != "" {
+		if _, err := clientaddr.DecodeKey(c.HTTP.ClientReference.Key); err != nil {
+			problems = append(problems, "http.client_reference.key: "+err.Error())
+		}
+	}
 	if c.Line.PolicyTTL.D() <= 0 || c.Line.ReconcileInterval.D() <= 0 ||
 		c.Line.HeartbeatInterval.D() <= 0 || c.Line.OperationTimeout.D() <= 0 {
 		problems = append(problems, "line durations must be positive")
@@ -649,17 +679,20 @@ func sanitizeURL(raw string) string {
 // value is included.
 func (c Config) Redacted() map[string]any {
 	return map[string]any{
-		"listen":            c.Listen,
-		"internal_listen":   c.InternalListen,
-		"mode":              c.Mode,
-		"public_url":        sanitizeURL(c.PublicURL),
-		"broker_url":        sanitizeURL(c.Broker.URL),
-		"broker_public_url": sanitizeURL(c.Broker.PublicURL),
-		"broker_username":   c.Broker.Username,
-		"line_policy_ttl":   c.Line.PolicyTTL.D().String(),
-		"admission_entries": c.Admission.MaxEntries,
-		"protocol_version":  c.Protocol.Version,
-		"log_level":         c.Log.Level,
-		"transport_profile": c.Transport.Profile,
+		"listen":                         c.Listen,
+		"internal_listen":                c.InternalListen,
+		"mode":                           c.Mode,
+		"public_url":                     sanitizeURL(c.PublicURL),
+		"broker_url":                     sanitizeURL(c.Broker.URL),
+		"broker_public_url":              sanitizeURL(c.Broker.PublicURL),
+		"broker_username":                c.Broker.Username,
+		"line_policy_ttl":                c.Line.PolicyTTL.D().String(),
+		"admission_entries":              c.Admission.MaxEntries,
+		"protocol_version":               c.Protocol.Version,
+		"log_level":                      c.Log.Level,
+		"transport_profile":              c.Transport.Profile,
+		"client_address_trusted_proxies": len(c.HTTP.ClientAddress.TrustedProxies),
+		"client_reference_enabled":       strings.TrimSpace(c.HTTP.ClientReference.Key) != "",
+		"client_reference_window":        c.HTTP.ClientReference.Window,
 	}
 }
