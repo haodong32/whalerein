@@ -415,7 +415,7 @@ export class ConnectionManager {
       if (typeof accessOrigin !== 'string' || accessOrigin === '') throw this.#failFast('not_found', 'this profile has no enrolled Access route')
       if (!authorization) {
         if (typeof apiOrigin !== 'string' || apiOrigin === '') throw this.#failFast('unavailable', 'service origin is unavailable')
-        this.#activation.acquire()
+        if (!this.#activation.owned) this.#activation.acquire()
         this.#generation += 1
         const generation = this.#generation
         this.#setState('recovering', null)
@@ -431,7 +431,7 @@ export class ConnectionManager {
           throw error
         }
       }
-      this.#activation.acquire()
+      if (!this.#activation.owned) this.#activation.acquire()
       this.#generation += 1
       const generation = this.#generation
       this.#setState('recovering', 'recovery_required')
@@ -1386,7 +1386,7 @@ export class ConnectionManager {
     }
     if (this.#runtime !== null) return this.snapshot()
     if (!this.#source) throw this.#failFast('invalid_argument', 'a source adapter is required to connect')
-    this.#activation.acquire()
+    if (!this.#activation.owned) this.#activation.acquire()
     this.#generation += 1
     const generation = this.#generation
     this.#setState('reconnecting', null)
@@ -1735,6 +1735,11 @@ export class ConnectionManager {
   }
 
   #handleOperationFailure(error) {
+    // A failed enrollment/reconnect that owns no runtime must release the
+    // activation lock, otherwise the recovery action cannot reacquire it.
+    if (this.#runtime === null) {
+      try { this.#activation.release() } catch { /* not owned */ }
+    }
     const code = codeOf(error)
     this.#lastErrorCode = code
     if (code === 'recovery_required' || (error instanceof EnrollmentError && error.committed === true)) {
