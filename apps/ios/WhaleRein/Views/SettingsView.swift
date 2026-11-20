@@ -77,20 +77,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(L10n.settingsData.key) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L10n.settingsStorage.key)
-                        Text(verbatim: app.dataDirectory.path)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                        Text(L10n.settingsStorageNote.key)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("settings.dataPath")
-                }
-
                 Section {
                     if app.settings.isStaging {
                         Label(L10n.settingsStaging.key, systemImage: "flag")
@@ -157,6 +143,20 @@ struct SettingsView: View {
                 }
 
                 SettingsAccountView(showDiagnostics: $showDiagnostics)
+
+                Section(L10n.settingsData.key) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L10n.settingsStorage.key)
+                        Text(verbatim: app.dataDirectory.path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text(L10n.settingsStorageNote.key)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("settings.dataPath")
+                }
 
                 Section(L10n.hostsTitle.key) {
                     Button {
