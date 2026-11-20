@@ -77,6 +77,11 @@ struct SettingsAccountView: View {
                     .accessibilityIdentifier("settings.status.loading")
             }
         }
+        .task {
+            if app.accountSettings?.statusState == .idle {
+                await app.accountSettings?.load()
+            }
+        }
     }
 
     // MARK: - Default computer
@@ -162,7 +167,7 @@ struct SettingsAccountView: View {
             }
             if model.sessions.isEmpty {
                 Text(
-                    isSessionsFailed(model.sessionsState)
+                    model.sessionsError != nil
                         ? L10n.settingsAppSessionsUnavailable.key
                         : L10n.settingsAppSessionsEmpty.key
                 )

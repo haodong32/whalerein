@@ -75,9 +75,15 @@ final class FixtureCloudAccountState {
     /// Local sign-out always clears the fixture account; remote confirmation is
     /// deliberately left pending so Settings can render that state.
     func signOut() -> Bool {
-        account = nil
-        logoutPending = true
+        endLocalSession(pending: true)
         return false
+    }
+
+    /// Ends the locally retained sign-in after a scoped app-session revocation.
+    /// A pending account-wide result keeps Core's remote sign-out record.
+    func endLocalSession(pending: Bool) {
+        account = nil
+        logoutPending = pending
     }
 
     func hosts() throws -> [CloudDirectoryHost] {
@@ -166,6 +172,10 @@ extension FixtureSessionService: CloudAccountService {
         guard ["sess-fixture-ios", "sess-fixture-other"].contains(id) else {
             throw SessionServiceError(.unavailable)
         }
+        if id == Self.fixtureCurrentSessionId {
+            // Revoking the current app sign-in also ends the local session.
+            cloudState.endLocalSession(pending: false)
+        }
         return .revoked
     }
 
@@ -173,6 +183,7 @@ extension FixtureSessionService: CloudAccountService {
         guard cloudState.account != nil else { throw SessionServiceError(.security) }
         // Cloud may accept the account-wide revocation without confirming every
         // session; Settings must present the pending scope and sign out locally.
+        cloudState.endLocalSession(pending: true)
         return .pending
     }
 
