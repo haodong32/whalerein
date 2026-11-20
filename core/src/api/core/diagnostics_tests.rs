@@ -145,6 +145,7 @@ async fn diagnostic_export_manifest_is_unchanged() {
 #[tokio::test]
 async fn cache_rebuild_diagnostic_can_read_the_published_cache() {
     use crate::api::{DiagnosticEvent, MemorySecretStore};
+    use std::sync::atomic::Ordering;
     use std::sync::{OnceLock, Weak};
 
     #[derive(Default)]

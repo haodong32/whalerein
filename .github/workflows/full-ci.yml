@@ -140,9 +140,35 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check, build and test selected projects
+        if: ${{ !contains(matrix.projects, 'cli') }}
         env:
           PROJECTS: ${{ toJSON(matrix.projects) }}
         run: uv run --project tools/repo python -m repo.ci run --projects "$PROJECTS"
+
+      - name: Check, build and test selected projects with an isolated Secret Service
+        if: contains(matrix.projects, 'cli')
+        env:
+          PROJECTS: ${{ toJSON(matrix.projects) }}
+        run: |
+          sudo apt-get install --yes dbus-daemon dbus-bin gnome-keyring
+          PYTHONPATH=tests/integration uv run --project tools/repo python - "$PROJECTS" <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from client_environment import isolated_keyring
+
+          with tempfile.TemporaryDirectory() as directory:
+              with isolated_keyring(Path(directory)) as keyring:
+                  result = subprocess.run(
+                      [sys.executable, "-m", "repo.ci", "run", "--projects", sys.argv[1]],
+                      env={**os.environ, **keyring},
+                      check=False,
+                  )
+          raise SystemExit(result.returncode)
+          PYTHON
 
       - name: Upload reports and local build outputs
         if: always()

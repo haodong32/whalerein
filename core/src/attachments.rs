@@ -2030,33 +2030,24 @@ mod download_tests {
         access.host.lock().unwrap().put_attachment(object);
         let destination = directory.path().join("downloads");
         std::fs::create_dir(&destination).unwrap();
-        access.host.lock().unwrap().attachment_pull_delay_ms = 300;
 
         let cancellation = Cancellation::new();
-        let cancel = cancellation.clone();
-        let task = {
-            let core = core.clone();
-            let destination = destination.clone();
-            tokio::spawn(async move {
-                core.download_attachment(request(&destination), &cancellation, |_| {})
-                    .await
+        let mut received = 0;
+        let error = core
+            .download_attachment(request(&destination), &cancellation, |progress| {
+                received = progress.received;
+                if received > 0 {
+                    cancellation.cancel();
+                }
             })
-        };
-        let readiness = std::time::Instant::now();
-        while access.host.lock().unwrap().attachment_open_calls == 0 {
-            assert!(
-                readiness.elapsed() < Duration::from_secs(5),
-                "the transfer never opened"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        cancel.cancel();
-        let error = task.await.unwrap().unwrap_err();
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), "cancelled");
+        assert_eq!(received, 16 * 1024);
         assert!(!destination.join("cancel.bin").exists());
         no_staging(&destination);
 
-        access.host.lock().unwrap().attachment_pull_delay_ms = 0;
+        access.host.lock().unwrap().attachment_pull_offsets.clear();
         let outcome = core
             .download_attachment(request(&destination), &Cancellation::new(), |_| {})
             .await
@@ -2064,14 +2055,7 @@ mod download_tests {
         assert_eq!(outcome.sha256, crate::util::sha256_hex(&bytes));
         let host = access.host.lock().unwrap();
         assert_eq!(host.attachment_open_calls, 2, "retry is a fresh transfer");
-        assert!(host.attachment_pull_offsets.contains(&0));
-        assert!(
-            host.attachment_pull_offsets
-                .iter()
-                .filter(|offset| **offset == 0)
-                .count()
-                >= 2
-        );
+        assert_eq!(host.attachment_pull_offsets.first(), Some(&0));
     }
 
     #[tokio::test]
