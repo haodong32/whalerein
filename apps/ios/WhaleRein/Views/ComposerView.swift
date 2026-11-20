@@ -10,6 +10,8 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            QueueSurfaceView(model: model)
+            WaitControlView(model: model)
             connectionLine
             statusLines
 

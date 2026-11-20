@@ -122,6 +122,42 @@ final class RecoverableSessionService: SessionService {
         try await current().stop(hostId: hostId, sessionId: sessionId)
     }
 
+    // MARK: - Pending queue
+
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot {
+        try await current().pendingQueue(hostId: hostId, sessionId: sessionId)
+    }
+
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation {
+        try await current().updateQueueItem(
+            hostId: hostId,
+            sessionId: sessionId,
+            itemId: itemId,
+            action: action,
+            text: text
+        )
+    }
+
+    // MARK: - Wait
+
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String {
+        try await current().beginWait(hostId: hostId, sessionId: sessionId, timeoutMs: timeoutMs)
+    }
+
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? {
+        try await current().takeWaitResult(waitId: waitId, waitMs: waitMs)
+    }
+
+    func cancelWait(waitId: String) async throws -> Bool {
+        try await current().cancelWait(waitId: waitId)
+    }
+
     // MARK: - Questions
 
     func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
@@ -158,10 +194,26 @@ final class RecoverableSessionService: SessionService {
         )
     }
 
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt {
+        try await current().requestQuestionAnswerCancel(
+            hostId: hostId,
+            sessionId: sessionId,
+            commandId: commandId
+        )
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
         try await current().approvals(hostId: hostId, sessionId: sessionId)
+    }
+
+    func approval(hostId: String, approvalId: String) async throws -> Approval {
+        try await current().approval(hostId: hostId, approvalId: approvalId)
     }
 
     func resolveApproval(

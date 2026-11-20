@@ -78,18 +78,32 @@ struct SessionCapabilities: Hashable, Sendable {
     /// True only when the Source reports interrupt support. Stop is additionally
     /// gated by `running`.
     var supportsInterrupt: Bool = false
+    /// Per-action queue capabilities. A read-only queue stays visible while a
+    /// mutation path is unsupported.
+    var supportsQueueRead: Bool = false
+    var supportsQueueEdit: Bool = false
+    var supportsQueueRemove: Bool = false
+    var supportsQueuePromote: Bool = false
 
     static let idle = SessionCapabilities(
         running: false,
         supportsSteer: true,
         supportsQueue: true,
-        supportsInterrupt: true
+        supportsInterrupt: true,
+        supportsQueueRead: true,
+        supportsQueueEdit: true,
+        supportsQueueRemove: true,
+        supportsQueuePromote: true
     )
     static let running = SessionCapabilities(
         running: true,
         supportsSteer: true,
         supportsQueue: true,
-        supportsInterrupt: true
+        supportsInterrupt: true,
+        supportsQueueRead: true,
+        supportsQueueEdit: true,
+        supportsQueueRemove: true,
+        supportsQueuePromote: true
     )
 }
 

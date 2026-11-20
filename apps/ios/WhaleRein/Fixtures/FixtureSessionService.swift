@@ -3,6 +3,17 @@
 
 import Foundation
 
+/// One fixture wait attempt. The continuation is resumed once by whichever of
+/// completion, cancellation or the caller's take deadline happens first.
+@MainActor
+private final class FixtureWaitAttempt {
+    var hostID: String = ""
+    var sessionID: String = ""
+    var result: WaitResult?
+    var waiter: CheckedContinuation<WaitResult?, Never>?
+    var task: Task<Void, Never>?
+}
+
 @MainActor
 final class FixtureSessionService: SessionService {
     let instanceId: String
@@ -36,6 +47,11 @@ final class FixtureSessionService: SessionService {
     private var questionRevisionBySession: [String: UInt64] = [:]
     private var questionInitializedSessions: Set<String> = []
     private var openQuestionCommands: Set<String> = []
+    private var queueBySession: [String: QueueSnapshot] = [:]
+    private var queueReadFails = false
+    private var queueMutations: [(itemID: String, action: QueueAction, text: String)] = []
+    private var waitAttempts: [String: FixtureWaitAttempt] = [:]
+    private var waitCounter = 0
     private var streamTask: Task<Void, Never>?
     private var leakTask: Task<Void, Never>?
     private var settlementTasks: [Task<Void, Never>] = []
@@ -163,13 +179,26 @@ final class FixtureSessionService: SessionService {
 
     func capabilities(hostId: String, sessionId: String) async throws -> SessionCapabilities {
         try requirePaired()
+        let readSupported = !options.queueUnsupported
         if sessionId == "s-legacy" {
-            return SessionCapabilities(running: runningSessions.contains(sessionId), supportsSteer: false, supportsQueue: true)
+            return SessionCapabilities(
+                running: runningSessions.contains(sessionId),
+                supportsSteer: false,
+                supportsQueue: true,
+                supportsQueueRead: readSupported,
+                supportsQueueEdit: false,
+                supportsQueueRemove: false,
+                supportsQueuePromote: false
+            )
         }
         return SessionCapabilities(
             running: runningSessions.contains(sessionId),
             supportsSteer: true,
-            supportsQueue: true
+            supportsQueue: true,
+            supportsQueueRead: readSupported,
+            supportsQueueEdit: readSupported,
+            supportsQueueRemove: readSupported,
+            supportsQueuePromote: readSupported
         )
     }
 
@@ -373,6 +402,258 @@ final class FixtureSessionService: SessionService {
         return receipt
     }
 
+    // MARK: - Pending queue
+
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot {
+        try requirePaired()
+        if options.queueUnsupported {
+            throw SessionServiceError(.unsupportedCapability, detail: "queue read unsupported")
+        }
+        if queueReadFails {
+            throw SessionServiceError(.unavailable, detail: "queue read failed")
+        }
+        if let existing = queueBySession[sessionId] {
+            return existing
+        }
+        let created = QueueSnapshot(
+            available: true,
+            running: runningSessions.contains(sessionId),
+            items: options.queueOnOpen ? Self.fixtureQueueItems() : []
+        )
+        queueBySession[sessionId] = created
+        return created
+    }
+
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation {
+        try requirePaired()
+        guard var snapshot = queueBySession[sessionId] else {
+            throw SessionServiceError(.unavailable, detail: "queue not read")
+        }
+        guard let index = snapshot.items.firstIndex(where: { $0.itemID == itemId }) else {
+            // The item was consumed between the menu and the action.
+            throw SessionServiceError(.conflict, detail: "queue item consumed")
+        }
+        guard snapshot.items[index].advertises(action) else {
+            throw SessionServiceError(.conflict, detail: "queue action not advertised")
+        }
+        queueMutations.append((itemID: itemId, action: action, text: text))
+        var items = snapshot.items
+        switch action {
+        case .edit:
+            let original = items[index]
+            items[index] = QueueItem(
+                itemID: original.itemID,
+                placement: original.placement,
+                deliveryID: original.deliveryID,
+                blocks: [.text(text)],
+                actions: original.actions
+            )
+        case .remove:
+            items.remove(at: index)
+        case .promote:
+            let original = items[index]
+            items[index] = QueueItem(
+                itemID: original.itemID,
+                placement: "steering",
+                deliveryID: original.deliveryID,
+                blocks: original.blocks,
+                actions: original.actions
+            )
+        }
+        snapshot = QueueSnapshot(
+            available: true,
+            running: snapshot.running,
+            items: items
+        )
+        queueBySession[sessionId] = snapshot
+        commandCounter += 1
+        let receipt = CommandReceipt(
+            commandId: String(format: "cmd-queue-%04d", commandCounter),
+            requestId: String(format: "req-queue-%04d", commandCounter),
+            status: .confirmed,
+            delivery: nil
+        )
+        if options.queueMutationRefreshFails {
+            queueReadFails = true
+        }
+        return QueueMutation(
+            operationID: receipt.commandId,
+            hostID: hostId,
+            sessionID: sessionId,
+            itemID: itemId,
+            action: action,
+            receipt: receipt
+        )
+    }
+
+    // MARK: - Wait
+
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String {
+        try requirePaired()
+        waitCounter += 1
+        let waitID = String(format: "wait-%04d", waitCounter)
+        let attempt = FixtureWaitAttempt()
+        attempt.hostID = hostId
+        attempt.sessionID = sessionId
+        waitAttempts[waitID] = attempt
+        let idle = WaitResult(
+            waitID: waitID,
+            hostID: hostId,
+            sessionID: sessionId,
+            outcome: .idle,
+            state: WaitSnapshot(
+                active: false,
+                running: runningSessions.contains(sessionId),
+                queueAvailable: true,
+                pendingInput: []
+            ),
+            errorCode: nil
+        )
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.clock.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            self.settleWait(waitID, result: idle)
+        }
+        attempt.task = task
+        return waitID
+    }
+
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? {
+        try requirePaired()
+        guard let attempt = waitAttempts[waitId] else {
+            throw SessionServiceError(.unavailable, detail: "wait not found")
+        }
+        if let result = attempt.result {
+            waitAttempts[waitId] = nil
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            attempt.waiter = continuation
+            attempt.task?.cancel()
+            attempt.task = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(Int(waitMs)))
+                guard !Task.isCancelled else { return }
+                self?.fulfilWait(waitId, result: nil)
+            }
+        }
+    }
+
+    func cancelWait(waitId: String) async throws -> Bool {
+        try requirePaired()
+        guard let attempt = waitAttempts[waitId], attempt.result == nil else {
+            return false
+        }
+        let cancelled = WaitResult(
+            waitID: waitId,
+            hostID: attempt.hostID,
+            sessionID: attempt.sessionID,
+            outcome: .cancelled,
+            state: nil,
+            errorCode: "cancelled"
+        )
+        settleWait(waitId, result: cancelled)
+        return true
+    }
+
+    /// Complete one fixture wait deterministically from a test.
+    func completeWaitForTesting(
+        _ waitID: String,
+        outcome: WaitOutcome,
+        state: WaitSnapshot? = nil,
+        errorCode: String? = nil
+    ) {
+        guard let attempt = waitAttempts[waitID] else { return }
+        settleWait(
+            waitID,
+            result: WaitResult(
+                waitID: waitID,
+                hostID: attempt.hostID,
+                sessionID: attempt.sessionID,
+                outcome: outcome,
+                state: state,
+                errorCode: errorCode
+            )
+        )
+    }
+
+    private func settleWait(_ waitID: String, result: WaitResult) {
+        guard let attempt = waitAttempts[waitID] else { return }
+        if let waiter = attempt.waiter {
+            attempt.waiter = nil
+            attempt.task?.cancel()
+            attempt.task = nil
+            waitAttempts[waitID] = nil
+            waiter.resume(returning: result)
+        } else {
+            attempt.result = result
+        }
+    }
+
+    private func fulfilWait(_ waitID: String, result: WaitResult?) {
+        guard let attempt = waitAttempts[waitID] else { return }
+        let waiter = attempt.waiter
+        attempt.waiter = nil
+        if result != nil {
+            waitAttempts[waitID] = nil
+        }
+        waiter?.resume(returning: result)
+    }
+
+    /// Replace the queue fixture deterministically from a test.
+    func seedQueueForTesting(
+        _ items: [QueueItem],
+        hostId: String = "studio-mac",
+        sessionId: String = "s-001"
+    ) {
+        queueBySession[sessionId] = QueueSnapshot(
+            available: true,
+            running: runningSessions.contains(sessionId),
+            items: items
+        )
+    }
+
+    func setQueueReadFailureForTesting(_ fails: Bool) {
+        queueReadFails = fails
+    }
+
+    var queueMutationsForTesting: [(itemID: String, action: QueueAction, text: String)] {
+        queueMutations
+    }
+
+    private static func fixtureQueueItems() -> [QueueItem] {
+        [
+            QueueItem(
+                itemID: "queue-1",
+                placement: "queued",
+                deliveryID: "delivery-1",
+                blocks: [.text("first queued instruction")],
+                actions: [.edit, .remove]
+            ),
+            QueueItem(
+                itemID: "queue-2",
+                placement: "queued",
+                deliveryID: "delivery-2",
+                blocks: [
+                    .text("second queued instruction"),
+                    .attachment(
+                        mediaType: "image/png",
+                        name: "screenshot.png",
+                        size: 42,
+                        available: true
+                    ),
+                ],
+                actions: [.edit, .remove, .promote]
+            ),
+        ]
+    }
+
     func stop(hostId: String, sessionId: String) async throws -> CommandReceipt {
         try requirePaired()
         guard activeWatch == SessionContext(hostId: hostId, sessionId: sessionId) else {
@@ -527,11 +808,33 @@ final class FixtureSessionService: SessionService {
         return openQuestionCommands.remove(commandId) != nil
     }
 
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt {
+        let requested = try await cancelQuestionAnswer(
+            hostId: hostId,
+            sessionId: sessionId,
+            commandId: commandId
+        )
+        return QuestionCancelReceipt(commandID: commandId, cancellationRequested: requested)
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
         try requirePaired()
         return [approval(for: hostId, sessionId: sessionId)]
+    }
+
+    func approval(hostId: String, approvalId: String) async throws -> Approval {
+        try requirePaired()
+        let current = approval(for: hostId, sessionId: "s-001")
+        guard current.approvalId == approvalId else {
+            throw SessionServiceError(.unavailable, detail: "approval not found")
+        }
+        return current
     }
 
     func resolveApproval(

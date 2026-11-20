@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess};
 use whalerein_mobile::{
     write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore, MessageView,
-    MobileClientService, MobileCore,
+    MobileClientService, MobileCore, QueueAction, WaitOutcome,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -983,6 +983,15 @@ fn question_observation_and_guard_flow_use_core_owned_state() {
         event,
         ConversationEvent::CommandStatus { command } if command.command_id == answered.command_id
     )));
+    let cancelled = core
+        .request_question_answer_cancel(
+            host_id.clone(),
+            session_id.clone(),
+            answered.command_id.clone(),
+        )
+        .unwrap();
+    assert_eq!(cancelled.command_id, answered.command_id);
+    assert!(cancelled.cancellation_requested);
     assert!(core
         .cancel_question_answer(host_id, session_id, answered.command_id)
         .unwrap());
@@ -1065,4 +1074,221 @@ fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
         "an independent command event was lost with the replaced watch: {emitted:?}"
     );
     core.stop_watch();
+}
+
+// ---------------------------------------------------------------------------
+// Queue, wait, exact approval and open-answer cancellation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_queue_reads_ordered_items_and_advertised_actions() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let queue = core
+        .pending_queue(host_id.clone(), "session-1".into())
+        .unwrap();
+    assert!(queue.available);
+    assert!(queue.running);
+    assert_eq!(queue.items.len(), 1);
+    let item = &queue.items[0];
+    assert_eq!(item.item_id, "queue-1");
+    assert_eq!(item.placement, "queued");
+    assert_eq!(item.actions, vec!["edit", "remove"]);
+    assert!(matches!(
+        item.blocks.as_slice(),
+        [whalerein_mobile::PendingQueueBlockView::Text { text }] if text == "fixture"
+    ));
+
+    // A fresh listing that does not advertise the action rejects the request
+    // before any control command is submitted.
+    let commands_before = access.host.lock().unwrap().commands_seen;
+    assert_eq!(
+        core.update_pending_queue(
+            host_id.clone(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Promote,
+            String::new(),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_input"
+    );
+    assert_eq!(access.host.lock().unwrap().commands_seen, commands_before);
+
+    // Edit carries replacement text and a native terminal receipt.
+    let edited = core
+        .update_pending_queue(
+            host_id.clone(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Edit,
+            "replacement".into(),
+        )
+        .unwrap();
+    assert_eq!(edited.item_id, "queue-1");
+    assert_eq!(edited.action, "edit");
+    assert_eq!(edited.operation_id, edited.receipt.command_id);
+    assert_eq!(edited.host_id, host_id);
+    assert_eq!(edited.session_id, "session-1");
+    assert_eq!(edited.receipt.status, "succeeded");
+
+    // Withdraw has no text and is also a native receipt.
+    let withdrawn = core
+        .update_pending_queue(
+            host_id,
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Remove,
+            String::new(),
+        )
+        .unwrap();
+    assert_eq!(withdrawn.action, "remove");
+    assert_eq!(withdrawn.receipt.status, "succeeded");
+
+    // Non-edit text is rejected locally rather than silently dropped.
+    assert_eq!(
+        core.update_pending_queue(
+            "host-1".into(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Promote,
+            "unexpected".into(),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_input"
+    );
+}
+
+#[test]
+fn queue_read_unavailable_stays_explicit() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    access.host.lock().unwrap().fail_pending_queue = true;
+    assert_eq!(
+        core.pending_queue(host_id, "session-1".into())
+            .unwrap_err()
+            .code(),
+        "unavailable"
+    );
+}
+
+#[test]
+fn wait_reaches_idle_and_cancel_keeps_the_attempt_identity() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let idle_id = core
+        .begin_wait(host_id.clone(), "session-1".into(), 5_000)
+        .unwrap();
+    let idle = take_wait_until(&core, &idle_id, Duration::from_secs(5));
+    assert_eq!(idle.wait_id, idle_id);
+    assert_eq!(idle.host_id, host_id);
+    assert_eq!(idle.session_id, "session-1");
+    assert_eq!(idle.outcome, WaitOutcome::Idle);
+    let state = idle.state.expect("idle carries source state");
+    assert!(!state.active);
+    assert!(!state.running);
+    assert!(idle.error_code.is_none());
+    // A settled attempt is consumed once.
+    assert_eq!(
+        core.take_wait_result(idle_id, 0).unwrap_err().code(),
+        "not_found"
+    );
+
+    // Delay the native answer so cancellation races an in-flight slice.
+    access.host.lock().unwrap().wait_receipt_delay_ms = 2_000;
+    let wait_id = core
+        .begin_wait(host_id.clone(), "session-1".into(), 60_000)
+        .unwrap();
+    assert!(core
+        .take_wait_result(wait_id.clone(), 50)
+        .unwrap()
+        .is_none());
+    assert!(core.cancel_wait(wait_id.clone()).unwrap());
+    let cancelled = take_wait_until(&core, &wait_id, Duration::from_secs(5));
+    assert_eq!(cancelled.outcome, WaitOutcome::Cancelled);
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(cancelled.state.is_none());
+
+    // A completed attempt cannot be cancelled after its result exists.
+    let settled_id = core.begin_wait(host_id, "session-1".into(), 5_000).unwrap();
+    let _ = take_wait_until(&core, &settled_id, Duration::from_secs(5));
+    assert!(!core.cancel_wait(settled_id).unwrap());
+}
+
+fn take_wait_until(
+    core: &MobileCore,
+    wait_id: &str,
+    timeout: Duration,
+) -> whalerein_mobile::WaitResultView {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(result) = core.take_wait_result(wait_id.to_owned(), 100).unwrap() {
+            return result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wait {wait_id} did not settle before the deadline"
+        );
+    }
+}
+
+#[test]
+fn exact_approval_read_is_host_scoped_and_carries_the_guard() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.approvals.push(whalerein_proto::Approval {
+            approval_id: "approval-1".into(),
+            session_id: "session-1".into(),
+            tool_name: "bash".into(),
+            call_id: "call-1".into(),
+            reason: "run the verification".into(),
+            version: 3,
+            expires_at_unix_ms: 1_900_000_000_000,
+            digest: vec![7; 32],
+            state: whalerein_proto::ApprovalState::Pending as i32,
+            ..Default::default()
+        });
+    }
+
+    let exact = core
+        .get_approval(host_id.clone(), "approval-1".into())
+        .unwrap();
+    assert_eq!(exact.approval_id, "approval-1");
+    assert_eq!(exact.session_id, "session-1");
+    assert_eq!(exact.state, "pending");
+    assert_eq!(exact.version, 3);
+    assert_eq!(exact.digest_hex, "07".repeat(32));
+    assert_eq!(exact.expires_at_unix_ms, 1_900_000_000_000);
+
+    // Missing identities and Hosts outside the original scope never guess.
+    assert_eq!(
+        core.get_approval(host_id, "missing".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+    assert_eq!(
+        core.get_approval("host-2".into(), "approval-1".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
 }

@@ -45,7 +45,10 @@ final class ConversationModel {
     private(set) var questions: QuestionsState = .loading
     private(set) var questionReview: QuestionReview?
     private(set) var questionAnswerState: QuestionAnswerState = .idle
+    private(set) var questionCancelReceipt: QuestionCancelReceipt?
     private(set) var questionErrorKey: L10nKey?
+    /// Exact approval status refreshes keyed by the original approval identity.
+    private(set) var approvalStatusRefresh: [String: ApprovalStatusRefresh] = [:]
     private(set) var isLoadingTruncatedQuestions = false
     private(set) var previewText: String?
     private(set) var previewAttemptId: String?
@@ -96,6 +99,9 @@ final class ConversationModel {
     }
 
     private let service: any SessionService
+    /// Queue and wait are independent observations; neither owns the watch.
+    let queue: ConversationQueueController
+    let wait: ConversationWaitController
     private let onStatusChange: (() -> Void)?
     private let onFatalError: ((AppErrorCode) -> Void)?
     private let onConnectionChange: ((ConnectionStatus) -> Void)?
@@ -145,6 +151,16 @@ final class ConversationModel {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.service = service
+        self.queue = ConversationQueueController(
+            hostID: hostId,
+            sessionID: sessionId,
+            service: service
+        )
+        self.wait = ConversationWaitController(
+            hostID: hostId,
+            sessionID: sessionId,
+            service: service
+        )
         self.onStatusChange = onStatusChange
         self.onFatalError = onFatalError
         self.onConnectionChange = onConnectionChange
@@ -255,6 +271,7 @@ final class ConversationModel {
             && resolvingApprovalId == nil
             && connection.isOnline
             && !watchEnded
+            && approvalStatusRefresh[approval.approvalId] != .refreshing
     }
 
     // MARK: - Lifecycle
@@ -270,6 +287,7 @@ final class ConversationModel {
         questionReview = nil
         questionErrorKey = nil
         questionAnswerState = .idle
+        questionCancelReceipt = nil
         ensureSubscription()
         do {
             draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
@@ -277,7 +295,9 @@ final class ConversationModel {
             if capabilities.running {
                 delivery = .steer
             }
+            queue.applyCapabilities(capabilities)
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
+            await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             loadState = .failed(code)
@@ -296,6 +316,7 @@ final class ConversationModel {
         stopApprovalTimer()
         consumeTask?.cancel()
         consumeTask = nil
+        wait.close()
         service.stopWatch()
         connection = .offline
     }
@@ -312,7 +333,7 @@ final class ConversationModel {
         questions = .loading
         questionReview = nil
         questionErrorKey = nil
-        questionAnswerState = .idle
+        preserveQuestionCancellation()
         if consumeTask == nil {
             ensureSubscription()
         }
@@ -330,7 +351,7 @@ final class ConversationModel {
         questions = .loading
         questionReview = nil
         questionErrorKey = nil
-        questionAnswerState = .idle
+        preserveQuestionCancellation()
         consumeTask?.cancel()
         consumeTask = nil
         ensureSubscription()
@@ -341,6 +362,7 @@ final class ConversationModel {
         consumeTask?.cancel()
         consumeTask = nil
         stopApprovalTimer()
+        wait.close()
         draftSaveTask?.cancel()
         draftSaveTask = nil
         let text = draft
@@ -391,6 +413,7 @@ final class ConversationModel {
         case .reset(let messages, let approvals):
             self.messages = messages
             trustedPendingApprovalIds.removeAll()
+            approvalStatusRefresh.removeAll()
             mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
             optimisticMessages.removeAll()
             previewText = nil
@@ -449,6 +472,7 @@ final class ConversationModel {
             previewAttemptId = nil
             authoritativeRunEpoch += 1
             updateCapabilities(running: false)
+            Task { await queue.refresh() }
 
         case .state(let status):
             updateConnection(status)
@@ -646,6 +670,11 @@ final class ConversationModel {
             }
             sendErrorKey = nil
             applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
+            if receipt.status == .confirmed {
+                // Interrupt is a current-turn control; the queue stays visible
+                // and is refreshed from the source after the turn settles.
+                await queue.refresh()
+            }
         } catch {
             // A definite failure releases the gate so Stop can be retried. A
             // late settlement for the failed command is only remembered as an
@@ -764,6 +793,7 @@ final class ConversationModel {
             return
         }
         questionAnswerState = .submitting
+        questionCancelReceipt = nil
         questionErrorKey = nil
         do {
             let receipt = try await service.answerQuestion(
@@ -793,21 +823,41 @@ final class ConversationModel {
         }
     }
 
-    /// Requests cancellation of an uncertain open answer. When `false`, the
-    /// answer may still complete; the UI must not promise a rollback.
+    /// Requests cancellation of the one uncertain open answer attempt. When
+    /// `false`, the answer may still complete; the UI must not promise a
+    /// rollback and the original command identity stays eligible for recovery.
     func cancelQuestionAnswer() async {
         guard case .uncertain(let commandId) = questionAnswerState else { return }
         do {
-            let requested = try await service.cancelQuestionAnswer(
+            let receipt = try await service.requestQuestionAnswerCancel(
                 hostId: hostId,
                 sessionId: sessionId,
                 commandId: commandId
             )
-            questionErrorKey = requested ? .questionsCancelRequested : .questionsCancelUnconfirmed
+            questionCancelReceipt = receipt
+            questionErrorKey = receipt.cancellationRequested
+                ? .questionsCancelRequested
+                : .questionsCancelUnconfirmed
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             questionErrorKey = L10nKey.errorKey(for: code)
         }
+    }
+
+    var canCancelQuestionAnswer: Bool {
+        if case .uncertain = questionAnswerState {
+            return !isSuspended && !watchEnded
+        }
+        return false
+    }
+
+    /// Keep an in-flight answer and its cancellation request across a watch
+    /// replacement: a new observer continues the original attempt recovery.
+    private func preserveQuestionCancellation() {
+        if case .uncertain = questionAnswerState {
+            return
+        }
+        questionAnswerState = .idle
     }
 
     // MARK: - Approvals
@@ -842,6 +892,44 @@ final class ConversationModel {
             if code == .revoked || code == .notPaired {
                 reportFatalIfNeeded(code)
             }
+        }
+    }
+
+    /// Read one approval's exact scoped state from the Host and update the card.
+    /// A failed or out-of-scope read never leaves a stale card actionable.
+    func refreshApprovalStatus(_ approval: Approval) async {
+        guard approval.sessionId == sessionId else {
+            approvalStatusRefresh[approval.approvalId] = .outOfScope
+            return
+        }
+        approvalStatusRefresh[approval.approvalId] = .refreshing
+        do {
+            let exact = try await service.approval(
+                hostId: hostId,
+                approvalId: approval.approvalId
+            )
+            guard exact.sessionId == sessionId else {
+                approvalStatusRefresh[approval.approvalId] = .outOfScope
+                return
+            }
+            if exact.state != .pending {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .resolved
+            } else if exact.version != approval.version
+                || exact.digestHex.caseInsensitiveCompare(approval.digestHex) != .orderedSame {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .changed
+            } else {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .current
+            }
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            if code == .revoked || code == .notPaired {
+                reportFatalIfNeeded(code)
+            }
+            markApprovalUnavailable(approval.approvalId)
+            approvalStatusRefresh[approval.approvalId] = .unavailable
         }
     }
 
@@ -955,6 +1043,12 @@ final class ConversationModel {
         }
     }
 
+    private func markApprovalUnavailable(_ approvalID: String) {
+        guard let index = approvals.firstIndex(where: { $0.approvalId == approvalID }),
+              approvals[index].state == .pending else { return }
+        approvals[index].state = .unavailable
+    }
+
     private func restartWatch() async {
         guard !isReconnecting else { return }
         isReconnecting = true
@@ -970,7 +1064,9 @@ final class ConversationModel {
             if loadState != .loaded {
                 loadState = .loading
             }
+            queue.applyCapabilities(capabilities)
             await refreshApprovals()
+            await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             errorKey = L10nKey.errorKey(for: code)
@@ -1201,6 +1297,7 @@ final class ConversationModel {
     private func applyCapabilities(_ next: SessionCapabilities) {
         let wasRunning = capabilities.running
         capabilities = next
+        queue.applyCapabilities(next)
         let options = DeliveryPolicy.choices(for: capabilities)
         if capabilities.running && !wasRunning {
             delivery = options.first ?? .send

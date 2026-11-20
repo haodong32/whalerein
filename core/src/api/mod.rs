@@ -90,7 +90,7 @@ pub use types::{
     DoctorReport, ExportManifest, HostCapabilities, HostInfo, InputKind, LifecycleReceipt,
     ModelCatalog, ModelChoice, ModelSelectionReceipt, ObservationInterests, OnlineStatus,
     PairingHistoryRecord, PairingOutcome, PairingPrompt, PendingCommand, PendingQueue,
-    PendingQueueAction, QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo,
+    PendingQueueAction, PendingQueueBlock, PendingQueueItem, QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo,
     QuestionOptionInfo, QuestionPageInfo, QuestionReceiptInfo, QuestionStamp, QuestionView,
     RevocationOutcome, RevocationRetention, SessionCapabilities, SessionEvent, SessionEventPayload,
     SessionList, SessionModel, SessionSummary, WaitInput, WaitObservation, WaitReason, WaitState,

@@ -176,12 +176,19 @@ final class StubSessionService: SessionService {
     var startWatchHandler: ((String, String) async throws -> Void)?
     var sendHandler: ((String, String, String, DeliveryChoice) async throws -> CommandReceipt)?
     var stopHandler: ((String, String) async throws -> CommandReceipt)?
+    var pendingQueueHandler: ((String, String) async throws -> QueueSnapshot)?
+    var updateQueueHandler: ((String, String, String, QueueAction, String) async throws -> QueueMutation)?
+    var beginWaitHandler: ((String, String, UInt64) async throws -> String)?
+    var takeWaitHandler: ((String, UInt64) async throws -> WaitResult?)?
+    var cancelWaitHandler: ((String) async throws -> Bool)?
     var approvalsHandler: ((String, String) async throws -> [Approval])?
     var resolveHandler: ((String, String, String, Int, String, Bool) async throws -> Approval)?
     var listQuestionsHandler: ((String, String, String) async throws -> QuestionPage)?
     var questionHandler: ((String, String, String) async throws -> QuestionBatch)?
     var answerQuestionHandler: ((String, String, QuestionBatch, [QuestionAnswer]) async throws -> CommandReceipt)?
     var cancelQuestionHandler: ((String, String, String) async throws -> Bool)?
+    var requestQuestionCancelHandler: ((String, String, String) async throws -> QuestionCancelReceipt)?
+    var approvalHandler: ((String, String) async throws -> Approval)?
     var diagnosticsHandler: (() async throws -> DiagnosticsReport)?
     var exportHandler: ((URL) async throws -> DiagnosticsReport)?
     var forgetHandler: (() async throws -> Void)?
@@ -194,6 +201,11 @@ final class StubSessionService: SessionService {
     private(set) var stopWatchCount = 0
     private(set) var sendCalls: [(String, String, String, DeliveryChoice)] = []
     private(set) var stopCalls: [(String, String)] = []
+    private(set) var pendingQueueCalls: [(String, String)] = []
+    private(set) var updateQueueCalls: [(String, String, String, QueueAction, String)] = []
+    private(set) var beginWaitCalls: [(String, String, UInt64)] = []
+    private(set) var takeWaitCalls: [(String, UInt64)] = []
+    private(set) var cancelWaitCalls: [String] = []
     private(set) var resolveCalls: [(approvalId: String, version: Int, digest: String, allow: Bool)] = []
     private(set) var savedDrafts: [String: String] = [:]
     private(set) var clearedDraftKeys: [String] = []
@@ -207,6 +219,8 @@ final class StubSessionService: SessionService {
     private(set) var questionCalls: [(String, String, String)] = []
     private(set) var answerQuestionCalls: [(String, String, QuestionBatch, [QuestionAnswer])] = []
     private(set) var cancelQuestionCalls: [(String, String, String)] = []
+    private(set) var requestQuestionCancelCalls: [(String, String, String)] = []
+    private(set) var approvalCalls: [(String, String)] = []
 
     var activeStreamCount: Int { continuations.count }
 
@@ -303,6 +317,59 @@ final class StubSessionService: SessionService {
         return try await stopHandler(hostId, sessionId)
     }
 
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot {
+        pendingQueueCalls.append((hostId, sessionId))
+        guard let pendingQueueHandler else {
+            return QueueSnapshot(available: true, running: false, items: [])
+        }
+        return try await pendingQueueHandler(hostId, sessionId)
+    }
+
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation {
+        updateQueueCalls.append((hostId, sessionId, itemId, action, text))
+        guard let updateQueueHandler else {
+            let receipt = CommandReceipt(
+                commandId: "cmd-queue-1",
+                requestId: "req-queue-1",
+                status: .confirmed,
+                delivery: nil
+            )
+            return QueueMutation(
+                operationID: receipt.commandId,
+                hostID: hostId,
+                sessionID: sessionId,
+                itemID: itemId,
+                action: action,
+                receipt: receipt
+            )
+        }
+        return try await updateQueueHandler(hostId, sessionId, itemId, action, text)
+    }
+
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String {
+        beginWaitCalls.append((hostId, sessionId, timeoutMs))
+        guard let beginWaitHandler else { return "wait-\(beginWaitCalls.count)" }
+        return try await beginWaitHandler(hostId, sessionId, timeoutMs)
+    }
+
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? {
+        takeWaitCalls.append((waitId, waitMs))
+        guard let takeWaitHandler else { return nil }
+        return try await takeWaitHandler(waitId, waitMs)
+    }
+
+    func cancelWait(waitId: String) async throws -> Bool {
+        cancelWaitCalls.append(waitId)
+        guard let cancelWaitHandler else { return true }
+        return try await cancelWaitHandler(waitId)
+    }
+
     func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
         listQuestionsCalls.append((hostId, sessionId, cursor))
         guard let listQuestionsHandler else {
@@ -345,9 +412,34 @@ final class StubSessionService: SessionService {
         return try await cancelQuestionHandler(hostId, sessionId, commandId)
     }
 
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt {
+        requestQuestionCancelCalls.append((hostId, sessionId, commandId))
+        if let requestQuestionCancelHandler {
+            return try await requestQuestionCancelHandler(hostId, sessionId, commandId)
+        }
+        let requested = try await cancelQuestionAnswer(
+            hostId: hostId,
+            sessionId: sessionId,
+            commandId: commandId
+        )
+        return QuestionCancelReceipt(commandID: commandId, cancellationRequested: requested)
+    }
+
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
         guard let approvalsHandler else { return [] }
         return try await approvalsHandler(hostId, sessionId)
+    }
+
+    func approval(hostId: String, approvalId: String) async throws -> Approval {
+        approvalCalls.append((hostId, approvalId))
+        guard let approvalHandler else {
+            throw SessionServiceError(.unavailable)
+        }
+        return try await approvalHandler(hostId, approvalId)
     }
 
     func resolveApproval(

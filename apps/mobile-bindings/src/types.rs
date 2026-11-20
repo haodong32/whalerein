@@ -933,6 +933,17 @@ pub struct QuestionAnswerView {
     pub custom: Option<String>,
 }
 
+/// Receipt for asking Core to cancel one in-flight open answer.
+///
+/// `cancellation_requested == false` never means the answer did not happen: it
+/// may have completed already or not yet reached the Host. `command_id` keeps
+/// the original attempt identity so the caller can recover its native result.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionCancelReceiptView {
+    pub command_id: String,
+    pub cancellation_requested: bool,
+}
+
 impl From<QuestionAnswerView> for core_api::QuestionAnswer {
     fn from(value: QuestionAnswerView) -> Self {
         Self {
