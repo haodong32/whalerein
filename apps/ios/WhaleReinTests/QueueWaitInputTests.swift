@@ -420,6 +420,35 @@ struct QueueWaitInputTests {
 
     // MARK: - Open-answer cancellation
 
+    @Test("a confirmed answer is not cancellable")
+    func settledAnswerIsNotCancellable() async {
+        let service = StubSessionService()
+        service.answerQuestionHandler = { _, _, _, _ in
+            CommandReceipt(
+                commandId: "cmd-answer-ok",
+                requestId: "req-answer-ok",
+                status: .confirmed,
+                delivery: nil
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        service.emit(.reset(messages: [], approvals: []), sequence: 1)
+        let batch = questionBatch()
+        service.emit(.questions(currentQuestions(batch)), sequence: 2)
+        await waitUntil { model.hasPendingQuestions }
+        model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Stable"
+        )
+        _ = model.beginQuestionReview(batchId: batch.batchID)
+        await model.submitQuestionReview()
+        await pump()
+
+        #expect(!model.canCancelQuestionAnswer)
+        #expect(model.questionCancelReceipt == nil)
+    }
+
     @Test("cancellation keeps the original command identity across a replacement observer")
     func questionCancellationRace() async {
         let service = StubSessionService()
