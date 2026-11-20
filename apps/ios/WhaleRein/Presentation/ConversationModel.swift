@@ -88,7 +88,7 @@ final class ConversationModel {
     private(set) var eventSubscriptionCount = 0
 
     var draft: String = ""
-    var delivery: DeliveryChoice = .send
+    var delivery: DeliveryChoice = .queue
 
     private struct QuestionDraft {
         let guardValue: QuestionGuard
@@ -1358,12 +1358,10 @@ final class ConversationModel {
         let wasRunning = capabilities.running
         capabilities = next
         let options = DeliveryPolicy.choices(for: capabilities)
-        if capabilities.running && !wasRunning {
-            delivery = options.first ?? .send
-        } else if !capabilities.running {
-            delivery = .send
-        } else if !options.contains(delivery) {
-            delivery = options.first ?? .send
+        // A run-state change returns the affordance to the ordinary queue
+        // default. An explicit choice otherwise persists while it is supported.
+        if !options.contains(delivery) || capabilities.running != wasRunning {
+            delivery = DeliveryPolicy.defaultChoice(for: capabilities) ?? .send
         }
         onStatusChange?()
     }
