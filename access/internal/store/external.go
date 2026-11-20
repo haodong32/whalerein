@@ -257,7 +257,7 @@ func (s *Store) EnrollHost(
 // service admits explicitly before calling a mutation; this fallback keeps a
 // direct store caller on the same admission-before-mutation path.
 func (s *Store) ensureAdmission(ctx context.Context, operation ExternalOperation) error {
-	if _, err := s.operationByID(ctx, s.db, operation.OperationID); err == nil {
+	if _, err := loadOperationByID(ctx, s.db, operation.OperationID); err == nil {
 		return nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return err
@@ -735,7 +735,7 @@ func (s *Store) ReplaceHostCredential(ctx context.Context, operation ExternalOpe
 
 // Operation loads one operation record scoped by operation id only.
 func (s *Store) Operation(ctx context.Context, operationID string) (ExternalOperation, error) {
-	return s.operationByID(ctx, s.db, operationID)
+	return loadOperationByID(ctx, s.db, operationID)
 }
 
 const operationColumns = `operation_id, authorization_id, purpose, workspace_id, region_id,
@@ -793,10 +793,6 @@ func loadOperationForUpdate(ctx context.Context, tx pgx.Tx, operationID string) 
 		return ExternalOperation{}, fmt.Errorf("load operation for mutation: %w", err)
 	}
 	return operation, nil
-}
-
-func (s *Store) operationByID(ctx context.Context, q querier, operationID string) (ExternalOperation, error) {
-	return loadOperationByID(ctx, q, operationID)
 }
 
 func lockHostScope(ctx context.Context, tx pgx.Tx, hostID string) error {
