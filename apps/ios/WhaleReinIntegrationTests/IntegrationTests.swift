@@ -320,6 +320,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .commandStatus: return "commandStatus"
         case .error: return "error"
         case .watchEnded: return "watchEnded"
+        default: return "other"
         }
     }
 }
