@@ -1394,7 +1394,14 @@ export class ConnectionManager {
       if (record.mode === 'standalone') return await this.#startStandalone(record, { resume: true })
       const prepared = await this.#prepareProfile(record, { allowCreate: false })
       const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
-      if (!credential) throw this.#failFast('not_found', 'this profile is not enrolled')
+      if (!credential) {
+        // A confirmed binding with a missing/superseded credential is
+        // recoverable through the original enrollment; never a new approval.
+        throw this.#failFast(
+          this.#hasBinding(record) ? 'recovery_required' : 'not_found',
+          this.#hasBinding(record) ? 'the saved transport credential is missing; recover it' : 'this profile is not enrolled',
+        )
+      }
       // `routeExpiresAt` is legacy approval metadata. Access confirms the
       // enrollment and the credential; an established Host reconnects without
       // a new approval even after the original authorization deadline.
@@ -1676,7 +1683,7 @@ export class ConnectionManager {
       if (this.#errorCode === 'unauthorized' || this.#errorCode === 'tls_trust' || this.#errorCode === 'invalid_config') {
         return { kind: 'fix-config' }
       }
-      if (this.#errorCode === 'recovery_required') {
+      if (this.#errorCode === 'recovery_required' || (this.#hasBinding(record) && this.#errorCode === 'not_found')) {
         return this.#hasBinding(record) ? { kind: 'recover-credential' } : { kind: 'retry' }
       }
       return this.#hasBinding(record) ? { kind: 'retry' } : { kind: 'connect' }
