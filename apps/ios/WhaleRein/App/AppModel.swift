@@ -58,6 +58,8 @@ final class AppModel {
     /// Cloud sign-in/directory presentation for the active instance. `nil` for
     /// standalone instances and unavailable services.
     private(set) var cloudSignIn: CloudSignInModel?
+    /// Selected-instance status, default computer and Cloud app sign-ins.
+    private(set) var accountSettings: AccountSettingsModel?
 
     private(set) var conversation: ConversationModel?
     private(set) var isPaired: Bool
@@ -134,6 +136,10 @@ final class AppModel {
             instanceId: activeInstance?.id ?? service.instanceId
         )
         self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
+        self.accountSettings = makeAccountSettingsModel(
+            service: service,
+            instance: activeInstance
+        )
         installCallbacks()
     }
 
@@ -154,7 +160,10 @@ final class AppModel {
             PairingModel(service: service),
             HostListModel(service: service, preferences: preferences),
             SessionListModel(service: service, preferences: preferences),
-            DiagnosticsModel(service: service),
+            DiagnosticsModel(
+                service: service,
+                stagingDirectory: Self.diagnosticsStagingDirectory(dataDirectory)
+            ),
             SettingsModel(
                 service: service,
                 preferences: preferences,
@@ -338,7 +347,10 @@ final class AppModel {
         self.showDiagnostics = false
         self.hostList = HostListModel(service: service, preferences: preferences)
         self.sessionList = SessionListModel(service: service, preferences: preferences)
-        self.diagnostics = DiagnosticsModel(service: service)
+        self.diagnostics = DiagnosticsModel(
+            service: service,
+            stagingDirectory: Self.diagnosticsStagingDirectory(dataDirectory)
+        )
         self.pairing = PairingModel(service: service)
         self.settings = SettingsModel(
             service: service,
@@ -353,6 +365,10 @@ final class AppModel {
             instanceId: instance?.id ?? service.instanceId
         )
         self.cloudSignIn = makeCloudSignInModel(service: service, instance: instance)
+        self.accountSettings = makeAccountSettingsModel(
+            service: service,
+            instance: instance
+        )
         installCallbacks()
     }
 
@@ -362,6 +378,35 @@ final class AppModel {
     ) -> OperationRecoveryModel? {
         guard let recovery = service as? any OperationRecoveryService else { return nil }
         return OperationRecoveryModel(service: recovery, instanceId: instanceId)
+    }
+
+    /// Redacted diagnostic exports go to an app-owned staging directory for the
+    /// selected instance, not a process-wide temporary drop box.
+    static func diagnosticsStagingDirectory(_ dataDirectory: URL) -> URL {
+        dataDirectory
+            .appendingPathComponent("diagnostics", isDirectory: true)
+    }
+
+    /// Builds the status/default-computer/app-sign-in model for the activation
+    /// that owns `service`. Revoking the current app session fences through the
+    /// same signed-out path as Cloud sign-out.
+    private func makeAccountSettingsModel(
+        service: any SessionService,
+        instance: AppInstance?
+    ) -> AccountSettingsModel {
+        let generation = activationGeneration
+        let instanceId = instance?.id ?? service.instanceId
+        let model = AccountSettingsModel(service: service)
+        model.onSignedOut = { [weak self] in
+            guard let self,
+                  self.activationGeneration == generation,
+                  (self.activeInstance?.id ?? self.service.instanceId) == instanceId else {
+                return
+            }
+            self.cloudSignIn?.markSignedOutLocally(pending: true)
+            self.handleCloudSignedOut()
+        }
+        return model
     }
 
     /// Builds the Cloud model for the activation that owns `service`. Callbacks
@@ -777,6 +822,11 @@ final class AppModel {
         sessionList.reset()
         pairing.reset()
         rootState = .restoring
+        // The signed-out status and pending remote sign-out stay visible in
+        // Settings even though the conversation root has been retired.
+        Task { @MainActor [weak self] in
+            await self?.accountSettings?.load()
+        }
     }
 
     /// Entry point for pairing an additional Host while already paired, or for

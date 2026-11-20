@@ -28,9 +28,16 @@ final class DiagnosticsModel {
     private(set) var exportCount = 0
 
     private let service: any SessionService
+    /// App-owned staging directory for the redacted report. A file is written
+    /// only after the user confirms, and never into a shared temporary area.
+    private let stagingDirectory: URL
 
-    init(service: any SessionService) {
+    init(service: any SessionService, stagingDirectory: URL? = nil) {
         self.service = service
+        self.stagingDirectory = stagingDirectory
+            ?? FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("WhaleRein/diagnostics", isDirectory: true)
     }
 
     var stages: [DiagnosticStage] { report?.stages ?? [] }
@@ -60,17 +67,21 @@ final class DiagnosticsModel {
         shareFile = nil
     }
 
-    /// Exports the redacted file and returns it for the system share sheet.
+    /// Exports the redacted file into app-owned staging and returns it for the
+    /// system share sheet. Nothing is written before this confirmation.
     func confirmShare() async {
         guard let report else { return }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("WhaleRein-diagnostics.json")
+        let url = stagingDirectory.appendingPathComponent("WhaleRein-diagnostics.json")
         do {
+            try FileManager.default.createDirectory(
+                at: stagingDirectory,
+                withIntermediateDirectories: true
+            )
             _ = try await service.exportDiagnostics(to: url)
             // Re-write locally with the same redaction so the exported file is
             // guaranteed to match the preview even for a future live adapter.
             let text = DiagnosticsRedactor.exportText(report: report)
-            try Data(text.utf8).write(to: url, options: [.atomic])
+            try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtection])
             exportCount += 1
             statusKey = .diagnosticsExported
             shareFile = DiagnosticsShareFile(url: url)

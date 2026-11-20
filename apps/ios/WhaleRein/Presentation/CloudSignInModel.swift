@@ -303,6 +303,16 @@ final class CloudSignInModel {
 
     // MARK: - Sign-out
 
+    /// Marks the locally retained account signed out after a scoped app-session
+    /// revocation. Core already owns the pending remote sign-out record, so this
+    /// only clears presentation; it never issues a second revocation.
+    func markSignedOutLocally(pending: Bool) {
+        logoutPending = pending
+        phase = .signedOut
+        directory = .idle
+        errorCode = nil
+    }
+
     /// Local sign-out. `logoutPending` records that Cloud could not confirm the
     /// remote revocation; Core retries it on the next account request.
     func signOut() async {

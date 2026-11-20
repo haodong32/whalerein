@@ -78,7 +78,8 @@ enum AppComposition {
             options: options,
             draftStore: draftStore,
             initiallyPaired: initiallyPaired,
-            instanceId: instance.id
+            instanceId: instance.id,
+            serviceKind: instance.service
         )
     }
 }

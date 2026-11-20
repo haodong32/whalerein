@@ -115,6 +115,10 @@ final class FixtureCloudAccountState {
 
 @MainActor
 extension FixtureSessionService: CloudAccountService {
+    /// Stable identity of the app sign-in this fixture instance holds. Settings
+    /// compares it with the listing to label the current row.
+    static let fixtureCurrentSessionId = "sess-fixture-ios"
+
     func cloudAuthStart() async throws -> CloudAuthAttempt {
         try cloudState.start()
     }
@@ -143,21 +147,33 @@ extension FixtureSessionService: CloudAccountService {
         guard cloudState.account != nil else { throw SessionServiceError(.security) }
         return [
             CloudAccountSession(
-                sessionId: "sess-fixture-ios",
+                sessionId: Self.fixtureCurrentSessionId,
                 instanceId: "ios",
                 expiresAt: 1_800_000_000,
+                state: .active
+            ),
+            CloudAccountSession(
+                sessionId: "sess-fixture-other",
+                instanceId: "ipad",
+                expiresAt: 1_800_000_600,
                 state: .active
             ),
         ]
     }
 
     func cloudRevokeSession(id: String) async throws -> CloudAccountSessionState {
-        guard id == "sess-fixture-ios" else { throw SessionServiceError(.unavailable) }
+        guard cloudState.account != nil else { throw SessionServiceError(.security) }
+        guard ["sess-fixture-ios", "sess-fixture-other"].contains(id) else {
+            throw SessionServiceError(.unavailable)
+        }
         return .revoked
     }
 
     func cloudRevokeAllSessions() async throws -> CloudAccountSessionState {
-        .revoked
+        guard cloudState.account != nil else { throw SessionServiceError(.security) }
+        // Cloud may accept the account-wide revocation without confirming every
+        // session; Settings must present the pending scope and sign out locally.
+        return .pending
     }
 
     func cloudHosts() async throws -> [CloudDirectoryHost] {

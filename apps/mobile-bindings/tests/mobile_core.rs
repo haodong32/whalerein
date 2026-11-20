@@ -1335,3 +1335,118 @@ fn retained_control_commands_are_listed_and_recovered_under_their_original_ident
         "not_found"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Account and device Settings: default Host scope, typed status, diagnostics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_host_persists_with_its_instance_and_reports_through_status() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    // Pairing records the first authorized Host as the default.
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+    // Selecting the same authorized Host is idempotent and persists.
+    core.select_default_host(host_id.clone()).unwrap();
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+
+    // The persisted record is exposed by the typed status view.
+    let status = core.status().unwrap();
+    assert_eq!(status.service, "standalone");
+    assert_eq!(status.account_state, "not_applicable");
+    assert_eq!(status.device_access, "ready");
+    assert_eq!(status.default_host.as_deref(), Some(host_id.as_str()));
+
+    // A second data directory is a separate instance and sees no default.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = new_core(other_dir.path());
+    assert_eq!(other.default_host().unwrap(), None);
+
+    // Reopening the same instance still has the default after a restart.
+    let reopened = MobileCore::new(
+        write_config(dir.path()),
+        MemorySecretStore::new(),
+        "test-app".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+}
+
+#[test]
+fn selecting_an_unauthorized_default_host_is_typed_and_keeps_the_old_value() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    core.select_default_host(host_id.clone()).unwrap();
+
+    let error = core
+        .select_default_host("not-an-authorized-host".into())
+        .unwrap_err();
+    assert!(matches!(
+        error.code(),
+        "not_paired" | "not_found" | "unavailable" | "conflict"
+    ));
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+}
+
+#[test]
+fn unpaired_status_is_typed_without_cloud_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let status = core.status().unwrap();
+    assert_eq!(status.service, "standalone");
+    assert_eq!(status.account_state, "not_applicable");
+    assert_eq!(status.device_access, "unpaired");
+    assert!(status.default_host.is_none());
+    assert!(!status.remote_signout_pending);
+    assert!(status.testing_environment.is_none());
+    assert!(core.current_cloud_session_id().unwrap().is_none());
+}
+
+#[test]
+fn redacted_diagnostics_never_carry_synthetic_private_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let preview = core.diagnostics_preview().unwrap();
+    for marker in [
+        "inv_SENSITIVE_VALUE",
+        "PRIVATE_KEY_MATERIAL",
+        "Do not export this sentence",
+        "SENSITIVE_ARGUMENT",
+    ] {
+        assert!(!preview.json.contains(marker), "preview leaked {marker}");
+    }
+
+    let path = dir.path().join("diagnostics.json");
+    let export = core
+        .export_diagnostics(path.to_string_lossy().into_owned())
+        .unwrap();
+    for marker in [
+        "inv_SENSITIVE_VALUE",
+        "PRIVATE_KEY_MATERIAL",
+        "Do not export this sentence",
+        "SENSITIVE_ARGUMENT",
+    ] {
+        assert!(!export.json.contains(marker), "export leaked {marker}");
+    }
+    // The report is written only after the caller asks for it.
+    assert!(path.exists());
+}
