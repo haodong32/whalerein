@@ -119,6 +119,7 @@ enum FixtureModelCatalog {
         ),
     ]
 
+    @MainActor
     static func catalog(for state: FixtureSessionManagementState) throws -> ModelCatalog {
         if state.catalogUnavailable {
             throw SessionServiceError(.unsupportedCapability)
@@ -395,7 +396,7 @@ extension FixtureSessionService: SessionManagementService {
     ) async throws -> ModelSelectionOutcome {
         let state = managementState
         state.recordSelection(sessionId: sessionId, choice: choice)
-        let status: SessionMutationStatus
+        let status: OperationStatus
         let commandStatus: CommandStatus
         switch state.selectionOutcome {
         case "REJECTED":

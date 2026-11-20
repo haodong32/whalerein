@@ -34,6 +34,6 @@ pub use types::{
     DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
     NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView, QuestionIntentView,
     QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView,
-    QuestionsView, SendOperationView, SessionCapabilitiesView, SessionKeyView, SessionSummaryView,
-    ToolActivityView, ToolResultPartView,
+    QuestionsView, RetainedOperationView, SendOperationView, SessionCapabilitiesView,
+    SessionKeyView, SessionSummaryView, ToolActivityView, ToolResultPartView,
 };

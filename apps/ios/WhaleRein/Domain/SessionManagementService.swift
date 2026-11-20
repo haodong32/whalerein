@@ -6,6 +6,8 @@ import Foundation
 
 @MainActor
 protocol SessionManagementService: AnyObject {
+    /// Stable app configuration instance this adapter belongs to.
+    var instanceId: String { get }
     /// Whether the Host advertises native session creation.
     func sessionCreateSupported(hostId: String) async throws -> Bool
     /// Create a session with optional Host-owned inputs passed unchanged.
@@ -30,6 +32,8 @@ protocol SessionManagementService: AnyObject {
 /// test stub). Every operation fails explicitly instead of inventing data.
 @MainActor
 final class UnavailableSessionManagementService: SessionManagementService {
+    let instanceId = ""
+
     func sessionCreateSupported(hostId: String) async throws -> Bool { false }
 
     func createSession(

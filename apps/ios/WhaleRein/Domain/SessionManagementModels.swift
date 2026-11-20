@@ -58,23 +58,13 @@ enum SessionMutationKind: String, Hashable, Sendable {
     case model
 }
 
-/// Shared presentation status for every session mutation.
-enum SessionMutationStatus: String, Hashable, Sendable {
-    /// The command was submitted and is not terminal yet.
-    case submitted
-    /// The Host accepted the command but the native effect is not confirmed.
-    case accepted
-    /// The native result could not be established; recover it with the
-    /// original operation identity.
-    case uncertain
-    /// A proven failure. Only a retryable failure may offer another attempt.
-    case failed
-    /// The Host returned a confirmed native identity.
-    case confirmed
+// Session mutations present their lifecycle through the shared
+// `OperationStatus` values, so one status vocabulary is used by the
+// conversation, Settings and this feature.
 
-    var isTerminal: Bool { self == .confirmed || self == .failed }
-
-    var labelKey: L10nKey {
+extension OperationStatus {
+    /// Feature-localized label for a mutation receipt.
+    var sessionLabelKey: L10nKey {
         switch self {
         case .submitted: return .sessionsReceiptSubmitted
         case .accepted: return .sessionsReceiptAccepted
@@ -117,8 +107,8 @@ struct SessionLifecycle: Hashable, Sendable {
         self.reconcileKey = reconcileKey
     }
 
-    /// Core's lifecycle disposition mapped onto the shared mutation status.
-    var status: SessionMutationStatus {
+    /// Core's lifecycle disposition mapped onto the shared operation status.
+    var status: OperationStatus {
         switch disposition.uppercased() {
         case "READY", "READY_WITH_WARNING": return .confirmed
         case "FAILED": return .failed
@@ -137,9 +127,28 @@ struct SessionMutationReceipt: Identifiable, Hashable, Sendable {
     let hostId: String
     /// The session the mutation was submitted against, when one existed.
     let sessionId: String?
-    let status: SessionMutationStatus
+    let status: OperationStatus
     let command: CommandReceipt
     let lifecycle: SessionLifecycle?
+
+    /// Adapter point to the shared retained-operation projection. Session
+    /// mutations stay in Core's command journal; no second journal is created.
+    /// Create without an existing session has no scope until the Host returns
+    /// one, so it maps to a nil scope instead of an invented identity.
+    func operationReceipt(instanceId: String) -> OperationReceipt {
+        OperationReceipt(
+            operationId: operationId,
+            kind: .control,
+            scope: sessionId.map {
+                OperationScope(instanceId: instanceId, hostId: hostId, sessionId: $0)
+            },
+            status: status,
+            receipt: command,
+            reply: nil,
+            content: nil,
+            readError: nil
+        )
+    }
 
     var id: String { operationId }
 
@@ -276,7 +285,7 @@ struct ModelEntry: Identifiable, Hashable, Sendable {
     let efforts: [ModelEffort]
     let defaultEffort: String
 
-    var defaultChoice(in provider: ModelProvider) -> ModelChoice {
+    func defaultChoice(in provider: ModelProvider) -> ModelChoice {
         ModelChoice(
             provider: provider.id,
             model: id,

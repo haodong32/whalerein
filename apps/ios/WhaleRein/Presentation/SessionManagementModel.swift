@@ -136,6 +136,14 @@ final class SessionManagementModel {
         self.service = service
     }
 
+    /// Instance that owns the active adapter; used for the shared receipt scope.
+    var instanceId: String { service.instanceId }
+
+    /// Shared retained-operation projection for one mutation receipt.
+    func sharedReceipt(for receipt: SessionMutationReceipt) -> OperationReceipt {
+        receipt.operationReceipt(instanceId: instanceId)
+    }
+
     // MARK: - Create
 
     func canCreate(hostId: String) -> Bool { createSupport[hostId] == true }

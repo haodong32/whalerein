@@ -194,10 +194,15 @@ struct SessionCreateView: View {
                     }
                     .accessibilityIdentifier("create.open")
                 } else if outcome.receipt.status == .uncertain {
-                    Button(L10nKey.commonRetry.key) {
-                        Task { await submit() }
+                    // Recovery uses the original command's reconcile key; it
+                    // never submits a second create.
+                    if let lookupKey = outcome.receipt.reconcileKey,
+                       !lookupKey.isEmpty {
+                        Button(L10nKey.sessionsReceiptLookup.string) {
+                            Task { await lookUp(create: outcome, key: lookupKey) }
+                        }
+                        .accessibilityIdentifier("create.lookup")
                     }
-                    .accessibilityIdentifier("create.lookup")
                 } else if outcome.receipt.retryable {
                     Button(L10nKey.commonRetry.key) {
                         Task { await submit() }
@@ -212,6 +217,15 @@ struct SessionCreateView: View {
         let outcome = await management.submitCreate(hostId: hostId)
         guard let summary = outcome?.openableSummary else { return }
         open(summary)
+    }
+
+    /// Looks the uncertain create up under the identity the Host asked the
+    /// client to reconcile with. A miss leaves the receipt intact.
+    private func lookUp(create outcome: SessionCreateOutcome, key: String) async {
+        guard let detail = await management.refreshDetails(hostId: hostId, sessionId: key) else {
+            return
+        }
+        open(detail.summary)
     }
 
     private func open(_ summary: SessionSummary) {
@@ -460,6 +474,15 @@ struct SessionForkView: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("fork.reconcile")
+                    // A later authoritative session list, not a resubmission,
+                    // describes whether the fork produced a child.
+                    Button(L10nKey.sessionsReceiptLookup.string) {
+                        Task {
+                            await app.refreshSwitcher()
+                            dismiss()
+                        }
+                    }
+                    .accessibilityIdentifier("fork.lookup")
                 }
             }
         }
@@ -473,7 +496,7 @@ struct MutationReceiptView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(receipt.status.labelKey.string, systemImage: icon)
+            Label(receipt.status.sessionLabelKey.string, systemImage: icon)
                 .foregroundStyle(color)
                 .accessibilityIdentifier("receipt.status")
             if let reason = receipt.reasonCode {
@@ -633,7 +656,7 @@ struct SessionModelSection: View {
             Text(
                 error == .unsupportedCapability
                     ? L10nKey.modelUnavailable.string
-                    : L10nKey.errorKey(for: error).key
+                    : L10nKey.errorKey(for: error).string
             )
             .font(.callout)
             .foregroundStyle(.secondary)

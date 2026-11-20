@@ -56,6 +56,8 @@ final class AppModel {
     /// Host-scoped create/details/fork/model presentation. It reads through the
     /// active service adapter and keeps no session cache of its own.
     private(set) var sessionManagement: SessionManagementModel
+    /// Shared retained-operation list and the one coalesced visible refresh.
+    private(set) var operationRecovery: OperationRecoveryModel?
 
     private(set) var conversation: ConversationModel?
     private(set) var isPaired: Bool
@@ -128,6 +130,10 @@ final class AppModel {
         self.diagnostics = models.diagnostics
         self.settings = models.settings
         self.sessionManagement = Self.makeManagementModel(service: service)
+        self.operationRecovery = Self.makeOperationRecovery(
+            service: service,
+            instanceId: activeInstance?.id ?? service.instanceId
+        )
         installCallbacks()
     }
 
@@ -353,7 +359,19 @@ final class AppModel {
             onDeviceReset: {}
         )
         self.sessionManagement = Self.makeManagementModel(service: service)
+        self.operationRecovery = Self.makeOperationRecovery(
+            service: service,
+            instanceId: instance?.id ?? service.instanceId
+        )
         installCallbacks()
+    }
+
+    private static func makeOperationRecovery(
+        service: any SessionService,
+        instanceId: String
+    ) -> OperationRecoveryModel? {
+        guard let recovery = service as? any OperationRecoveryService else { return nil }
+        return OperationRecoveryModel(service: recovery, instanceId: instanceId)
     }
 
     @discardableResult
@@ -528,6 +546,7 @@ final class AppModel {
         guard isCurrentActivation(generation) else { return }
         await refreshSwitcher()
         updateCachedBanner()
+        await refreshVisibleOperationResults()
     }
 
     // MARK: - Switcher
@@ -620,6 +639,10 @@ final class AppModel {
             onFatalError: { [weak self] code in
                 guard let self, self.isCurrentActivation(generation) else { return }
                 self.handleConversationFatal(code)
+            },
+            onReconnected: { [weak self] in
+                guard let self, self.isCurrentActivation(generation) else { return }
+                Task { await self.refreshVisibleOperationResults() }
             }
         )
         conversation = model
@@ -635,6 +658,21 @@ final class AppModel {
         showSwitcher = false
         rootState = .ready
         Task { await model.start() }
+    }
+
+    /// One read-only refresh for the visible instance/Host/session. Automatic
+    /// lookup never sends a message or resumes pairing; other sessions stay
+    /// available through Settings for manual recovery.
+    private func refreshVisibleOperationResults() async {
+        guard let operationRecovery, let conversation else { return }
+        let scope = OperationScope(
+            instanceId: activeInstance?.id ?? service.instanceId,
+            hostId: conversation.hostId,
+            sessionId: conversation.sessionId
+        )
+        await operationRecovery.refreshVisibleOperations(in: scope)
+        guard self.conversation === conversation else { return }
+        conversation.applyRecoveredOperations(operationRecovery.operations(for: scope))
     }
 
     private func updateCachedBanner() {

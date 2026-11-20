@@ -217,7 +217,7 @@ extension LiveSessionService: SessionManagementService {
         }
     }
 
-    private static func mutationStatus(forCommandStatus status: String) -> SessionMutationStatus {
+    private static func mutationStatus(forCommandStatus status: String) -> OperationStatus {
         switch commandStatus(status) {
         case .confirmed: return .confirmed
         case .accepted: return .accepted
@@ -226,7 +226,7 @@ extension LiveSessionService: SessionManagementService {
         }
     }
 
-    static func mutationStatus(forDisposition disposition: String) -> SessionMutationStatus {
+    static func mutationStatus(forDisposition disposition: String) -> OperationStatus {
         switch disposition.uppercased() {
         case "READY", "READY_WITH_WARNING": return .confirmed
         case "FAILED": return .failed

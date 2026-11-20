@@ -11,14 +11,15 @@ import Testing
 @MainActor
 struct SessionManagementTests {
     private func makeModel(
-        state: FixtureSessionManagementState = FixtureSessionManagementState()
+        state: FixtureSessionManagementState? = nil
     ) -> (SessionManagementModel, FixtureSessionService, FixtureSessionManagementState) {
+        let resolved = state ?? FixtureSessionManagementState()
         let service = FixtureSessionService(
             draftStore: InMemoryDraftStore(),
             initiallyPaired: true,
-            sessionManagement: state
+            sessionManagement: resolved
         )
-        return (SessionManagementModel(service: service), service, state)
+        return (SessionManagementModel(service: service), service, resolved)
     }
 
     // MARK: - Create form

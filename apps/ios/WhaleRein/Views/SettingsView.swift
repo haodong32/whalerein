@@ -68,6 +68,8 @@ struct SettingsView: View {
                     }
                 }
 
+                SettingsOperationsView()
+
                 Section {
                     ServiceSelectionView(showsStandaloneCA: true)
                 }
