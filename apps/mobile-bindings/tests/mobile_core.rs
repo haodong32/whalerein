@@ -10,11 +10,12 @@ use bytes::BytesMut;
 use rumqttc::v5::mqttbytes::v5::Packet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use whalerein_core::api::test_support::{history_message, FakeAccess};
+use whalerein_core::api::test_support::{history_message, FakeAccess, FakeAttachmentObject};
 use whalerein_mobile::{
-    write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore,
+    write_client_config, AttachmentDownloadRequestView, AttachmentReferenceView,
+    AttachmentTransferView, ConversationEvent, DeliveryChoice, MemorySecretStore,
     MessageReferenceView, MessageReplyView, MessageView, MobileClientService, MobileCore,
-    QueueAction, WaitOutcome,
+    QueueAction, SessionKeyView, WaitOutcome,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -1560,4 +1561,517 @@ fn retained_control_commands_are_listed_and_recovered_under_their_original_ident
             .code(),
         "not_found"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Committed history paging, exact reads and attachment transfers
+// ---------------------------------------------------------------------------
+
+fn history_reference(
+    host_id: &str,
+    session_id: &str,
+    message_id: &str,
+    projection: &str,
+) -> MessageReferenceView {
+    MessageReferenceView {
+        session: SessionKeyView {
+            host_id: host_id.into(),
+            session_id: session_id.into(),
+        },
+        message_id: message_id.into(),
+        source_locator: format!("locator-{message_id}"),
+        projection_id: projection.into(),
+    }
+}
+
+fn terminal_transfer(core: &MobileCore, id: &str) -> AttachmentTransferView {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let view = core
+            .take_attachment_result(id.into(), 500)
+            .expect("known transfer");
+        if view.state != "running" {
+            return view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attachment transfer did not finish: {view:?}"
+        );
+    }
+}
+
+fn no_staging_files(directory: &std::path::Path) -> bool {
+    std::fs::read_dir(directory).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".whalerein-download-")
+    })
+}
+
+#[test]
+fn history_pages_preserve_provenance_order_and_continuation() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = ["m1", "m2", "m3", "m4", "m5"]
+            .into_iter()
+            .map(|id| history_message(id, &format!("body {id}")))
+            .collect();
+        host.history_page_size = 2;
+    }
+
+    let first = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(first.source, "online");
+    assert!(!first.complete);
+    assert_eq!(
+        first
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m4", "m5"]
+    );
+    let projection = first.projection.clone();
+    let continuation = first.continuation.clone().expect("continuation");
+
+    let second = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(second.source, "online");
+    assert_eq!(second.projection, projection);
+    assert!(!second.complete);
+    assert_eq!(
+        second
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m2", "m3"]
+    );
+
+    let third = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            second.continuation.clone(),
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert!(third.complete);
+    assert!(third.continuation.is_none());
+    assert_eq!(
+        third
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1"]
+    );
+}
+
+#[test]
+fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = ["m1", "m2", "m3", "m4"]
+            .into_iter()
+            .map(|id| history_message(id, id))
+            .collect();
+        host.history_page_size = 2;
+    }
+    let first = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    let continuation = first.continuation.clone().expect("continuation");
+
+    // Another Host/session scope cannot satisfy the original continuation.
+    let error = core
+        .history_page(
+            host_id.clone(),
+            "session-2".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // A changed cut on the same scope also requires a fresh traversal.
+    access.host.lock().unwrap().history_cut = "bookmark:replaced".into();
+    let error = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // Tampered tokens never resolve to content.
+    let mut tampered = continuation;
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == 'a' { 'b' } else { 'a' });
+    let error = core
+        .history_page(
+            host_id,
+            "session-1".into(),
+            false,
+            Some(tampered),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+}
+
+#[test]
+fn cache_history_is_local_and_explicitly_empty_or_populated() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
+    spawn_mqtt_peer(&runtime, listener);
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
+    }
+
+    let empty = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            true,
+            None,
+            10,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(empty.source, "cache");
+    assert!(empty.complete);
+    assert!(empty.messages.is_empty());
+    assert!(empty.continuation.is_none());
+
+    core.start_watch(host_id.clone(), "session-1".into())
+        .unwrap();
+    wait_for_cached_message(&core, &host_id, "session-1", "m2");
+    core.stop_watch();
+    let populated = core
+        .history_page(host_id, "session-1".into(), true, None, 10, 256 * 1024)
+        .unwrap();
+    assert_eq!(populated.source, "cache");
+    assert!(populated.complete);
+    assert_eq!(
+        populated
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1", "m2"]
+    );
+}
+
+#[test]
+fn exact_read_resolves_the_paged_message_and_rejects_a_changed_projection() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
+    }
+    let page = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            10,
+            256 * 1024,
+        )
+        .unwrap();
+    let reference = history_reference(&host_id, "session-1", "m2", &page.projection);
+    let message = core.read_history_message(reference.clone()).unwrap();
+    assert_eq!(message.message_id, "m2");
+    assert_eq!(
+        message
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        ["two"]
+    );
+
+    access.host.lock().unwrap().history_projection = "projection-replaced".into();
+    let error = core.read_history_message(reference).unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // Malformed fields fail before any request and never fall back.
+    let mut malformed = history_reference(&host_id, "session-1", "m2", "projection-1");
+    malformed.source_locator.clear();
+    assert_eq!(
+        core.read_history_message(malformed).unwrap_err().code(),
+        "invalid_input"
+    );
+}
+
+fn attachment_request(
+    host_id: &str,
+    session_id: &str,
+    reference: &str,
+    destination: &std::path::Path,
+    name: Option<&str>,
+    overwrite: bool,
+) -> AttachmentDownloadRequestView {
+    AttachmentDownloadRequestView {
+        reference: AttachmentReferenceView {
+            session: SessionKeyView {
+                host_id: host_id.into(),
+                session_id: session_id.into(),
+            },
+            attachment_ref: reference.into(),
+        },
+        destination: destination.to_string_lossy().into_owned(),
+        file_name: name.map(str::to_owned),
+        overwrite,
+    }
+}
+
+#[test]
+fn verified_attachment_download_reports_progress_and_commits_the_file() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let bytes = (0..200 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut object =
+        FakeAttachmentObject::new("session-1", "attachment-1", "report.bin", bytes.clone());
+    object.policy.max_chunk_bytes = 32 * 1024;
+    access.host.lock().unwrap().put_attachment(object);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let terminal = terminal_transfer(&core, &id);
+    assert_eq!(terminal.state, "succeeded", "{terminal:?}");
+    let download = terminal.download.expect("verified download");
+    assert!(download.verified);
+    assert_eq!(download.bytes, bytes.len() as u64);
+    assert_eq!(download.name, "report.bin");
+    assert_eq!(download.media_type, "application/octet-stream");
+    assert_eq!(
+        download.path,
+        destination.join("report.bin").to_string_lossy()
+    );
+    assert_eq!(std::fs::read(&download.path).unwrap(), bytes);
+    assert!(no_staging_files(&destination));
+    // Progress never exceeds the declared total.
+    assert_eq!(terminal.progress.total, bytes.len() as u64);
+    assert!(terminal.progress.received <= terminal.progress.total);
+    // A completed result is consumed exactly once.
+    assert_eq!(
+        core.take_attachment_result(id, 0).unwrap_err().code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn missing_name_uses_a_media_derived_name_and_collisions_preserve_existing_files() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let mut object =
+        FakeAttachmentObject::new("session-1", "attachment-1", "", b"png bytes".to_vec());
+    object.media_type = "image/png".into();
+    access.host.lock().unwrap().put_attachment(object);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let first = terminal_transfer(&core, &id);
+    assert_eq!(first.state, "succeeded");
+    assert_eq!(first.download.unwrap().name, "attachment.png");
+
+    // The second transfer collides with the committed final file.
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let collision = terminal_transfer(&core, &id);
+    assert_eq!(collision.state, "failed");
+    assert_eq!(collision.error_code.as_deref(), Some("conflict"));
+    assert_eq!(
+        std::fs::read(destination.join("attachment.png")).unwrap(),
+        b"png bytes"
+    );
+    assert!(no_staging_files(&destination));
+}
+
+#[test]
+fn integrity_failure_unavailable_and_cancellation_leave_no_partial_file() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    // Integrity failure: the Host serves a digest that does not match.
+    let mut object = FakeAttachmentObject::new(
+        "session-1",
+        "attachment-1",
+        "corrupt.bin",
+        vec![7u8; 64 * 1024],
+    );
+    object.policy.max_chunk_bytes = 16 * 1024;
+    {
+        let mut host = access.host.lock().unwrap();
+        host.put_attachment(object);
+        host.attachment_wrong_digest = true;
+    }
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let failed = terminal_transfer(&core, &id);
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error_code.as_deref(), Some("security"));
+    assert!(!destination.join("corrupt.bin").exists());
+    assert!(no_staging_files(&destination));
+
+    // Unavailable occurrence.
+    access.host.lock().unwrap().attachment_wrong_digest = false;
+    access.host.lock().unwrap().attachment_open_error = Some(whalerein_proto::ErrorCode::NotFound);
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let unavailable = terminal_transfer(&core, &id);
+    assert_eq!(unavailable.state, "failed");
+    assert_eq!(unavailable.error_code.as_deref(), Some("not_found"));
+
+    // Cancellation stops an in-flight transfer and cleans staging.
+    access.host.lock().unwrap().attachment_open_error = None;
+    access.host.lock().unwrap().attachment_pull_delay_ms = 120;
+    let mut object = FakeAttachmentObject::new(
+        "session-1",
+        "attachment-1",
+        "cancel.bin",
+        vec![5u8; 64 * 1024],
+    );
+    object.policy.max_chunk_bytes = 16 * 1024;
+    access.host.lock().unwrap().put_attachment(object);
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while core
+        .attachment_download_progress(id.clone())
+        .map(|progress| progress.received)
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(Instant::now() < deadline, "transfer never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(core.cancel_attachment_download(id.clone()));
+    assert!(!core.cancel_attachment_download("attachment-ffffffff".into()));
+    let cancelled = terminal_transfer(&core, &id);
+    assert_eq!(cancelled.state, "cancelled");
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(!destination.join("cancel.bin").exists());
+    assert!(no_staging_files(&destination));
 }

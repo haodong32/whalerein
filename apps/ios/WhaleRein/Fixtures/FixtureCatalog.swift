@@ -302,7 +302,20 @@ enum FixtureCatalog {
                         finished in 2.41s
                         exit code \(exitCode)
                         """,
-                        toolName: "bash"
+                        toolName: "bash",
+                        toolActivity: ToolActivity(
+                            callId: "call-\(index)",
+                            name: "bash",
+                            summary: "./repo test core",
+                            state: exitCode == 0 ? .succeeded : .failed,
+                            stages: ["preparation", "execution", "settlement"],
+                            progress: nil,
+                            failureCode: exitCode == 0 ? nil : "test_failed",
+                            result: [
+                                .text("exit code \(exitCode)")
+                            ],
+                            callMissing: false
+                        )
                     )
                 ]
             } else if index % 13 == 0 {
@@ -343,6 +356,36 @@ enum FixtureCatalog {
                         """
                     )
                 ]
+            } else if index % 17 == 0 {
+                role = .assistant
+                blocks = [
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-0",
+                        kind: .reasoning,
+                        text: "I considered the failing checks and decided to verify the release artifact before answering."
+                    ),
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-1",
+                        kind: .text,
+                        text: "Reasoning sample \(index): the release artifact is ready."
+                    )
+                ]
+            } else if index % 19 == 0 {
+                role = .assistant
+                blocks = [
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-0",
+                        kind: .attachment,
+                        text: "build-report-\(index).txt",
+                        attachment: AttachmentBlock(
+                            mediaType: "text/plain",
+                            name: "build-report-\(index).txt",
+                            size: 96,
+                            available: true,
+                            attachmentRef: "fixture-attachment-\(index)"
+                        )
+                    )
+                ]
             } else if index % 7 == 0 {
                 role = .assistant
                 blocks = [
@@ -367,5 +410,39 @@ enum FixtureCatalog {
             )
         }
         return messages
+    }
+
+    // MARK: - Synthetic attachments
+
+    static func attachmentBytes(for reference: String) -> Data {
+        Data("Synthetic verified attachment for \(reference).\n".utf8)
+    }
+
+    static func attachmentName(for reference: String) -> String {
+        let safe = reference.unicodeScalars.map { scalar in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+        }
+        return "fixture-\(String(safe)).txt"
+    }
+
+    static func attachmentDigest(for reference: String) -> String {
+        // Deterministic SHA-256-shaped value; fixture transfers are explicitly
+        // synthetic and never represent Host verification.
+        let seed = attachmentBytes(for: reference)
+        return seed.map { String(format: "%02x", $0) }.joined().padding(
+            toLength: 64,
+            withPad: "0",
+            startingAt: 0
+        )
+    }
+}
+
+private extension String {
+    func padding(toLength length: Int, withPad pad: String, startingAt index: Int) -> String {
+        var value = self
+        while value.count < length {
+            value += pad
+        }
+        return String(value.prefix(length))
     }
 }

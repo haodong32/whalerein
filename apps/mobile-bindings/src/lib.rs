@@ -35,13 +35,15 @@ pub use session_management::{
     SessionCreateResultView, SessionDetailView, SessionModelView,
 };
 pub use types::{
-    ApprovalView, BlockView, ClientStatusView, CloudAccountSessionView, CloudAccountStatusView,
-    CloudAccountView, CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView,
-    CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView, HostSummary,
-    MessageReferenceView, MessageReplyView, MessageView, NoticeView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionCancelReceiptView, QuestionIntentView,
-    QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView,
-    QuestionsView, RetainedOperationView, SendOperationView, SessionCapabilitiesView,
-    SessionKeyView, SessionSummaryView, ToolActivityView, ToolResultPartView,
+    ApprovalView, AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
+    AttachmentReferenceView, AttachmentTransferView, AttachmentView, BlockView, ClientStatusView,
+    CloudAccountSessionView, CloudAccountStatusView, CloudAccountView, CloudAuthAttemptView,
+    CloudConnectResultView, CloudDirectoryHostView, CommandView, ConversationEvent, DeliveryChoice,
+    DiagnosticsReportView, HistoryPageView, HostSummary, MessageReferenceView, MessageReplyView,
+    MessageView, NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
+    QuestionCancelReceiptView, QuestionIntentView, QuestionItemView, QuestionOptionView,
+    QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView, RetainedOperationView,
+    SendOperationView, SessionCapabilitiesView, SessionKeyView, SessionSummaryView,
+    ToolActivityView, ToolResultPartView,
 };
 pub use wait::{WaitOutcome, WaitResultView, WaitStateView};

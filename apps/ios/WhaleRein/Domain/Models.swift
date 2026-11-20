@@ -84,6 +84,16 @@ struct SessionCapabilities: Hashable, Sendable {
     var supportsQueueEdit: Bool = false
     var supportsQueueRemove: Bool = false
     var supportsQueuePromote: Bool = false
+    /// Independent bounded committed-history pages.
+    var supportsHistoryPage: Bool = true
+    /// Exact committed-message reads by reference.
+    var supportsHistoryExact: Bool = true
+    /// Typed attachment metadata and verified downloads.
+    var supportsAttachments: Bool = true
+    /// The Source can stream displayable reasoning blocks.
+    var supportsReasoning: Bool = true
+    /// The Source reports typed tool activities.
+    var supportsToolActivity: Bool = true
 
     static let idle = SessionCapabilities(
         running: false,
@@ -124,9 +134,64 @@ enum MessageRole: String, Codable, Sendable {
 
 enum BlockKind: String, Codable, Sendable {
     case text
+    case reasoning
     case tool
     case notice
+    case attachment
     case question
+}
+
+/// One ordered, displayable part of a settled tool result. Attachment parts
+/// keep the opaque occurrence reference so the row can request a verified
+/// download without flattening the result to text.
+enum ToolResultPart: Hashable, Sendable {
+    case text(String)
+    case attachment(AttachmentBlock)
+}
+
+enum ToolState: String, Codable, Sendable {
+    case preparing
+    case running
+    case succeeded
+    case failed
+    case interrupted
+    case abandoned
+    case unknown
+}
+
+/// Core-normalized tool activity. The call and result occurrences are already
+/// merged by Core; the app never correlates them itself.
+struct ToolActivity: Hashable, Sendable {
+    let callId: String
+    let name: String
+    let summary: String?
+    let state: ToolState
+    let stages: [String]
+    let progress: String?
+    let failureCode: String?
+    let result: [ToolResultPart]
+    let callMissing: Bool
+
+    var displayText: String {
+        let parts = result.map { part -> String in
+            switch part {
+            case .text(let text): return text
+            case .attachment(let attachment): return attachment.name
+            }
+        }
+        if !parts.isEmpty { return parts.joined(separator: "\n") }
+        return summary ?? progress ?? ""
+    }
+}
+
+/// One canonical committed attachment occurrence. `attachmentRef` is opaque
+/// Source evidence, never a path or authorization token.
+struct AttachmentBlock: Hashable, Sendable {
+    let mediaType: String
+    let name: String
+    let size: Int64
+    let available: Bool
+    let attachmentRef: String
 }
 
 struct ConversationBlock: Identifiable, Hashable, Sendable {
@@ -134,14 +199,25 @@ struct ConversationBlock: Identifiable, Hashable, Sendable {
     let kind: BlockKind
     let text: String
     let toolName: String?
+    let toolActivity: ToolActivity?
+    let attachment: AttachmentBlock?
 
     var id: String { blockId }
 
-    init(blockId: String, kind: BlockKind, text: String, toolName: String? = nil) {
+    init(
+        blockId: String,
+        kind: BlockKind,
+        text: String,
+        toolName: String? = nil,
+        toolActivity: ToolActivity? = nil,
+        attachment: AttachmentBlock? = nil
+    ) {
         self.blockId = blockId
         self.kind = kind
         self.text = text
         self.toolName = toolName
+        self.toolActivity = toolActivity
+        self.attachment = attachment
     }
 }
 
@@ -156,6 +232,39 @@ struct ConversationMessage: Identifiable, Hashable, Sendable {
     var plainText: String { blocks.map(\.text).joined(separator: "\n") }
 
     var hasToolBlock: Bool { blocks.contains { $0.kind == .tool } }
+}
+
+// MARK: - Committed history
+
+/// Scoped reference to one canonical committed message. Resolve its body with
+/// an exact Core read; the reference itself never carries content.
+struct MessageReference: Hashable, Sendable {
+    let hostId: String
+    let sessionId: String
+    let messageId: String
+    let sourceLocator: String
+    let projectionId: String
+}
+
+enum HistorySource: String, Codable, Sendable {
+    case online
+    case cache
+}
+
+/// Explicit provenance for a committed-history view.
+enum HistoryProvenance: String, Codable, Sendable {
+    case online
+    case cache
+    case unavailable
+}
+
+struct ConversationHistoryPage: Sendable {
+    let source: HistorySource
+    let projection: String
+    let complete: Bool
+    let messages: [ConversationMessage]
+    let activities: [ToolActivity]
+    let continuation: String?
 }
 
 // MARK: - Approvals
@@ -437,6 +546,10 @@ enum MessageEvent: Sendable {
     case message(ConversationMessage)
     case replace(message: ConversationMessage)
     case preview(attemptId: String, text: String, replace: Bool, incomplete: Bool)
+    /// Reasoning preview is a distinct typed identity from the answer preview.
+    case reasoningPreview(attemptId: String, text: String, replace: Bool, incomplete: Bool)
+    /// One material change to a canonical tool activity already merged by Core.
+    case toolActivity(ToolActivity)
     case attemptEnded(attemptId: String, outcome: AttemptOutcome)
     case state(ConnectionStatus)
     case connection(hostId: String, status: ConnectionStatus)
@@ -491,6 +604,9 @@ enum AppErrorCode: String, CaseIterable, Codable, Sendable {
     /// The app configuration document is invalid or could not be saved. The
     /// previous committed selection and runtime stay in place.
     case configuration
+    /// A history continuation or exact reference is stale, expired or belongs
+    /// to another scope or content projection. A fresh traversal is required.
+    case staleHistory
 }
 
 struct SessionServiceError: Error, Equatable, LocalizedError, Sendable {

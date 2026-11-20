@@ -198,15 +198,32 @@ final class LiveSessionService: SessionService {
             broadcast(.message(mapped), scope: scope)
 
         case .preview(let attemptId, let kind, let text, let replace, let incomplete):
-            // This presenter has a single answer preview. Other block kinds arrive through history.
-            guard kind == "text" else { return }
+            // Answer and reasoning previews keep distinct typed identities.
+            switch kind {
+            case "reasoning":
+                broadcast(
+                    .reasoningPreview(
+                        attemptId: attemptId,
+                        text: text,
+                        replace: replace,
+                        incomplete: incomplete
+                    ),
+                    scope: scope
+                )
+            case "text":
+                broadcast(
+                    .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
+                    scope: scope
+                )
+            default:
+                break
+            }
+
+        case .toolActivity(let activity):
             broadcast(
-                .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
+                .toolActivity(Self.map(toolActivity: activity)),
                 scope: scope
             )
-
-        case .toolActivity:
-            break
 
         case .attemptEnded(let attemptId, let outcome):
             broadcast(
@@ -963,7 +980,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(capabilities view: SessionCapabilitiesView, running: Bool) -> SessionCapabilities {
+    static func map(capabilities view: SessionCapabilitiesView, running: Bool) -> SessionCapabilities {
         let modes = Set(view.deliveryModes.map { $0.lowercased() })
         return SessionCapabilities(
             running: running,
@@ -973,7 +990,12 @@ final class LiveSessionService: SessionService {
             supportsQueueRead: view.pendingQueueRead,
             supportsQueueEdit: view.pendingQueueEdit,
             supportsQueueRemove: view.pendingQueueRemove,
-            supportsQueuePromote: view.pendingQueueSteer
+            supportsQueuePromote: view.pendingQueueSteer,
+            supportsHistoryPage: view.historyPage,
+            supportsHistoryExact: view.historyExact,
+            supportsAttachments: view.attachments,
+            supportsReasoning: view.liveReasoning,
+            supportsToolActivity: view.toolActivity
         )
     }
 
@@ -1000,7 +1022,9 @@ final class LiveSessionService: SessionService {
                     blockId: block.blockId,
                     kind: map(blockKind: block.kind),
                     text: block.text,
-                    toolName: block.toolName
+                    toolName: block.toolName,
+                    toolActivity: block.toolActivity.map(map(toolActivity:)),
+                    attachment: block.attachment.map(map(attachment:))
                 )
             },
             createdAtUnixMs: view.createdAtUnixMs
@@ -1018,7 +1042,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(role: String) -> MessageRole {
+    static func map(role: String) -> MessageRole {
         switch role.lowercased() {
         case "user": return .user
         case "assistant": return .assistant
@@ -1028,11 +1052,14 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(blockKind: String) -> BlockKind {
+    static func map(blockKind: String) -> BlockKind {
         switch blockKind.lowercased() {
         case "text": return .text
-        case "tool", "attachment": return .tool
+        case "reasoning": return .reasoning
+        case "tool": return .tool
+        case "attachment": return .attachment
         case "question": return .question
+        case "notice": return .notice
         default: return .notice
         }
     }
@@ -1129,6 +1156,7 @@ final class LiveSessionService: SessionService {
         case "conflict": return .conflict
         case "timeout": return .timeout
         case "cancelled": return .cancelled
+        case "stale_history": return .staleHistory
         case "security": return .security
         case "unavailable": return .unavailable
         case "protocol_version_incompatible": return .protocolVersionIncompatible

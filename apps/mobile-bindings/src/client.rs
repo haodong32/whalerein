@@ -6,6 +6,7 @@
 //! and watching publish ordered events into a bounded queue consumed by
 //! `pollEvents`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
@@ -18,6 +19,8 @@ use whalerein_core::api::{
     Cancellation, ClientConfig, ClientService, Core, Environment, ObservationInterests,
     PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload, SessionKey,
 };
+use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
+use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
@@ -28,11 +31,13 @@ use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
     bounded_question_view, convert_update, message_view, operation_status_name,
     question_batch_view, question_guard, question_page_view, questions_view, ApprovalView,
-    CloudAccountSessionView, CloudAccountStatusView, CloudAccountView, CloudAuthAttemptView,
-    CloudConnectResultView, CloudDirectoryHostView, CommandView, ConversationEvent, DeliveryChoice,
-    DiagnosticsReportView, HostSummary, MessageReferenceView, MessageView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionCancelReceiptView, QuestionPageView,
-    RetainedOperationView, SessionCapabilitiesView, SessionSummaryView,
+    AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
+    AttachmentTransferView, CloudAccountSessionView, CloudAccountStatusView, CloudAccountView,
+    CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
+    ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostSummary,
+    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
+    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SessionCapabilitiesView,
+    SessionSummaryView,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -59,6 +64,10 @@ const MAX_FINGERPRINT_BYTES: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_APP_VERSION_BYTES: usize = 256;
 const MAX_CALLBACK_BYTES: usize = 8192;
+/// Upper bound for one caller-supplied attachment result wait.
+const MAX_ATTACHMENT_WAIT_MS: u64 = 30_000;
+/// Upper bound for concurrent app-started attachment transfers.
+const MAX_ATTACHMENT_TRANSFERS: usize = 32;
 
 /// Build-time Core package version, recorded by `build.rs`.
 pub(crate) const CORE_VERSION: &str = env!("WHALERIN_CORE_VERSION");
@@ -312,6 +321,131 @@ impl EventQueue {
     }
 }
 
+/// One terminal transfer outcome. The shape keeps the stable error code and
+/// message separate from the verified download so Swift never inspects Core
+/// text to tell a cancellation from an integrity failure.
+struct AttachmentTerminal {
+    state: &'static str,
+    download: Option<AttachmentDownloadView>,
+    error: Option<MobileError>,
+}
+
+/// Shared state for one app-started verified attachment download.
+struct AttachmentTransferState {
+    id: String,
+    progress: Mutex<AttachmentProgressView>,
+    terminal: Mutex<Option<AttachmentTerminal>>,
+    notify: Condvar,
+    cancellation: Cancellation,
+}
+
+impl AttachmentTransferState {
+    fn new(id: String) -> Self {
+        Self {
+            id,
+            progress: Mutex::new(AttachmentProgressView {
+                received: 0,
+                total: 0,
+            }),
+            terminal: Mutex::new(None),
+            notify: Condvar::new(),
+            cancellation: Cancellation::new(),
+        }
+    }
+
+    fn set_progress(&self, progress: DownloadProgress) {
+        if let Ok(mut current) = self.progress.lock() {
+            *current = progress.into();
+        }
+        self.notify.notify_all();
+    }
+
+    fn finish(&self, terminal: AttachmentTerminal) {
+        if let Ok(mut current) = self.terminal.lock() {
+            *current = Some(terminal);
+        }
+        self.notify.notify_all();
+    }
+
+    fn view(&self, terminal: Option<AttachmentTerminal>) -> AttachmentTransferView {
+        let progress = self
+            .progress
+            .lock()
+            .map(|value| *value)
+            .unwrap_or(AttachmentProgressView {
+                received: 0,
+                total: 0,
+            });
+        match terminal {
+            Some(terminal) => AttachmentTransferView {
+                download_id: self.id.clone(),
+                state: terminal.state.into(),
+                progress,
+                download: terminal.download,
+                error_code: terminal.error.as_ref().map(|error| error.code().to_owned()),
+                error_message: terminal
+                    .error
+                    .as_ref()
+                    .map(|error| error.message().to_owned()),
+            },
+            None => AttachmentTransferView {
+                download_id: self.id.clone(),
+                state: "running".into(),
+                progress,
+                download: None,
+                error_code: None,
+                error_message: None,
+            },
+        }
+    }
+}
+
+/// Bounded registry of app-started attachment transfers.
+#[derive(Default)]
+struct AttachmentTransfers {
+    next: AtomicU64,
+    transfers: Mutex<HashMap<String, Arc<AttachmentTransferState>>>,
+}
+
+impl AttachmentTransfers {
+    fn insert(&self, state: Arc<AttachmentTransferState>) -> Result<(), MobileError> {
+        let mut transfers = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if transfers.len() >= MAX_ATTACHMENT_TRANSFERS {
+            return Err(MobileError::conflict());
+        }
+        transfers.insert(state.id.clone(), state);
+        Ok(())
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<AttachmentTransferState>> {
+        self.transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    fn remove(&self, id: &str) {
+        self.transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+    }
+
+    fn cancel_all(&self) {
+        let transfers = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for transfer in transfers.values() {
+            transfer.cancellation.cancel();
+        }
+    }
+}
+
 /// Owns the multi-thread runtime on a dedicated thread.
 ///
 /// FFI calls use `Handle::block_on`; the thread that built the runtime keeps it
@@ -422,6 +556,7 @@ pub struct MobileCore {
     watch: Arc<Mutex<WatchState>>,
     watch_generation: Arc<AtomicU64>,
     wait_attempts: WaitAttempts,
+    attachment_transfers: Arc<AttachmentTransfers>,
 }
 
 #[uniffi::export]
@@ -457,6 +592,7 @@ impl MobileCore {
             watch: Arc::new(Mutex::new(WatchState::default())),
             watch_generation: Arc::new(AtomicU64::new(0)),
             wait_attempts: WaitAttempts::default(),
+            attachment_transfers: Arc::new(AttachmentTransfers::default()),
         }))
     }
 
@@ -1244,6 +1380,47 @@ impl MobileCore {
         })
     }
 
+    /// Read one bounded latest-first page of committed history.
+    ///
+    /// `cache == true` serves the encrypted local cache without a network call;
+    /// otherwise the page comes from the Host. `continuation` is the opaque
+    /// token from a previous page and is only valid for the original
+    /// Host/session scope and projection. A stale, expired or foreign token is
+    /// `stale_history` and never yields content from another traversal.
+    pub fn history_page(
+        &self,
+        host_id: String,
+        session_id: String,
+        cache: bool,
+        continuation: Option<String>,
+        max_messages: u32,
+        max_bytes: u32,
+    ) -> Result<HistoryPageView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let session = SessionKey {
+            host_id,
+            session_id,
+        };
+        let mut request = HistoryPageRequest::new(session);
+        if cache {
+            request = request.cache();
+        }
+        if let Some(continuation) = continuation {
+            if continuation.is_empty() || continuation.len() > 8192 {
+                return Err(MobileError::stale_history());
+            }
+            let continuation = continuation
+                .parse::<HistoryContinuation>()
+                .map_err(|_| MobileError::stale_history())?;
+            request = request.continuation(continuation);
+        }
+        request.max_messages = max_messages;
+        request.max_bytes = max_bytes;
+        self.run(QUERY_TIMEOUT, self.core.history_page(&request))
+            .map(|page| HistoryPageView::from(&page))
+    }
+
     /// Read one exact scoped committed message from Core history.
     ///
     /// The reference is reconstructed from the typed fields, including the
@@ -1255,28 +1432,161 @@ impl MobileCore {
     ) -> Result<MessageView, MobileError> {
         validate_id(&reference.session.host_id)?;
         validate_id(&reference.session.session_id)?;
-        if reference.message_id.is_empty()
-            || reference.message_id.len() > 512
-            || reference.source_locator.is_empty()
-            || reference.source_locator.len() > 4096
-            || reference.projection_id.is_empty()
-            || reference.projection_id.len() > 128
-        {
-            return Err(MobileError::invalid_input());
-        }
-        let session = SessionKey {
-            host_id: reference.session.host_id,
-            session_id: reference.session.session_id,
-        };
-        let reference = whalerein_core::history::MessageReference::new(
-            session,
-            reference.message_id,
-            reference.source_locator,
-            reference.projection_id,
-        )
-        .map_err(|_| MobileError::invalid_input())?;
+        let reference = reference
+            .to_core()
+            .map_err(|()| MobileError::invalid_input())?;
         let message = self.run(QUERY_TIMEOUT, self.core.history_message(&reference))?;
         Ok(message_view(&message))
+    }
+
+    /// Start a verified attachment download into an app-owned destination.
+    ///
+    /// The transfer runs on this object's runtime; progress and the terminal
+    /// verified path are observed through `attachmentDownloadProgress` and
+    /// `takeAttachmentResult`. Incomplete staging data is removed by Core on
+    /// failure or cancellation, and an existing final file is preserved unless
+    /// `overwrite` is true.
+    pub fn begin_attachment_download(
+        &self,
+        request: AttachmentDownloadRequestView,
+    ) -> Result<String, MobileError> {
+        validate_id(&request.reference.session.host_id)?;
+        validate_id(&request.reference.session.session_id)?;
+        validate_id(&request.reference.attachment_ref)?;
+        if request.destination.is_empty() || request.destination.len() > MAX_PATH_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        if let Some(name) = request.file_name.as_deref() {
+            if name.is_empty() || name.len() > 512 {
+                return Err(MobileError::invalid_input());
+            }
+        }
+        let reference = request
+            .reference
+            .to_core()
+            .map_err(|()| MobileError::invalid_input())?;
+        let mut download =
+            DownloadRequest::new(reference, Path::new(&request.destination).to_path_buf());
+        download.file_name = request.file_name;
+        download.overwrite = request.overwrite;
+
+        let id = format!(
+            "attachment-{:08x}",
+            self.attachment_transfers
+                .next
+                .fetch_add(1, Ordering::SeqCst)
+        );
+        let state = Arc::new(AttachmentTransferState::new(id.clone()));
+        self.attachment_transfers.insert(Arc::clone(&state))?;
+
+        let core = self.core.clone();
+        let task_state = Arc::clone(&state);
+        self.runtime.handle.spawn(async move {
+            let progress_state = Arc::clone(&task_state);
+            let cancellation = task_state.cancellation.clone();
+            let outcome = core
+                .download_attachment(download, &cancellation, move |progress| {
+                    progress_state.set_progress(progress);
+                })
+                .await;
+            let terminal = match outcome {
+                Ok(download) => AttachmentTerminal {
+                    state: "succeeded",
+                    download: Some(AttachmentDownloadView::from(download)),
+                    error: None,
+                },
+                Err(error) => {
+                    let mapped = MobileError::from(error);
+                    AttachmentTerminal {
+                        state: if mapped.code() == crate::error::CODE_CANCELLED {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        download: None,
+                        error: Some(mapped),
+                    }
+                }
+            };
+            task_state.finish(terminal);
+        });
+        Ok(id)
+    }
+
+    /// Latest bounded progress for one app-started transfer, if it is known.
+    pub fn attachment_download_progress(
+        &self,
+        download_id: String,
+    ) -> Option<AttachmentProgressView> {
+        self.attachment_transfers.get(&download_id).map(|state| {
+            state
+                .progress
+                .lock()
+                .map(|value| *value)
+                .unwrap_or(AttachmentProgressView {
+                    received: 0,
+                    total: 0,
+                })
+        })
+    }
+
+    /// Wait up to `waitMs` for one transfer to reach a terminal state.
+    ///
+    /// A timeout returns the current `running` view rather than an error, so the
+    /// caller can keep rendering progress and poll again. Terminal failures are
+    /// returned as typed `failed`/`cancelled` views with stable codes.
+    pub fn take_attachment_result(
+        &self,
+        download_id: String,
+        wait_ms: u64,
+    ) -> Result<AttachmentTransferView, MobileError> {
+        if wait_ms > MAX_ATTACHMENT_WAIT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let state = self
+            .attachment_transfers
+            .get(&download_id)
+            .ok_or_else(MobileError::not_found)?;
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            if let Some(terminal) = state
+                .terminal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                self.attachment_transfers.remove(&download_id);
+                return Ok(state.view(Some(terminal)));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(state.view(None));
+            }
+            let guard = state
+                .terminal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_some() {
+                continue;
+            }
+            let _ = state
+                .notify
+                .wait_timeout(guard, deadline.saturating_duration_since(now));
+        }
+    }
+
+    /// Request cancellation of one transfer. Returns false for an unknown id.
+    ///
+    /// Cancellation is cooperative: Core removes incomplete staging data and
+    /// preserves existing finals; the terminal view becomes `cancelled`.
+    pub fn cancel_attachment_download(&self, download_id: String) -> bool {
+        match self.attachment_transfers.get(&download_id) {
+            Some(state) => {
+                state.cancellation.cancel();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Inspect selected paths and local service and authorization state.
@@ -1886,6 +2196,7 @@ impl MobileCore {
 impl Drop for MobileCore {
     fn drop(&mut self) {
         self.wait_attempts.cancel_all();
+        self.attachment_transfers.cancel_all();
         self.watch_generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut state = self.lock_watch();
@@ -2082,6 +2393,7 @@ mod tests {
                     tool_name: None,
                     tool_activity: None,
                     notice: None,
+                    attachment: None,
                 }],
                 created_at_unix_ms: 1,
             },

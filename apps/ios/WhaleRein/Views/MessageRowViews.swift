@@ -1,12 +1,15 @@
-// Typed native rows for user, assistant, tool, notice and question content.
-// Stable identifiers come from message and block IDs; expansion state lives in
-// the conversation model so streaming updates do not collapse open details.
+// Typed native rows for user, assistant, tool, reasoning, notice, attachment
+// and question content. Stable identifiers come from message and block IDs;
+// expansion state lives in the conversation model so streaming updates do not
+// collapse open details. Reasoning is hidden unless the App-section preference
+// is on.
 
 import SwiftUI
 
 struct MessageRowView: View {
     @Bindable var model: ConversationModel
     let message: ConversationMessage
+    var reasoningVisible: Bool = false
 
     var body: some View {
         Group {
@@ -43,23 +46,43 @@ struct MessageRowView: View {
 
     private var assistantRow: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(message.blocks) { block in
-                switch block.kind {
-                case .text:
-                    MarkdownView(text: block.text, messageId: message.messageId)
-                case .tool:
-                    ToolBlockView(
-                        model: model,
-                        block: block
-                    )
-                case .notice:
-                    noticeContent(block.text)
-                case .question:
-                    questionContent(block.text)
-                }
+            ForEach(
+                ConversationContent.visibleBlocks(
+                    message.blocks,
+                    reasoningVisible: reasoningVisible
+                )
+            ) { block in
+                blockContent(block)
             }
         }
         .frame(maxWidth: 620, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func blockContent(_ block: ConversationBlock) -> some View {
+        switch block.kind {
+        case .text:
+            MarkdownView(text: block.text, messageId: message.messageId)
+        case .reasoning:
+            if reasoningVisible {
+                ReasoningBlockView(block: block)
+            }
+        case .tool:
+            ToolBlockView(model: model, block: block)
+        case .notice:
+            noticeContent(block.text)
+        case .attachment:
+            if let attachment = block.attachment {
+                AttachmentBlockView(
+                    model: model,
+                    attachment: attachment,
+                    hostId: model.hostId,
+                    sessionId: model.sessionId
+                )
+            }
+        case .question:
+            questionContent(block.text)
+        }
     }
 
     private var noticeRow: some View {
@@ -104,6 +127,31 @@ struct MessageRowView: View {
     }
 }
 
+struct ReasoningBlockView: View {
+    let block: ConversationBlock
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(L10n.conversationReasoning.key, systemImage: "brain")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(verbatim: block.text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(.secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("reasoning.\(block.blockId)")
+    }
+}
+
 struct ToolBlockView: View {
     @Bindable var model: ConversationModel
     let block: ConversationBlock
@@ -115,13 +163,19 @@ struct ToolBlockView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Label {
-                    Text(verbatim: block.toolName ?? L10n.conversationToolResult.string)
+                    Text(verbatim: activity?.name ?? block.toolName ?? L10n.conversationToolResult.string)
                         .font(.subheadline.weight(.semibold))
                 } icon: {
                     Image(systemName: "wrench.and.screwdriver")
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
+                if let activity {
+                    Text(Self.stateKey(for: activity.state).key)
+                        .font(.caption)
+                        .foregroundStyle(activity.state == .failed ? .red : .secondary)
+                        .accessibilityIdentifier("tool.state.\(block.blockId)")
+                }
                 Button {
                     model.toggleExpansion(block.blockId)
                 } label: {
@@ -135,27 +189,65 @@ struct ToolBlockView: View {
                 .accessibilityHint(L10n.conversationToolOutput.key)
             }
 
+            if let activity {
+                if !activity.stages.isEmpty {
+                    Text(verbatim: activity.stages.joined(separator: " · "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("tool.stages.\(block.blockId)")
+                }
+                if let failure = activity.failureCode {
+                    Text(verbatim: failure)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("tool.failure.\(block.blockId)")
+                }
+                if let progress = activity.progress, !progress.isEmpty, activity.result.isEmpty {
+                    Text(verbatim: progress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("tool.progress.\(block.blockId)")
+                }
+            }
+
             if expanded {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    Text(verbatim: block.text)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel(L10n.conversationToolOutput.key)
-                        .accessibilityIdentifier("tool.output.\(block.blockId)")
-                        .accessibilityFocused($detailsFocused)
-                        .onAppear {
-                            // Move VoiceOver focus to the expanded output so a
-                            // long tool result is announced instead of leaving
-                            // focus on the toggle it just activated.
-                            detailsFocused = true
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let activity, !activity.result.isEmpty {
+                            ForEach(Array(activity.result.enumerated()), id: \.offset) { _, part in
+                                switch part {
+                                case .text(let text):
+                                    Text(verbatim: text)
+                                        .font(.system(.footnote, design: .monospaced))
+                                        .textSelection(.enabled)
+                                case .attachment(let attachment):
+                                    AttachmentBlockView(
+                                        model: model,
+                                        attachment: attachment,
+                                        hostId: model.hostId,
+                                        sessionId: model.sessionId
+                                    )
+                                }
+                            }
+                        } else {
+                            Text(verbatim: block.text)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
                         }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(L10n.conversationToolOutput.key)
+                    .accessibilityIdentifier("tool.output.\(block.blockId)")
+                    .accessibilityFocused($detailsFocused)
+                    .onAppear {
+                        detailsFocused = true
+                    }
                 }
                 .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityIdentifier("tool.details.\(block.blockId)")
             } else {
-                Text(verbatim: block.text)
+                Text(verbatim: activity?.displayText ?? block.text)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -166,6 +258,20 @@ struct ToolBlockView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .contain)
+    }
+
+    private var activity: ToolActivity? { block.toolActivity }
+
+    static func stateKey(for state: ToolState) -> L10nKey {
+        switch state {
+        case .preparing: return .conversationToolPreparing
+        case .running: return .conversationToolRunning
+        case .succeeded: return .conversationToolSucceeded
+        case .failed: return .conversationToolFailed
+        case .interrupted: return .conversationToolInterrupted
+        case .abandoned: return .conversationToolAbandoned
+        case .unknown: return .conversationToolUnknown
+        }
     }
 }
 
@@ -193,5 +299,58 @@ struct LivePreviewRow: View {
         .accessibilityIdentifier("conversation.preview")
         .accessibilityLabel(Text(L10n.conversationPreview.string))
         .accessibilityValue(Text(text))
+    }
+}
+
+struct ReasoningPreviewRow: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(L10n.conversationReasoningPreview.key, systemImage: "brain")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(verbatim: text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation.reasoningPreview")
+        .accessibilityValue(Text(text))
+    }
+}
+
+struct LiveToolActivityRow: View {
+    let activity: ToolActivity
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(verbatim: activity.name)
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(ToolBlockView.stateKey(for: activity.state).key)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let summary = activity.summary ?? activity.progress {
+                Text(verbatim: summary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("tool.live.\(activity.callId)")
     }
 }

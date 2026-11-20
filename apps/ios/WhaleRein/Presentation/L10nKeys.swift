@@ -43,6 +43,8 @@ extension L10nKey {
             return .errorKeychainUnavailable
         case .configuration:
             return .errorConfiguration
+        case .staleHistory:
+            return .errorStaleHistory
         }
     }
 

@@ -17,6 +17,10 @@ pub const CODE_UNAVAILABLE: &str = "unavailable";
 pub const CODE_CONFLICT: &str = "conflict";
 pub const CODE_TIMEOUT: &str = "timeout";
 pub const CODE_CANCELLED: &str = "cancelled";
+/// A history continuation or exact-message reference is stale, expired or
+/// belongs to another scope or content projection. The caller must restart the
+/// traversal instead of retrying the same token.
+pub const CODE_STALE_HISTORY: &str = "stale_history";
 pub const CODE_SECURITY: &str = "security";
 pub const CODE_INTERNAL: &str = "internal";
 /// The Host speaks a protocol line this client cannot use. The only recovery is
@@ -51,6 +55,8 @@ pub enum MobileError {
     Timeout { message: String },
     #[error("{message}")]
     Cancelled { message: String },
+    #[error("{message}")]
+    StaleHistory { message: String },
     #[error("{message}")]
     Security { message: String },
     #[error("{message}")]
@@ -87,6 +93,10 @@ constructors! {
     conflict => (Conflict, "The operation conflicts with the current state."),
     timeout => (Timeout, "The operation timed out."),
     cancelled => (Cancelled, "The operation was cancelled."),
+    stale_history => (
+        StaleHistory,
+        "This history view is out of date. Load the latest messages again."
+    ),
     security => (Security, "A security check failed."),
     internal => (Internal, "An internal error occurred."),
     protocol_version_incompatible => (
@@ -112,6 +122,7 @@ impl MobileError {
             Self::Conflict { .. } => CODE_CONFLICT,
             Self::Timeout { .. } => CODE_TIMEOUT,
             Self::Cancelled { .. } => CODE_CANCELLED,
+            Self::StaleHistory { .. } => CODE_STALE_HISTORY,
             Self::Security { .. } => CODE_SECURITY,
             Self::Internal { .. } => CODE_INTERNAL,
             Self::ProtocolVersionIncompatible { .. } => CODE_PROTOCOL_VERSION_INCOMPATIBLE,
@@ -131,6 +142,7 @@ impl MobileError {
             | Self::Conflict { message }
             | Self::Timeout { message }
             | Self::Cancelled { message }
+            | Self::StaleHistory { message }
             | Self::Security { message }
             | Self::Internal { message }
             | Self::ProtocolVersionIncompatible { message }
@@ -159,10 +171,10 @@ pub(crate) fn from_core(error: &CoreError) -> MobileError {
         | "unauthorized"
         | "forbidden"
         | "payload_digest_mismatch" => MobileError::security(),
+        "snapshot_required" => MobileError::stale_history(),
         "unavailable"
         | "rejected"
         | "expired"
-        | "snapshot_required"
         | "revocations_pending"
         | "channel_mismatch"
         | "channel_replaced"
@@ -197,6 +209,7 @@ mod tests {
             MobileError::conflict(),
             MobileError::timeout(),
             MobileError::cancelled(),
+            MobileError::stale_history(),
             MobileError::security(),
             MobileError::internal(),
             MobileError::protocol_version_incompatible(),
@@ -219,6 +232,7 @@ mod tests {
                 "conflict",
                 "timeout",
                 "cancelled",
+                "stale_history",
                 "security",
                 "internal",
                 "protocol_version_incompatible",
@@ -243,6 +257,13 @@ mod tests {
             (CoreError::UnknownResult, "timeout"),
             (CoreError::Conflict("x".into()), "conflict"),
             (CoreError::PairingCancelled, "cancelled"),
+            (
+                CoreError::Api {
+                    code: Some(whalerein_proto::ErrorCode::SnapshotRequired),
+                    message: "x".into(),
+                },
+                "stale_history",
+            ),
             (CoreError::Security("x".into()), "security"),
             (
                 CoreError::FingerprintMismatch {

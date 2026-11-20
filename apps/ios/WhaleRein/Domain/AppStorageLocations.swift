@@ -8,6 +8,7 @@ import Foundation
 enum AppStorageLocations {
     static let dataDirectoryName = "WhaleRein"
     static let draftsDirectoryName = "drafts"
+    static let attachmentsDirectoryName = "downloads"
     static let preferencesFileName = "preferences.json"
     static let fixtureStateFileName = "fixture-state.json"
 
@@ -76,6 +77,31 @@ enum AppStorageLocations {
 
     static func draftsDirectory(in dataDirectory: URL, fileManager: FileManager = .default) throws -> URL {
         let directory = dataDirectory.appendingPathComponent(draftsDirectoryName, isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        #if os(iOS)
+        try? fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: directory.path
+        )
+        #endif
+        return directory
+    }
+
+    /// App-owned staging directory for verified attachment downloads. Only
+    /// this directory is offered to Core as a destination, and no conversation
+    /// content is ever written outside it.
+    static func attachmentStagingDirectory(
+        in dataDirectory: URL = applicationSupportDirectory(),
+        hostId: String,
+        sessionId: String,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let directory = dataDirectory
+            .appendingPathComponent(attachmentsDirectoryName, isDirectory: true)
+            .appendingPathComponent(
+                sessionKey(hostId: hostId, sessionId: sessionId),
+                isDirectory: true
+            )
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         #if os(iOS)
         try? fileManager.setAttributes(

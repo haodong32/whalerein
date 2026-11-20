@@ -47,7 +47,10 @@ final class FixtureSessionService: SessionService {
     private var didSimulateApprovalChange = false
     private var didReturnUncertain = false
     private var runningSessions: Set<String> = []
-    private var messagesBySession: [String: [ConversationMessage]] = [:]
+    var messagesBySession: [String: [ConversationMessage]] = [:]
+    /// Deterministic history projection and attachment transfer fixture.
+    var fixtureProjection = "fixture-projection"
+    let fixtureAttachments = FixtureAttachmentTransfers()
     private var approvalsBySession: [String: Approval] = [:]
     private var questionBatchesBySession: [String: [QuestionBatch]] = [:]
     private var questionRevisionBySession: [String: UInt64] = [:]
@@ -1081,12 +1084,12 @@ final class FixtureSessionService: SessionService {
 
     // MARK: - Internal
 
-    private func requirePaired() throws {
+    func requirePaired() throws {
         if revoked { throw SessionServiceError(.revoked) }
         guard paired else { throw SessionServiceError(.notPaired) }
     }
 
-    private func messages(for hostId: String, sessionId: String) -> [ConversationMessage] {
+    func messages(for hostId: String, sessionId: String) -> [ConversationMessage] {
         if let cached = messagesBySession[sessionId] { return cached }
         let generated = FixtureCatalog.conversation(sessionId: sessionId, hostId: hostId, now: clock.now())
         messagesBySession[sessionId] = generated
