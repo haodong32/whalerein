@@ -50,6 +50,7 @@ export class MqttAccess {
   #published = 0
   #publishErrors = 0
   #lastErrorCode = ''
+  #terminalCode = ''
   #handlers = {}
   #disconnectReason = -1
   #transport
@@ -204,6 +205,7 @@ export class MqttAccess {
   start(handlers = {}) {
     if (!this.#stopped) return this
     this.#stopped = false
+    this.#terminalCode = ''
     this.#handlers = handlers
     this.#connect()
     return this
@@ -347,7 +349,9 @@ export class MqttAccess {
   }
 
   #failDefinitive(code, generation) {
-    if (generation !== this.#generation) return
+    if (generation !== this.#generation || this.#terminalCode !== '') return
+    this.#terminalCode = code
+    this.#lastErrorCode = code
     this.#stopped = true
     this.#connected = false
     if (this.#reconnectTimer) {
@@ -529,6 +533,7 @@ export class MqttAccess {
   /** Wait until the first successful connect+subscribe+Ready cycle. */
   waitForConnected(timeoutMs = 5000) {
     if (this.#connected) return Promise.resolve()
+    if (this.#terminalCode) return Promise.reject(new PluginError(this.#terminalCode, 'transport refused the saved credential or trust configuration'))
     return new Promise((resolve, reject) => {
       const waiter = {
         resolve: () => {
