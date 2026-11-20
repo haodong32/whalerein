@@ -37,6 +37,7 @@ struct SessionManagementTests {
         #expect(form.input.workspaceId == "workspace-1")
         #expect(form.input.cwd == "/work/tree")
 
+        form.workspaceId = ""
         form.cwd = "relative/tree"
         #expect(form.validation == .relativeHostPath)
 
