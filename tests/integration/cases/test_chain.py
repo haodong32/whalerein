@@ -1552,3 +1552,28 @@ def test_send_queued_behind_unrelated_input_never_claims_input(scenario, paired_
         event["type"] == "user/message"
         for event in scenario.dsh.snapshot(session_id)["events"]
     )
+
+
+def test_history_cache_returns_the_synced_page(scenario, paired_device, session_id):
+    """After a watch syncs, an explicit cache read returns the same typed committed page without another observation."""
+    paired_device.send(session_id, "cache fixture message")
+    paired_device.observe_history(session_id)
+    pages = []
+
+    def cached_page():
+        page = paired_device.call("session", "history", session_id, "--cache", "--json")
+        pages.append(page)
+        return bool(page.get("messages"))
+
+    wait(cached_page, timeout=20)
+    page = pages[-1]
+    assert page["source"] == "cache"
+    assert page["projection"]
+    texts = [
+        block.get("text")
+        for message in page["messages"]
+        for block in message["blocks"]
+        if block.get("type") == "text"
+    ]
+    assert "cache fixture message" in texts
+    assert page["continuation"] is None or isinstance(page["continuation"], str)
