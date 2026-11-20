@@ -160,7 +160,7 @@ final class SuspendedResponse<Value: Sendable> {
 }
 
 @MainActor
-final class StubSessionService: SessionService {
+class StubSessionService: SessionService {
     var connectionStatus: ConnectionStatus = .online
     var instanceId = "test"
     var coreRevision = "stub-add-ios-client-1"

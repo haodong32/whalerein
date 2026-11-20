@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use whalerein_core::api as core_api;
 use whalerein_core::api::{
-    ApprovalInfo, DeliveryMode, HostInfo, InputKind, PairingPrompt, QuestionBatchInfo,
-    QuestionFreshness, QuestionPageInfo, SendReply, SessionCapabilities, SessionKey,
-    SessionSummary,
+    ApprovalInfo, DeliveryMode, HostInfo, InputKind, OnlineStatus, PairingPrompt,
+    QuestionBatchInfo, QuestionFreshness, QuestionPageInfo, SendReply, SessionCapabilities,
+    SessionKey, SessionSummary,
 };
 use whalerein_core::conversation::{
     content_block, ApprovalState, AttemptOutcome, BlockKind, ConversationMessage, MessageRole,
@@ -625,6 +625,36 @@ impl From<whalerein_core::api::CommandHandle> for CommandView {
     }
 }
 
+/// A durable retained operation. `kind` is `send`, `control` or `pairing`.
+/// `status` is the shared recovery state: `submitted`, `accepted`, `uncertain`,
+/// `failed` or `confirmed`. The receipt is the immediate submission result; the
+/// reply, content and read error are only populated by an explicit follow-up.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RetainedOperationView {
+    pub operation_id: String,
+    pub kind: String,
+    pub host_id: Option<String>,
+    pub session_id: Option<String>,
+    pub status: String,
+    pub receipt: Option<CommandView>,
+    pub reply: Option<MessageReplyView>,
+    pub content: Option<MessageView>,
+    pub read_error: Option<String>,
+}
+
+/// Map one Core command status onto the shared recovery status vocabulary.
+/// A command that has not reported a receipt is `submitted`; a lost or
+/// unconfirmed result is `uncertain`, never a fabricated success.
+pub(crate) fn operation_status_name(status: OnlineStatus) -> &'static str {
+    match status {
+        OnlineStatus::Received => "submitted",
+        OnlineStatus::HostAccepted => "accepted",
+        OnlineStatus::Succeeded => "confirmed",
+        OnlineStatus::Rejected | OnlineStatus::Failed => "failed",
+        OnlineStatus::HostOffline | OnlineStatus::Unknown => "uncertain",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SendOperationView {
     pub operation_id: String,
@@ -660,11 +690,13 @@ impl From<&SessionKey> for SessionKeyView {
 }
 
 /// Scoped reference to a canonical committed message. Resolve its body through
-/// Core history; the reference itself never carries content.
+/// Core history; the reference itself never carries content. `source_locator`
+/// is the opaque Source identity required to reconstruct the exact reference.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MessageReferenceView {
     pub session: SessionKeyView,
     pub message_id: String,
+    pub source_locator: String,
     pub projection_id: String,
 }
 
@@ -673,6 +705,7 @@ impl From<&MessageReference> for MessageReferenceView {
         Self {
             session: SessionKeyView::from(value.session()),
             message_id: value.message_id().to_owned(),
+            source_locator: value.source_locator().to_owned(),
             projection_id: value.projection_id().to_owned(),
         }
     }
@@ -1634,6 +1667,33 @@ mod tests {
     }
 
     #[test]
+    fn message_reference_view_round_trips_the_exact_scoped_reference() {
+        let session = SessionKey {
+            host_id: "h".into(),
+            session_id: "s".into(),
+        };
+        let reference =
+            MessageReference::new(session.clone(), "message-1", "locator-1", "projection-1")
+                .expect("reference");
+        let view = MessageReferenceView::from(&reference);
+        assert_eq!(view.source_locator, "locator-1");
+        assert_eq!(view.message_id, "message-1");
+        let rebuilt = MessageReference::new(
+            SessionKey {
+                host_id: view.session.host_id.clone(),
+                session_id: view.session.session_id.clone(),
+            },
+            view.message_id.clone(),
+            view.source_locator.clone(),
+            view.projection_id.clone(),
+        )
+        .expect("rebuilt reference");
+        assert_eq!(rebuilt, reference);
+        assert_eq!(rebuilt.session(), &session);
+        assert_eq!(rebuilt.source_locator(), "locator-1");
+    }
+
+    #[test]
     fn send_reply_states_map_to_the_typed_surface() {
         let session = SessionKey {
             host_id: "h".into(),
@@ -1652,6 +1712,7 @@ mod tests {
                         session_id: "s".into(),
                     },
                     message_id: "message-1".into(),
+                    source_locator: "locator-1".into(),
                     projection_id: "projection-1".into(),
                 }
             }

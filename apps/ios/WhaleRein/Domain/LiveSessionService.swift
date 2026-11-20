@@ -803,7 +803,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(message view: MessageView) -> ConversationMessage {
+    static func map(message view: MessageView) -> ConversationMessage {
         ConversationMessage(
             messageId: view.messageId,
             role: map(role: view.role),
@@ -819,7 +819,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
+    static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
         CommandReceipt(
             commandId: view.commandId,
             requestId: view.requestId,
@@ -915,7 +915,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(error: MobileError) -> AppErrorCode {
+    static func map(error: MobileError) -> AppErrorCode {
         map(code: error.code)
     }
 

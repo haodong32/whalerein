@@ -20,6 +20,7 @@ final class FixtureSessionService: SessionService {
     /// Deterministic Cloud sign-in/directory state; implemented by the Cloud
     /// account extension in FixtureCloudAccount.swift.
     let cloudState: FixtureCloudAccountState
+    let operationJournal = FixtureOperationJournal()
 
     private var paired: Bool
     private var revoked = false
@@ -44,6 +45,10 @@ final class FixtureSessionService: SessionService {
     private var settlementTasks: [Task<Void, Never>] = []
     private var lifecycleTasks: [Task<Void, Never>] = []
     private var didEmitLifecycleEvents = false
+
+    /// Recovery reads must not fabricate results before pairing.
+    var isPairedForRecovery: Bool { paired }
+    var isRevokedForRecovery: Bool { revoked }
 
     init(
         options: LaunchOptions = LaunchOptions(),
@@ -363,6 +368,12 @@ final class FixtureSessionService: SessionService {
             messageId: echoMessageId,
             deliveryId: options.sendEcho ? "del-\(receiptId)" : nil
         )
+        operationJournal.recordSend(
+            receipt: receipt,
+            hostId: hostId,
+            sessionId: sessionId,
+            instanceId: instanceId
+        )
         if uncertain {
             scheduleSettlement(receipt: receipt, hostId: hostId, sessionId: sessionId)
         }
@@ -392,6 +403,12 @@ final class FixtureSessionService: SessionService {
             status: .uncertain,
             delivery: nil
         )
+        operationJournal.recordControl(
+            receipt: receipt,
+            hostId: hostId,
+            sessionId: sessionId,
+            instanceId: instanceId
+        )
         let stopReceipt = receipt
         let task = Task { [weak self] in
             guard let self else { return }
@@ -400,6 +417,7 @@ final class FixtureSessionService: SessionService {
             self.runningSessions.remove(sessionId)
             var settled = stopReceipt
             settled.status = .confirmed
+            self.operationJournal.settle(commandId: settled.commandId, status: .confirmed)
             self.emit(.commandStatus(settled), hostId: hostId, sessionId: sessionId)
             self.emit(.attemptEnded(attemptId: "attempt-live", outcome: .cancelled), hostId: hostId, sessionId: sessionId)
         }
@@ -416,6 +434,7 @@ final class FixtureSessionService: SessionService {
             if Task.isCancelled { return }
             var settled = receipt
             settled.status = .confirmed
+            self.operationJournal.settle(commandId: settled.commandId, status: .confirmed)
             self.emit(.commandStatus(settled), hostId: hostId, sessionId: sessionId)
             self.emit(.attemptEnded(attemptId: "attempt-live", outcome: .completed), hostId: hostId, sessionId: sessionId)
         }
@@ -649,6 +668,7 @@ final class FixtureSessionService: SessionService {
         pendingPrompt = nil
         pendingInvitation = nil
         stopWatch()
+        operationJournal.reset()
         runningSessions.removeAll()
         approvalsBySession.removeAll()
         messagesBySession.removeAll()
@@ -665,6 +685,7 @@ final class FixtureSessionService: SessionService {
         revoked = true
         pendingPrompt = nil
         pendingInvitation = nil
+        operationJournal.reset()
         runningSessions.removeAll()
         approvalsBySession.removeAll()
         messagesBySession.removeAll()

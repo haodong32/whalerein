@@ -30,6 +30,6 @@ pub use types::{
     MessageReferenceView, MessageReplyView, MessageView, NoticeView, PairingPromptView,
     QuestionAnswerView, QuestionBatchView, QuestionIntentView, QuestionItemView,
     QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
-    SendOperationView, SessionCapabilitiesView, SessionKeyView, SessionSummaryView,
-    ToolActivityView, ToolResultPartView,
+    RetainedOperationView, SendOperationView, SessionCapabilitiesView, SessionKeyView,
+    SessionSummaryView, ToolActivityView, ToolResultPartView,
 };
