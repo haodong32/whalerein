@@ -728,7 +728,9 @@ final class ConversationModel {
             if receipt.status != .rejected {
                 appendOptimisticUserMessage(text: text, receipt: receipt)
             }
-            if choice == .send {
+            if choice == .send || (choice == .queue && !capabilities.running) {
+                // An idle native-queue submission starts the turn; a running
+                // queue submission leaves the current run untouched.
                 updateCapabilities(running: true)
             }
             if receipt.status == .uncertain {
