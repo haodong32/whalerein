@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/clientaddr"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/policy"
@@ -78,6 +79,8 @@ type Dependencies struct {
 	Logger                   *slog.Logger
 	InternalToken            string
 	MaxBodyBytes             int64
+	ClientAddress            *clientaddr.Resolver
+	ClientReference          *clientaddr.Referencer
 	HostPresence             external.HostPresence
 	// External serves external account mode when it is configured. Standalone
 	// deployments leave it nil and keep the invitation routes only.
@@ -120,6 +123,13 @@ func New(deps Dependencies) (*Server, error) {
 	}
 	if deps.MaxBodyBytes <= 0 {
 		deps.MaxBodyBytes = 24 << 20
+	}
+	if deps.ClientAddress == nil {
+		resolver, err := clientaddr.NewResolver(nil)
+		if err != nil {
+			return nil, err
+		}
+		deps.ClientAddress = resolver
 	}
 	s := &Server{deps: deps}
 	notFound := func(w http.ResponseWriter, r *http.Request) { s.writeError(w, r, errRouteNotFound) }
@@ -201,7 +211,8 @@ func (s *Server) instrument(router *router, internal bool) http.Handler {
 
 func (s *Server) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		meta := &requestMeta{traceID: traceID(r)}
+		client := s.deps.ClientAddress.Resolve(r.RemoteAddr, r.Header)
+		meta := &requestMeta{traceID: traceID(r), client: client}
 		ctx := withRequestMeta(diagnostics.WithTraceID(r.Context(), meta.traceID), meta)
 		r = r.WithContext(ctx)
 		w.Header().Set(TraceHeader, meta.traceID)
@@ -224,6 +235,10 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				"code", meta.errorCode,
 				"duration_ms", duration.Milliseconds(),
 				"trace_id", meta.traceID,
+				"client_addr_status", string(client.Source),
+			}
+			if ref, window := s.deps.ClientReference.Reference(client.Address, started); ref != "" {
+				attrs = append(attrs, "client_ref", ref, "client_ref_window", window)
 			}
 			if meta.requestID != "" {
 				attrs = append(attrs, "request", s.deps.Masker.Request(meta.requestID))
@@ -269,6 +284,7 @@ func (s *Server) internalTokenOK(value string) bool {
 
 type requestMeta struct {
 	traceID   string
+	client    clientaddr.Identity
 	route     string
 	requestID string
 	errorCode string

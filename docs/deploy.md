@@ -62,6 +62,42 @@ Logs must never carry message contents, tool parameters, private keys, pairing
 or device tokens. Acceptance checks the common credential values and export
 redaction; that is a guard, not permission to log payloads.
 
+## Client address in logs
+
+Access never records a plaintext client address. The public ingress writes
+`X-Whalerein-Client-IP` (overwriting any inbound value), and Access reads it only
+from the CIDRs in `http.client_address.trusted_proxies`. The access record then
+carries:
+
+| Field | Meaning |
+|---|---|
+| `client_ref` | `c1_` + a 128-bit windowed HMAC of the address |
+| `client_ref_window` | UTC window, `2026-11` (monthly) or `2026-11-20` (daily) |
+| `client_addr_status` | `forwarded`, `direct`, or `unavailable` |
+
+Generate the 256-bit master key once per environment with
+`openssl rand -base64 32`, put it in the deployment secret store, and set
+`http.client_reference.key` from `${WHALEREIN_CLIENT_REF_KEY}`. Put it in
+`http.client_reference.window` (`monthly` or `daily`). The window changes
+automatically; the master key changes only on compromise or an explicit annual
+rotation. Never reuse a key across environments.
+
+To relate an operator-held IP (for example from a firewall or load-balancer
+log) to a record, compute the same reference in Python 3:
+
+```python
+import base64, hashlib, hmac, sys
+key = base64.b64decode(sys.argv[1])
+window, address = sys.argv[2], sys.argv[3]
+digest = hmac.new(key, f"whalerein/client/v1\n{window}\n{address}".encode(),
+                  hashlib.sha256).hexdigest()
+print("c1_" + digest[:32])
+```
+
+Run it with the key, the `client_ref_window` from the record, and the candidate
+address; search the Access logs for the printed value. The raw address never
+appears in those logs.
+
 ## Request metadata retention and capacity
 
 Access runs cleanup every `cleanup.interval` (Compose: one minute) and once at
