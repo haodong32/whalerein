@@ -69,6 +69,24 @@ struct SettingsView: View {
                     }
                 }
 
+                Section {
+                    Button(role: .destructive) {
+                        confirmation = .forget
+                    } label: {
+                        Text(L10n.settingsForget.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.forget")
+
+                    Button(role: .destructive) {
+                        confirmation = .revoke
+                    } label: {
+                        Text(L10n.settingsRevoke.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.revoke")
+                }
+
                 SettingsOperationsView()
 
                 Section {
@@ -128,23 +146,6 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.addHost")
                 }
 
-                Section {
-                    Button(role: .destructive) {
-                        confirmation = .forget
-                    } label: {
-                        Text(L10n.settingsForget.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.forget")
-
-                    Button(role: .destructive) {
-                        confirmation = .revoke
-                    } label: {
-                        Text(L10n.settingsRevoke.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.revoke")
-                }
             }
             .navigationTitle(L10n.settingsTitle.key)
             .inlineNavigationTitle()

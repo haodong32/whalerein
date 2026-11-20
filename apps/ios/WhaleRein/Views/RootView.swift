@@ -56,10 +56,11 @@ struct RootView: View {
             RevokedDeviceView()
         } else if model.isPaired {
             pairedRoot
-        } else if let cloud = model.cloudSignIn {
+        } else if let cloud = model.cloudSignIn, !model.prefersInvitationAfterDeviceReset {
             // Cloud instances use the official hosted sign-in and computer
             // directory; the self-hosted invitation flow remains reachable
-            // from the welcome surface.
+            // from the welcome surface. An explicit local forget/revoke
+            // returns to the invitation flow so the reset is visible.
             CloudSignInRootView(cloud: cloud)
         } else {
             InvitationView()
