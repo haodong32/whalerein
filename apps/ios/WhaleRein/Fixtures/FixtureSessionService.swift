@@ -14,7 +14,7 @@ final class FixtureSessionService: SessionService {
     private var continuations: [UUID: AsyncStream<SessionEventEnvelope>.Continuation] = [:]
     private(set) var connectionStatus: ConnectionStatus = .online
 
-    private let options: LaunchOptions
+    let options: LaunchOptions
     private let clock: FixtureClock
     private let draftStore: any DraftStore
     let operationJournal = FixtureOperationJournal()
@@ -25,10 +25,10 @@ final class FixtureSessionService: SessionService {
     /// Cloud from Standalone without reading the app document.
     let serviceKind: AppService
     /// Default computer selected through the same Core-backed contract as live.
-    private(set) var defaultHostId: String?
+    var defaultHostId: String?
 
-    private var paired: Bool
-    private var revoked = false
+    private(set) var paired: Bool
+    private(set) var revoked = false
     private var pendingPrompt: PairingPrompt?
     private var pendingInvitation: String?
     private var activeWatch: SessionContext?
