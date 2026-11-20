@@ -65,9 +65,11 @@ Session IDs belong to the selected Host.
   without creating a watch lease or changing the cache. Messages are
   chronological inside the page. `--continuation <token>` walks toward older
   history; an expired, stale or wrong-scope token fails with `snapshot_required`
-  and asks you to restart without `--continuation`. `--cache` reads the eligible
-  encrypted local cache explicitly, `--message <reference>` resolves one exact
-  committed message, and `--max-messages` / `--max-bytes` bound the page.
+  and asks you to restart without `--continuation`. The human page prints the
+  exact command for that token. `--cache` reads the eligible encrypted local
+  cache explicitly (an empty cache says so), `--message <reference>` resolves
+  one exact committed message, and `--max-messages` / `--max-bytes` bound the
+  page.
 - `session download <reference> --to <dir> --session <id>` saves one verified
   attachment. Use the `save_command` shown by `session history` (or its human
   `Save:` line); the reference is opaque and belongs to that Host and session.
@@ -77,6 +79,11 @@ Session IDs belong to the selected Host.
   verified file appears only after the local save commits; a failure removes
   temporary data and leaves existing files unchanged. Success is reported after
   that commit, never before. Recovery is always a fresh transfer, not a resume.
+  An attachment without a Source name is shown and saved under a media-derived
+  name (`attachment.png`, `attachment.bin`, ...). Rows the Source cannot expose
+  explain why no save action is available. When two rows share a suggested
+  name, later `Save:` commands add a distinct `--name`. Large images show an
+  estimated decoding memory note before you download them.
 - `session model`, `session queue`, `session approval` and `session question`
   expose advanced operations and their verification guards.
 - `session send <id> <text>` follows the submitted message's reply and renders
@@ -90,6 +97,8 @@ Session IDs belong to the selected Host.
   and confirmed send output. It is off by default and never changes
   authorization. Hidden reasoning does not satisfy `session watch --once` and
   does not appear in default JSON.
+- Human tool results are capped at 8 KiB with a hidden-byte note; `--full`
+  shows the complete text. JSON always carries complete values.
 - `operation list` displays retained operations. `operation recover <id>`
   checks the original operation using its recorded target. Recover uncertain
   sends before submitting another message.

@@ -249,6 +249,7 @@ where
     let json = parsed.json;
     let yes = parsed.yes;
     let show_reasoning = parsed.show_reasoning;
+    crate::output::set_full_tool_output(parsed.full);
     let (mut command, host) = parsed.into_command();
     diagnostics.cli_event(context.trace_id(), || {
         json!({

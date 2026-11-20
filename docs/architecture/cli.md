@@ -42,6 +42,13 @@ satisfy `session watch --once`; Core reports answer and reasoning preview
 prefixes separately, so a hidden prefix never offsets visible text. This is a
 presentation policy only and never changes authorization.
 
+Human tool-result text is bounded (8 KiB per result) with an explicit hidden-byte
+marker; a global `--full` disables the cap for human output. JSON always carries
+complete values. An attachment without a Source name is shown and saved under a
+media-derived default, unavailable rows explain why no save action exists, and
+duplicate suggested names receive distinct `--name` arguments in printed save
+commands.
+
 Send renders one typed outcome. `Committed` reads the canonical message through
 history and shows the reply. A later content-read failure preserves the
 confirmation and prints the exact `session history --message` command;

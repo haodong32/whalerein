@@ -7,6 +7,8 @@ use whalerein_core::api::{
     SessionModel,
 };
 
+use std::cell::Cell;
+
 use crate::cli::{Command, ModelAction};
 
 use whalerein_core::conversation::{
@@ -116,11 +118,8 @@ fn notice_label(category: NoticeCategory, state: NoticeState) -> String {
     )
 }
 
-fn attachment_display_name(attachment: &content_block::AttachmentContent) -> String {
-    if !attachment.name.trim().is_empty() {
-        return attachment.name.clone();
-    }
-    let extension = match attachment.media_type.as_str() {
+fn attachment_extension(media_type: &str) -> &'static str {
+    match media_type {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
@@ -129,8 +128,17 @@ fn attachment_display_name(attachment: &content_block::AttachmentContent) -> Str
         "application/pdf" => "pdf",
         "text/plain" => "txt",
         _ => "bin",
-    };
-    format!("attachment.{extension}")
+    }
+}
+
+fn attachment_display_name(attachment: &content_block::AttachmentContent) -> String {
+    if !attachment.name.trim().is_empty() {
+        return attachment.name.clone();
+    }
+    format!(
+        "attachment.{}",
+        attachment_extension(&attachment.media_type)
+    )
 }
 
 fn render_attachment(attachment: &content_block::AttachmentContent) -> String {
@@ -144,6 +152,41 @@ fn render_attachment(attachment: &content_block::AttachmentContent) -> String {
         } else {
             ", unavailable"
         }
+    )
+}
+
+thread_local! {
+    static FULL_TOOL_OUTPUT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set by the CLI before dispatch; human tool-result rendering only.
+pub fn set_full_tool_output(full: bool) {
+    FULL_TOOL_OUTPUT.with(|value| value.set(full));
+}
+
+fn full_tool_output() -> bool {
+    FULL_TOOL_OUTPUT.with(Cell::get)
+}
+
+/// Human display keeps a tool result bounded. Machine output stays complete.
+const TOOL_RESULT_DISPLAY_BYTES: usize = 8 * 1024;
+
+fn bounded_tool_text(text: &str) -> String {
+    if full_tool_output() || text.len() <= TOOL_RESULT_DISPLAY_BYTES {
+        return text.to_owned();
+    }
+    let mut end = 0;
+    for (index, _) in text.char_indices() {
+        if index > TOOL_RESULT_DISPLAY_BYTES {
+            break;
+        }
+        end = index;
+    }
+    let hidden = text.len().saturating_sub(end);
+    format!(
+        "{}\n… [{} bytes hidden; use --full to show complete tool output]",
+        &text[..end],
+        hidden
     )
 }
 
@@ -183,7 +226,10 @@ fn render_tool_activity(activity: &ToolActivity) -> String {
     for part in &activity.result {
         match part {
             ToolResultPart::Text(text) if !text.is_empty() => {
-                out.push_str(&format!("\n[tool result] {}", sanitize_field(text)));
+                out.push_str(&format!(
+                    "\n[tool result] {}",
+                    sanitize_field(&bounded_tool_text(text))
+                ));
             }
             ToolResultPart::Text(_) => {}
             ToolResultPart::Attachment(attachment) => {
@@ -310,13 +356,46 @@ fn history_source_label(source: HistorySource) -> &'static str {
     }
 }
 
-fn attachment_save_command(key: &SessionKey, reference: &str) -> String {
+fn attachment_save_command(key: &SessionKey, reference: &str, name: Option<&str>) -> String {
+    let name = name
+        .map(|name| format!(" --name {}", shell_quote(name)))
+        .unwrap_or_default();
     format!(
-        "whalerein session download {} --host {} --session {} --to <DIR>",
+        "whalerein session download {} --host {} --session {} --to <DIR>{name}",
         shell_quote(reference),
         shell_quote(&key.host_id),
         shell_quote(&key.session_id)
     )
+}
+
+/// Duplicate display names would make two save commands collide in one
+/// directory. The first keeps the Source suggestion; later ones get a stable
+/// media-derived name so each printed command is directly usable.
+fn attachment_name_overrides(
+    attachments: &[content_block::AttachmentContent],
+) -> Vec<Option<String>> {
+    let mut counts = std::collections::HashMap::new();
+    let mut overrides = Vec::with_capacity(attachments.len());
+    let mut position = 0usize;
+    for attachment in attachments {
+        if !attachment.available || attachment.attachment_ref.is_empty() {
+            overrides.push(None);
+            continue;
+        }
+        let display = attachment_display_name(attachment);
+        let count = counts.entry(display).or_insert(0usize);
+        *count += 1;
+        position += 1;
+        if *count == 1 {
+            overrides.push(None);
+        } else {
+            overrides.push(Some(format!(
+                "attachment-{position}.{}",
+                attachment_extension(&attachment.media_type)
+            )));
+        }
+    }
+    overrides
 }
 
 /// One verified attachment save as machine data.
@@ -411,6 +490,8 @@ impl DownloadProgressRenderer {
             .to_string();
             line.push('\n');
             line
+        } else if progress.total == 0 {
+            "Progress: 0/0 bytes (complete)\n".to_owned()
         } else {
             let percent = progress
                 .received
@@ -456,13 +537,19 @@ fn attachments_json(
     key: &SessionKey,
     attachments: &[content_block::AttachmentContent],
 ) -> Vec<Value> {
+    let overrides = attachment_name_overrides(attachments);
     attachments
         .iter()
-        .map(|attachment| {
+        .zip(overrides)
+        .map(|(attachment, override_name)| {
             let mut value = attachment_json(attachment);
             value["save_command"] = if attachment.available && !attachment.attachment_ref.is_empty()
             {
-                json!(attachment_save_command(key, &attachment.attachment_ref))
+                json!(attachment_save_command(
+                    key,
+                    &attachment.attachment_ref,
+                    override_name.as_deref()
+                ))
             } else {
                 Value::Null
             };
@@ -476,7 +563,8 @@ fn render_attachment_rows(
     attachments: &[content_block::AttachmentContent],
 ) -> String {
     let mut out = String::new();
-    for attachment in attachments {
+    let overrides = attachment_name_overrides(attachments);
+    for (attachment, override_name) in attachments.iter().zip(overrides) {
         out.push_str(&format!(
             "Attachment: {} ({}, {} bytes{})\n",
             sanitize_field(&attachment_display_name(attachment)),
@@ -491,8 +579,18 @@ fn render_attachment_rows(
         if attachment.available && !attachment.attachment_ref.is_empty() {
             out.push_str(&format!(
                 "  Save: {}\n",
-                attachment_save_command(key, &attachment.attachment_ref)
+                attachment_save_command(key, &attachment.attachment_ref, override_name.as_deref())
             ));
+            if attachment.media_type.starts_with("image/") && attachment.size > 32 * 1024 * 1024 {
+                out.push_str(&format!(
+                    "  Large image: decoding may use about {} MiB of memory.\n",
+                    attachment.size.div_ceil(1024 * 1024)
+                ));
+            }
+        } else {
+            out.push_str(
+                "  The Source did not expose readable bytes for this occurrence; no save action is available.\n",
+            );
         }
     }
     out
@@ -518,7 +616,11 @@ pub fn render_history_page(key: &SessionKey, page: &HistoryPage, show_reasoning:
         sanitize_field(&key.session_id)
     );
     if page.messages.is_empty() {
-        out.push_str("No committed messages in this page.\n");
+        out.push_str(if page.source == HistorySource::Cache {
+            "No committed messages in the local cache.\n"
+        } else {
+            "No committed messages in this page.\n"
+        });
     }
     for message in &page.messages {
         let body = render_message_blocks(message, None, show_reasoning);
@@ -3920,7 +4022,7 @@ mod history_output_tests {
                     total: 0
                 })
                 .unwrap(),
-            "Progress: 0/0 bytes (100%)\n"
+            "Progress: 0/0 bytes (complete)\n"
         );
         assert!(human
             .report(DownloadProgress {
@@ -3992,4 +4094,73 @@ mod history_output_tests {
         assert!(rows.contains("Save:"), "{rows}");
     }
 
+    #[test]
+    fn long_tool_results_are_bounded_unless_full_output_is_requested() {
+        let text = "x".repeat(TOOL_RESULT_DISPLAY_BYTES + 100);
+        let activity = ToolActivity {
+            id: whalerein_core::conversation::ToolActivityId {
+                call_id: "c".into(),
+            },
+            name: "Read".into(),
+            summary: None,
+            order: 1,
+            state: whalerein_core::conversation::ToolState::Succeeded,
+            stages: vec![whalerein_core::conversation::ToolStage::Settlement],
+            progress: None,
+            failure_code: None,
+            result: vec![ToolResultPart::Text(text.clone())],
+            outcome: whalerein_core::conversation::ToolOutcome::Succeeded,
+            attempt: None,
+            call_missing: false,
+        };
+        set_full_tool_output(false);
+        let bounded = render_tool_activity(&activity);
+        assert!(bounded.contains("bytes hidden"), "{bounded}");
+        assert!(
+            !bounded.contains(&text),
+            "bounded output must not contain the full result"
+        );
+        set_full_tool_output(true);
+        let complete = render_tool_activity(&activity);
+        assert!(complete.contains(&text));
+        set_full_tool_output(false);
+    }
+
+    #[test]
+    fn duplicate_attachment_names_get_distinct_saves_and_unavailable_rows_explain() {
+        let key = SessionKey::new("host-1", "session-1").unwrap();
+        let first = content_block::AttachmentContent {
+            media_type: "application/octet-stream".into(),
+            name: "report.bin".into(),
+            size: 4,
+            available: true,
+            attachment_ref: "ref-1".into(),
+        };
+        let mut second = first.clone();
+        second.attachment_ref = "ref-2".into();
+        let unavailable = content_block::AttachmentContent {
+            media_type: "application/octet-stream".into(),
+            name: "gone.bin".into(),
+            size: 4,
+            available: false,
+            attachment_ref: "ref-3".into(),
+        };
+        let rows = render_attachment_rows(&key, &[first.clone(), second, unavailable]);
+        assert!(rows.contains("--name attachment-2.bin"), "{rows}");
+        assert!(rows.contains("did not expose readable bytes"), "{rows}");
+        let values = attachments_json(&key, &[first]);
+        assert!(values[0]["save_command"]
+            .as_str()
+            .unwrap()
+            .contains("session download"));
+        let large = content_block::AttachmentContent {
+            media_type: "image/png".into(),
+            name: "huge.png".into(),
+            size: 40 * 1024 * 1024,
+            available: true,
+            attachment_ref: "ref-4".into(),
+        };
+        let rows = render_attachment_rows(&key, &[large]);
+        assert!(rows.contains("Large image"), "{rows}");
+    }
 }

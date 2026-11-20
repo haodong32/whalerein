@@ -43,6 +43,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub show_reasoning: bool,
 
+    /// Show complete tool result text in human output.
+    /// The default truncates long tool results; JSON stays complete.
+    #[arg(long, global = true)]
+    pub full: bool,
+
     /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic export).
     #[arg(long, global = true)]
     pub yes: bool,
