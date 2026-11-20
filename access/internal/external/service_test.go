@@ -27,6 +27,7 @@ type fakeStore struct {
 	readyCalls  int
 	disabled    map[string]time.Time
 	revocations map[string]uint64
+	removals    map[string]store.DisabledEnrollment
 }
 
 func newFakeStore() *fakeStore {
@@ -37,20 +38,49 @@ func newFakeStore() *fakeStore {
 		credential:  "credential-once",
 		nonces:      map[string]bool{},
 		disabled:    map[string]time.Time{},
+		removals:    map[string]store.DisabledEnrollment{},
 	}
+}
+
+func (f *fakeStore) AdmitOperation(_ context.Context, operation store.ExternalOperation) (store.ExternalOperation, bool, error) {
+	if f.err != nil {
+		return store.ExternalOperation{}, false, f.err
+	}
+	if recorded, ok := f.operations[operation.OperationID]; ok {
+		if string(recorded.PayloadDigest) != string(operation.PayloadDigest) {
+			return store.ExternalOperation{}, false, store.ErrOperationConflict
+		}
+		return recorded, false, nil
+	}
+	if recorded, ok := f.byPayload[operation.AuthorizationID]; ok {
+		if string(recorded.PayloadDigest) != string(operation.PayloadDigest) {
+			return store.ExternalOperation{}, false, store.ErrOperationConflict
+		}
+		return recorded, false, nil
+	}
+	operation.Outcome = "admitted"
+	operation.State = "operation_admitted"
+	f.operations[operation.OperationID] = operation
+	f.byPayload[operation.AuthorizationID] = operation
+	return operation, true, nil
 }
 
 func (f *fakeStore) EnrollHost(_ context.Context, operation store.ExternalOperation, enrollment store.ExternalEnrollment) (store.ExternalEnrollment, string, bool, error) {
 	if f.err != nil {
 		return store.ExternalEnrollment{}, "", false, f.err
 	}
-	if recorded, ok := f.byPayload[operation.AuthorizationID]; ok {
+	if recorded, ok := f.byPayload[operation.AuthorizationID]; ok && recorded.Outcome == "committed" {
 		if string(recorded.PayloadDigest) != string(operation.PayloadDigest) {
 			return store.ExternalEnrollment{}, "", false, store.ErrOperationConflict
 		}
 		return f.enrollments[operation.HostID], "", false, nil
 	}
+	if _, exists := f.enrollments[enrollment.HostID]; exists {
+		return store.ExternalEnrollment{}, "", false, store.ErrConflict
+	}
 	f.commits++
+	operation.Outcome = "committed"
+	operation.State = "operation_committed"
 	f.operations[operation.OperationID] = operation
 	f.byPayload[operation.AuthorizationID] = operation
 	enrollment.OperationID = operation.OperationID
@@ -121,7 +151,7 @@ func (f *fakeStore) DisableEnrollment(_ context.Context, hostID string, at time.
 }
 
 func (f *fakeStore) ReplaceHostCredential(_ context.Context, operation store.ExternalOperation) (store.ExternalEnrollment, string, error) {
-	if _, ok := f.byPayload[operation.AuthorizationID]; ok {
+	if recorded, ok := f.byPayload[operation.AuthorizationID]; ok && recorded.Outcome == "committed" {
 		return store.ExternalEnrollment{}, "", store.ErrOperationConflict
 	}
 	enrollment, ok := f.enrollments[operation.HostID]
@@ -131,10 +161,59 @@ func (f *fakeStore) ReplaceHostCredential(_ context.Context, operation store.Ext
 	if enrollment.DisabledAt != nil || enrollment.EnrollmentRevision != operation.EnrollmentRevision {
 		return store.ExternalEnrollment{}, "", store.ErrConflict
 	}
+	operation.Outcome = "committed"
+	operation.State = "operation_committed"
 	f.byPayload[operation.AuthorizationID] = operation
 	f.operations[operation.OperationID] = operation
 	f.commits++
+	enrollment.CurrentCredentialOperationID = operation.OperationID
+	enrollment.CredentialGeneration++
+	f.enrollments[operation.HostID] = enrollment
 	return enrollment, f.credential + "-replacement", nil
+}
+
+func (f *fakeStore) DisableEnrollmentWithTarget(_ context.Context, hostID, removalOperationID string, expected *store.RemovalTarget, at time.Time) (store.DisabledEnrollment, error) {
+	if removalOperationID == "" {
+		removalOperationID = "legacy:" + hostID
+	}
+	if recorded, ok := f.removals[removalOperationID]; ok {
+		return recorded, nil
+	}
+	enrollment, ok := f.enrollments[hostID]
+	if !ok {
+		return store.DisabledEnrollment{}, store.ErrNotFound
+	}
+	target := store.RemovalTarget{WorkspaceID: enrollment.WorkspaceID, EnrollmentOperationID: enrollment.OperationID, EnrollmentRevision: enrollment.EnrollmentRevision}
+	if expected != nil && (expected.WorkspaceID != target.WorkspaceID || expected.EnrollmentOperationID != target.EnrollmentOperationID || expected.EnrollmentRevision != target.EnrollmentRevision) {
+		return store.DisabledEnrollment{}, store.ErrConflict
+	}
+	disabledAt, repeated := f.disabled[hostID]
+	if !repeated {
+		disabledAt = at
+		f.disabled[hostID] = at
+	}
+	enrollment.DisabledAt = &disabledAt
+	enrollment.State = "enrollment_disabled"
+	f.enrollments[hostID] = enrollment
+	revocations := map[string]uint64{}
+	if !repeated {
+		for deviceID, generation := range f.revocations {
+			revocations[deviceID] = generation
+		}
+	}
+	recorded := store.DisabledEnrollment{HostID: hostID, RemovalOperationID: removalOperationID, Target: target, DisabledAt: disabledAt, Revocations: revocations}
+	f.removals[removalOperationID] = recorded
+	return recorded, nil
+}
+
+func (f *fakeStore) MarkRemovalEnforced(_ context.Context, removalOperationID string, at time.Time) error {
+	recorded, ok := f.removals[removalOperationID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	recorded.EnforcedAt = &at
+	f.removals[removalOperationID] = recorded
+	return nil
 }
 
 func (f *fakeStore) ConsumeHostProofNonce(_ context.Context, nonceHash []byte, purpose string, _ time.Time) (bool, error) {
@@ -273,7 +352,7 @@ func TestEnrollHostRejectsAConflictingPayload(t *testing.T) {
 	changed.ProofSignature = ed25519.Sign(h.data.signingKey,
 		[]byte(ProofInput(auth, changed.GetOperationId(), changed.GetHostSigningPublicKey())))
 
-	if _, err := service.EnrollHost(context.Background(), changed); !errors.Is(err, store.ErrOperationConflict) {
+	if _, err := service.EnrollHost(context.Background(), changed); !errors.Is(err, ErrOperationConflict) {
 		t.Fatalf("expected a conflict, got %v", err)
 	}
 }
@@ -551,8 +630,13 @@ func TestDisableHostIsIdempotentAndClosesTheLiveScope(t *testing.T) {
 	if !second.Equal(first) {
 		t.Fatalf("repeated disable changed disabled_at from %s to %s", first, second)
 	}
-	if len(h.enforcer.generations) != 0 {
-		t.Fatalf("repeated disable revoked %v twice", h.enforcer.generations)
+	// A retry repeats exactly the stored suppression for the original target;
+	// it never changes the receipt or invents a second revocation set.
+	if h.enforcer.calls[len(h.enforcer.calls)-1] != request.GetHostId() {
+		t.Fatalf("repeated disable did not repeat the original scope: %v", h.enforcer.calls)
+	}
+	if _, ok := h.enforcer.generations["device-1"]; !ok {
+		t.Fatalf("repeated disable did not repeat the stored revocations: %v", h.enforcer.generations)
 	}
 	if _, err := h.service.DisableHost(context.Background(), "host-missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected not found for an unknown Host, got %v", err)
@@ -623,8 +707,12 @@ func TestEnrollmentStatusForHostRefusesDisabledEnrollments(t *testing.T) {
 	}
 	proof := signedHostProof(t, h.data.signingKey, PurposeEnrollmentStatus,
 		request.GetHostId(), "op-1", issued, "c3RhdHVzLW5vbmNlLTQ")
-	if _, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), proof); !errors.Is(err, ErrEnrollmentDisabled) {
-		t.Fatalf("expected a disabled refusal, got %v", err)
+	status, err := h.service.EnrollmentStatusForHost(context.Background(), request.GetHostId(), proof)
+	if err != nil {
+		t.Fatalf("disabled status must be an authoritative read, got %v", err)
+	}
+	if status.GetRemovalState() == "" || status.GetRemovalState() == "none" {
+		t.Fatalf("disabled status must report the removal lifecycle, got %+v", status)
 	}
 }
 
@@ -657,8 +745,12 @@ func TestRecoverCredentialReplacesOnceAndRejectsReplays(t *testing.T) {
 	// credential: the durable operation records one intent only.
 	replayProof := signedHostProof(t, h.data.signingKey, PurposeCredentialReplacement,
 		request.GetHostId(), auth.GetAuthorizationId(), issued, "cmVjb3Zlci1ub25jZS00")
-	if _, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, replayProof); !errors.Is(err, store.ErrOperationConflict) {
-		t.Fatalf("expected an authorization replay conflict, got %v", err)
+	replayed, err := h.service.RecoverCredential(context.Background(), request.GetHostId(), auth, replayProof)
+	if err != nil {
+		t.Fatalf("a replay must return the recorded credential-free outcome, got %v", err)
+	}
+	if replayed.Credential.Password != "" || replayed.CredentialIssued {
+		t.Fatalf("a replay issued a second credential: %+v", replayed)
 	}
 }
 

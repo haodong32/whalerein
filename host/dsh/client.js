@@ -232,6 +232,21 @@ window.__ModuleLoader__.load({
       cloudRemoveHint: 'Remove this computer requires fresh browser authorization. The status stays Removing until the service enforces it.',
       cloudLocalOnly: 'Local action',
       cloudConfirmationRequired: 'Confirm removal in your browser. Keep this page open.',
+      cloudResume: 'Resume connection',
+      cloudResuming: 'Resuming…',
+      cloudRecoverCredential: 'Recover credential',
+      cloudRecoveringCredential: 'Recovering credential…',
+      cloudVerifyStatus: 'Verify status',
+      cloudContinueSetup: 'This computer has a saved setup request. Finish it in the browser; this page never starts a second request.',
+      cloudRemovalVerified: 'Removal is pending. Waiting for the service to confirm enforcement.',
+      cloudEnforcementConfirmed: 'The service confirmed that removal was enforced.',
+      cloudCancelRemoval: 'Cancel removal',
+      errorHint_transport: 'A temporary transport failure interrupted the connection. Automatic retries continue with bounded backoff.',
+      errorHint_credential: 'The service refused this computer credential. For Cloud, recover the credential; for Standalone, correct the Host Token setting.',
+      errorHint_tls_trust: 'The service certificate did not pass TLS verification. Correct the CA provider or CA file setting, or the service endpoint, and retry.',
+      errorHint_invalid_config: 'The saved connection configuration is invalid. Correct the highlighted setting and reload the plugin.',
+      errorHint_removal_pending: 'Removal is pending or enforced for this enrollment. Adding this computer again requires fresh browser approval.',
+      configurationConflict: 'Another WhaleRein Host process owns this profile. Stop that process, then reload this plugin. The saved identity and pairing are unchanged.',
     }
     const zh = {
       nav: 'WhaleRein',
@@ -440,6 +455,21 @@ window.__ModuleLoader__.load({
       cloudRemoveHint: '移除这台电脑需要新的浏览器授权。在服务执行完成前，状态会一直显示“正在移除”。',
       cloudLocalOnly: '本地操作',
       cloudConfirmationRequired: '请在浏览器中确认移除，并保持此页面打开。',
+      cloudResume: '继续连接',
+      cloudResuming: '正在继续连接…',
+      cloudRecoverCredential: '恢复凭据',
+      cloudRecoveringCredential: '正在恢复凭据…',
+      cloudVerifyStatus: '检查状态',
+      cloudContinueSetup: '这台电脑已有待完成的设置请求。请到浏览器中完成授权；此页面不会再次发起请求。',
+      cloudRemovalVerified: '移除正在等待服务确认执行。',
+      cloudEnforcementConfirmed: '服务已确认移除生效。',
+      cloudCancelRemoval: '取消移除',
+      errorHint_transport: '临时传输故障中断了连接。插件会按有界退避自动重试。',
+      errorHint_credential: '服务拒绝了这台电脑的凭据。Cloud 连接请使用凭据恢复；Standalone 连接请修正主机 Token 设置。',
+      errorHint_tls_trust: '服务证书未通过 TLS 验证。请修正 CA 来源、CA 文件或服务地址后重试。',
+      errorHint_invalid_config: '已保存的连接配置无效。请修正标出的设置并重新加载插件。',
+      errorHint_removal_pending: '该注册正在移除或已被移除。重新添加这台电脑需要新的浏览器授权。',
+      configurationConflict: '另一个 WhaleRein 主机进程正在占用此配置。请先停止该进程，再重新加载插件；已保存的身份和配对不会改变。',
     }
 
     const styles = {
@@ -716,9 +746,11 @@ window.__ModuleLoader__.load({
 
     function ConfigurationError({ t, error }) {
       if (!error) return null
-      const detail = error.field
-        ? t('configurationInvalidDetail', { field: t('configurationInvalidField', { field: error.field }), reason: error.reason ? t('configurationInvalidReason', { reason: error.reason }) : '' })
-        : t('configurationInvalidGeneric')
+      const detail = error.code === 'conflict'
+        ? t('configurationConflict')
+        : error.field
+          ? t('configurationInvalidDetail', { field: t('configurationInvalidField', { field: error.field }), reason: error.reason ? t('configurationInvalidReason', { reason: error.reason }) : '' })
+          : t('configurationInvalidGeneric')
       return h('section', { style: styles.statusCard, role: 'alert', 'aria-labelledby': 'whalerein-config-error-title' },
         h('div', { style: styles.statusHeader },
           h('span', { style: { ...styles.statusIcon, color: 'var(--dsw-alias-state-error-primary)' }, 'aria-hidden': true },
@@ -1219,6 +1251,11 @@ window.__ModuleLoader__.load({
       protocol_version_incompatible: 'errorHint_protocol_version_incompatible',
       unsupported_capability: 'errorHint_unsupported_capability',
       internal: 'errorHint_internal',
+      transport: 'errorHint_transport',
+      credential: 'errorHint_credential',
+      tls_trust: 'errorHint_tls_trust',
+      invalid_config: 'errorHint_invalid_config',
+      removal_pending: 'errorHint_removal_pending',
     }
 
     function errorHintKey(code) {
@@ -1288,21 +1325,46 @@ window.__ModuleLoader__.load({
 
       const state = MANAGED_STATES.has(snapshot.state) ? snapshot.state : 'action_required'
       const stateHint = errorHintKey(snapshot.error?.code) || `stateHint_${state}`
+      // The runtime chooses the available action. Settings never infers a new
+      // connection from a persisted operation flag, and a pending operation
+      // must not disable the action it still requires.
+      const action = snapshot.action && typeof snapshot.action.kind === 'string' ? snapshot.action : null
+      const actionKind = action?.kind ?? ''
       const pending = snapshot.pendingOperation === true
       const isStaging = snapshot.environment === 'staging'
       const activeLocale = localeService?.getSnapshot?.().active
       const matchesTarget = (link) => link?.service === snapshot.service && link?.profileId === snapshot.profileId
-      const approvalUrl = localeApprovalUrl(snapshot.approvalUrl || (matchesTarget(approvalLink) ? approvalLink.url : ''), activeLocale)
-      const removalUrl = matchesTarget(removalLink) ? removalLink.url : ''
+      const approvalUrl = localeApprovalUrl(snapshot.approvalUrl || action?.url || (matchesTarget(approvalLink) ? approvalLink.url : ''), activeLocale)
+      const removalUrl = localeApprovalUrl(snapshot.removalUrl
+        || (actionKind === 'remove' ? action?.url : '')
+        || (matchesTarget(removalLink) ? removalLink.url : ''), activeLocale)
       const currentDetails = matchesTarget(details) ? details.value : null
-      const showConnect = ['idle', 'disconnected'].includes(state)
+      const stateConnect = ['idle', 'disconnected'].includes(state)
+      const showConnect = actionKind ? actionKind === 'connect' : stateConnect
+      const showResume = actionKind === 'resume'
+      const showRetry = actionKind ? actionKind === 'retry' : ['denied', 'expired', 'action_required'].includes(state)
+      const showRecover = actionKind === 'recover-credential'
+      const showVerify = actionKind === 'verify'
       const showCancel = ['requesting', 'awaiting_approval', 'enrolling', 'recovering'].includes(state)
-      const showRetry = ['denied', 'expired', 'action_required'].includes(state)
+        || actionKind === 'open-approval'
       const showDisconnect = state === 'connected' || state === 'reconnecting'
+      const showRemovalPending = state === 'removing' || state === 'removed' || !!removalUrl
 
       const isCurrentTarget = () => {
         const current = status.getSnapshot()
         return mounted.current && current.service === snapshot.service && current.profileId === snapshot.profileId
+      }
+      // A browser handoff starts only from an explicit click that reserves its
+      // tab synchronously. Settings never opens a browser while loading.
+      const followActionUrl = (result, tab, active) => {
+        const url = localeApprovalUrl(result?.value?.action?.url, active)
+          || localeApprovalUrl(result?.value?.approvalUrl, active)
+          || localeApprovalUrl(result?.value?.snapshot?.approvalUrl, active)
+        if (!url) {
+          try { tab?.close?.() } catch { /* already closed */ }
+          return { url: '', opened: false }
+        }
+        return { url, opened: commitBrowserTab(tab, url) }
       }
       const run = async (method, label, ...args) => {
         if (actionInFlight.current || !isCurrentTarget() || status.getSnapshot().available !== true || typeof connection?.invoke !== 'function') return
@@ -1318,17 +1380,17 @@ window.__ModuleLoader__.load({
         finally { actionInFlight.current = false; setBusy('') }
       }
 
-      const start = async () => {
-        if (actionInFlight.current || !isCurrentTarget() || status.getSnapshot().available !== true || status.getSnapshot().pendingOperation || typeof connection?.invoke !== 'function') return
+      const start = async (method = 'startConnect', label = 'start') => {
+        if (actionInFlight.current || !isCurrentTarget() || status.getSnapshot().available !== true || typeof connection?.invoke !== 'function') return
         actionInFlight.current = true
-        setBusy('start')
+        setBusy(label)
         setActionError('')
         setBrowserBlocked(false)
         setApprovalLink('')
         // Reserve the tab during the explicit click, before awaiting the RPC.
         const tab = reserveBrowserTab()
         try {
-          const result = await connection.invoke('startConnect')
+          const result = await connection.invoke(method)
           await status.refresh?.()
           if (!isCurrentTarget()) {
             try { tab?.close?.() } catch { /* already closed */ }
@@ -1340,15 +1402,16 @@ window.__ModuleLoader__.load({
             return
           }
           const active = localeService?.getSnapshot?.().active
-          const url = localeApprovalUrl(result.value?.approvalUrl, active)
-            || localeApprovalUrl(result.value?.snapshot?.approvalUrl, active)
-            || localeApprovalUrl(status.getSnapshot().approvalUrl, active)
+          const followed = followActionUrl(result, tab, active)
+          let url = followed.url
+          let opened = followed.opened
+          if (!url) {
+            url = localeApprovalUrl(status.getSnapshot().approvalUrl, active)
+            if (url) opened = commitBrowserTab(tab, url)
+          }
           if (url) {
-            const opened = commitBrowserTab(tab, url)
             setApprovalLink({ url, service: snapshot.service, profileId: snapshot.profileId })
             setBrowserBlocked(!opened)
-          } else {
-            try { tab?.close?.() } catch { /* already closed */ }
           }
         } catch {
           try { tab?.close?.() } catch { /* already closed */ }
@@ -1359,9 +1422,12 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const resume = () => run('reconnect', 'resume')
+      const recover = () => start('recoverCredential', 'recover')
+
       const remove = async () => {
         const current = status.getSnapshot()
-        if (actionInFlight.current || !isCurrentTarget() || current.available !== true || current.pendingOperation
+        if (actionInFlight.current || !isCurrentTarget() || current.available !== true
           || ['removing', 'removed'].includes(current.state) || typeof connection?.invoke !== 'function') return
         actionInFlight.current = true
         setBusy('remove')
@@ -1381,19 +1447,28 @@ window.__ModuleLoader__.load({
             setActionError('cloudActionFailed')
             return
           }
+          // Removal stays pending only after Cloud accepts the intent. Until
+          // then the connection policy is unchanged. The link is retained in
+          // the runtime snapshot, with this click's value as a fallback.
           const active = localeService?.getSnapshot?.().active
-          const url = localeApprovalUrl(result.value?.action?.url, active)
-          if (url) {
-            const opened = commitBrowserTab(tab, url)
-            setRemovalLink({ url, service: snapshot.service, profileId: snapshot.profileId })
-            setBrowserBlocked(!opened)
-          } else {
-            try { tab?.close?.() } catch { /* already closed */ }
+          const followed = followActionUrl(result, tab, active)
+          if (followed.url) {
+            setRemovalLink({ url: followed.url, service: snapshot.service, profileId: snapshot.profileId })
+            setBrowserBlocked(!followed.opened)
+          } else if (removalUrl) {
+            setBrowserBlocked(true)
           }
         } catch {
           try { tab?.close?.() } catch { /* already closed */ }
           if (isCurrentTarget()) setActionError('cloudActionFailed')
         } finally { actionInFlight.current = false; setBusy('') }
+      }
+      const cancelRemoval = () => {
+        // Closing the browser only abandons the local handoff. Cancel clears
+        // the cached link; a verified pending state remains until the service
+        // confirms enforcement.
+        setRemovalLink('')
+        setBrowserBlocked(false)
       }
       const entries = [
         [tr('cloudDetailsState'), tr(`state_${state}`)],
@@ -1434,11 +1509,23 @@ window.__ModuleLoader__.load({
                 h('p', { id: `${fieldId}-state-hint`, style: { ...styles.statusHint, margin: 0 } }, tr(stateHint)))),
             h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
               showConnect ? h(Button, {
-                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy || pending,
-                'aria-describedby': `${fieldId}-state-hint`, onClick: start,
-              }, busy === 'start' ? tr('state_requesting') : state === 'idle' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
+                'aria-describedby': `${fieldId}-state-hint`, onClick: () => start(),
+              }, busy === 'start' ? tr('state_requesting') : state === 'idle' || actionKind === 'connect' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
+              showResume ? h(Button, {
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
+                'aria-describedby': `${fieldId}-state-hint`, onClick: resume,
+              }, busy === 'resume' ? tr('cloudResuming') : tr('cloudResume')) : null,
+              showRecover ? h(Button, {
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
+                'aria-describedby': `${fieldId}-state-hint`, onClick: recover,
+              }, busy === 'recover' ? tr('cloudRecoveringCredential') : tr('cloudRecoverCredential')) : null,
+              showVerify ? h(Button, {
+                variant: 'outline', size: 'md', disabled: snapshot.available !== true || !!busy,
+                onClick: () => { void status.refresh?.() },
+              }, tr('cloudVerifyStatus')) : null,
               showRetry ? h(Button, {
-                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy || pending,
+                variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
                 onClick: () => run('retry', 'retry'),
               }, busy === 'retry' ? tr('state_requesting') : tr('cloudTryAgain')) : null,
               showCancel ? h(Button, {
@@ -1451,22 +1538,27 @@ window.__ModuleLoader__.load({
               }, busy === 'disconnect' ? tr('cloudDisconnecting') : tr('cloudDisconnect')) : null,
               )),
           !snapshot.available ? h('p', { style: styles.hint, role: 'status' }, tr('cloudStatusUnavailable')) : null,
-          pending ? h('p', { style: styles.hint, role: 'status' }, tr('cloudPending')) : null,
-          ['requesting', 'awaiting_approval'].includes(state) && approvalUrl
+          pending && !action && !showRemovalPending ? h('p', { style: styles.hint, role: 'status' }, tr('cloudPending')) : null,
+          approvalUrl && (actionKind === 'open-approval' || ['requesting', 'awaiting_approval'].includes(state))
             ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
+              h('p', { style: styles.hint, role: 'status' }, tr('cloudContinueSetup')),
               h('a', {
                 href: approvalUrl, target: '_blank', rel: 'noopener noreferrer',
                 style: styles.approvalLink, className: 'whalerein-approval-link',
               }, tr('cloudOpenBrowser')),
               browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
             : null,
-          state === 'removing'
+          showRemovalPending
             ? h('div', { style: styles.managedActions, className: 'whalerein-managed-actions' },
-              h('p', { style: styles.hint, role: 'status' }, tr('cloudConfirmationRequired')),
-              removalUrl ? h('a', {
+              h('p', { style: styles.hint, role: 'status' }, state === 'removed' ? tr('cloudEnforcementConfirmed') : tr('cloudConfirmationRequired')),
+              state === 'removing' ? h('p', { style: styles.hint, role: 'status' }, tr('cloudRemovalVerified')) : null,
+              removalUrl && state !== 'removed' ? h('a', {
                 href: removalUrl, target: '_blank', rel: 'noopener noreferrer',
                 style: styles.approvalLink, className: 'whalerein-approval-link',
               }, tr('cloudOpenBrowser')) : null,
+              state === 'removing' || (state !== 'removed' && !!removalUrl)
+                ? h(Button, { variant: 'ghost', size: 'sm', onClick: cancelRemoval }, tr('cloudCancelRemoval'))
+                : null,
               browserBlocked ? h('p', { style: styles.hint, role: 'status' }, tr('cloudBrowserBlocked')) : null)
             : null,
           actionError ? h('p', { style: styles.error, role: 'alert' }, tr(actionError)) : null),
@@ -1507,7 +1599,7 @@ window.__ModuleLoader__.load({
               }, tr('cloudDisconnect')) : null,
               h(Button, {
                 variant: 'ghost', size: 'sm', style: styles.dangerAction,
-                disabled: snapshot.available !== true || !!busy || pending || state === 'removing' || state === 'removed',
+                disabled: snapshot.available !== true || !!busy || state === 'removing' || state === 'removed',
                 onClick: remove,
               }, busy === 'remove' ? tr('cloudRemoving') : tr('cloudRemove'))),
             h('p', { style: styles.hint }, tr('cloudPairingManaged'))))),
@@ -1641,6 +1733,9 @@ window.__ModuleLoader__.load({
     }
 
     function SettingsPage(props) {
+      if (props.view === 'summary') {
+        return h('span', null, (props.t ?? ((key) => key))('intro'))
+      }
       const [ready, setReady] = React.useState(() => props.status.getSnapshot().ready === true)
       const [managed, setManaged] = React.useState(() => props.status.getSnapshot().managed === true)
       React.useEffect(() => props.status.subscribe(() => {
@@ -1695,6 +1790,13 @@ window.__ModuleLoader__.load({
     function cloudSnapshot(value) {
       const text = (item, max = 200) => typeof item === 'string'
         ? item.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max) : ''
+      const rawAction = value.action && typeof value.action === 'object' && typeof value.action.kind === 'string'
+        ? value.action : null
+      const action = rawAction
+        ? { kind: text(rawAction.kind, 32), url: safeApprovalUrl(rawAction.url) }
+        : null
+      const removalUrl = safeApprovalUrl(value.removalUrl)
+        || (action?.kind === 'remove' ? safeApprovalUrl(action.url) : '')
       return {
         available: value.available === true,
         managed: value.managed === true,
@@ -1706,6 +1808,8 @@ window.__ModuleLoader__.load({
         label: text(value.label, 64),
         hostName: text(value.hostName, 64),
         approvalUrl: safeApprovalUrl(value.approvalUrl),
+        removalUrl,
+        action,
         error: value.error && typeof value.error === 'object' ? { code: text(value.error.code, 64) } : null,
         pendingOperation: value.pendingOperation === true,
         capabilities: Array.isArray(value.capabilities) ? value.capabilities.slice(0, 8) : [],
@@ -1802,6 +1906,7 @@ window.__ModuleLoader__.load({
       ['retry', [], 'WhaleReinConnectionSnapshot'],
       ['disconnect', [], 'WhaleReinConnectionSnapshot'],
       ['reconnect', [], 'WhaleReinConnectionSnapshot'],
+      ['recoverCredential', [], 'WhaleReinConnectionSnapshot'],
       ['removeComputer', [], 'WhaleReinConnectionSnapshot'],
     ].map(([method, parameters, typeSymbol]) => ({
       id: `whalerein-dsh#whalerein/${method}`,
@@ -1905,13 +2010,16 @@ window.__ModuleLoader__.load({
           )
           injected.slots.inject('plugins.row.config', () =>
             injected.slots.register(
-              { name: 'plugins.row.config', key: 'whalerein-dsh#whalerein-dsh', locale: NS },
-              ({ view }) => view === 'summary'
-                ? h('span', null, t('intro'))
-                : h(SettingsPage, {
-                  t, form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection,
+              {
+                name: 'plugins.row.config',
+                key: 'whalerein-dsh#whalerein-dsh',
+                locale: NS,
+                inject: () => ({
+                  form, status, developerTools, locale: injected.locale, invite, revoke, secrets, testConnection,
                   connection: createConnectionActions(injected.remote),
                 }),
+              },
+              SettingsPage,
             ),
           )
         })

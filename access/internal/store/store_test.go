@@ -49,7 +49,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"device_credentials", "device_sessions", "devices", "external_device_revocations", "external_enrollments", "external_operations", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_device_sessions", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
+	want := []string{"device_credentials", "device_sessions", "devices", "external_device_revocations", "external_enrollments", "external_operations", "external_removals", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_device_sessions", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}

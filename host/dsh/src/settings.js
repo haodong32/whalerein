@@ -18,6 +18,12 @@ export const CONNECTION_STATES = Object.freeze([
 ])
 const ENVIRONMENTS = new Set(['production', 'staging', 'local', 'custom', 'standalone'])
 const CAPABILITIES = new Set(['pairing', 'removal'])
+// Additive runtime `snapshot().action`. Settings projects the runtime's
+// decision instead of inferring one from a persisted operation flag.
+const ACTION_KINDS = new Set([
+  'connect', 'open-approval', 'retry', 'resume', 'recover-credential',
+  'remove', 'fix-config', 'verify', 'wait',
+])
 const ERROR_CODE = /^[a-z][a-z0-9_./-]{0,63}$/
 
 export const EMPTY_SETTINGS_STATUS = Object.freeze({
@@ -40,6 +46,8 @@ export const EMPTY_MANAGED_SNAPSHOT = Object.freeze({
   label: '',
   hostName: '',
   approvalUrl: '',
+  action: null,
+  removalUrl: '',
   error: null,
   connected: false,
   devices: null,
@@ -79,12 +87,20 @@ function safeCapabilities(value) {
   return [...new Set(value.filter((name) => CAPABILITIES.has(name)))].slice(0, 8)
 }
 
+/** Project the runtime-chosen available action. The URL stays credential-free. */
+export function sanitizeManagerAction(raw) {
+  if (!raw || typeof raw !== 'object' || !ACTION_KINDS.has(raw.kind)) return null
+  const url = safeApprovalUrl(raw.url)
+  return url ? { kind: raw.kind, url } : { kind: raw.kind }
+}
+
 /**
  * Project the frozen ConnectionManager snapshot. Every field is selected
  * explicitly so a future runtime field cannot leak through this boundary.
  */
 export function sanitizeManagerSnapshot(raw = {}, extra = {}) {
   const state = CONNECTION_STATES.includes(raw?.state) ? raw.state : 'action_required'
+  const action = sanitizeManagerAction(raw?.action)
   return {
     available: raw?.available !== false,
     managed: true,
@@ -96,6 +112,12 @@ export function sanitizeManagerSnapshot(raw = {}, extra = {}) {
     // The browser handoff needs the approval destination. It is validated to a
     // credential-free http(s) origin and is never written to logs.
     approvalUrl: safeApprovalUrl(raw?.approvalUrl),
+    // The runtime persists the removal confirmation target so a page reload,
+    // restart or closed browser does not lose it.
+    removalUrl: safeApprovalUrl(raw?.removalUrl)
+      || safeApprovalUrl(raw?.removal?.url)
+      || (action?.kind === 'remove' ? action.url ?? '' : ''),
+    action,
     error: raw?.error && typeof raw.error === 'object'
       ? { code: safeCode(raw.error.code) }
       : null,
@@ -133,6 +155,7 @@ function safeDevices(devices) {
 }
 
 /** Project active Host details without private routes or credentials. */
+const REMOVAL_STATES = new Set(['none', 'pending', 'removing', 'removed', 'disabled', 'failed', 'unavailable'])
 export function sanitizeManagerDetails(raw = {}) {
   if (!raw || typeof raw !== 'object') return null
   return {
@@ -144,6 +167,7 @@ export function sanitizeManagerDetails(raw = {}) {
     accessOrigin: safeApprovalUrl(raw.accessOrigin) || null,
     region: text(raw.region, 64) || null,
     revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : null,
+    removalState: REMOVAL_STATES.has(raw.removalState) ? raw.removalState : null,
     lastErrorCode: raw.lastErrorCode ? safeCode(raw.lastErrorCode) : null,
     protocolVersion: Number.isSafeInteger(raw.protocolVersion) && raw.protocolVersion > 0 ? raw.protocolVersion : null,
   }
@@ -179,13 +203,44 @@ function managedManager(host) {
   return host?.manager ?? host?.connectionManager ?? null
 }
 
+// Background removal reconciliation is a read-only scoped status poll. It may
+// run on settings refresh or startup, but never starts, stops or enrolls.
+const reconciling = new WeakSet()
+function pendingRemoval(raw) {
+  if (!raw || typeof raw !== 'object') return false
+  return raw.state === 'removing'
+    || ['pending', 'removing', 'disabled'].includes(raw.removalState)
+    || ['pending', 'removing', 'disabled'].includes(raw.removal?.state)
+    || raw.action?.kind === 'remove'
+}
+
+/** Poll a verified removal once in the background. */
+export function reconcileRemoval(manager, raw) {
+  if (!pendingRemoval(raw)) return undefined
+  if (!manager || typeof manager.reconcileRemoval !== 'function' || reconciling.has(manager)) return undefined
+  reconciling.add(manager)
+  const task = Promise.resolve()
+    .then(() => manager.reconcileRemoval())
+    .catch(() => undefined)
+    .finally(() => reconciling.delete(manager))
+  return task
+}
+
 export function settingsStatus(host) {
   const configError = host?.configError ?? null
   if (isManagedHost(host)) {
     const manager = managedManager(host)
     const selectedService = host.service ?? host.config?.service
     const service = SERVICES.includes(selectedService) ? selectedService : 'whalerein_cloud'
-    const unavailable = () => ({ ...EMPTY_MANAGED_SNAPSHOT, state: 'action_required', service, error: { code: 'unavailable' }, configError })
+    const unavailable = () => ({
+      ...EMPTY_MANAGED_SNAPSHOT,
+      state: 'action_required',
+      service,
+      // A manager that could not be constructed is a settings state, not only
+      // a log line. Use its stable code so the page can name the next step.
+      error: { code: safeCode(configError?.code, 'unavailable') },
+      configError,
+    })
     if (!manager || typeof manager.snapshot !== 'function') {
       return unavailable()
     }
@@ -201,6 +256,7 @@ export function settingsStatus(host) {
     const snapshot = sanitizeManagerSnapshot(raw, {
       configError,
     })
+    void reconcileRemoval(manager, raw)
     return { ...snapshot, service }
   }
   if (!host?.started) {
@@ -240,12 +296,15 @@ export function settingsStatus(host) {
 }
 
 const MANAGER_METHODS = Object.freeze([
-  'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'removeComputer',
+  'startConnect', 'cancel', 'retry', 'disconnect', 'reconnect', 'recoverCredential', 'removeComputer',
 ])
 
 /** The browser needs only a validated removal-management destination. */
 function sanitizeAction(raw) {
   const url = safeApprovalUrl(raw?.url)
+    || safeApprovalUrl(raw?.action?.url)
+    || safeApprovalUrl(raw?.approvalUrl)
+    || safeApprovalUrl(raw?.snapshot?.approvalUrl)
   return url ? { url } : null
 }
 
@@ -298,6 +357,8 @@ export class WhaleReinSettingsService extends TypertRemoteService {
   retry() { return this._forward('retry') }
   disconnect() { return this._forward('disconnect') }
   reconnect() { return this._forward('reconnect') }
+  /** Scoped credential recovery, available only when the runtime offers it. */
+  recoverCredential() { return this._forward('recoverCredential') }
   removeComputer() { return this._forward('remove') }
   _requirePairing() {
     if (!this.managed) return
@@ -386,5 +447,14 @@ Object.defineProperty(WhaleReinSettingsService, 'initializeRemoteSnapshot', {
 export function createSettingsService(ctx, host) {
   const service = new WhaleReinSettingsService(ctx, host)
   WhaleReinSettingsService.initializeRemoteSnapshot.call(service)
+  // Resume a verified removal in the background even when the settings page is
+  // never opened. This only reads scoped status; it never starts a connection.
+  if (service.manager && typeof service.manager.snapshot === 'function') {
+    try {
+      void reconcileRemoval(service.manager, service.manager.snapshot())
+    } catch {
+      // Status remains available through the regular snapshot path.
+    }
+  }
   return service
 }

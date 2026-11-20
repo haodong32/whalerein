@@ -94,6 +94,19 @@ pub enum CoreError {
     Configuration(Box<ConfigurationError>),
 }
 
+impl CoreError {
+    /// A Central rejection that only says the account service is temporarily
+    /// unavailable is not authority revocation; the paired Device may use its
+    /// saved regional credential until Central returns.
+    pub(crate) fn is_retryable_transport(&self) -> bool {
+        match self {
+            Self::Unavailable(_) | Self::Timeout => true,
+            Self::Api { code, .. } => matches!(code, None | Some(ErrorCode::Unavailable)),
+            _ => false,
+        }
+    }
+}
+
 impl From<ConfigurationError> for CoreError {
     fn from(error: ConfigurationError) -> Self {
         Self::Configuration(Box::new(error))
@@ -1014,5 +1027,33 @@ mod exhaustive_tests {
             message: String::new()
         }
         .host_channel_replaced());
+    }
+}
+
+#[cfg(test)]
+mod retryable_transport_tests {
+    use super::*;
+
+    #[test]
+    fn temporary_account_denials_allow_the_saved_regional_token() {
+        assert!(CoreError::Unavailable("central down".into()).is_retryable_transport());
+        assert!(CoreError::Timeout.is_retryable_transport());
+        assert!(CoreError::Api {
+            code: None,
+            message: "transport".into()
+        }
+        .is_retryable_transport());
+        assert!(CoreError::Api {
+            code: Some(ErrorCode::Unavailable),
+            message: "transport".into()
+        }
+        .is_retryable_transport());
+        assert!(!CoreError::Api {
+            code: Some(ErrorCode::Unauthorized),
+            message: "unauthorized".into()
+        }
+        .is_retryable_transport());
+        assert!(!CoreError::AuthenticationRequired.is_retryable_transport());
+        assert!(!CoreError::AuthorizationExpired.is_retryable_transport());
     }
 }

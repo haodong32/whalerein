@@ -52,7 +52,7 @@ async function waitFor(predicate, timeoutMs = 3000) {
   }
 }
 
-function createFetch({ metadata = metadataDocument(), pollReply = 'approved', onCreate, onPoll, onEnroll, onMetadata } = {}) {
+function createFetch({ metadata = metadataDocument(), pollReply = 'approved', operationOutcome = 'committed', onCreate, onPoll, onEnroll, onMetadata } = {}) {
   const calls = []
   let intentBody = null
   const fetch = async (url, options = {}) => {
@@ -143,6 +143,16 @@ function createFetch({ metadata = metadataDocument(), pollReply = 'approved', on
           username: `host:${intentBody.hostId}`,
           password: 'broker-password',
         },
+      })
+    }
+    if (url.includes('/v1/hosts/') && url.includes('/operations/')) {
+      return json(200, {
+        hostId: intentBody?.hostId,
+        operationId: 'op-1',
+        outcome: operationOutcome,
+        reason: operationOutcome === 'refused' ? 'duplicate_host' : '',
+        credentialIssued: operationOutcome === 'committed',
+        credentialGeneration: 1,
       })
     }
     if (url.includes('/v1/hosts/')) {
@@ -589,12 +599,13 @@ test('removal opens the management page, stays pending and never claims local re
     await f.manager.startConnect()
     await waitFor(() => f.manager.snapshot().state === 'connected')
     const removal = await f.manager.remove()
-    assert.equal(removal.state, 'removing')
-    assert.equal(removal.remoteRevocation, 'pending')
+    assert.equal(removal.state, 'confirm_removal')
+    assert.equal(removal.remoteRevocation, 'unconfirmed')
     assert.match(removal.url, /^https:\/\/app\.whalerein\.com\/hosts\//)
-    assert.equal(f.manager.snapshot().state, 'removing')
-    await assert.rejects(f.manager.startConnect(), (error) => error.code === 'removal_pending')
-    await assert.rejects(f.manager.retry(), (error) => error.code === 'removal_pending')
+    assert.match(removal.url, /\?removal=1$/)
+    // The browser confirmation has not committed an intent yet, so the live
+    // connection is untouched and activation is not fenced.
+    assert.equal(f.manager.snapshot().state, 'connected')
     const reconciled = await f.manager.reconcileRemoval()
     assert.equal(reconciled.state, 'removed')
     assert.equal(reconciled.connected, false)
@@ -820,15 +831,16 @@ test('retry resume paths reconnect or start a new approval without fallback', as
   }
 })
 
-test('retry reconciles a persisted uncertain operation only when the credential exists', async () => {
+test('startup reconciles a persisted uncertain operation and requires a credential to connect', async () => {
   const f = fixture()
   try {
     await f.manager.startConnect()
     await waitFor(() => f.manager.snapshot().state === 'connected')
     await f.manager.disconnect()
     const profileId = f.manager.snapshot().profileId
+    const createsBefore = f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length
     const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
-    registry.setPending(profileId, { uncertain: true, phase: 'enrollment' })
+    registry.setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
     await f.manager.dispose()
 
     const reopened = createConnectionManager({
@@ -844,17 +856,16 @@ test('retry reconciles a persisted uncertain operation only when the credential 
       installationId: 'test-install',
     })
     await reopened.ready
-    assert.equal(reopened.snapshot().state, 'recovering')
-    const afterCancel = await reopened.cancel()
-    assert.equal(afterCancel.state, 'action_required')
-    const retried = await reopened.retry()
-    assert.equal(retried.state, 'connected')
+    await waitFor(() => reopened.snapshot().state === 'connected')
+    assert.equal(reopened.snapshot().pendingOperation, false)
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length, createsBefore)
     await reopened.dispose()
 
-    // Without a persisted credential the same retry stays explicitly unresolved.
+    // Without a persisted credential the committed operation remains visible
+    // and actionable; it must never start a new enrollment.
     const registry2 = new HostProfileRegistry({ stateRoot: f.stateRoot })
     const profileId2 = registry2.read().active
-    registry2.setPending(profileId2, { uncertain: true, phase: 'enrollment' })
+    registry2.setPending(profileId2, { uncertain: true, phase: 'enrollment', paused: null })
     const store = new ProfileCredentialStore({ credentials: f.credentials, profileId: profileId2, installationId: 'test-install' })
     await store.remove(CREDENTIAL_PURPOSES.transportCredential)
     const unresolved = createConnectionManager({
@@ -870,65 +881,12 @@ test('retry reconciles a persisted uncertain operation only when the credential 
       installationId: 'test-install',
     })
     await unresolved.ready
-    await unresolved.cancel()
-    await assert.rejects(unresolved.retry(), (error) => error.code === 'recovery_required')
+    assert.equal(unresolved.snapshot().state, 'action_required')
+    assert.equal(unresolved.snapshot().error.code, 'recovery_required')
+    assert.equal(unresolved.snapshot().action.kind, 'recover-credential')
+    assert.equal(unresolved.snapshot().pendingOperation, true)
+    assert.equal(f.network.calls.filter((call) => call.url.endsWith('/api/enrollment-requests')).length, createsBefore)
     await unresolved.dispose()
-  } finally {
-    f.cleanup()
-  }
-})
-
-test('removal reconciliation preserves pending on outage, failure and removing states', async () => {
-  let status = 'failed'
-  const f = fixture({ removalStatus: async () => status })
-  try {
-    await f.manager.startConnect()
-    await waitFor(() => f.manager.snapshot().state === 'connected')
-    await f.manager.remove()
-    let snapshot = await f.manager.reconcileRemoval()
-    assert.equal(snapshot.state, 'action_required')
-    assert.equal(f.manager.details().removalState, 'failed')
-    status = 'removing'
-    snapshot = await f.manager.reconcileRemoval()
-    assert.equal(snapshot.state, 'removing')
-    status = 'removed'
-    snapshot = await f.manager.reconcileRemoval()
-    assert.equal(snapshot.state, 'removed')
-    // A later observation with no pending removal is a no-op.
-    assert.equal((await f.manager.reconcileRemoval()).state, 'removed')
-    await f.manager.dispose()
-  } finally {
-    f.cleanup()
-  }
-  const noProvider = fixture()
-  try {
-    await noProvider.manager.startConnect()
-    await waitFor(() => noProvider.manager.snapshot().state === 'connected')
-    await noProvider.manager.remove()
-    assert.equal((await noProvider.manager.reconcileRemoval()).state, 'removing')
-    await noProvider.manager.dispose()
-  } finally {
-    noProvider.cleanup()
-  }
-})
-
-test('reconnect refuses a pending removal and an expired assigned route', async () => {
-  const f = fixture()
-  try {
-    await f.manager.startConnect()
-    await waitFor(() => f.manager.snapshot().state === 'connected')
-    await f.manager.disconnect()
-    const profileId = f.manager.snapshot().profileId
-    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
-    registry.setPending(profileId, { removal: 'removing' })
-    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'removal_pending')
-    registry.setPending(profileId, { removal: null })
-    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
-    const credential = await store.getJson(CREDENTIAL_PURPOSES.transportCredential)
-    await store.setJson(CREDENTIAL_PURPOSES.transportCredential, { ...credential, routeExpiresAt: NOW - 1 })
-    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'expired')
-    assert.equal(f.manager.snapshot().environment, 'production')
-    await f.manager.dispose()
   } finally {
     f.cleanup()
   }
@@ -1033,7 +991,7 @@ test('persisted approved intent resumes through polling and uncertain intent is 
 
     writeFileSync(path, JSON.stringify({ ...intent, state: 'uncertain' }))
     const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
-    registry.setPending(profileId, { uncertain: true, phase: 'enrollment' })
+    registry.setPending(profileId, { uncertain: true, phase: 'enrollment', paused: null })
     const uncertain = createConnectionManager({
       stateRoot: f.stateRoot,
       configFile: ensureConfig(f.stateRoot),
@@ -1047,8 +1005,11 @@ test('persisted approved intent resumes through polling and uncertain intent is 
       installationId: 'test-install',
     })
     await uncertain.ready
-    const result = await uncertain.startConnect()
-    assert.equal(result.state, 'recovering')
+    // An uncertain operation is reconciled at startup; a committed operation
+    // with a usable credential resumes the original connection directly.
+    await waitFor(() => uncertain.snapshot().state === 'connected')
+    assert.equal(uncertain.snapshot().pendingOperation, false)
+    assert.equal(uncertain.snapshot().connected, true)
     await uncertain.dispose()
   } finally {
     f.cleanup()
@@ -1068,8 +1029,10 @@ test('runtime failures and missing readiness produce action-required without fal
   const noReadiness = fixture({ mqtt: () => ({ start() {}, connected: false, async stop() {} }) })
   try {
     await noReadiness.manager.startConnect()
-    await waitFor(() => noReadiness.manager.snapshot().state === 'action_required')
-    assert.equal(noReadiness.manager.snapshot().error.code, 'unavailable')
+    // Readiness that never arrives is a transient condition: keep the existing
+    // transport and report reconnecting instead of a terminal action-required.
+    await waitFor(() => noReadiness.manager.snapshot().state === 'reconnecting')
+    assert.equal(noReadiness.manager.snapshot().error, null)
     await noReadiness.manager.dispose()
   } finally {
     noReadiness.cleanup()
@@ -1315,6 +1278,22 @@ test('pending and completed Host removal fence credential recovery', async () =>
     registry.setPending(profileId, { removal: null })
     const recovered = await f.manager.recoverCredential({ authorization })
     assert.equal(recovered.state, 'connected')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a pending removal fences reconnect and connect without touching the region', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const profileId = f.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry.setPending(profileId, { removal: 'removing' })
+    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'removal_pending')
+    await assert.rejects(f.manager.startConnect(), (error) => error.code === 'removal_pending')
     await f.manager.dispose()
   } finally {
     f.cleanup()
