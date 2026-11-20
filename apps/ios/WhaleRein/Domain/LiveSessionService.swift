@@ -12,7 +12,7 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    private let core: MobileCore
+    let core: MobileCore
     let instanceId: String
     let appVersion: String
 
@@ -633,7 +633,7 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
-    private func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value
         } catch let error as MobileError {
@@ -803,7 +803,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(message view: MessageView) -> ConversationMessage {
+    static func map(message view: MessageView) -> ConversationMessage {
         ConversationMessage(
             messageId: view.messageId,
             role: map(role: view.role),
@@ -819,7 +819,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
+    static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
         CommandReceipt(
             commandId: view.commandId,
             requestId: view.requestId,
@@ -915,7 +915,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(error: MobileError) -> AppErrorCode {
+    static func map(error: MobileError) -> AppErrorCode {
         map(code: error.code)
     }
 
