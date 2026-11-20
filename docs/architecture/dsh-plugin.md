@@ -40,8 +40,9 @@ runtime state are read separately and do not receive synthetic history positions
 The current native history API may materialize a source snapshot. Byte-bounded
 pages bound protocol messages, not that native allocation. Incomplete snapshots
 fail explicitly; retained delta ranges are accepted only when proven available.
-When a live snapshot is tail-truncated, its retained lower bound comes from that
-actual tail, not from the full native array.
+A snapshot stages complete passive pages pinned to one cut; it no longer slices a
+fixed 5,000-event tail. When the page safety cap makes a snapshot incomplete, its
+retained lower bound comes from the actual staged range, not a synthesized tail.
 State refresh uses the native live head directly when available rather than
 materializing conversation content on every heartbeat.
 
