@@ -592,6 +592,22 @@ fn validate_destination(path: &Path) -> CoreResult<()> {
 /// used. Absolute paths, `..`, control characters and reserved device names
 /// never become a local name. Explicit names are stricter: separators are
 /// rejected rather than normalized.
+/// A stable default filename when the Source supplies no display name. The
+/// media type chooses a conventional extension; everything else stays `.bin`.
+pub(crate) fn default_attachment_name(media_type: &str) -> String {
+    let extension = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        _ => "bin",
+    };
+    format!("attachment.{extension}")
+}
+
 pub(crate) fn safe_file_name(value: &str, explicit: bool) -> CoreResult<String> {
     if value.is_empty() || value.len() > MAX_SUGGESTION_BYTES {
         return Err(CoreError::InvalidInput(
@@ -1065,19 +1081,7 @@ impl Core {
                         return Err(error);
                     }
                 },
-                None => {
-                    self.attachment_diagnostic(
-                        "download_commit",
-                        "failed",
-                        Some("invalid_name"),
-                        0,
-                        None,
-                        None,
-                    );
-                    return Err(CoreError::InvalidInput(
-                        "attachment has no safe display filename".into(),
-                    ));
-                }
+                None => safe_file_name(&default_attachment_name(&metadata.media_type), false)?,
             },
         };
         let target = request.destination.join(&name);
@@ -2321,4 +2325,23 @@ mod download_tests {
         assert!(host.attachment_pull_calls >= 14);
         assert_eq!(host.attachment_pull_offsets[0], 0);
     }
+
+    #[tokio::test]
+    async fn an_unnamed_image_uses_a_media_derived_default_file_name() {
+        let (directory, core, access) = paired().await;
+        let bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let mut object = attachment("session-1", "attachment-1", "", bytes.clone());
+        object.media_type = "image/png".into();
+        access.host.lock().unwrap().put_attachment(object);
+        let destination = directory.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let outcome = core
+            .download_attachment(request(&destination), &Cancellation::new(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(outcome.name, "attachment.png");
+        assert_eq!(outcome.path, destination.join("attachment.png"));
+        assert_eq!(std::fs::read(&outcome.path).unwrap(), bytes);
+    }
+
 }
