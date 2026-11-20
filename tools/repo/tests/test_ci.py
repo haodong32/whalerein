@@ -152,7 +152,7 @@ def test_cli_native_passes_the_selected_matrix(monkeypatch):
 
 def test_native_plan_schedules_matching_rust_consumers_on_both_systems():
     jobs = ci.native_plan(ROOT, ["core/src/api.rs"])["include"]
-    assert {job["os"] for job in jobs} == {"macos-15", "windows-2025"}
+    assert {job["os"] for job in jobs} == {"macos-26", "windows-2025"}
     assert all(set(job["projects"]) == {"core", "cli", "noise-peer"} for job in jobs)
     assert ci.native_plan(ROOT, ["host/dsh/client.js"]) == {"include": []}
     assert ci.native_plan(ROOT, ["docs/testing.md"]) == {"include": []}

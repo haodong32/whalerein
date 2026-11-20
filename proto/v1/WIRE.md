@@ -441,6 +441,7 @@ POST   /v1/pairing/invitations        admin bearer or host signature
 POST   /v1/pairing/claims              token in body
 GET    /v1/hosts                       device bearer token
 POST   /v1/hosts/{host_id}/requests     device bearer token
+GET    /v1/hosts/{host_id}/authority    device bearer token
 GET    /v1/requests/{request_id}        device bearer token
 POST   /v1/requests/{request_id}/heartbeat  device bearer token
 DELETE /v1/devices/{device_id}          device bearer token (self) or admin

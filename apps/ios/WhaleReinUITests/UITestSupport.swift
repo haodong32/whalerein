@@ -89,8 +89,21 @@ class WhaleReinUITestCase: XCTestCase {
         tap(field, file: file, line: line)
         field.typeText(Self.invitationLink + "\n")
 
-        let confirm = waitFor("pairing.confirm", file: file, line: line)
+        let confirm = waitForEnabled("pairing.confirm", file: file, line: line)
         tap(confirm, file: file, line: line)
+        // XCTest can leave the confirmation visible after a tap. Retry once
+        // while the button is still actionable.
+        if !confirm.waitForNonExistence(timeout: 3) {
+            if confirm.isEnabled, confirm.isHittable {
+                confirm.tap()
+            }
+            XCTAssertTrue(
+                confirm.waitForNonExistence(timeout: 15),
+                "Pairing confirmation did not close",
+                file: file,
+                line: line
+            )
+        }
         // Pairing lands directly in the restored conversation; there is no Host
         // list page in between.
         waitFor("composer.field", file: file, line: line)
