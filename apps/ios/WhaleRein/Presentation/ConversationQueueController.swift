@@ -9,8 +9,8 @@ import Observation
 @MainActor
 @Observable
 final class ConversationQueueController {
-    let hostID: String
-    let sessionID: String
+    let hostId: String
+    let sessionId: String
 
     private(set) var freshness: QueueFreshness = .idle
     private(set) var items: [QueueItem] = []
@@ -30,9 +30,9 @@ final class ConversationQueueController {
     private let service: any SessionService
     private var capabilities: SessionCapabilities?
 
-    init(hostID: String, sessionID: String, service: any SessionService) {
-        self.hostID = hostID
-        self.sessionID = sessionID
+    init(hostId: String, sessionId: String, service: any SessionService) {
+        self.hostId = hostId
+        self.sessionId = sessionId
         self.service = service
     }
 
@@ -79,7 +79,7 @@ final class ConversationQueueController {
             freshness = .unavailable
         }
         do {
-            let snapshot = try await service.pendingQueue(hostID: hostID, sessionID: sessionID)
+            let snapshot = try await service.pendingQueue(hostId: hostId, sessionId: sessionId)
             lastRefreshError = nil
             guard snapshot.available else {
                 // An unavailable answer never establishes an empty queue.
@@ -119,8 +119,8 @@ final class ConversationQueueController {
         defer { isMutating = false }
         do {
             let mutation = try await service.updateQueueItem(
-                hostId: hostID,
-                sessionId: sessionID,
+                hostId: hostId,
+                sessionId: sessionId,
                 itemId: itemID,
                 action: action,
                 text: text

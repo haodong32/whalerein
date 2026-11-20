@@ -29,25 +29,25 @@ struct SettingsAccountView: View {
             if let model = app.accountSettings, let status = model.status {
                 row(
                     L10n.settingsStatusService,
-                    value: status.service.labelKey.key,
+                    value: status.service.labelKey.string,
                     identifier: "settings.status.service"
                 )
                 row(
                     L10n.settingsStatusAccount,
-                    value: status.accountState.labelKey.key
+                    value: status.accountState.labelKey.string
                         + (status.remoteSignoutPending
-                            ? " · \(L10n.settingsStatusPendingSignOut.key)"
+                            ? " · \(L10n.settingsStatusPendingSignOut.string)"
                             : ""),
                     identifier: "settings.status.account"
                 )
                 row(
                     L10n.settingsStatusDeviceAccess,
-                    value: status.deviceAccess.labelKey.key,
+                    value: status.deviceAccess.labelKey.string,
                     identifier: "settings.status.deviceAccess"
                 )
                 row(
                     L10n.settingsStatusDefaultHost,
-                    value: status.defaultHost ?? L10n.settingsDefaultNone.key,
+                    value: status.defaultHost ?? L10n.settingsDefaultNone.string,
                     identifier: "settings.status.defaultHost"
                 )
                 if let environment = status.testingEnvironment {
@@ -162,7 +162,7 @@ struct SettingsAccountView: View {
             }
             if model.sessions.isEmpty {
                 Text(
-                    model.sessionsState == .failed
+                    isSessionsFailed(model.sessionsState)
                         ? L10n.settingsAppSessionsUnavailable.key
                         : L10n.settingsAppSessionsEmpty.key
                 )
@@ -273,7 +273,7 @@ struct SettingsAccountView: View {
                 Spacer()
                 Text(session.stateKey.key)
                     .font(.caption2)
-                    .foregroundStyle(session.isActive ? .secondary : .orange)
+                    .foregroundStyle(session.isActive ? Color.secondary : Color.orange)
                     .accessibilityIdentifier("settings.appSessionState.\(session.sessionId)")
             }
             HStack(spacing: 16) {
@@ -333,6 +333,11 @@ struct SettingsAccountView: View {
         .sheet(isPresented: $showDiagnostics) {
             DiagnosticsView()
         }
+    }
+
+    private func isSessionsFailed(_ state: AccountSettingsModel.LoadState) -> Bool {
+        if case .failed = state { return true }
+        return false
     }
 
     private func row(_ label: L10nKey, value: String, identifier: String) -> some View {

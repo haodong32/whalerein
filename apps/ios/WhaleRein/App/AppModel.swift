@@ -134,9 +134,9 @@ final class AppModel {
         self.sessionList = models.sessionList
         self.diagnostics = models.diagnostics
         self.settings = models.settings
+        self.sessionManagement = Self.makeManagementModel(service: service)
         self.cloudSignIn = nil
         self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
-        self.sessionManagement = Self.makeManagementModel(service: service)
         self.operationRecovery = Self.makeOperationRecovery(
             service: service,
             instanceId: activeInstance?.id ?? service.instanceId

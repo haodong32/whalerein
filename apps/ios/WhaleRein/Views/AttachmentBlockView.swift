@@ -119,13 +119,13 @@ struct AttachmentBlockView: View {
             if let errorKey = state.errorKey, state.phase != .downloading {
                 Text(errorKey.key)
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.red)
                     .accessibilityIdentifier("attachment.error.\(attachment.attachmentRef)")
             }
             if let outcome = state.exportOutcome {
                 Text(Self.exportKey(for: outcome).key)
                     .font(.footnote)
-                    .foregroundStyle(outcome == .exported ? .secondary : .red)
+                    .foregroundStyle(outcome == .exported ? Color.secondary : Color.red)
                     .accessibilityIdentifier("attachment.exportOutcome.\(attachment.attachmentRef)")
             }
         }

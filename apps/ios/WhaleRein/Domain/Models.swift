@@ -244,6 +244,10 @@ struct MessageReference: Hashable, Sendable {
     let messageId: String
     let sourceLocator: String
     let projectionId: String
+
+    var session: SessionContext {
+        SessionContext(hostId: hostId, sessionId: sessionId)
+    }
 }
 
 enum HistorySource: String, Codable, Sendable {

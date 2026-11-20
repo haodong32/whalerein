@@ -193,8 +193,8 @@ final class ConversationModel {
         self.sessionTitle = sessionTitle
         self.service = service
         self.queue = ConversationQueueController(
-            hostID: hostId,
-            sessionID: sessionId,
+            hostId: hostId,
+            sessionId: sessionId,
             service: service
         )
         self.wait = ConversationWaitController(
