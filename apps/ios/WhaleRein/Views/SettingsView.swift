@@ -33,6 +33,24 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.languageNote")
                 }
 
+                Section {
+                    Button(role: .destructive) {
+                        confirmation = .forget
+                    } label: {
+                        Text(L10n.settingsForget.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.forget")
+
+                    Button(role: .destructive) {
+                        confirmation = .revoke
+                    } label: {
+                        Text(L10n.settingsRevoke.key)
+                    }
+                    .disabled(app.settings.isBusy)
+                    .accessibilityIdentifier("settings.revoke")
+                }
+
                 Section(L10n.settingsAppSection.key) {
                     Toggle(
                         L10n.settingsReasoning.key,
@@ -94,24 +112,6 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("settings.error")
                     }
-                }
-
-                Section {
-                    Button(role: .destructive) {
-                        confirmation = .forget
-                    } label: {
-                        Text(L10n.settingsForget.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.forget")
-
-                    Button(role: .destructive) {
-                        confirmation = .revoke
-                    } label: {
-                        Text(L10n.settingsRevoke.key)
-                    }
-                    .disabled(app.settings.isBusy)
-                    .accessibilityIdentifier("settings.revoke")
                 }
 
                 SettingsOperationsView()
