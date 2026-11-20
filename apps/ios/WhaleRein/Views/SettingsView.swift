@@ -33,6 +33,29 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.languageNote")
                 }
 
+                Section {
+                    if app.settings.isStaging {
+                        Label(L10n.settingsStaging.key, systemImage: "flag")
+                            .accessibilityIdentifier("settings.staging")
+                    }
+                    if app.settings.isFixtureBacked {
+                        Label(L10n.settingsFixtureData.key, systemImage: "shippingbox")
+                            .accessibilityIdentifier("settings.fixtureData")
+                    }
+                    if let statusKey = app.settings.statusKey {
+                        Text(statusKey.key)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("settings.status")
+                    }
+                    if let errorKey = app.settings.errorKey {
+                        Text(errorKey.key)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("settings.error")
+                    }
+                }
+
                 Section(L10n.settingsData.key) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.settingsStorage.key)
@@ -88,29 +111,6 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("settings.reasoningError")
-                    }
-                }
-
-                Section {
-                    if app.settings.isStaging {
-                        Label(L10n.settingsStaging.key, systemImage: "flag")
-                            .accessibilityIdentifier("settings.staging")
-                    }
-                    if app.settings.isFixtureBacked {
-                        Label(L10n.settingsFixtureData.key, systemImage: "shippingbox")
-                            .accessibilityIdentifier("settings.fixtureData")
-                    }
-                    if let statusKey = app.settings.statusKey {
-                        Text(statusKey.key)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("settings.status")
-                    }
-                    if let errorKey = app.settings.errorKey {
-                        Text(errorKey.key)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .accessibilityIdentifier("settings.error")
                     }
                 }
 
