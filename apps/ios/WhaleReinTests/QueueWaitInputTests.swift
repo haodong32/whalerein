@@ -389,21 +389,26 @@ struct QueueWaitInputTests {
         #expect(model.approvals[0].state == .allowed)
         #expect(!model.isApprovalActionable(model.approvals[0]))
 
-        // An unavailable read marks the card unavailable instead of clickable.
-        service.approvalHandler = { _, _ in throw SessionServiceError(.unavailable) }
-        current = testApproval(state: .pending, version: 6)
-        model.handle(
+        // An unavailable read marks a still-pending card unavailable instead of
+        // clickable. A fresh model avoids the intentionally sticky terminal card.
+        let unavailableService = StubSessionService()
+        unavailableService.approvalHandler = { _, _ in
+            throw SessionServiceError(.unavailable)
+        }
+        let pending = testApproval(state: .pending, version: 6)
+        let unavailableModel = await makeStartedConversation(service: unavailableService)
+        unavailableModel.handle(
             SessionEventEnvelope(
                 hostId: "studio-mac",
                 sessionId: "s-001",
-                sequence: 2,
-                event: .approvalChanged(current)
+                sequence: 1,
+                event: .reset(messages: [], approvals: [pending])
             )
         )
-        await model.refreshApprovalStatus(model.approvals[0])
-        #expect(model.approvalStatusRefresh[current.approvalId] == .unavailable)
-        #expect(model.approvals[0].state == .unavailable)
-        #expect(!model.isApprovalActionable(model.approvals[0]))
+        await unavailableModel.refreshApprovalStatus(unavailableModel.approvals[0])
+        #expect(unavailableModel.approvalStatusRefresh[pending.approvalId] == .unavailable)
+        #expect(unavailableModel.approvals[0].state == .unavailable)
+        #expect(!unavailableModel.isApprovalActionable(unavailableModel.approvals[0]))
 
         // A read for another session never touches the card.
         service.approvalHandler = { _, _ in
@@ -414,6 +419,35 @@ struct QueueWaitInputTests {
     }
 
     // MARK: - Open-answer cancellation
+
+    @Test("a confirmed answer is not cancellable")
+    func settledAnswerIsNotCancellable() async {
+        let service = StubSessionService()
+        service.answerQuestionHandler = { _, _, _, _ in
+            CommandReceipt(
+                commandId: "cmd-answer-ok",
+                requestId: "req-answer-ok",
+                status: .confirmed,
+                delivery: nil
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        service.emit(.reset(messages: [], approvals: []), sequence: 1)
+        let batch = questionBatch()
+        service.emit(.questions(currentQuestions(batch)), sequence: 2)
+        await waitUntil { model.hasPendingQuestions }
+        model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Stable"
+        )
+        _ = model.beginQuestionReview(batchId: batch.batchID)
+        await model.submitQuestionReview()
+        await pump()
+
+        #expect(!model.canCancelQuestionAnswer)
+        #expect(model.questionCancelReceipt == nil)
+    }
 
     @Test("cancellation keeps the original command identity across a replacement observer")
     func questionCancellationRace() async {

@@ -76,7 +76,7 @@ final class ConversationQueueController {
         isRefreshing = true
         defer { isRefreshing = false }
         if freshness == .idle {
-            freshness = .unavailable
+            freshness = .loading
         }
         do {
             let snapshot = try await service.pendingQueue(hostId: hostId, sessionId: sessionId)
