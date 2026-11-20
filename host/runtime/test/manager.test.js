@@ -1284,6 +1284,22 @@ test('pending and completed Host removal fence credential recovery', async () =>
   }
 })
 
+test('a pending removal fences reconnect and connect without touching the region', async () => {
+  const f = fixture()
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const profileId = f.manager.snapshot().profileId
+    const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
+    registry.setPending(profileId, { removal: 'removing' })
+    await assert.rejects(f.manager.reconnect(), (error) => error.code === 'removal_pending')
+    await assert.rejects(f.manager.startConnect(), (error) => error.code === 'removal_pending')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
 test('re-adding a removed Host uses fresh approval and does not restore the old grant', async () => {
   let enrollments = 0
   const f = fixture({
