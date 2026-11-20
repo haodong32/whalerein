@@ -116,10 +116,27 @@ fn notice_label(category: NoticeCategory, state: NoticeState) -> String {
     )
 }
 
+fn attachment_display_name(attachment: &content_block::AttachmentContent) -> String {
+    if !attachment.name.trim().is_empty() {
+        return attachment.name.clone();
+    }
+    let extension = match attachment.media_type.as_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        _ => "bin",
+    };
+    format!("attachment.{extension}")
+}
+
 fn render_attachment(attachment: &content_block::AttachmentContent) -> String {
     format!(
         "[attachment {} ({}, {} bytes{})]",
-        sanitize_field(&attachment.name),
+        sanitize_field(&attachment_display_name(attachment)),
         sanitize_field(&attachment.media_type),
         attachment.size,
         if attachment.available {
@@ -462,7 +479,7 @@ fn render_attachment_rows(
     for attachment in attachments {
         out.push_str(&format!(
             "Attachment: {} ({}, {} bytes{})\n",
-            sanitize_field(&attachment.name),
+            sanitize_field(&attachment_display_name(attachment)),
             sanitize_field(&attachment.media_type),
             attachment.size,
             if attachment.available {
@@ -479,6 +496,15 @@ fn render_attachment_rows(
         }
     }
     out
+}
+
+fn history_continue_command(key: &SessionKey, continuation: &str) -> String {
+    format!(
+        "whalerein session history {} --host {} --continuation {}",
+        shell_quote(&key.session_id),
+        shell_quote(&key.host_id),
+        shell_quote(continuation)
+    )
 }
 
 /// Human output for one independent history page. Messages are chronological
@@ -507,7 +533,11 @@ pub fn render_history_page(key: &SessionKey, page: &HistoryPage, show_reasoning:
     ));
     match &page.continuation {
         Some(continuation) if !page.complete => {
-            out.push_str(&format!("Continuation: {continuation}\n"));
+            let token = continuation.to_string();
+            out.push_str(&format!(
+                "Continuation: {token}\nContinue older history:\n  {}\n",
+                history_continue_command(key, &token)
+            ));
         }
         _ => out.push_str("End of history: the oldest message in this cut was reached.\n"),
     }
@@ -3708,6 +3738,7 @@ mod history_output_tests {
         assert!(!text.contains("private reasoning"), "{text}");
         assert!(!text.contains("[reasoning]"), "{text}");
         assert!(text.contains("Continuation: continuation-token"), "{text}");
+        assert!(text.contains("--continuation continuation-token"), "{text}");
         let shown = render_history_page(&key(), &page(), true);
         assert!(shown.contains("[reasoning] private reasoning"), "{shown}");
     }
@@ -3944,4 +3975,21 @@ mod history_output_tests {
         let unauthorized = download_failure_message("unauthorized", "unauthorized", "s");
         assert!(unauthorized.contains("whalerein status"), "{unauthorized}");
     }
+
+    #[test]
+    fn an_unnamed_attachment_displays_and_saves_under_a_media_derived_name() {
+        let attachment = content_block::AttachmentContent {
+            media_type: "image/png".into(),
+            name: String::new(),
+            size: 3,
+            available: true,
+            attachment_ref: "ref-1".into(),
+        };
+        assert!(render_attachment(&attachment).contains("attachment.png"));
+        let key = SessionKey::new("host-1", "session-1").unwrap();
+        let rows = render_attachment_rows(&key, &[attachment]);
+        assert!(rows.contains("Attachment: attachment.png"), "{rows}");
+        assert!(rows.contains("Save:"), "{rows}");
+    }
+
 }
