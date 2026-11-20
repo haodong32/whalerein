@@ -143,10 +143,38 @@ Grouping is skipped when a Host has only one workspace. The compact switcher
 uses a plain list for density; the wide sidebar keeps the native sidebar list
 style.
 
-Service selection: `-ui-fixtures` keeps the deterministic `FixtureSessionService`;
-`-integration-fixtures` and a normal launch select `LiveSessionService`, which
-uses the app data directory plus the device-only Keychain namespace
-(`com.whalerein.ios.secrets`, staging `.staging`). If Core cannot initialize,
+## Client configuration
+
+The app has one authoritative TOML at
+`Application Support/WhaleRein/client/app.toml`. Its `[app]` section stores the
+committed `active_instance` and `reasoning_visible`; each `[instances.<id>]`
+table uses the typed Core `ClientConfig` fields with paths relative to the app
+document. The binding creates a fresh document containing `cloud-production`
+and `standalone` only when absent. Legacy root `preferences.json`/`core/` files
+are never read, migrated or deleted.
+
+Per-instance materialized Core configuration lives at
+`client/instances/<id>/instance.toml`, Core state under
+`client/instances/<id>/data`, and an imported Standalone private CA at
+`client/instances/<id>/ca.pem`. All document writes are atomic; activation
+writes and validates the materialized instance before committing
+`app.active_instance`, so a failed write keeps the previous selection.
+
+The welcome screen and Settings offer the service selector. Production builds
+show Cloud production and Standalone; Debug/test builds also show Staging.
+Local stays hidden until iOS trust for the desktop mkcert root is verified.
+Switching requires explicit confirmation, prepares the destination, rebuilds
+`AppModel` and the service for the new instance, and fences callbacks and
+events from the previous activation with a generation counter. Each instance
+has its own data directory, draft/cache state and Keychain service
+`com.whalerein.ios.secrets.<instanceId>` (staging
+`com.whalerein.ios.staging.secrets.<instanceId>`). A failed switch returns an
+error and keeps the old runtime.
+
+`-ui-fixtures` keeps the deterministic `FixtureSessionService` with an
+in-memory app configuration containing the same two instances.
+`-integration-fixtures` and a normal launch compose `LiveSessionService` from
+the active instance's materialized `config_path`. If Core cannot initialize,
 the app shows the localized unavailable state instead of crashing.
 
 `LiveSessionService` restores the encrypted local transcript with

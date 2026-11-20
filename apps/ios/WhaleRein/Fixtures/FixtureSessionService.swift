@@ -5,6 +5,7 @@ import Foundation
 
 @MainActor
 final class FixtureSessionService: SessionService {
+    let instanceId: String
     let coreRevision: String = FixtureCatalog.coreRevision
     var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
@@ -45,8 +46,10 @@ final class FixtureSessionService: SessionService {
         options: LaunchOptions = LaunchOptions(),
         clock: FixtureClock = SystemFixtureClock(),
         draftStore: any DraftStore,
-        initiallyPaired: Bool = false
+        initiallyPaired: Bool = false,
+        instanceId: String = "fixtures"
     ) {
+        self.instanceId = instanceId
         self.options = options
         self.clock = clock
         self.draftStore = draftStore

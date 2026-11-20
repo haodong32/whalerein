@@ -17,6 +17,8 @@ struct InvitationView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
+                ServiceSelectionView()
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text(L10n.invitationFieldPlaceholder.key)
                         .font(.subheadline.weight(.semibold))

@@ -15,18 +15,23 @@ final class RecoverableSessionService: SessionService {
     private var underlying: (any SessionService)?
 
     private let factory: () throws -> any SessionService
+    private let fallbackInstanceId: String
 
     init(
         failureCode: AppErrorCode = .keychainUnavailable,
+        instanceId: String = "unavailable",
         factory: @escaping () throws -> any SessionService
     ) {
         self.lastFailureCode = failureCode
+        self.fallbackInstanceId = instanceId
         self.factory = factory
     }
 
     var isRecovered: Bool { underlying != nil }
 
     var connectionStatus: ConnectionStatus { underlying?.connectionStatus ?? .offline }
+
+    var instanceId: String { underlying?.instanceId ?? fallbackInstanceId }
 
     var coreRevision: String { underlying?.coreRevision ?? "unavailable" }
 

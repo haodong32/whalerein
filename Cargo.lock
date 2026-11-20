@@ -3368,6 +3368,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml_edit",
  "uniffi",
  "whalerein-core",
  "whalerein-proto",

@@ -159,10 +159,23 @@ final class LiveCase {
     }
 
     private func makeService() throws -> LiveSessionService {
-        try LiveSessionService(
-            dataDirectory: dataDirectory,
+        let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
+        let store = try AppConfigurationStore(documentPath: document.path)
+        let standalone = AppInstanceInput(
+            id: "standalone",
+            service: .standalone,
+            environment: nil,
+            dataDirectory: "instances/standalone/data",
+            standaloneCAPEM: nil
+        )
+        try store.save(standalone)
+        try store.activate(id: "standalone")
+        let instance = store.activeInstance
+        return try LiveSessionService(
+            configPath: instance.configPath,
             keychainService: keychainService,
-            appVersion: "0.1.0-integration"
+            appVersion: "0.1.0-integration",
+            instanceId: instance.id
         )
     }
 
