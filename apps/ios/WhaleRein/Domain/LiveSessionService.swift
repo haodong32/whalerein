@@ -12,7 +12,7 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    private let core: MobileCore
+    let core: MobileCore
     let instanceId: String
     let appVersion: String
 
@@ -510,13 +510,24 @@ final class LiveSessionService: SessionService {
                 text: text
             )
         }
+        let receipt = Self.map(command: view.receipt, delivery: nil)
         return QueueMutation(
-            operationID: view.operationId,
-            hostID: view.hostId,
-            sessionID: view.sessionId,
             itemID: view.itemId,
             action: QueueAction(rawValue: view.action) ?? action,
-            receipt: Self.map(command: view.receipt, delivery: nil)
+            operation: OperationReceipt(
+                operationId: view.operationId,
+                kind: .control,
+                scope: OperationScope(
+                    instanceId: instanceId,
+                    hostId: view.hostId,
+                    sessionId: view.sessionId
+                ),
+                status: Self.map(operationStatus: receipt.status),
+                receipt: receipt,
+                reply: nil,
+                content: nil,
+                readError: nil
+            )
         )
     }
 
@@ -728,7 +739,7 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
-    private func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value
         } catch let error as MobileError {
@@ -970,7 +981,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(message view: MessageView) -> ConversationMessage {
+    static func map(message view: MessageView) -> ConversationMessage {
         ConversationMessage(
             messageId: view.messageId,
             role: map(role: view.role),
@@ -986,7 +997,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
+    static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
         CommandReceipt(
             commandId: view.commandId,
             requestId: view.requestId,
@@ -1064,6 +1075,15 @@ final class LiveSessionService: SessionService {
         }
     }
 
+    static func map(operationStatus status: CommandStatus) -> OperationStatus {
+        switch status {
+        case .accepted: return .accepted
+        case .confirmed: return .confirmed
+        case .uncertain: return .uncertain
+        case .rejected, .cancelled: return .failed
+        }
+    }
+
     private static func map(commandStatus status: String) -> CommandStatus {
         switch status.lowercased() {
         case "succeeded", "confirmed": return .confirmed
@@ -1082,7 +1102,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(error: MobileError) -> AppErrorCode {
+    static func map(error: MobileError) -> AppErrorCode {
         map(code: error.code)
     }
 

@@ -160,7 +160,7 @@ final class SuspendedResponse<Value: Sendable> {
 }
 
 @MainActor
-final class StubSessionService: SessionService {
+class StubSessionService: SessionService {
     var connectionStatus: ConnectionStatus = .online
     var instanceId = "test"
     var coreRevision = "stub-add-ios-client-1"
@@ -341,12 +341,22 @@ final class StubSessionService: SessionService {
                 delivery: nil
             )
             return QueueMutation(
-                operationID: receipt.commandId,
-                hostID: hostId,
-                sessionID: sessionId,
                 itemID: itemId,
                 action: action,
-                receipt: receipt
+                operation: OperationReceipt(
+                    operationId: receipt.commandId,
+                    kind: .control,
+                    scope: OperationScope(
+                        instanceId: instanceId,
+                        hostId: hostId,
+                        sessionId: sessionId
+                    ),
+                    status: .confirmed,
+                    receipt: receipt,
+                    reply: nil,
+                    content: nil,
+                    readError: nil
+                )
             )
         }
         return try await updateQueueHandler(hostId, sessionId, itemId, action, text)

@@ -177,7 +177,7 @@ struct QueueSurfaceView: View {
     private var mutationStatus: some View {
         if let mutation = queue.lastMutation {
             Label(
-                L10nKey.queueMutationKey(for: mutation.receipt.status).key,
+                L10nKey.queueMutationKey(for: mutation.receipt?.status ?? .uncertain).key,
                 systemImage: "arrow.triangle.2.circlepath"
             )
             .font(.caption2)

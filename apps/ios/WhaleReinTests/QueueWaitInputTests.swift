@@ -141,7 +141,7 @@ struct QueueWaitInputTests {
         #expect(service.updateQueueCalls[0].3 == .remove)
         #expect(model.queue.lastMutation?.itemID == item.itemID)
         #expect(model.queue.lastMutation?.action == .remove)
-        #expect(model.queue.lastMutation?.operationID == model.queue.lastMutation?.receipt.commandId)
+        #expect(model.queue.lastMutation?.operationID == model.queue.lastMutation?.receipt?.commandId)
     }
 
     @Test("a confirmed mutation receipt survives a failed refresh")
@@ -159,7 +159,7 @@ struct QueueWaitInputTests {
 
         await model.queue.withdraw(item.itemID)
 
-        #expect(model.queue.lastMutation?.receipt.status == .confirmed)
+        #expect(model.queue.lastMutation?.receipt?.status == .confirmed)
         #expect(model.queue.freshness == .stale)
         // The old list is not replaced by a failed read, but the receipt stays.
         #expect(model.queue.items == [item])

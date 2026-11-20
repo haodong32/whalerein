@@ -60,6 +60,14 @@ final class ConversationModel {
     private(set) var capabilities: SessionCapabilities = .idle
     private(set) var lastSendStatus: CommandStatus?
     private(set) var lastStopStatus: CommandStatus?
+    /// Original operation identity and the message-level recovery result for
+    /// the last send. Submission status stays separate from these values.
+    private(set) var lastSendOperationId: String?
+    private(set) var operationResult: OperationReceipt?
+    private(set) var operationErrorKey: L10nKey?
+    private(set) var operationReadErrorKey: L10nKey?
+    private(set) var isRecoveringOperation = false
+    private(set) var isReadingExactReply = false
     private(set) var inFlightSend: CommandReceipt?
     private(set) var pendingStop: CommandReceipt?
     /// Command submission that has not settled yet. While set, the matching
@@ -105,6 +113,7 @@ final class ConversationModel {
     private let onStatusChange: (() -> Void)?
     private let onFatalError: ((AppErrorCode) -> Void)?
     private let onConnectionChange: ((ConnectionStatus) -> Void)?
+    private let onReconnected: (() -> Void)?
     private let now: () -> Date
 
     private var consumeTask: Task<Void, Never>?
@@ -145,6 +154,7 @@ final class ConversationModel {
         onStatusChange: (() -> Void)? = nil,
         onFatalError: ((AppErrorCode) -> Void)? = nil,
         onConnectionChange: ((ConnectionStatus) -> Void)? = nil,
+        onReconnected: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.hostId = hostId
@@ -164,6 +174,7 @@ final class ConversationModel {
         self.onStatusChange = onStatusChange
         self.onFatalError = onFatalError
         self.onConnectionChange = onConnectionChange
+        self.onReconnected = onReconnected
         self.now = now
         self.approvalClock = now()
     }
@@ -240,6 +251,35 @@ final class ConversationModel {
         case .cancelled:
             return .errorCancelled
         }
+    }
+
+    /// Message-level result for the original send. Submission receipt
+    /// (`sendStatusKey`) stays separate from confirmation and content reads.
+    var operationStatusKey: L10nKey? {
+        guard let operationResult else { return nil }
+        switch operationResult.status {
+        case .submitted: return .conversationOperationSubmitted
+        case .accepted: return .conversationOperationAccepted
+        case .uncertain: return .conversationOperationUncertain
+        case .failed: return .conversationOperationFailed
+        case .confirmed: return .conversationOperationConfirmed
+        }
+    }
+
+    var operationInputRequired: Bool { operationResult?.inputKinds != nil }
+
+    var canRecoverSend: Bool {
+        lastSendOperationId != nil && !isRecoveringOperation && !watchEnded
+    }
+
+    var canReadExactReply: Bool {
+        operationResult?.canReadExactReply == true && !isReadingExactReply
+    }
+
+    var operationReferenceText: String? { operationResult?.confirmedReference?.messageId }
+
+    var operationDeliveryIdentity: String? {
+        operationResult?.receipt?.deliveryId ?? operationResult?.receipt?.messageId
     }
 
     var livePreview: String? {
@@ -356,6 +396,7 @@ final class ConversationModel {
         consumeTask = nil
         ensureSubscription()
         await restartWatch()
+        onReconnected?()
     }
 
     func close() {
@@ -618,6 +659,10 @@ final class ConversationModel {
             }
             sendErrorKey = nil
             lastSendStatus = receipt.status
+            lastSendOperationId = receipt.requestId
+            operationResult = nil
+            operationErrorKey = nil
+            operationReadErrorKey = nil
             inFlightSend = receipt.status == .uncertain ? receipt : nil
             inFlightSendText = receipt.status == .uncertain ? text : nil
             if receipt.status != .rejected {
@@ -683,6 +728,117 @@ final class ConversationModel {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             sendErrorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
+        }
+    }
+
+    // MARK: - Operation recovery
+
+    /// Manual recovery for the original send. Uses Core's recorded operation
+    /// identity and never submits another message.
+    func recoverSendResult() async {
+        guard let operationId = lastSendOperationId, !isRecoveringOperation else { return }
+        guard let recovery = service as? any OperationRecoveryService else {
+            operationErrorKey = .errorIntegrationUnavailable
+            return
+        }
+        isRecoveringOperation = true
+        operationErrorKey = nil
+        defer { isRecoveringOperation = false }
+        do {
+            let receipt = try await recovery.recoverSend(operationId: operationId, follow: true)
+            applyOperationReceipt(receipt)
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            operationErrorKey = L10nKey.errorKey(for: code)
+            reportFatalIfNeeded(code)
+        }
+    }
+
+    /// Explicit exact reread for a confirmed reference. A failed read keeps the
+    /// confirmation and never resubmits.
+    func readExactReply() async {
+        guard let receipt = operationResult,
+              let reference = receipt.confirmedReference,
+              !isReadingExactReply else { return }
+        guard let recovery = service as? any OperationRecoveryService else {
+            operationErrorKey = .errorIntegrationUnavailable
+            return
+        }
+        guard reference.hostId == hostId, reference.sessionId == sessionId else {
+            operationErrorKey = .errorOperationScope
+            return
+        }
+        isReadingExactReply = true
+        defer { isReadingExactReply = false }
+        do {
+            let message = try await recovery.readMessage(reference)
+            insertCommittedMessage(message)
+            operationResult = OperationReceipt(
+                operationId: receipt.operationId,
+                kind: receipt.kind,
+                scope: receipt.scope,
+                status: receipt.status,
+                receipt: receipt.receipt,
+                reply: receipt.reply,
+                content: message,
+                readError: nil
+            )
+            operationReadErrorKey = nil
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            operationErrorKey = L10nKey.errorKey(for: code)
+            operationReadErrorKey = .conversationOperationReadFailed
+        }
+    }
+
+    /// Applies results from the one coalesced visible-session refresh. Only the
+    /// original send is updated; a foreign scope is rejected.
+    func applyRecoveredOperations(_ receipts: [OperationReceipt]) {
+        guard let operationId = lastSendOperationId else { return }
+        guard let receipt = receipts.first(where: { $0.operationId == operationId }) else {
+            return
+        }
+        applyOperationReceipt(receipt)
+    }
+
+    private func applyOperationReceipt(_ receipt: OperationReceipt) {
+        guard receipt.kind == .send else { return }
+        guard let scope = receipt.scope,
+              scope.hostId == hostId,
+              scope.sessionId == sessionId else {
+            operationErrorKey = .errorOperationScope
+            return
+        }
+        operationResult = receipt
+        operationErrorKey = nil
+        if let content = receipt.content {
+            insertCommittedMessage(content)
+        }
+        if receipt.readError != nil {
+            operationReadErrorKey = .conversationOperationReadFailed
+        } else if receipt.content != nil {
+            operationReadErrorKey = nil
+        }
+        if receipt.status == .confirmed || receipt.status == .failed {
+            inFlightSend = nil
+            inFlightSendText = nil
+        }
+    }
+
+    /// Deduplicates committed messages by stable identity, including a recovered
+    /// reply that also arrived through the live watch.
+    private func insertCommittedMessage(_ message: ConversationMessage) {
+        if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+            if messages[index] != message {
+                messages[index] = message
+            }
+            return
+        }
+        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
+        if let echoIndex {
+            messages.insert(message, at: min(echoIndex, messages.count))
+        } else {
+            messages.append(message)
         }
     }
 

@@ -61,15 +61,16 @@ struct QueueSnapshot: Hashable, Sendable {
     let items: [QueueItem]
 }
 
-/// One targeted mutation and its native terminal receipt. `operationID` is the
-/// Core command identity; it is not a second operation journal.
+/// One targeted mutation projected onto the shared operation receipt. The
+/// operation identity is Core's command identity; this is not a second journal.
 struct QueueMutation: Identifiable, Hashable, Sendable {
-    let operationID: String
-    let hostID: String
-    let sessionID: String
     let itemID: String
     let action: QueueAction
-    let receipt: CommandReceipt
+    let operation: OperationReceipt
 
-    var id: String { operationID }
+    var id: String { operation.operationId }
+    var operationID: String { operation.operationId }
+    var hostID: String? { operation.scope?.hostId }
+    var sessionID: String? { operation.scope?.sessionId }
+    var receipt: CommandReceipt? { operation.receipt }
 }

@@ -26,11 +26,12 @@ use crate::queue::{
 };
 use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
-    bounded_question_view, convert_update, message_view, question_batch_view, question_guard,
-    question_page_view, questions_view, ApprovalView, CommandView, ConversationEvent,
-    DeliveryChoice, DiagnosticsReportView, HostSummary, MessageView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionCancelReceiptView, QuestionPageView,
-    SessionCapabilitiesView, SessionSummaryView,
+    bounded_question_view, convert_update, message_view, operation_status_name,
+    question_batch_view, question_guard, question_page_view, questions_view, ApprovalView,
+    CommandView, ConversationEvent, DeliveryChoice, DiagnosticsReportView, HostSummary,
+    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
+    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SessionCapabilitiesView,
+    SessionSummaryView,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -38,6 +39,8 @@ use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Request/response budget for operations Core may wait on until its TTL.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for one follow-up/content-read budget supplied by the caller.
+const MAX_FOLLOW_TIMEOUT_MS: u64 = 55_000;
 /// How long `pairingStart` waits for Core to produce a prompt.
 const PAIRING_PROMPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a pending pairing prompt waits for a decision before rejecting.
@@ -986,6 +989,182 @@ impl MobileCore {
         })
     }
 
+    /// List locally retained send operations. Local state only: this never
+    /// performs a status lookup and never sends or resumes pairing.
+    pub fn list_send_operations(&self) -> Result<Vec<RetainedOperationView>, MobileError> {
+        let operations = self.core.send_operations().map_err(MobileError::from)?;
+        Ok(operations.iter().map(retained_send_view).collect())
+    }
+
+    /// Recover one retained send and optionally follow its exact reply.
+    ///
+    /// With `follow == false` this performs only the status lookup Core's send
+    /// recovery path needs, which is the automatic foreground/reconnect path.
+    /// With `follow == true` it reads the confirmed reply reference and its
+    /// canonical content within `timeout_ms`. A failed content read keeps the
+    /// confirmation and reports `read_error`; it never resubmits.
+    pub fn recover_send_with_content(
+        &self,
+        operation_id: String,
+        follow: bool,
+        timeout_ms: u64,
+    ) -> Result<RetainedOperationView, MobileError> {
+        validate_id(&operation_id)?;
+        if timeout_ms == 0 || timeout_ms > MAX_FOLLOW_TIMEOUT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let operation = self.run(
+            COMMAND_TIMEOUT,
+            self.core.recover_send_operation(&operation_id),
+        )?;
+        let mut view = retained_send_view(&operation);
+        if follow {
+            let follow_up = self.run(
+                COMMAND_TIMEOUT,
+                self.core.follow_send_operation_with_content(
+                    operation,
+                    Duration::from_millis(timeout_ms),
+                ),
+            )?;
+            view.read_error = follow_up.read_error_code().map(str::to_owned);
+            view.reply = Some(follow_up.reply.into());
+            view.content = follow_up.message.as_ref().map(message_view);
+        }
+        Ok(view)
+    }
+
+    /// List retained non-send operations: durable control identities and any
+    /// retained Standalone pairing FINISH. Local state only.
+    pub fn list_pending_commands(&self) -> Result<Vec<RetainedOperationView>, MobileError> {
+        let mut views = Vec::new();
+        if let Some((operation_id, host_id)) = self
+            .core
+            .pending_standalone_pairing()
+            .map_err(MobileError::from)?
+        {
+            views.push(RetainedOperationView {
+                operation_id,
+                kind: "pairing".into(),
+                host_id: Some(host_id),
+                session_id: None,
+                status: "submitted".into(),
+                receipt: None,
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        for pending in self.core.pending_commands().map_err(MobileError::from)? {
+            let receipt = CommandView {
+                request_id: pending.request_id.clone(),
+                command_id: pending.command_id.clone(),
+                status: pending.status.as_str().to_owned(),
+                message_id: None,
+                delivery_id: None,
+            };
+            views.push(RetainedOperationView {
+                operation_id: pending.request_id,
+                kind: "control".into(),
+                host_id: Some(pending.host_id),
+                session_id: None,
+                status: operation_status_name(pending.status).to_owned(),
+                receipt: Some(receipt),
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        views.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+        Ok(views)
+    }
+
+    /// Manually recover one retained control command or Standalone pairing
+    /// operation under its original identity. This is never called by the
+    /// automatic refresh and never starts a new pairing attempt.
+    pub fn recover_pending_command(
+        &self,
+        operation_id: String,
+    ) -> Result<RetainedOperationView, MobileError> {
+        validate_id(&operation_id)?;
+        if self
+            .core
+            .has_standalone_pairing_operation(&operation_id)
+            .map_err(MobileError::from)?
+        {
+            let outcome = self.run(
+                COMMAND_TIMEOUT,
+                self.core.recover_standalone_pairing(&operation_id),
+            )?;
+            return Ok(RetainedOperationView {
+                operation_id,
+                kind: "pairing".into(),
+                host_id: Some(outcome.host_id),
+                session_id: None,
+                status: "confirmed".into(),
+                receipt: None,
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        let pending = self
+            .core
+            .pending_commands()
+            .map_err(MobileError::from)?
+            .into_iter()
+            .find(|command| command.request_id == operation_id);
+        let handle = self.run(
+            COMMAND_TIMEOUT,
+            self.core.recover_pending_command(&operation_id),
+        )?;
+        Ok(RetainedOperationView {
+            operation_id,
+            kind: "control".into(),
+            host_id: pending.map(|command| command.host_id),
+            session_id: None,
+            status: operation_status_name(handle.status).to_owned(),
+            receipt: Some(handle.into()),
+            reply: None,
+            content: None,
+            read_error: None,
+        })
+    }
+
+    /// Read one exact scoped committed message from Core history.
+    ///
+    /// The reference is reconstructed from the typed fields, including the
+    /// opaque `source_locator`; a malformed or foreign reference is a typed
+    /// error and never falls back to a different message.
+    pub fn read_history_message(
+        &self,
+        reference: MessageReferenceView,
+    ) -> Result<MessageView, MobileError> {
+        validate_id(&reference.session.host_id)?;
+        validate_id(&reference.session.session_id)?;
+        if reference.message_id.is_empty()
+            || reference.message_id.len() > 512
+            || reference.source_locator.is_empty()
+            || reference.source_locator.len() > 4096
+            || reference.projection_id.is_empty()
+            || reference.projection_id.len() > 128
+        {
+            return Err(MobileError::invalid_input());
+        }
+        let session = SessionKey {
+            host_id: reference.session.host_id,
+            session_id: reference.session.session_id,
+        };
+        let reference = whalerein_core::history::MessageReference::new(
+            session,
+            reference.message_id,
+            reference.source_locator,
+            reference.projection_id,
+        )
+        .map_err(|_| MobileError::invalid_input())?;
+        let message = self.run(QUERY_TIMEOUT, self.core.history_message(&reference))?;
+        Ok(message_view(&message))
+    }
+
     /// Inspect selected paths and local service and authorization state.
     pub fn status(&self) -> Result<crate::types::ClientStatusView, MobileError> {
         self.run(QUERY_TIMEOUT, self.core.status()).map(Into::into)
@@ -1525,6 +1704,25 @@ fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> 
         "revoked" => Some(MobileError::revoked()),
         "failed" => Some(MobileError::unavailable()),
         _ => None,
+    }
+}
+
+fn retained_send_view(operation: &whalerein_core::api::SendOperation) -> RetainedOperationView {
+    let status = operation
+        .receipt
+        .as_ref()
+        .map(|receipt| operation_status_name(receipt.status))
+        .unwrap_or("submitted");
+    RetainedOperationView {
+        operation_id: operation.operation_id.clone(),
+        kind: "send".into(),
+        host_id: Some(operation.target.host_id.clone()),
+        session_id: Some(operation.target.session_id.clone()),
+        status: status.to_owned(),
+        receipt: operation.receipt.clone().map(Into::into),
+        reply: None,
+        content: None,
+        read_error: None,
     }
 }
 

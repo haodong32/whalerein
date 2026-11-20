@@ -12,8 +12,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess};
 use whalerein_mobile::{
-    write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore, MessageView,
-    MobileClientService, MobileCore, QueueAction, WaitOutcome,
+    write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore,
+    MessageReferenceView, MessageReplyView, MessageView, MobileClientService, MobileCore,
+    QueueAction, WaitOutcome,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -1287,6 +1288,274 @@ fn exact_approval_read_is_host_scoped_and_carries_the_guard() {
     );
     assert_eq!(
         core.get_approval("host-2".into(), "approval-1".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+}
+
+// Operation receipt and recovery contract.
+// ---------------------------------------------------------------------------
+
+fn committed_reference(reply: Option<MessageReplyView>) -> MessageReferenceView {
+    match reply.expect("confirmed reply") {
+        MessageReplyView::Committed { reference } => reference,
+        other => panic!("unexpected reply state: {other:?}"),
+    }
+}
+
+#[test]
+fn retained_send_list_and_exact_reference_read_round_trip() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let sent = core
+        .send(
+            host_id.clone(),
+            "session-1".into(),
+            "retained send".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    let operation_id = sent.request_id.clone();
+    let listed = core.list_send_operations().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].operation_id, operation_id);
+    assert_eq!(listed[0].kind, "send");
+    assert_eq!(listed[0].host_id.as_deref(), Some(host_id.as_str()));
+    assert_eq!(listed[0].session_id.as_deref(), Some("session-1"));
+    assert!(matches!(
+        listed[0].status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    // Listing is local-only: no reply, content or read error yet.
+    assert!(listed[0].reply.is_none());
+    assert!(listed[0].content.is_none());
+    assert!(listed[0].read_error.is_none());
+
+    let recovered = core
+        .recover_send_with_content(operation_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(recovered.read_error.is_none());
+    let reference = committed_reference(recovered.reply.clone());
+    assert_eq!(reference.session.host_id, host_id);
+    assert_eq!(reference.session.session_id, "session-1");
+    assert!(!reference.source_locator.is_empty());
+    let content = recovered.content.expect("canonical content");
+    assert_eq!(content.message_id, reference.message_id);
+    let exact = core.read_history_message(reference).unwrap();
+    assert_eq!(exact.message_id, content.message_id);
+    assert_eq!(exact.blocks, content.blocks);
+
+    // The compatibility export keeps working over the same operation identity.
+    let compatible = core.recover_send(operation_id, true).unwrap();
+    assert!(matches!(
+        compatible.reply,
+        Some(MessageReplyView::Committed { .. })
+    ));
+}
+
+#[test]
+fn content_read_failure_keeps_the_confirmation_and_reports_the_error() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let sent = core
+        .send(
+            host_id,
+            "session-1".into(),
+            "content read fails".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    access.host.lock().unwrap().history_messages.clear();
+    let recovered = core
+        .recover_send_with_content(sent.request_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(matches!(
+        recovered.reply,
+        Some(MessageReplyView::Committed { .. })
+    ));
+    assert!(recovered.content.is_none());
+    assert_eq!(recovered.read_error.as_deref(), Some("not_found"));
+    // A failed read never resubmits.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    // The confirmation survives a second attempt and the reference stays usable.
+    let again = core
+        .recover_send_with_content(sent.request_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(again.status.as_str(), "accepted" | "confirmed"));
+    let reference = committed_reference(again.reply);
+    assert_eq!(reference.message_id, sent.message_id.expect("message id"));
+    assert_eq!(
+        core.read_history_message(reference).unwrap_err().code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn a_dropped_send_receipt_stays_listed_and_recovers_without_another_submission() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    access.host.lock().unwrap().drop_command_receipts = true;
+    let error = core
+        .send(
+            host_id.clone(),
+            "session-1".into(),
+            "lost receipt".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error.code(), "unavailable" | "unknown_result" | "timeout"),
+        "unexpected drop-receipt error: {error:?}"
+    );
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    let listed = core.list_send_operations().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].status, "submitted");
+    assert!(listed[0].receipt.is_none());
+    assert_eq!(listed[0].host_id.as_deref(), Some(host_id.as_str()));
+    assert_eq!(listed[0].session_id.as_deref(), Some("session-1"));
+
+    access.host.lock().unwrap().drop_command_receipts = false;
+    let recovered = core
+        .recover_send_with_content(listed[0].operation_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(recovered.content.is_some());
+    // Recovery queried the original command; it never sent the message again.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+}
+
+#[test]
+fn invalid_and_foreign_references_are_typed_errors() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let sent = core
+        .send(
+            host_id,
+            "session-1".into(),
+            "scoped".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    let operation_id = sent.request_id.clone();
+
+    assert_eq!(
+        core.recover_send_with_content("not-an-id".into(), false, 1_000)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content(operation_id.clone(), false, 0)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content(operation_id.clone(), false, 60_000)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content("ab".repeat(16), false, 1_000)
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+
+    let recovered = core
+        .recover_send_with_content(operation_id, true, 5_000)
+        .unwrap();
+    let reference = committed_reference(recovered.reply);
+
+    let mut empty_locator = reference.clone();
+    empty_locator.source_locator.clear();
+    assert_eq!(
+        core.read_history_message(empty_locator).unwrap_err().code(),
+        "invalid_input"
+    );
+    let mut foreign = reference;
+    foreign.session.host_id = "other-host".into();
+    let error = core.read_history_message(foreign).unwrap_err();
+    assert!(
+        matches!(
+            error.code(),
+            "not_found" | "unavailable" | "conflict" | "not_paired" | "security"
+        ),
+        "unexpected foreign-scope error: {error:?}"
+    );
+}
+
+#[test]
+fn retained_control_commands_are_listed_and_recovered_under_their_original_identity() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    access.host.lock().unwrap().drop_command_receipts = true;
+    assert!(core.stop(host_id.clone(), "session-1".into()).is_err());
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    let listed = core.list_pending_commands().unwrap();
+    assert_eq!(listed.len(), 1);
+    let pending = &listed[0];
+    assert_eq!(pending.kind, "control");
+    assert_eq!(pending.host_id.as_deref(), Some(host_id.as_str()));
+    assert!(pending.session_id.is_none());
+    assert_eq!(pending.status, "uncertain");
+    assert!(pending.receipt.is_some());
+
+    access.host.lock().unwrap().drop_command_receipts = false;
+    let recovered = core
+        .recover_pending_command(pending.operation_id.clone())
+        .unwrap();
+    assert_eq!(recovered.operation_id, pending.operation_id);
+    assert_eq!(recovered.kind, "control");
+    assert_eq!(recovered.status, "confirmed");
+    assert_eq!(
+        recovered
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.request_id.as_str()),
+        Some(pending.operation_id.as_str())
+    );
+    assert!(core.list_pending_commands().unwrap().is_empty());
+    // Recovery queried the original control command instead of issuing a new one.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+    assert_eq!(
+        core.recover_pending_command("missing-command".into())
             .unwrap_err()
             .code(),
         "not_found"

@@ -125,7 +125,7 @@ final class ConversationQueueController {
                 action: action,
                 text: text
             )
-            // Keep the confirmed receipt even if the following refresh fails.
+            // Keep the confirmed operation receipt even if the refresh fails.
             lastMutation = mutation
             mutationErrorKey = nil
             await refresh()

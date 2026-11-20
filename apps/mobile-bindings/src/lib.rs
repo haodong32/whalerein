@@ -33,8 +33,8 @@ pub use types::{
     DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
     NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
     QuestionCancelReceiptView, QuestionIntentView, QuestionItemView, QuestionOptionView,
-    QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView, SendOperationView,
-    SessionCapabilitiesView, SessionKeyView, SessionSummaryView, ToolActivityView,
-    ToolResultPartView,
+    QuestionPageView, QuestionStampView, QuestionSubjectView, QuestionsView,
+    RetainedOperationView, SendOperationView, SessionCapabilitiesView, SessionKeyView,
+    SessionSummaryView, ToolActivityView, ToolResultPartView,
 };
 pub use wait::{WaitOutcome, WaitResultView, WaitStateView};
