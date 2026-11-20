@@ -1594,6 +1594,28 @@ impl MobileCore {
         self.run(QUERY_TIMEOUT, self.core.status()).map(Into::into)
     }
 
+    /// The default Host recorded for this client instance, if any.
+    ///
+    /// The record lives in this instance's Core data directory, so another
+    /// instance never sees or overwrites it.
+    pub fn default_host(&self) -> Result<Option<String>, MobileError> {
+        self.core.default_host().map_err(MobileError::from)
+    }
+
+    /// Persist `host_id` as the default Host after Core confirms it is
+    /// authorized and reachable. Only the selected instance is affected.
+    pub fn select_default_host(&self, host_id: String) -> Result<(), MobileError> {
+        validate_id(&host_id)?;
+        self.run(QUERY_TIMEOUT, self.core.select_default_host(&host_id))
+    }
+
+    /// The Cloud app session identity retained for this instance, when signed in.
+    pub fn current_cloud_session_id(&self) -> Result<Option<String>, MobileError> {
+        self.core
+            .current_cloud_session_id()
+            .map_err(MobileError::from)
+    }
+
     /// Interrupt the running turn for a session.
     pub fn stop(&self, host_id: String, session_id: String) -> Result<CommandView, MobileError> {
         validate_id(&host_id)?;

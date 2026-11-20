@@ -267,4 +267,31 @@ final class RecoverableSessionService: SessionService {
     func revoke() async throws {
         try await current().revoke()
     }
+
+    // MARK: - Instance status
+
+    func instanceStatus() async throws -> InstanceStatus {
+        try await statusService().instanceStatus()
+    }
+
+    func defaultHost() async throws -> String? {
+        try await statusService().defaultHost()
+    }
+
+    func selectDefaultHost(hostId: String) async throws {
+        try await statusService().selectDefaultHost(hostId: hostId)
+    }
+
+    func currentCloudSessionId() async throws -> String? {
+        try await statusService().currentCloudSessionId()
+    }
+
+    private func statusService() throws -> any InstanceStatusService {
+        guard let service = try current() as? any InstanceStatusService else {
+            throw SessionServiceError(.unavailable)
+        }
+        return service
+    }
 }
+
+extension RecoverableSessionService: InstanceStatusService {}

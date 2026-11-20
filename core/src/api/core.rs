@@ -790,6 +790,15 @@ impl Core {
             .and_then(|id| id.map(Some).ok_or(CoreError::AuthenticationRequired))
     }
 
+    /// The locally retained Cloud app session identity for scoped UI state.
+    ///
+    /// Account app-session listings do not mark which row belongs to this app;
+    /// the binding pairs this read-only identity with the list so Settings can
+    /// label the current sign-in without a second session store.
+    pub fn current_cloud_session_id(&self) -> CoreResult<Option<String>> {
+        self.cloud_session_id()
+    }
+
     pub(crate) async fn cloud_transport(
         &self,
     ) -> CoreResult<Option<crate::account::native::RegionalSession>> {

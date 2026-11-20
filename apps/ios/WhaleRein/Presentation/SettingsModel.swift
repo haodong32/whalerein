@@ -12,9 +12,17 @@ final class SettingsModel {
         case revoke
     }
 
+    /// Typed successful outcome for the selected instance only. The owning
+    /// service is per instance, so another instance's pairing is untouched.
+    enum Outcome: Equatable {
+        case forgotten
+        case revoked
+    }
+
     private(set) var isBusy = false
     private(set) var statusKey: L10nKey?
     private(set) var errorKey: L10nKey?
+    private(set) var lastOutcome: Outcome?
 
     let coreRevision: String
     let appVersion: String
@@ -49,14 +57,17 @@ final class SettingsModel {
         isBusy = true
         statusKey = nil
         errorKey = nil
+        lastOutcome = nil
         do {
             switch confirmation {
             case .forget:
                 try await service.forgetDevice()
                 statusKey = .settingsForgotten
+                lastOutcome = .forgotten
             case .revoke:
                 try await service.revoke()
                 statusKey = .settingsRevoked
+                lastOutcome = .revoked
             }
             preferences.update {
                 $0.paired = false

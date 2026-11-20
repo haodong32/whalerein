@@ -28,12 +28,17 @@ final class FixtureSessionService: SessionService {
     private let options: LaunchOptions
     private let clock: FixtureClock
     private let draftStore: any DraftStore
+    let operationJournal = FixtureOperationJournal()
     /// Deterministic Cloud sign-in/directory state; implemented by the Cloud
     /// account extension in FixtureCloudAccount.swift.
     let cloudState: FixtureCloudAccountState
     /// Deterministic state and outcomes for the session-management adapter.
     let sessionManagement: FixtureSessionManagementState
-    let operationJournal = FixtureOperationJournal()
+    /// Service mode of the fixture instance, so status fixtures can distinguish
+    /// Cloud from Standalone without reading the app document.
+    let serviceKind: AppService
+    /// Default computer selected through the same Core-backed contract as live.
+    private(set) var defaultHostId: String?
 
     private var paired: Bool
     private var revoked = false
@@ -77,13 +82,16 @@ final class FixtureSessionService: SessionService {
         draftStore: any DraftStore,
         initiallyPaired: Bool = false,
         instanceId: String = "fixtures",
-        sessionManagement: FixtureSessionManagementState? = nil
+        sessionManagement: FixtureSessionManagementState? = nil,
+        serviceKind: AppService = .cloud
     ) {
         self.instanceId = instanceId
         self.options = options
         self.clock = clock
         self.draftStore = draftStore
         self.cloudState = FixtureCloudAccountState(options: options)
+        self.serviceKind = serviceKind
+        self.defaultHostId = nil
         self.paired = initiallyPaired
         self.sessionManagement = sessionManagement ?? FixtureSessionManagementState()
     }
@@ -147,6 +155,8 @@ final class FixtureSessionService: SessionService {
         }
         if approved {
             paired = true
+            // Core records the first authorized Host as the default on pairing.
+            defaultHostId = prompt.hostId
             pendingPrompt = nil
             pendingInvitation = nil
         } else {

@@ -124,6 +124,8 @@ struct SettingsView: View {
                     }
                 }
 
+                SettingsAccountView()
+
                 Section(L10n.hostsTitle.key) {
                     Button {
                         // Dismiss this sheet first: two sheets cannot be
