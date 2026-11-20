@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/admission"
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/broker"
+	"github.com/whalerein/whalerein/access/internal/clientaddr"
 	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/events"
@@ -110,7 +112,13 @@ func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, ops s
 		return 0
 	}
 
-	logger := diagnostics.NewLogger(cfg.Log.Level, stderr)
+	referencer, err := clientaddr.NewReferencerFromConfig(
+		cfg.HTTP.ClientReference.Key, cfg.HTTP.ClientReference.Window)
+	if err != nil {
+		fmt.Fprintf(stderr, "access: invalid client reference: %v\n", err)
+		return 2
+	}
+	logger := diagnostics.NewLogger(cfg.Log.Level, clientaddr.NewRedactor(stderr, referencer))
 	if opts.migrateOnly {
 		db, err := ops.open(ctx, cfg.DatabaseURL)
 		if err != nil {
@@ -185,6 +193,16 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) error {
 	metrics := diagnostics.NewMetrics()
 	masker := diagnostics.NewMasker()
+	resolver, err := clientaddr.NewResolver(cfg.HTTP.ClientAddress.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("client address configuration: %w", err)
+	}
+	referencer, err := clientaddr.NewReferencerFromConfig(
+		cfg.HTTP.ClientReference.Key, cfg.HTTP.ClientReference.Window)
+	if err != nil {
+		return fmt.Errorf("client reference configuration: %w", err)
+	}
+	errorLog := log.New(clientaddr.NewRedactor(os.Stderr, referencer), "", 0)
 
 	// Validate the packaged vocabulary and the effective budget before any
 	// listener, database or broker connection becomes ready.
@@ -424,6 +442,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Logger:                   logger,
 		InternalToken:            cfg.Internal.CallbackToken,
 		MaxBodyBytes:             transport.HTTPBodyBytes,
+		ClientAddress:            resolver,
+		ClientReference:          referencer,
 	}
 	// Assign through the interface only when external mode is configured. A
 	// typed nil *external.Service would make the interface non-nil and turn the
@@ -450,6 +470,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	publicServer := &http.Server{
 		Handler:           api.PublicHandler(),
+		ErrorLog:          errorLog,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout.D(),
 		ReadTimeout:       cfg.HTTP.ReadTimeout.D(),
 		WriteTimeout:      cfg.HTTP.WriteTimeout.D(),
@@ -457,6 +478,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 	internalServer := &http.Server{
 		Handler:           api.InternalHandler(),
+		ErrorLog:          errorLog,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout.D(),
 		ReadTimeout:       cfg.HTTP.ReadTimeout.D(),
 		WriteTimeout:      cfg.HTTP.WriteTimeout.D(),

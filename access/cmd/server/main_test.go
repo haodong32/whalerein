@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -299,4 +300,29 @@ func TestDrainCleanupTaskStopsOnAFailedStatement(t *testing.T) {
 		},
 	}
 	drainCleanupTask(context.Background(), task, time.Now().UTC(), logger, diagnostics.NewMetrics())
+}
+
+func TestRunServerRejectsInvalidClientAddressConfiguration(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{name: "malformed trusted proxy", mutate: func(c *config.Config) {
+			c.HTTP.ClientAddress.TrustedProxies = []string{"not-a-cidr"}
+		}, want: "client address configuration"},
+		{name: "invalid reference key", mutate: func(c *config.Config) {
+			c.HTTP.ClientReference.Key = "not-base64!"
+		}, want: "client reference configuration"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var cfg config.Config
+			test.mutate(&cfg)
+			err := runServerWithStore(context.Background(), cfg, logger, defaultStartupStoreOps())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
 }

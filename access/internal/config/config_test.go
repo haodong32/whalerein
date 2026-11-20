@@ -155,6 +155,10 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects callback token matching admin token", func(c *Config) { c.Internal.CallbackToken = c.AdminToken }, "must differ from admin_token"},
 		{"rejects negative HTTP body limit", func(c *Config) { c.HTTP.MaxBodyBytes = -1 }, "max_body_bytes"},
 		{"rejects nonpositive HTTP timeout", func(c *Config) { c.HTTP.ReadTimeout = 0 }, "http timeouts"},
+		{"rejects malformed trusted proxy", func(c *Config) { c.HTTP.ClientAddress.TrustedProxies = []string{"172.18.0.0"} }, "trusted_proxies"},
+		{"rejects whole-space trusted proxy", func(c *Config) { c.HTTP.ClientAddress.TrustedProxies = []string{"0.0.0.0/0"} }, "whole address space"},
+		{"rejects invalid reference window", func(c *Config) { c.HTTP.ClientReference.Window = "weekly" }, "client_reference.window"},
+		{"rejects invalid reference key", func(c *Config) { c.HTTP.ClientReference.Key = "not-base64!" }, "client_reference.key"},
 		{"rejects nonpositive line policy TTL", func(c *Config) { c.Line.PolicyTTL = 0 }, "line durations"},
 		{"rejects nonpositive line reconcile interval", func(c *Config) { c.Line.ReconcileInterval = 0 }, "line durations"},
 		{"rejects heartbeat not shorter than policy TTL", func(c *Config) { c.Line.HeartbeatInterval = c.Line.PolicyTTL }, "heartbeat_interval must be shorter"},
@@ -197,6 +201,30 @@ func TestRedactedConfigurationOmitsCredentials(t *testing.T) {
 	}
 	if !strings.Contains(text, "tls://mqtt.example.com:8883") {
 		t.Fatalf("summary missing sanitized broker URL: %s", text)
+	}
+}
+
+func TestClientAddressConfigurationAndRedaction(t *testing.T) {
+	cfg := validConfig(t)
+	if cfg.HTTP.ClientReference.Window != "monthly" {
+		t.Fatalf("default window = %q", cfg.HTTP.ClientReference.Window)
+	}
+	cfg.HTTP.ClientAddress.TrustedProxies = []string{"172.18.0.0/16"}
+	cfg.HTTP.ClientReference.Key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	cfg.HTTP.ClientReference.Window = "daily"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid client address config rejected: %v", err)
+	}
+	summary := cfg.Redacted()
+	text := summaryString(summary)
+	if strings.Contains(text, cfg.HTTP.ClientReference.Key) {
+		t.Fatalf("redacted summary contains the reference key: %s", text)
+	}
+	if summary["client_reference_enabled"] != true || summary["client_reference_window"] != "daily" {
+		t.Fatalf("redacted client reference summary = %v", summary)
+	}
+	if summary["client_address_trusted_proxies"] != 1 {
+		t.Fatalf("redacted trusted proxy count = %v", summary["client_address_trusted_proxies"])
 	}
 }
 
