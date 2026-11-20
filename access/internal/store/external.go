@@ -184,7 +184,7 @@ func (s *Store) EnrollHost(
 	if !bytes.Equal(admitted.PayloadDigest, operation.PayloadDigest) {
 		return ExternalEnrollment{}, "", false, ErrOperationConflict
 	}
-	expired, err := operationDeadlinePassed(ctx, tx, admitted)
+	expired, err := operationAdmissionExpired(ctx, tx, admitted)
 	if err != nil {
 		return ExternalEnrollment{}, "", false, err
 	}
@@ -675,7 +675,7 @@ func (s *Store) ReplaceHostCredential(ctx context.Context, operation ExternalOpe
 	if !bytes.Equal(admitted.PayloadDigest, operation.PayloadDigest) {
 		return ExternalEnrollment{}, "", ErrOperationConflict
 	}
-	expired, err := operationDeadlinePassed(ctx, tx, admitted)
+	expired, err := operationAdmissionExpired(ctx, tx, admitted)
 	if err != nil {
 		return ExternalEnrollment{}, "", err
 	}
@@ -806,13 +806,20 @@ func lockHostScope(ctx context.Context, tx pgx.Tx, hostID string) error {
 	return nil
 }
 
-func operationDeadlinePassed(ctx context.Context, tx pgx.Tx, operation ExternalOperation) (bool, error) {
+// operationAdmissionExpired reports an operation that was admitted at or after
+// its authorization deadline. An operation admitted before the deadline may
+// still commit after it (AC-17 .commit-after-expiry); a later admission is
+// fenced instead.
+func operationAdmissionExpired(ctx context.Context, tx pgx.Tx, operation ExternalOperation) (bool, error) {
 	if operation.AuthorizationExpiresAt == nil {
 		return false, nil
 	}
 	var expired bool
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() >= $1`, operation.AuthorizationExpiresAt).Scan(&expired); err != nil {
-		return false, fmt.Errorf("check operation deadline: %w", err)
+	if err := tx.QueryRow(ctx, `
+		SELECT clock_timestamp() >= $1
+		   AND COALESCE($2::timestamptz, clock_timestamp()) >= $1`,
+		operation.AuthorizationExpiresAt, operation.AdmittedAt).Scan(&expired); err != nil {
+		return false, fmt.Errorf("check operation admission deadline: %w", err)
 	}
 	return expired, nil
 }
