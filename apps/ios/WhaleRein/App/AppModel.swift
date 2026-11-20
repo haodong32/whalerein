@@ -53,6 +53,9 @@ final class AppModel {
     private(set) var sessionList: SessionListModel
     private(set) var diagnostics: DiagnosticsModel
     private(set) var settings: SettingsModel
+    /// Host-scoped create/details/fork/model presentation. It reads through the
+    /// active service adapter and keeps no session cache of its own.
+    private(set) var sessionManagement: SessionManagementModel
 
     private(set) var conversation: ConversationModel?
     private(set) var isPaired: Bool
@@ -124,6 +127,7 @@ final class AppModel {
         self.sessionList = models.sessionList
         self.diagnostics = models.diagnostics
         self.settings = models.settings
+        self.sessionManagement = Self.makeManagementModel(service: service)
         installCallbacks()
     }
 
@@ -153,6 +157,16 @@ final class AppModel {
                 isFixtureBacked: service is FixtureSessionService,
                 onDeviceReset: {}
             )
+        )
+    }
+
+    /// Builds the management adapter from the active service. A service that
+    /// does not implement the adapter (a stub or an older composition) gets an
+    /// explicit unavailable implementation instead of invented data.
+    private static func makeManagementModel(service: any SessionService) -> SessionManagementModel {
+        SessionManagementModel(
+            service: (service as? any SessionManagementService)
+                ?? UnavailableSessionManagementService()
         )
     }
 
@@ -338,6 +352,7 @@ final class AppModel {
             isFixtureBacked: service is FixtureSessionService,
             onDeviceReset: {}
         )
+        self.sessionManagement = Self.makeManagementModel(service: service)
         installCallbacks()
     }
 

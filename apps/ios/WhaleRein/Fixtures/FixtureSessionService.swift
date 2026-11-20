@@ -17,6 +17,8 @@ final class FixtureSessionService: SessionService {
     private let options: LaunchOptions
     private let clock: FixtureClock
     private let draftStore: any DraftStore
+    /// Deterministic state and outcomes for the session-management adapter.
+    let sessionManagement: FixtureSessionManagementState
 
     private var paired: Bool
     private var revoked = false
@@ -47,13 +49,15 @@ final class FixtureSessionService: SessionService {
         clock: FixtureClock = SystemFixtureClock(),
         draftStore: any DraftStore,
         initiallyPaired: Bool = false,
-        instanceId: String = "fixtures"
+        instanceId: String = "fixtures",
+        sessionManagement: FixtureSessionManagementState = FixtureSessionManagementState()
     ) {
         self.instanceId = instanceId
         self.options = options
         self.clock = clock
         self.draftStore = draftStore
         self.paired = initiallyPaired
+        self.sessionManagement = sessionManagement
     }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {

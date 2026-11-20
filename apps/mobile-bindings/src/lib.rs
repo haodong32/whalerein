@@ -11,6 +11,7 @@ mod app_config;
 mod client;
 mod error;
 mod secret;
+mod session_management;
 mod types;
 
 pub use app_config::{
@@ -23,6 +24,11 @@ pub use client::{
 };
 pub use error::MobileError;
 pub use secret::{MemorySecretStore, SecretStore, SecretStoreError};
+pub use session_management::{
+    ForkResultView, ModelCatalogView, ModelChoiceView, ModelEffortView, ModelEntryView,
+    ModelProviderFailureView, ModelProviderView, ModelSelectionResultView, SessionCreateInputView,
+    SessionCreateResultView, SessionDetailView, SessionModelView,
+};
 pub use types::{
     ApprovalView, BlockView, ClientStatusView, CommandView, ConversationEvent, DeliveryChoice,
     DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
