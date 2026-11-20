@@ -1684,6 +1684,9 @@ export class ConnectionManager {
         return { kind: 'fix-config' }
       }
       if (this.#errorCode === 'recovery_required' || (this.#hasBinding(record) && this.#errorCode === 'not_found')) {
+        // An uncertain enrollment/setup attempt is reconciled, not treated as a
+        // credential recovery; only an established credential may recover.
+        if (record?.pending?.phase === 'enrollment') return { kind: 'retry' }
         return this.#hasBinding(record) ? { kind: 'recover-credential' } : { kind: 'retry' }
       }
       return this.#hasBinding(record) ? { kind: 'retry' } : { kind: 'connect' }
