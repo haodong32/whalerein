@@ -708,3 +708,93 @@ func TestDisableEndpointIsIdempotent(t *testing.T) {
 		t.Fatalf("status after disable = %d %s", code, payload)
 	}
 }
+
+// A lost replacement response must not become a second credential. Retrying the
+// identical proof either receives a credential-free receipt or is refused; only
+// a new recovery authorization can mint again.
+func TestLostCredentialReplacementResponseNeverMintsASecondCredential(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	status, enrolled := h.enroll(t, "host-1", "ws-fixture-1", "op-1", now, now.Add(5*time.Minute))
+	if status != http.StatusOK || enrolled.GetCredential() == nil {
+		t.Fatalf("enrollment failed: %d", status)
+	}
+	authorization := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-lost-response",
+		Purpose:            external.PurposeHostCredentialRecovery,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-lost-response",
+		HostId:             "host-1",
+		EnrollmentRevision: enrolled.GetStatus().GetEnrollmentRevision(),
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("lostresponseonce"),
+	})
+	proof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", authorization.GetAuthorizationId(), now, "bG9zdC1yZXBsYWNlLW5vbmNl")
+	body, err := json.Marshal(map[string]any{"authorization": authorization})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, proof)}
+	code, payload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body, headers)
+	if code != http.StatusOK {
+		t.Fatalf("replacement failed: %d %s", code, payload)
+	}
+
+	// The client lost this response and retries the exact same proof.
+	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body, headers)
+	var retry struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	_ = json.Unmarshal(payload, &retry)
+	if retry.Credential.Password != "" {
+		t.Fatalf("a lost-response retry minted a second credential: %s", payload)
+	}
+	if code == http.StatusOK {
+		// Credential-free receipt is the intended replay answer.
+	} else if code != http.StatusConflict && code != http.StatusUnauthorized && code != http.StatusForbidden {
+		t.Fatalf("unexpected lost-response retry status: %d %s", code, payload)
+	}
+
+	// A fresh recovery authorization can mint one new credential.
+	next := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-lost-response-next",
+		Purpose:            external.PurposeHostCredentialRecovery,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-lost-response-next",
+		HostId:             "host-1",
+		EnrollmentRevision: enrolled.GetStatus().GetEnrollmentRevision(),
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("lostresponseagain"),
+	})
+	freshProof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", next.GetAuthorizationId(), now, "bG9zdC1yZXBsYWNlLW5vbmNlLTI")
+	freshBody, err := json.Marshal(map[string]any{"authorization": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", freshBody,
+		map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, freshProof)})
+	if code != http.StatusOK {
+		t.Fatalf("fresh recovery authorization failed: %d %s", code, payload)
+	}
+	var fresh struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(payload, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Credential.Password == "" {
+		t.Fatal("a fresh recovery authorization did not mint a credential")
+	}
+}
