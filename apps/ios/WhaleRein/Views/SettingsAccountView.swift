@@ -8,8 +8,8 @@ import SwiftUI
 
 struct SettingsAccountView: View {
     @Environment(AppModel.self) private var app
+    @Binding var showDiagnostics: Bool
     @State private var pendingScope: AccountSessionScope?
-    @State private var showDiagnostics = false
 
     @ViewBuilder
     var body: some View {
@@ -334,9 +334,6 @@ struct SettingsAccountView: View {
                 Label(L10n.settingsDiagnosticsOpen.key, systemImage: "stethoscope")
             }
             .accessibilityIdentifier("settings.diagnostics.open")
-        }
-        .sheet(isPresented: $showDiagnostics) {
-            DiagnosticsView()
         }
     }
 

@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: SettingsModel.Confirmation?
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -110,7 +111,7 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsAccountView()
+                SettingsAccountView(showDiagnostics: $showDiagnostics)
 
                 Section(L10n.hostsTitle.key) {
                     Button {
@@ -154,6 +155,9 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.done")
                 }
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsView()
             }
             .alert(
                 confirmation == .revoke ? L10n.settingsRevokeConfirm.string : L10n.settingsForgetConfirm.string,
