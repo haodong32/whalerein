@@ -177,6 +177,23 @@ in-memory app configuration containing the same two instances.
 the active instance's materialized `config_path`. If Core cannot initialize,
 the app shows the localized unavailable state instead of crashing.
 
+A Cloud instance shows the official hosted sign-in as the primary welcome
+action and keeps self-hosted invitation pairing as the secondary path. Swift
+opens the URL returned by Core in `ASWebAuthenticationSession` with callback
+scheme `whalerein`; it never renders credential fields, and Passkey/email are
+handled by the hosted page. Core owns the attempt ID, PKCE S256 verifier,
+Cloud-issued state, local credential/revocation material and exchange, all
+outside the Swift boundary. Cancellation, expiry, replay, a mismatched state,
+a wrong account/workspace scope and a callback for a replaced activation or
+instance never establish a session. After sign-in the app shows the account
+computer directory with empty, authorized-online, authorized-offline, eligible
+connect and unavailable states; a session opens only after Core confirms the
+computer grant. The account is restored on launch, Settings shows local
+sign-out plus a pending remote sign-out, and `-ui-cloud-signed-in`,
+`-ui-cloud-empty` and `-ui-cloud-unavailable` drive the deterministic Cloud
+fixtures. Live Staging, Passkey, email and signed-iPhone behavior is not
+verified in this environment.
+
 `LiveSessionService` restores the encrypted local transcript with
 `MobileCore.cachedMessages` on each watch reset, deduplicates committed message
 ids against live updates, maps Source `deliveryModes`
