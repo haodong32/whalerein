@@ -1,9 +1,9 @@
 //! Drift and relation checks for the generated transport profile artifact.
 
 use whalerein_proto::{
-    DEFAULT_TRANSPORT_PROFILE, TRANSPORT_PROFILES, TRANSPORT_PROFILES_SCHEMA,
     default_transport_profile_values, transport_profile_values, validate_transport_profile,
-    validate_transport_profiles,
+    validate_transport_profiles, DEFAULT_TRANSPORT_PROFILE, TRANSPORT_PROFILES,
+    TRANSPORT_PROFILES_SCHEMA,
 };
 
 #[test]

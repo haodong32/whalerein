@@ -89,7 +89,9 @@ impl std::error::Error for TransportProfileError {}
 
 /// Resolve one packaged profile by local name.
 pub fn transport_profile_values(name: &str) -> Option<&'static TransportProfileValues> {
-    TRANSPORT_PROFILES.iter().find(|profile| profile.name == name)
+    TRANSPORT_PROFILES
+        .iter()
+        .find(|profile| profile.name == name)
 }
 
 /// The packaged default profile.
@@ -101,14 +103,19 @@ pub fn default_transport_profile_values() -> &'static TransportProfileValues {
 pub fn validate_transport_profile(
     profile: &TransportProfileValues,
 ) -> Result<(), TransportProfileError> {
-    let error = |reason| TransportProfileError { profile: profile.name, reason };
+    let error = |reason| TransportProfileError {
+        profile: profile.name,
+        reason,
+    };
     if profile.packet_bytes <= profile.fragment_payload_bytes {
         return Err(error("packet budget must exceed the fragment payload"));
     }
     if u64::from(profile.fragment_payload_bytes) + u64::from(profile.packet_overhead_bytes)
         > u64::from(profile.packet_bytes)
     {
-        return Err(error("fragment payload exceeds packetBytes - packetOverheadBytes"));
+        return Err(error(
+            "fragment payload exceeds packetBytes - packetOverheadBytes",
+        ));
     }
     let required = profile
         .envelope_bytes
@@ -119,8 +126,7 @@ pub fn validate_transport_profile(
     if profile.reserved_bytes < profile.envelope_bytes {
         return Err(error("reserved bytes do not cover one envelope"));
     }
-    let in_flight = u64::from(profile.bulk_concurrency)
-        * u64::from(profile.fragment_payload_bytes);
+    let in_flight = u64::from(profile.bulk_concurrency) * u64::from(profile.fragment_payload_bytes);
     if profile.reserved_bytes < in_flight {
         return Err(error("reserved bytes do not cover in-flight fragments"));
     }

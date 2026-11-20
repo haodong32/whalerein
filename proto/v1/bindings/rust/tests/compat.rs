@@ -784,7 +784,10 @@ fn expanded_conversation_attachment_and_transport_shapes_are_typed() {
         ..Default::default()
     };
     let stamps = request.transport.unwrap();
-    assert_eq!((stamps.grant_generation, stamps.revocation_generation), (7, 2));
+    assert_eq!(
+        (stamps.grant_generation, stamps.revocation_generation),
+        (7, 2)
+    );
 
     let advertisement = ReceiveAdvertisement {
         profile: TransportProfile::Default as i32,
