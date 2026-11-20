@@ -760,7 +760,17 @@ impl Core {
         let config = self.require_config()?;
         let base = Url::parse(&config.access_url)
             .map_err(|_| CoreError::Config("invalid Access URL".into()))?;
-        if let Some(region) = self.cloud_transport().await? {
+        // A paired Device keeps its durable regional Access token. When the
+        // Cloud account/transport service is temporarily unreachable, use that
+        // saved authority instead of failing the local Host operation. A
+        // definitive account refusal still propagates.
+        let cloud = match self.cloud_transport().await {
+            Ok(region) => region,
+            Err(CoreError::Unavailable(_)) | Err(CoreError::Timeout) => None,
+            Err(error @ CoreError::Api { .. }) if error.is_retryable_transport() => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(region) = cloud {
             let origin = region
                 .permission
                 .as_ref()
