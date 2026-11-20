@@ -4625,6 +4625,23 @@
         }
       }
     },
+    "cloud.accountLabel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账号"
+          }
+        }
+      }
+    },
     "cloud.directoryEmptyBody": {
       "extractionState": "manual",
       "localizations": {

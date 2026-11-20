@@ -180,6 +180,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case cloudSignOut = "cloud.signOut"
     case cloudSignOutPending = "cloud.signOutPending"
     case cloudSignedInAs = "cloud.signedInAs"
+    case cloudAccountLabel = "cloud.accountLabel"
     case cloudRefresh = "cloud.refresh"
     case cloudSettingsTitle = "cloud.settingsTitle"
     case cloudSignedOut = "cloud.signedOut"
@@ -475,6 +476,7 @@ enum L10n {
     static let cloudSignOut = L10nKey.cloudSignOut
     static let cloudSignOutPending = L10nKey.cloudSignOutPending
     static let cloudSignedInAs = L10nKey.cloudSignedInAs
+    static let cloudAccountLabel = L10nKey.cloudAccountLabel
     static let cloudRefresh = L10nKey.cloudRefresh
     static let cloudSettingsTitle = L10nKey.cloudSettingsTitle
     static let cloudSignedOut = L10nKey.cloudSignedOut

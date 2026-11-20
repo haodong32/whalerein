@@ -77,7 +77,7 @@ struct SettingsView: View {
                 if let cloud = app.cloudSignIn {
                     Section(L10n.cloudSettingsTitle.key) {
                         if let account = cloud.account {
-                            LabeledContent(L10n.cloudSignedInAs.key) {
+                            LabeledContent(L10n.cloudAccountLabel.key) {
                                 Text(verbatim: account.email)
                                     .accessibilityIdentifier("settings.cloudAccount")
                             }
