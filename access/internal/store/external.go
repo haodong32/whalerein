@@ -858,7 +858,9 @@ func refusedOperationError(operation ExternalOperation) error {
 }
 
 func admissionMatches(recorded, incoming ExternalOperation) bool {
-	return recorded.Purpose == incoming.Purpose &&
+	return recorded.OperationID == incoming.OperationID &&
+		recorded.AuthorizationID == incoming.AuthorizationID &&
+		recorded.Purpose == incoming.Purpose &&
 		recorded.WorkspaceID == incoming.WorkspaceID &&
 		recorded.HostID == incoming.HostID &&
 		recorded.ExpectedWorkspaceID == incoming.ExpectedWorkspaceID &&

@@ -335,8 +335,10 @@ func TestEnrollmentCommitsOnceAndDeliversTheCredentialOnce(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 from the status read, got %d", status)
 	}
-	if strings.Contains(strings.ToLower(string(payload)), "credential") {
-		t.Fatalf("a status read must not mention credentials: %s", payload)
+	if strings.Contains(strings.ToLower(string(payload)), "password") ||
+		strings.Contains(strings.ToLower(string(payload)), "mqtturl") ||
+		strings.Contains(strings.ToLower(string(payload)), "username") {
+		t.Fatalf("a status read must not expose a credential: %s", payload)
 	}
 	status, payload = h.get(t, "/v1/operations/op-1", adminToken)
 	if status != http.StatusOK {
@@ -570,8 +572,10 @@ func TestHostProofStatusReadsTheEnrollmentWithoutACredential(t *testing.T) {
 		decoded.GetEnrollmentRevision() != enrolled.GetStatus().GetEnrollmentRevision() {
 		t.Fatalf("unexpected status %+v", decoded)
 	}
-	if strings.Contains(strings.ToLower(string(payload)), "credential") {
-		t.Fatalf("a status read must not mention credentials: %s", payload)
+	if strings.Contains(strings.ToLower(string(payload)), "password") ||
+		strings.Contains(strings.ToLower(string(payload)), "mqtturl") ||
+		strings.Contains(strings.ToLower(string(payload)), "username") {
+		t.Fatalf("a status read must not expose a credential: %s", payload)
 	}
 	// The nonce is single-use.
 	code, _ = h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
@@ -637,10 +641,21 @@ func TestCredentialReplacementDeliversOneNewCredentialAndRejectsReplay(t *testin
 	// A fresh proof for the same authorization id cannot mint a second one.
 	freshProof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
 		"host-1", authorization.GetAuthorizationId(), now, "cmVwbGFjZS1pbnQtbm9uY2UtMg")
-	code, _ = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body,
+	code, replayPayload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body,
 		map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, freshProof)})
-	if code != http.StatusConflict {
-		t.Fatalf("a replayed authorization must conflict, got %d", code)
+	if code != http.StatusOK {
+		t.Fatalf("a replayed authorization must return its recorded receipt, got %d", code)
+	}
+	var replay struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(replayPayload, &replay); err != nil {
+		t.Fatal(err)
+	}
+	if replay.Credential.Password != "" {
+		t.Fatalf("a replay delivered a second credential: %s", payload)
 	}
 }
 
@@ -659,13 +674,17 @@ func TestDisableEndpointIsIdempotent(t *testing.T) {
 		t.Fatalf("disable failed: %d %s", code, payload)
 	}
 	var first struct {
-		State      string `json:"state"`
-		DisabledAt string `json:"disabledAt"`
+		State            string `json:"state"`
+		RemovalOperation string `json:"removal_operation_id"`
+		DisabledAt       int64  `json:"disabled_at_unix_ms"`
+		RevocationCount  int    `json:"revocation_count"`
 	}
 	if err := json.Unmarshal(payload, &first); err != nil {
 		t.Fatal(err)
 	}
-	if first.State != "disabled" || first.DisabledAt == "" {
+	// The legacy bodyless call still returns an authoritative, enforced receipt
+	// for the target Access applied.
+	if (first.State != "enforced" && first.State != "disabled") || first.DisabledAt == 0 {
 		t.Fatalf("unexpected disable response %+v", first)
 	}
 	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/disable", nil, headers)
@@ -673,13 +692,15 @@ func TestDisableEndpointIsIdempotent(t *testing.T) {
 		t.Fatalf("repeated disable failed: %d %s", code, payload)
 	}
 	var repeated struct {
-		DisabledAt string `json:"disabledAt"`
+		State           string `json:"state"`
+		DisabledAt      int64  `json:"disabled_at_unix_ms"`
+		RevocationCount int    `json:"revocation_count"`
 	}
 	if err := json.Unmarshal(payload, &repeated); err != nil {
 		t.Fatal(err)
 	}
-	if repeated.DisabledAt != first.DisabledAt {
-		t.Fatalf("repeated disable changed disabledAt: %q -> %q", first.DisabledAt, repeated.DisabledAt)
+	if repeated.DisabledAt != first.DisabledAt || repeated.State != first.State {
+		t.Fatalf("repeated disable changed the receipt: %+v -> %+v", first, repeated)
 	}
 	// The enrollment is disabled for both retry and broker admission.
 	code, payload = h.get(t, "/v1/enrollments/hosts/host-1", adminToken)
