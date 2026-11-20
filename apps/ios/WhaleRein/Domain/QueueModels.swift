@@ -8,6 +8,7 @@ import Foundation
 /// list is authoritative; stale, unavailable and unsupported never do.
 enum QueueFreshness: String, Equatable, Sendable {
     case idle
+    case loading
     case current
     case stale
     case unavailable

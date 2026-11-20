@@ -363,13 +363,19 @@ mod tests {
     fn transport_errors_keep_their_stable_code() {
         let mapped = map_error(CoreError::ChannelMismatch);
         assert_eq!(mapped.outcome, WaitOutcome::Failed);
-        assert!(mapped.error_code.as_deref().is_some_and(|code| !code.is_empty()));
+        assert!(mapped
+            .error_code
+            .as_deref()
+            .is_some_and(|code| !code.is_empty()));
         assert!(mapped.state.is_none());
     }
 
     #[test]
     fn wait_timeout_bounds_match_core() {
         assert_eq!(MAX_WAIT_TIMEOUT_MS, 2_147_483_647);
-        assert!(MAX_TAKE_WAIT_MS >= 1_000);
+        // The take bound is a runtime constant; compare it through a value so
+        // clippy does not treat the check as a compile-time constant assertion.
+        let take_bound = std::hint::black_box(MAX_TAKE_WAIT_MS);
+        assert!(take_bound >= 1_000);
     }
 }

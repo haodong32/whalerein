@@ -76,10 +76,10 @@ final class ConversationQueueController {
         isRefreshing = true
         defer { isRefreshing = false }
         if freshness == .idle {
-            freshness = .unavailable
+            freshness = .loading
         }
         do {
-            let snapshot = try await service.pendingQueue(hostID: hostID, sessionID: sessionID)
+            let snapshot = try await service.pendingQueue(hostId: hostID, sessionId: sessionID)
             lastRefreshError = nil
             guard snapshot.available else {
                 // An unavailable answer never establishes an empty queue.

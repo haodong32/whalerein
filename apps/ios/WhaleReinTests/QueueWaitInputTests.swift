@@ -389,21 +389,26 @@ struct QueueWaitInputTests {
         #expect(model.approvals[0].state == .allowed)
         #expect(!model.isApprovalActionable(model.approvals[0]))
 
-        // An unavailable read marks the card unavailable instead of clickable.
-        service.approvalHandler = { _, _ in throw SessionServiceError(.unavailable) }
-        current = testApproval(state: .pending, version: 6)
-        model.handle(
+        // An unavailable read marks a still-pending card unavailable instead of
+        // clickable. A fresh model avoids the intentionally sticky terminal card.
+        let unavailableService = StubSessionService()
+        unavailableService.approvalHandler = { _, _ in
+            throw SessionServiceError(.unavailable)
+        }
+        let pending = testApproval(state: .pending, version: 6)
+        let unavailableModel = await makeStartedConversation(service: unavailableService)
+        unavailableModel.handle(
             SessionEventEnvelope(
                 hostId: "studio-mac",
                 sessionId: "s-001",
-                sequence: 2,
-                event: .approvalChanged(current)
+                sequence: 1,
+                event: .reset(messages: [], approvals: [pending])
             )
         )
-        await model.refreshApprovalStatus(model.approvals[0])
-        #expect(model.approvalStatusRefresh[current.approvalId] == .unavailable)
-        #expect(model.approvals[0].state == .unavailable)
-        #expect(!model.isApprovalActionable(model.approvals[0]))
+        await unavailableModel.refreshApprovalStatus(unavailableModel.approvals[0])
+        #expect(unavailableModel.approvalStatusRefresh[pending.approvalId] == .unavailable)
+        #expect(unavailableModel.approvals[0].state == .unavailable)
+        #expect(!unavailableModel.isApprovalActionable(unavailableModel.approvals[0]))
 
         // A read for another session never touches the card.
         service.approvalHandler = { _, _ in
