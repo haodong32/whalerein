@@ -17,6 +17,7 @@ apps/mobile-bindings/
   src/lib.rs                  uniffi::setup_scaffolding!("WhaleReinMobile")
   src/secret.rs               foreign SecretStore + MemorySecretStore
   src/client.rs               MobileCore, runtime, pairing/watch, event queue
+  src/app_config.rs           typed app document, instance materialization, CA staging
   src/types.rs                exported records/enums and total conversions
   src/error.rs                flat MobileError and Core error mapping
   src/bin/uniffi-bindgen.rs   bindings generator entry point
@@ -87,6 +88,18 @@ Module `WhaleReinMobile`; C module `WhaleReinMobileFFI`. Errors are
 
 func coreRevision() -> String
 
+// Authoritative app document at Application Support/WhaleRein/client/app.toml.
+// Mutators return the new AppConfigView; every write is atomic and a failed
+// save/bootstrapped selection leaves the previous document in place.
+func appConfigBootstrap(path: String) throws -> AppConfigView
+func appConfigRead(path: String) throws -> AppConfigView
+func appConfigValidateInstance(path: String, input: InstanceInput) throws -> AppConfigView
+func appConfigSaveInstance(path: String, input: InstanceInput) throws -> AppConfigView
+func appConfigSetActive(path: String, id: String) throws -> AppConfigView
+func appConfigRemoveInstance(path: String, id: String) throws -> AppConfigView
+func appConfigSetReasoningVisible(path: String, visible: Bool) throws -> AppConfigView
+func appConfigRemoveCA(path: String, id: String) throws -> AppConfigView
+
 final class MobileCore {
     convenience init(dataDir: String, secretStore: SecretStore, appVersion: String) throws
     static func newWithMemorySecretStore(dataDir: String, appVersion: String) throws -> MobileCore
@@ -145,6 +158,11 @@ final class MemorySecretStore {          // Rust object; process-local, test onl
 }
 ```
 
+App configuration records: `AppSettingsView { activeInstanceId, reasoningVisible }`,
+`InstanceView { id, service, environment, dataDir, configPath, hasStandaloneCA,
+standaloneCAPath }`, `AppConfigView { path, version, app, instances }`,
+`InstanceInput { id, service, environment, dataDir, standaloneCAPEM }`.
+
 Records: `HostSummary { hostId, online, fingerprint, protocolVersion }`,
 `SessionSummaryView { sessionId, title, updatedAtUnixMs, cwd, running,
 capabilities: SessionCapabilitiesView? }`,
@@ -181,6 +199,19 @@ droppedEvents(count:), watchEnded }`.
 
 Semantics:
 
+- `appConfigBootstrap` creates `cloud-production` (official production) and
+  `standalone` only when the document is absent; an existing document is never
+  overwritten and legacy `preferences.json`/`core/` files are never read,
+  migrated or deleted. `InstanceInput.dataDir` and the CA reference are relative
+  to the app document; `InstanceView.dataDir`, `configPath` and
+  `standaloneCAPath` are absolute for Swift.
+- `appConfigSetActive` writes the materialized
+  `client/instances/<id>/instance.toml` first and then commits
+  `app.active_instance`, so a failed write leaves the previous selection. A
+  valid Standalone PEM is validated through Core trust, staged under the
+  instance directory, and replaces `ca.pem` only after the document commits;
+  invalid PEM changes nothing. Editing one field preserves `transport` and every
+  other instance entry.
 - `send` maps `send` to start-if-idle, `queue` to enqueue-after-run and `steer`
   to steer. Delivery capability remains a Source decision; the app chooses the
   mode.

@@ -250,7 +250,7 @@ export function createHostProof({ signingPrivateKey, hostId, purpose, subjectId 
     fail('internal', 'Host signing key is unavailable')
   }
   if (typeof hostId !== 'string' || hostId === '') fail('internal', 'Host id is unavailable')
-  if (!['enrollment_status', 'credential_replacement'].includes(purpose)) fail('internal', 'Host proof purpose is invalid')
+  if (!['enrollment_status', 'credential_replacement', 'operation_status', 'removal_status', 'recovery_intent'].includes(purpose)) fail('internal', 'Host proof purpose is invalid')
   const nonceValue = nonce ?? b64(randomBytes(16))
   const text = hostProofText({ purpose, hostId, subjectId, issuedAt, nonce: nonceValue })
   const signature = b64(ed25519.sign(new TextEncoder().encode(text), signingPrivateKey))
@@ -740,9 +740,14 @@ export class ManagedEnrollmentClient {
     }
     const payload = await this.#json(response, 'Host enrollment')
     if (response.status === 409) {
-      const committed = await this.#readStatus({ accessOrigin: route.accessOrigin, operationId }).catch(() => null)
-      this.#markUncertain({ operationId, authorizationId: authorization.authorizationId, phase: 'enrollment', committed: true })
-      fail('conflict', 'enrollment operation conflicts with a recorded payload', { committed: committed?.state ? true : true })
+      const operation = await this.readOperation({
+        accessOrigin: route.accessOrigin,
+        operationId,
+        authorizationExpiresAtUnixMs: authorization.expiresAtUnixMs,
+      }).catch(() => null)
+      const proved = operation?.outcome === 'committed'
+      this.#markUncertain({ operationId, authorizationId: authorization.authorizationId, phase: 'enrollment', committed: proved ? true : null })
+      fail('conflict', 'enrollment operation conflicts with a recorded payload', { committed: proved ? true : null })
     }
     if (response.status === 401 || response.status === 403) fail('forbidden', 'enrollment authorization was refused')
     if (response.status === 404) fail('not_found', 'enrollment endpoint was not found')
@@ -790,6 +795,168 @@ export class ManagedEnrollmentClient {
   /** Proof-scoped status read. Never returns a credential. */
   async readStatus({ accessOrigin, operationId = '', nonce = undefined } = {}) {
     return this.#readStatus({ accessOrigin, operationId, nonce })
+  }
+
+  /** Credential-free operation outcome scoped to this Host and operation. */
+  async readOperation({ accessOrigin, operationId, authorizationExpiresAtUnixMs = 0, nonce = undefined } = {}) {
+    if (typeof accessOrigin !== 'string' || accessOrigin === '') fail('invalid_argument', 'Access origin is required')
+    if (typeof operationId !== 'string' || operationId === '') fail('invalid_argument', 'operation id is required')
+    const origin = validateServiceOrigin(accessOrigin, { allowLoopback: this.#options.allowLoopback })
+    const issuedAt = this.#now()
+    const proof = createHostProof({
+      signingPrivateKey: this.#signingPrivateKey,
+      hostId: this.#hostId,
+      purpose: 'operation_status',
+      subjectId: operationId,
+      issuedAt,
+      nonce,
+    })
+    const query = authorizationExpiresAtUnixMs ? `?authorizationExpiresAtUnixMs=${encodeURIComponent(String(authorizationExpiresAtUnixMs))}` : ''
+    let response
+    try {
+      response = await this.#request(`${origin}/v1/hosts/${encodeURIComponent(this.#hostId)}/operations/${encodeURIComponent(operationId)}${query}`, {
+        method: 'GET',
+        headers: { accept: 'application/json', 'X-Whalerein-Host-Proof': proof },
+        expectedOrigin: origin,
+      })
+    } catch (error) {
+      if (error instanceof EnrollmentError) throw error
+      fail('unavailable', 'operation status is unavailable')
+    }
+    if (response.status === 401 || response.status === 403) fail('unauthorized', 'Host operation proof was refused')
+    if (response.status === 404) return { outcome: 'absent', reason: 'not_admitted', operationId }
+    if (response.status !== 200) fail('unavailable', 'operation status is unavailable')
+    const payload = await this.#json(response, 'Host operation status')
+    const status = normalizeFieldNames(payload?.status ?? payload)
+    if (status.hostId && status.hostId !== this.#hostId) fail('forbidden', 'operation status Host mismatch')
+    const outcome = status.outcome ?? ''
+    if (!['admitted', 'pending', 'committed', 'refused', 'expired', 'fenced', 'absent'].includes(outcome)) {
+      return { outcome: 'unknown', operationId }
+    }
+    return {
+      outcome,
+      reason: status.reason ?? '',
+      operationId: status.operationId ?? operationId,
+      credentialIssued: status.credentialIssued === true,
+      credentialGeneration: status.credentialGeneration ?? 0,
+      credentialOperationId: status.credentialOperationId ?? '',
+    }
+  }
+
+  /** Mint the durable browser-to-Host credential-recovery intent. */
+  async createRecoveryIntent({ apiOrigin, hostId = this.#hostId, nonce = undefined } = {}) {
+    if (typeof apiOrigin !== 'string' || apiOrigin === '') fail('invalid_argument', 'service origin is required')
+    const origin = validateServiceOrigin(apiOrigin, { allowLoopback: this.#options.allowLoopback })
+    const proof = createHostProof({
+      signingPrivateKey: this.#signingPrivateKey,
+      hostId,
+      purpose: 'recovery_intent',
+      subjectId: hostId,
+      issuedAt: this.#now(),
+      nonce,
+    })
+    let response
+    try {
+      response = await this.#request(`${origin}/api/hosts/recovery-intents`, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json', 'X-Whalerein-Host-Proof': proof },
+        body: JSON.stringify({ host_id: hostId }),
+        expectedOrigin: origin,
+      })
+    } catch {
+      fail('unavailable', 'recovery intent is unavailable')
+    }
+    if (response.status === 401 || response.status === 403) fail('unauthorized', 'Host recovery proof was refused')
+    if (response.status === 409) fail('recovery_required', 'this Host is not eligible for credential recovery')
+    if (response.status !== 201 && response.status !== 200) fail('unavailable', 'recovery intent is unavailable')
+    const payload = await this.#json(response, 'recovery intent')
+    const intentId = payload?.intent_id ?? payload?.intentId
+    const approvalUrl = payload?.approval_url ?? payload?.approvalUrl
+    const pollToken = payload?.poll_token ?? payload?.pollToken
+    if (typeof intentId !== 'string' || intentId === '' || typeof approvalUrl !== 'string' || typeof pollToken !== 'string') {
+      fail('unavailable', 'recovery intent response is incomplete')
+    }
+    return {
+      intentId,
+      approvalUrl,
+      pollToken,
+      expiresAtUnixMs: payload?.expires_at_unix_ms ?? payload?.expiresAtUnixMs ?? 0,
+    }
+  }
+
+  /** Poll one recovery intent with its one-time token. Never starts enrollment. */
+  async pollRecovery({ apiOrigin, intentId, pollToken, isActive = () => true, signal = null, deadlineMs = DEFAULT_DEADLINE_MS } = {}) {
+    const origin = validateServiceOrigin(apiOrigin, { allowLoopback: this.#options.allowLoopback })
+    const started = this.#now()
+    let interval = 500
+    while (this.#now() < started + deadlineMs) {
+      if (!isActive()) fail('cancelled', 'recovery polling was cancelled')
+      let response
+      try {
+        response = await this.#request(`${origin}/api/hosts/recovery-intents/${encodeURIComponent(intentId)}?token=${encodeURIComponent(pollToken)}`, {
+          method: 'GET', headers: { accept: 'application/json' }, expectedOrigin: origin, signal,
+        })
+      } catch (error) {
+        if (error instanceof EnrollmentError) throw error
+        await this.#sleep(interval, signal)
+        interval = Math.min(interval * 2, MAX_BACKOFF_MS)
+        continue
+      }
+      if (response.status === 401) fail('unauthorized', 'recovery poll token was refused')
+      if (response.status === 410) fail('expired', 'recovery authorization expired')
+      if (response.status === 404) fail('not_found', 'recovery intent was not found')
+      if (response.status !== 200) fail('unavailable', 'recovery intent is unavailable')
+      const payload = await this.#json(response, 'recovery intent')
+      const state = payload?.state ?? ''
+      if (state === 'approved' || state === 'delivered') {
+        if (!payload.authorization) fail('unavailable', 'recovery authorization is missing')
+        return {
+          state: 'approved',
+          authorization: payload.authorization,
+          route: payload.route ?? { accessOrigin: origin },
+        }
+      }
+      if (state === 'denied' || state === 'expired' || state === 'failed') {
+        fail(state === 'expired' ? 'expired' : 'denied', `recovery intent ${state}`)
+      }
+      await this.#sleep(interval, signal)
+      interval = Math.min(interval * 2, MAX_BACKOFF_MS)
+    }
+    fail('expired', 'recovery approval timed out')
+  }
+
+  /** Scoped Cloud removal lifecycle read. Credential-free and browser-free. */
+  async readRemoval({ apiOrigin, hostId = this.#hostId, nonce = undefined } = {}) {
+    if (typeof apiOrigin !== 'string' || apiOrigin === '') fail('invalid_argument', 'service origin is required')
+    const origin = validateServiceOrigin(apiOrigin, { allowLoopback: this.#options.allowLoopback })
+    const proof = createHostProof({
+      signingPrivateKey: this.#signingPrivateKey,
+      hostId,
+      purpose: 'removal_status',
+      subjectId: hostId,
+      issuedAt: this.#now(),
+      nonce,
+    })
+    let response
+    try {
+      response = await this.#request(`${origin}/api/hosts/${encodeURIComponent(hostId)}/removal`, {
+        method: 'GET',
+        headers: { accept: 'application/json', 'X-Whalerein-Host-Proof': proof },
+        expectedOrigin: origin,
+      })
+    } catch {
+      fail('unavailable', 'removal status is unavailable')
+    }
+    if (response.status === 401 || response.status === 403) fail('unauthorized', 'removal status proof was refused')
+    if (response.status === 404) return { state: 'none' }
+    if (response.status !== 200) fail('unavailable', 'removal status is unavailable')
+    const payload = await this.#json(response, 'removal status')
+    const state = payload?.state ?? ''
+    return {
+      state: ['none', 'pending', 'disabled', 'removing', 'enforced', 'removed', 'unavailable'].includes(state) ? state : 'unavailable',
+      removalOperationId: payload?.removalOperationId ?? payload?.removal_operation_id ?? '',
+      target: payload?.target ?? null,
+    }
   }
 
   async #readStatus({ accessOrigin, operationId = '', nonce }) {

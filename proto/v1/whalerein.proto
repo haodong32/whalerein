@@ -1456,6 +1456,15 @@ message HostEnrollmentStatus {
   string operation_id = 5;
   bytes host_signing_public_key = 6;
   bytes host_noise_public_key = 7;
+  // The credential issuance recorded beside the broker credential hash. A
+  // legacy enrollment that never recorded one keeps both fields empty/zero.
+  string current_credential_operation_id = 8;
+  uint64 credential_generation = 9;
+  // Additive removal lifecycle: none, pending, enforced or disabled (a
+  // disabled enrollment without a recorded removal operation).
+  string removal_state = 10;
+  string removal_operation_id = 11;
+  int64 removal_enforced_at_unix_ms = 12;
 }
 
 message HostEnrollmentResponse {
@@ -1482,6 +1491,16 @@ message OperationStatus {
   string authorization_id = 7;
   bytes payload_digest = 8;
   int64 committed_at_unix_ms = 9;
+  // Authoritative admission outcome: admitted, committed, refused, expired,
+  // fenced, absent or pending. A legacy row without an outcome reports pending
+  // and keeps its stored state.
+  string outcome = 10;
+  // Stable machine reason for a refused/expired/fenced outcome.
+  string reason = 11;
+  int64 updated_at_unix_ms = 12;
+  uint64 credential_generation = 13;
+  bool credential_issued = 14;
+  string credential_operation_id = 15;
 }
 
 // Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.

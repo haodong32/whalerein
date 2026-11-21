@@ -205,11 +205,18 @@ directly with a temporary data directory and an isolated Keychain service.
 
 ### Storage
 
-- App data: `Application Support/WhaleRein` (created with complete file
-  protection), Core state under `core/`, non-secret preferences in
-  `preferences.json`.
-- Secrets use `KeychainSecretStore` with service `com.whalerein.ios.secrets`
-  (staging `com.whalerein.ios.staging.secrets`) and
+- Authoritative configuration: `Application Support/WhaleRein/client/app.toml`
+  with `[app] active_instance`/`reasoning_visible` and typed
+  `[instances.<id>]` tables. It is created only when absent and contains Cloud
+  production and Standalone; legacy root `preferences.json`/`core/` are never
+  read, migrated or deleted.
+- Per-instance state: materialized Core config at
+  `client/instances/<id>/instance.toml`, Core data at
+  `client/instances/<id>/data`, imported CA at
+  `client/instances/<id>/ca.pem`, and last-selection UI state beside them.
+- Secrets use `KeychainSecretStore` with per-instance service
+  `com.whalerein.ios.secrets.<instanceId>` (staging
+  `com.whalerein.ios.staging.secrets.<instanceId>`) and
   `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. No secrets are written to
   UserDefaults or logs. Integration tests use a disposable service name per case.
 - Drafts and cached history are owned by Core, scoped to profile, Host and
@@ -217,10 +224,11 @@ directly with a temporary data directory and an isolated Keychain service.
 
 ### Screens
 
-1. Invitation: `onOpenURL` for `whalerein://pair?...`, paste field, localized
-   validation, explicit Host fingerprint prompt with confirm/decline, expiry and
-   lost-result copy. The unpaired launch state; pairing success goes straight to
-   the conversation.
+1. Invitation: service selector for Cloud production, Standalone and (Debug
+   only) Staging with explicit switch confirmation, `onOpenURL` for
+   `whalerein://pair?...`, paste field, localized validation, explicit Host
+   fingerprint prompt with confirm/decline, expiry and lost-result copy. The
+   unpaired launch state; pairing success goes straight to the conversation.
 2. Conversation root: after pairing, launch restores the last-opened session
    (`lastHostId` / `lastSessionId` / title) instead of showing a Host list. If
    the remembered session is gone it opens the most recent session of the
@@ -252,10 +260,13 @@ directly with a temporary data directory and an isolated Keychain service.
    preview, explicit Cancel/Share confirmation, system share sheet with the
    exported file only after confirmation. Reachable in one tap from the
    conversation toolbar (`conversation.diagnostics`).
-6. Settings: Core revision, language note (follows system), forget/revoke with
-   confirmation, staging and fixture indicators, data location. Reachable in
-   one tap from the conversation toolbar (`conversation.settings`). Forget and
-   revoke return to the invitation flow and clear switcher state.
+6. Settings: Core revision, language note (follows system), data location,
+   staging/fixture indicators, service selector with explicit switch
+   confirmation, Standalone private-CA import/removal with validation errors,
+   forget/revoke with confirmation. Reachable in one tap from the conversation
+   toolbar (`conversation.settings`). Forget and revoke return to the invitation
+   flow and clear switcher state. The App-section reasoning flag is readable and
+   writable on the model but has no reasoning UI in this change.
 
 ### Fixtures and determinism
 
@@ -313,7 +324,7 @@ point.
 
 ## Tests
 
-- Unit (`WhaleReinTests`, Swift Testing): 201 tests covering invitation parsing,
+- Unit (`WhaleReinTests`, Swift Testing): 234 tests covering invitation parsing,
   pairing state machine and queued deep links, conversation-first launch
   restoration, background/foreground suspend and resume, preference migration and
   corrupt-payload recovery, remote revocation and re-pair routes, switcher
@@ -397,10 +408,10 @@ point.
   refresh at the deadline; a Host that still reports the request pending wins
   over a fast local clock. Offline, the locally expired request is shown as
   expired and decisions stay disabled.
-- Preferences are not authoritative for pairing. A corrupt, future-schema or
-  partially migrated `preferences.json` falls back to onboarding; if Core still
-  has usable Hosts the app adopts the Core pairing instead of stranding the
-  user.
+- The authoritative app document is not authoritative for pairing state; Core
+  still owns the device identity. Legacy root `preferences.json`/`core/` are
+  deliberately ignored by the new layout, so an upgrade enters fresh Cloud
+  onboarding without reading or deleting them.
 - A locked Keychain cannot be reproduced on the Simulator (its Keychain is
   always unlocked). The locked/unavailable classification, the recoverable
   service wrapper and the UI state are covered by injected failures; a real

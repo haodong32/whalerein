@@ -51,6 +51,11 @@ test('when log levels or silent mode are set, the logger filters events and clea
   nan.info('nan', { ms: Number.NaN, count: Number.POSITIVE_INFINITY })
   assert.equal(records[0].ms, 0)
   assert.equal(records[0].count, 0)
+  records.length = 0
+  nan.info('unsupported-scalars', { status: { nested: true }, code: null, kind: undefined })
+  assert.equal(records[0].status, undefined)
+  assert.equal(records[0].code, undefined)
+  assert.equal(records[0].kind, undefined)
 })
 
 test('when local log salts differ, operation trace IDs remain comparable', () => {
@@ -65,4 +70,23 @@ test('when local log salts differ, operation trace IDs remain comparable', () =>
   const rejected = []
   createLogger({ salt: '00'.repeat(16), sink: (record) => rejected.push(record) }).info('invalid', { trace: 'bad\ntrace' })
   assert.equal(rejected[0].trace_id, undefined)
+})
+
+test('the default sink writes one JSON line and uses the default clock', () => {
+  const chunks = []
+  const original = process.stderr.write
+  process.stderr.write = (chunk) => {
+    chunks.push(String(chunk))
+    return true
+  }
+  try {
+    createLogger({ salt: '00'.repeat(16) }).info('default-sink', { status: 'ok' })
+  } finally {
+    process.stderr.write = original
+  }
+  assert.equal(chunks.length, 1)
+  const record = JSON.parse(chunks[0])
+  assert.equal(record.event, 'default-sink')
+  assert.equal(record.status, 'ok')
+  assert.equal(typeof record.time, 'number')
 })

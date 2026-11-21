@@ -533,3 +533,59 @@ test('a rejected subscription or a failed HostReady closes the link and schedule
   assert.equal(failedReady.access.connected, false)
   await failedReady.access.stop()
 })
+
+test('a definitive TLS trust failure stops retrying and reports the actionable code', async () => {
+  const attempts = []
+  const connect = () => {
+    attempts.push(1)
+    const client = new EventEmitter()
+    client.end = (force, opts, callback) => {
+      const done = typeof force === 'function' ? force : callback
+      queueMicrotask(() => { client.emit('close'); done?.() })
+      return client
+    }
+    queueMicrotask(() => client.emit('error', Object.assign(new Error('private detail'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })))
+    return client
+  }
+  const access = new MqttAccess({
+    url: 'mqtts://access.example:443', hostId: 'host-1', token: 'secret-token', connect,
+    reconnectMinMs: 60_000, reconnectMaxMs: 60_000,
+  })
+  let failure = ''
+  access.start({ onFailure: (code) => { failure = code } })
+  await assert.rejects(access.waitForConnected(120), (error) => error.code === 'tls_trust')
+  assert.equal(access.describe().lastErrorCode, 'tls_trust')
+  assert.equal(failure, 'tls_trust')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(attempts.length, 1, 'a TLS trust failure does not keep retrying')
+  await access.stop()
+})
+
+test('a definitive broker credential refusal stops retrying with unauthorized', async () => {
+  const attempts = []
+  const connect = () => {
+    attempts.push(1)
+    const client = new EventEmitter()
+    client.end = (force, opts, callback) => {
+      const done = typeof force === 'function' ? force : callback
+      queueMicrotask(() => { client.emit('close'); done?.() })
+      return client
+    }
+    queueMicrotask(() => {
+      client.emit('disconnect', { reasonCode: 5 })
+      client.emit('close')
+    })
+    return client
+  }
+  const access = new MqttAccess({
+    url: 'mqtts://access.example:443', hostId: 'host-1', token: 'refused-token', connect,
+    reconnectMinMs: 60_000, reconnectMaxMs: 60_000,
+  })
+  access.start()
+  await assert.rejects(access.waitForConnected(150), (error) => error.code === 'unauthorized')
+  assert.equal(access.describe().lastErrorCode, 'unauthorized')
+  assert.equal(access.describe().lastErrorCode, 'unauthorized')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(attempts.length, 1, 'a refused credential does not retry forever')
+  await access.stop()
+})

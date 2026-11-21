@@ -79,6 +79,7 @@ test('when settings reads remote status, it returns a read-only snapshot compati
     { method: 'retry', invocation: { kind: 'direct' } },
     { method: 'disconnect', invocation: { kind: 'direct' } },
     { method: 'reconnect', invocation: { kind: 'direct' } },
+    { method: 'recoverCredential', invocation: { kind: 'direct' } },
     { method: 'removeComputer', invocation: { kind: 'direct' } },
     { method: 'invite', invocation: { kind: 'direct' } },
     { method: 'revoke', invocation: { kind: 'direct' } },
@@ -325,7 +326,7 @@ test('invalid or hostile manager values fail closed without leaking them', () =>
   })
   assert.deepEqual(details, {
     state: 'connected', environment: 'production', label: null, hostName: null, hostId: 'private-host',
-    accessOrigin: 'https://access.example/', region: 'eu-west', revision: 4,
+    accessOrigin: 'https://access.example/', region: 'eu-west', revision: 4, removalState: null,
     lastErrorCode: 'internal', protocolVersion: null,
   })
   assert.equal(sanitizeManagerDetails(null), null)
@@ -344,7 +345,8 @@ test('managed settings exposes sanitized manager details and refuses missing or 
   assert.equal(service.snapshot().connected, true)
   assert.deepEqual(service.details(), {
     state: 'connected', environment: null, label: null, hostName: null, hostId: 'host-test-1',
-    accessOrigin: null, region: 'eu-west', revision: null, lastErrorCode: null, protocolVersion: null,
+    accessOrigin: null, region: 'eu-west', revision: null, removalState: null,
+    lastErrorCode: null, protocolVersion: null,
   })
   await ctx.fiber.dispose()
   const failingCtx = new Context()
@@ -439,4 +441,122 @@ test('unavailable managers retain a valid configured service without exposing in
   const snapshot = settingsStatus({ managed: true, config: { service: { private: 'must-not-be-exposed' } } })
   assert.equal(snapshot.service, 'whalerein_cloud')
   assert.equal(JSON.stringify(snapshot).includes('must-not-be-exposed'), false)
+})
+
+
+test('settings projects the runtime action and never infers connect from a pending operation', async () => {
+  const { sanitizeManagerAction } = await import('../src/settings.js')
+  const raw = {
+    state: 'action_required',
+    pendingOperation: true,
+    action: { kind: 'connect', url: 'https://app.example/approve?locale=en' },
+  }
+  assert.deepEqual(sanitizeManagerSnapshot(raw).action, {
+    kind: 'connect', url: 'https://app.example/approve?locale=en',
+  })
+  // A legacy pending flag alone does not manufacture an action, and an action
+  // that requires input is not disabled by its own persisted operation.
+  const legacy = sanitizeManagerSnapshot({ state: 'action_required', pendingOperation: true })
+  assert.equal(legacy.action, null)
+  assert.equal(legacy.pendingOperation, true)
+  assert.equal(sanitizeManagerAction({ kind: 'connect', url: 'javascript:alert(1)' }).url, undefined)
+  assert.equal(sanitizeManagerAction({ kind: 'private-kind', url: 'https://app.example/x' }), null)
+  // A safe kind survives, but a credential-bearing URL never crosses the boundary.
+  assert.deepEqual(sanitizeManagerAction({ kind: 'connect', url: 'https://user:pass@app.example/x' }), { kind: 'connect' })
+  assert.equal(sanitizeManagerAction(null), null)
+})
+
+test('settings keeps a verified removal confirmation link in the projected snapshot', async () => {
+  for (const raw of [
+    { state: 'removing', removalUrl: 'https://app.example/hosts/host-1?removal=1' },
+    { state: 'removing', removal: { url: 'https://app.example/hosts/host-1?removal=1' } },
+    { state: 'removing', action: { kind: 'remove', url: 'https://app.example/hosts/host-1?removal=1' } },
+  ]) {
+    const snapshot = sanitizeManagerSnapshot(raw)
+    assert.equal(snapshot.removalUrl, 'https://app.example/hosts/host-1?removal=1')
+  }
+  assert.equal(sanitizeManagerSnapshot({ state: 'removing', removalUrl: 'javascript:alert(1)' }).removalUrl, '')
+  assert.equal(sanitizeManagerSnapshot({ state: 'removing', action: { kind: 'remove', url: 'https://user:pass@app.example/x' } }).removalUrl, '')
+})
+
+test('settings load, refresh and details reads perform zero connection mutations', async () => {
+  const calls = []
+  const manager = {
+    snapshot: () => ({ state: 'connected', connected: true, action: { kind: 'connect' } }),
+    details: () => { calls.push('details'); return { state: 'connected', hostId: 'host-1' } },
+    startConnect: () => { calls.push('startConnect'); return {} },
+    disconnect: () => { calls.push('disconnect'); return {} },
+    reconnect: () => { calls.push('reconnect'); return {} },
+    recoverCredential: () => { calls.push('recoverCredential'); return {} },
+    remove: () => { calls.push('remove'); return {} },
+    reconcileRemoval: () => { calls.push('reconcileRemoval'); return {} },
+  }
+  const ctx = new Context()
+  try {
+    const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
+    assert.deepEqual(service.snapshot().action, { kind: 'connect' })
+    assert.deepEqual(service.snapshot(), settingsStatus({ managed: true, manager }))
+    assert.deepEqual(calls, [])
+    assert.equal(service.details().hostId, 'host-1')
+    assert.deepEqual(calls, ['details'])
+    assert.deepEqual(service.snapshot().action, { kind: 'connect' })
+    assert.deepEqual(calls, ['details'])
+  } finally { await ctx.fiber.dispose() }
+})
+
+test('a verified removal is reconciled in the background on refresh without duplicate polls', async () => {
+
+  const calls = []
+  let resolve
+  const manager = {
+    snapshot: () => ({ state: 'removing', removalUrl: 'https://app.example/hosts/host-1?removal=1' }),
+    reconcileRemoval: () => {
+      calls.push('reconcile')
+      return new Promise((done) => { resolve = done })
+    },
+  }
+  settingsStatus({ managed: true, manager })
+  settingsStatus({ managed: true, manager })
+  await new Promise((done) => setImmediate(done))
+  assert.equal(calls.length, 1)
+  resolve()
+  await new Promise((done) => setImmediate(done))
+  settingsStatus({ managed: true, manager })
+  await new Promise((done) => setImmediate(done))
+  assert.equal(calls.length, 2)
+  assert.equal(sanitizeManagerSnapshot(manager.snapshot()).removalUrl, 'https://app.example/hosts/host-1?removal=1')
+})
+
+test('credential recovery is exposed only when the runtime offers the scoped method', async () => {
+  const ctx = new Context()
+  const calls = []
+  try {
+    const manager = {
+      snapshot: () => ({ state: 'action_required', action: { kind: 'recover-credential' } }),
+      recoverCredential: async (...args) => {
+        calls.push(args)
+        return { approvalUrl: 'https://app.example/hosts/recover?intent=1', credential: 'must-not-return' }
+      },
+    }
+    const service = new WhaleReinSettingsService(ctx, { managed: true, manager })
+    const result = await service.recoverCredential()
+    assert.deepEqual(calls, [[]], 'recovery forwards no browser-supplied authority')
+    assert.equal(result.action.url, 'https://app.example/hosts/recover?intent=1')
+    assert.equal(JSON.stringify(result).includes('must-not-return'), false)
+    const missingCtx = new Context()
+    const standaloneCtx = new Context()
+    try {
+      const missing = new WhaleReinSettingsService(missingCtx, { managed: true, manager: { snapshot: () => ({ state: 'connected' }) } })
+      await assert.rejects(missing.recoverCredential(), (error) => error instanceof RemoteError
+        && error.code === 'whalerein/unavailable')
+      const standalone = new WhaleReinSettingsService(standaloneCtx, { started: false })
+      await assert.rejects(standalone.recoverCredential(), (error) => error instanceof RemoteError
+        && error.code === 'whalerein/unsupported_capability')
+    } finally {
+      await missingCtx.fiber.dispose()
+      await standaloneCtx.fiber.dispose()
+    }
+  } finally {
+    await ctx.fiber.dispose()
+  }
 })

@@ -102,6 +102,9 @@ struct ProtocolCompatibilityTests {
         #expect(LiveSessionService.map(code: "protocol_version_incompatible") == .protocolVersionIncompatible)
         #expect(LiveSessionService.map(code: "unsupported_capability") == .unsupportedCapability)
         #expect(LiveSessionService.map(code: "unavailable") == .unavailable)
+        // A rejected request shape is not a pairing failure.
+        #expect(LiveSessionService.map(code: "invalid_input") == .invalidInput)
+        #expect(L10nKey.errorKey(for: .invalidInput) == .errorInvalidInput)
         #expect(L10nKey.errorKey(for: .protocolVersionIncompatible) == .errorProtocolIncompatible)
         #expect(L10nKey.errorKey(for: .unsupportedCapability) == .errorUnsupportedCapability)
         #expect(L10nKey.errorKey(for: .protocolVersionIncompatible) != .errorUnavailable)

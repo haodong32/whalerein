@@ -9,13 +9,15 @@ import Foundation
 @MainActor
 final class UnavailableSessionService: SessionService {
     let connectionStatus: ConnectionStatus = .offline
+    let instanceId: String
     let coreRevision = "unavailable"
     let appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
 
     private let code: AppErrorCode
 
-    init(code: AppErrorCode = .integrationUnavailable) {
+    init(code: AppErrorCode = .integrationUnavailable, instanceId: String = "unavailable") {
         self.code = code
+        self.instanceId = instanceId
     }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {
@@ -39,6 +41,17 @@ final class UnavailableSessionService: SessionService {
     func stopWatch() {}
     func send(hostId: String, sessionId: String, text: String, delivery: DeliveryChoice) async throws -> CommandReceipt { try fail() }
     func stop(hostId: String, sessionId: String) async throws -> CommandReceipt { try fail() }
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot { try fail() }
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation { try fail() }
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String { try fail() }
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? { try fail() }
+    func cancelWait(waitId: String) async throws -> Bool { try fail() }
     func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage { try fail() }
     func question(hostId: String, sessionId: String, batchId: String) async throws -> QuestionBatch { try fail() }
     func answerQuestion(
@@ -52,7 +65,13 @@ final class UnavailableSessionService: SessionService {
         sessionId: String,
         commandId: String
     ) async throws -> Bool { try fail() }
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt { try fail() }
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] { try fail() }
+    func approval(hostId: String, approvalId: String) async throws -> Approval { try fail() }
     func resolveApproval(
         hostId: String,
         sessionId: String,

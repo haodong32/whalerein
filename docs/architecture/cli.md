@@ -1,8 +1,10 @@
 # WhaleRein CLI Architecture
 
-The CLI selects a configuration path, opens Core with the platform SecretStore,
-and formats typed outcomes. Core owns TOML validation, endpoint selection,
-authority binding, credential storage and the client instance lifecycle.
+The CLI selects a configuration path and SecretStore, then opens Core and
+formats typed outcomes. The system keyring is the default. On Unix
+`--secrets-dir` selects owner-only local files for that invocation. Core owns
+TOML validation, endpoint selection, authority binding, credential storage and
+the client instance lifecycle.
 
 | File | Responsibility |
 | --- | --- |

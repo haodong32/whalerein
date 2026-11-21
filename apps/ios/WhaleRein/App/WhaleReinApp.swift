@@ -1,5 +1,10 @@
-// App entry point. Selects the fixture or live service, prepares the app data
-// directory, honors launch arguments, and injects the composition root.
+// App entry point. Bootstraps the authoritative client document, builds the
+// service for the committed instance, honors launch arguments, and injects the
+// composition root.
+//
+// Legacy `preferences.json`/`core/` at the old app root are never read,
+// migrated or deleted. New per-instance state lives under
+// `Application Support/WhaleRein/client/instances/<id>/`.
 
 import SwiftUI
 
@@ -19,14 +24,6 @@ struct WhaleReinApp: App {
                 ?? AppStorageLocations.applicationSupportDirectory(fileManager: fileManager)
         }
 
-        let preferences = PreferencesStore(directory: dataDirectory)
-        if options.keychainLocked || options.seedPairedFixture {
-            preferences.update {
-                $0.paired = true
-                if $0.lastHostId == nil { $0.lastHostId = LaunchOptions.fixtureInvitationHostId }
-                if $0.lastSessionId == nil { $0.lastSessionId = "s-001" }
-            }
-        }
         let draftStore: any DraftStore
         if let fileStore = try? FileDraftStore(dataDirectory: dataDirectory, fileManager: fileManager) {
             draftStore = fileStore
@@ -34,84 +31,176 @@ struct WhaleReinApp: App {
             draftStore = InMemoryDraftStore()
         }
 
-        let service: any SessionService
-        let keychainService = options.staging
-            ? AppStorageLocations.stagingKeychainService
-            : AppStorageLocations.keychainService
-
-        if options.keychainLocked {
-            service = RecoverableSessionService(failureCode: .keychainUnavailable) {
-                throw SessionServiceError(.keychainUnavailable)
+        switch options.serviceMode {
+        case .fixtures:
+            let configuration = AppComposition.makeFixtureConfigurationStore(
+                dataDirectory: dataDirectory
+            )
+            let active = configuration.activeInstance
+            let preferences = Self.instancePreferences(
+                dataDirectory: dataDirectory,
+                instanceId: active.id,
+                fallback: "fixtures"
+            )
+            if options.seedPairedFixture {
+                preferences.update {
+                    $0.paired = true
+                    if $0.lastHostId == nil { $0.lastHostId = LaunchOptions.fixtureInvitationHostId }
+                    if $0.lastSessionId == nil { $0.lastSessionId = "s-001" }
+                }
             }
-        } else {
-            switch options.serviceMode {
-            case .fixtures:
-                service = FixtureSessionService(
+            let service = AppComposition.makeFixtureService(
+                for: active,
+                options: options,
+                draftStore: draftStore,
+                initiallyPaired: preferences.value.paired
+            )
+            _model = State(
+                initialValue: AppModel(
+                    service: service,
+                    preferences: preferences,
+                    dataDirectory: active.dataDirectory,
                     options: options,
-                    draftStore: draftStore,
-                    initiallyPaired: preferences.value.paired
-                )
-            case .live:
-                let probe = KeychainSecretStore(service: keychainService)
-                if probe.availability() == .available {
-                    do {
-                        service = try LiveSessionService(
-                            dataDirectory: dataDirectory,
-                            secretStore: probe,
-                            appVersion: Self.appVersion
+                    configuration: configuration,
+                    activeInstance: active,
+                    serviceFactory: { instance in
+                        AppComposition.makeFixtureService(
+                            for: instance,
+                            options: options,
+                            draftStore: draftStore,
+                            initiallyPaired: false
                         )
-                    } catch {
-                        // A transient Core/Keychain failure stays recoverable.
-                        service = Self.makeRecoverableLiveService(
+                    },
+                    preferencesFactory: { instance in
+                        Self.instancePreferences(
                             dataDirectory: dataDirectory,
-                            keychainService: keychainService
+                            instanceId: instance.id,
+                            fallback: "fixtures"
                         )
                     }
-                } else {
-                    // Before the first unlock after a reboot the Keychain is
-                    // locked. Show an actionable state and retry only on an
-                    // explicit user action or foreground transition.
-                    service = Self.makeRecoverableLiveService(
-                        dataDirectory: dataDirectory,
-                        keychainService: keychainService
-                    )
-                }
-            case .unavailable:
-                service = UnavailableSessionService()
-            }
-        }
-
-        _model = State(
-            initialValue: AppModel(
-                service: service,
-                preferences: preferences,
-                dataDirectory: dataDirectory,
-                options: options
+                )
             )
-        )
-    }
-
-    private static func makeRecoverableLiveService(
-        dataDirectory: URL,
-        keychainService: String
-    ) -> RecoverableSessionService {
-        RecoverableSessionService(failureCode: .keychainUnavailable) {
-            let retryStore = KeychainSecretStore(service: keychainService)
-            guard retryStore.availability() == .available else {
-                throw SessionServiceError(.keychainUnavailable)
-            }
+        case .live:
+            let configuration: AppConfigurationStore
             do {
-                return try LiveSessionService(
+                configuration = try AppComposition.makeConfigurationStore(
+                    dataDirectory: dataDirectory
+                )
+            } catch {
+                let unavailable = UnavailableSessionService(
+                    code: .configuration,
+                    instanceId: "unavailable"
+                )
+                let preferences = Self.instancePreferences(
                     dataDirectory: dataDirectory,
-                    secretStore: retryStore,
+                    instanceId: "unavailable",
+                    fallback: "unavailable"
+                )
+                _model = State(
+                    initialValue: AppModel(
+                        service: unavailable,
+                        preferences: preferences,
+                        dataDirectory: dataDirectory,
+                        options: options
+                    )
+                )
+                return
+            }
+            let active = configuration.activeInstance
+            let preferences = Self.instancePreferences(
+                dataDirectory: dataDirectory,
+                instanceId: active.id,
+                fallback: active.id
+            )
+            let service: any SessionService
+            if options.keychainLocked {
+                service = AppComposition.makeRecoverableLiveService(
+                    for: active,
+                    options: options,
                     appVersion: Self.appVersion
                 )
-            } catch let error as SessionServiceError {
-                throw error
-            } catch {
-                throw SessionServiceError(.keychainUnavailable)
+            } else {
+                do {
+                    service = try AppComposition.makeLiveService(
+                        for: active,
+                        options: options,
+                        appVersion: Self.appVersion
+                    )
+                } catch {
+                    // A transient Core/Keychain failure stays recoverable and
+                    // retries only on an explicit action or foreground return.
+                    service = AppComposition.makeRecoverableLiveService(
+                        for: active,
+                        options: options,
+                        appVersion: Self.appVersion
+                    )
+                }
             }
+            _model = State(
+                initialValue: AppModel(
+                    service: service,
+                    preferences: preferences,
+                    dataDirectory: active.dataDirectory,
+                    options: options,
+                    configuration: configuration,
+                    activeInstance: active,
+                    serviceFactory: { instance in
+                        try AppComposition.makeLiveService(
+                            for: instance,
+                            options: options,
+                            appVersion: Self.appVersion
+                        )
+                    },
+                    preferencesFactory: { instance in
+                        Self.instancePreferences(
+                            dataDirectory: dataDirectory,
+                            instanceId: instance.id,
+                            fallback: active.id
+                        )
+                    }
+                )
+            )
+        case .unavailable:
+            let preferences = Self.instancePreferences(
+                dataDirectory: dataDirectory,
+                instanceId: "unavailable",
+                fallback: "unavailable"
+            )
+            _model = State(
+                initialValue: AppModel(
+                    service: UnavailableSessionService(),
+                    preferences: preferences,
+                    dataDirectory: dataDirectory,
+                    options: options
+                )
+            )
         }
+    }
+
+    /// Per-instance non-secret UI state (last Host/session). The file lives
+    /// beside the instance's materialized configuration, never at the legacy
+    /// app root.
+    private static func instancePreferences(
+        dataDirectory: URL,
+        instanceId: String,
+        fallback: String
+    ) -> PreferencesStore {
+        let id = instanceId.isEmpty ? fallback : instanceId
+        let directory = AppStorageLocations.instanceDirectory(
+            in: dataDirectory,
+            instanceId: id
+        )
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        #if os(iOS)
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: directory.path
+        )
+        #endif
+        return PreferencesStore(directory: directory)
     }
 
     private static var appVersion: String {

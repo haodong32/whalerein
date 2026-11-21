@@ -1,6 +1,6 @@
-// Composer send/stop behavior: idle Send starts work, running sends default to
-// Steer, Queue is honored, unsupported modes keep the draft, and uncertain
-// results reconcile exactly once.
+// Composer send/stop behavior: ordinary Send uses the native queue, explicit
+// Steer and start-if-idle are honored, unsupported modes keep the draft, and
+// uncertain results reconcile exactly once.
 
 import Foundation
 import Testing
@@ -9,7 +9,7 @@ import Testing
 @Suite("Conversation commands")
 @MainActor
 struct ConversationCommandTests {
-    @Test("idle send starts work, clears the persisted draft and defaults to Steer")
+    @Test("idle send starts work, clears the persisted draft and defaults to Queue")
     func idleSend() async throws {
         let service = try await makePairedFixture()
         let model = await makeStartedConversation(service: service)
@@ -23,7 +23,7 @@ struct ConversationCommandTests {
         #expect(model.messages.contains { $0.role == .user && $0.plainText == "ship the release" })
         #expect(model.draft.isEmpty)
         #expect(model.isRunning)
-        #expect(model.delivery == .steer)
+        #expect(model.delivery == .queue)
         let persisted = try await service.loadDraft(hostId: "studio-mac", sessionId: "s-001")
         #expect(persisted == nil)
     }
@@ -34,7 +34,7 @@ struct ConversationCommandTests {
         let model = await makeStartedConversation(service: service)
         model.draft = "first"
         await model.send()
-        #expect(model.delivery == .steer)
+        #expect(model.delivery == .queue)
 
         model.draft = "second"
         model.selectDelivery(.steer)
@@ -51,10 +51,12 @@ struct ConversationCommandTests {
     @Test("an unsupported mode keeps the draft and reports a localized error")
     func unsupportedModeKeepsDraft() async throws {
         let service = StubSessionService()
-        service.capabilitiesHandler = { _, _ in SessionCapabilities.idle }
+        service.capabilitiesHandler = { _, _ in
+            SessionCapabilities(running: false, supportsSteer: false, supportsQueue: false)
+        }
         let model = await makeStartedConversation(service: service)
         model.draft = "keep me"
-        model.delivery = .steer
+        model.delivery = .queue
 
         await model.send()
 

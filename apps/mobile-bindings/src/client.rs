@@ -6,6 +6,7 @@
 //! and watching publish ordered events into a bounded queue consumed by
 //! `pollEvents`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
@@ -18,22 +19,34 @@ use whalerein_core::api::{
     Cancellation, ClientConfig, ClientService, Core, Environment, ObservationInterests,
     PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload, SessionKey,
 };
+use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
+use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
 use whalerein_core::CoreError;
 
 use crate::error::{MobileError, CODE_CANCELLED};
+use crate::queue::{
+    action_is_advertised, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
+};
 use crate::secret::{MemorySecretStore, SecretStore, SecretStoreAdapter};
 use crate::types::{
-    bounded_question_view, convert_update, message_view, question_batch_view, question_guard,
-    question_page_view, questions_view, ApprovalView, CommandView, ConversationEvent,
-    DeliveryChoice, DiagnosticsReportView, HostSummary, MessageView, PairingPromptView,
-    QuestionAnswerView, QuestionBatchView, QuestionPageView, SessionCapabilitiesView,
+    bounded_question_view, convert_update, message_view, operation_status_name,
+    question_batch_view, question_guard, question_page_view, questions_view, ApprovalView,
+    AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
+    AttachmentTransferView, CloudAccountSessionView, CloudAccountStatusView, CloudAccountView,
+    CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
+    ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostSummary,
+    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
+    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SessionCapabilitiesView,
     SessionSummaryView,
 };
+use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
 /// Request/response budget for listing and local operations.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Request/response budget for operations Core may wait on until its TTL.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for one follow-up/content-read budget supplied by the caller.
+const MAX_FOLLOW_TIMEOUT_MS: u64 = 55_000;
 /// How long `pairingStart` waits for Core to produce a prompt.
 const PAIRING_PROMPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a pending pairing prompt waits for a decision before rejecting.
@@ -50,6 +63,11 @@ const MAX_INVITATION_BYTES: usize = 16 * 1024;
 const MAX_FINGERPRINT_BYTES: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_APP_VERSION_BYTES: usize = 256;
+const MAX_CALLBACK_BYTES: usize = 8192;
+/// Upper bound for one caller-supplied attachment result wait.
+const MAX_ATTACHMENT_WAIT_MS: u64 = 30_000;
+/// Upper bound for concurrent app-started attachment transfers.
+const MAX_ATTACHMENT_TRANSFERS: usize = 32;
 
 /// Build-time Core package version, recorded by `build.rs`.
 pub(crate) const CORE_VERSION: &str = env!("WHALERIN_CORE_VERSION");
@@ -303,6 +321,131 @@ impl EventQueue {
     }
 }
 
+/// One terminal transfer outcome. The shape keeps the stable error code and
+/// message separate from the verified download so Swift never inspects Core
+/// text to tell a cancellation from an integrity failure.
+struct AttachmentTerminal {
+    state: &'static str,
+    download: Option<AttachmentDownloadView>,
+    error: Option<MobileError>,
+}
+
+/// Shared state for one app-started verified attachment download.
+struct AttachmentTransferState {
+    id: String,
+    progress: Mutex<AttachmentProgressView>,
+    terminal: Mutex<Option<AttachmentTerminal>>,
+    notify: Condvar,
+    cancellation: Cancellation,
+}
+
+impl AttachmentTransferState {
+    fn new(id: String) -> Self {
+        Self {
+            id,
+            progress: Mutex::new(AttachmentProgressView {
+                received: 0,
+                total: 0,
+            }),
+            terminal: Mutex::new(None),
+            notify: Condvar::new(),
+            cancellation: Cancellation::new(),
+        }
+    }
+
+    fn set_progress(&self, progress: DownloadProgress) {
+        if let Ok(mut current) = self.progress.lock() {
+            *current = progress.into();
+        }
+        self.notify.notify_all();
+    }
+
+    fn finish(&self, terminal: AttachmentTerminal) {
+        if let Ok(mut current) = self.terminal.lock() {
+            *current = Some(terminal);
+        }
+        self.notify.notify_all();
+    }
+
+    fn view(&self, terminal: Option<AttachmentTerminal>) -> AttachmentTransferView {
+        let progress = self
+            .progress
+            .lock()
+            .map(|value| *value)
+            .unwrap_or(AttachmentProgressView {
+                received: 0,
+                total: 0,
+            });
+        match terminal {
+            Some(terminal) => AttachmentTransferView {
+                download_id: self.id.clone(),
+                state: terminal.state.into(),
+                progress,
+                download: terminal.download,
+                error_code: terminal.error.as_ref().map(|error| error.code().to_owned()),
+                error_message: terminal
+                    .error
+                    .as_ref()
+                    .map(|error| error.message().to_owned()),
+            },
+            None => AttachmentTransferView {
+                download_id: self.id.clone(),
+                state: "running".into(),
+                progress,
+                download: None,
+                error_code: None,
+                error_message: None,
+            },
+        }
+    }
+}
+
+/// Bounded registry of app-started attachment transfers.
+#[derive(Default)]
+struct AttachmentTransfers {
+    next: AtomicU64,
+    transfers: Mutex<HashMap<String, Arc<AttachmentTransferState>>>,
+}
+
+impl AttachmentTransfers {
+    fn insert(&self, state: Arc<AttachmentTransferState>) -> Result<(), MobileError> {
+        let mut transfers = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if transfers.len() >= MAX_ATTACHMENT_TRANSFERS {
+            return Err(MobileError::conflict());
+        }
+        transfers.insert(state.id.clone(), state);
+        Ok(())
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<AttachmentTransferState>> {
+        self.transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    fn remove(&self, id: &str) {
+        self.transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+    }
+
+    fn cancel_all(&self) {
+        let transfers = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for transfer in transfers.values() {
+            transfer.cancellation.cancel();
+        }
+    }
+}
+
 /// Owns the multi-thread runtime on a dedicated thread.
 ///
 /// FFI calls use `Handle::block_on`; the thread that built the runtime keeps it
@@ -412,6 +555,8 @@ pub struct MobileCore {
     pairing_generation: Arc<AtomicU64>,
     watch: Arc<Mutex<WatchState>>,
     watch_generation: Arc<AtomicU64>,
+    wait_attempts: WaitAttempts,
+    attachment_transfers: Arc<AttachmentTransfers>,
 }
 
 #[uniffi::export]
@@ -446,6 +591,8 @@ impl MobileCore {
             pairing_generation: Arc::new(AtomicU64::new(0)),
             watch: Arc::new(Mutex::new(WatchState::default())),
             watch_generation: Arc::new(AtomicU64::new(0)),
+            wait_attempts: WaitAttempts::default(),
+            attachment_transfers: Arc::new(AttachmentTransfers::default()),
         }))
     }
 
@@ -696,6 +843,118 @@ impl MobileCore {
     /// `offline`, `revoked` or `failed`.
     pub fn connection_state(&self, host_id: String) -> String {
         self.core.get_connection_state(&host_id).as_str().to_owned()
+    }
+
+    // -----------------------------------------------------------------
+    // Session management
+    // -----------------------------------------------------------------
+
+    /// Whether the Host advertises native session creation.
+    ///
+    /// A peer that predates the capability reports `false`; the caller must
+    /// hide or disable creation instead of submitting a lifecycle command.
+    pub fn session_create_supported(&self, host_id: String) -> Result<bool, MobileError> {
+        validate_id(&host_id)?;
+        self.run(QUERY_TIMEOUT, self.core.session_create_supported(&host_id))
+    }
+
+    /// Create one Host session. Every optional input is forwarded unchanged;
+    /// Core and the Host choose defaults, validate combinations and report the
+    /// actual returned session identity.
+    pub fn create_session(
+        &self,
+        host_id: String,
+        input: crate::session_management::SessionCreateInputView,
+    ) -> Result<crate::session_management::SessionCreateResultView, MobileError> {
+        validate_id(&host_id)?;
+        let input = crate::session_management::create_input(input)?;
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::create_session(&self.core, &host_id, input),
+        )
+    }
+
+    /// Read one Host-qualified session summary.
+    pub fn session_details(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::SessionDetailView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::session_details(&self.core, &host_id, &key),
+        )
+    }
+
+    /// Fork the latest complete native turn and resolve the child directory.
+    pub fn fork_session_outcome(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::ForkResultView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::fork_session_outcome(&self.core, &key),
+        )
+    }
+
+    /// Read the current source model catalog. Offline values are never cached.
+    pub fn model_catalog(
+        &self,
+        host_id: String,
+    ) -> Result<crate::session_management::ModelCatalogView, MobileError> {
+        validate_id(&host_id)?;
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::model_catalog(&self.core, &host_id),
+        )
+    }
+
+    /// Read the passive session model observation without activating the
+    /// session.
+    pub fn read_session_model(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<crate::session_management::SessionModelView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            QUERY_TIMEOUT,
+            crate::session_management::read_session_model(&self.core, &key),
+        )
+    }
+
+    /// Submit exactly one native model selection. No prompt is sent.
+    pub fn select_session_model(
+        &self,
+        host_id: String,
+        session_id: String,
+        provider: String,
+        model: String,
+        effort: Option<String>,
+    ) -> Result<crate::session_management::ModelSelectionResultView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&provider)?;
+        validate_id(&model)?;
+        if let Some(effort) = &effort {
+            validate_id(effort)?;
+        }
+        let key = crate::session_management::key(&host_id, &session_id);
+        self.run(
+            COMMAND_TIMEOUT,
+            crate::session_management::select_session_model(
+                &self.core, &key, &provider, &model, effort,
+            ),
+        )
     }
 
     // -----------------------------------------------------------------
@@ -980,9 +1239,381 @@ impl MobileCore {
         })
     }
 
+    /// List locally retained send operations. Local state only: this never
+    /// performs a status lookup and never sends or resumes pairing.
+    pub fn list_send_operations(&self) -> Result<Vec<RetainedOperationView>, MobileError> {
+        let operations = self.core.send_operations().map_err(MobileError::from)?;
+        Ok(operations.iter().map(retained_send_view).collect())
+    }
+
+    /// Recover one retained send and optionally follow its exact reply.
+    ///
+    /// With `follow == false` this performs only the status lookup Core's send
+    /// recovery path needs, which is the automatic foreground/reconnect path.
+    /// With `follow == true` it reads the confirmed reply reference and its
+    /// canonical content within `timeout_ms`. A failed content read keeps the
+    /// confirmation and reports `read_error`; it never resubmits.
+    pub fn recover_send_with_content(
+        &self,
+        operation_id: String,
+        follow: bool,
+        timeout_ms: u64,
+    ) -> Result<RetainedOperationView, MobileError> {
+        validate_id(&operation_id)?;
+        if timeout_ms == 0 || timeout_ms > MAX_FOLLOW_TIMEOUT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let operation = self.run(
+            COMMAND_TIMEOUT,
+            self.core.recover_send_operation(&operation_id),
+        )?;
+        let mut view = retained_send_view(&operation);
+        if follow {
+            let follow_up = self.run(
+                COMMAND_TIMEOUT,
+                self.core.follow_send_operation_with_content(
+                    operation,
+                    Duration::from_millis(timeout_ms),
+                ),
+            )?;
+            view.read_error = follow_up.read_error_code().map(str::to_owned);
+            view.reply = Some(follow_up.reply.into());
+            view.content = follow_up.message.as_ref().map(message_view);
+        }
+        Ok(view)
+    }
+
+    /// List retained non-send operations: durable control identities and any
+    /// retained Standalone pairing FINISH. Local state only.
+    pub fn list_pending_commands(&self) -> Result<Vec<RetainedOperationView>, MobileError> {
+        let mut views = Vec::new();
+        if let Some((operation_id, host_id)) = self
+            .core
+            .pending_standalone_pairing()
+            .map_err(MobileError::from)?
+        {
+            views.push(RetainedOperationView {
+                operation_id,
+                kind: "pairing".into(),
+                host_id: Some(host_id),
+                session_id: None,
+                status: "submitted".into(),
+                receipt: None,
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        for pending in self.core.pending_commands().map_err(MobileError::from)? {
+            let receipt = CommandView {
+                request_id: pending.request_id.clone(),
+                command_id: pending.command_id.clone(),
+                status: pending.status.as_str().to_owned(),
+                message_id: None,
+                delivery_id: None,
+            };
+            views.push(RetainedOperationView {
+                operation_id: pending.request_id,
+                kind: "control".into(),
+                host_id: Some(pending.host_id),
+                session_id: None,
+                status: operation_status_name(pending.status).to_owned(),
+                receipt: Some(receipt),
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        views.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+        Ok(views)
+    }
+
+    /// Manually recover one retained control command or Standalone pairing
+    /// operation under its original identity. This is never called by the
+    /// automatic refresh and never starts a new pairing attempt.
+    pub fn recover_pending_command(
+        &self,
+        operation_id: String,
+    ) -> Result<RetainedOperationView, MobileError> {
+        validate_id(&operation_id)?;
+        if self
+            .core
+            .has_standalone_pairing_operation(&operation_id)
+            .map_err(MobileError::from)?
+        {
+            let outcome = self.run(
+                COMMAND_TIMEOUT,
+                self.core.recover_standalone_pairing(&operation_id),
+            )?;
+            return Ok(RetainedOperationView {
+                operation_id,
+                kind: "pairing".into(),
+                host_id: Some(outcome.host_id),
+                session_id: None,
+                status: "confirmed".into(),
+                receipt: None,
+                reply: None,
+                content: None,
+                read_error: None,
+            });
+        }
+        let pending = self
+            .core
+            .pending_commands()
+            .map_err(MobileError::from)?
+            .into_iter()
+            .find(|command| command.request_id == operation_id);
+        let handle = self.run(
+            COMMAND_TIMEOUT,
+            self.core.recover_pending_command(&operation_id),
+        )?;
+        Ok(RetainedOperationView {
+            operation_id,
+            kind: "control".into(),
+            host_id: pending.map(|command| command.host_id),
+            session_id: None,
+            status: operation_status_name(handle.status).to_owned(),
+            receipt: Some(handle.into()),
+            reply: None,
+            content: None,
+            read_error: None,
+        })
+    }
+
+    /// Read one bounded latest-first page of committed history.
+    ///
+    /// `cache == true` serves the encrypted local cache without a network call;
+    /// otherwise the page comes from the Host. `continuation` is the opaque
+    /// token from a previous page and is only valid for the original
+    /// Host/session scope and projection. A stale, expired or foreign token is
+    /// `stale_history` and never yields content from another traversal.
+    pub fn history_page(
+        &self,
+        host_id: String,
+        session_id: String,
+        cache: bool,
+        continuation: Option<String>,
+        max_messages: u32,
+        max_bytes: u32,
+    ) -> Result<HistoryPageView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let session = SessionKey {
+            host_id,
+            session_id,
+        };
+        let mut request = HistoryPageRequest::new(session);
+        if cache {
+            request = request.cache();
+        }
+        if let Some(continuation) = continuation {
+            if continuation.is_empty() || continuation.len() > 8192 {
+                return Err(MobileError::stale_history());
+            }
+            let continuation = continuation
+                .parse::<HistoryContinuation>()
+                .map_err(|_| MobileError::stale_history())?;
+            request = request.continuation(continuation);
+        }
+        request.max_messages = max_messages;
+        request.max_bytes = max_bytes;
+        self.run(QUERY_TIMEOUT, self.core.history_page(&request))
+            .map(|page| HistoryPageView::from(&page))
+    }
+
+    /// Read one exact scoped committed message from Core history.
+    ///
+    /// The reference is reconstructed from the typed fields, including the
+    /// opaque `source_locator`; a malformed or foreign reference is a typed
+    /// error and never falls back to a different message.
+    pub fn read_history_message(
+        &self,
+        reference: MessageReferenceView,
+    ) -> Result<MessageView, MobileError> {
+        validate_id(&reference.session.host_id)?;
+        validate_id(&reference.session.session_id)?;
+        let reference = reference
+            .to_core()
+            .map_err(|()| MobileError::invalid_input())?;
+        let message = self.run(QUERY_TIMEOUT, self.core.history_message(&reference))?;
+        Ok(message_view(&message))
+    }
+
+    /// Start a verified attachment download into an app-owned destination.
+    ///
+    /// The transfer runs on this object's runtime; progress and the terminal
+    /// verified path are observed through `attachmentDownloadProgress` and
+    /// `takeAttachmentResult`. Incomplete staging data is removed by Core on
+    /// failure or cancellation, and an existing final file is preserved unless
+    /// `overwrite` is true.
+    pub fn begin_attachment_download(
+        &self,
+        request: AttachmentDownloadRequestView,
+    ) -> Result<String, MobileError> {
+        validate_id(&request.reference.session.host_id)?;
+        validate_id(&request.reference.session.session_id)?;
+        validate_id(&request.reference.attachment_ref)?;
+        if request.destination.is_empty() || request.destination.len() > MAX_PATH_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        if let Some(name) = request.file_name.as_deref() {
+            if name.is_empty() || name.len() > 512 {
+                return Err(MobileError::invalid_input());
+            }
+        }
+        let reference = request
+            .reference
+            .to_core()
+            .map_err(|()| MobileError::invalid_input())?;
+        let mut download =
+            DownloadRequest::new(reference, Path::new(&request.destination).to_path_buf());
+        download.file_name = request.file_name;
+        download.overwrite = request.overwrite;
+
+        let id = format!(
+            "attachment-{:08x}",
+            self.attachment_transfers
+                .next
+                .fetch_add(1, Ordering::SeqCst)
+        );
+        let state = Arc::new(AttachmentTransferState::new(id.clone()));
+        self.attachment_transfers.insert(Arc::clone(&state))?;
+
+        let core = self.core.clone();
+        let task_state = Arc::clone(&state);
+        self.runtime.handle.spawn(async move {
+            let progress_state = Arc::clone(&task_state);
+            let cancellation = task_state.cancellation.clone();
+            let outcome = core
+                .download_attachment(download, &cancellation, move |progress| {
+                    progress_state.set_progress(progress);
+                })
+                .await;
+            let terminal = match outcome {
+                Ok(download) => AttachmentTerminal {
+                    state: "succeeded",
+                    download: Some(AttachmentDownloadView::from(download)),
+                    error: None,
+                },
+                Err(error) => {
+                    let mapped = MobileError::from(error);
+                    AttachmentTerminal {
+                        state: if mapped.code() == crate::error::CODE_CANCELLED {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        download: None,
+                        error: Some(mapped),
+                    }
+                }
+            };
+            task_state.finish(terminal);
+        });
+        Ok(id)
+    }
+
+    /// Latest bounded progress for one app-started transfer, if it is known.
+    pub fn attachment_download_progress(
+        &self,
+        download_id: String,
+    ) -> Option<AttachmentProgressView> {
+        self.attachment_transfers.get(&download_id).map(|state| {
+            state
+                .progress
+                .lock()
+                .map(|value| *value)
+                .unwrap_or(AttachmentProgressView {
+                    received: 0,
+                    total: 0,
+                })
+        })
+    }
+
+    /// Wait up to `waitMs` for one transfer to reach a terminal state.
+    ///
+    /// A timeout returns the current `running` view rather than an error, so the
+    /// caller can keep rendering progress and poll again. Terminal failures are
+    /// returned as typed `failed`/`cancelled` views with stable codes.
+    pub fn take_attachment_result(
+        &self,
+        download_id: String,
+        wait_ms: u64,
+    ) -> Result<AttachmentTransferView, MobileError> {
+        if wait_ms > MAX_ATTACHMENT_WAIT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let state = self
+            .attachment_transfers
+            .get(&download_id)
+            .ok_or_else(MobileError::not_found)?;
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            if let Some(terminal) = state
+                .terminal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                self.attachment_transfers.remove(&download_id);
+                return Ok(state.view(Some(terminal)));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(state.view(None));
+            }
+            let guard = state
+                .terminal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_some() {
+                continue;
+            }
+            let _ = state
+                .notify
+                .wait_timeout(guard, deadline.saturating_duration_since(now));
+        }
+    }
+
+    /// Request cancellation of one transfer. Returns false for an unknown id.
+    ///
+    /// Cancellation is cooperative: Core removes incomplete staging data and
+    /// preserves existing finals; the terminal view becomes `cancelled`.
+    pub fn cancel_attachment_download(&self, download_id: String) -> bool {
+        match self.attachment_transfers.get(&download_id) {
+            Some(state) => {
+                state.cancellation.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Inspect selected paths and local service and authorization state.
     pub fn status(&self) -> Result<crate::types::ClientStatusView, MobileError> {
         self.run(QUERY_TIMEOUT, self.core.status()).map(Into::into)
+    }
+
+    /// The default Host recorded for this client instance, if any.
+    ///
+    /// The record lives in this instance's Core data directory, so another
+    /// instance never sees or overwrites it.
+    pub fn default_host(&self) -> Result<Option<String>, MobileError> {
+        self.core.default_host().map_err(MobileError::from)
+    }
+
+    /// Persist `host_id` as the default Host after Core confirms it is
+    /// authorized and reachable. Only the selected instance is affected.
+    pub fn select_default_host(&self, host_id: String) -> Result<(), MobileError> {
+        validate_id(&host_id)?;
+        self.run(QUERY_TIMEOUT, self.core.select_default_host(&host_id))
+    }
+
+    /// The Cloud app session identity retained for this instance, when signed in.
+    pub fn current_cloud_session_id(&self) -> Result<Option<String>, MobileError> {
+        self.core
+            .current_cloud_session_id()
+            .map_err(MobileError::from)
     }
 
     /// Interrupt the running turn for a session.
@@ -995,6 +1626,130 @@ impl MobileCore {
         };
         let handle = self.run(COMMAND_TIMEOUT, self.core.interrupt(&key))?;
         Ok(self.publish_command(handle))
+    }
+
+    // -----------------------------------------------------------------
+    // Pending queue
+    // -----------------------------------------------------------------
+
+    /// Read the ordered pending queue from the Source.
+    ///
+    /// `available == false` is not an empty queue: the Source did not confirm a
+    /// readable listing. Queue contents are never cached here.
+    pub fn pending_queue(
+        &self,
+        host_id: String,
+        session_id: String,
+    ) -> Result<PendingQueueView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let queue = self.run(QUERY_TIMEOUT, self.core.pending_queue(&key))?;
+        Ok(PendingQueueView::from(queue))
+    }
+
+    /// Apply one targeted source-owned queue action.
+    ///
+    /// When the fresh listing still contains the item, the action must be one
+    /// the Source advertises for it. If the item disappeared in the same
+    /// window, the mutation is still submitted so the Host's native receipt
+    /// owns the consumed-before-mutation outcome.
+    pub fn update_pending_queue(
+        &self,
+        host_id: String,
+        session_id: String,
+        item_id: String,
+        action: QueueAction,
+        text: String,
+    ) -> Result<QueueMutationView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&item_id)?;
+        match action {
+            QueueAction::Edit => validate_text(&text)?,
+            QueueAction::Remove | QueueAction::Promote if !text.is_empty() => {
+                return Err(MobileError::invalid_input());
+            }
+            QueueAction::Remove | QueueAction::Promote => {}
+        }
+        let key = SessionKey {
+            host_id: host_id.clone(),
+            session_id: session_id.clone(),
+        };
+        if let Ok(queue) = self.run(QUERY_TIMEOUT, self.core.pending_queue(&key)) {
+            if queue.available {
+                if let Some(item) = queue.items.iter().find(|item| item.item_id == item_id) {
+                    if !action_is_advertised(&PendingQueueItemView::from(item.clone()), action) {
+                        return Err(MobileError::invalid_input());
+                    }
+                }
+            }
+        }
+        let handle = self.run(
+            COMMAND_TIMEOUT,
+            self.core
+                .update_pending_queue(&key, &item_id, action.to_core(), &text),
+        )?;
+        let receipt = self.publish_command(handle);
+        Ok(QueueMutationView {
+            operation_id: receipt.command_id.clone(),
+            host_id,
+            session_id,
+            item_id,
+            action: action.as_str().to_owned(),
+            receipt,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Wait
+    // -----------------------------------------------------------------
+
+    /// Start one background state-only wait and return its attempt identity.
+    ///
+    /// The conversation watch is independent: cancelling this attempt aborts
+    /// only the wait task.
+    pub fn begin_wait(
+        &self,
+        host_id: String,
+        session_id: String,
+        timeout_ms: u64,
+    ) -> Result<String, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        if timeout_ms == 0 || timeout_ms > MAX_WAIT_TIMEOUT_MS {
+            return Err(MobileError::invalid_input());
+        }
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        Ok(self
+            .wait_attempts
+            .begin(self.core.clone(), &self.runtime.handle, key, timeout_ms))
+    }
+
+    /// Wait up to `wait_ms` for one attempt to settle.
+    ///
+    /// `None` means the native attempt is still running; the same attempt
+    /// identity remains valid for a later take.
+    pub fn take_wait_result(
+        &self,
+        wait_id: String,
+        wait_ms: u64,
+    ) -> Result<Option<WaitResultView>, MobileError> {
+        validate_id(&wait_id)?;
+        self.wait_attempts.take(&wait_id, wait_ms)
+    }
+
+    /// Abort only this wait attempt. Returns whether an unsettled attempt was
+    /// cancelled.
+    pub fn cancel_wait(&self, wait_id: String) -> Result<bool, MobileError> {
+        validate_id(&wait_id)?;
+        Ok(self.wait_attempts.cancel(&wait_id))
     }
 
     /// List pending approvals for one session.
@@ -1010,6 +1765,24 @@ impl MobileCore {
             self.core.list_approvals(&host_id, &session_id),
         )?;
         Ok(approvals.into_iter().map(ApprovalView::from).collect())
+    }
+
+    /// Read one approval's exact scoped state by identity.
+    ///
+    /// The Host is never guessed: the caller's original scope is used and the
+    /// returned state/version/digest/expiry is authoritative for the card.
+    pub fn get_approval(
+        &self,
+        host_id: String,
+        approval_id: String,
+    ) -> Result<ApprovalView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&approval_id)?;
+        let approval = self.run(
+            QUERY_TIMEOUT,
+            self.core.get_approval(&host_id, &approval_id),
+        )?;
+        Ok(ApprovalView::from(approval))
     }
 
     /// Resolve exactly the approval version and digest the user reviewed.
@@ -1147,6 +1920,32 @@ impl MobileCore {
         )
     }
 
+    /// Cancel an in-flight open answer and return the original command identity
+    /// alongside the request outcome. A `false` request does not establish that
+    /// no native answer occurred; the caller retains the identity for recovery.
+    pub fn request_question_answer_cancel(
+        &self,
+        host_id: String,
+        session_id: String,
+        command_id: String,
+    ) -> Result<QuestionCancelReceiptView, MobileError> {
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_id(&command_id)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let cancellation_requested = self.run(
+            QUERY_TIMEOUT,
+            self.core.cancel_question_answer(&key, &command_id),
+        )?;
+        Ok(QuestionCancelReceiptView {
+            command_id,
+            cancellation_requested,
+        })
+    }
+
     // -----------------------------------------------------------------
     // Drafts
     // -----------------------------------------------------------------
@@ -1256,6 +2055,106 @@ impl MobileCore {
         self.stop_watch();
         Ok(())
     }
+
+    // MARK: - Cloud account
+
+    /// Begin the native iOS authorization-code flow. Core owns the attempt,
+    /// PKCE material and Cloud state; only the hosted URL crosses this seam.
+    pub fn cloud_auth_start(&self) -> Result<CloudAuthAttemptView, MobileError> {
+        let attempt = self.run(QUERY_TIMEOUT, self.core.cloud_auth_start())?;
+        Ok(CloudAuthAttemptView {
+            url: attempt.url,
+            attempt_id: attempt.attempt_id,
+        })
+    }
+
+    /// Complete the exact pending attempt from the callback URL. Only this
+    /// path establishes an account session for the native flow.
+    pub fn cloud_auth_complete(
+        &self,
+        callback_url: String,
+    ) -> Result<CloudAccountView, MobileError> {
+        if callback_url.is_empty() || callback_url.len() > MAX_CALLBACK_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        let account = self.run(QUERY_TIMEOUT, self.core.cloud_auth_complete(&callback_url))?;
+        Ok(account.into())
+    }
+
+    /// Drop the pending attempt. A late callback can no longer complete it.
+    pub fn cloud_auth_cancel(&self) -> Result<(), MobileError> {
+        self.run(QUERY_TIMEOUT, self.core.cloud_auth_cancel())
+    }
+
+    /// Locally retained verified account plus pending remote sign-out state.
+    pub fn cloud_status(&self) -> Result<CloudAccountStatusView, MobileError> {
+        let account = self
+            .core
+            .account_status()
+            .map_err(MobileError::from)?
+            .map(CloudAccountView::from);
+        let logout_pending = self
+            .core
+            .account_logout_pending()
+            .map_err(MobileError::from)?;
+        Ok(CloudAccountStatusView {
+            account,
+            logout_pending,
+        })
+    }
+
+    /// Verify the current session against Cloud and refresh its expiry.
+    pub fn cloud_refresh_status(&self) -> Result<CloudAccountView, MobileError> {
+        let account = self.run(QUERY_TIMEOUT, self.core.refresh_account_status())?;
+        Ok(account.into())
+    }
+
+    /// End this Cloud app session. `false` means the remote sign-out is still
+    /// pending and will be retried on the next account request.
+    pub fn cloud_sign_out(&self) -> Result<bool, MobileError> {
+        let complete = self.run(COMMAND_TIMEOUT, self.core.logout())?;
+        self.stop_watch();
+        Ok(complete)
+    }
+
+    /// Account app sessions. Only stable session metadata is returned.
+    pub fn cloud_account_sessions(&self) -> Result<Vec<CloudAccountSessionView>, MobileError> {
+        let sessions = self.run(QUERY_TIMEOUT, self.core.cloud_account_sessions())?;
+        Ok(sessions.into_iter().map(Into::into).collect())
+    }
+
+    /// Revoke one account app session and return its resulting state.
+    pub fn cloud_revoke_session(&self, session_id: String) -> Result<String, MobileError> {
+        validate_id(&session_id)?;
+        let state = self.run(
+            COMMAND_TIMEOUT,
+            self.core.revoke_cloud_account_session(&session_id),
+        )?;
+        Ok(state.as_str().to_owned())
+    }
+
+    /// Revoke every account app session and return the resulting state.
+    pub fn cloud_revoke_all_sessions(&self) -> Result<String, MobileError> {
+        let state = self.run(
+            COMMAND_TIMEOUT,
+            self.core.revoke_all_cloud_account_sessions(),
+        )?;
+        Ok(state.as_str().to_owned())
+    }
+
+    /// The account's Cloud computer directory.
+    pub fn cloud_hosts(&self) -> Result<Vec<CloudDirectoryHostView>, MobileError> {
+        let hosts = self.run(QUERY_TIMEOUT, self.core.account_hosts())?;
+        Ok(hosts.into_iter().map(Into::into).collect())
+    }
+
+    /// Connect one explicitly selected eligible Cloud computer. Core confirms
+    /// the grant and persists recovery state before this returns.
+    pub fn connect_cloud(&self, host_id: String) -> Result<CloudConnectResultView, MobileError> {
+        validate_id(&host_id)?;
+        let outcome = self.run(COMMAND_TIMEOUT, self.core.connect_cloud(&host_id))?;
+        Ok(outcome.into())
+    }
 }
 
 impl MobileCore {
@@ -1318,6 +2217,8 @@ impl MobileCore {
 
 impl Drop for MobileCore {
     fn drop(&mut self) {
+        self.wait_attempts.cancel_all();
+        self.attachment_transfers.cancel_all();
         self.watch_generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut state = self.lock_watch();
@@ -1350,6 +2251,25 @@ fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> 
         "revoked" => Some(MobileError::revoked()),
         "failed" => Some(MobileError::unavailable()),
         _ => None,
+    }
+}
+
+fn retained_send_view(operation: &whalerein_core::api::SendOperation) -> RetainedOperationView {
+    let status = operation
+        .receipt
+        .as_ref()
+        .map(|receipt| operation_status_name(receipt.status))
+        .unwrap_or("submitted");
+    RetainedOperationView {
+        operation_id: operation.operation_id.clone(),
+        kind: "send".into(),
+        host_id: Some(operation.target.host_id.clone()),
+        session_id: Some(operation.target.session_id.clone()),
+        status: status.to_owned(),
+        receipt: operation.receipt.clone().map(Into::into),
+        reply: None,
+        content: None,
+        read_error: None,
     }
 }
 
@@ -1495,6 +2415,7 @@ mod tests {
                     tool_name: None,
                     tool_activity: None,
                     notice: None,
+                    attachment: None,
                 }],
                 created_at_unix_ms: 1,
             },
@@ -1693,6 +2614,101 @@ mod tests {
             DeliveryChoice::Send.to_core(),
             whalerein_core::api::DeliveryMode::StartIfIdle
         );
+    }
+
+    #[test]
+    fn cloud_records_map_typed_state_without_exposing_credentials() {
+        use whalerein_core::api::{
+            AccountHost, AccountIdentity, AccountSessionInfo, AccountSessionState,
+            AccountWorkspace, PairingOutcome, SignedInAccount,
+        };
+        let account = CloudAccountView::from(SignedInAccount {
+            account: AccountIdentity {
+                id: "acct-1".into(),
+                email: "user@example.test".into(),
+                issuer: "https://login.whalerein.com/oidc".into(),
+                subject: "subject-1".into(),
+            },
+            workspace: AccountWorkspace { id: "ws-1".into() },
+        });
+        assert_eq!(account.account_id, "acct-1");
+        assert_eq!(account.email, "user@example.test");
+        assert_eq!(account.issuer, "https://login.whalerein.com/oidc");
+        assert_eq!(account.subject, "subject-1");
+        assert_eq!(account.workspace_id, "ws-1");
+        let status = CloudAccountStatusView {
+            account: Some(account.clone()),
+            logout_pending: true,
+        };
+        assert!(status.logout_pending);
+        assert_eq!(status.account.as_ref().unwrap().workspace_id, "ws-1");
+
+        let host = CloudDirectoryHostView::from(AccountHost {
+            host_id: "host-1".into(),
+            display_name: "Studio".into(),
+            enrolled: true,
+            online: false,
+            presence: "away".into(),
+            observation: "observed".into(),
+            enrollment_state: "enrolled".into(),
+            pairing_eligible: false,
+            device_access: "granted".into(),
+        });
+        assert_eq!(host.host_id, "host-1");
+        assert_eq!(host.display_name, "Studio");
+        assert!(host.enrolled && !host.online);
+        assert_eq!(host.enrollment_state, "enrolled");
+
+        let session = CloudAccountSessionView::from(AccountSessionInfo {
+            session_id: "sess-1".into(),
+            instance_id: "ios".into(),
+            expires_at: 1_780_000_000,
+            state: AccountSessionState::Active,
+        });
+        assert_eq!(session.session_id, "sess-1");
+        assert_eq!(session.instance_id, "ios");
+        assert_eq!(session.state, "active");
+
+        let connect = CloudConnectResultView::from(PairingOutcome {
+            operation_id: Some("op-1".into()),
+            host_id: "host-1".into(),
+            device_id: "device-1".into(),
+            fingerprint: "ab".repeat(32),
+            access_url: "https://host-1.access.example/secret-token".into(),
+        });
+        assert_eq!(connect.operation_id.as_deref(), Some("op-1"));
+        assert_eq!(connect.host_id, "host-1");
+        assert_eq!(connect.device_id, "device-1");
+        assert_eq!(connect.fingerprint, "ab".repeat(32));
+        let rendered = format!("{account:?} {host:?} {session:?} {connect:?} {status:?}");
+        for forbidden in [
+            "credential",
+            "revocation",
+            "token",
+            "secret-token",
+            "code_verifier",
+            "codeVerifier",
+            "access_url",
+            "accessUrl",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden} leaked into {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_auth_attempt_exposes_only_the_url_and_attempt_identity() {
+        let attempt = CloudAuthAttemptView {
+            url: "https://login.whalerein.com/oidc/auth?state=opaque".into(),
+            attempt_id: "ab".repeat(16),
+        };
+        assert_eq!(attempt.attempt_id.len(), 32);
+        assert!(attempt.url.starts_with("https://"));
+        let rendered = format!("{attempt:?}");
+        assert!(!rendered.contains("credential"));
+        assert!(!rendered.contains("verifier"));
     }
 
     #[test]

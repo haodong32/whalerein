@@ -159,10 +159,23 @@ final class LiveCase {
     }
 
     private func makeService() throws -> LiveSessionService {
-        try LiveSessionService(
-            dataDirectory: dataDirectory,
+        let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
+        let store = try AppConfigurationStore(documentPath: document.path)
+        let standalone = AppInstanceInput(
+            id: "standalone",
+            service: .standalone,
+            environment: nil,
+            dataDirectory: "instances/standalone/data",
+            standaloneCAPEM: nil
+        )
+        try store.save(standalone)
+        try store.activate(id: "standalone")
+        let instance = store.activeInstance
+        return try LiveSessionService(
+            configPath: instance.configPath,
             keychainService: keychainService,
-            appVersion: "0.1.0-integration"
+            appVersion: "0.1.0-integration",
+            instanceId: instance.id
         )
     }
 
@@ -297,6 +310,8 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .message: return "message"
         case .replace: return "replace"
         case .preview: return "preview"
+        case .reasoningPreview: return "reasoningPreview"
+        case .toolActivity: return "toolActivity"
         case .attemptEnded: return "attemptEnded"
         case .state: return "state"
         case .connection: return "connection"
@@ -307,6 +322,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .commandStatus: return "commandStatus"
         case .error: return "error"
         case .watchEnded: return "watchEnded"
+        default: return "other"
         }
     }
 }

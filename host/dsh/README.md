@@ -168,8 +168,11 @@ exposes lifecycle actions, read-only details, connection probes and device pairi
 configuration edits use the existing revisioned DSH settings writer only.
 
 Disconnect is a local pause that retains the cloud registration. **Remove this
-computer** is browser-authorized and stays `removing` until the service enforces
-removal. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
+computer** opens the verified browser confirmation without marking removal
+pending; the page polls the scoped Cloud/Access status and reports `removing`
+only after the service accepts the intent, and completion only after Access
+confirms enforcement. A blocked or abandoned browser handoff leaves the
+original connection policy intact. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
 unless the selected service advertises pairing support; Standalone profiles keep
 the existing pairing, invitation, revocation, and connection-test behavior.
 Managed settings list paired Devices and mark those with an active Session

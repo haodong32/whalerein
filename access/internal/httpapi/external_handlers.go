@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +189,48 @@ func (s *Server) handleCredentialReplacement(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// handleHostOperationStatus reports one operation to the original Host with
+// its scoped proof. It never returns a credential or a foreign operation.
+func (s *Server) handleHostOperationStatus(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	if s.deps.External == nil {
+		s.writeError(w, r, errExternalNotConfigured)
+		return
+	}
+	hostID := params["host_id"]
+	operationID := params["operation_id"]
+	if !validResourceID(hostID) || !validResourceID(operationID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	proof, err := requireHostProof(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	expires := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("authorizationExpiresAtUnixMs")); raw != "" {
+		value, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || value < 0 {
+			s.writeError(w, r, auth.ErrBadRequest)
+			return
+		}
+		expires = value
+	}
+	scoped, ok := s.deps.External.(interface {
+		OperationStatusForHost(context.Context, string, string, int64, external.HostOwnershipProof) (*whalereinv1.OperationStatus, error)
+	})
+	if !ok {
+		s.writeError(w, r, errExternalNotConfigured)
+		return
+	}
+	status, err := scoped.OperationStatusForHost(r.Context(), hostID, operationID, expires, proof)
+	if err != nil {
+		s.writeError(w, r, classifyExternal(err))
+		return
+	}
+	s.writeJSON(w, http.StatusOK, status)
+}
+
 // handleDisableHostEnrollment durably disables one Host enrollment. It is an
 // administrative operation and requires the deployment admin bearer.
 func (s *Server) handleDisableHostEnrollment(w http.ResponseWriter, r *http.Request, params map[string]string) {
@@ -207,15 +252,72 @@ func (s *Server) handleDisableHostEnrollment(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, err)
 		return
 	}
-	disabledAt, err := s.deps.External.DisableHost(r.Context(), hostID)
+	var request removalEnforcementRequest
+	if r.Body != nil {
+		if err := decodeOptionalJSON(r.Body, &request); err != nil {
+			s.writeError(w, r, errInvalidBody)
+			return
+		}
+	}
+	removal := external.RemovalRequest{RemovalOperationID: request.RemovalOperationID}
+	if request.WorkspaceID != "" || request.EnrollmentOperationID != "" || request.EnrollmentRevision != "" {
+		removal.Target = &store.RemovalTarget{
+			WorkspaceID:           request.WorkspaceID,
+			EnrollmentOperationID: request.EnrollmentOperationID,
+			EnrollmentRevision:    request.EnrollmentRevision,
+		}
+	}
+	remover, ok := s.deps.External.(interface {
+		RemoveHost(context.Context, string, external.RemovalRequest) (external.RemovalReceipt, error)
+	})
+	if !ok {
+		// A build that has not adopted the scoped removal contract still
+		// supports the legacy bodyless disable for unscoped callers.
+		if removal.Target != nil || removal.RemovalOperationID != "" {
+			s.writeError(w, r, errExternalNotConfigured)
+			return
+		}
+		disabledAt, legacyErr := s.deps.External.DisableHost(r.Context(), hostID)
+		if legacyErr != nil {
+			s.writeError(w, r, classifyExternal(legacyErr))
+			return
+		}
+		s.writeJSON(w, http.StatusOK, disableEnrollmentResponse{
+			State:      "disabled",
+			DisabledAt: disabledAt.UTC().Format(time.RFC3339),
+		})
+		return
+	}
+	receipt, err := remover.RemoveHost(r.Context(), hostID, removal)
 	if err != nil {
 		s.writeError(w, r, classifyExternal(err))
 		return
 	}
-	s.writeJSON(w, http.StatusOK, disableEnrollmentResponse{
-		State:      "disabled",
-		DisabledAt: disabledAt.UTC().Format(time.RFC3339),
+	s.writeJSON(w, http.StatusOK, removalReceiptResponse{
+		State:              receipt.State,
+		RemovalOperationID: receipt.RemovalOperationID,
+		DisabledAtUnixMs:   receipt.DisabledAt.UnixMilli(),
+		RevocationCount:    receipt.RevocationCount(),
+		Target: removalTargetResponse{
+			WorkspaceID:           receipt.Target.WorkspaceID,
+			HostID:                hostID,
+			EnrollmentOperationID: receipt.Target.EnrollmentOperationID,
+			EnrollmentRevision:    receipt.Target.EnrollmentRevision,
+		},
+		EnforcedAtUnixMs: enforcedAtMillis(receipt.EnforcedAt),
 	})
+}
+
+// decodeOptionalJSON accepts an empty body as the legacy unscoped request.
+func decodeOptionalJSON(body io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, target)
 }
 
 // requireHostProof parses the signed JSON proof header. A missing header is an
@@ -235,6 +337,37 @@ func requireHostProof(r *http.Request) (external.HostOwnershipProof, error) {
 type disableEnrollmentResponse struct {
 	State      string `json:"state"`
 	DisabledAt string `json:"disabledAt"`
+}
+
+type removalEnforcementRequest struct {
+	RemovalOperationID    string `json:"removal_operation_id"`
+	WorkspaceID           string `json:"workspace_id"`
+	HostID                string `json:"host_id"`
+	EnrollmentOperationID string `json:"enrollment_operation_id"`
+	EnrollmentRevision    string `json:"enrollment_revision"`
+}
+
+type removalTargetResponse struct {
+	WorkspaceID           string `json:"workspace_id"`
+	HostID                string `json:"host_id"`
+	EnrollmentOperationID string `json:"enrollment_operation_id"`
+	EnrollmentRevision    string `json:"enrollment_revision"`
+}
+
+type removalReceiptResponse struct {
+	State              string                `json:"state"`
+	RemovalOperationID string                `json:"removal_operation_id"`
+	DisabledAtUnixMs   int64                 `json:"disabled_at_unix_ms"`
+	EnforcedAtUnixMs   int64                 `json:"enforced_at_unix_ms"`
+	RevocationCount    int                   `json:"revocation_count"`
+	Target             removalTargetResponse `json:"target"`
+}
+
+func enforcedAtMillis(at *time.Time) int64 {
+	if at == nil {
+		return 0
+	}
+	return at.UnixMilli()
 }
 
 type issuedCredentialResponse struct {

@@ -45,7 +45,10 @@ final class ConversationModel {
     private(set) var questions: QuestionsState = .loading
     private(set) var questionReview: QuestionReview?
     private(set) var questionAnswerState: QuestionAnswerState = .idle
+    private(set) var questionCancelReceipt: QuestionCancelReceipt?
     private(set) var questionErrorKey: L10nKey?
+    /// Exact approval status refreshes keyed by the original approval identity.
+    private(set) var approvalStatusRefresh: [String: ApprovalStatusRefresh] = [:]
     private(set) var isLoadingTruncatedQuestions = false
     private(set) var previewText: String?
     private(set) var previewAttemptId: String?
@@ -57,6 +60,14 @@ final class ConversationModel {
     private(set) var capabilities: SessionCapabilities = .idle
     private(set) var lastSendStatus: CommandStatus?
     private(set) var lastStopStatus: CommandStatus?
+    /// Original operation identity and the message-level recovery result for
+    /// the last send. Submission status stays separate from these values.
+    private(set) var lastSendOperationId: String?
+    private(set) var operationResult: OperationReceipt?
+    private(set) var operationErrorKey: L10nKey?
+    private(set) var operationReadErrorKey: L10nKey?
+    private(set) var isRecoveringOperation = false
+    private(set) var isReadingExactReply = false
     private(set) var inFlightSend: CommandReceipt?
     private(set) var pendingStop: CommandReceipt?
     /// Command submission that has not settled yet. While set, the matching
@@ -79,8 +90,39 @@ final class ConversationModel {
     private(set) var approvalRefreshCount = 0
     private(set) var eventSubscriptionCount = 0
 
+    // Older committed history is an independent one-shot read; it never
+    // replaces the single live watch.
+    private(set) var historyProvenance: HistoryProvenance?
+    private(set) var isLoadingOlderHistory = false
+    private(set) var historyComplete = false
+    private(set) var historyNeedsFreshTraversal = false
+    private(set) var historyErrorKey: L10nKey?
+    /// Increments after a page is prepended so the view can restore the row
+    /// that was visible before the insertion.
+    private(set) var historyPrepend: HistoryPrepend?
+    private(set) var reasoningPreviewText: String?
+    /// Live typed activity rows that preview their committed replacement.
+    private(set) var liveToolActivities: [ToolActivity] = []
+    /// Verified attachment transfers for committed attachment blocks.
+    let attachments: AttachmentTransferModel
+
+    struct HistoryPrepend: Equatable, Sendable {
+        let id: Int
+        let anchorMessageId: String?
+    }
+
+    private var historyContinuation: String?
+    private var historyProjection: String?
+    private var historySource: HistorySource?
+    private var historyGeneration = 0
+    private var isClosed = false
+    private var pagedMessageIds: Set<String> = []
+    private var liveMessageIds: Set<String> = []
+    private let historyPageMessages = 50
+    private let historyPageBytes = 256 * 1024
+
     var draft: String = ""
-    var delivery: DeliveryChoice = .send
+    var delivery: DeliveryChoice = .queue
 
     private struct QuestionDraft {
         let guardValue: QuestionGuard
@@ -96,9 +138,13 @@ final class ConversationModel {
     }
 
     private let service: any SessionService
+    /// Queue and wait are independent observations; neither owns the watch.
+    let queue: ConversationQueueController
+    let wait: ConversationWaitController
     private let onStatusChange: (() -> Void)?
     private let onFatalError: ((AppErrorCode) -> Void)?
     private let onConnectionChange: ((ConnectionStatus) -> Void)?
+    private let onReconnected: (() -> Void)?
     private let now: () -> Date
 
     private var consumeTask: Task<Void, Never>?
@@ -139,17 +185,32 @@ final class ConversationModel {
         onStatusChange: (() -> Void)? = nil,
         onFatalError: ((AppErrorCode) -> Void)? = nil,
         onConnectionChange: ((ConnectionStatus) -> Void)? = nil,
+        onReconnected: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.hostId = hostId
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.service = service
+        self.queue = ConversationQueueController(
+            hostId: hostId,
+            sessionId: sessionId,
+            service: service
+        )
+        self.wait = ConversationWaitController(
+            hostID: hostId,
+            sessionID: sessionId,
+            service: service
+        )
         self.onStatusChange = onStatusChange
         self.onFatalError = onFatalError
         self.onConnectionChange = onConnectionChange
+        self.onReconnected = onReconnected
         self.now = now
         self.approvalClock = now()
+        self.attachments = AttachmentTransferModel(
+            service: service as? any AttachmentTransferService
+        )
     }
 
     // MARK: - Derived state
@@ -226,6 +287,35 @@ final class ConversationModel {
         }
     }
 
+    /// Message-level result for the original send. Submission receipt
+    /// (`sendStatusKey`) stays separate from confirmation and content reads.
+    var operationStatusKey: L10nKey? {
+        guard let operationResult else { return nil }
+        switch operationResult.status {
+        case .submitted: return .conversationOperationSubmitted
+        case .accepted: return .conversationOperationAccepted
+        case .uncertain: return .conversationOperationUncertain
+        case .failed: return .conversationOperationFailed
+        case .confirmed: return .conversationOperationConfirmed
+        }
+    }
+
+    var operationInputRequired: Bool { operationResult?.inputKinds != nil }
+
+    var canRecoverSend: Bool {
+        lastSendOperationId != nil && !isRecoveringOperation && !watchEnded
+    }
+
+    var canReadExactReply: Bool {
+        operationResult?.canReadExactReply == true && !isReadingExactReply
+    }
+
+    var operationReferenceText: String? { operationResult?.confirmedReference?.messageId }
+
+    var operationDeliveryIdentity: String? {
+        operationResult?.receipt?.deliveryId ?? operationResult?.receipt?.messageId
+    }
+
     var livePreview: String? {
         guard let previewText, !previewText.isEmpty else { return nil }
         return previewText
@@ -255,6 +345,7 @@ final class ConversationModel {
             && resolvingApprovalId == nil
             && connection.isOnline
             && !watchEnded
+            && approvalStatusRefresh[approval.approvalId] != .refreshing
     }
 
     // MARK: - Lifecycle
@@ -270,6 +361,7 @@ final class ConversationModel {
         questionReview = nil
         questionErrorKey = nil
         questionAnswerState = .idle
+        questionCancelReceipt = nil
         ensureSubscription()
         do {
             draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
@@ -277,7 +369,9 @@ final class ConversationModel {
             if capabilities.running {
                 delivery = .steer
             }
+            queue.applyCapabilities(capabilities)
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
+            await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             loadState = .failed(code)
@@ -296,6 +390,7 @@ final class ConversationModel {
         stopApprovalTimer()
         consumeTask?.cancel()
         consumeTask = nil
+        wait.close()
         service.stopWatch()
         connection = .offline
     }
@@ -312,7 +407,7 @@ final class ConversationModel {
         questions = .loading
         questionReview = nil
         questionErrorKey = nil
-        questionAnswerState = .idle
+        preserveQuestionCancellation()
         if consumeTask == nil {
             ensureSubscription()
         }
@@ -330,17 +425,22 @@ final class ConversationModel {
         questions = .loading
         questionReview = nil
         questionErrorKey = nil
-        questionAnswerState = .idle
+        preserveQuestionCancellation()
         consumeTask?.cancel()
         consumeTask = nil
         ensureSubscription()
         await restartWatch()
+        onReconnected?()
     }
 
     func close() {
+        isClosed = true
+        historyGeneration &+= 1
+        attachments.cancelAll()
         consumeTask?.cancel()
         consumeTask = nil
         stopApprovalTimer()
+        wait.close()
         draftSaveTask?.cancel()
         draftSaveTask = nil
         let text = draft
@@ -390,7 +490,14 @@ final class ConversationModel {
         switch envelope.event {
         case .reset(let messages, let approvals):
             self.messages = messages
+            liveMessageIds = Set(messages.map(\.messageId))
+            pagedMessageIds.removeAll()
+            historyGeneration &+= 1
+            isLoadingOlderHistory = false
+            liveToolActivities.removeAll()
+            reasoningPreviewText = nil
             trustedPendingApprovalIds.removeAll()
+            approvalStatusRefresh.removeAll()
             mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
             optimisticMessages.removeAll()
             previewText = nil
@@ -404,6 +511,9 @@ final class ConversationModel {
             restartApprovalTimer()
 
         case .message(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
             // A committed message identity is idempotent: a replay must not
             // touch (or consume) any optimistic row.
             guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
@@ -422,6 +532,9 @@ final class ConversationModel {
             }
 
         case .replace(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
                 messages[index] = message
             } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
@@ -444,11 +557,23 @@ final class ConversationModel {
                 requestScroll(animated: false)
             }
 
+        case .reasoningPreview(_, let text, _, _):
+            reasoningPreviewText = text.isEmpty ? nil : text
+
+        case .toolActivity(let activity):
+            if let index = liveToolActivities.firstIndex(where: { $0.callId == activity.callId }) {
+                liveToolActivities[index] = activity
+            } else {
+                liveToolActivities.append(activity)
+            }
+
         case .attemptEnded:
             previewText = nil
             previewAttemptId = nil
+            reasoningPreviewText = nil
             authoritativeRunEpoch += 1
             updateCapabilities(running: false)
+            Task { await queue.refresh() }
 
         case .state(let status):
             updateConnection(status)
@@ -594,12 +719,18 @@ final class ConversationModel {
             }
             sendErrorKey = nil
             lastSendStatus = receipt.status
+            lastSendOperationId = receipt.requestId
+            operationResult = nil
+            operationErrorKey = nil
+            operationReadErrorKey = nil
             inFlightSend = receipt.status == .uncertain ? receipt : nil
             inFlightSendText = receipt.status == .uncertain ? text : nil
             if receipt.status != .rejected {
                 appendOptimisticUserMessage(text: text, receipt: receipt)
             }
-            if choice == .send {
+            if choice == .send || (choice == .queue && !capabilities.running) {
+                // An idle native-queue submission starts the turn; a running
+                // queue submission leaves the current run untouched.
                 updateCapabilities(running: true)
             }
             if receipt.status == .uncertain {
@@ -646,6 +777,11 @@ final class ConversationModel {
             }
             sendErrorKey = nil
             applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
+            if receipt.status == .confirmed {
+                // Interrupt is a current-turn control; the queue stays visible
+                // and is refreshed from the source after the turn settles.
+                await queue.refresh()
+            }
         } catch {
             // A definite failure releases the gate so Stop can be retried. A
             // late settlement for the failed command is only remembered as an
@@ -654,6 +790,117 @@ final class ConversationModel {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             sendErrorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
+        }
+    }
+
+    // MARK: - Operation recovery
+
+    /// Manual recovery for the original send. Uses Core's recorded operation
+    /// identity and never submits another message.
+    func recoverSendResult() async {
+        guard let operationId = lastSendOperationId, !isRecoveringOperation else { return }
+        guard let recovery = service as? any OperationRecoveryService else {
+            operationErrorKey = .errorIntegrationUnavailable
+            return
+        }
+        isRecoveringOperation = true
+        operationErrorKey = nil
+        defer { isRecoveringOperation = false }
+        do {
+            let receipt = try await recovery.recoverSend(operationId: operationId, follow: true)
+            applyOperationReceipt(receipt)
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            operationErrorKey = L10nKey.errorKey(for: code)
+            reportFatalIfNeeded(code)
+        }
+    }
+
+    /// Explicit exact reread for a confirmed reference. A failed read keeps the
+    /// confirmation and never resubmits.
+    func readExactReply() async {
+        guard let receipt = operationResult,
+              let reference = receipt.confirmedReference,
+              !isReadingExactReply else { return }
+        guard let recovery = service as? any OperationRecoveryService else {
+            operationErrorKey = .errorIntegrationUnavailable
+            return
+        }
+        guard reference.hostId == hostId, reference.sessionId == sessionId else {
+            operationErrorKey = .errorOperationScope
+            return
+        }
+        isReadingExactReply = true
+        defer { isReadingExactReply = false }
+        do {
+            let message = try await recovery.readMessage(reference)
+            insertCommittedMessage(message)
+            operationResult = OperationReceipt(
+                operationId: receipt.operationId,
+                kind: receipt.kind,
+                scope: receipt.scope,
+                status: receipt.status,
+                receipt: receipt.receipt,
+                reply: receipt.reply,
+                content: message,
+                readError: nil
+            )
+            operationReadErrorKey = nil
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            operationErrorKey = L10nKey.errorKey(for: code)
+            operationReadErrorKey = .conversationOperationReadFailed
+        }
+    }
+
+    /// Applies results from the one coalesced visible-session refresh. Only the
+    /// original send is updated; a foreign scope is rejected.
+    func applyRecoveredOperations(_ receipts: [OperationReceipt]) {
+        guard let operationId = lastSendOperationId else { return }
+        guard let receipt = receipts.first(where: { $0.operationId == operationId }) else {
+            return
+        }
+        applyOperationReceipt(receipt)
+    }
+
+    private func applyOperationReceipt(_ receipt: OperationReceipt) {
+        guard receipt.kind == .send else { return }
+        guard let scope = receipt.scope,
+              scope.hostId == hostId,
+              scope.sessionId == sessionId else {
+            operationErrorKey = .errorOperationScope
+            return
+        }
+        operationResult = receipt
+        operationErrorKey = nil
+        if let content = receipt.content {
+            insertCommittedMessage(content)
+        }
+        if receipt.readError != nil {
+            operationReadErrorKey = .conversationOperationReadFailed
+        } else if receipt.content != nil {
+            operationReadErrorKey = nil
+        }
+        if receipt.status == .confirmed || receipt.status == .failed {
+            inFlightSend = nil
+            inFlightSendText = nil
+        }
+    }
+
+    /// Deduplicates committed messages by stable identity, including a recovered
+    /// reply that also arrived through the live watch.
+    private func insertCommittedMessage(_ message: ConversationMessage) {
+        if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+            if messages[index] != message {
+                messages[index] = message
+            }
+            return
+        }
+        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
+        if let echoIndex {
+            messages.insert(message, at: min(echoIndex, messages.count))
+        } else {
+            messages.append(message)
         }
     }
 
@@ -764,6 +1011,7 @@ final class ConversationModel {
             return
         }
         questionAnswerState = .submitting
+        questionCancelReceipt = nil
         questionErrorKey = nil
         do {
             let receipt = try await service.answerQuestion(
@@ -793,21 +1041,41 @@ final class ConversationModel {
         }
     }
 
-    /// Requests cancellation of an uncertain open answer. When `false`, the
-    /// answer may still complete; the UI must not promise a rollback.
+    /// Requests cancellation of the one uncertain open answer attempt. When
+    /// `false`, the answer may still complete; the UI must not promise a
+    /// rollback and the original command identity stays eligible for recovery.
     func cancelQuestionAnswer() async {
         guard case .uncertain(let commandId) = questionAnswerState else { return }
         do {
-            let requested = try await service.cancelQuestionAnswer(
+            let receipt = try await service.requestQuestionAnswerCancel(
                 hostId: hostId,
                 sessionId: sessionId,
                 commandId: commandId
             )
-            questionErrorKey = requested ? .questionsCancelRequested : .questionsCancelUnconfirmed
+            questionCancelReceipt = receipt
+            questionErrorKey = receipt.cancellationRequested
+                ? .questionsCancelRequested
+                : .questionsCancelUnconfirmed
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             questionErrorKey = L10nKey.errorKey(for: code)
         }
+    }
+
+    var canCancelQuestionAnswer: Bool {
+        if case .uncertain = questionAnswerState {
+            return !isSuspended && !watchEnded
+        }
+        return false
+    }
+
+    /// Keep an in-flight answer and its cancellation request across a watch
+    /// replacement: a new observer continues the original attempt recovery.
+    private func preserveQuestionCancellation() {
+        if case .uncertain = questionAnswerState {
+            return
+        }
+        questionAnswerState = .idle
     }
 
     // MARK: - Approvals
@@ -842,6 +1110,44 @@ final class ConversationModel {
             if code == .revoked || code == .notPaired {
                 reportFatalIfNeeded(code)
             }
+        }
+    }
+
+    /// Read one approval's exact scoped state from the Host and update the card.
+    /// A failed or out-of-scope read never leaves a stale card actionable.
+    func refreshApprovalStatus(_ approval: Approval) async {
+        guard approval.sessionId == sessionId else {
+            approvalStatusRefresh[approval.approvalId] = .outOfScope
+            return
+        }
+        approvalStatusRefresh[approval.approvalId] = .refreshing
+        do {
+            let exact = try await service.approval(
+                hostId: hostId,
+                approvalId: approval.approvalId
+            )
+            guard exact.sessionId == sessionId else {
+                approvalStatusRefresh[approval.approvalId] = .outOfScope
+                return
+            }
+            if exact.state != .pending {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .resolved
+            } else if exact.version != approval.version
+                || exact.digestHex.caseInsensitiveCompare(approval.digestHex) != .orderedSame {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .changed
+            } else {
+                applyServerApproval(exact)
+                approvalStatusRefresh[approval.approvalId] = .current
+            }
+        } catch {
+            let code = (error as? SessionServiceError)?.code ?? .internalError
+            if code == .revoked || code == .notPaired {
+                reportFatalIfNeeded(code)
+            }
+            markApprovalUnavailable(approval.approvalId)
+            approvalStatusRefresh[approval.approvalId] = .unavailable
         }
     }
 
@@ -955,6 +1261,12 @@ final class ConversationModel {
         }
     }
 
+    private func markApprovalUnavailable(_ approvalID: String) {
+        guard let index = approvals.firstIndex(where: { $0.approvalId == approvalID }),
+              approvals[index].state == .pending else { return }
+        approvals[index].state = .unavailable
+    }
+
     private func restartWatch() async {
         guard !isReconnecting else { return }
         isReconnecting = true
@@ -970,7 +1282,9 @@ final class ConversationModel {
             if loadState != .loaded {
                 loadState = .loading
             }
+            queue.applyCapabilities(capabilities)
             await refreshApprovals()
+            await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             errorKey = L10nKey.errorKey(for: code)
@@ -1034,6 +1348,205 @@ final class ConversationModel {
     func jumpToLatest() {
         scroll.jumpToLatest()
         requestScroll(animated: true)
+    }
+
+    // MARK: - Committed history
+
+    var canLoadOlderHistory: Bool {
+        capabilities.supportsHistoryPage
+            && loadState == .loaded
+            && !historyComplete
+            && !isLoadingOlderHistory
+            && !historyNeedsFreshTraversal
+    }
+
+    var canLoadFreshHistory: Bool {
+        capabilities.supportsHistoryPage
+            && historyNeedsFreshTraversal
+            && !isLoadingOlderHistory
+            && loadState == .loaded
+    }
+
+    var historyProvenanceKey: L10nKey? {
+        switch historyProvenance {
+        case .online: return .conversationHistoryOnline
+        case .cache: return .conversationHistoryCache
+        case .unavailable: return .conversationHistoryUnavailable
+        case nil: return nil
+        }
+    }
+
+    /// Live tool previews stay until their authoritative committed block
+    /// arrives; a committed identity always wins.
+    var visibleLiveToolActivities: [ToolActivity] {
+        let committed = Set(
+            messages.flatMap { message in
+                message.blocks.compactMap { $0.toolActivity?.callId }
+            }
+        )
+        return liveToolActivities.filter { !committed.contains($0.callId) }
+    }
+
+    /// Loads one older bounded page. `cacheFallback` explicitly serves the
+    /// encrypted local cache when the Host is unreachable, with cache
+    /// provenance shown to the reader.
+    func loadOlderHistory(cacheFallback: Bool = false) async {
+        guard canLoadOlderHistory,
+              let history = service as? any ConversationHistoryService else {
+            if !capabilities.supportsHistoryPage {
+                historyErrorKey = .errorUnsupportedCapability
+            }
+            return
+        }
+        let useCache = cacheFallback || historySource == .cache || !connection.isOnline
+        // Switching source requires a fresh traversal; a continuation belongs
+        // to one source, projection and scope.
+        if let historySource, historySource != (useCache ? .cache : .online) {
+            historyContinuation = nil
+            historyProjection = nil
+        }
+        let generation = historyGeneration
+        let anchor = scroll.anchorMessageId ?? messages.first?.messageId
+        scroll.capturePrependAnchor(anchor)
+        isLoadingOlderHistory = true
+        historyErrorKey = nil
+        defer {
+            if generation == historyGeneration {
+                isLoadingOlderHistory = false
+            }
+        }
+        do {
+            let page = try await history.historyPage(
+                hostId: hostId,
+                sessionId: sessionId,
+                source: useCache ? .cache : .online,
+                continuation: historyContinuation,
+                maxMessages: historyPageMessages,
+                maxBytes: historyPageBytes
+            )
+            // A replaced session/instance invalidates this late page.
+            guard generation == historyGeneration, !isClosed else { return }
+            applyHistoryPage(page, anchor: anchor)
+        } catch {
+            guard generation == historyGeneration, !isClosed else { return }
+            handleHistoryFailure(error)
+        }
+    }
+
+    /// Drops paged-only rows and starts a fresh latest-first traversal after a
+    /// stale continuation or content projection. Live rows are preserved.
+    func loadFreshHistory() async {
+        guard canLoadFreshHistory else { return }
+        historyGeneration &+= 1
+        messages.removeAll { message in
+            pagedMessageIds.contains(message.messageId)
+                && !liveMessageIds.contains(message.messageId)
+        }
+        pagedMessageIds.removeAll()
+        historyContinuation = nil
+        historyProjection = nil
+        historySource = nil
+        historyComplete = false
+        historyNeedsFreshTraversal = false
+        historyErrorKey = nil
+        await loadOlderHistory()
+    }
+
+    /// Resolve one exact scoped committed message. Stale or foreign content is
+    /// never applied: the model offers a fresh traversal instead.
+    func rereadMessage(_ reference: MessageReference) async {
+        guard reference.hostId == hostId, reference.sessionId == sessionId else {
+            historyErrorKey = .errorSecurity
+            return
+        }
+        guard capabilities.supportsHistoryExact,
+              let history = service as? any ConversationHistoryService else {
+            historyErrorKey = .errorUnsupportedCapability
+            return
+        }
+        if let historyProjection, reference.projectionId != historyProjection {
+            historyNeedsFreshTraversal = true
+            historyErrorKey = nil
+            return
+        }
+        do {
+            let message = try await history.historyMessage(reference)
+            guard !isClosed,
+                  reference.hostId == hostId,
+                  reference.sessionId == sessionId else { return }
+            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+                messages[index] = message
+            } else {
+                messages.append(message)
+            }
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
+            historyErrorKey = nil
+        } catch {
+            handleHistoryFailure(error)
+        }
+    }
+
+    private func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
+        if let historyProjection, historyProjection != page.projection {
+            historyNeedsFreshTraversal = true
+            historyContinuation = nil
+            return
+        }
+        historyProjection = page.projection
+        historySource = page.source
+        historyProvenance = page.source == .cache
+            ? .cache
+            : (connection.isOnline ? .online : .unavailable)
+        let existing = Set(messages.map(\.messageId))
+        var prepended: [ConversationMessage] = []
+        for message in page.messages where !existing.contains(message.messageId) {
+            prepended.append(message)
+            pagedMessageIds.insert(message.messageId)
+        }
+        if !prepended.isEmpty {
+            messages.insert(contentsOf: prepended, at: 0)
+        }
+        historyContinuation = page.complete ? nil : page.continuation
+        historyComplete = page.complete
+        historyErrorKey = nil
+        if !prepended.isEmpty {
+            historyPrepend = HistoryPrepend(
+                id: (historyPrepend?.id ?? 0) + 1,
+                anchorMessageId: anchor
+            )
+        }
+    }
+
+    private func handleHistoryFailure(_ error: Error) {
+        let code = (error as? SessionServiceError)?.code ?? .internalError
+        if code == .staleHistory {
+            historyNeedsFreshTraversal = true
+            historyContinuation = nil
+            historyProjection = nil
+            historyErrorKey = nil
+            return
+        }
+        historyErrorKey = L10nKey.errorKey(for: code)
+        if code == .unavailable || code == .hostOffline {
+            historyProvenance = .unavailable
+        }
+    }
+
+    /// Settles any live preview whose authoritative committed identity arrived.
+    private func settleAuthoritativeContent(_ message: ConversationMessage) {
+        let settledCallIds = Set(
+            message.blocks.compactMap { $0.toolActivity?.callId }
+        )
+        if !settledCallIds.isEmpty {
+            liveToolActivities.removeAll { settledCallIds.contains($0.callId) }
+        }
+        if message.role == .assistant {
+            previewText = nil
+            previewAttemptId = nil
+            reasoningPreviewText = nil
+        }
     }
 
     // MARK: - Internals
@@ -1201,13 +1714,12 @@ final class ConversationModel {
     private func applyCapabilities(_ next: SessionCapabilities) {
         let wasRunning = capabilities.running
         capabilities = next
+        queue.applyCapabilities(next)
         let options = DeliveryPolicy.choices(for: capabilities)
-        if capabilities.running && !wasRunning {
-            delivery = options.first ?? .send
-        } else if !capabilities.running {
-            delivery = .send
-        } else if !options.contains(delivery) {
-            delivery = options.first ?? .send
+        // A run-state change returns the affordance to the ordinary queue
+        // default. An explicit choice otherwise persists while it is supported.
+        if !options.contains(delivery) || capabilities.running != wasRunning {
+            delivery = DeliveryPolicy.defaultChoice(for: capabilities) ?? .send
         }
         onStatusChange?()
     }

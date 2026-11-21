@@ -45,8 +45,12 @@ Production selects an official descriptor with no account connection; staging
 is added only through `enableStaging()` and never activates by itself; custom
 managed services are added with an explicit validated `apiOrigin`. Switching
 stops the old profile's traffic and publishes the new selection atomically.
-`disconnect()` persists a local pause across restarts and `remove()` hands off
-to the service's authenticated management page without claiming revocation.
+A confirmed enrollment and stored credential reconnect automatically after the
+original approval deadline. `disconnect()` persists the local pause before
+teardown; `remove()` only opens the verified management confirmation and does
+not claim removal until scoped status reports an accepted/enforced intent.
+`snapshot().action` projects the runtime-selected next action; settings refresh
+never starts or changes a connection.
 
 | Module | Responsibility |
 | --- | --- |

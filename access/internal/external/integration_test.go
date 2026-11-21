@@ -335,8 +335,10 @@ func TestEnrollmentCommitsOnceAndDeliversTheCredentialOnce(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 from the status read, got %d", status)
 	}
-	if strings.Contains(strings.ToLower(string(payload)), "credential") {
-		t.Fatalf("a status read must not mention credentials: %s", payload)
+	if strings.Contains(strings.ToLower(string(payload)), "password") ||
+		strings.Contains(strings.ToLower(string(payload)), "mqtturl") ||
+		strings.Contains(strings.ToLower(string(payload)), "username") {
+		t.Fatalf("a status read must not expose a credential: %s", payload)
 	}
 	status, payload = h.get(t, "/v1/operations/op-1", adminToken)
 	if status != http.StatusOK {
@@ -574,8 +576,10 @@ func TestHostProofStatusReadsTheEnrollmentWithoutACredential(t *testing.T) {
 		decoded.GetEnrollmentRevision() != enrolled.GetStatus().GetEnrollmentRevision() {
 		t.Fatalf("unexpected status %+v", decoded)
 	}
-	if strings.Contains(strings.ToLower(string(payload)), "credential") {
-		t.Fatalf("a status read must not mention credentials: %s", payload)
+	if strings.Contains(strings.ToLower(string(payload)), "password") ||
+		strings.Contains(strings.ToLower(string(payload)), "mqtturl") ||
+		strings.Contains(strings.ToLower(string(payload)), "username") {
+		t.Fatalf("a status read must not expose a credential: %s", payload)
 	}
 	// The nonce is single-use.
 	code, _ = h.do(t, http.MethodGet, "/v1/hosts/host-1/enrollment", nil,
@@ -641,10 +645,21 @@ func TestCredentialReplacementDeliversOneNewCredentialAndRejectsReplay(t *testin
 	// A fresh proof for the same authorization id cannot mint a second one.
 	freshProof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
 		"host-1", authorization.GetAuthorizationId(), now, "cmVwbGFjZS1pbnQtbm9uY2UtMg")
-	code, _ = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body,
+	code, replayPayload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body,
 		map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, freshProof)})
-	if code != http.StatusConflict {
-		t.Fatalf("a replayed authorization must conflict, got %d", code)
+	if code != http.StatusOK {
+		t.Fatalf("a replayed authorization must return its recorded receipt, got %d", code)
+	}
+	var replay struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(replayPayload, &replay); err != nil {
+		t.Fatal(err)
+	}
+	if replay.Credential.Password != "" {
+		t.Fatalf("a replay delivered a second credential: %s", payload)
 	}
 }
 
@@ -663,13 +678,17 @@ func TestDisableEndpointIsIdempotent(t *testing.T) {
 		t.Fatalf("disable failed: %d %s", code, payload)
 	}
 	var first struct {
-		State      string `json:"state"`
-		DisabledAt string `json:"disabledAt"`
+		State            string `json:"state"`
+		RemovalOperation string `json:"removal_operation_id"`
+		DisabledAt       int64  `json:"disabled_at_unix_ms"`
+		RevocationCount  int    `json:"revocation_count"`
 	}
 	if err := json.Unmarshal(payload, &first); err != nil {
 		t.Fatal(err)
 	}
-	if first.State != "disabled" || first.DisabledAt == "" {
+	// The legacy bodyless call still returns an authoritative, enforced receipt
+	// for the target Access applied.
+	if (first.State != "enforced" && first.State != "disabled") || first.DisabledAt == 0 {
 		t.Fatalf("unexpected disable response %+v", first)
 	}
 	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/disable", nil, headers)
@@ -677,17 +696,109 @@ func TestDisableEndpointIsIdempotent(t *testing.T) {
 		t.Fatalf("repeated disable failed: %d %s", code, payload)
 	}
 	var repeated struct {
-		DisabledAt string `json:"disabledAt"`
+		State           string `json:"state"`
+		DisabledAt      int64  `json:"disabled_at_unix_ms"`
+		RevocationCount int    `json:"revocation_count"`
 	}
 	if err := json.Unmarshal(payload, &repeated); err != nil {
 		t.Fatal(err)
 	}
-	if repeated.DisabledAt != first.DisabledAt {
-		t.Fatalf("repeated disable changed disabledAt: %q -> %q", first.DisabledAt, repeated.DisabledAt)
+	if repeated.DisabledAt != first.DisabledAt || repeated.State != first.State {
+		t.Fatalf("repeated disable changed the receipt: %+v -> %+v", first, repeated)
 	}
 	// The enrollment is disabled for both retry and broker admission.
 	code, payload = h.get(t, "/v1/enrollments/hosts/host-1", adminToken)
 	if code != http.StatusOK || !strings.Contains(string(payload), "enrollment_disabled") {
 		t.Fatalf("status after disable = %d %s", code, payload)
+	}
+}
+
+// A lost replacement response must not become a second credential. Retrying the
+// identical proof either receives a credential-free receipt or is refused; only
+// a new recovery authorization can mint again.
+func TestLostCredentialReplacementResponseNeverMintsASecondCredential(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC()
+	status, enrolled := h.enroll(t, "host-1", "ws-fixture-1", "op-1", now, now.Add(5*time.Minute))
+	if status != http.StatusOK || enrolled.GetCredential() == nil {
+		t.Fatalf("enrollment failed: %d", status)
+	}
+	authorization := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-lost-response",
+		Purpose:            external.PurposeHostCredentialRecovery,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-lost-response",
+		HostId:             "host-1",
+		EnrollmentRevision: enrolled.GetStatus().GetEnrollmentRevision(),
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("lostresponseonce"),
+	})
+	proof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", authorization.GetAuthorizationId(), now, "bG9zdC1yZXBsYWNlLW5vbmNl")
+	body, err := json.Marshal(map[string]any{"authorization": authorization})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, proof)}
+	code, payload := h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body, headers)
+	if code != http.StatusOK {
+		t.Fatalf("replacement failed: %d %s", code, payload)
+	}
+
+	// The client lost this response and retries the exact same proof.
+	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", body, headers)
+	var retry struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	_ = json.Unmarshal(payload, &retry)
+	if retry.Credential.Password != "" {
+		t.Fatalf("a lost-response retry minted a second credential: %s", payload)
+	}
+	if code == http.StatusOK {
+		// Credential-free receipt is the intended replay answer.
+	} else if code != http.StatusConflict && code != http.StatusUnauthorized && code != http.StatusForbidden {
+		t.Fatalf("unexpected lost-response retry status: %d %s", code, payload)
+	}
+
+	// A fresh recovery authorization can mint one new credential.
+	next := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-lost-response-next",
+		Purpose:            external.PurposeHostCredentialRecovery,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-lost-response-next",
+		HostId:             "host-1",
+		EnrollmentRevision: enrolled.GetStatus().GetEnrollmentRevision(),
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("lostresponseagain"),
+	})
+	freshProof := hostProof(t, h.signingKeys["host-1"], external.PurposeCredentialReplacement,
+		"host-1", next.GetAuthorizationId(), now, "bG9zdC1yZXBsYWNlLW5vbmNlLTI")
+	freshBody, err := json.Marshal(map[string]any{"authorization": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, payload = h.do(t, http.MethodPost, "/v1/enrollments/hosts/host-1/credential", freshBody,
+		map[string]string{"X-Whalerein-Host-Proof": encodedHostProof(t, freshProof)})
+	if code != http.StatusOK {
+		t.Fatalf("fresh recovery authorization failed: %d %s", code, payload)
+	}
+	var fresh struct {
+		Credential struct {
+			Password string `json:"password"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(payload, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Credential.Password == "" {
+		t.Fatal("a fresh recovery authorization did not mint a credential")
 	}
 }

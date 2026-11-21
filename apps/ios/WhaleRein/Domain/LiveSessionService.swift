@@ -12,7 +12,8 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    private let core: MobileCore
+    let core: MobileCore
+    let instanceId: String
     let appVersion: String
 
     private var eventPump: Task<Void, Never>?
@@ -33,59 +34,67 @@ final class LiveSessionService: SessionService {
 
     // MARK: - Construction
 
-    /// Production initializer: app data directory plus an explicit Keychain
-    /// namespace. The staging app passes the staging service.
-    convenience init(dataDirectory: URL, keychainService: String, appVersion: String) throws {
+    /// Production initializer: the materialized per-instance TOML produced by
+    /// the authoritative app document plus an explicit Keychain namespace.
+    ///
+    /// Opening never creates or rewrites configuration; composition owns that.
+    convenience init(
+        configPath: URL,
+        keychainService: String,
+        appVersion: String,
+        instanceId: String
+    ) throws {
         let store = KeychainSecretStore(service: keychainService)
-        try self.init(dataDirectory: dataDirectory, secretStore: store, appVersion: appVersion)
+        try self.init(
+            configPath: configPath,
+            secretStore: store,
+            appVersion: appVersion,
+            instanceId: instanceId
+        )
     }
 
-    /// Test initializer with an explicit data directory and secret store.
-    init(dataDirectory: URL, secretStore: any SecretStore, appVersion: String) throws {
+    /// Test initializer with an explicit materialized config and secret store.
+    init(
+        configPath: URL,
+        secretStore: any SecretStore,
+        appVersion: String,
+        instanceId: String
+    ) throws {
         do {
             self.core = try MobileCore(
-                configPath: try Self.configurationPath(in: dataDirectory),
+                configPath: configPath.path,
                 secretStore: secretStore,
                 appVersion: appVersion
             )
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
+        self.instanceId = instanceId
         self.appVersion = appVersion
         self.eventPump = startEventPump()
     }
 
     /// Isolated Simulator/test initializer: process-local secrets, no Keychain.
-    static func memory(dataDirectory: URL, appVersion: String) throws -> LiveSessionService {
+    static func memory(
+        configPath: URL,
+        appVersion: String,
+        instanceId: String
+    ) throws -> LiveSessionService {
         let core: MobileCore
         do {
             core = try MobileCore.newWithMemorySecretStore(
-                configPath: try Self.configurationPath(in: dataDirectory),
+                configPath: configPath.path,
                 appVersion: appVersion
             )
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
-        return LiveSessionService(core: core, appVersion: appVersion)
+        return LiveSessionService(core: core, appVersion: appVersion, instanceId: instanceId)
     }
 
-    private static func configurationPath(in dataDirectory: URL) throws -> String {
-        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-        let path = dataDirectory.appendingPathComponent("config.toml").path
-        if !FileManager.default.fileExists(atPath: path) {
-            try WhaleReinMobile.writeClientConfig(
-                configPath: path,
-                service: .standalone,
-                dataDir: "instance",
-                cloudEnvironment: nil,
-                standaloneCaCertificate: nil
-            )
-        }
-        return path
-    }
-
-    private init(core: MobileCore, appVersion: String) {
+    private init(core: MobileCore, appVersion: String, instanceId: String) {
         self.core = core
+        self.instanceId = instanceId
         self.appVersion = appVersion
         self.eventPump = startEventPump()
     }
@@ -189,15 +198,32 @@ final class LiveSessionService: SessionService {
             broadcast(.message(mapped), scope: scope)
 
         case .preview(let attemptId, let kind, let text, let replace, let incomplete):
-            // This presenter has a single answer preview. Other block kinds arrive through history.
-            guard kind == "text" else { return }
+            // Answer and reasoning previews keep distinct typed identities.
+            switch kind {
+            case "reasoning":
+                broadcast(
+                    .reasoningPreview(
+                        attemptId: attemptId,
+                        text: text,
+                        replace: replace,
+                        incomplete: incomplete
+                    ),
+                    scope: scope
+                )
+            case "text":
+                broadcast(
+                    .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
+                    scope: scope
+                )
+            default:
+                break
+            }
+
+        case .toolActivity(let activity):
             broadcast(
-                .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
+                .toolActivity(Self.map(toolActivity: activity)),
                 scope: scope
             )
-
-        case .toolActivity:
-            break
 
         case .attemptEnded(let attemptId, let outcome):
             broadcast(
@@ -473,6 +499,77 @@ final class LiveSessionService: SessionService {
         return Self.map(command: view, delivery: nil)
     }
 
+    // MARK: - Pending queue
+
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot {
+        let core = self.core
+        let view = try await call {
+            try core.pendingQueue(hostId: hostId, sessionId: sessionId)
+        }
+        return Self.map(queue: view)
+    }
+
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation {
+        let core = self.core
+        let bindingAction = Self.map(queueAction: action)
+        let view = try await call {
+            try core.updatePendingQueue(
+                hostId: hostId,
+                sessionId: sessionId,
+                itemId: itemId,
+                action: bindingAction,
+                text: text
+            )
+        }
+        let receipt = Self.map(command: view.receipt, delivery: nil)
+        return QueueMutation(
+            itemID: view.itemId,
+            action: QueueAction(rawValue: view.action) ?? action,
+            operation: OperationReceipt(
+                operationId: view.operationId,
+                kind: .control,
+                scope: OperationScope(
+                    instanceId: instanceId,
+                    hostId: view.hostId,
+                    sessionId: view.sessionId
+                ),
+                status: Self.map(operationStatus: receipt.status),
+                receipt: receipt,
+                reply: nil,
+                content: nil,
+                readError: nil
+            )
+        )
+    }
+
+    // MARK: - Wait
+
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String {
+        let core = self.core
+        return try await call {
+            try core.beginWait(hostId: hostId, sessionId: sessionId, timeoutMs: timeoutMs)
+        }
+    }
+
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? {
+        let core = self.core
+        let view = try await call {
+            try core.takeWaitResult(waitId: waitId, waitMs: waitMs)
+        }
+        return view.map(Self.map(wait:))
+    }
+
+    func cancelWait(waitId: String) async throws -> Bool {
+        let core = self.core
+        return try await call { try core.cancelWait(waitId: waitId) }
+    }
+
     /// Encrypted local transcript for restart/cache verification.
     func cachedTranscript(hostId: String, sessionId: String) async throws -> [ConversationMessage] {
         let core = self.core
@@ -535,12 +632,39 @@ final class LiveSessionService: SessionService {
         }
     }
 
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt {
+        let core = self.core
+        let view = try await call {
+            try core.requestQuestionAnswerCancel(
+                hostId: hostId,
+                sessionId: sessionId,
+                commandId: commandId
+            )
+        }
+        return QuestionCancelReceipt(
+            commandID: view.commandId,
+            cancellationRequested: view.cancellationRequested
+        )
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
         let core = self.core
         let approvals = try await call { try core.approvals(hostId: hostId, sessionId: sessionId) }
         return approvals.map(Self.map(approval:))
+    }
+
+    func approval(hostId: String, approvalId: String) async throws -> Approval {
+        let core = self.core
+        let view = try await call {
+            try core.getApproval(hostId: hostId, approvalId: approvalId)
+        }
+        return Self.map(approval: view)
     }
 
     func resolveApproval(
@@ -552,9 +676,17 @@ final class LiveSessionService: SessionService {
         allow: Bool
     ) async throws -> Approval {
         let core = self.core
-        let pending = try await call { try core.approvals(hostId: hostId, sessionId: sessionId) }
-        guard let reviewed = pending.first(where: { $0.approvalId == approvalId }) else {
+        // The exact Host-scoped read, not the pending list, owns the guard the
+        // decision is bound to. A changed, resolved or out-of-scope request is
+        // refused before any decision is submitted.
+        let reviewed = try await call {
+            try core.getApproval(hostId: hostId, approvalId: approvalId)
+        }
+        guard reviewed.sessionId == sessionId else {
             throw SessionServiceError(.conflict)
+        }
+        guard reviewed.state == "pending" else {
+            throw SessionServiceError(.staleApproval)
         }
         guard reviewed.version == Int64(version),
               reviewed.digestHex.caseInsensitiveCompare(digestHex) == .orderedSame else {
@@ -624,7 +756,17 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
-    private func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    // MARK: - Feature extension access
+
+    /// Binding access for feature adapters that live in separate files.
+    var bindingCore: MobileCore { core }
+
+    /// Runs one binding call with this service's typed error mapping.
+    func bindingCall<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await call(body)
+    }
+
+    func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value
         } catch let error as MobileError {
@@ -770,13 +912,90 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(capabilities view: SessionCapabilitiesView, running: Bool) -> SessionCapabilities {
+    private static func map(queue view: WhaleReinMobile.PendingQueueView) -> QueueSnapshot {
+        QueueSnapshot(
+            available: view.available,
+            running: view.running,
+            items: view.items.map(map(queueItem:))
+        )
+    }
+
+    private static func map(queueItem view: WhaleReinMobile.PendingQueueItemView) -> QueueItem {
+        QueueItem(
+            itemID: view.itemId,
+            placement: view.placement,
+            deliveryID: view.deliveryId,
+            blocks: view.blocks.map { block in
+                switch block {
+                case .text(let text):
+                    return .text(text)
+                case .attachment(let mediaType, let name, let size, let available):
+                    return .attachment(
+                        mediaType: mediaType,
+                        name: name,
+                        size: size,
+                        available: available
+                    )
+                case .unavailable:
+                    return .unavailable
+                }
+            },
+            actions: view.actions.compactMap(QueueAction.init(rawValue:))
+        )
+    }
+
+    private static func map(queueAction action: QueueAction) -> WhaleReinMobile.QueueAction {
+        switch action {
+        case .edit: return .edit
+        case .remove: return .remove
+        case .promote: return .promote
+        }
+    }
+
+    private static func map(wait view: WhaleReinMobile.WaitResultView) -> WaitResult {
+        WaitResult(
+            waitID: view.waitId,
+            hostID: view.hostId,
+            sessionID: view.sessionId,
+            outcome: map(waitOutcome: view.outcome),
+            state: view.state.map { state in
+                WaitSnapshot(
+                    active: state.active,
+                    running: state.running,
+                    queueAvailable: state.queueAvailable,
+                    pendingInput: state.pendingInput
+                )
+            },
+            errorCode: view.errorCode
+        )
+    }
+
+    private static func map(waitOutcome outcome: WhaleReinMobile.WaitOutcome) -> WaitOutcome {
+        switch outcome {
+        case .idle: return .idle
+        case .inputRequired: return .inputRequired
+        case .timeout: return .timeout
+        case .cancelled: return .cancelled
+        case .failed: return .failed
+        }
+    }
+
+    static func map(capabilities view: SessionCapabilitiesView, running: Bool) -> SessionCapabilities {
         let modes = Set(view.deliveryModes.map { $0.lowercased() })
         return SessionCapabilities(
             running: running,
             supportsSteer: modes.contains("steer"),
             supportsQueue: modes.contains("enqueue_after_run") || modes.contains("queue"),
-            supportsInterrupt: view.interrupt
+            supportsInterrupt: view.interrupt,
+            supportsQueueRead: view.pendingQueueRead,
+            supportsQueueEdit: view.pendingQueueEdit,
+            supportsQueueRemove: view.pendingQueueRemove,
+            supportsQueuePromote: view.pendingQueueSteer,
+            supportsHistoryPage: view.historyPage,
+            supportsHistoryExact: view.historyExact,
+            supportsAttachments: view.attachments,
+            supportsReasoning: view.liveReasoning,
+            supportsToolActivity: view.toolActivity
         )
     }
 
@@ -794,7 +1013,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(message view: MessageView) -> ConversationMessage {
+    static func map(message view: MessageView) -> ConversationMessage {
         ConversationMessage(
             messageId: view.messageId,
             role: map(role: view.role),
@@ -803,14 +1022,16 @@ final class LiveSessionService: SessionService {
                     blockId: block.blockId,
                     kind: map(blockKind: block.kind),
                     text: block.text,
-                    toolName: block.toolName
+                    toolName: block.toolName,
+                    toolActivity: block.toolActivity.map(map(toolActivity:)),
+                    attachment: block.attachment.map(map(attachment:))
                 )
             },
             createdAtUnixMs: view.createdAtUnixMs
         )
     }
 
-    private static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
+    static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
         CommandReceipt(
             commandId: view.commandId,
             requestId: view.requestId,
@@ -821,7 +1042,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(role: String) -> MessageRole {
+    static func map(role: String) -> MessageRole {
         switch role.lowercased() {
         case "user": return .user
         case "assistant": return .assistant
@@ -831,11 +1052,14 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(blockKind: String) -> BlockKind {
+    static func map(blockKind: String) -> BlockKind {
         switch blockKind.lowercased() {
         case "text": return .text
-        case "tool", "attachment": return .tool
+        case "reasoning": return .reasoning
+        case "tool": return .tool
+        case "attachment": return .attachment
         case "question": return .question
+        case "notice": return .notice
         default: return .notice
         }
     }
@@ -888,6 +1112,15 @@ final class LiveSessionService: SessionService {
         }
     }
 
+    static func map(operationStatus status: CommandStatus) -> OperationStatus {
+        switch status {
+        case .accepted: return .accepted
+        case .confirmed: return .confirmed
+        case .uncertain: return .uncertain
+        case .rejected, .cancelled: return .failed
+        }
+    }
+
     private static func map(commandStatus status: String) -> CommandStatus {
         switch status.lowercased() {
         case "succeeded", "confirmed": return .confirmed
@@ -906,7 +1139,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(error: MobileError) -> AppErrorCode {
+    static func map(error: MobileError) -> AppErrorCode {
         map(code: error.code)
     }
 
@@ -915,7 +1148,7 @@ final class LiveSessionService: SessionService {
     /// generic retryable failure.
     static func map(code: String) -> AppErrorCode {
         switch code {
-        case "invalid_input": return .invalidInvitation
+        case "invalid_input": return .invalidInput
         case "not_paired": return .notPaired
         case "not_found": return .unavailable
         case "revoked": return .revoked
@@ -923,6 +1156,7 @@ final class LiveSessionService: SessionService {
         case "conflict": return .conflict
         case "timeout": return .timeout
         case "cancelled": return .cancelled
+        case "stale_history": return .staleHistory
         case "security": return .security
         case "unavailable": return .unavailable
         case "protocol_version_incompatible": return .protocolVersionIncompatible

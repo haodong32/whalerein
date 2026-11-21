@@ -10,10 +10,12 @@ use bytes::BytesMut;
 use rumqttc::v5::mqttbytes::v5::Packet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use whalerein_core::api::test_support::{history_message, FakeAccess};
+use whalerein_core::api::test_support::{history_message, FakeAccess, FakeAttachmentObject};
 use whalerein_mobile::{
-    write_client_config, ConversationEvent, DeliveryChoice, MemorySecretStore, MessageView,
-    MobileClientService, MobileCore,
+    write_client_config, AttachmentDownloadRequestView, AttachmentReferenceView,
+    AttachmentTransferView, ConversationEvent, DeliveryChoice, MemorySecretStore,
+    MessageReferenceView, MessageReplyView, MessageView, MobileClientService, MobileCore,
+    QueueAction, SessionKeyView, WaitOutcome,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -983,6 +985,15 @@ fn question_observation_and_guard_flow_use_core_owned_state() {
         event,
         ConversationEvent::CommandStatus { command } if command.command_id == answered.command_id
     )));
+    let cancelled = core
+        .request_question_answer_cancel(
+            host_id.clone(),
+            session_id.clone(),
+            answered.command_id.clone(),
+        )
+        .unwrap();
+    assert_eq!(cancelled.command_id, answered.command_id);
+    assert!(cancelled.cancellation_requested);
     assert!(core
         .cancel_question_answer(host_id, session_id, answered.command_id)
         .unwrap());
@@ -1065,4 +1076,1116 @@ fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
         "an independent command event was lost with the replaced watch: {emitted:?}"
     );
     core.stop_watch();
+}
+
+// ---------------------------------------------------------------------------
+// Queue, wait, exact approval and open-answer cancellation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_queue_reads_ordered_items_and_advertised_actions() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let queue = core
+        .pending_queue(host_id.clone(), "session-1".into())
+        .unwrap();
+    assert!(queue.available);
+    assert!(queue.running);
+    assert_eq!(queue.items.len(), 1);
+    let item = &queue.items[0];
+    assert_eq!(item.item_id, "queue-1");
+    assert_eq!(item.placement, "queued");
+    assert_eq!(item.actions, vec!["edit", "remove"]);
+    assert!(matches!(
+        item.blocks.as_slice(),
+        [whalerein_mobile::PendingQueueBlockView::Text { text }] if text == "fixture"
+    ));
+
+    // A fresh listing that does not advertise the action rejects the request
+    // before any control command is submitted.
+    let commands_before = access.host.lock().unwrap().commands_seen;
+    assert_eq!(
+        core.update_pending_queue(
+            host_id.clone(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Promote,
+            String::new(),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_input"
+    );
+    assert_eq!(access.host.lock().unwrap().commands_seen, commands_before);
+
+    // Edit carries replacement text and a native terminal receipt.
+    let edited = core
+        .update_pending_queue(
+            host_id.clone(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Edit,
+            "replacement".into(),
+        )
+        .unwrap();
+    assert_eq!(edited.item_id, "queue-1");
+    assert_eq!(edited.action, "edit");
+    assert_eq!(edited.operation_id, edited.receipt.command_id);
+    assert_eq!(edited.host_id, host_id);
+    assert_eq!(edited.session_id, "session-1");
+    assert_eq!(edited.receipt.status, "succeeded");
+
+    // Withdraw has no text and is also a native receipt.
+    let withdrawn = core
+        .update_pending_queue(
+            host_id,
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Remove,
+            String::new(),
+        )
+        .unwrap();
+    assert_eq!(withdrawn.action, "remove");
+    assert_eq!(withdrawn.receipt.status, "succeeded");
+
+    // Non-edit text is rejected locally rather than silently dropped.
+    assert_eq!(
+        core.update_pending_queue(
+            "host-1".into(),
+            "session-1".into(),
+            "queue-1".into(),
+            QueueAction::Promote,
+            "unexpected".into(),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_input"
+    );
+}
+
+#[test]
+fn queue_read_unavailable_stays_explicit() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    access.host.lock().unwrap().fail_pending_queue = true;
+    assert_eq!(
+        core.pending_queue(host_id, "session-1".into())
+            .unwrap_err()
+            .code(),
+        "unavailable"
+    );
+}
+
+#[test]
+fn wait_reaches_idle_and_cancel_keeps_the_attempt_identity() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let idle_id = core
+        .begin_wait(host_id.clone(), "session-1".into(), 5_000)
+        .unwrap();
+    let idle = take_wait_until(&core, &idle_id, Duration::from_secs(5));
+    assert_eq!(idle.wait_id, idle_id);
+    assert_eq!(idle.host_id, host_id);
+    assert_eq!(idle.session_id, "session-1");
+    assert_eq!(idle.outcome, WaitOutcome::Idle);
+    let state = idle.state.expect("idle carries source state");
+    assert!(!state.active);
+    assert!(!state.running);
+    assert!(idle.error_code.is_none());
+    // A settled attempt is consumed once.
+    assert_eq!(
+        core.take_wait_result(idle_id, 0).unwrap_err().code(),
+        "not_found"
+    );
+
+    // Delay the native answer so cancellation races an in-flight slice.
+    access.host.lock().unwrap().wait_receipt_delay_ms = 2_000;
+    let wait_id = core
+        .begin_wait(host_id.clone(), "session-1".into(), 60_000)
+        .unwrap();
+    assert!(core
+        .take_wait_result(wait_id.clone(), 50)
+        .unwrap()
+        .is_none());
+    assert!(core.cancel_wait(wait_id.clone()).unwrap());
+    let cancelled = take_wait_until(&core, &wait_id, Duration::from_secs(5));
+    assert_eq!(cancelled.outcome, WaitOutcome::Cancelled);
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(cancelled.state.is_none());
+
+    // A completed attempt cannot be cancelled after its result exists.
+    let settled_id = core.begin_wait(host_id, "session-1".into(), 5_000).unwrap();
+    let _ = take_wait_until(&core, &settled_id, Duration::from_secs(5));
+    assert!(!core.cancel_wait(settled_id).unwrap());
+}
+
+fn take_wait_until(
+    core: &MobileCore,
+    wait_id: &str,
+    timeout: Duration,
+) -> whalerein_mobile::WaitResultView {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(result) = core.take_wait_result(wait_id.to_owned(), 100).unwrap() {
+            return result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wait {wait_id} did not settle before the deadline"
+        );
+    }
+}
+
+#[test]
+fn exact_approval_read_is_host_scoped_and_carries_the_guard() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.approvals.push(whalerein_proto::Approval {
+            approval_id: "approval-1".into(),
+            session_id: "session-1".into(),
+            tool_name: "bash".into(),
+            call_id: "call-1".into(),
+            reason: "run the verification".into(),
+            version: 3,
+            expires_at_unix_ms: 1_900_000_000_000,
+            digest: vec![7; 32],
+            state: whalerein_proto::ApprovalState::Pending as i32,
+            ..Default::default()
+        });
+    }
+
+    let exact = core
+        .get_approval(host_id.clone(), "approval-1".into())
+        .unwrap();
+    assert_eq!(exact.approval_id, "approval-1");
+    assert_eq!(exact.session_id, "session-1");
+    assert_eq!(exact.state, "pending");
+    assert_eq!(exact.version, 3);
+    assert_eq!(exact.digest_hex, "07".repeat(32));
+    assert_eq!(exact.expires_at_unix_ms, 1_900_000_000_000);
+
+    // Missing identities and Hosts outside the original scope never guess.
+    assert_eq!(
+        core.get_approval(host_id, "missing".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+    assert_eq!(
+        core.get_approval("host-2".into(), "approval-1".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+}
+
+// Operation receipt and recovery contract.
+// ---------------------------------------------------------------------------
+
+fn committed_reference(reply: Option<MessageReplyView>) -> MessageReferenceView {
+    match reply.expect("confirmed reply") {
+        MessageReplyView::Committed { reference } => reference,
+        other => panic!("unexpected reply state: {other:?}"),
+    }
+}
+
+#[test]
+fn retained_send_list_and_exact_reference_read_round_trip() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let sent = core
+        .send(
+            host_id.clone(),
+            "session-1".into(),
+            "retained send".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    let operation_id = sent.request_id.clone();
+    let listed = core.list_send_operations().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].operation_id, operation_id);
+    assert_eq!(listed[0].kind, "send");
+    assert_eq!(listed[0].host_id.as_deref(), Some(host_id.as_str()));
+    assert_eq!(listed[0].session_id.as_deref(), Some("session-1"));
+    assert!(matches!(
+        listed[0].status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    // Listing is local-only: no reply, content or read error yet.
+    assert!(listed[0].reply.is_none());
+    assert!(listed[0].content.is_none());
+    assert!(listed[0].read_error.is_none());
+
+    let recovered = core
+        .recover_send_with_content(operation_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(recovered.read_error.is_none());
+    let reference = committed_reference(recovered.reply.clone());
+    assert_eq!(reference.session.host_id, host_id);
+    assert_eq!(reference.session.session_id, "session-1");
+    assert!(!reference.source_locator.is_empty());
+    let content = recovered.content.expect("canonical content");
+    assert_eq!(content.message_id, reference.message_id);
+    let exact = core.read_history_message(reference).unwrap();
+    assert_eq!(exact.message_id, content.message_id);
+    assert_eq!(exact.blocks, content.blocks);
+
+    // The compatibility export keeps working over the same operation identity.
+    let compatible = core.recover_send(operation_id, true).unwrap();
+    assert!(matches!(
+        compatible.reply,
+        Some(MessageReplyView::Committed { .. })
+    ));
+}
+
+#[test]
+fn content_read_failure_keeps_the_confirmation_and_reports_the_error() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let sent = core
+        .send(
+            host_id,
+            "session-1".into(),
+            "content read fails".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    access.host.lock().unwrap().history_messages.clear();
+    let recovered = core
+        .recover_send_with_content(sent.request_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(matches!(
+        recovered.reply,
+        Some(MessageReplyView::Committed { .. })
+    ));
+    assert!(recovered.content.is_none());
+    assert_eq!(recovered.read_error.as_deref(), Some("not_found"));
+    // A failed read never resubmits.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    // The confirmation survives a second attempt and the reference stays usable.
+    let again = core
+        .recover_send_with_content(sent.request_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(again.status.as_str(), "accepted" | "confirmed"));
+    let reference = committed_reference(again.reply);
+    assert_eq!(reference.message_id, sent.message_id.expect("message id"));
+    assert_eq!(
+        core.read_history_message(reference).unwrap_err().code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn a_dropped_send_receipt_stays_listed_and_recovers_without_another_submission() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    access.host.lock().unwrap().drop_command_receipts = true;
+    let error = core
+        .send(
+            host_id.clone(),
+            "session-1".into(),
+            "lost receipt".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error.code(), "unavailable" | "unknown_result" | "timeout"),
+        "unexpected drop-receipt error: {error:?}"
+    );
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    let listed = core.list_send_operations().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].status, "submitted");
+    assert!(listed[0].receipt.is_none());
+    assert_eq!(listed[0].host_id.as_deref(), Some(host_id.as_str()));
+    assert_eq!(listed[0].session_id.as_deref(), Some("session-1"));
+
+    access.host.lock().unwrap().drop_command_receipts = false;
+    let recovered = core
+        .recover_send_with_content(listed[0].operation_id.clone(), true, 5_000)
+        .unwrap();
+    assert!(matches!(
+        recovered.status.as_str(),
+        "accepted" | "confirmed"
+    ));
+    assert!(recovered.content.is_some());
+    // Recovery queried the original command; it never sent the message again.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+}
+
+#[test]
+fn invalid_and_foreign_references_are_typed_errors() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let sent = core
+        .send(
+            host_id,
+            "session-1".into(),
+            "scoped".into(),
+            DeliveryChoice::Queue,
+        )
+        .unwrap();
+    let operation_id = sent.request_id.clone();
+
+    assert_eq!(
+        core.recover_send_with_content("not-an-id".into(), false, 1_000)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content(operation_id.clone(), false, 0)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content(operation_id.clone(), false, 60_000)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(
+        core.recover_send_with_content("ab".repeat(16), false, 1_000)
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+
+    let recovered = core
+        .recover_send_with_content(operation_id, true, 5_000)
+        .unwrap();
+    let reference = committed_reference(recovered.reply);
+
+    let mut empty_locator = reference.clone();
+    empty_locator.source_locator.clear();
+    assert_eq!(
+        core.read_history_message(empty_locator).unwrap_err().code(),
+        "invalid_input"
+    );
+    let mut foreign = reference;
+    foreign.session.host_id = "other-host".into();
+    let error = core.read_history_message(foreign).unwrap_err();
+    assert!(
+        matches!(
+            error.code(),
+            "not_found" | "unavailable" | "conflict" | "not_paired" | "security"
+        ),
+        "unexpected foreign-scope error: {error:?}"
+    );
+}
+
+#[test]
+fn retained_control_commands_are_listed_and_recovered_under_their_original_identity() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    access.host.lock().unwrap().drop_command_receipts = true;
+    assert!(core.stop(host_id.clone(), "session-1".into()).is_err());
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    let listed = core.list_pending_commands().unwrap();
+    assert_eq!(listed.len(), 1);
+    let pending = &listed[0];
+    assert_eq!(pending.kind, "control");
+    assert_eq!(pending.host_id.as_deref(), Some(host_id.as_str()));
+    assert!(pending.session_id.is_none());
+    assert_eq!(pending.status, "uncertain");
+    assert!(pending.receipt.is_some());
+
+    access.host.lock().unwrap().drop_command_receipts = false;
+    let recovered = core
+        .recover_pending_command(pending.operation_id.clone())
+        .unwrap();
+    assert_eq!(recovered.operation_id, pending.operation_id);
+    assert_eq!(recovered.kind, "control");
+    assert_eq!(recovered.status, "confirmed");
+    assert_eq!(
+        recovered
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.request_id.as_str()),
+        Some(pending.operation_id.as_str())
+    );
+    assert!(core.list_pending_commands().unwrap().is_empty());
+    // Recovery queried the original control command instead of issuing a new one.
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+    assert_eq!(
+        core.recover_pending_command("missing-command".into())
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Committed history paging, exact reads and attachment transfers
+// ---------------------------------------------------------------------------
+
+fn history_reference(
+    host_id: &str,
+    session_id: &str,
+    message_id: &str,
+    projection: &str,
+) -> MessageReferenceView {
+    MessageReferenceView {
+        session: SessionKeyView {
+            host_id: host_id.into(),
+            session_id: session_id.into(),
+        },
+        message_id: message_id.into(),
+        source_locator: format!("locator-{message_id}"),
+        projection_id: projection.into(),
+    }
+}
+
+fn terminal_transfer(core: &MobileCore, id: &str) -> AttachmentTransferView {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let view = core
+            .take_attachment_result(id.into(), 500)
+            .expect("known transfer");
+        if view.state != "running" {
+            return view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attachment transfer did not finish: {view:?}"
+        );
+    }
+}
+
+fn no_staging_files(directory: &std::path::Path) -> bool {
+    std::fs::read_dir(directory).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".whalerein-download-")
+    })
+}
+
+#[test]
+fn history_pages_preserve_provenance_order_and_continuation() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = ["m1", "m2", "m3", "m4", "m5"]
+            .into_iter()
+            .map(|id| history_message(id, &format!("body {id}")))
+            .collect();
+        host.history_page_size = 2;
+    }
+
+    let first = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(first.source, "online");
+    assert!(!first.complete);
+    assert_eq!(
+        first
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m4", "m5"]
+    );
+    let projection = first.projection.clone();
+    let continuation = first.continuation.clone().expect("continuation");
+
+    let second = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(second.source, "online");
+    assert_eq!(second.projection, projection);
+    assert!(!second.complete);
+    assert_eq!(
+        second
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m2", "m3"]
+    );
+
+    let third = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            second.continuation.clone(),
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert!(third.complete);
+    assert!(third.continuation.is_none());
+    assert_eq!(
+        third
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1"]
+    );
+}
+
+#[test]
+fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = ["m1", "m2", "m3", "m4"]
+            .into_iter()
+            .map(|id| history_message(id, id))
+            .collect();
+        host.history_page_size = 2;
+    }
+    let first = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    let continuation = first.continuation.clone().expect("continuation");
+
+    // Another Host/session scope cannot satisfy the original continuation.
+    let error = core
+        .history_page(
+            host_id.clone(),
+            "session-2".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // A changed cut on the same scope also requires a fresh traversal.
+    access.host.lock().unwrap().history_cut = "bookmark:replaced".into();
+    let error = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            Some(continuation.clone()),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // Tampered tokens never resolve to content.
+    let mut tampered = continuation;
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == 'a' { 'b' } else { 'a' });
+    let error = core
+        .history_page(
+            host_id,
+            "session-1".into(),
+            false,
+            Some(tampered),
+            2,
+            256 * 1024,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+}
+
+#[test]
+fn cache_history_is_local_and_explicitly_empty_or_populated() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
+    spawn_mqtt_peer(&runtime, listener);
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
+    }
+
+    let empty = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            true,
+            None,
+            10,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(empty.source, "cache");
+    assert!(empty.complete);
+    assert!(empty.messages.is_empty());
+    assert!(empty.continuation.is_none());
+
+    core.start_watch(host_id.clone(), "session-1".into())
+        .unwrap();
+    wait_for_cached_message(&core, &host_id, "session-1", "m2");
+    core.stop_watch();
+    let populated = core
+        .history_page(host_id, "session-1".into(), true, None, 10, 256 * 1024)
+        .unwrap();
+    assert_eq!(populated.source, "cache");
+    assert!(populated.complete);
+    assert_eq!(
+        populated
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1", "m2"]
+    );
+}
+
+#[test]
+fn exact_read_resolves_the_paged_message_and_rejects_a_changed_projection() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
+    }
+    let page = core
+        .history_page(
+            host_id.clone(),
+            "session-1".into(),
+            false,
+            None,
+            10,
+            256 * 1024,
+        )
+        .unwrap();
+    let reference = history_reference(&host_id, "session-1", "m2", &page.projection);
+    let message = core.read_history_message(reference.clone()).unwrap();
+    assert_eq!(message.message_id, "m2");
+    assert_eq!(
+        message
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>(),
+        ["two"]
+    );
+
+    access.host.lock().unwrap().history_projection = "projection-replaced".into();
+    let error = core.read_history_message(reference).unwrap_err();
+    assert_eq!(error.code(), "stale_history");
+
+    // Malformed fields fail before any request and never fall back.
+    let mut malformed = history_reference(&host_id, "session-1", "m2", "projection-1");
+    malformed.source_locator.clear();
+    assert_eq!(
+        core.read_history_message(malformed).unwrap_err().code(),
+        "invalid_input"
+    );
+}
+
+fn attachment_request(
+    host_id: &str,
+    session_id: &str,
+    reference: &str,
+    destination: &std::path::Path,
+    name: Option<&str>,
+    overwrite: bool,
+) -> AttachmentDownloadRequestView {
+    AttachmentDownloadRequestView {
+        reference: AttachmentReferenceView {
+            session: SessionKeyView {
+                host_id: host_id.into(),
+                session_id: session_id.into(),
+            },
+            attachment_ref: reference.into(),
+        },
+        destination: destination.to_string_lossy().into_owned(),
+        file_name: name.map(str::to_owned),
+        overwrite,
+    }
+}
+
+#[test]
+fn verified_attachment_download_reports_progress_and_commits_the_file() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let bytes = (0..200 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut object =
+        FakeAttachmentObject::new("session-1", "attachment-1", "report.bin", bytes.clone());
+    object.policy.max_chunk_bytes = 32 * 1024;
+    access.host.lock().unwrap().put_attachment(object);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let terminal = terminal_transfer(&core, &id);
+    assert_eq!(terminal.state, "succeeded", "{terminal:?}");
+    let download = terminal.download.expect("verified download");
+    assert!(download.verified);
+    assert_eq!(download.bytes, bytes.len() as u64);
+    assert_eq!(download.name, "report.bin");
+    assert_eq!(download.media_type, "application/octet-stream");
+    assert_eq!(
+        download.path,
+        destination.join("report.bin").to_string_lossy()
+    );
+    assert_eq!(std::fs::read(&download.path).unwrap(), bytes);
+    assert!(no_staging_files(&destination));
+    // Progress never exceeds the declared total.
+    assert_eq!(terminal.progress.total, bytes.len() as u64);
+    assert!(terminal.progress.received <= terminal.progress.total);
+    // A completed result is consumed exactly once.
+    assert_eq!(
+        core.take_attachment_result(id, 0).unwrap_err().code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn missing_name_uses_a_media_derived_name_and_collisions_preserve_existing_files() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let mut object =
+        FakeAttachmentObject::new("session-1", "attachment-1", "", b"png bytes".to_vec());
+    object.media_type = "image/png".into();
+    access.host.lock().unwrap().put_attachment(object);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let first = terminal_transfer(&core, &id);
+    assert_eq!(first.state, "succeeded");
+    assert_eq!(first.download.unwrap().name, "attachment.png");
+
+    // The second transfer collides with the committed final file.
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let collision = terminal_transfer(&core, &id);
+    assert_eq!(collision.state, "failed");
+    assert_eq!(collision.error_code.as_deref(), Some("conflict"));
+    assert_eq!(
+        std::fs::read(destination.join("attachment.png")).unwrap(),
+        b"png bytes"
+    );
+    assert!(no_staging_files(&destination));
+}
+
+#[test]
+fn integrity_failure_unavailable_and_cancellation_leave_no_partial_file() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let destination = dir.path().join("downloads");
+    std::fs::create_dir(&destination).unwrap();
+
+    // Integrity failure: the Host serves a digest that does not match.
+    let mut object = FakeAttachmentObject::new(
+        "session-1",
+        "attachment-1",
+        "corrupt.bin",
+        vec![7u8; 64 * 1024],
+    );
+    object.policy.max_chunk_bytes = 16 * 1024;
+    {
+        let mut host = access.host.lock().unwrap();
+        host.put_attachment(object);
+        host.attachment_wrong_digest = true;
+    }
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let failed = terminal_transfer(&core, &id);
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error_code.as_deref(), Some("security"));
+    assert!(!destination.join("corrupt.bin").exists());
+    assert!(no_staging_files(&destination));
+
+    // Unavailable occurrence.
+    access.host.lock().unwrap().attachment_wrong_digest = false;
+    access.host.lock().unwrap().attachment_open_error = Some(whalerein_proto::ErrorCode::NotFound);
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let unavailable = terminal_transfer(&core, &id);
+    assert_eq!(unavailable.state, "failed");
+    assert_eq!(unavailable.error_code.as_deref(), Some("not_found"));
+
+    // Cancellation stops an in-flight transfer and cleans staging.
+    access.host.lock().unwrap().attachment_open_error = None;
+    access.host.lock().unwrap().attachment_pull_delay_ms = 120;
+    let mut object = FakeAttachmentObject::new(
+        "session-1",
+        "attachment-1",
+        "cancel.bin",
+        vec![5u8; 64 * 1024],
+    );
+    object.policy.max_chunk_bytes = 16 * 1024;
+    access.host.lock().unwrap().put_attachment(object);
+    let id = core
+        .begin_attachment_download(attachment_request(
+            &host_id,
+            "session-1",
+            "attachment-1",
+            &destination,
+            None,
+            false,
+        ))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while core
+        .attachment_download_progress(id.clone())
+        .map(|progress| progress.received)
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(Instant::now() < deadline, "transfer never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(core.cancel_attachment_download(id.clone()));
+    assert!(!core.cancel_attachment_download("attachment-ffffffff".into()));
+    let cancelled = terminal_transfer(&core, &id);
+    assert_eq!(cancelled.state, "cancelled");
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(!destination.join("cancel.bin").exists());
+    assert!(no_staging_files(&destination));
+}
+
+// Account and device Settings: default Host scope, typed status, diagnostics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_host_persists_with_its_instance_and_reports_through_status() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    // Pairing records the first authorized Host as the default.
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+    // Selecting the same authorized Host is idempotent and persists.
+    core.select_default_host(host_id.clone()).unwrap();
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+
+    // The persisted record is exposed by the typed status view.
+    let status = core.status().unwrap();
+    assert_eq!(status.service, "standalone");
+    assert_eq!(status.account_state, "not_applicable");
+    assert_eq!(status.device_access, "ready");
+    assert_eq!(status.default_host.as_deref(), Some(host_id.as_str()));
+
+    // A second data directory is a separate instance and sees no default.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = new_core(other_dir.path());
+    assert_eq!(other.default_host().unwrap(), None);
+
+    // Reopening the same instance still has the default after a restart.
+    let reopened = MobileCore::new(
+        write_config(dir.path()),
+        MemorySecretStore::new(),
+        "test-app".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+}
+
+#[test]
+fn selecting_an_unauthorized_default_host_is_typed_and_keeps_the_old_value() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    core.select_default_host(host_id.clone()).unwrap();
+
+    let error = core
+        .select_default_host("not-an-authorized-host".into())
+        .unwrap_err();
+    assert!(matches!(
+        error.code(),
+        "not_paired" | "not_found" | "unavailable" | "conflict"
+    ));
+    assert_eq!(
+        core.default_host().unwrap().as_deref(),
+        Some(host_id.as_str())
+    );
+}
+
+#[test]
+fn unpaired_status_is_typed_without_cloud_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let status = core.status().unwrap();
+    assert_eq!(status.service, "standalone");
+    assert_eq!(status.account_state, "not_applicable");
+    assert_eq!(status.device_access, "unpaired");
+    assert!(status.default_host.is_none());
+    assert!(!status.remote_signout_pending);
+    assert!(status.testing_environment.is_none());
+    assert!(core.current_cloud_session_id().unwrap().is_none());
+}
+
+#[test]
+fn redacted_diagnostics_never_carry_synthetic_private_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let preview = core.diagnostics_preview().unwrap();
+    for marker in [
+        "inv_SENSITIVE_VALUE",
+        "PRIVATE_KEY_MATERIAL",
+        "Do not export this sentence",
+        "SENSITIVE_ARGUMENT",
+    ] {
+        assert!(!preview.json.contains(marker), "preview leaked {marker}");
+    }
+
+    let path = dir.path().join("diagnostics.json");
+    let export = core
+        .export_diagnostics(path.to_string_lossy().into_owned())
+        .unwrap();
+    for marker in [
+        "inv_SENSITIVE_VALUE",
+        "PRIVATE_KEY_MATERIAL",
+        "Do not export this sentence",
+        "SENSITIVE_ARGUMENT",
+    ] {
+        assert!(!export.json.contains(marker), "export leaked {marker}");
+    }
+    // The report is written only after the caller asks for it.
+    assert!(path.exists());
 }

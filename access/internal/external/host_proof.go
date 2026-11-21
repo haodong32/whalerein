@@ -21,6 +21,7 @@ const HostOwnershipProofPrefix = "whalerein/v1/host-proof-v1"
 const (
 	PurposeEnrollmentStatus      = "enrollment_status"
 	PurposeCredentialReplacement = "credential_replacement"
+	PurposeOperationStatus       = "operation_status"
 )
 
 const hostOwnershipProofWindow = 5 * time.Minute

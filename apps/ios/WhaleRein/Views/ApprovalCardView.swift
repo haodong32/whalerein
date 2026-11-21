@@ -49,6 +49,26 @@ struct ApprovalCardView: View {
                 .accessibilityLabel(L10n.approvalTitle.key)
                 .accessibilityValue(stateKey.key)
 
+            HStack(spacing: 8) {
+                Button {
+                    Task { await model.refreshApprovalStatus(approval) }
+                } label: {
+                    Label(L10nKey.approvalRefresh.key, systemImage: "arrow.clockwise")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.approvalStatusRefresh[approval.approvalId] == .refreshing)
+                .accessibilityIdentifier("approval.refresh.\(approval.approvalId)")
+
+                if let status = model.approvalStatusRefresh[approval.approvalId],
+                   status != .refreshing {
+                    Text(L10nKey.approvalStatusKey(for: status).key)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("approval.status.\(approval.approvalId)")
+                }
+            }
+
             if effectiveState == .changed {
                 Label(L10n.approvalChanged.key, systemImage: "arrow.triangle.2.circlepath")
                     .font(.footnote)

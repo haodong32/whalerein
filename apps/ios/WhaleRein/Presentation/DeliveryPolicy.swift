@@ -1,14 +1,25 @@
-// Capability-aware delivery selection. Idle work starts with Send; running work
-// defaults to Steer and offers Queue only when the Source supports it.
+// Capability-aware delivery selection.
+//
+// Ordinary Send uses the native queue, matching the CLI default
+// (`enqueue-after-run`). Steering and start-if-idle remain explicit choices
+// when the Source advertises them; a Source without queue support keeps the
+// best supported fallback rather than inventing a mode.
 
 import Foundation
 
 enum DeliveryPolicy {
     static func choices(for capabilities: SessionCapabilities) -> [DeliveryChoice] {
-        guard capabilities.running else { return [.send] }
         var result: [DeliveryChoice] = []
-        if capabilities.supportsSteer { result.append(.steer) }
-        if capabilities.supportsQueue { result.append(.queue) }
+        if capabilities.supportsQueue {
+            result.append(.queue)
+        }
+        // Start-if-idle is meaningful only while no turn is running.
+        if !capabilities.running {
+            result.append(.send)
+        }
+        if capabilities.supportsSteer {
+            result.append(.steer)
+        }
         return result
     }
 

@@ -14,6 +14,8 @@ pub use identity::{
     store_device_token, StaticIdentity,
 };
 pub use noise::{fingerprint, NoiseSession};
+#[cfg(unix)]
+pub use secrets::FileSecretStore;
 pub use secrets::{keys, MemorySecretStore, SecretError, SecretStore};
 
 #[cfg(feature = "keyring")]

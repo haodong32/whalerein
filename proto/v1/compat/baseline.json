@@ -2297,6 +2297,41 @@
           "number": 7,
           "repeated": false,
           "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "currentCredentialOperationId",
+          "name": "current_credential_operation_id",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "credentialGeneration",
+          "name": "credential_generation",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "removalState",
+          "name": "removal_state",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "removalOperationId",
+          "name": "removal_operation_id",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "removalEnforcedAtUnixMs",
+          "name": "removal_enforced_at_unix_ms",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_INT64"
         }
       ]
     },
@@ -3263,6 +3298,48 @@
           "number": 9,
           "repeated": false,
           "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "outcome",
+          "name": "outcome",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "credentialGeneration",
+          "name": "credential_generation",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "credentialIssued",
+          "name": "credential_issued",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "credentialOperationId",
+          "name": "credential_operation_id",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },

@@ -64,6 +64,8 @@ struct SessionSwitcherContent: View {
     @Environment(AppModel.self) private var app
     var style: SessionSwitcherStyle = .sheet
 
+    @State private var managementSheet: SessionManagementSheet?
+
     private var showsWorkspaceHeaders: Bool {
         app.sessionList.hasMultipleWorkspaces
     }
@@ -73,18 +75,60 @@ struct SessionSwitcherContent: View {
             .modifier(SwitcherListStyle(style: style))
             .refreshable {
                 await app.refreshSwitcher()
+                await loadManagementSupport()
             }
             .task {
                 await app.refreshSwitcher()
+                await loadManagementSupport()
+            }
+            .sheet(item: $managementSheet) { sheet in
+                switch sheet {
+                case .create(let hostId):
+                    SessionCreateView(hostId: hostId)
+                case .details(let hostId, let session, let cached):
+                    SessionDetailsView(
+                        hostId: hostId,
+                        session: session,
+                        cached: cached
+                    )
+                case .fork(let hostId, let session):
+                    SessionForkView(hostId: hostId, session: session)
+                }
             }
     }
 
     private var list: some View {
         List {
             hostPickerSection
+            createSection
             sessionSections
         }
         .listSectionSpacing(.compact)
+    }
+
+    private func loadManagementSupport() async {
+        guard let host = currentHost else { return }
+        await app.sessionManagement.loadCreateSupport(hostId: host.hostId)
+    }
+
+    /// Create is offered only for a Host that advertises native creation. The
+    /// capability is probed, never assumed.
+    @ViewBuilder
+    private var createSection: some View {
+        if let host = currentHost,
+           app.sessionManagement.canCreate(hostId: host.hostId) {
+            Section {
+                Button {
+                    managementSheet = .create(hostId: host.hostId)
+                } label: {
+                    Label(
+                        L10nKey.sessionsCreateTitle.string,
+                        systemImage: "plus.circle"
+                    )
+                }
+                .accessibilityIdentifier("sessions.create")
+            }
+        }
     }
 
     // MARK: - Host picker
@@ -268,18 +312,58 @@ struct SessionSwitcherContent: View {
     private func sessionRows(in group: WorkspaceGroup?) -> some View {
         if let group {
             ForEach(group.sessions) { session in
+                row(for: session)
+            }
+        }
+    }
+
+    private func row(for session: SessionSummary) -> some View {
+        let hostId = app.sessionList.hostId
+        let cached = app.sessionList.isShowingCached
+        return HStack(spacing: 8) {
+            Button {
+                app.selectSessionInSwitcher(session)
+            } label: {
+                SwitcherSessionRow(
+                    session: session,
+                    hostId: hostId,
+                    isCurrent: app.conversation?.hostId == hostId
+                        && app.conversation?.sessionId == session.sessionId
+                )
+            }
+            .accessibilityIdentifier("session.row.\(session.sessionId)")
+
+            Menu {
                 Button {
-                    app.selectSessionInSwitcher(session)
-                } label: {
-                    SwitcherSessionRow(
+                    managementSheet = .details(
+                        hostId: hostId,
                         session: session,
-                        hostId: app.sessionList.hostId,
-                        isCurrent: app.conversation?.hostId == app.sessionList.hostId
-                            && app.conversation?.sessionId == session.sessionId
+                        cached: cached
+                    )
+                } label: {
+                    Label(
+                        L10nKey.sessionsDetailsTitle.string,
+                        systemImage: "info.circle"
                     )
                 }
-                .accessibilityIdentifier("session.row.\(session.sessionId)")
+                .accessibilityIdentifier("session.details.\(session.sessionId)")
+
+                Button {
+                    managementSheet = .fork(hostId: hostId, session: session)
+                } label: {
+                    Label(
+                        L10nKey.sessionsForkAction.string,
+                        systemImage: "arrow.triangle.branch"
+                    )
+                }
+                .accessibilityIdentifier("session.fork.\(session.sessionId)")
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(Text(L10nKey.sessionsForkAction.key))
             }
+            .accessibilityIdentifier("session.menu.\(session.sessionId)")
         }
     }
 

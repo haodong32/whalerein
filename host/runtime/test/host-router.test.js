@@ -728,6 +728,61 @@ test('an authenticated delivery with an omitted envelope host is scoped to the c
   }
 })
 
+test('local stop fences new read and watch admission before Access presence changes', async () => {
+  const ctx = setup()
+  const gate = Promise.withResolvers()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const originalStop = ctx.access.stop.bind(ctx.access)
+    ctx.access.stop = async () => { await gate.promise; await originalStop() }
+    const stopping = ctx.host.stop()
+    await new Promise((resolve) => setImmediate(resolve))
+    const request = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel, payload: { list_models: {} } })
+    const result = await send(ctx.access, request)
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'unavailable')
+    gate.resolve()
+    await stopping
+    assert.equal(ctx.host.clientDevices(), null)
+  } finally {
+    gate.resolve()
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('local stop fences a command before the Source executes it', async () => {
+  const ctx = setup()
+  const gate = Promise.withResolvers()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    let executed = false
+    ctx.adapter.execute = async () => { executed = true; return { command_accepted: { delivery_id: 'late' } } }
+    const originalStop = ctx.access.stop.bind(ctx.access)
+    ctx.access.stop = async () => { await gate.promise; await originalStop() }
+    const stopping = ctx.host.stop()
+    await new Promise((resolve) => setImmediate(resolve))
+    const request = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel,
+      payload: { send_message: { session_id: 's1', text: 'during stop' } }, kind: 'REQUEST_KIND_COMMAND', commandId: 'stop-fenced-command' })
+    const result = await send(ctx.access, request)
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'unavailable')
+    assert.equal(executed, false)
+    gate.resolve()
+    await stopping
+  } finally {
+    gate.resolve()
+    await ctx.host.stop()
+    ctx.store.close()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
 test('disconnect releases a stalled model query and discards its late result', async () => {
   const ctx = setup()
   try {

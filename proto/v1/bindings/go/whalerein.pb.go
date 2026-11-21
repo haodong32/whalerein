@@ -13130,8 +13130,17 @@ type HostEnrollmentStatus struct {
 	OperationId          string                 `protobuf:"bytes,5,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	HostSigningPublicKey []byte                 `protobuf:"bytes,6,opt,name=host_signing_public_key,json=hostSigningPublicKey,proto3" json:"host_signing_public_key,omitempty"`
 	HostNoisePublicKey   []byte                 `protobuf:"bytes,7,opt,name=host_noise_public_key,json=hostNoisePublicKey,proto3" json:"host_noise_public_key,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// The credential issuance recorded beside the broker credential hash. A
+	// legacy enrollment that never recorded one keeps both fields empty/zero.
+	CurrentCredentialOperationId string `protobuf:"bytes,8,opt,name=current_credential_operation_id,json=currentCredentialOperationId,proto3" json:"current_credential_operation_id,omitempty"`
+	CredentialGeneration         uint64 `protobuf:"varint,9,opt,name=credential_generation,json=credentialGeneration,proto3" json:"credential_generation,omitempty"`
+	// Additive removal lifecycle: none, pending, enforced or disabled (a
+	// disabled enrollment without a recorded removal operation).
+	RemovalState            string `protobuf:"bytes,10,opt,name=removal_state,json=removalState,proto3" json:"removal_state,omitempty"`
+	RemovalOperationId      string `protobuf:"bytes,11,opt,name=removal_operation_id,json=removalOperationId,proto3" json:"removal_operation_id,omitempty"`
+	RemovalEnforcedAtUnixMs int64  `protobuf:"varint,12,opt,name=removal_enforced_at_unix_ms,json=removalEnforcedAtUnixMs,proto3" json:"removal_enforced_at_unix_ms,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *HostEnrollmentStatus) Reset() {
@@ -13213,6 +13222,41 @@ func (x *HostEnrollmentStatus) GetHostNoisePublicKey() []byte {
 	return nil
 }
 
+func (x *HostEnrollmentStatus) GetCurrentCredentialOperationId() string {
+	if x != nil {
+		return x.CurrentCredentialOperationId
+	}
+	return ""
+}
+
+func (x *HostEnrollmentStatus) GetCredentialGeneration() uint64 {
+	if x != nil {
+		return x.CredentialGeneration
+	}
+	return 0
+}
+
+func (x *HostEnrollmentStatus) GetRemovalState() string {
+	if x != nil {
+		return x.RemovalState
+	}
+	return ""
+}
+
+func (x *HostEnrollmentStatus) GetRemovalOperationId() string {
+	if x != nil {
+		return x.RemovalOperationId
+	}
+	return ""
+}
+
+func (x *HostEnrollmentStatus) GetRemovalEnforcedAtUnixMs() int64 {
+	if x != nil {
+		return x.RemovalEnforcedAtUnixMs
+	}
+	return 0
+}
+
 type HostEnrollmentResponse struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Status *HostEnrollmentStatus  `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
@@ -13277,8 +13321,18 @@ type OperationStatus struct {
 	AuthorizationId    string                 `protobuf:"bytes,7,opt,name=authorization_id,json=authorizationId,proto3" json:"authorization_id,omitempty"`
 	PayloadDigest      []byte                 `protobuf:"bytes,8,opt,name=payload_digest,json=payloadDigest,proto3" json:"payload_digest,omitempty"`
 	CommittedAtUnixMs  int64                  `protobuf:"varint,9,opt,name=committed_at_unix_ms,json=committedAtUnixMs,proto3" json:"committed_at_unix_ms,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Authoritative admission outcome: admitted, committed, refused, expired,
+	// fenced, absent or pending. A legacy row without an outcome reports pending
+	// and keeps its stored state.
+	Outcome string `protobuf:"bytes,10,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	// Stable machine reason for a refused/expired/fenced outcome.
+	Reason                string `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
+	UpdatedAtUnixMs       int64  `protobuf:"varint,12,opt,name=updated_at_unix_ms,json=updatedAtUnixMs,proto3" json:"updated_at_unix_ms,omitempty"`
+	CredentialGeneration  uint64 `protobuf:"varint,13,opt,name=credential_generation,json=credentialGeneration,proto3" json:"credential_generation,omitempty"`
+	CredentialIssued      bool   `protobuf:"varint,14,opt,name=credential_issued,json=credentialIssued,proto3" json:"credential_issued,omitempty"`
+	CredentialOperationId string `protobuf:"bytes,15,opt,name=credential_operation_id,json=credentialOperationId,proto3" json:"credential_operation_id,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *OperationStatus) Reset() {
@@ -13372,6 +13426,48 @@ func (x *OperationStatus) GetCommittedAtUnixMs() int64 {
 		return x.CommittedAtUnixMs
 	}
 	return 0
+}
+
+func (x *OperationStatus) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
+func (x *OperationStatus) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *OperationStatus) GetUpdatedAtUnixMs() int64 {
+	if x != nil {
+		return x.UpdatedAtUnixMs
+	}
+	return 0
+}
+
+func (x *OperationStatus) GetCredentialGeneration() uint64 {
+	if x != nil {
+		return x.CredentialGeneration
+	}
+	return 0
+}
+
+func (x *OperationStatus) GetCredentialIssued() bool {
+	if x != nil {
+		return x.CredentialIssued
+	}
+	return false
+}
+
+func (x *OperationStatus) GetCredentialOperationId() string {
+	if x != nil {
+		return x.CredentialOperationId
+	}
+	return ""
 }
 
 // Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.
@@ -14386,7 +14482,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x19\n" +
 	"\bmqtt_url\x18\x02 \x01(\tR\amqttUrl\x12\x1a\n" +
 	"\busername\x18\x03 \x01(\tR\busername\x12\x1a\n" +
-	"\bpassword\x18\x04 \x01(\tR\bpassword\"\xc5\x02\n" +
+	"\bpassword\x18\x04 \x01(\tR\bpassword\"\xd6\x04\n" +
 	"\x14HostEnrollmentStatus\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12/\n" +
@@ -14394,12 +14490,18 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x05state\x18\x04 \x01(\x0e2\x1d.whalerein.v1.EnrollmentStateR\x05state\x12!\n" +
 	"\foperation_id\x18\x05 \x01(\tR\voperationId\x125\n" +
 	"\x17host_signing_public_key\x18\x06 \x01(\fR\x14hostSigningPublicKey\x121\n" +
-	"\x15host_noise_public_key\x18\a \x01(\fR\x12hostNoisePublicKey\"\x92\x01\n" +
+	"\x15host_noise_public_key\x18\a \x01(\fR\x12hostNoisePublicKey\x12E\n" +
+	"\x1fcurrent_credential_operation_id\x18\b \x01(\tR\x1ccurrentCredentialOperationId\x123\n" +
+	"\x15credential_generation\x18\t \x01(\x04R\x14credentialGeneration\x12#\n" +
+	"\rremoval_state\x18\n" +
+	" \x01(\tR\fremovalState\x120\n" +
+	"\x14removal_operation_id\x18\v \x01(\tR\x12removalOperationId\x12<\n" +
+	"\x1bremoval_enforced_at_unix_ms\x18\f \x01(\x03R\x17removalEnforcedAtUnixMs\"\x92\x01\n" +
 	"\x16HostEnrollmentResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\v2\".whalerein.v1.HostEnrollmentStatusR\x06status\x12<\n" +
 	"\n" +
 	"credential\x18\x02 \x01(\v2\x1c.whalerein.v1.HostCredentialR\n" +
-	"credential\"\xf2\x02\n" +
+	"credential\"\xeb\x04\n" +
 	"\x0fOperationStatus\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\tR\apurpose\x122\n" +
@@ -14409,7 +14511,14 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x13enrollment_revision\x18\x06 \x01(\tR\x12enrollmentRevision\x12)\n" +
 	"\x10authorization_id\x18\a \x01(\tR\x0fauthorizationId\x12%\n" +
 	"\x0epayload_digest\x18\b \x01(\fR\rpayloadDigest\x12/\n" +
-	"\x14committed_at_unix_ms\x18\t \x01(\x03R\x11committedAtUnixMs\"?\n" +
+	"\x14committed_at_unix_ms\x18\t \x01(\x03R\x11committedAtUnixMs\x12\x18\n" +
+	"\aoutcome\x18\n" +
+	" \x01(\tR\aoutcome\x12\x16\n" +
+	"\x06reason\x18\v \x01(\tR\x06reason\x12+\n" +
+	"\x12updated_at_unix_ms\x18\f \x01(\x03R\x0fupdatedAtUnixMs\x123\n" +
+	"\x15credential_generation\x18\r \x01(\x04R\x14credentialGeneration\x12+\n" +
+	"\x11credential_issued\x18\x0e \x01(\bR\x10credentialIssued\x126\n" +
+	"\x17credential_operation_id\x18\x0f \x01(\tR\x15credentialOperationId\"?\n" +
 	"\vHostClients\x120\n" +
 	"\x14observing_device_ids\x18\x01 \x03(\tR\x12observingDeviceIds*\x96\x01\n" +
 	"\fOnlineStatus\x12\x1d\n" +

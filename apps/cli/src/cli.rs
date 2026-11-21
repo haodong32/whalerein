@@ -56,6 +56,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
+    /// Store credentials in a private local directory. Defaults to the OS keyring.
+    #[cfg(unix)]
+    #[arg(long, global = true, value_name = "PATH")]
+    pub secrets_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: AccountArgs,
 }

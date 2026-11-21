@@ -608,6 +608,26 @@ export class HostRuntime {
         errorDetail: 'RequestPayload carries no known payload variant; the sender may use a newer protocol version',
       })
     }
+    // Local stop fence: once shutdown begins, no fresh read, watch or send may
+    // be admitted. A command is journal-fenced so it can never execute later
+    // when the same Host resumes; accepted work keeps its recorded outcome.
+    if (this.#stopping || !this.#started) {
+      if (request.kind === 'REQUEST_KIND_COMMAND') {
+        try {
+          this.#commands?.fenceCancelledCommand({
+            deviceId: request.device_id,
+            requestId: request.request_id,
+            commandId: request.command_id ?? '',
+            digest: request.payload_digest instanceof Uint8Array ? request.payload_digest : EMPTY,
+            expiresAt: Number(request.expires_at_unix_ms) || 0,
+            errorCode: 'unavailable',
+          })
+        } catch {
+          // the rejection still fences the current attempt
+        }
+      }
+      return await this.#reply(request, { status: 'rejected', errorCode: 'unavailable' })
+    }
     let completedAt
     const questionBudget = payload.list_questions ? () => {
       completedAt = this.now()

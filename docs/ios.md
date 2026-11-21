@@ -143,11 +143,56 @@ Grouping is skipped when a Host has only one workspace. The compact switcher
 uses a plain list for density; the wide sidebar keeps the native sidebar list
 style.
 
-Service selection: `-ui-fixtures` keeps the deterministic `FixtureSessionService`;
-`-integration-fixtures` and a normal launch select `LiveSessionService`, which
-uses the app data directory plus the device-only Keychain namespace
-(`com.whalerein.ios.secrets`, staging `.staging`). If Core cannot initialize,
+## Client configuration
+
+The app has one authoritative TOML at
+`Application Support/WhaleRein/client/app.toml`. Its `[app]` section stores the
+committed `active_instance` and `reasoning_visible`; each `[instances.<id>]`
+table uses the typed Core `ClientConfig` fields with paths relative to the app
+document. The binding creates a fresh document containing `cloud-production`
+and `standalone` only when absent. Legacy root `preferences.json`/`core/` files
+are never read, migrated or deleted.
+
+Per-instance materialized Core configuration lives at
+`client/instances/<id>/instance.toml`, Core state under
+`client/instances/<id>/data`, and an imported Standalone private CA at
+`client/instances/<id>/ca.pem`. All document writes are atomic; activation
+writes and validates the materialized instance before committing
+`app.active_instance`, so a failed write keeps the previous selection.
+
+The welcome screen and Settings offer the service selector. Production builds
+show Cloud production and Standalone; Debug/test builds also show Staging.
+Local stays hidden until iOS trust for the desktop mkcert root is verified.
+Switching requires explicit confirmation, prepares the destination, rebuilds
+`AppModel` and the service for the new instance, and fences callbacks and
+events from the previous activation with a generation counter. Each instance
+has its own data directory, draft/cache state and Keychain service
+`com.whalerein.ios.secrets.<instanceId>` (staging
+`com.whalerein.ios.staging.secrets.<instanceId>`). A failed switch returns an
+error and keeps the old runtime.
+
+`-ui-fixtures` keeps the deterministic `FixtureSessionService` with an
+in-memory app configuration containing the same two instances.
+`-integration-fixtures` and a normal launch compose `LiveSessionService` from
+the active instance's materialized `config_path`. If Core cannot initialize,
 the app shows the localized unavailable state instead of crashing.
+
+A Cloud instance shows the official hosted sign-in as the primary welcome
+action and keeps self-hosted invitation pairing as the secondary path. Swift
+opens the URL returned by Core in `ASWebAuthenticationSession` with callback
+scheme `whalerein`; it never renders credential fields, and Passkey/email are
+handled by the hosted page. Core owns the attempt ID, PKCE S256 verifier,
+Cloud-issued state, local credential/revocation material and exchange, all
+outside the Swift boundary. Cancellation, expiry, replay, a mismatched state,
+a wrong account/workspace scope and a callback for a replaced activation or
+instance never establish a session. After sign-in the app shows the account
+computer directory with empty, authorized-online, authorized-offline, eligible
+connect and unavailable states; a session opens only after Core confirms the
+computer grant. The account is restored on launch, Settings shows local
+sign-out plus a pending remote sign-out, and `-ui-cloud-signed-in`,
+`-ui-cloud-empty` and `-ui-cloud-unavailable` drive the deterministic Cloud
+fixtures. Live Staging, Passkey, email and signed-iPhone behavior is not
+verified in this environment.
 
 `LiveSessionService` restores the encrypted local transcript with
 `MobileCore.cachedMessages` on each watch reset, deduplicates committed message
@@ -195,7 +240,12 @@ See [CI test tiers](testing.md#ci-test-tiers) for timing and revision rules.
 ## Security and accessibility
 
 Secrets live in the device-only Keychain namespace and never in UserDefaults or
-the app container. Drafts and cached conversation data are encrypted by Core and
+the app container. The one exception is the Debug-only local Cloud instance
+(`cloud-local`), which uses a 0700, complete-file-protection, backup-excluded
+file store beside its materialized configuration because the local test stack is
+used from Simulator builds where the Keychain identity may be absent. Every
+other instance, including Staging and production, keeps the Keychain store.
+Drafts and cached conversation data are encrypted by Core and
 scoped to the profile, Host and session. A confirmed revocation clears the
 affected authorization, cache and drafts while preserving the device identity.
 Diagnostics are redacted by Core and shared only after an explicit user

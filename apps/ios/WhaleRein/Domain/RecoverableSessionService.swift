@@ -15,18 +15,23 @@ final class RecoverableSessionService: SessionService {
     private var underlying: (any SessionService)?
 
     private let factory: () throws -> any SessionService
+    private let fallbackInstanceId: String
 
     init(
         failureCode: AppErrorCode = .keychainUnavailable,
+        instanceId: String = "unavailable",
         factory: @escaping () throws -> any SessionService
     ) {
         self.lastFailureCode = failureCode
+        self.fallbackInstanceId = instanceId
         self.factory = factory
     }
 
     var isRecovered: Bool { underlying != nil }
 
     var connectionStatus: ConnectionStatus { underlying?.connectionStatus ?? .offline }
+
+    var instanceId: String { underlying?.instanceId ?? fallbackInstanceId }
 
     var coreRevision: String { underlying?.coreRevision ?? "unavailable" }
 
@@ -117,6 +122,42 @@ final class RecoverableSessionService: SessionService {
         try await current().stop(hostId: hostId, sessionId: sessionId)
     }
 
+    // MARK: - Pending queue
+
+    func pendingQueue(hostId: String, sessionId: String) async throws -> QueueSnapshot {
+        try await current().pendingQueue(hostId: hostId, sessionId: sessionId)
+    }
+
+    func updateQueueItem(
+        hostId: String,
+        sessionId: String,
+        itemId: String,
+        action: QueueAction,
+        text: String
+    ) async throws -> QueueMutation {
+        try await current().updateQueueItem(
+            hostId: hostId,
+            sessionId: sessionId,
+            itemId: itemId,
+            action: action,
+            text: text
+        )
+    }
+
+    // MARK: - Wait
+
+    func beginWait(hostId: String, sessionId: String, timeoutMs: UInt64) async throws -> String {
+        try await current().beginWait(hostId: hostId, sessionId: sessionId, timeoutMs: timeoutMs)
+    }
+
+    func takeWaitResult(waitId: String, waitMs: UInt64) async throws -> WaitResult? {
+        try await current().takeWaitResult(waitId: waitId, waitMs: waitMs)
+    }
+
+    func cancelWait(waitId: String) async throws -> Bool {
+        try await current().cancelWait(waitId: waitId)
+    }
+
     // MARK: - Questions
 
     func listQuestions(hostId: String, sessionId: String, cursor: String) async throws -> QuestionPage {
@@ -153,10 +194,26 @@ final class RecoverableSessionService: SessionService {
         )
     }
 
+    func requestQuestionAnswerCancel(
+        hostId: String,
+        sessionId: String,
+        commandId: String
+    ) async throws -> QuestionCancelReceipt {
+        try await current().requestQuestionAnswerCancel(
+            hostId: hostId,
+            sessionId: sessionId,
+            commandId: commandId
+        )
+    }
+
     // MARK: - Approvals
 
     func approvals(hostId: String, sessionId: String) async throws -> [Approval] {
         try await current().approvals(hostId: hostId, sessionId: sessionId)
+    }
+
+    func approval(hostId: String, approvalId: String) async throws -> Approval {
+        try await current().approval(hostId: hostId, approvalId: approvalId)
     }
 
     func resolveApproval(
@@ -210,4 +267,31 @@ final class RecoverableSessionService: SessionService {
     func revoke() async throws {
         try await current().revoke()
     }
+
+    // MARK: - Instance status
+
+    func instanceStatus() async throws -> InstanceStatus {
+        try await statusService().instanceStatus()
+    }
+
+    func defaultHost() async throws -> String? {
+        try await statusService().defaultHost()
+    }
+
+    func selectDefaultHost(hostId: String) async throws {
+        try await statusService().selectDefaultHost(hostId: hostId)
+    }
+
+    func currentCloudSessionId() async throws -> String? {
+        try await statusService().currentCloudSessionId()
+    }
+
+    private func statusService() throws -> any InstanceStatusService {
+        guard let service = try current() as? any InstanceStatusService else {
+            throw SessionServiceError(.unavailable)
+        }
+        return service
+    }
 }
+
+extension RecoverableSessionService: InstanceStatusService {}

@@ -30,7 +30,88 @@ enum FixtureCatalog {
         ),
     ]
 
+    static let cloudAccount = CloudAccount(
+        accountId: "acct-fixture",
+        email: "fixture@whalerein.test",
+        issuer: "https://login.whalerein.test/oidc",
+        subject: "subject-fixture",
+        workspaceId: "ws-fixture"
+    )
+
+    /// The second account a fixture sign-in returns after a sign-out so UI
+    /// tests can prove the sheet did not resume the previous account.
+    static let cloudSecondAccount = CloudAccount(
+        accountId: "acct-fixture-second",
+        email: "second@whalerein.test",
+        issuer: "https://login.whalerein.test/oidc",
+        subject: "subject-fixture-second",
+        workspaceId: "ws-fixture-second"
+    )
+
+    /// Deterministic Cloud directory covering authorized online/offline,
+    /// eligible and unavailable computer states.
+    static let cloudHosts: [CloudDirectoryHost] = [
+        CloudDirectoryHost(
+            hostId: "studio-mac",
+            displayName: "Studio Mac",
+            enrolled: true,
+            online: true,
+            presence: "online",
+            observation: "active",
+            enrollmentState: "enrolled",
+            pairingEligible: false,
+            deviceAccess: "granted"
+        ),
+        CloudDirectoryHost(
+            hostId: "travel-laptop",
+            displayName: "Travel Laptop",
+            enrolled: true,
+            online: false,
+            presence: "offline",
+            observation: "last seen yesterday",
+            enrollmentState: "enrolled",
+            pairingEligible: false,
+            deviceAccess: "granted"
+        ),
+        CloudDirectoryHost(
+            hostId: "new-laptop",
+            displayName: "New Laptop",
+            enrolled: false,
+            online: true,
+            presence: "online",
+            observation: "ready to connect",
+            enrollmentState: "eligible",
+            pairingEligible: true,
+            deviceAccess: "none"
+        ),
+        CloudDirectoryHost(
+            hostId: "granted-mac",
+            displayName: "Pending Grant Mac",
+            enrolled: true,
+            online: true,
+            presence: "online",
+            observation: "enrolled, device not connected",
+            enrollmentState: "enrolled",
+            pairingEligible: true,
+            deviceAccess: "absent"
+        ),
+        CloudDirectoryHost(
+            hostId: "old-server",
+            displayName: "Old Server",
+            enrolled: false,
+            online: false,
+            presence: "offline",
+            observation: "not eligible",
+            enrollmentState: "unavailable",
+            pairingEligible: false,
+            deviceAccess: "denied"
+        ),
+    ]
+
     static let sessionsByHost: [String: [SessionSummary]] = [
+        "granted-mac": [
+            SessionSummary(sessionId: "s-grant", title: "Granted workspace", updatedAtUnixMs: 1_761_000_500_000, cwd: "/work/whalerein"),
+        ],
         "studio-mac": [
             SessionSummary(sessionId: "s-001", title: "Release checklist", updatedAtUnixMs: 1_761_000_300_000, cwd: "/work/whalerein"),
             SessionSummary(sessionId: "s-002", title: "Build triage", updatedAtUnixMs: 1_761_000_120_000, cwd: "/work/whalerein"),
@@ -245,7 +326,20 @@ enum FixtureCatalog {
                         finished in 2.41s
                         exit code \(exitCode)
                         """,
-                        toolName: "bash"
+                        toolName: "bash",
+                        toolActivity: ToolActivity(
+                            callId: "call-\(index)",
+                            name: "bash",
+                            summary: "./repo test core",
+                            state: exitCode == 0 ? .succeeded : .failed,
+                            stages: ["preparation", "execution", "settlement"],
+                            progress: nil,
+                            failureCode: exitCode == 0 ? nil : "test_failed",
+                            result: [
+                                .text("exit code \(exitCode)")
+                            ],
+                            callMissing: false
+                        )
                     )
                 ]
             } else if index % 13 == 0 {
@@ -286,6 +380,36 @@ enum FixtureCatalog {
                         """
                     )
                 ]
+            } else if index % 17 == 0 {
+                role = .assistant
+                blocks = [
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-0",
+                        kind: .reasoning,
+                        text: "I considered the failing checks and decided to verify the release artifact before answering."
+                    ),
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-1",
+                        kind: .text,
+                        text: "Reasoning sample \(index): the release artifact is ready."
+                    )
+                ]
+            } else if index % 19 == 0 {
+                role = .assistant
+                blocks = [
+                    ConversationBlock(
+                        blockId: "\(messageId)-block-0",
+                        kind: .attachment,
+                        text: "build-report-\(index).txt",
+                        attachment: AttachmentBlock(
+                            mediaType: "text/plain",
+                            name: "build-report-\(index).txt",
+                            size: 96,
+                            available: true,
+                            attachmentRef: "fixture-attachment-\(index)"
+                        )
+                    )
+                ]
             } else if index % 7 == 0 {
                 role = .assistant
                 blocks = [
@@ -310,5 +434,39 @@ enum FixtureCatalog {
             )
         }
         return messages
+    }
+
+    // MARK: - Synthetic attachments
+
+    static func attachmentBytes(for reference: String) -> Data {
+        Data("Synthetic verified attachment for \(reference).\n".utf8)
+    }
+
+    static func attachmentName(for reference: String) -> String {
+        let safe = reference.unicodeScalars.map { scalar in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+        }
+        return "fixture-\(String(safe)).txt"
+    }
+
+    static func attachmentDigest(for reference: String) -> String {
+        // Deterministic SHA-256-shaped value; fixture transfers are explicitly
+        // synthetic and never represent Host verification.
+        let seed = attachmentBytes(for: reference)
+        return seed.map { String(format: "%02x", $0) }.joined().padding(
+            toLength: 64,
+            withPad: "0",
+            startingAt: 0
+        )
+    }
+}
+
+private extension String {
+    func padding(toLength length: Int, withPad pad: String, startingAt index: Int) -> String {
+        var value = self
+        while value.count < length {
+            value += pad
+        }
+        return String(value.prefix(length))
     }
 }

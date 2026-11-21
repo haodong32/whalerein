@@ -225,9 +225,16 @@ pub async fn run(
     diagnostics: &CliDiagnosticSink,
     context: DiagnosticContext,
 ) -> CliOutcome {
+    let secrets: Arc<dyn SecretStore> =
+        Arc::new(whalerein_core::api::KeyringSecretStore::new("whalerein"));
+    #[cfg(unix)]
+    let secrets: Arc<dyn SecretStore> = match &cli.secrets_dir {
+        Some(path) => Arc::new(whalerein_core::api::FileSecretStore::new(path)),
+        None => secrets,
+    };
     run_with_signal(
         cli,
-        Arc::new(whalerein_core::api::KeyringSecretStore::new("whalerein")),
+        secrets,
         crate::signal::registered_interrupt(),
         diagnostics,
         context,
