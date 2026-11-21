@@ -16,6 +16,13 @@ struct PendingCommand: Equatable, Sendable {
     let submittedAt: Date
 }
 
+extension PendingCommand.Kind {
+    var isStop: Bool {
+        if case .stop = self { return true }
+        return false
+    }
+}
+
 /// Identity of a native wait attempt.
 struct WaitHandle: Equatable, Sendable {
     let id: String

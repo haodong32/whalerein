@@ -22,6 +22,12 @@ struct ConversationState: Equatable, Sendable {
     var provenance: ContentProvenance = .confirmed
     var messages: [ConversationMessage] = []
     var approvals: [Approval] = []
+    /// Terminal receipt of the most recent command, for the status row.
+    var lastReceipt: CommandReceipt?
+    /// Which command the last receipt belongs to (send or stop).
+    var lastCommandKind: PendingCommand.Kind?
+    /// A definite local/service failure. A settlement receipt is not an error.
+    var commandError: AppErrorCode?
     var loadError: AppErrorCode?
     var isLoading = false
     var isLoaded = false

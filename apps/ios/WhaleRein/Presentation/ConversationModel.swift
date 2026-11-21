@@ -65,9 +65,15 @@ final class ConversationModel {
     }
     private(set) var errorKey: L10nKey?
     private(set) var approvalErrorKey: L10nKey?
-    private(set) var sendErrorKey: L10nKey?
     var capabilities: SessionCapabilities { state.capabilities }
-    private(set) var lastSendStatus: CommandStatus?
+    var sendErrorKey: L10nKey? {
+        guard let code = state.commandError else { return nil }
+        return L10nKey.errorKey(for: code)
+    }
+    var lastSendStatus: CommandStatus? {
+        guard state.lastCommandKind?.isStop == false else { return nil }
+        return state.lastReceipt?.status
+    }
     private(set) var lastStopStatus: CommandStatus?
     /// Original operation identity and the message-level recovery result for
     /// the last send. Submission status stays separate from these values.
@@ -77,11 +83,17 @@ final class ConversationModel {
     private(set) var operationReadErrorKey: L10nKey?
     private(set) var isRecoveringOperation = false
     private(set) var isReadingExactReply = false
-    private(set) var inFlightSend: CommandReceipt?
+    var inFlightSend: CommandReceipt? {
+        if case .uncertain(_, let receipt) = state.lifecycle { return receipt }
+        return nil
+    }
     private(set) var pendingStop: CommandReceipt?
     /// Command submission that has not settled yet. While set, the matching
     /// affordance is disabled and repeated taps are ignored.
-    private(set) var pendingSubmission: PendingSubmission?
+    var pendingSubmission: PendingSubmission? {
+        guard case .submitted(let command) = state.lifecycle else { return nil }
+        return command.kind.isStop ? .stop : .send
+    }
     private(set) var stopSettled = false
     private(set) var watchEnded = false
     private(set) var isSuspended = false
@@ -709,11 +721,16 @@ final class ConversationModel {
             choice = try DeliveryPolicy.resolve(delivery, for: capabilities)
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
+            state = ConversationReduce.reduce(state, .commandErrorRaised(code))
             reportFatalIfNeeded(code)
             return
         }
-        pendingSubmission = .send
+        let command = PendingCommand(
+            id: UUID().uuidString,
+            kind: .send(text: text),
+            submittedAt: now()
+        )
+        state = ConversationReduce.reduce(state, .sendSubmitted(command))
         do {
             var receipt = try await service.send(
                 hostId: hostId,
@@ -723,18 +740,21 @@ final class ConversationModel {
             )
             // The submission settled: release the gate even though an uncertain
             // receipt continues to block Send until reconciliation.
-            pendingSubmission = nil
             if let early = takeEarlyCommandStatus(for: receipt.commandId) {
                 receipt.status = preferredStatus(early, over: receipt.status)
             }
-            sendErrorKey = nil
-            lastSendStatus = receipt.status
+            state.lastCommandKind = command.kind
             lastSendOperationId = receipt.requestId
             operationResult = nil
             operationErrorKey = nil
             operationReadErrorKey = nil
-            inFlightSend = receipt.status == .uncertain ? receipt : nil
-            inFlightSendText = receipt.status == .uncertain ? text : nil
+            if receipt.status == .uncertain {
+                state = ConversationReduce.reduce(state, .sendUncertain(command, receipt))
+                inFlightSendText = text
+            } else {
+                state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
+                inFlightSendText = nil
+            }
             if receipt.status != .rejected {
                 appendOptimisticUserMessage(text: text, receipt: receipt)
             }
@@ -763,9 +783,8 @@ final class ConversationModel {
         } catch {
             // A definite failure releases the gate so the same intent can be
             // retried; a late settlement of the failed command cannot re-arm it.
-            pendingSubmission = nil
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
+            state = ConversationReduce.reduce(state, .sendRejected(command, code))
             reportFatalIfNeeded(code)
         }
     }
@@ -776,16 +795,20 @@ final class ConversationModel {
         // run becomes authoritative before a late confirmation arrives, that
         // confirmation must settle this operation without clearing the new run.
         let submissionEpoch = authoritativeRunEpoch
-        pendingSubmission = .stop
+        let command = PendingCommand(
+            id: UUID().uuidString,
+            kind: .stop,
+            submittedAt: now()
+        )
+        state = ConversationReduce.reduce(state, .stopSubmitted(command))
         do {
             var receipt = try await service.stop(hostId: hostId, sessionId: sessionId)
             // The submission settled; an accepted or uncertain Stop remains
             // pending through `pendingStop` until the Host reconciles it.
-            pendingSubmission = nil
             if let early = takeEarlyCommandStatus(for: receipt.commandId) {
                 receipt.status = preferredStatus(early, over: receipt.status)
             }
-            sendErrorKey = nil
+            state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
             applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
             if receipt.status == .confirmed {
                 // Interrupt is a current-turn control; the queue stays visible
@@ -796,9 +819,8 @@ final class ConversationModel {
             // A definite failure releases the gate so Stop can be retried. A
             // late settlement for the failed command is only remembered as an
             // early status and never resurrects this cleared intent.
-            pendingSubmission = nil
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
+            state = ConversationReduce.reduce(state, .stopRejected(command, code))
             reportFatalIfNeeded(code)
         }
     }
@@ -892,7 +914,9 @@ final class ConversationModel {
             operationReadErrorKey = nil
         }
         if receipt.status == .confirmed || receipt.status == .failed {
-            inFlightSend = nil
+            if let commandReceipt = receipt.receipt {
+                settleUncertainCommand(with: commandReceipt)
+            }
             inFlightSendText = nil
         }
     }
@@ -1625,11 +1649,20 @@ final class ConversationModel {
         draft.trimmingCharacters(in: .whitespacesAndNewlines) == submittedText
     }
 
+    /// Settles the one uncertain command with a terminal receipt.
+    private func settleUncertainCommand(with receipt: CommandReceipt) {
+        guard case .uncertain(let command, let inFlight) = state.lifecycle,
+              inFlight.commandId == receipt.commandId else { return }
+        state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
+    }
+
     private func applyCommandStatus(_ receipt: CommandReceipt) {
-        if let inFlightSend, inFlightSend.commandId == receipt.commandId {
-            lastSendStatus = receipt.status
-            if receipt.status != .uncertain {
-                self.inFlightSend = nil
+        if case .uncertain(let command, let inFlight) = state.lifecycle,
+           inFlight.commandId == receipt.commandId {
+            if receipt.status == .uncertain {
+                state.lastReceipt = receipt
+            } else {
+                state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
                 if receipt.status == .confirmed || receipt.status == .accepted {
                     let submitted = inFlightSendText
                     if let submitted, draftMatchesSubmission(submitted) {

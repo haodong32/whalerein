@@ -25,6 +25,8 @@ enum ConversationAction: Equatable, Sendable {
     case sendSubmitted(PendingCommand)
     case sendAccepted(PendingCommand, CommandReceipt)
     case sendDelivered(CommandReceipt)
+    case commandSettled(PendingCommand, CommandReceipt)
+    case commandErrorRaised(AppErrorCode)
     case sendUncertain(PendingCommand, CommandReceipt)
     case sendRejected(PendingCommand, AppErrorCode)
     case stopSubmitted(PendingCommand)
@@ -126,27 +128,46 @@ enum ConversationReduce {
             // A second submission in the same window is coalesced, not queued.
             guard state.lifecycle.isSettled else { break }
             state.lifecycle = .submitted(command)
+            state.lastCommandKind = command.kind
+            state.lastReceipt = nil
+            state.commandError = nil
 
         case .sendAccepted(let command, let receipt), .stopAccepted(let command, let receipt):
             guard case .submitted(let current) = state.lifecycle, current.id == command.id else {
                 break
             }
             state.lifecycle = .accepted(command, receipt)
+            state.lastReceipt = receipt
 
         case .sendDelivered(let receipt), .stopDelivered(let receipt):
             state.lifecycle = .delivered(receipt)
+            state.lastReceipt = receipt
+
+        case .commandErrorRaised(let code):
+            state.commandError = code
+
+        case .commandSettled(let command, let receipt):
+            // Any non-uncertain service receipt is terminal, including a
+            // Core-rejected one. It is a settlement, not a local error. A
+            // reconciled uncertain command settles here too.
+            guard command.id == state.lifecycle.pending?.id else { break }
+            state.lifecycle = .delivered(receipt)
+            state.lastReceipt = receipt
+            state.commandError = nil
 
         case .sendUncertain(let command, let receipt):
             guard case .submitted(let current) = state.lifecycle, current.id == command.id else {
                 break
             }
             state.lifecycle = .uncertain(command, receipt)
+            state.lastReceipt = receipt
 
         case .sendRejected(let command, let code), .stopRejected(let command, let code):
             guard case .submitted(let current) = state.lifecycle, current.id == command.id else {
                 break
             }
             state.lifecycle = .rejected(command, code)
+            state.commandError = code
 
         case .queueLoaded(let snapshot):
             state.queue = .ready(snapshot)

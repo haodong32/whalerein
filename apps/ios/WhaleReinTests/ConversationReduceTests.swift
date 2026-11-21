@@ -168,6 +168,38 @@ final class ConversationReduceTests: XCTestCase {
         XCTAssertNil(state.lifecycle.receipt)
     }
 
+    func testCommandSettledReleasesAnUncertainCommand() {
+        var state = ConversationState()
+        let pending = command()
+        state = ConversationReduce.reduce(state, .sendSubmitted(pending))
+        state = ConversationReduce.reduce(state, .sendUncertain(pending, receipt()))
+        XCTAssertEqual(state.lifecycle, .uncertain(pending, receipt()))
+
+        let settled = receipt(status: .confirmed)
+        state = ConversationReduce.reduce(state, .commandSettled(pending, settled))
+        XCTAssertEqual(state.lifecycle, .delivered(settled))
+        XCTAssertEqual(state.lastReceipt, settled)
+        XCTAssertTrue(state.lifecycle.isSettled)
+        XCTAssertNil(state.commandError)
+    }
+
+    func testSettledRejectedReceiptIsNotALocalError() {
+        var state = ConversationState()
+        let pending = command()
+        state = ConversationReduce.reduce(state, .sendSubmitted(pending))
+        let rejected = receipt(status: .rejected)
+        state = ConversationReduce.reduce(state, .commandSettled(pending, rejected))
+        XCTAssertEqual(state.lastReceipt, rejected)
+        XCTAssertNil(state.commandError, "a settlement is not a local failure")
+    }
+
+    func testLocalCommandErrorUsesOneErrorDimension() {
+        var state = ConversationState()
+        state = ConversationReduce.reduce(state, .commandErrorRaised(.unsupportedDelivery))
+        XCTAssertEqual(state.commandError, .unsupportedDelivery)
+        XCTAssertEqual(state.lifecycle, .idle)
+    }
+
     func testLateResultForReplacedCommandIsIgnored() {
         var state = ConversationState()
         let first = command("cmd-1")
