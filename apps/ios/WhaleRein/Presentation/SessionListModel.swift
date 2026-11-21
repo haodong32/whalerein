@@ -17,11 +17,24 @@ final class SessionListModel {
         case failed(AppErrorCode)
     }
 
-    private(set) var sessions: [SessionSummary] = []
-    private(set) var loadState: LoadState = .idle
-    private(set) var isShowingCached = false
-    private(set) var errorKey: L10nKey?
-    private(set) var hostId: String = ""
+    /// One business state for the switcher lists; this model owns the session
+    /// part and the cached indicator.
+    private(set) var state = SessionsState()
+
+    var sessions: [SessionSummary] { state.sessionList }
+    var isShowingCached: Bool { state.showingCached }
+    var hostId: String { state.hostId }
+    var loadState: LoadState { Self.legacy(state.sessions) }
+    var errorKey: L10nKey? { state.sessions.error.map { L10nKey.errorKey(for: $0) } }
+
+    private static func legacy(_ load: Load<[SessionSummary]>) -> LoadState {
+        switch load {
+        case .idle: .idle
+        case .loading: .loading
+        case .loaded: .loaded
+        case .failed(let code): .failed(code)
+        }
+    }
 
     private let service: any SessionService
     private let preferences: PreferencesStore
@@ -52,7 +65,7 @@ final class SessionListModel {
     var isEmpty: Bool { loadState == .loaded && sessions.isEmpty }
 
     func load(hostId: String) async {
-        self.hostId = hostId
+        state = SessionsReduce.reduce(state, .sessionsLoadStarted(hostId: hostId))
         requestedHostId = hostId
         if isLoadInFlight {
             reloadRequested = true
@@ -90,19 +103,13 @@ final class SessionListModel {
     }
 
     func reset() {
-        sessions = []
-        loadState = .idle
-        isShowingCached = false
-        errorKey = nil
-        hostId = ""
+        state = SessionsReduce.reduce(state, .reset)
         requestedHostId = ""
         reloadRequested = false
     }
 
     private func fetch(hostId: String) async {
-        self.hostId = hostId
-        loadState = .loading
-        errorKey = nil
+        state = SessionsReduce.reduce(state, .sessionsLoadStarted(hostId: hostId))
         do {
             let loaded = try await service.sessions(hostId: hostId)
             apply(loaded)
@@ -111,8 +118,7 @@ final class SessionListModel {
             if code == .hostOffline {
                 do {
                     let cached = try await service.cachedSessions(hostId: hostId)
-                    apply(cached)
-                    isShowingCached = true
+                    apply(cached, cached: true)
                 } catch {
                     fail(error)
                 }
@@ -122,22 +128,18 @@ final class SessionListModel {
         }
     }
 
-    private func apply(_ loaded: [SessionSummary]) {
-        sessions = loaded.sorted { lhs, rhs in
+    private func apply(_ loaded: [SessionSummary], cached: Bool = false) {
+        let sorted = loaded.sorted { lhs, rhs in
             if lhs.updatedAtUnixMs == rhs.updatedAtUnixMs {
                 return lhs.sessionId < rhs.sessionId
             }
             return lhs.updatedAtUnixMs > rhs.updatedAtUnixMs
         }
-        loadState = .loaded
-        errorKey = nil
-        isShowingCached = false
+        state = SessionsReduce.reduce(state, .sessionsLoaded(sorted, cached: cached))
     }
 
     private func fail(_ error: Error) {
         let code = (error as? SessionServiceError)?.code ?? .internalError
-        loadState = .failed(code)
-        errorKey = L10nKey.errorKey(for: code)
-        isShowingCached = false
+        state = SessionsReduce.reduce(state, .sessionsFailed(code))
     }
 }
