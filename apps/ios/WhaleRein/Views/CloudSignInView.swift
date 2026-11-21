@@ -7,6 +7,24 @@
 
 import SwiftUI
 
+/// Blocking sign-in progress. Signing out returns to this screen, and a completed
+/// provider sheet lands here until the exchanged account is ready, so the
+/// welcome page never doubles as a half-signed-in state.
+struct CloudSignInProgressView: View {
+    let phase: CloudSignInPhase
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text(phase == .completing ? L10n.cloudCompleting.key : L10n.cloudSigningIn.key)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("cloud.signingIn")
+    }
+}
+
 struct CloudSignInRootView: View {
     let cloud: CloudSignInModel
 
@@ -30,6 +48,14 @@ struct CloudWelcomeView: View {
     let cloud: CloudSignInModel
 
     var body: some View {
+        if cloud.isBusy {
+            CloudSignInProgressView(phase: cloud.phase)
+        } else {
+            welcome
+        }
+    }
+
+    private var welcome: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -46,19 +72,6 @@ struct CloudWelcomeView: View {
                 }
 
                 ServiceSelectionView()
-
-                if cloud.phase == .restoring || cloud.phase == .starting {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text(
-                            cloud.phase == .restoring
-                                ? L10n.cloudRestoring.key
-                                : L10n.cloudSigningIn.key
-                        )
-                        .foregroundStyle(.secondary)
-                    }
-                    .accessibilityIdentifier("cloud.signingIn")
-                }
 
                 if let errorKey = cloud.errorCode.map({ L10nKey.errorKey(for: $0) }) {
                     Label {
@@ -89,16 +102,6 @@ struct CloudWelcomeView: View {
                     .controlSize(.large)
                     .disabled(cloud.isBusy)
                     .accessibilityIdentifier("cloud.signIn")
-
-                    Button {
-                        Task { await cloud.signIn(ephemeral: true) }
-                    } label: {
-                        Text(L10n.cloudUseAnotherAccount.key)
-                            .font(.footnote)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(cloud.isBusy)
-                    .accessibilityIdentifier("cloud.useAnotherAccount")
 
                     Button {
                         app.openManualPairing()
@@ -207,6 +210,7 @@ struct CloudDirectoryView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.cloudDirectoryUnavailableTitle.key)
                     .font(.headline)
+                    .accessibilityIdentifier("cloud.directory.unavailable")
                 Text(L10nKey.errorKey(for: code).key)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -215,7 +219,6 @@ struct CloudDirectoryView: View {
                 }
                 .accessibilityIdentifier("cloud.directory.retry")
             }
-            .accessibilityIdentifier("cloud.directory.unavailable")
         case .loaded(let hosts):
             ForEach(hosts) { host in
                 CloudDirectoryHostRow(cloud: cloud, host: host)

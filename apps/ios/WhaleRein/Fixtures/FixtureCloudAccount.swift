@@ -19,18 +19,33 @@ final class FixtureCloudAccountState {
     private(set) var pendingAttempt: CloudAuthAttempt?
     private(set) var connectedHostIds: [String] = []
 
+    private(set) var signInCount = 0
+    private let switchAccounts: Bool
+
     init(options: LaunchOptions = LaunchOptions()) {
+        switchAccounts = options.cloudSwitchAccounts
         account = options.seedCloudSignedIn ? FixtureCatalog.cloudAccount : nil
         directory = options.cloudDirectoryEmpty ? [] : FixtureCatalog.cloudHosts
         if options.cloudDirectoryUnavailable {
             directoryError = .unavailable
         }
+        if options.cloudStartFailure {
+            startError = .unavailable
+        }
+        if options.cloudCompleteFailure {
+            completeError = .security
+        }
+        if options.cloudRevoked {
+            statusError = .security
+        }
     }
 
     func start() throws -> CloudAuthAttempt {
         if let startError { throw SessionServiceError(startError) }
+        let base = ProcessInfo.processInfo.environment["UI_CLOUD_AUTH_BASE"]
+            ?? "https://login.whalerein.test"
         let attempt = CloudAuthAttempt(
-            url: URL(string: "https://login.whalerein.test/oidc/auth?state=fixture-state")!,
+            url: URL(string: "\(base)/authorize?state=fixture-state")!,
             attemptId: "0123456789abcdef0123456789abcdef"
         )
         pendingAttempt = attempt
@@ -52,7 +67,10 @@ final class FixtureCloudAccountState {
             throw SessionServiceError(.security)
         }
         self.pendingAttempt = nil
-        let signedIn = FixtureCatalog.cloudAccount
+        signInCount += 1
+        let signedIn = switchAccounts && signInCount > 1
+            ? FixtureCatalog.cloudSecondAccount
+            : FixtureCatalog.cloudAccount
         account = signedIn
         logoutPending = false
         return signedIn

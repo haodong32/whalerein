@@ -38,6 +38,16 @@ enum FixtureCatalog {
         workspaceId: "ws-fixture"
     )
 
+    /// The second account a fixture sign-in returns after a sign-out so UI
+    /// tests can prove the sheet did not resume the previous account.
+    static let cloudSecondAccount = CloudAccount(
+        accountId: "acct-fixture-second",
+        email: "second@whalerein.test",
+        issuer: "https://login.whalerein.test/oidc",
+        subject: "subject-fixture-second",
+        workspaceId: "ws-fixture-second"
+    )
+
     /// Deterministic Cloud directory covering authorized online/offline,
     /// eligible and unavailable computer states.
     static let cloudHosts: [CloudDirectoryHost] = [

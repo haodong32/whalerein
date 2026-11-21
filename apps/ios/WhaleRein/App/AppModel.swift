@@ -457,6 +457,19 @@ final class AppModel {
             .appendingPathComponent("diagnostics", isDirectory: true)
     }
 
+    /// Fixtures replace the system sheet with a deterministic callback so UI
+    /// tests can cover the app-side sign-in flow. Live builds always use the
+    /// real authentication session.
+    private func authenticator(options: LaunchOptions) -> any CloudWebAuthenticator {
+        if case .fixtures = options.serviceMode {
+            if options.cloudSystemSheet {
+                return WebAuthenticationSessionRunner()
+            }
+            return FixtureCloudAuthenticator(cancels: options.cloudCancelSheet)
+        }
+        return WebAuthenticationSessionRunner()
+    }
+
     /// Builds the status/default-computer/app-sign-in model for the activation
     /// that owns `service`. Revoking the current app session fences through the
     /// same signed-out path as Cloud sign-out.
@@ -495,7 +508,7 @@ final class AppModel {
                 instanceId: instanceId,
                 activationGeneration: generation
             ),
-            authenticator: WebAuthenticationSessionRunner(),
+            authenticator: authenticator(options: options),
             fenceIsCurrent: { [weak self] in
                 guard let self else { return false }
                 return self.activationGeneration == generation
