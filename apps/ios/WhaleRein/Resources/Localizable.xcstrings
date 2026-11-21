@@ -545,23 +545,6 @@
         }
       }
     },
-    "cloud.directoryUnavailableBody": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Check your connection and try again."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请检查网络连接后重试。"
-          }
-        }
-      }
-    },
     "cloud.directoryUnavailableTitle": {
       "extractionState": "manual",
       "localizations": {
@@ -592,23 +575,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "连接"
-          }
-        }
-      }
-    },
-    "cloud.hostConnecting": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connecting…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在连接…"
           }
         }
       }
@@ -711,23 +677,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "刷新"
-          }
-        }
-      }
-    },
-    "cloud.restoring": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Restoring your Cloud session…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在恢复云服务会话…"
           }
         }
       }
@@ -919,23 +868,6 @@
         }
       }
     },
-    "common.back": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Back"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "返回"
-          }
-        }
-      }
-    },
     "common.cancel": {
       "extractionState": "manual",
       "localizations": {
@@ -983,23 +915,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "已拷贝"
-          }
-        }
-      }
-    },
-    "common.copy": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Copy"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拷贝"
           }
         }
       }
@@ -1068,23 +983,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "重试"
-          }
-        }
-      }
-    },
-    "common.share": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Share"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "共享"
           }
         }
       }
@@ -1306,23 +1204,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "下载的文件未通过验证。"
-          }
-        }
-      }
-    },
-    "conversation.attachment.name": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "File name"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "文件名"
           }
         }
       }
@@ -2245,23 +2126,6 @@
         }
       }
     },
-    "conversation.sendQueued": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Queued"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已排队"
-          }
-        }
-      }
-    },
     "conversation.sendRejected": {
       "extractionState": "manual",
       "localizations": {
@@ -2292,23 +2156,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "发送结果不确定。将恢复原始请求。"
-          }
-        }
-      }
-    },
-    "conversation.sending": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sending"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在发送"
           }
         }
       }
@@ -2377,23 +2224,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "正在等待 Host 确认停止。"
-          }
-        }
-      }
-    },
-    "conversation.stopping": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Stopping"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在停止"
           }
         }
       }
@@ -2772,23 +2602,6 @@
         }
       }
     },
-    "diagnostics.export": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Export report"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导出报告"
-          }
-        }
-      }
-    },
     "diagnostics.exported": {
       "extractionState": "manual",
       "localizations": {
@@ -2904,23 +2717,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "预览"
-          }
-        }
-      }
-    },
-    "diagnostics.redaction": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Redacted fields: %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已脱敏字段：%@"
           }
         }
       }
@@ -3418,23 +3214,6 @@
         }
       }
     },
-    "hosts.fingerprint": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fingerprint"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "指纹"
-          }
-        }
-      }
-    },
     "hosts.loadError": {
       "extractionState": "manual",
       "localizations": {
@@ -3843,23 +3622,6 @@
         }
       }
     },
-    "model.apply": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Apply"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "应用"
-          }
-        }
-      }
-    },
     "model.defaultEffectDisclosure": {
       "extractionState": "manual",
       "localizations": {
@@ -3907,23 +3669,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "来源默认模型是否保存尚未确认。"
-          }
-        }
-      }
-    },
-    "model.effort": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reasoning effort"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "推理强度"
           }
         }
       }
@@ -4149,23 +3894,6 @@
         }
       }
     },
-    "pairing.cancelling": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cancelling"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在取消"
-          }
-        }
-      }
-    },
     "pairing.confirm": {
       "extractionState": "manual",
       "localizations": {
@@ -4315,23 +4043,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "新的邀请已排队，将在本次配对完成后处理。"
-          }
-        }
-      }
-    },
-    "pairing.lostResult": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The result was not delivered. The original request is still pending."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "结果尚未送达。原始请求仍处于待处理状态。"
           }
         }
       }
@@ -4978,23 +4689,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "此主机不支持该队列操作"
-          }
-        }
-      }
-    },
-    "queue.attachment": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Attachment"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "附件"
           }
         }
       }
@@ -5815,23 +5509,6 @@
         }
       }
     },
-    "sessions.continueLast": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Continue last session"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "继续上次会话"
-          }
-        }
-      }
-    },
     "sessions.create.action": {
       "extractionState": "manual",
       "localizations": {
@@ -6325,23 +6002,6 @@
         }
       }
     },
-    "sessions.lastUsed": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Last opened"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "上次打开"
-          }
-        }
-      }
-    },
     "sessions.loading": {
       "extractionState": "manual",
       "localizations": {
@@ -6512,23 +6172,6 @@
         }
       }
     },
-    "sessions.switchHost": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Switch Host"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "切换 Host"
-          }
-        }
-      }
-    },
     "sessions.title": {
       "extractionState": "manual",
       "localizations": {
@@ -6576,23 +6219,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld 小时前更新"
-          }
-        }
-      }
-    },
-    "sessions.updatedJustNow": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Updated just now"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "刚刚更新"
           }
         }
       }
@@ -6831,23 +6457,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前应用"
-          }
-        }
-      }
-    },
-    "settings.appSessions.currentSignedOut": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This app was signed out."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前应用已退出。"
           }
         }
       }
