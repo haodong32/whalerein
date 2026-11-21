@@ -6,20 +6,7 @@
 
 import Foundation
 
-enum PairingPhase: Equatable, Sendable {
-    case editing
-    case validating
-    case awaitingConfirmation(PairingPrompt)
-    case confirming(PairingPrompt)
-    case paired(hostId: String)
-    case declined
-    case failed(AppErrorCode)
-}
-
-enum PairingHint: Equatable, Sendable {
-    case pastedNothing
-    case linkQueued
-}
+import Foundation
 
 struct PairingState: Equatable, Sendable {
     var phase: PairingPhase = .editing
