@@ -91,6 +91,16 @@ struct CloudWelcomeView: View {
                     .accessibilityIdentifier("cloud.signIn")
 
                     Button {
+                        Task { await cloud.signIn(ephemeral: true) }
+                    } label: {
+                        Text(L10n.cloudUseAnotherAccount.key)
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(cloud.isBusy)
+                    .accessibilityIdentifier("cloud.useAnotherAccount")
+
+                    Button {
                         app.openManualPairing()
                     } label: {
                         Label(L10n.cloudSelfHosted.key, systemImage: "desktopcomputer")

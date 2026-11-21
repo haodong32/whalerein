@@ -161,6 +161,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case cloudWelcomeTitle = "cloud.welcomeTitle"
     case cloudWelcomeSubtitle = "cloud.welcomeSubtitle"
     case cloudSignIn = "cloud.signIn"
+    case cloudUseAnotherAccount = "cloud.useAnotherAccount"
     case cloudSigningIn = "cloud.signingIn"
     case cloudSelfHosted = "cloud.selfHosted"
     case cloudRestoring = "cloud.restoring"
@@ -647,6 +648,7 @@ enum L10n {
     static let cloudWelcomeTitle = L10nKey.cloudWelcomeTitle
     static let cloudWelcomeSubtitle = L10nKey.cloudWelcomeSubtitle
     static let cloudSignIn = L10nKey.cloudSignIn
+    static let cloudUseAnotherAccount = L10nKey.cloudUseAnotherAccount
     static let cloudSigningIn = L10nKey.cloudSigningIn
     static let cloudSelfHosted = L10nKey.cloudSelfHosted
     static let cloudRestoring = L10nKey.cloudRestoring

@@ -9,9 +9,13 @@ import UIKit
 
 @MainActor
 protocol CloudWebAuthenticator: AnyObject {
+    /// `ephemeral` ignores the shared browser session so the next sign-in can
+    /// choose a different account. The shared session is kept for the ordinary
+    /// path, which lets an already signed-in provider account return in one tap.
     func authenticate(
         url: URL,
         callbackURLScheme: String,
+        ephemeral: Bool,
         completion: @escaping @MainActor (URL?, Error?) -> Void
     )
     func cancel()
@@ -32,6 +36,7 @@ final class WebAuthenticationSessionRunner: NSObject, CloudWebAuthenticator,
     func authenticate(
         url: URL,
         callbackURLScheme: String,
+        ephemeral: Bool,
         completion: @escaping @MainActor (URL?, Error?) -> Void
     ) {
         session?.cancel()
@@ -44,9 +49,9 @@ final class WebAuthenticationSessionRunner: NSObject, CloudWebAuthenticator,
             }
         }
         session.presentationContextProvider = self
-        // Keep the sheet tied to the user's existing browser session so a
-        // previously signed-in official account (Passkey or email) is reused.
-        session.prefersEphemeralWebBrowserSession = false
+        // The shared session resumes the provider's signed-in account. An
+        // explicit "use another account" request starts from a clean sheet.
+        session.prefersEphemeralWebBrowserSession = ephemeral
         self.session = session
         session.start()
     }

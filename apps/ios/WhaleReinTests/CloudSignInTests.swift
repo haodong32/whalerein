@@ -13,16 +13,19 @@ import Testing
 private final class FakeAuthenticator: CloudWebAuthenticator {
     private(set) var presentedURL: URL?
     private(set) var callbackScheme: String?
+    private(set) var lastEphemeral: Bool?
     private(set) var cancelCount = 0
     private var completion: (@MainActor (URL?, Error?) -> Void)?
 
     func authenticate(
         url: URL,
         callbackURLScheme: String,
+        ephemeral: Bool,
         completion: @escaping @MainActor (URL?, Error?) -> Void
     ) {
         presentedURL = url
         callbackScheme = callbackURLScheme
+        lastEphemeral = ephemeral
         self.completion = completion
     }
 
@@ -184,9 +187,43 @@ struct CloudSignInModelTests {
         #expect(service.startCount == 1)
         #expect(authenticator.presentedURL == service.attempt.url)
         #expect(authenticator.callbackScheme == "whalerein")
+        #expect(authenticator.lastEphemeral == false)
         #expect(model.phase == .authorizing)
         #expect(model.isAuthPresented)
         #expect(model.errorCode == nil)
+    }
+
+    @Test("a local sign-out makes the next primary sign-in choose an account")
+    func signOutForcesCleanNextAttempt() async {
+        let service = StubCloudAccountService()
+        let authenticator = FakeAuthenticator()
+        let model = makeModel(service: service, authenticator: authenticator)
+
+        await model.signIn()
+        authenticator.complete(with: callbackURL)
+        await waitUntil { model.phase.isSignedIn }
+        await model.signOut()
+
+        await model.signIn()
+        #expect(authenticator.lastEphemeral == true)
+
+        // The clean sheet is one-shot; a cancelled attempt shares again.
+        await model.cancelSignIn()
+        await model.signIn()
+        #expect(authenticator.lastEphemeral == false)
+    }
+
+    @Test("switching accounts starts from a clean browser session")
+    func switchAccountUsesEphemeralSheet() async {
+        let service = StubCloudAccountService()
+        let authenticator = FakeAuthenticator()
+        let model = makeModel(service: service, authenticator: authenticator)
+
+        await model.signIn(ephemeral: true)
+
+        #expect(service.startCount == 1)
+        #expect(authenticator.lastEphemeral == true)
+        #expect(model.phase == .authorizing)
     }
 
     @Test("the callback signs in and loads the Cloud directory")
