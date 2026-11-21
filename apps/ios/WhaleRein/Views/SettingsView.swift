@@ -57,25 +57,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(L10n.settingsLogs.key) {
-                    if let logExportURL {
-                        ShareLink(item: logExportURL) {
-                            Text(L10n.settingsShareLogs.key)
-                        }
-                        .accessibilityIdentifier("settings.shareLogs")
-                    } else {
-                        Button {
-                            logExportURL = try? AppLog.shared.exportSnapshot()
-                        } label: {
-                            Text(L10n.settingsExportLogs.key)
-                        }
-                        .accessibilityIdentifier("settings.exportLogs")
-                    }
-                    Text(L10n.settingsExportLogsNote.key)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
                 Section(L10n.settingsData.key) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.settingsStorage.key)
@@ -135,6 +116,26 @@ struct SettingsView: View {
                 }
 
                 SettingsOperationsView()
+
+                Section(L10n.settingsLogs.key) {
+                    if let logExportURL {
+                        ShareLink(item: logExportURL) {
+                            Text(L10n.settingsShareLogs.key)
+                        }
+                        .accessibilityIdentifier("settings.shareLogs")
+                    } else {
+                        Button {
+                            logExportURL = try? AppLog.shared.exportSnapshot()
+                        } label: {
+                            Text(L10n.settingsExportLogs.key)
+                        }
+                        .accessibilityIdentifier("settings.exportLogs")
+                    }
+                    Text(L10n.settingsExportLogsNote.key)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
 
                 Section {
                     ServiceSelectionView(showsStandaloneCA: true)

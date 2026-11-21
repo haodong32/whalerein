@@ -152,7 +152,8 @@ final class AppRuntime {
         switch options.serviceMode {
         case .fixtures:
             configuration = AppComposition.makeFixtureConfigurationStore(
-                dataDirectory: dataDirectory
+                dataDirectory: dataDirectory,
+                activeInstance: options.fixtureInstance
             )
         case .live:
             configuration = try? AppComposition.makeConfigurationStore(
@@ -175,7 +176,8 @@ final class AppRuntime {
         let appLog = AppLog.shared
         let diagnosticBridge = CoreDiagnosticBridge(log: appLog)
 
-        if options.serviceMode == .fixtures, options.seedPairedFixture {
+        if options.serviceMode == .fixtures,
+           options.seedPairedFixture || options.keychainLocked {
             preferences.update {
                 $0.paired = true
                 if $0.lastHostId == nil {
@@ -215,7 +217,14 @@ final class AppRuntime {
         )
 
         let service: any SessionService
-        if let activeInstance {
+        if options.serviceMode == .fixtures, options.keychainLocked {
+            // A locked Keychain keeps the pairing but cannot open the service;
+            // the screen offers an explicit retry instead of a dead end.
+            service = UnavailableSessionService(
+                code: .keychainUnavailable,
+                instanceId: activeInstance?.id ?? "fixtures"
+            )
+        } else if let activeInstance {
             service = (try? Self.makeService(
                 for: activeInstance,
                 options: options,

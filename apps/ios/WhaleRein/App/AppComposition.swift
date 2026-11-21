@@ -17,10 +17,16 @@ enum AppComposition {
     }
 
     static func makeFixtureConfigurationStore(
-        dataDirectory: URL
+        dataDirectory: URL,
+        activeInstance: FixtureInstance = .standalone
     ) -> AppConfigurationStore {
         let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
-        return AppConfigurationStore(fixture: .fixture(documentURL: document))
+        return AppConfigurationStore(
+            fixture: .fixture(
+                documentURL: document,
+                activeInstanceID: activeInstance.instanceId
+            )
+        )
     }
 
     static func keychainService(

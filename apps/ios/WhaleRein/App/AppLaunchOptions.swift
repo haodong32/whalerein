@@ -79,6 +79,8 @@ struct LaunchOptions: Sendable {
     var queueUnsupported: Bool
     /// Make the refresh after a confirmed queue mutation fail.
     var queueMutationRefreshFails: Bool
+    /// Fixture instance a deterministic launch opens.
+    var fixtureInstance: FixtureInstance
     var arguments: [String]
 
     init(arguments: [String] = CommandLine.arguments, defaults: UserDefaults = .standard) {
@@ -126,6 +128,14 @@ struct LaunchOptions: Sendable {
         queueOnOpen = flags.contains("-ui-queue")
         queueUnsupported = flags.contains("-ui-queue-unsupported")
         queueMutationRefreshFails = flags.contains("-ui-queue-refresh-fails")
+        let cloudFlags = [
+            "-ui-cloud-signed-in", "-ui-cloud-switch", "-ui-cloud-start-fail",
+            "-ui-cloud-complete-fail", "-ui-cloud-revoked", "-ui-cloud-cancel-sheet",
+            "-ui-cloud-system-sheet", "-ui-cloud-empty", "-ui-cloud-unavailable"
+        ]
+        fixtureInstance = cloudFlags.contains(where: flags.contains)
+            ? .cloudProduction
+            : .standalone
         approvalVariant = FixtureApprovalVariant(
             rawValue: defaults.string(forKey: "ui-approval-state") ?? ""
         ) ?? .current
@@ -201,6 +211,7 @@ extension LaunchOptions {
         self.queueOnOpen = fixture.queueOnOpen
         self.queueUnsupported = fixture.queueUnsupported
         self.queueMutationRefreshFails = fixture.queueMutationRefreshFails
+        self.fixtureInstance = launch.fixtureInstance
     }
 
     /// The scenario this launch was built from, for Debug surfaces that need to

@@ -124,6 +124,8 @@ struct LaunchOverrides: Equatable, Sendable {
     }
 
     var serviceMode: ServiceMode = .live
+    /// Fixture instance to open; only meaningful for `.fixtures`.
+    var fixtureInstance: FixtureInstance = .standalone
     var resetState = false
     /// Simulate a locked Keychain so recovery starts from an unavailable store.
     var keychainLocked = false

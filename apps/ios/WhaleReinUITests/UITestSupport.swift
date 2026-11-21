@@ -56,6 +56,17 @@ class WhaleReinUITestCase: XCTestCase {
         return element
     }
 
+    /// Scrolls the active scroll view until `identifier` exists. Settings grew
+    /// past one screen, so tests must not assume every row is on screen.
+    @discardableResult
+    func scrollTo(_ identifier: String, maxSwipes: Int = 8) -> XCUIElement {
+        let target = element(identifier)
+        for _ in 0..<maxSwipes where !target.exists {
+            app.swipeUp()
+        }
+        return target
+    }
+
     func waitForLabel(_ label: String, timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line) {
         let predicate = NSPredicate(format: "label == %@", label)
         let element = app.descendants(matching: .any).matching(predicate).firstMatch

@@ -211,7 +211,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     func testAddHostEntryPointFromSettings() {
         launchAndOpenConversation()
         tap(waitFor("conversation.settings"))
-        tap(waitFor("settings.addHost"))
+        tap(scrollTo("settings.addHost"))
 
         XCTAssertTrue(waitFor("invitation.field", timeout: 20).exists)
         XCTAssertTrue(waitFor("invitation.close").exists)

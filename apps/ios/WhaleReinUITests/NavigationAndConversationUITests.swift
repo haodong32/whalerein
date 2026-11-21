@@ -36,7 +36,9 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
         let running = waitFor("conversation.running")
         XCTAssertTrue(running.exists)
         let delivery = waitFor("composer.delivery")
-        XCTAssertEqual(delivery.value as? String, "Steer", "Running work should default to Steer")
+        // Ordinary Send defaults to the native queue, matching the CLI. Steer
+        // stays an explicit choice when the Source advertises it.
+        XCTAssertEqual(delivery.value as? String, "Queue", "Running work should default to Queue")
         _ = waitFor("conversation.sendStatus")
 
         field.tap()

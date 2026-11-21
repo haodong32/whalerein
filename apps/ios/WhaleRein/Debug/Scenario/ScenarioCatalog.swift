@@ -330,7 +330,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud signed in",
                 notes: "Deterministic Cloud account and computer directory.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSignedIn: true),
                 entry: .cloudSignIn
             ),
@@ -339,7 +339,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud switch accounts",
                 notes: "Sign-out returns a different account.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSignedIn: true, cloudSwitchAccounts: true),
                 entry: .cloudSignIn
             ),
@@ -348,7 +348,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud start failure",
                 notes: "Sign-in start fails before the system sheet is presented.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudStartFailure: true),
                 entry: .cloudSignIn
             ),
@@ -357,7 +357,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud completion failure",
                 notes: "The callback completes with an error.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudCompleteFailure: true),
                 entry: .cloudSignIn
             ),
@@ -366,7 +366,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud session revoked",
                 notes: "The Cloud session is revoked while the app is open.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSignedIn: true, cloudRevoked: true),
                 entry: .cloudSignIn
             ),
@@ -375,7 +375,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud sheet cancelled",
                 notes: "The system authentication sheet completes with a cancellation.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudCancelSheet: true),
                 entry: .cloudSignIn
             ),
@@ -384,7 +384,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Real system sheet",
                 notes: "The real ASWebAuthenticationSession against a local mock OIDC page.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSystemSheet: true),
                 entry: .cloudSignIn
             ),
@@ -393,7 +393,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud directory empty",
                 notes: "Signed in with no computers available.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSignedIn: true, cloudDirectoryEmpty: true),
                 entry: .cloudSignIn
             ),
@@ -402,7 +402,7 @@ enum ScenarioCatalog {
                 category: .cloud,
                 title: "Cloud directory unavailable",
                 notes: "The directory read fails while signed in.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(cloudSignedIn: true, cloudDirectoryUnavailable: true),
                 entry: .cloudSignIn
             )
@@ -427,7 +427,7 @@ enum ScenarioCatalog {
                 category: .settings,
                 title: "Account and device",
                 notes: "Device revoke, forget and scoped sign-out entries.",
-                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
                 fixture: FixtureScenario(initiallyPaired: true, cloudSignedIn: true),
                 entry: .settings
             )

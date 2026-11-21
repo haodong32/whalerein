@@ -499,7 +499,10 @@ final class AppModel {
         service: any SessionService,
         instance: AppInstance?
     ) -> CloudSignInModel? {
-        guard let cloud = service as? any CloudAccountService else { return nil }
+        // A standalone instance has no Cloud account surface, even though the
+        // fixture type also implements the Cloud protocol.
+        guard instance?.service == .cloud,
+              let cloud = service as? any CloudAccountService else { return nil }
         let generation = activationGeneration
         let instanceId = instance?.id ?? service.instanceId
         let model = CloudSignInModel(

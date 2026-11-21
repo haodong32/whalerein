@@ -10,7 +10,7 @@ final class LogExportUITests: WhaleReinUITestCase {
         ]
         app.launch()
 
-        let export = waitFor("settings.exportLogs")
+        let export = scrollTo("settings.exportLogs")
         export.tap()
         XCTAssertTrue(
             waitFor("settings.shareLogs").waitForExistence(timeout: 10),
