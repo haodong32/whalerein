@@ -336,12 +336,23 @@ final class AppModel {
               let local = configuration.instances.first(where: { $0.isLocal }) else {
             return nil
         }
+        // A local instance cannot open without its CA, so it is removed rather
+        // than left half-configured. Leave it first because the active instance
+        // cannot be deleted.
+        if activeInstance?.id == local.id {
+            guard let fallback = configuration.instances.first(where: { $0.isCloudProduction }) else {
+                return reportInstanceError(SessionServiceError(.configuration))
+            }
+            if let code = await switchInstance(id: fallback.id) {
+                return code
+            }
+        }
         do {
             try configuration.removeCloudCA(instanceID: local.id)
         } catch {
             return reportInstanceError(error)
         }
-        return await reselectIfActive(id: local.id)
+        return nil
     }
 
     /// Imports a validated private CA for the Standalone instance. An invalid

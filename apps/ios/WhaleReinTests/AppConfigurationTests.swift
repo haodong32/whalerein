@@ -100,13 +100,7 @@ final class StubAppConfigurationBinding: AppConfigurationBinding {
 
     func removeCloudCA(path: String, id: String) throws -> AppConfiguration {
         if let removeCAError { throw removeCAError }
-        let instances = configuration.instances.map { instance in
-            guard instance.id == id else { return instance }
-            var next = instance
-            next.hasCloudCA = false
-            next.cloudCAPath = nil
-            return next
-        }
+        let instances = configuration.instances.filter { $0.id != id }
         configuration = AppConfiguration(
             documentURL: configuration.documentURL,
             version: configuration.version,
@@ -179,9 +173,7 @@ struct AppConfigurationTests {
         #expect(local.cloudCAPath?.lastPathComponent == "cloud-ca.pem")
 
         _ = try store.removeCloudCA(instanceID: "cloud-local")
-        let cleared = try #require(store.configuration.instance(id: "cloud-local"))
-        #expect(!cleared.hasCloudCA)
-        #expect(cleared.cloudCAPath == nil)
+        #expect(store.configuration.instance(id: "cloud-local") == nil)
     }
 
     @Test("an existing Staging instance is selected instead of creating a new one")

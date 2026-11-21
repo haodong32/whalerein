@@ -191,10 +191,11 @@ struct InstanceActivationTests {
         #expect(created.hasCloudCA)
         #expect(created.isLocal)
 
-        // Removing the CA clears the pin while leaving the instance in place.
+        // Removing the CA leaves the instance first and deletes it, because a
+        // local instance cannot open without its CA.
         #expect(await harness.app.removeLocalCA() == nil)
-        let cleared = try #require(harness.store.instances.first { $0.id == "cloud-local" })
-        #expect(!cleared.hasCloudCA)
+        #expect(harness.app.activeInstance?.id == "cloud-production")
+        #expect(!harness.store.instances.contains { $0.id == "cloud-local" })
     }
 
     @Test("Staging options are exposed only when the build flavor allows them")

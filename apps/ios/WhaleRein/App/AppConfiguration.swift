@@ -38,6 +38,10 @@ struct AppInstance: Identifiable, Equatable, Sendable {
     var isLocal: Bool {
         service == .cloud && environment == .local
     }
+
+    var isCloudProduction: Bool {
+        service == .cloud && (environment == .production || environment == nil)
+    }
 }
 
 struct AppConfiguration: Equatable, Sendable {
@@ -267,13 +271,7 @@ final class AppConfigurationStore {
     @discardableResult
     func removeCloudCA(instanceID: String) throws -> AppConfiguration {
         guard binding != nil else {
-            let instances = configuration.instances.map { instance in
-                guard instance.id == instanceID else { return instance }
-                var next = instance
-                next.hasCloudCA = false
-                next.cloudCAPath = nil
-                return next
-            }
+            let instances = configuration.instances.filter { $0.id != instanceID }
             configuration = AppConfiguration(
                 documentURL: configuration.documentURL,
                 version: configuration.version,

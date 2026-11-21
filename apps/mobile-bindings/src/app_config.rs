@@ -204,41 +204,58 @@ pub fn app_config_remove_instance(path: String, id: String) -> Result<AppConfigV
     read_document(path).map(|parsed| parsed.view())
 }
 
-/// Remove the local Cloud CA reference and delete its instance bundle.
+/// Remove the local Cloud instance and its CA bundle.
+///
+/// A local instance cannot resolve trust without its explicit CA, so clearing
+/// the reference would leave it unopenable. Removing it returns the selector to
+/// its create-Local path; the data directory is left on disk.
 #[uniffi::export]
 pub fn app_config_remove_cloud_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
-    remove_ca_reference(Path::new(&path), &id, true)
+    let path = Path::new(&path);
+    let mut parsed = read_document(path)?;
+    validate_id(&id)?;
+    if parsed.active_instance == id {
+        return Err(MobileError::conflict());
+    }
+    let Some(record) = parsed.instances.get(&id).cloned() else {
+        return Err(MobileError::not_found());
+    };
+    if record.service != "whalerein_cloud"
+        || record.cloud_environment.as_deref() != Some(LOCAL_ENVIRONMENT)
+    {
+        return Err(MobileError::invalid_input());
+    }
+    let reference = record.cloud_ca_certificate.clone();
+    parsed.instances.remove(&id);
+    remove_instance_table(&mut parsed.doc, &id);
+    commit_document(&parsed, &write_document)?;
+    if let Some(reference) = reference {
+        match fs::remove_file(resolve_reference_path(&parsed.base(), &reference)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(MobileError::internal()),
+        }
+    }
+    read_document(path).map(|parsed| parsed.view())
 }
 
 /// Remove the Standalone CA reference and delete the instance-owned bundle.
 #[uniffi::export]
 pub fn app_config_remove_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
-    remove_ca_reference(Path::new(&path), &id, false)
-}
-
-fn remove_ca_reference(path: &Path, id: &str, cloud: bool) -> Result<AppConfigView, MobileError> {
+    let path = Path::new(&path);
     let mut parsed = read_document(path)?;
-    validate_id(id)?;
-    let Some(record) = parsed.instances.get(id).cloned() else {
+    validate_id(&id)?;
+    let Some(record) = parsed.instances.get(&id).cloned() else {
         return Err(MobileError::not_found());
     };
-    let reference = if cloud {
-        record.cloud_ca_certificate.clone()
-    } else {
-        record.standalone_ca_certificate.clone()
-    };
-    let Some(reference) = reference else {
+    let Some(reference) = record.standalone_ca_certificate.clone() else {
         return Ok(parsed.view());
     };
     let mut next = record;
-    if cloud {
-        next.cloud_ca_certificate = None;
-    } else {
-        next.standalone_ca_certificate = None;
-    }
-    write_instance_table(&mut parsed.doc, id, &next);
-    parsed.instances.insert(id.to_owned(), next);
-    materialize(&parsed, id)?;
+    next.standalone_ca_certificate = None;
+    write_instance_table(&mut parsed.doc, &id, &next);
+    parsed.instances.insert(id.clone(), next);
+    materialize(&parsed, &id)?;
     commit_document(&parsed, &write_document)?;
     match fs::remove_file(resolve_reference_path(&parsed.base(), &reference)) {
         Ok(()) => {}
@@ -248,7 +265,7 @@ fn remove_ca_reference(path: &Path, id: &str, cloud: bool) -> Result<AppConfigVi
     read_document(path).map(|parsed| parsed.view())
 }
 
-/// Persist only the App-section reasoning visibility flag.
+/// Persist only the App-section reasoning visibility flag./// Persist only the App-section reasoning visibility flag.
 #[uniffi::export]
 pub fn app_config_set_reasoning_visible(
     path: String,
@@ -1308,14 +1325,10 @@ kg3kmwrRgJT2uxIVgusk+cBIKzWjxMwkC7uvy8RsrQ==
 
         let cleared =
             app_config_remove_cloud_ca(document(root.path()), "cloud-local".into()).unwrap();
-        assert!(
-            !cleared
-                .instances
-                .iter()
-                .find(|instance| instance.id == "cloud-local")
-                .unwrap()
-                .has_cloud_ca
-        );
+        assert!(!cleared
+            .instances
+            .iter()
+            .any(|instance| instance.id == "cloud-local"));
         assert!(!root
             .path()
             .join("client/instances/cloud-local/cloud-ca.pem")
