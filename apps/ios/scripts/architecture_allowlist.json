@@ -20,11 +20,6 @@
   ],
   "entries": [
     {
-      "path": "App/AppLaunchOptions.swift",
-      "rule": "legacy-ui-flag",
-      "reason": "Legacy -ui-* launch flag; replaced by the single -ui-scenario surface in task 6.4."
-    },
-    {
       "path": "App/AppModel.swift",
       "rule": "model-size",
       "reason": "Legacy model over the 500-line budget; deleted or split by the rewrite."
