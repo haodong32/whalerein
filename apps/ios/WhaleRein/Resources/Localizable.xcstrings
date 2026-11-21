@@ -5458,6 +5458,108 @@
         }
       }
     },
+    "service.localCA": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local CA"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地 CA"
+          }
+        }
+      }
+    },
+    "service.localCAImport": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import mkcert rootCA.pem"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导入 mkcert rootCA.pem"
+          }
+        }
+      }
+    },
+    "service.localCAImported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "mkcert root imported"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已导入 mkcert 根证书"
+          }
+        }
+      }
+    },
+    "service.localCANone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No CA imported"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未导入 CA"
+          }
+        }
+      }
+    },
+    "service.localCANote": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import the mkcert rootCA.pem used by app.whalerein.test. The Simulator must trust it; the app only pins it for this local instance."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请导入 app.whalerein.test 使用的 mkcert rootCA.pem。Simulator 需要信任该根证书；App 仅将其固定到本地实例。"
+          }
+        }
+      }
+    },
+    "service.localCARemove": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove local CA"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除本地 CA"
+          }
+        }
+      }
+    },
     "service.selectionTitle": {
       "extractionState": "manual",
       "localizations": {

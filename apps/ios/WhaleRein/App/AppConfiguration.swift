@@ -28,8 +28,16 @@ struct AppInstance: Identifiable, Equatable, Sendable {
     let configPath: URL
     let hasStandaloneCA: Bool
     let standaloneCAPath: URL?
+    /// True when the local Cloud instance pins an imported mkcert root bundle.
+    var hasCloudCA: Bool = false
+    /// Absolute imported local Cloud CA bundle.
+    var cloudCAPath: URL? = nil
 
     var isStandalone: Bool { service == .standalone }
+
+    var isLocal: Bool {
+        service == .cloud && environment == .local
+    }
 }
 
 struct AppConfiguration: Equatable, Sendable {
@@ -55,6 +63,8 @@ struct AppInstanceInput: Equatable, Sendable {
     var environment: AppCloudEnvironment?
     var dataDirectory: String
     var standaloneCAPEM: String?
+    /// Imported mkcert root for the local Cloud instance.
+    var cloudCAPEM: String? = nil
 }
 
 /// One selectable service entry on the welcome/settings surface.
@@ -85,6 +95,7 @@ protocol AppConfigurationBinding {
     func remove(path: String, id: String) throws -> AppConfiguration
     func setReasoningVisible(path: String, visible: Bool) throws -> AppConfiguration
     func removeCA(path: String, id: String) throws -> AppConfiguration
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration
 }
 
 @MainActor
@@ -119,6 +130,10 @@ final class BindingAppConfigurationBinding: AppConfigurationBinding {
 
     func removeCA(path: String, id: String) throws -> AppConfiguration {
         try map { try WhaleReinMobile.appConfigRemoveCa(path: path, id: id) }
+    }
+
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration {
+        try map { try WhaleReinMobile.appConfigRemoveCloudCa(path: path, id: id) }
     }
 
     private func map(_ body: () throws -> WhaleReinMobile.AppConfigView) throws -> AppConfiguration {
@@ -235,6 +250,42 @@ final class AppConfigurationStore {
         return try apply { try $0.setReasoningVisible(path: documentPath, visible: visible) }
     }
 
+    /// Save the local Cloud instance with its imported mkcert root and select it.
+    @discardableResult
+    func enableLocal(pem: String) throws -> AppConfiguration {
+        let input = AppInstanceInput(
+            id: "cloud-local",
+            service: .cloud,
+            environment: .local,
+            dataDirectory: "instances/cloud-local/data",
+            standaloneCAPEM: nil,
+            cloudCAPEM: pem
+        )
+        return try save(input)
+    }
+
+    @discardableResult
+    func removeCloudCA(instanceID: String) throws -> AppConfiguration {
+        guard binding != nil else {
+            let instances = configuration.instances.map { instance in
+                guard instance.id == instanceID else { return instance }
+                var next = instance
+                next.hasCloudCA = false
+                next.cloudCAPath = nil
+                return next
+            }
+            configuration = AppConfiguration(
+                documentURL: configuration.documentURL,
+                version: configuration.version,
+                activeInstanceID: configuration.activeInstanceID,
+                reasoningVisible: configuration.reasoningVisible,
+                instances: instances
+            )
+            return configuration
+        }
+        return try apply { try $0.removeCloudCA(path: documentPath, id: instanceID) }
+    }
+
     @discardableResult
     func importCA(instanceID: String, pem: String) throws -> AppConfiguration {
         guard let instance = configuration.instance(id: instanceID), instance.isStandalone else {
@@ -262,7 +313,9 @@ final class AppConfigurationStore {
                     dataDirectory: instance.dataDirectory,
                     configPath: instance.configPath,
                     hasStandaloneCA: false,
-                    standaloneCAPath: nil
+                    standaloneCAPath: nil,
+                    hasCloudCA: instance.hasCloudCA,
+                    cloudCAPath: instance.cloudCAPath
                 )
             }
             configuration = AppConfiguration(
@@ -281,7 +334,9 @@ final class AppConfigurationStore {
         let environmentIsValid = input.service == .standalone
             ? input.environment == nil
             : input.environment != nil
-        guard !input.id.isEmpty, environmentIsValid else {
+        let cloudCAIsValid = input.cloudCAPEM == nil
+            || (input.service == .cloud && input.environment == .local)
+        guard !input.id.isEmpty, environmentIsValid, cloudCAIsValid else {
             throw SessionServiceError(.configuration)
         }
         let client = configuration.documentURL.deletingLastPathComponent()
@@ -296,7 +351,13 @@ final class AppConfigurationStore {
             hasStandaloneCA: input.standaloneCAPEM != nil,
             standaloneCAPath: input.standaloneCAPEM == nil
                 ? nil
-                : client.appendingPathComponent("instances/\(input.id)/ca.pem")
+                : client.appendingPathComponent("instances/\(input.id)/ca.pem"),
+            hasCloudCA: input.service == .cloud
+                && input.environment == .local
+                && input.cloudCAPEM != nil,
+            cloudCAPath: input.cloudCAPEM == nil
+                ? nil
+                : client.appendingPathComponent("instances/\(input.id)/cloud-ca.pem")
         )
         var instances = configuration.instances.filter { $0.id != input.id }
         instances.append(instance)
@@ -467,6 +528,10 @@ extension AppConfiguration {
                 hasStandaloneCA: instance.hasStandaloneCa,
                 standaloneCAPath: instance.standaloneCaPath.map {
                     URL(fileURLWithPath: $0)
+                },
+                hasCloudCA: instance.hasCloudCa,
+                cloudCAPath: instance.cloudCaPath.map {
+                    URL(fileURLWithPath: $0)
                 }
             )
         }
@@ -524,7 +589,8 @@ extension AppInstanceInput {
             service: service.rawValue,
             environment: environment?.rawValue,
             dataDir: dataDirectory,
-            standaloneCaPem: standaloneCAPEM
+            standaloneCaPem: standaloneCAPEM,
+            cloudCaPem: cloudCAPEM
         )
     }
 }

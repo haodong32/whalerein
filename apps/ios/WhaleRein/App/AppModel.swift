@@ -309,20 +309,39 @@ final class AppModel {
             }
             return await switchInstance(id: "cloud-staging")
         case .createLocal:
-            let input = AppInstanceInput(
-                id: "cloud-local",
-                service: .cloud,
-                environment: .local,
-                dataDirectory: "instances/cloud-local/data",
-                standaloneCAPEM: nil
-            )
-            do {
-                try configuration.save(input)
-            } catch {
-                return reportInstanceError(error)
-            }
-            return await switchInstance(id: "cloud-local")
+            // Local needs an imported mkcert root bundle; the selector collects
+            // it before calling `enableLocal`. Creating the instance here would
+            // fail Core validation with a generic configuration error.
+            return reportInstanceError(SessionServiceError(.configuration))
         }
+    }
+
+    /// Imports the mkcert root bundle for the local Cloud instance and selects
+    /// it. An invalid bundle leaves the previous document and trust unchanged.
+    @discardableResult
+    func enableLocal(pem: String) async -> AppErrorCode? {
+        guard let configuration else { return .configuration }
+        do {
+            try configuration.enableLocal(pem: pem)
+        } catch {
+            return reportInstanceError(error)
+        }
+        return await switchInstance(id: "cloud-local", force: true)
+    }
+
+    @discardableResult
+    func removeLocalCA() async -> AppErrorCode? {
+        guard let configuration,
+              let local = configuration.instances.first(where: { $0.isLocal }) else {
+            return nil
+        }
+        do {
+            try configuration.removeCloudCA(instanceID: local.id)
+        } catch {
+            return reportInstanceError(error)
+        }
+        guard activeInstance?.id == local.id else { return nil }
+        return await switchInstance(id: local.id, force: true)
     }
 
     /// Imports a validated private CA for the Standalone instance. An invalid

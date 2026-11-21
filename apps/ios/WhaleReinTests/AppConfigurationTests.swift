@@ -45,7 +45,11 @@ final class StubAppConfigurationBinding: AppConfigurationBinding {
             hasStandaloneCA: input.standaloneCAPEM != nil,
             standaloneCAPath: input.standaloneCAPEM == nil
                 ? nil
-                : base.appendingPathComponent("instances/\(input.id)/ca.pem")
+                : base.appendingPathComponent("instances/\(input.id)/ca.pem"),
+            hasCloudCA: input.cloudCAPEM != nil,
+            cloudCAPath: input.cloudCAPEM == nil
+                ? nil
+                : base.appendingPathComponent("instances/\(input.id)/cloud-ca.pem")
         )
         var instances = configuration.instances.filter { $0.id != input.id }
         instances.append(instance)
@@ -91,6 +95,25 @@ final class StubAppConfigurationBinding: AppConfigurationBinding {
 
     func removeCA(path: String, id: String) throws -> AppConfiguration {
         if let removeCAError { throw removeCAError }
+        return configuration
+    }
+
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration {
+        if let removeCAError { throw removeCAError }
+        let instances = configuration.instances.map { instance in
+            guard instance.id == id else { return instance }
+            var next = instance
+            next.hasCloudCA = false
+            next.cloudCAPath = nil
+            return next
+        }
+        configuration = AppConfiguration(
+            documentURL: configuration.documentURL,
+            version: configuration.version,
+            activeInstanceID: configuration.activeInstanceID,
+            reasoningVisible: configuration.reasoningVisible,
+            instances: instances
+        )
         return configuration
     }
 }
@@ -143,6 +166,22 @@ struct AppConfigurationTests {
             "cloud-production", "cloud-staging", "cloud-local", "standalone"
         ])
         #expect(debug.map(\.environment) == [.production, .staging, .local, nil])
+    }
+
+    @Test("a local instance pins the imported mkcert root and can clear it")
+    func localInstancePinsCA() throws {
+        let document = URL(fileURLWithPath: "/tmp/WhaleRein/client/app.toml")
+        let store = AppConfigurationStore(fixture: .fixture(documentURL: document))
+        let view = try store.enableLocal(pem: "pem-bundle")
+        let local = try #require(view.instance(id: "cloud-local"))
+        #expect(local.isLocal)
+        #expect(local.hasCloudCA)
+        #expect(local.cloudCAPath?.lastPathComponent == "cloud-ca.pem")
+
+        _ = try store.removeCloudCA(instanceID: "cloud-local")
+        let cleared = try #require(store.configuration.instance(id: "cloud-local"))
+        #expect(!cleared.hasCloudCA)
+        #expect(cleared.cloudCAPath == nil)
     }
 
     @Test("an existing Staging instance is selected instead of creating a new one")
