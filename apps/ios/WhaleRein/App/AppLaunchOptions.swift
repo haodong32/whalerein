@@ -143,10 +143,5 @@ struct LaunchOptions: Sendable {
         self.fixtureInstance = launch.fixtureInstance
     }
 
-    /// The scenario id this launch was built from, for Debug surfaces.
-    var appliedScenarioId: String? {
-        ScenarioCatalog.argumentValue("-ui-scenario", in: arguments)
-    }
-
     static let fixtureInvitationHostId = "studio-mac"
 }
