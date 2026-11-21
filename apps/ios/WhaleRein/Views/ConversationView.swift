@@ -5,8 +5,12 @@
 import SwiftUI
 
 struct ConversationView: View {
-    @Environment(AppShellModel.self) private var app
     @Bindable var model: ConversationModel
+    /// Presentation inputs the shell owns; the screen does not read it.
+    let reasoningVisible: Bool
+    let isCached: Bool
+    /// True while this model is still the shell's current conversation.
+    let isCurrent: () -> Bool
     @FocusState private var composerFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -17,7 +21,7 @@ struct ConversationView: View {
             content
             ComposerView(
                 model: model,
-                isCached: app.isOfflineCached,
+                isCached: isCached,
                 focused: $composerFocused
             )
         }
@@ -34,7 +38,7 @@ struct ConversationView: View {
         }
         .onDisappear {
             // A superseded conversation must not stop the watch that replaced it.
-            if app.conversation === model {
+            if isCurrent() {
                 model.close()
             }
         }
@@ -196,6 +200,6 @@ struct ConversationView: View {
 
 
     private var transcriptRows: some View {
-        ConversationRowsView(model: model, reasoningVisible: app.reasoningVisible)
+        ConversationRowsView(model: model, reasoningVisible: reasoningVisible)
     }
 }

@@ -30,11 +30,6 @@
       "reason": "Legacy model over the 500-line budget; deleted or split by the rewrite."
     },
     {
-      "path": "Views/ConversationView.swift",
-      "rule": "environment-appmodel",
-      "reason": "Legacy environment injection of AppModel; removed with the aggregator model in task 6.1."
-    },
-    {
       "path": "Views/InvitationView.swift",
       "rule": "environment-appmodel",
       "reason": "Legacy environment injection of AppModel; removed with the aggregator model in task 6.1."

@@ -170,7 +170,12 @@ struct RootView: View {
     @ViewBuilder
     private var conversationContent: some View {
         if let conversation = model.conversation {
-            ConversationView(model: conversation)
+            ConversationView(
+                model: conversation,
+                reasoningVisible: model.reasoningVisible,
+                isCached: model.isOfflineCached,
+                isCurrent: { model.conversation === conversation }
+            )
                 // Selecting a different session replaces the conversation and
                 // must not inherit the previous transcript's scroll position.
                 .id(ObjectIdentifier(conversation))
