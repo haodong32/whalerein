@@ -59,6 +59,7 @@ struct RootView: View {
                 InvitationView(
                     pairing: app.pairing,
                     serviceSelection: serviceSelection,
+                    isModal: true,
                     onDismiss: { app.dismissInvitationSheet() }
                 )
             }

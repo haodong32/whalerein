@@ -6,9 +6,9 @@ import SwiftUI
 struct InvitationView: View {
     let pairing: PairingModel
     let serviceSelection: ServiceSelectionContext
+    var isModal = false
     var onDismiss: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
-    var isModal = false
 
     @State private var pasteboardError: L10nKey?
     @FocusState private var fieldFocused: Bool
