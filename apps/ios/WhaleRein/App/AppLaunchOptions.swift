@@ -155,7 +155,7 @@ extension LaunchOptions {
 
     /// Maps one catalog entry onto the values the fixture services currently
     /// read. Every field mirrors a legacy flag so behavior is identical.
-    private init(scenarioOnly scenario: Scenario, arguments: [String]) {
+    init(scenarioOnly scenario: Scenario, arguments: [String]) {
         let fixture = scenario.fixture
         let launch = scenario.launch
         self.arguments = arguments

@@ -21,6 +21,7 @@ struct WhaleReinApp: App {
             RootView()
                 .environment(runtime.legacy)
                 .environment(runtime)
+                .id(runtime.activationGeneration)
                 .modifier(DynamicTypeOverride(
                     enabled: runtime.legacy.options.largeText
                 ))

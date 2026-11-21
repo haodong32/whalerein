@@ -42,8 +42,8 @@
 
 ## 5. Debug gallery and previews
 
-- [ ] 5.1 Add `Debug/StateGallery/StateGalleryView.swift` and model: group by category, search, show notes/owner/entry, apply a scenario and open its entry (AC-08).
-- [ ] 5.2 Add the Debug-only Settings entry and the fallback gesture; verify it is absent from Release configuration (AC-08, AC-09).
+- [x] 5.1 Add `Debug/StateGallery/StateGalleryView.swift` and model: group by category, search, show notes/owner/entry, apply a scenario and open its entry (AC-08).
+- [x] 5.2 Add the Debug-only Settings entry and the fallback gesture; verify it is absent from Release configuration (AC-08, AC-09).
 - [ ] 5.3 Add previews for the rewritten screens, each constructed from a scenario through `TestSupport`; no network, no real data (AC-07, AC-11).
 - [ ] 5.4 Add the Release surface scan to CI. Emit a Debug-only marker string/constant for the gallery and scenario entry, build a Release-configured app, scan symbols and strings for that marker and `-ui-scenario`, and record the artifact (AC-09).
 

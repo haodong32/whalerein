@@ -11,6 +11,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppRuntime.self) private var runtime
     @Environment(\.scenePhase) private var scenePhase
     @State private var availableWidth: CGFloat = 0
 
@@ -48,6 +49,11 @@ struct RootView: View {
         .sheet(isPresented: $app.showSwitcher) {
             SessionSwitcherView()
         }
+        #if DEBUG
+        .sheet(isPresented: Bindable(runtime.router).showsStateGallery) {
+            StateGalleryView()
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -108,6 +114,14 @@ struct RootView: View {
                         }
                         .accessibilityLabel(L10n.hostsDiagnostics.key)
                         .accessibilityIdentifier("conversation.diagnostics")
+
+                        Button {
+                            runtime.router.showsStateGallery = true
+                        } label: {
+                            Image(systemName: "square.grid.2x2")
+                        }
+                        .accessibilityLabel("State gallery")
+                        .accessibilityIdentifier("conversation.gallery")
                         #endif
 
                         Button {

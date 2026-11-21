@@ -12,10 +12,10 @@ import WhaleReinMobile
 @MainActor
 @Observable
 final class AppRuntime {
-    let environment: AppEnvironment
+    private(set) var environment: AppEnvironment
     let router: AppRouter
     /// Temporary bridge to the pre-rewrite aggregator.
-    let legacy: AppModel
+    private(set) var legacy: AppModel
 
     /// Monotonic fence. Every asynchronous result carries the generation it
     /// started under and is dropped when the runtime has moved on.
@@ -64,16 +64,66 @@ final class AppRuntime {
         await legacy.handleOpenURL(url)
     }
 
+    /// One built group: the environment and the models it assembled.
+    struct RuntimeGroup {
+        let environment: AppEnvironment
+        let model: AppModel
+    }
+
     /// Builds one runtime from launch arguments and the committed document.
     static func bootstrap(
         arguments: [String] = CommandLine.arguments,
         fileManager: FileManager = .default
     ) -> AppRuntime {
+        AppLog.install(AppLog(
+            store: AppLog.makeDefaultStore(appVersion: Self.appVersion),
+            appVersion: Self.appVersion
+        ))
         #if DEBUG
         let scenario = ScenarioCatalog.resolve(arguments: arguments)
-        let options = LaunchOptions(scenario: scenario, arguments: arguments)
+        let forceScenario = ScenarioCatalog.hasScenarioArgument(arguments)
         #else
         let scenario = Scenario.normal
+        let forceScenario = false
+        #endif
+        let group = makeGroup(
+            scenario: scenario,
+            arguments: arguments,
+            forceScenario: forceScenario,
+            fileManager: fileManager
+        )
+        return AppRuntime(environment: group.environment, legacy: group.model)
+    }
+
+    /// Replaces the current group with one built for `scenario`. Debug only:
+    /// Release has no scenario surface, so the group never changes at runtime.
+    func apply(_ scenario: Scenario) {
+        #if DEBUG
+        let group = Self.makeGroup(
+            scenario: scenario,
+            arguments: [],
+            forceScenario: true,
+            fileManager: .default
+        )
+        environment = group.environment
+        legacy = group.model
+        activationGeneration &+= 1
+        applyScenarioEntry()
+        #endif
+    }
+
+    /// Builds the environment and the model group for one scenario.
+    static func makeGroup(
+        scenario: Scenario,
+        arguments: [String],
+        forceScenario: Bool,
+        fileManager: FileManager
+    ) -> RuntimeGroup {
+        #if DEBUG
+        let options = forceScenario
+            ? LaunchOptions(scenarioOnly: scenario, arguments: arguments)
+            : LaunchOptions(scenario: scenario, arguments: arguments)
+        #else
         let options = LaunchOptions()
         #endif
 
@@ -116,12 +166,8 @@ final class AppRuntime {
 
         // One process logger and one Core bridge. The bridge is installed on
         // every service the runtime builds, so an instance switch keeps the
-        // same correlated timeline.
-        let appLog = AppLog(
-            store: AppLog.makeDefaultStore(appVersion: Self.appVersion),
-            appVersion: Self.appVersion
-        )
-        AppLog.install(appLog)
+        // same correlated timeline. Rebuilding a group reuses both.
+        let appLog = AppLog.shared
         let diagnosticBridge = CoreDiagnosticBridge(log: appLog)
 
         if options.serviceMode == .fixtures, options.seedPairedFixture {
@@ -197,7 +243,7 @@ final class AppRuntime {
             }
         )
 
-        return AppRuntime(environment: environment, legacy: legacy)
+        return RuntimeGroup(environment: environment, model: legacy)
     }
 
     /// One service for one instance: fixtures for deterministic launches, or
