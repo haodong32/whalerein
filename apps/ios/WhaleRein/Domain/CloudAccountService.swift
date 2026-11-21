@@ -47,14 +47,25 @@ struct CloudDirectoryHost: Identifiable, Equatable, Sendable {
 
     /// Presentation-only classification. The app still asks Core to confirm a
     /// grant before opening any session; `eligible` is never treated as a grant.
+    ///
+    /// An enrolled host is not necessarily granted to this device. `deviceAccess`
+    /// comes from Cloud per device and is authoritative: an enrolled host whose
+    /// device is absent still needs the connect step, otherwise opening would
+    /// ask Core to enter a host this device never paired and bounce back.
     var access: CloudHostAccess {
-        if enrolled {
+        switch deviceAccess {
+        case "ready", "granted":
             return .authorized(online: online)
-        }
-        if pairingEligible {
+        case "absent", "pending", "none":
             return .eligible
+        case "revoked", "revocation_pending", "unavailable":
+            return .unavailable
+        default:
+            if enrolled {
+                return .authorized(online: online)
+            }
+            return pairingEligible ? .eligible : .unavailable
         }
-        return .unavailable
     }
 }
 
