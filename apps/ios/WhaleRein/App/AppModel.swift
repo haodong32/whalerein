@@ -47,6 +47,9 @@ final class AppModel {
     private(set) var service: any SessionService
     private(set) var preferences: PreferencesStore
     private(set) var dataDirectory: URL
+    /// Capabilities decided once for this runtime. Feature models are built
+    /// from this set instead of probing the service with `as?`.
+    private(set) var featureSet: FeatureSet
 
     private(set) var pairing: PairingModel
     private(set) var hostList: HostListModel
@@ -139,17 +142,23 @@ final class AppModel {
         self.diagnostics = models.diagnostics
         self.settings = models.settings
         self.sessionManagement = Self.makeManagementModel(service: service)
-        self.cloudSignIn = nil
-        self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
-        self.operationRecovery = Self.makeOperationRecovery(
-            service: service,
-            instanceId: activeInstance?.id ?? service.instanceId
+        let available = !(service is UnavailableSessionService)
+        self.featureSet = FeatureSet.resolved(
+            instance: activeInstance,
+            serviceIsAvailable: available
         )
-        self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
-        self.accountSettings = makeAccountSettingsModel(
-            service: service,
-            instance: activeInstance
-        )
+        self.cloudSignIn = featureSet.cloudAccount
+            ? makeCloudSignInModel(service: service, instance: activeInstance)
+            : nil
+        self.operationRecovery = featureSet.operationRecovery
+            ? Self.makeOperationRecovery(
+                service: service,
+                instanceId: activeInstance?.id ?? service.instanceId
+            )
+            : nil
+        self.accountSettings = featureSet.sessionManagement
+            ? makeAccountSettingsModel(service: service, instance: activeInstance)
+            : nil
         installCallbacks()
     }
 
@@ -430,15 +439,20 @@ final class AppModel {
             onDeviceReset: {}
         )
         self.sessionManagement = Self.makeManagementModel(service: service)
-        self.operationRecovery = Self.makeOperationRecovery(
-            service: service,
-            instanceId: instance?.id ?? service.instanceId
-        )
-        self.cloudSignIn = makeCloudSignInModel(service: service, instance: instance)
-        self.accountSettings = makeAccountSettingsModel(
-            service: service,
-            instance: instance
-        )
+        let available = !(service is UnavailableSessionService)
+        self.featureSet = FeatureSet.resolved(instance: instance, serviceIsAvailable: available)
+        self.operationRecovery = featureSet.operationRecovery
+            ? Self.makeOperationRecovery(
+                service: service,
+                instanceId: instance?.id ?? service.instanceId
+            )
+            : nil
+        self.cloudSignIn = featureSet.cloudAccount
+            ? makeCloudSignInModel(service: service, instance: instance)
+            : nil
+        self.accountSettings = featureSet.sessionManagement
+            ? makeAccountSettingsModel(service: service, instance: instance)
+            : nil
         installCallbacks()
     }
 
