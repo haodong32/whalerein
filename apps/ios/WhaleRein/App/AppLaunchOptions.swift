@@ -133,3 +133,81 @@ struct LaunchOptions: Sendable {
 
     static let fixtureInvitationHostId = "studio-mac"
 }
+
+// MARK: - Scenario bridge
+
+#if DEBUG
+// Temporary bridge while the legacy `-ui-*` flags still exist (deleted by task
+// 6.4). A scenario-derived launch takes precedence over a flag-derived one, so
+// UI tests and the Debug gallery can drive the app from the catalog.
+extension LaunchOptions {
+    init(
+        scenario: Scenario,
+        arguments: [String] = CommandLine.arguments,
+        defaults: UserDefaults = .standard
+    ) {
+        if ScenarioCatalog.hasScenarioArgument(arguments) {
+            self.init(scenarioOnly: scenario, arguments: arguments)
+        } else {
+            self.init(arguments: arguments, defaults: defaults)
+        }
+    }
+
+    /// Maps one catalog entry onto the values the fixture services currently
+    /// read. Every field mirrors a legacy flag so behavior is identical.
+    private init(scenarioOnly scenario: Scenario, arguments: [String]) {
+        let fixture = scenario.fixture
+        let launch = scenario.launch
+        self.arguments = arguments
+        self.serviceMode = switch launch.serviceMode {
+        case .fixtures: .fixtures
+        case .live: .live
+        }
+        self.resetState = launch.resetState
+        self.seedPairedFixture = fixture.initiallyPaired
+        self.largeText = scenario.presentation.accessibilityTextSize
+        self.streamOnOpen = fixture.streamOnOpen
+        self.lateEventLeak = fixture.lateEventLeak
+        self.sendUncertain = fixture.sendUncertain
+        self.sendEcho = fixture.sendEcho
+        self.approvalVariant = switch fixture.approvalVariant {
+        case .current: .current
+        case .expired: .expired
+        case .changed: .changed
+        case .fastClock: .fastClock
+        case .shortLived: .shortLived
+        case .unavailable: .unavailable
+        }
+        self.staging = launch.staging
+        self.revokedOnOpen = fixture.revokedOnOpen
+        self.watchEndedOnOpen = fixture.watchEndedOnOpen
+        self.offlineOnOpen = fixture.offlineOnOpen
+        self.incompatibleProtocol = fixture.incompatibleProtocol
+        self.legacyProtocol = fixture.legacyProtocol
+        self.approvalRefreshAfterDecision = fixture.approvalRefreshAfterDecision
+        self.slowPairing = fixture.slowPairing
+        self.diagnosticsFailure = fixture.diagnosticsFailure
+        self.keychainLocked = launch.keychainLocked
+        self.questionsOnOpen = fixture.questionsOnOpen
+        self.seedCloudSignedIn = fixture.cloudSignedIn
+        self.cloudSwitchAccounts = fixture.cloudSwitchAccounts
+        self.cloudStartFailure = fixture.cloudStartFailure
+        self.cloudCompleteFailure = fixture.cloudCompleteFailure
+        self.cloudRevoked = fixture.cloudRevoked
+        self.cloudCancelSheet = fixture.cloudCancelSheet
+        self.cloudSystemSheet = fixture.cloudSystemSheet
+        self.cloudDirectoryEmpty = fixture.cloudDirectoryEmpty
+        self.cloudDirectoryUnavailable = fixture.cloudDirectoryUnavailable
+        self.queueOnOpen = fixture.queueOnOpen
+        self.queueUnsupported = fixture.queueUnsupported
+        self.queueMutationRefreshFails = fixture.queueMutationRefreshFails
+    }
+
+    /// The scenario this launch was built from, for Debug surfaces that need to
+    /// show what is currently applied.
+    var appliedScenarioId: String? {
+        ScenarioCatalog.argumentValue("-ui-scenario", in: arguments)
+    }
+}
+
+#endif

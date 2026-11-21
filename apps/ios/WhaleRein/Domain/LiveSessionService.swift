@@ -58,14 +58,24 @@ final class LiveSessionService: SessionService {
         configPath: URL,
         secretStore: any SecretStore,
         appVersion: String,
-        instanceId: String
+        instanceId: String,
+        diagnosticSink: MobileDiagnosticSink? = nil
     ) throws {
         do {
-            self.core = try MobileCore(
-                configPath: configPath.path,
-                secretStore: secretStore,
-                appVersion: appVersion
-            )
+            if let diagnosticSink {
+                self.core = try MobileCore.newWithDiagnosticSink(
+                    configPath: configPath.path,
+                    secretStore: secretStore,
+                    appVersion: appVersion,
+                    sink: diagnosticSink
+                )
+            } else {
+                self.core = try MobileCore(
+                    configPath: configPath.path,
+                    secretStore: secretStore,
+                    appVersion: appVersion
+                )
+            }
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }

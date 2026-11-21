@@ -189,10 +189,20 @@ jobs:
           include-hidden-files: true
           retention-days: 7
 
+  architecture:
+    name: iOS architecture gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Enforce client architecture boundaries
+        run: python3 apps/ios/scripts/architecture_gate.py
+
   gate:
     name: iOS gate
     if: always() && !cancelled()
-    needs: [changes, native]
+    needs: [changes, native, architecture]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -201,9 +211,11 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           NATIVE_REQUIRED: ${{ needs.changes.outputs.build }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          ARCHITECTURE_RESULT: ${{ needs.architecture.result }}
         run: |
           set -euo pipefail
           test "$CHANGES_RESULT" = success
+          test "$ARCHITECTURE_RESULT" = success
           case "$NATIVE_REQUIRED" in
             true) test "$NATIVE_RESULT" = success ;;
             false) test "$NATIVE_RESULT" = skipped ;;

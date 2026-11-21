@@ -16,13 +16,15 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 use whalerein_core::api::{
-    Cancellation, ClientConfig, ClientService, Core, Environment, ObservationInterests,
-    PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload, SessionKey,
+    Cancellation, ClientConfig, ClientService, Core, DiagnosticSink as CoreDiagnosticSink,
+    Environment, ObservationInterests, PairingDecision, PairingPrompt, QuestionAnswer,
+    SessionEventPayload, SessionKey,
 };
 use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
 use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
 use whalerein_core::CoreError;
 
+use crate::diagnostics::{DiagnosticSinkAdapter, MobileDiagnosticSink};
 use crate::error::{MobileError, CODE_CANCELLED};
 use crate::queue::{
     action_is_advertised, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
@@ -559,41 +561,71 @@ pub struct MobileCore {
     attachment_transfers: Arc<AttachmentTransfers>,
 }
 
+/// Shared open path: validation, runtime host, Core open with or without a
+/// diagnostic sink.
+fn open_core(
+    config_path: String,
+    secret_store: Arc<dyn SecretStore>,
+    app_version: String,
+    sink: Option<Arc<dyn CoreDiagnosticSink>>,
+) -> Result<Arc<MobileCore>, MobileError> {
+    if config_path.is_empty() || config_path.len() > MAX_PATH_BYTES {
+        return Err(MobileError::invalid_input());
+    }
+    if app_version.len() > MAX_APP_VERSION_BYTES {
+        return Err(MobileError::invalid_input());
+    }
+    let runtime = RuntimeHost::start()?;
+    let secrets = Arc::new(SecretStoreAdapter::new(secret_store));
+    let path = Path::new(&config_path);
+    let core = match sink {
+        Some(sink) => Core::open_with_diagnostic_sink(path, secrets, sink),
+        None => Core::open(path, secrets),
+    }
+    .map_err(MobileError::from)?;
+    Ok(Arc::new(MobileCore {
+        core,
+        runtime,
+        events: Arc::new(EventQueue::new()),
+        app_version,
+        pairing: Arc::new(Mutex::new(PairingState::default())),
+        pairing_generation: Arc::new(AtomicU64::new(0)),
+        watch: Arc::new(Mutex::new(WatchState::default())),
+        watch_generation: Arc::new(AtomicU64::new(0)),
+        wait_attempts: WaitAttempts::default(),
+        attachment_transfers: Arc::new(AttachmentTransfers::default()),
+    }))
+}
+
 #[uniffi::export]
 impl MobileCore {
     /// Create a Core instance backed by `secretStore`.
     ///
-    /// `configPath` is selected by the app inside its persistent sandbox.
+    /// `config_path` is selected by the app inside its persistent sandbox.
     #[uniffi::constructor]
     pub fn new(
         config_path: String,
         secret_store: Arc<dyn SecretStore>,
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
-        if config_path.is_empty() || config_path.len() > MAX_PATH_BYTES {
-            return Err(MobileError::invalid_input());
-        }
-        if app_version.len() > MAX_APP_VERSION_BYTES {
-            return Err(MobileError::invalid_input());
-        }
-        let runtime = RuntimeHost::start()?;
-        let core = Core::open(
-            Path::new(&config_path),
-            Arc::new(SecretStoreAdapter::new(secret_store)),
-        )
-        .map_err(MobileError::from)?;
-        Ok(Arc::new(Self {
-            core,
-            runtime,
-            events: Arc::new(EventQueue::new()),
-            app_version,
-            pairing: Arc::new(Mutex::new(PairingState::default())),
-            pairing_generation: Arc::new(AtomicU64::new(0)),
-            watch: Arc::new(Mutex::new(WatchState::default())),
-            watch_generation: Arc::new(AtomicU64::new(0)),
-            wait_attempts: WaitAttempts::default(),
-            attachment_transfers: Arc::new(AttachmentTransfers::default()),
-        }))
+        open_core(config_path, secret_store, app_version, None)
+    }
+
+    /// Create a Core instance that forwards Core's existing redacted
+    /// diagnostic stream to `sink`, starting before configuration is loaded.
+    ///
+    /// Core calls the sink synchronously on the producing thread. Swift must
+    /// hand slow work to its own queue; a panicking sink is isolated and never
+    /// changes a Core result.
+    #[uniffi::constructor]
+    pub fn new_with_diagnostic_sink(
+        config_path: String,
+        secret_store: Arc<dyn SecretStore>,
+        app_version: String,
+        sink: Arc<dyn MobileDiagnosticSink>,
+    ) -> Result<Arc<Self>, MobileError> {
+        let sink = Arc::new(DiagnosticSinkAdapter::new(sink)) as Arc<dyn CoreDiagnosticSink>;
+        open_core(config_path, secret_store, app_version, Some(sink))
     }
 
     /// Create a Core instance with a process-local secret store.

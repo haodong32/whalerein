@@ -9,6 +9,7 @@ uniffi::setup_scaffolding!("WhaleReinMobile");
 
 mod app_config;
 mod client;
+mod diagnostics;
 mod error;
 mod queue;
 mod secret;
@@ -24,6 +25,7 @@ pub use app_config::{
 pub use client::{
     core_revision, write_client_config, MobileClientService, MobileCloudEnvironment, MobileCore,
 };
+pub use diagnostics::{DiagnosticEventView, MobileDiagnosticSink};
 pub use error::MobileError;
 pub use queue::{
     PendingQueueBlockView, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
