@@ -20,7 +20,7 @@
 - [x] 2.10 Add one small Swift sink adapter that validates event level/name, applies the shared redactor, assigns receipt timestamps, appends to the shared ring buffer and preserves the Core trace id (AC-21).
 - [x] 2.11 Add `Platform/Logging/AppLog.swift` and `AppLogStore`: one facade, a 2 MB in-memory ring buffer, a JSON-lines file at `Library/Logs/WhaleRein/app-log.jsonl` with schema version/app version/Core revision, category/level policy, injected-clock timestamps, redaction-before-write and reset clearing (AC-18, AC-19).
 - [x] 2.13 Add rotation, age/size pruning, `completeFileProtection`, private permissions, backup exclusion, periodic flush, background flush, export-staging cleanup and write-failure handling for the log file; verify bounds, relaunch persistence and no crash while locked (AC-19).
-- [ ] 2.12 Verify early-event buffering and saturation: the sink adapter drops oldest records with a visible counter, never blocks Core, and a failing sink leaves operation results unchanged (AC-21).
+- [x] 2.12 Verify early-event buffering and saturation: the sink adapter drops oldest records with a visible counter, never blocks Core, and a failing sink leaves operation results unchanged (AC-21).
 
 ## 3. Conversation rewrite
 
