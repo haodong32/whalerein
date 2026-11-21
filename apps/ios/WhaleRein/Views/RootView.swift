@@ -80,7 +80,9 @@ struct RootView: View {
             // directory; the self-hosted invitation flow remains reachable
             // from the welcome surface. An explicit local forget/revoke
             // returns to the invitation flow so the reset is visible.
-            CloudSignInRootView(cloud: cloud)
+            CloudSignInRootView(cloud: cloud) {
+                model.openManualPairing()
+            }
         } else {
             InvitationView()
         }

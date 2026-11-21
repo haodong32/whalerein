@@ -59,7 +59,7 @@
 ## 7. Agent navigation and documentation
 
 - [x] 7.1 Write `docs/ios-architecture.md`: layer map, feature map, state ownership, dependency rules, "where does this belong", scenario workflow, focused commands, catalog ownership/cleanup and review checklist (AC-11).
-- [ ] 7.2 Add one state transition table per feature next to its State, covering events, target states and invariants (AC-11).
+- [x] 7.2 Add one state transition table per feature next to its State, covering events, target states and invariants (AC-11).
 - [x] 7.3 Add per-feature focused test commands to `docs/ios-architecture.md` and verify each command runs only the named layer (AC-10, AC-11).
 - [x] 7.4 Update `docs/ios.md` composition sections to describe the rewritten client; record that no other maintained guide needs changes or update the ones that do (AC-11).
 
