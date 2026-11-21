@@ -79,7 +79,7 @@ Full reference: tools/repo/README.md""",
         "check": "Check formatting and static analysis without modifying source or running tests.",
         "build": "Build applicable projects.",
         "test": "Run native unit tests by default; integration tests are opt-in.",
-        "bench": "Run the opt-in streaming-reply product benchmark in an isolated container.",
+        "bench": "Measure the plugin–Access–client path under controlled network conditions.",
         "bench-compare": "Compare saved benchmark runs under the predeclared protocol.",
         "report": "Render saved JSON test results as offline HTML without running tests.",
         "recover": "Clean up resources still owned by an abandoned verification run.",
@@ -104,9 +104,10 @@ Full reference: tools/repo/README.md""",
         "proto": "  ./repo proto",
         "bench": (
             "  ./repo bench\n"
-            "  ./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline\n"
-            "  ./repo bench --delay 50 --output .data/benchmarks/delayed-50\n"
-            "  ./repo bench --cadence 20 --output .data/benchmarks/cadence-20"
+            "  ./repo bench --attempts 3 --warmup 0 --output .data/benchmarks/smoke-suite\n"
+            "  ./repo bench --network jitter --link client\n"
+            "  ./repo bench --scenario recovery\n"
+            "  ./repo bench --scenario mixed-load"
         ),
         "bench-compare": (
             "  ./repo bench-compare --baseline .data/benchmarks/a --candidate .data/benchmarks/b\n"
@@ -212,7 +213,7 @@ Full reference: tools/repo/README.md""",
                 type=int,
                 default=0,
                 metavar="MS",
-                help="injected delay on the scripted reply in milliseconds (default: 0)",
+                help="fixture delay before the first source increment (default: 0 ms)",
             )
             sub.add_argument(
                 "--cadence",
@@ -224,11 +225,26 @@ Full reference: tools/repo/README.md""",
                 "window expose batching",
             )
             sub.add_argument(
+                "--scenario",
+                choices=("watch", "recovery", "mixed-load"),
+                help="run an individual workload instead of the default suite",
+            )
+            sub.add_argument(
+                "--network",
+                choices=("normal", "high-rtt", "jitter", "loss"),
+                help="override the selected workload network profile",
+            )
+            sub.add_argument(
+                "--link",
+                choices=("host", "client", "both"),
+                help="endpoint link for network shaping (default: host, client for recovery)",
+            )
+            sub.add_argument(
                 "--deadline",
                 type=int,
-                default=5000,
+                default=10000,
                 metavar="MS",
-                help="per-attempt deadline from dispatch in milliseconds (default: 5000)",
+                help="per-attempt deadline from the first source emission (default: 10000 ms)",
             )
             sub.add_argument(
                 "--observation-window",
@@ -255,16 +271,22 @@ Full reference: tools/repo/README.md""",
                 "--benchmark-timeout",
                 type=int,
                 metavar="SECONDS",
-                help="execution deadline in seconds (default: 900; build is separate)",
+                help="per-case execution deadline in seconds (default: 900; build is separate)",
             )
             sub.add_argument(
                 "--output",
                 type=Path,
                 metavar="DIR",
-                help="save benchmark.json (default: unique .data/benchmarks/ directory); "
-                "must not already exist",
+                help="save suite.json or benchmark.json under a new directory "
+                "(default: unique .data/benchmarks/ directory)",
             )
         if name == "bench-compare":
+            sub.add_argument(
+                "--vary",
+                choices=("build", "network"),
+                default="build",
+                help="the only variable allowed to differ between arms (default: build)",
+            )
             sub.add_argument(
                 "-b",
                 "--baseline",
@@ -324,6 +346,7 @@ def dispatch(args, root, runner):
         result = benchmark_compare.compare(
             [benchmark_compare.load(path) for path in args.baseline],
             [benchmark_compare.load(path) for path in args.candidate],
+            vary=args.vary,
         )
         for line in benchmark_summary.comparison(result).splitlines():
             runner.out.info(line)
@@ -339,6 +362,9 @@ def dispatch(args, root, runner):
             warmup=args.warmup,
             delay_ms=args.delay,
             cadence_ms=args.cadence,
+            workflow=args.scenario or "watch",
+            network_profile=args.network or "normal",
+            link=args.link or ("client" if args.scenario == "recovery" else "host"),
             deadline_ms=args.deadline,
             observation_window_ms=args.observation_window,
             seed=args.seed,
@@ -348,6 +374,18 @@ def dispatch(args, root, runner):
         directory = args.output or root / ".data/benchmarks" / (
             datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
         )
+        if args.scenario is None and args.network is None and args.link is None:
+            runner.out.info("Benchmark: preparing one build for all workloads")
+            result = benchmark.run_matrix(root, runner, request, directory)
+            cases = result.document["cases"]
+            passed = sum(case.get("exit_code") == 0 for case in cases)
+            runner.out.info(
+                f"Benchmark suite: {result.document['status']}, {passed}/{len(cases)} cases passed"
+            )
+            for error in result.errors:
+                runner.out.info(f"Benchmark suite: {error}")
+            runner.out.info("Report: " + str(result.path))
+            return {**result.document, "report": str(result.path)}, result.exit_code
         runner.out.info("Benchmark: preparing isolated container")
         result = benchmark.run(root, runner, request, directory)
         text = benchmark_summary.render(result.document)
@@ -360,7 +398,11 @@ def dispatch(args, root, runner):
             "status": result.document["status"]["state"],
             "outcomes": result.document["outcomes"],
             "latency": result.document["latency"]["samples"],
+            "streaming": result.document.get("streaming"),
+            "diagnostics": result.document.get("diagnostics", {}),
+            "network_probe": result.document["environment"].get("network_probe"),
             "snapshot": result.document["environment"]["artifacts"],
+            "workflow_results": result.document.get("workflow_results", {}),
             "errors": [sanitize(entry) for entry in result.errors],
         }, result.exit_code
     if args.command == "proto" or (args.command == "check" and args.target == "proto"):

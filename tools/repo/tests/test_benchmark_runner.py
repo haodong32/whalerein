@@ -40,6 +40,10 @@ class Docker:
         self.environ = {}
         self.created = None
         self.identity = "c" * 64
+        self.out = self
+
+    def info(self, _message):
+        pass
 
     def which(self, tool):
         return None if (tool == "docker" and self.missing_buildx) else "/usr/bin/" + tool
@@ -251,6 +255,7 @@ def test_successful_run_writes_validated_report_and_uses_one_owned_container(tmp
     assert name.startswith("wr-verify-benchmark-")
     # Isolation: no network, private tmpfs, only this run's export mounted.
     assert run_call[run_call.index("--network") + 1] == "none"
+    assert run_call[run_call.index("--cap-add") + 1] == "NET_ADMIN"
     assert any(part.startswith("/tmp:") for part in run_call)
     assert run_call[-1] == "tests/integration/benchmark/main.py"
     stopped = {args[-1] for args in docker.calls if args[1] in ("stop", "rm")}
@@ -272,8 +277,95 @@ def test_failed_attempt_exits_nonzero_while_keeping_evidence(tmp_path):
     result = run(tmp_path, docker)
     assert result.exit_code == 1
     saved = json.loads(result.path.read_text())
+    assert saved["outcomes"]["measured"] == 2
     assert saved["outcomes"]["counts"]["product_error"] == 1
     assert saved["outcomes"]["correct_by_deadline"] == 1
+
+
+def test_default_bench_runs_the_whole_matrix_with_one_build(tmp_path, monkeypatch):
+    from repo import cli
+
+    docker = Docker(document([attempt(outcome="product_error", final_ms=None)]), container_code=1)
+    original_run = docker.run
+    original_prepare = runner.prepare
+    prepared = []
+
+    def prepare(context, native, target):
+        result = original_prepare(context, native, target)
+        prepared.append(result)
+        return result
+
+    def fail_only_first(argv, cwd, **kwargs):
+        result = original_run(argv, cwd, **kwargs)
+        if argv[1] == "start":
+            docker.document = document()
+            docker.container_code = 0
+        return result
+
+    monkeypatch.setattr(runner, "prepare", prepare)
+    monkeypatch.setattr(docker, "run", fail_only_first)
+    args = cli.build_parser().parse_args(["bench", "--output", str(tmp_path / "matrix")])
+    result, code = cli.dispatch(args, tmp_path, docker)
+    assert code == 1
+    assert result["status"] == "complete"
+    assert len(prepared) == 1
+    cases = result["cases"]
+    assert [(row["workflow"], row["network"], row["link"]) for row in cases] == list(
+        runner.model.DEFAULT_CASES
+    )
+    assert [row["exit_code"] for row in cases] == [1] + [0] * (len(cases) - 1)
+    assert all((tmp_path / "matrix" / row["report"]).is_file() for row in cases)
+    assert json.loads((tmp_path / "matrix" / "suite.json").read_text())["cases"] == cases
+    created = [call for call in docker.calls if call[1] == "create"]
+    assert len(created) == len(cases)
+    [(_, workspace)] = prepared
+    assert all(f"type=bind,src={workspace},dst=/workspace,readonly" in call for call in created)
+    assert [
+        json.loads(
+            next(
+                arg.split("=", 1)[1]
+                for arg in call
+                if arg.startswith("WHALEREIN_BENCHMARK_CONFIG=")
+            )
+        )["network"]
+        for call in created
+    ] == [runner.model.network_settings(row["network"], row["link"]) for row in cases]
+
+
+@pytest.mark.parametrize(
+    ("selectors", "profile", "link"),
+    [
+        (["--network", "jitter"], "jitter", "host"),
+        (["--link", "client"], "normal", "client"),
+        (["--scenario", "recovery"], "normal", "client"),
+        (["--scenario", "mixed-load"], "normal", "host"),
+    ],
+)
+def test_a_bench_selector_keeps_single_case_execution(tmp_path, selectors, profile, link):
+    from repo import cli
+
+    docker = Docker(document())
+    args = cli.build_parser().parse_args(
+        ["bench", "--output", str(tmp_path / "single"), *selectors]
+    )
+    result, code = cli.dispatch(args, tmp_path, docker)
+    assert code == 0
+    assert result["report"].endswith("/benchmark.json")
+    [created] = [call for call in docker.calls if call[1] == "create"]
+    config = next(
+        arg.split("=", 1)[1] for arg in created if arg.startswith("WHALEREIN_BENCHMARK_CONFIG=")
+    )
+    assert json.loads(config)["network"] == runner.model.network_settings(profile, link)
+
+
+def test_matrix_interruption_keeps_unstarted_cases_pending(tmp_path):
+    docker = Docker(document(), container_code=130)
+    result = runner.run_matrix(tmp_path, docker, runner.BenchRequest(), tmp_path / "matrix")
+    assert result.exit_code == 130
+    assert result.document["status"] == "incomplete"
+    assert result.document["cases"][0]["exit_code"] == 130
+    assert all(row["status"] == "pending" for row in result.document["cases"][1:])
+    assert len([call for call in docker.calls if call[1] == "create"]) == 1
 
 
 def test_complete_run_with_a_late_reply_is_never_a_success(tmp_path):
@@ -302,6 +394,8 @@ def test_existing_report_in_the_output_directory_is_rejected(tmp_path):
         ({"deadline_ms": 0}, "--deadline must be between"),
         ({"cadence_ms": 5}, "--cadence must be between"),
         ({"cadence_ms": 70000}, "--cadence must be between"),
+        ({"network_profile": "unknown"}, "--network must be a named"),
+        ({"link": "unknown"}, "--link must be"),
         ({"concurrency": 2}, "--concurrency must be 1"),
         ({"timeout": 0}, "--benchmark-timeout must be a positive"),
     ],
@@ -316,18 +410,19 @@ def test_a_cadence_that_cannot_settle_before_the_deadline_is_a_usage_error():
         runner.BenchRequest(cadence_ms=2000, deadline_ms=5000).validate()
 
 
-def test_cadence_is_recorded_and_reaches_the_container(tmp_path):
+def test_workload_and_network_delay_reach_the_container(tmp_path):
     docker = Docker(document())
-    run(tmp_path, docker, cadence_ms=20)
+    run(tmp_path, docker, cadence_ms=20, network_profile="jitter", link="client")
     run_call = next(args for args in docker.calls if args[1] == "create")
     probe = next(part for part in run_call if part.startswith("WHALEREIN_BENCHMARK_CONFIG="))
     configuration = json.loads(probe.split("=", 1)[1])
     assert configuration["cadence_ms"] == 20
+    assert configuration["network"] == runner.model.network_settings("jitter", "client")
 
 
 def test_default_cadence_matches_the_streaming_scenario():
     assert runner.BenchRequest().cadence_ms == 100
-    assert runner.SCENARIO_UPDATES == 5
+    assert len(runner.model.UPDATES) == 32
 
 
 def test_missing_buildx_is_a_prerequisite_failure(tmp_path):
