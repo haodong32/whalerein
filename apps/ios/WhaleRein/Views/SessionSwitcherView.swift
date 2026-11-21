@@ -107,15 +107,29 @@ struct SessionSwitcherContent: View {
             .sheet(item: $managementSheet) { sheet in
                 switch sheet {
                 case .create(let hostId):
-                    SessionCreateView(hostId: hostId)
+                    SessionCreateView(
+                        hostId: hostId,
+                        management: models.management,
+                        openConversation: actions.openConversation,
+                        refresh: actions.refresh
+                    )
                 case .details(let hostId, let session, let cached):
                     SessionDetailsView(
                         hostId: hostId,
                         session: session,
-                        cached: cached
+                        cached: cached,
+                        management: models.management,
+                        openConversation: actions.openConversation,
+                        refresh: actions.refresh
                     )
                 case .fork(let hostId, let session):
-                    SessionForkView(hostId: hostId, session: session)
+                    SessionForkView(
+                        hostId: hostId,
+                        session: session,
+                        management: models.management,
+                        openConversation: actions.openConversation,
+                        refresh: actions.refresh
+                    )
                 }
             }
     }

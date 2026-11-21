@@ -27,15 +27,15 @@ enum SessionManagementSheet: Identifiable {
 // MARK: - Create
 
 struct SessionCreateView: View {
-    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
-
-    private var management: SessionManagementModel { app.sessionManagement }
+    let management: SessionManagementModel
+    var openConversation: (String, SessionSummary) -> Void = { _, _ in }
+    var refresh: (() async -> Void)?
 
     var body: some View {
-        @Bindable var management = app.sessionManagement
+        @Bindable var management = management
         NavigationStack {
             Form {
                 Section {
@@ -229,7 +229,7 @@ struct SessionCreateView: View {
     }
 
     private func open(_ summary: SessionSummary) {
-        app.openConversation(hostId: hostId, session: summary)
+        openConversation(hostId, summary)
         dismiss()
     }
 }
@@ -237,14 +237,14 @@ struct SessionCreateView: View {
 // MARK: - Details
 
 struct SessionDetailsView: View {
-    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
     let session: SessionSummary
     let cached: Bool
-
-    private var management: SessionManagementModel { app.sessionManagement }
+    let management: SessionManagementModel
+    var openConversation: (String, SessionSummary) -> Void = { _, _ in }
+    var refresh: (() async -> Void)?
 
     var body: some View {
         NavigationStack {
@@ -356,7 +356,8 @@ struct SessionDetailsView: View {
         SessionModelSection(
             hostId: hostId,
             sessionId: session.sessionId,
-            supported: supportsModel
+            supported: supportsModel,
+            management: management
         )
     }
 }
@@ -364,13 +365,13 @@ struct SessionDetailsView: View {
 // MARK: - Fork
 
 struct SessionForkView: View {
-    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
     let session: SessionSummary
-
-    private var management: SessionManagementModel { app.sessionManagement }
+    let management: SessionManagementModel
+    var openConversation: (String, SessionSummary) -> Void = { _, _ in }
+    var refresh: (() async -> Void)?
     private var scope: SessionScope {
         SessionScope(hostId: hostId, sessionId: session.sessionId)
     }
@@ -455,7 +456,7 @@ struct SessionForkView: View {
             Section {
                 if let summary = outcome.openableSummary {
                     Button(L10nKey.sessionsForkOpenChild.key) {
-                        app.openConversation(hostId: hostId, session: summary)
+                        openConversation(hostId, summary)
                         dismiss()
                     }
                     .accessibilityIdentifier("fork.openChild")
@@ -478,7 +479,7 @@ struct SessionForkView: View {
                     // describes whether the fork produced a child.
                     Button(L10nKey.sessionsReceiptLookup.string) {
                         Task {
-                            await app.refreshSwitcher()
+                            await refresh?()
                             dismiss()
                         }
                     }
@@ -553,13 +554,10 @@ struct MutationReceiptView: View {
 /// and the source default are displayed as separate values. The DSH default
 /// effect is disclosed before any selection is submitted.
 struct SessionModelSection: View {
-    @Environment(AppShellModel.self) private var app
-
     let hostId: String
     let sessionId: String
     let supported: Bool
-
-    private var management: SessionManagementModel { app.sessionManagement }
+    let management: SessionManagementModel
 
     var body: some View {
         Section {
