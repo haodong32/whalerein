@@ -12,11 +12,11 @@ struct ProtocolCompatibilityTests {
     private func makeApp(
         service: StubSessionService,
         configure: (inout AppPreferences) -> Void = { $0.paired = true }
-    ) -> AppModel {
+    ) -> AppShellModel {
         let directory = makeTempDirectory()
         let preferences = PreferencesStore(directory: directory)
         preferences.update(configure)
-        return AppModel(
+        return AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,

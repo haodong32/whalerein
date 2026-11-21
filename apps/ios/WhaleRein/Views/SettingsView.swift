@@ -4,7 +4,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     /// The destructive action awaiting confirmation, owned by the model.
     private var pendingAction: SettingsAction? { app.settings.state.pendingConfirmation }

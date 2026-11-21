@@ -16,14 +16,14 @@ final class AppRuntime {
     private(set) var environment: AppEnvironment
     let router: AppRouter
     /// Temporary bridge to the pre-rewrite aggregator.
-    private(set) var legacy: AppModel
+    private(set) var legacy: AppShellModel
 
     /// Monotonic fence. Every asynchronous result carries the generation it
     /// started under and is dropped when the runtime has moved on.
     private(set) var activationGeneration: UInt64 = 0
     private var launchInterval: OSSignpostIntervalState?
 
-    init(environment: AppEnvironment, legacy: AppModel, router: AppRouter? = nil) {
+    init(environment: AppEnvironment, legacy: AppShellModel, router: AppRouter? = nil) {
         self.environment = environment
         self.legacy = legacy
         self.router = router ?? AppRouter()
@@ -73,7 +73,7 @@ final class AppRuntime {
     /// One built group: the environment and the models it assembled.
     struct RuntimeGroup {
         let environment: AppEnvironment
-        let model: AppModel
+        let model: AppShellModel
     }
 
     /// Builds one runtime from launch arguments and the committed document.
@@ -237,7 +237,7 @@ final class AppRuntime {
             service = UnavailableSessionService()
         }
 
-        let legacy = AppModel(
+        let legacy = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: activeInstance?.dataDirectory ?? dataDirectory,

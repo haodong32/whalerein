@@ -27,7 +27,7 @@ enum SessionManagementSheet: Identifiable {
 // MARK: - Create
 
 struct SessionCreateView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
@@ -237,7 +237,7 @@ struct SessionCreateView: View {
 // MARK: - Details
 
 struct SessionDetailsView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
@@ -364,7 +364,7 @@ struct SessionDetailsView: View {
 // MARK: - Fork
 
 struct SessionForkView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     let hostId: String
@@ -553,7 +553,7 @@ struct MutationReceiptView: View {
 /// and the source default are displayed as separate values. The DSH default
 /// effect is disclosed before any selection is submitted.
 struct SessionModelSection: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
 
     let hostId: String
     let sessionId: String

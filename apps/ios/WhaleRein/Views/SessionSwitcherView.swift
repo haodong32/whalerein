@@ -14,7 +14,7 @@ enum SessionSwitcherStyle {
 }
 
 struct SessionSwitcherView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
 
     var body: some View {
         NavigationStack {
@@ -61,7 +61,7 @@ struct SessionSwitcherSidebar: View {
 /// Reusable Host/session list. Both presentations use the same actions, states
 /// and accessibility identifiers.
 struct SessionSwitcherContent: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     var style: SessionSwitcherStyle = .sheet
 
     @State private var managementSheet: SessionManagementSheet?

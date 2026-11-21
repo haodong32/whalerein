@@ -8,15 +8,15 @@ import Testing
 
 @Suite("App composition")
 @MainActor
-struct AppModelTests {
+struct AppShellModelTests {
     private func makeApp(
         service: StubSessionService,
         configure: (inout AppPreferences) -> Void = { _ in }
-    ) -> (AppModel, PreferencesStore) {
+    ) -> (AppShellModel, PreferencesStore) {
         let directory = makeTempDirectory()
         let preferences = PreferencesStore(directory: directory)
         preferences.update(configure)
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,

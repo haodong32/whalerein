@@ -4,7 +4,7 @@
 import SwiftUI
 
 struct InvitationView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(AppShellModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var isModal = false
 

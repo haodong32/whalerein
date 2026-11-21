@@ -3,7 +3,7 @@
 // The official hosted page is opened in `ASWebAuthenticationSession`; this
 // model never renders credential fields. Core performs the authorization-code
 // exchange and owns attempt state, so the model only drives presentation and
-// fences callbacks against the AppModel activation that created it.
+// fences callbacks against the AppShellModel activation that created it.
 
 import Foundation
 import Observation
@@ -52,7 +52,7 @@ final class CloudSignInModel {
     let fence: CloudSignInFence
     private let service: any CloudAccountService
     private let authenticator: any CloudWebAuthenticator
-    /// AppModel supplies the live activation check. Tests can flip it to model
+    /// AppShellModel supplies the live activation check. Tests can flip it to model
     /// a switch that happened while the system sheet was open.
     private let fenceIsCurrent: @MainActor () -> Bool
 

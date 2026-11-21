@@ -453,9 +453,9 @@ struct CloudSignInModelTests {
     }
 }
 
-@Suite("Cloud AppModel wiring")
+@Suite("Cloud AppShellModel wiring")
 @MainActor
-struct CloudAppModelTests {
+struct CloudAppShellModelTests {
     private func cloudInstance(_ directory: URL) -> AppInstance {
         AppInstance(
             id: "cloud-production",
@@ -476,7 +476,7 @@ struct CloudAppModelTests {
             options: options,
             draftStore: InMemoryDraftStore()
         )
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: PreferencesStore(directory: directory),
             dataDirectory: directory,
@@ -507,7 +507,7 @@ struct CloudAppModelTests {
             draftStore: InMemoryDraftStore(),
             initiallyPaired: true
         )
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
@@ -530,7 +530,7 @@ struct CloudAppModelTests {
     func callbackNotTreatedAsInvitation() async {
         let options = testLaunchOptions(["-ui-fixtures", "-ui-test-reset", "-ui-cloud-signed-in"])
         let directory = makeTempDirectory()
-        let app = AppModel(
+        let app = AppShellModel(
             service: FixtureSessionService(options: options, draftStore: InMemoryDraftStore()),
             preferences: PreferencesStore(directory: directory),
             dataDirectory: directory,

@@ -5,7 +5,7 @@
 import SwiftUI
 
 struct ConversationView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Bindable var model: ConversationModel
     @FocusState private var composerFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize

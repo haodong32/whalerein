@@ -44,7 +44,7 @@ struct CloudSignInRootView: View {
 }
 
 struct CloudWelcomeView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     let cloud: CloudSignInModel
 
     var body: some View {

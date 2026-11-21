@@ -12,10 +12,10 @@ struct RevocationAndRecoveryTests {
         service: StubSessionService,
         configure: (inout AppPreferences) -> Void = { _ in },
         directory: URL = makeTempDirectory()
-    ) -> (AppModel, PreferencesStore) {
+    ) -> (AppShellModel, PreferencesStore) {
         let preferences = PreferencesStore(directory: directory)
         preferences.update(configure)
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
@@ -110,7 +110,7 @@ struct RevocationAndRecoveryTests {
         #expect(preferences.value == AppPreferences())
 
         let service = StubSessionService()
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,

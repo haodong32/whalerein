@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 struct ServiceSelectionView: View {
     var showsStandaloneCA = false
 
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @State private var pending: AppServiceOption?
     @State private var showConfirmation = false
     @State private var isSwitching = false

@@ -10,7 +10,7 @@
 import SwiftUI
 
 struct RootView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(AppShellModel.self) private var model
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.scenePhase) private var scenePhase
     @State private var availableWidth: CGFloat = 0
@@ -198,7 +198,7 @@ struct PrivacyShieldView: View {
 /// Blocking state after a remote revocation. Pairing and forgetting both leave
 /// this screen and clear navigation; neither requires finding Settings first.
 struct RevokedDeviceView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @State private var isForgetting = false
 
     var body: some View {
@@ -251,7 +251,7 @@ struct RevokedDeviceView: View {
 }
 
 private struct ConversationRootPlaceholderView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
 
     var body: some View {
         Group {

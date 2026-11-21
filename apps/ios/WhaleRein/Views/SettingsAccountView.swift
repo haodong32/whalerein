@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct SettingsAccountView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
     @Binding var showDiagnostics: Bool
     @State private var pendingScope: AccountSessionScope?
 

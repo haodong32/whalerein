@@ -30,7 +30,7 @@ Rules
     checked because the design rule is specifically about optional probes.
 
 ``environment-appmodel``
-    No Swift file may use ``@Environment(AppModel.self)`` or
+    No Swift file may use ``@Environment(AppModel.self)``, ``@Environment(AppShellModel.self)`` or
     ``@Environment(\\.appModel)``.
 
 ``legacy-ui-flag``
@@ -191,7 +191,7 @@ CAST_RE = re.compile(r"\bas\s*\?")
 ENVIRONMENT_RE = re.compile(
     r"@Environment\s*\(\s*("
     + "|".join(
-        re.escape(target) for target in ("AppModel.self", "\\.appModel")
+        re.escape(target) for target in ("AppModel.self", "AppShellModel.self", "\\.appModel")
     )
     + r")\s*\)"
 )

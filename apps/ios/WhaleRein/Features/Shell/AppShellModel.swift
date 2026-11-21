@@ -12,7 +12,7 @@ import Observation
 
 @MainActor
 @Observable
-final class AppModel {
+final class AppShellModel {
     let options: LaunchOptions
     private(set) var service: any SessionService
     private(set) var preferences: PreferencesStore

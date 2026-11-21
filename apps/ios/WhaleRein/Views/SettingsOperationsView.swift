@@ -4,7 +4,7 @@
 import SwiftUI
 
 struct SettingsOperationsView: View {
-    @Environment(AppModel.self) private var app
+    @Environment(AppShellModel.self) private var app
 
     var body: some View {
         Section(L10n.settingsOperations.key) {

@@ -247,7 +247,7 @@ struct OperationRecoveryTests {
         let directory = makeTempDirectory()
         let preferences = PreferencesStore(directory: directory)
         preferences.update { $0.paired = true }
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
@@ -298,7 +298,7 @@ struct OperationRecoveryTests {
         let directory = makeTempDirectory()
         let preferences = PreferencesStore(directory: directory)
         preferences.update { $0.paired = true }
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,

@@ -69,7 +69,7 @@ struct KeychainRecoveryTests {
         let state = FactoryState()
         let stub = StubSessionService()
         let service = makeRecoverable(state: state, service: stub)
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
@@ -102,7 +102,7 @@ struct KeychainRecoveryTests {
         }
         let state = FactoryState()
         let service = makeRecoverable(state: state, service: StubSessionService())
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
