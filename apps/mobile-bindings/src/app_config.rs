@@ -207,31 +207,45 @@ pub fn app_config_remove_instance(path: String, id: String) -> Result<AppConfigV
 /// Remove the local Cloud CA reference and delete its instance bundle.
 #[uniffi::export]
 pub fn app_config_remove_cloud_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
-    let path = Path::new(&path);
+    remove_ca_reference(Path::new(&path), &id, true)
+}
+
+/// Remove the Standalone CA reference and delete the instance-owned bundle.
+#[uniffi::export]
+pub fn app_config_remove_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
+    remove_ca_reference(Path::new(&path), &id, false)
+}
+
+fn remove_ca_reference(path: &Path, id: &str, cloud: bool) -> Result<AppConfigView, MobileError> {
     let mut parsed = read_document(path)?;
-    validate_id(&id)?;
-    let Some(record) = parsed.instances.get(&id).cloned() else {
+    validate_id(id)?;
+    let Some(record) = parsed.instances.get(id).cloned() else {
         return Err(MobileError::not_found());
     };
-    let Some(ca_reference) = record.cloud_ca_certificate.clone() else {
+    let reference = if cloud {
+        record.cloud_ca_certificate.clone()
+    } else {
+        record.standalone_ca_certificate.clone()
+    };
+    let Some(reference) = reference else {
         return Ok(parsed.view());
     };
     let mut next = record;
-    next.cloud_ca_certificate = None;
-    write_instance_table(&mut parsed.doc, &id, &next);
-    parsed.instances.insert(id.clone(), next);
-    materialize(&parsed, &id)?;
-    commit_document(&parsed, &write_document)?;
-    remove_owned_bundle(&parsed.base(), &ca_reference)?;
-    read_document(path).map(|parsed| parsed.view())
-}
-
-fn remove_owned_bundle(base: &Path, reference: &str) -> Result<(), MobileError> {
-    match fs::remove_file(resolve_reference(base, reference)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(MobileError::internal()),
+    if cloud {
+        next.cloud_ca_certificate = None;
+    } else {
+        next.standalone_ca_certificate = None;
     }
+    write_instance_table(&mut parsed.doc, id, &next);
+    parsed.instances.insert(id.to_owned(), next);
+    materialize(&parsed, id)?;
+    commit_document(&parsed, &write_document)?;
+    match fs::remove_file(resolve_reference_path(&parsed.base(), &reference)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(MobileError::internal()),
+    }
+    read_document(path).map(|parsed| parsed.view())
 }
 
 /// Persist only the App-section reasoning visibility flag.
@@ -245,33 +259,6 @@ pub fn app_config_set_reasoning_visible(
     parsed.reasoning_visible = visible;
     app_table_mut(&mut parsed.doc)?["reasoning_visible"] = value(visible);
     commit_document(&parsed, &write_document)?;
-    read_document(path).map(|parsed| parsed.view())
-}
-
-/// Remove the Standalone CA reference and delete the instance-owned bundle.
-#[uniffi::export]
-pub fn app_config_remove_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
-    let path = Path::new(&path);
-    let mut parsed = read_document(path)?;
-    validate_id(&id)?;
-    let Some(record) = parsed.instances.get(&id).cloned() else {
-        return Err(MobileError::not_found());
-    };
-    let Some(ca_reference) = record.standalone_ca_certificate.clone() else {
-        return Ok(parsed.view());
-    };
-    let mut next = record;
-    next.standalone_ca_certificate = None;
-    write_instance_table(&mut parsed.doc, &id, &next);
-    parsed.instances.insert(id.clone(), next);
-    materialize(&parsed, &id)?;
-    commit_document(&parsed, &write_document)?;
-    let ca_path = resolve_reference(&parsed.base(), &ca_reference);
-    match fs::remove_file(&ca_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(MobileError::internal()),
-    }
     read_document(path).map(|parsed| parsed.view())
 }
 
@@ -441,33 +428,23 @@ fn default_document() -> DocumentMut {
         "whalerein_cloud",
         "instances/cloud-production/data",
         Some("production"),
-        None,
     ));
     instances[STANDALONE_ID] = Item::Table(instance_table(
         "standalone",
         "instances/standalone/data",
-        None,
         None,
     ));
     doc["instances"] = Item::Table(instances);
     doc
 }
 
-fn instance_table(
-    service: &str,
-    data_dir: &str,
-    environment: Option<&str>,
-    ca: Option<&str>,
-) -> Table {
+fn instance_table(service: &str, data_dir: &str, environment: Option<&str>) -> Table {
     let mut table = Table::new();
     table["version"] = value(i64::from(INSTANCE_VERSION));
     table["service"] = value(service);
     table["data_dir"] = value(data_dir);
     if let Some(environment) = environment {
         table["cloud_environment"] = value(environment);
-    }
-    if let Some(ca) = ca {
-        table["standalone_ca_certificate"] = value(ca);
     }
     table
 }
@@ -519,6 +496,8 @@ fn save_instance(path: &Path, input: InstanceInput) -> Result<AppConfigView, Mob
         ClientService::Standalone => record.cloud_ca_certificate = None,
     }
 
+    let standalone_cleared = record.standalone_ca_certificate.is_none();
+    let cloud_cleared = record.cloud_ca_certificate.is_none();
     write_instance_table(&mut parsed.doc, &input.id, &record);
     parsed.instances.insert(input.id.clone(), record);
 
@@ -538,14 +517,14 @@ fn save_instance(path: &Path, input: InstanceInput) -> Result<AppConfigView, Mob
 
     // A service change or explicit removal drops the old instance-owned bundle
     // after the document reference is gone.
-    if record_ca_is_none(&parsed, &input.id, false) {
+    if standalone_cleared {
         if let Some(previous) = previous_standalone {
-            let _ = fs::remove_file(resolve_reference(&base, &previous));
+            let _ = fs::remove_file(resolve_reference_path(&base, &previous));
         }
     }
-    if record_ca_is_none(&parsed, &input.id, true) {
+    if cloud_cleared {
         if let Some(previous) = previous_cloud {
-            let _ = fs::remove_file(resolve_reference(&base, &previous));
+            let _ = fs::remove_file(resolve_reference_path(&base, &previous));
         }
     }
     read_document(path).map(|parsed| parsed.view())
@@ -569,13 +548,13 @@ impl PreparedCa {
     }
 
     fn finish(&self) {
-        if let Some(staged) = &self.staged {
-            if self.created {
-                let _ = fs::remove_file(staged);
-            } else if fs::rename(staged, &self.target).is_err() {
-                let _ = fs::remove_file(staged);
-            }
+        let Some(staged) = &self.staged else { return };
+        // The first import already installed the validated copy; a replacement
+        // is published by rename now that the document reference is durable.
+        if !self.created {
+            let _ = fs::rename(staged, &self.target);
         }
+        let _ = fs::remove_file(staged);
     }
 }
 
@@ -616,16 +595,6 @@ fn prepare_ca(
         staged: Some(staged),
         target,
         created: true,
-    })
-}
-
-fn record_ca_is_none(parsed: &ParsedDocument, id: &str, cloud: bool) -> bool {
-    parsed.instances.get(id).is_some_and(|record| {
-        if cloud {
-            record.cloud_ca_certificate.is_none()
-        } else {
-            record.standalone_ca_certificate.is_none()
-        }
     })
 }
 
@@ -852,10 +821,6 @@ fn relative_or_absolute(path: &Path, directory: &Path) -> PathBuf {
         .unwrap_or(resolved_path)
 }
 
-fn resolve_reference(base: &Path, reference: &str) -> PathBuf {
-    resolve_reference_path(base, reference)
-}
-
 fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
     let path = Path::new(reference);
     if path.is_absolute() {
@@ -873,16 +838,16 @@ fn instance_view(base: &Path, id: &str, record: &InstanceRecord) -> InstanceView
     let ca_path = record
         .standalone_ca_certificate
         .as_deref()
-        .map(|reference| resolve_reference(base, reference));
+        .map(|reference| resolve_reference_path(base, reference));
     let cloud_ca_path = record
         .cloud_ca_certificate
         .as_deref()
-        .map(|reference| resolve_reference(base, reference));
+        .map(|reference| resolve_reference_path(base, reference));
     InstanceView {
         id: id.to_owned(),
         service: record.service.clone(),
         environment: record.cloud_environment.clone(),
-        data_dir: resolve_reference(base, &record.data_dir)
+        data_dir: resolve_reference_path(base, &record.data_dir)
             .to_string_lossy()
             .into_owned(),
         config_path: instance_directory(base, id)

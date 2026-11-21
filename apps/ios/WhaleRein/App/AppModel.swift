@@ -326,6 +326,7 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
+        // Creating the instance is an explicit selection, not a refresh.
         return await switchInstance(id: "cloud-local", force: true)
     }
 
@@ -340,8 +341,7 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
-        guard activeInstance?.id == local.id else { return nil }
-        return await switchInstance(id: local.id, force: true)
+        return await reselectIfActive(id: local.id)
     }
 
     /// Imports a validated private CA for the Standalone instance. An invalid
@@ -357,8 +357,13 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
-        guard activeInstance?.id == standalone.id else { return nil }
-        return await switchInstance(id: standalone.id, force: true)
+        return await reselectIfActive(id: standalone.id)
+    }
+
+    /// Rebuild the runtime for a CA change only when that instance is active.
+    private func reselectIfActive(id: String) async -> AppErrorCode? {
+        guard activeInstance?.id == id else { return nil }
+        return await switchInstance(id: id, force: true)
     }
 
     @discardableResult
@@ -372,8 +377,7 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
-        guard activeInstance?.id == standalone.id else { return nil }
-        return await switchInstance(id: standalone.id, force: true)
+        return await reselectIfActive(id: standalone.id)
     }
 
     private func replaceRuntime(

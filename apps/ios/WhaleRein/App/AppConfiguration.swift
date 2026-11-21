@@ -26,8 +26,8 @@ struct AppInstance: Identifiable, Equatable, Sendable {
     let dataDirectory: URL
     /// Absolute materialized Core TOML passed to `MobileCore`.
     let configPath: URL
-    let hasStandaloneCA: Bool
-    let standaloneCAPath: URL?
+    var hasStandaloneCA: Bool
+    var standaloneCAPath: URL?
     /// True when the local Cloud instance pins an imported mkcert root bundle.
     var hasCloudCA: Bool = false
     /// Absolute imported local Cloud CA bundle.
@@ -306,17 +306,10 @@ final class AppConfigurationStore {
         guard binding != nil else {
             let instances = configuration.instances.map { instance in
                 guard instance.id == instanceID else { return instance }
-                return AppInstance(
-                    id: instance.id,
-                    service: instance.service,
-                    environment: instance.environment,
-                    dataDirectory: instance.dataDirectory,
-                    configPath: instance.configPath,
-                    hasStandaloneCA: false,
-                    standaloneCAPath: nil,
-                    hasCloudCA: instance.hasCloudCA,
-                    cloudCAPath: instance.cloudCAPath
-                )
+                var next = instance
+                next.hasStandaloneCA = false
+                next.standaloneCAPath = nil
+                return next
             }
             configuration = AppConfiguration(
                 documentURL: configuration.documentURL,

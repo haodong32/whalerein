@@ -74,7 +74,7 @@ struct ServiceSelectionView: View {
                 if showsStandaloneCA, let standalone {
                     standaloneCASection(standalone)
                 }
-                if let local {
+                if AppConfigurationStore.defaultShowsLocal, let local {
                     localCASection(local)
                 }
             }
@@ -178,7 +178,7 @@ struct ServiceSelectionView: View {
             if instance.hasStandaloneCA {
                 Button(role: .destructive) {
                     errorKey = nil
-                    Task { await removeCA(instance) }
+                    Task { await removeCA() }
                 } label: {
                     Label(L10n.serviceStandaloneCARemove.key, systemImage: "trash")
                 }
@@ -229,32 +229,30 @@ struct ServiceSelectionView: View {
 
     private func importLocalCA(_ result: Result<[URL], Error>) {
         errorKey = nil
-        switch result {
-        case .failure:
+        guard let pem = readPEM(result) else {
             errorKey = .errorConfiguration
-        case .success(let urls):
-            guard let url = urls.first else {
-                errorKey = .errorConfiguration
-                return
-            }
-            let access = url.startAccessingSecurityScopedResource()
-            defer {
-                if access { url.stopAccessingSecurityScopedResource() }
-            }
-            guard let data = try? Data(contentsOf: url),
-                  let pem = String(data: data, encoding: .utf8) else {
-                errorKey = .errorConfiguration
-                return
-            }
-            isSwitching = true
-            Task {
-                let code = await app.enableLocal(pem: pem)
-                if let code {
-                    errorKey = L10nKey.errorKey(for: code)
-                }
-                isSwitching = false
-            }
+            return
         }
+        isSwitching = true
+        Task {
+            let code = await app.enableLocal(pem: pem)
+            if let code {
+                errorKey = L10nKey.errorKey(for: code)
+            }
+            isSwitching = false
+        }
+    }
+
+    /// Reads one user-selected PEM with security-scoped access.
+    private func readPEM(_ result: Result<[URL], Error>) -> String? {
+        guard case .success(let urls) = result, let url = urls.first else { return nil }
+        let access = url.startAccessingSecurityScopedResource()
+        defer {
+            if access { url.stopAccessingSecurityScopedResource() }
+        }
+        guard let data = try? Data(contentsOf: url),
+              let pem = String(data: data, encoding: .utf8) else { return nil }
+        return pem
     }
 
     private func removeLocalCA() async {
@@ -278,7 +276,7 @@ struct ServiceSelectionView: View {
         isSwitching = false
     }
 
-    private func removeCA(_ instance: AppInstance) async {
+    private func removeCA() async {
         guard !isSwitching else { return }
         isSwitching = true
         let code = await app.removeStandaloneCA()
@@ -290,32 +288,14 @@ struct ServiceSelectionView: View {
 
     private func importCA(_ result: Result<[URL], Error>) {
         errorKey = nil
-        switch result {
-        case .failure:
+        guard let pem = readPEM(result) else {
             errorKey = .errorConfiguration
-        case .success(let urls):
-            guard let url = urls.first else {
-                errorKey = .errorConfiguration
-                return
-            }
-            let access = url.startAccessingSecurityScopedResource()
-            defer {
-                if access { url.stopAccessingSecurityScopedResource() }
-            }
-            do {
-                let data = try Data(contentsOf: url)
-                guard let pem = String(data: data, encoding: .utf8) else {
-                    errorKey = .errorConfiguration
-                    return
-                }
-                Task {
-                    let code = await app.importStandaloneCA(pem)
-                    if let code {
-                        errorKey = L10nKey.errorKey(for: code)
-                    }
-                }
-            } catch {
-                errorKey = .errorConfiguration
+            return
+        }
+        Task {
+            let code = await app.importStandaloneCA(pem)
+            if let code {
+                errorKey = L10nKey.errorKey(for: code)
             }
         }
     }
