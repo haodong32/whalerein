@@ -4,7 +4,7 @@
 
 - [ ] 1.1 Record the pre-rewrite baseline in local acceptance evidence: every `WhaleReinUITests` flow with its launch state and expected outcome; the screen/state inventory expressed by `LaunchOptions`, `AppModel` and `ConversationModel`; cold-launch and first-conversation-render timings; and the accessibility identifier/string list (AC-12, AC-14, AC-15).
 - [x] 1.2 Add the architecture gate script under `apps/ios/scripts/` and wire it into the iOS CI workflow. It rejects feature-to-feature Model/View/State imports, service references or `as?` in Views, `@Environment(AppModel)`, legacy `-ui-` flags, and files over the documented budget. Start with a shrinking allowlist for legacy files only; new files are never allowlisted (AC-03, AC-04, AC-05, AC-08).
-- [ ] 1.3 Add `apps/ios/AGENTS.md` with layer rules, naming, file budgets, the six invariants and the focused test commands (AC-11).
+- [x] 1.3 Add `apps/ios/AGENTS.md` with layer rules, naming, file budgets, the six invariants and the focused test commands (AC-11).
 
 ## 2. App shell and scenario foundation
 
