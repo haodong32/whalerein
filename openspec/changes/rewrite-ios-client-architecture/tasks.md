@@ -44,14 +44,14 @@
 
 - [x] 5.1 Add `Debug/StateGallery/StateGalleryView.swift` and model: group by category, search, show notes/owner/entry, apply a scenario and open its entry (AC-08).
 - [x] 5.2 Add the Debug-only Settings entry and the fallback gesture; verify it is absent from Release configuration (AC-08, AC-09).
-- [ ] 5.3 Add previews for the rewritten screens, each constructed from a scenario through `TestSupport`; no network, no real data (AC-07, AC-11).
+- [x] 5.3 Add previews for the rewritten screens, each constructed from a scenario through `TestSupport`; no network, no real data (AC-07, AC-11).
 - [x] 5.4 Add the Release surface scan to CI. Emit a Debug-only marker string/constant for the gallery and scenario entry, build a Release-configured app, scan symbols and strings for that marker and `-ui-scenario`, and record the artifact (AC-09).
 
 ## 6. Remove the legacy architecture
 
 - [x] 6.1 Delete `AppModel`, `ConversationModel` and their extensions after every screen and flow has moved; delete `LaunchOptions` flags and the legacy fixtures' boolean construction (AC-01, AC-08).
 - [ ] 6.2 Delete obsolete fixtures, stub services, tests and localization keys that no longer have a consumer; verify the catalog covers the removed states (AC-07, AC-12).
-- [ ] 6.3 Add `Fixtures/ScenarioBuilder` and `TestSupport` shared fakes; remove per-test mock duplication (AC-10, AC-11).
+- [x] 6.3 Add `Fixtures/ScenarioBuilder` and `TestSupport` shared fakes; remove per-test mock duplication (AC-10, AC-11).
 - [x] 6.4 Delete all `-ui-` flags and legacy scenario mapping; empty the 1.2 allowlist so the gate runs unconditionally (AC-07, AC-08, AC-03, AC-04, AC-05).
 - [ ] 6.5 Implement the two-level contract parity suite for send, queue, wait, approval, history, attachment and recovery. The deterministic level compares projections from recorded envelopes; the local level runs against the local stack and records unavailable live variants as BLOCKED (AC-10).
 - [ ] 6.6 Replace the remaining `print` in fixtures; add the explicit Settings log export (redacted snapshot to an app-private staging file + system share) and append the same snapshot to diagnostics export; verify reset deletes both log segments and calls Core's existing `clear_diagnostics` (AC-19).

@@ -249,3 +249,46 @@ struct SettingsView: View {
         }
     }
 }
+
+
+#if DEBUG
+#Preview("Settings fixture") {
+    if let scenario = ScenarioCatalog.scenario(id: "settings.baseline") {
+        let directory = ScenarioBuilder.temporaryDirectory()
+        let service = ScenarioBuilder.service(for: scenario, directory: directory)
+        SettingsView(
+            settings: SettingsModel(
+                service: service,
+                preferences: PreferencesStore(directory: directory),
+                dataDirectory: directory,
+                isStaging: false,
+                isFixtureBacked: true,
+                onDeviceReset: {}
+            ),
+            diagnostics: DiagnosticsModel(
+                service: service,
+                stagingDirectory: directory
+            ),
+            account: nil,
+            operations: nil,
+            cloud: nil,
+            dataPath: directory.path,
+            serviceSelection: ServiceSelectionContext(
+                configuration: nil,
+                activeInstance: nil,
+                actions: ServiceSelectionActions(
+                    switchToService: { _ in nil },
+                    enableLocal: { _ in nil },
+                    removeLocalCA: { nil },
+                    importStandaloneCA: { _ in nil },
+                    removeStandaloneCA: { nil }
+                )
+            ),
+            reasoningVisible: false,
+            setReasoningVisible: { _ in nil },
+            onSignOutCloud: {},
+            onAddHost: {}
+        )
+    }
+}
+#endif

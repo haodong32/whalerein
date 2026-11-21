@@ -121,6 +121,10 @@ extension AppShellModel {
     // MARK: - Reset
 
     func deviceDidReset() {
+        // The device state is gone, so the persisted redacted log and any
+        // staging snapshot go with it. Core owns its own diagnostic journal.
+        AppLog.shared.discardExportStaging()
+        AppLog.shared.reset()
         conversation?.close()
         conversation = nil
         isPaired = false

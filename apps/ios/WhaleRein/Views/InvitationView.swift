@@ -194,3 +194,27 @@ struct InvitationView: View {
         pairing.paste(value)
     }
 }
+
+
+#if DEBUG
+#Preview("Invitation fixture") {
+    if let scenario = ScenarioCatalog.scenario(id: "onboarding.unpaired") {
+        let directory = ScenarioBuilder.temporaryDirectory()
+        let service = ScenarioBuilder.service(for: scenario, directory: directory)
+        InvitationView(
+            pairing: PairingModel(service: service),
+            serviceSelection: ServiceSelectionContext(
+                configuration: nil,
+                activeInstance: nil,
+                actions: ServiceSelectionActions(
+                    switchToService: { _ in nil },
+                    enableLocal: { _ in nil },
+                    removeLocalCA: { nil },
+                    importStandaloneCA: { _ in nil },
+                    removeStandaloneCA: { nil }
+                )
+            )
+        )
+    }
+}
+#endif
