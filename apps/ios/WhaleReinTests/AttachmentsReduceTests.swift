@@ -158,7 +158,17 @@ final class AttachmentsReduceTests: XCTestCase {
         )
         state = AttachmentsReduce.reduce(
             state,
-            .completed(attachmentRef: attachmentRef, download: verifiedDownload())
+            .completed(
+                attachmentRef: attachmentRef,
+                download: AttachmentDownload(
+                    url: URL(fileURLWithPath: "/tmp/other.txt"),
+                    name: "other.txt",
+                    bytes: 1,
+                    sha256: String(repeating: "b", count: 64),
+                    mediaType: "text/plain",
+                    verified: true
+                )
+            )
         )
         state = AttachmentsReduce.reduce(
             state,
