@@ -1148,7 +1148,7 @@ final class LiveSessionService: SessionService {
     /// generic retryable failure.
     static func map(code: String) -> AppErrorCode {
         switch code {
-        case "invalid_input": return .invalidInvitation
+        case "invalid_input": return .invalidInput
         case "not_paired": return .notPaired
         case "not_found": return .unavailable
         case "revoked": return .revoked

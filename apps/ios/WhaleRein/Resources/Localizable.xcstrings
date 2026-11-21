@@ -3180,6 +3180,23 @@
         }
       }
     },
+    "error.invalidInput": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request is invalid."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求无效。"
+          }
+        }
+      }
+    },
     "error.keychainUnavailable": {
       "extractionState": "manual",
       "localizations": {
