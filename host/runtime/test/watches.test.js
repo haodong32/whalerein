@@ -5,6 +5,7 @@ import { WatchedEvents } from '../src/events/watches.js'
 import { StateStore } from '../src/state/store.js'
 import { SecurityManager } from '../src/security/manager.js'
 import { transportProfileBudget } from '../src/contracts/transport.js'
+import { publishPacketBytes } from '../src/access/transport.js'
 import { generateKeypair } from '../src/security/noise.js'
 import { codec } from '../src/protocol.js'
 import { establishChannel, openEventEnvelope } from './support/channel.js'
@@ -17,14 +18,14 @@ class Source extends SourceAdapter {
   watch(id,sink){this.sinks.set(id,sink);return {close:()=>{this.closed++;this.sinks.delete(id)}}}
   async readHistory(id){return {session:{session_id:id},batch:{from_cursor:'bookmark:start',to_cursor:'bookmark:alpha',batch_id:'record:alpha',changes:[]},cut_cursor:'bookmark:alpha',complete:true}}
 }
-function fixture(access={connected:true,published:[],async publishEvent(value){this.published.push(value)}},source=new Source()) {
+function fixture(access={connected:true,published:[],async publishEvent(value){this.published.push(value)}},source=new Source(),config={}) {
   let now=100
   const store=new StateStore({path:':memory:'})
   const security=new SecurityManager({hostId:'h',identity:generateKeypair(),store,codec:codec(),now:()=>now})
   const channel=establishChannel({hostId:'h',deviceId:'d',security,store})
-  const events=new WatchedEvents({hostId:'h',store,security,adapter:source,access,codec:codec(),now:()=>now})
+  const events=new WatchedEvents({hostId:'h',store,security,adapter:source,access,config,codec:codec(),now:()=>now})
   events.start()
-  return {events,source,store,security,channel,access,advance:ms=>{now+=ms}}
+  return {events,source,store,security,channel,access,config,advance:ms=>{now+=ms}}
 }
 const CONV={conversation:true,questions:false}
 const settle=()=>new Promise(r=>setTimeout(r,30))
@@ -703,10 +704,15 @@ test('a shared event route uses a relation-valid overridden receive budget as it
   t.after(() => ctx.events.stop())
   // This budget carries an operator override that matches no packaged profile
   // exactly. It is still relation-valid and must bound the shared route.
-  const override = { ...transportProfileBudget('default'), envelope_bytes: 2048 }
+  const override = {
+    ...transportProfileBudget('default'),
+    packet_bytes: 1024,
+    envelope_bytes: 2048,
+    reserved_bytes: 32 * 1024,
+  }
   const other = establishChannel({
     hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
-    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9 },
+    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9, relay_version: 3 },
   })
   assert.equal(ctx.security.getChannelReceive(other.channelId).budget.envelope_bytes, 2048)
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -724,6 +730,123 @@ test('a shared event route uses a relation-valid overridden receive budget as it
     assert.equal(payload.update.history, undefined)
     assert.equal(payload.update.reset.reason, 'snapshot_required')
   }
+})
+
+test('an oversized live delta is split before sealing into packet-sized previews with exact prefix and contiguous intervals', async (t) => {
+  const transportBudget = {
+    packet_bytes: 2048,
+    envelope_bytes: 16 * 1024,
+    bulk_concurrency: 4,
+    reserved_bytes: 32 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
+  const ctx = fixture(undefined, new Source(), { transportBudget, eventBatchMs: 1 })
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const watch = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  const text = 'é'.repeat(4000)
+  ctx.source.sinks.get('s')({
+    session: { session_id: 's' },
+    live: {
+      attempt: { live_epoch: 'run-native', attempt_id: 'generation' },
+      block_id: 'visible', first_seq: 1, last_seq: 40,
+      delta: { kind: 'BLOCK_KIND_TEXT', text },
+    },
+  })
+  await settle()
+  assert.ok(ctx.access.published.length > 1, 'a 8 KiB delta cannot be one 2 KiB packet')
+  const topic = 'whalerein/v1/h/h/event'
+  const intervals = []
+  const texts = []
+  for (const bytes of ctx.access.published) {
+    const packetSize = publishPacketBytes(topic, bytes.length)
+    assert.ok(packetSize <= transportBudget.packet_bytes, `${packetSize} > ${transportBudget.packet_bytes}`)
+    const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    assert.equal(envelope.relay_version, 3)
+    assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length > 0, true, 'previews stay inline on MQTT')
+    const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+    assert.equal(payload.update.reset, undefined, 'a live preview never becomes a HistoryReset')
+    assert.equal(payload.update.watch_id, watch.watch_id)
+    assert.equal(payload.update.live.block_id, 'visible')
+    assert.equal(payload.update.live.delta.kind, 'BLOCK_KIND_TEXT')
+    intervals.push([payload.update.live.first_seq, payload.update.live.last_seq])
+    texts.push(payload.update.live.delta.text)
+  }
+  assert.equal(texts.join(''), text, 'the exact prefix appears once')
+  assert.equal(intervals[0][0], 1)
+  assert.equal(intervals.at(-1)[1], 40)
+  for (let index = 1; index < intervals.length; index++) {
+    assert.equal(intervals[index][0], intervals[index - 1][1] + 1, 'no gap and no overlap')
+  }
+})
+
+test('a shared route uses the smallest authenticated receive budget for every preview', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const override = {
+    ...transportProfileBudget('default'),
+    packet_bytes: 3000,
+    envelope_bytes: 16 * 1024,
+    reserved_bytes: 32 * 1024,
+  }
+  const other = establishChannel({
+    hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
+    receive: {
+      profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override,
+      connection_generation: 9, relay_version: 3,
+    },
+  })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
+  const text = 'x'.repeat(8000)
+  ctx.source.sinks.get('s')({
+    session: { session_id: 's' },
+    live: {
+      attempt: { live_epoch: 'run-native', attempt_id: 'generation' },
+      block_id: 'visible', first_seq: 1, last_seq: 40,
+      delta: { kind: 'BLOCK_KIND_TEXT', text },
+    },
+  })
+  await settle()
+  assert.ok(ctx.access.published.length >= 2, 'both recipients receive bounded previews')
+  const topic = 'whalerein/v1/h/h/event'
+  for (const bytes of ctx.access.published) {
+    assert.ok(publishPacketBytes(topic, bytes.length) <= 3000, 'the smaller receiver budget governs the shared route')
+  }
+  const perDevice = new Map()
+  for (const bytes of ctx.access.published) {
+    const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    perDevice.set(envelope.device_id, (perDevice.get(envelope.device_id) ?? 0) + 1)
+  }
+  assert.equal(perDevice.get('d') > 0, true)
+  assert.equal(perDevice.get('second') > 0, true)
+})
+
+test('an unsplittable one-unit live delta is never replaced by a HistoryReset', async (t) => {
+  const transportBudget = {
+    packet_bytes: 1024,
+    envelope_bytes: 16 * 1024,
+    bulk_concurrency: 4,
+    reserved_bytes: 32 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
+  const ctx = fixture(undefined, new Source(), { transportBudget, eventBatchMs: 1 })
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')({
+    session: { session_id: 's' },
+    live: {
+      attempt: { live_epoch: 'run-native', attempt_id: 'generation' },
+      block_id: 'visible', first_seq: 1, last_seq: 1,
+      delta: { kind: 'BLOCK_KIND_TEXT', text: 'x'.repeat(5000) },
+    },
+  })
+  await settle()
+  assert.equal(ctx.events.describe().snapshotRequired, 0)
+  assert.equal(ctx.access.published.length, 1)
+  const envelope = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
+  const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+  assert.equal(payload.update.reset, undefined)
+  assert.equal(payload.update.live.delta.text.length, 5000)
 })
 
 test('a cleared channel cannot replay a parked preview into the next observation', async (t) => {

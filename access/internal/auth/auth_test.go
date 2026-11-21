@@ -653,6 +653,9 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"denies Access subscription to host requests", access, ActionSubscribe, "whalerein/v1/h/h1/request", false},
 		{"allows Access to publish host requests", access, ActionPublish, "whalerein/v1/h/h1/request", true},
 		{"allows Access to publish device events", access, ActionPublish, "whalerein/v1/h/h1/d/d1/event", true},
+		{"allows Access to publish device notices", access, ActionPublish, "whalerein/v1/h/h1/d/d1/notice", true},
+		{"allows Access to subscribe to device advertisements", access, ActionSubscribe, "whalerein/v1/h/+/d/+/ready", true},
+		{"denies Access device acknowledgement publishes", access, ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
 		{"allows Access to publish host-scoped presence", access, ActionPublish, "whalerein/v1/h/h1/presence", true},
 		{"denies Access publication to host results", access, ActionPublish, "whalerein/v1/h/h1/result", false},
 		{"denies Access publication to device will topics", access, ActionPublish, "whalerein/v1/presence/device/d1", false},
@@ -938,7 +941,7 @@ func TestRevocationAuditIncludesOriginEvenWhenHostOffline(t *testing.T) {
 	}
 }
 
-func TestDeviceCanOnlyPublishItsOwnTransportReceipts(t *testing.T) {
+func TestDeviceCanOnlyPublishItsOwnReadyAdvertisement(t *testing.T) {
 	service, fs, _, _ := newService(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
@@ -948,18 +951,21 @@ func TestDeviceCanOnlyPublishItsOwnTransportReceipts(t *testing.T) {
 		topic   string
 		allowed bool
 	}{
-		{ActionPublish, "whalerein/v1/h/h1/d/d1/ack", true},
-		{ActionSubscribe, "whalerein/v1/h/h1/d/d1/ack", false},
-		{ActionPublish, "whalerein/v1/h/h1/d/other/ack", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/ready", true},
+		{ActionSubscribe, "whalerein/v1/h/h1/d/d1/ready", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/other/ready", false},
 		{ActionPublish, "whalerein/v1/h/h1/d/d1/event", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/notice", false},
+		// The retired device acknowledgement topic is denied.
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
 	} {
 		allowed, err := service.AuthorizeACL(ctx, identity, item.action, item.topic)
 		if err != nil || allowed != item.allowed {
-			t.Fatal("invalid receipt authorization")
+			t.Fatalf("invalid ready authorization for %s %s: allowed=%v err=%v", item.action, item.topic, allowed, err)
 		}
 	}
 	fs.grantErr = errors.New("offline")
-	if _, err := service.AuthorizeACL(ctx, identity, ActionPublish, "whalerein/v1/h/h1/d/d1/ack"); err == nil {
+	if _, err := service.AuthorizeACL(ctx, identity, ActionPublish, "whalerein/v1/h/h1/d/d1/ready"); err == nil {
 		t.Fatal("authorization lookup failure ignored")
 	}
 }

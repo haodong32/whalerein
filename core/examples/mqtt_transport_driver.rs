@@ -1,4 +1,9 @@
 //! Device receiver driven by the container-owned Go/JS integration case.
+//!
+//! The relay carries one complete message per PUBLISH: either the inline
+//! ciphertext or an opaque reference that the caller resolves over HTTPS. This
+//! driver only asserts that the received event is exactly one valid
+//! representation of the coordinated relay epoch.
 use std::time::Duration;
 use whalerein_core::testing::{DeviceMqttClient, MqttConnectionEvent, MqttSettings};
 
@@ -17,10 +22,14 @@ async fn main() {
         client.run(
             || false,
             |event| {
-                assert_eq!(event.ciphertext.len(), 2 * 1024 * 1024);
+                assert_eq!(event.relay_version, 3);
+                let inline = !event.ciphertext.is_empty();
+                let referenced = event.payload_reference.is_some();
+                assert!(inline != referenced);
                 received += 1;
                 false
             },
+            |_| true,
             |state| {
                 if state == MqttConnectionEvent::Subscribed {
                     println!("transport-device-ready");

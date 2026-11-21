@@ -12,7 +12,9 @@ use serde::de::DeserializeOwned;
 use url::Url;
 use whalerein_proto::{
     ErrorCode, ErrorResponse, HostInfo, HostList, HostRequest, OnlineStatus, PairingClaimRequest,
-    PairingClaimResponse, RequestKind, RequestReceipt, RequestState,
+    PairingClaimResponse, PayloadReference, RelayObject, RelayObjectDeleteResult,
+    RelayObjectFinishRequest, RelayObjectReservation, RelayObjectReserveRequest, RequestKind,
+    RequestReceipt, RequestState,
 };
 
 use crate::access::transport::TransportBudget;
@@ -21,8 +23,14 @@ use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostic
 use crate::util::now_unix_ms;
 
 pub const TRACE_HEADER: &str = "x-whalerein-trace-id";
+/// Every raw relay-directory request carries the coordinated relay epoch.
+pub const RELAY_EPOCH_HEADER: &str = "WhaleRein-Relay-Epoch";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Time held back from an authorized wait for exactly one final authoritative
+/// `GET /v1/requests/{id}`. It is spent only when the wait would otherwise end
+/// without a proven outcome.
+pub const FINAL_LOOKUP_RESERVE: Duration = Duration::from_secs(2);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,6 +562,142 @@ impl AccessClient {
         .await
     }
 
+    /// Reserve exact bytes and scope in the Access temporary ciphertext
+    /// directory. The reservation is the only object the caller may upload.
+    pub async fn reserve_relay_object(
+        &self,
+        request: &RelayObjectReserveRequest,
+    ) -> Result<RelayObjectReservation, AccessError> {
+        let url = self.endpoint(&["v1", "relay", "objects"])?;
+        let reservation: RelayObjectReservation = self
+            .send(self.request(reqwest::Method::POST, url, None).json(request))
+            .await?;
+        if reservation.object_id.is_empty()
+            || reservation.object_id.len() != 32
+            || !reservation
+                .object_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || reservation.upload_path.is_empty()
+        {
+            return Err(AccessError::protocol("invalid relay object reservation"));
+        }
+        Ok(reservation)
+    }
+
+    /// Upload exactly the reserved ciphertext length. The body is never
+    /// buffered, inspected or re-encoded by Access.
+    pub async fn upload_relay_object(
+        &self,
+        reservation: &RelayObjectReservation,
+        bytes: &[u8],
+    ) -> Result<(), AccessError> {
+        if bytes.is_empty() || bytes.len() as u64 > reservation.max_bytes {
+            return Err(AccessError::protocol(
+                "ciphertext does not match the reserved length",
+            ));
+        }
+        let url = self.object_url(&reservation.upload_path)?;
+        let mut request = self
+            .http
+            .put(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(RELAY_EPOCH_HEADER, "3")
+            .header(reqwest::header::CONTENT_LENGTH, bytes.len().to_string())
+            .header(TRACE_HEADER, self.trace_id())
+            .timeout(self.transfer_timeout());
+        // The directory authenticates the Device bearer on every route.
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|_| AccessError::transport("relay ciphertext upload failed"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await)
+    }
+
+    /// Publish the reserved object only after the upload validated. Until this
+    /// call succeeds, no reference may be submitted or published.
+    pub async fn finish_relay_object(
+        &self,
+        object_id: &str,
+        finish: &RelayObjectFinishRequest,
+    ) -> Result<RelayObject, AccessError> {
+        let url = self.endpoint(&["v1", "relay", "objects", object_id, "finish"])?;
+        let object: RelayObject = self
+            .send(self.request(reqwest::Method::POST, url, None).json(finish))
+            .await?;
+        if object.object_id != object_id {
+            return Err(AccessError::protocol("relay object identity mismatch"));
+        }
+        Ok(object)
+    }
+
+    /// Fetch one complete referenced ciphertext. A missing, short, long or
+    /// corrupt stream is an error and never a completed message.
+    pub async fn fetch_relay_object(
+        &self,
+        reference: &PayloadReference,
+    ) -> Result<Vec<u8>, AccessError> {
+        let url = self.endpoint(&["v1", "relay", "objects", &reference.object_id])?;
+        let limit = usize::try_from(reference.ciphertext_bytes).unwrap_or(usize::MAX);
+        let mut request = self
+            .http
+            .get(url)
+            .header(RELAY_EPOCH_HEADER, "3")
+            .header(reqwest::header::ACCEPT, "application/octet-stream")
+            .header(TRACE_HEADER, self.trace_id())
+            .timeout(self.transfer_timeout());
+        // The directory rechecks the authenticated Device principal on every
+        // ciphertext release, just like every other request route.
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| AccessError::transport("relay ciphertext fetch failed"))?;
+        if !response.status().is_success() {
+            return Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await);
+        }
+        read_bounded(response, limit).await
+    }
+
+    /// Bounded, idempotent release of a reserved or ready object. Best effort:
+    /// a failed delete stays charged until Access expires it.
+    pub async fn delete_relay_object(
+        &self,
+        object_id: &str,
+    ) -> Result<RelayObjectDeleteResult, AccessError> {
+        let url = self.endpoint(&["v1", "relay", "objects", object_id])?;
+        self.send(
+            self.request(reqwest::Method::DELETE, url, None)
+                .header(RELAY_EPOCH_HEADER, "3"),
+        )
+        .await
+    }
+
+    fn transfer_timeout(&self) -> Duration {
+        Duration::from_millis(u64::from(self.transport.transfer_timeout_ms))
+    }
+
+    /// Resolve an Access-supplied node-scoped path under the configured Access
+    /// origin while preserving a deployment ingress prefix.
+    fn object_url(&self, path: &str) -> Result<Url, AccessError> {
+        let mut url = self.base.clone();
+        let prefix = url.path().trim_end_matches('/').to_owned();
+        let relative = path.trim_start_matches('/');
+        url.set_path(&format!("{prefix}/{relative}"));
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> Result<(), AccessError> {
         let url = self.endpoint(&["v1", "devices", device_id])?;
         let response = self
@@ -678,10 +822,10 @@ impl AccessClient {
                                 polls,
                             });
                     }
-                    if is_terminal(state.status)
-                        || (allow_host_accepted
-                            && state.status == OnlineStatus::HostAccepted as i32)
-                    {
+                    let status = OnlineStatus::try_from(state.status).unwrap_or_default();
+                    let proven = is_terminal(state.status)
+                        || (allow_host_accepted && status == OnlineStatus::HostAccepted);
+                    if proven {
                         break Ok(state);
                     }
                 }
@@ -701,9 +845,14 @@ impl AccessClient {
                 }
                 Err(error) => break Err(error.into()),
             }
-            if now_unix_ms() >= deadline {
+            let remaining_ms = deadline - now_unix_ms();
+            if remaining_ms <= 0 {
                 break Err(CoreError::Timeout);
             }
+            // A wait observes an authoritative status with the short fixed
+            // cadence. Growing backoff could miss a result returned just
+            // before the overall deadline; foreground commands use scoped
+            // notifications instead of this loop.
             tokio::time::sleep(self.poll_interval).await;
         };
 
@@ -726,6 +875,22 @@ impl AccessClient {
             },
         });
         result
+    }
+
+    /// One authoritative status read for a foreground wait. The caller decides
+    /// whether the returned status is a proven outcome.
+    pub(crate) async fn read_request_authoritative(
+        &self,
+        request: &HostRequest,
+    ) -> Result<RequestState, AccessError> {
+        let limit = request
+            .transport
+            .as_ref()
+            .map_or(self.response_limit, |transport| {
+                https_body_limit(transport.result_max_bytes)
+                    .min(https_body_limit(self.transport.envelope_bytes))
+            });
+        self.read_request(&request.request_id, true, limit).await
     }
 
     pub(crate) fn validate_request_state(
@@ -1465,5 +1630,167 @@ mod transport_tests {
         let error = client.get_request("r-1").await.unwrap_err();
         assert_eq!(error.code, Some(ErrorCode::ProtocolVersionIncompatible));
         assert!(error.message.contains("upgrade"), "{}", error.message);
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use crate::access::transport::resolve_reference;
+    use crate::api::test_support::{MockResponse, MockServer};
+    use std::sync::{Arc, Mutex};
+    use whalerein_proto::{PayloadPurpose, RelayObject, RelayObjectReservation};
+
+    fn reference(bytes: &[u8]) -> PayloadReference {
+        PayloadReference {
+            object_id: "b".repeat(32),
+            owner_node_id: "node-1".into(),
+            ciphertext_bytes: bytes.len() as u64,
+            sha256: crate::util::sha256(bytes).to_vec(),
+            expires_at_unix_ms: 1,
+            purpose: PayloadPurpose::Result as i32,
+        }
+    }
+
+    #[tokio::test]
+    async fn reserves_uploads_and_finishes_exact_ciphertext_in_order() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = calls.clone();
+        let object_id = "c".repeat(32);
+        let served_object_id = object_id.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            observed
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", mock.method, mock.path));
+            match (mock.method.as_str(), mock.path.as_str()) {
+                ("POST", "/v1/relay/objects") => MockResponse::json(
+                    200,
+                    &RelayObjectReservation {
+                        object_id: served_object_id.clone(),
+                        owner_node_id: "node-1".into(),
+                        upload_path: format!("/v1/relay/objects/{served_object_id}"),
+                        max_bytes: 8,
+                        expires_at_unix_ms: 9,
+                        upload_timeout_ms: 5_000,
+                    },
+                ),
+                ("PUT", path) if path == format!("/v1/relay/objects/{served_object_id}") => {
+                    assert_eq!(mock.headers.get("whalerein-relay-epoch").unwrap(), "3");
+                    assert_eq!(mock.headers.get("content-length").unwrap(), "8");
+                    assert_eq!(mock.body, b"cipher-!");
+                    MockResponse::empty(204)
+                }
+                ("POST", path)
+                    if path == format!("/v1/relay/objects/{served_object_id}/finish") =>
+                {
+                    MockResponse::json(
+                        200,
+                        &RelayObject {
+                            object_id: served_object_id.clone(),
+                            owner_node_id: "node-1".into(),
+                            purpose: PayloadPurpose::Result as i32,
+                            ciphertext_bytes: 8,
+                            sha256: crate::util::sha256(b"cipher-!").to_vec(),
+                            expires_at_unix_ms: 9,
+                        },
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
+        let reservation = client
+            .reserve_relay_object(&RelayObjectReserveRequest {
+                relay_version: 3,
+                host_id: "h".into(),
+                device_id: "d".into(),
+                session_id: String::new(),
+                channel_id: "c".into(),
+                purpose: PayloadPurpose::Result as i32,
+                part_id: String::new(),
+                ciphertext_bytes: 8,
+                sha256: crate::util::sha256(b"cipher-!").to_vec(),
+                expires_at_unix_ms: 9,
+                signed_at_unix_ms: 0,
+                signature: Vec::new(),
+            })
+            .await
+            .unwrap();
+        client
+            .upload_relay_object(&reservation, b"cipher-!")
+            .await
+            .unwrap();
+        let object = client
+            .finish_relay_object(
+                &object_id,
+                &RelayObjectFinishRequest {
+                    relay_version: 3,
+                    ciphertext_bytes: 8,
+                    sha256: crate::util::sha256(b"cipher-!").to_vec(),
+                    signed_at_unix_ms: 0,
+                    signature: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(object.object_id, object_id);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "POST /v1/relay/objects".to_owned(),
+                format!("PUT /v1/relay/objects/{object_id}"),
+                format!("POST /v1/relay/objects/{object_id}/finish"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_an_exact_reference_and_rejects_truncation_and_corruption() {
+        for (body, expected) in [
+            (b"payload".to_vec(), true),
+            (b"payloa".to_vec(), false),
+            (b"PAYLOAD".to_vec(), false),
+        ] {
+            let served = body.clone();
+            let server = MockServer::start(Arc::new(move |_| MockResponse {
+                status: 200,
+                body: served.clone(),
+                delay_ms: 0,
+            }))
+            .await;
+            let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
+            let resolved = resolve_reference(&client, &reference(b"payload")).await;
+            assert_eq!(resolved.is_ok(), expected, "{body:?}");
+        }
+
+        // A stream longer than the reserved length is rejected before it can
+        // become a complete object.
+        let server = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            body: b"payload-plus".to_vec(),
+            delay_ms: 0,
+        }))
+        .await;
+        let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
+        assert!(resolve_reference(&client, &reference(b"payload"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_is_terminal_and_never_a_completed_message() {
+        let server = MockServer::start(Arc::new(|_| MockResponse {
+            status: 410,
+            body: br#"{"code":"expired","message":"expired"}"#.to_vec(),
+            delay_ms: 0,
+        }))
+        .await;
+        let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
+        let error = resolve_reference(&client, &reference(b"payload"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, Some(ErrorCode::Expired));
     }
 }

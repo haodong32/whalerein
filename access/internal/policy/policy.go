@@ -84,10 +84,13 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			seen[grant.HostID] = struct{}{}
 			revision := Revision(grant)
 			eventTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/event"
+			noticeTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/notice"
 			connection.Entries = append(connection.Entries,
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
-				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: topicRoot + grant.HostID + "/d/" + deviceID + "/ack"},
+				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
+				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
+				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: topicRoot + grant.HostID + "/d/" + deviceID + "/ready"},
 			)
 			if revision > connection.Revision {
 				connection.Revision = revision

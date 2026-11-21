@@ -254,10 +254,17 @@ class Broker:
 @pytest.fixture
 def broker_control(tmp_path, request):
     policy_stub = None
-    if request.node.path.name == "test_transport.py":
+    if request.node.path.name in {
+        "test_transport.py",
+        "test_relay_transport.py",
+        "test_relay_cutover.py",
+    }:
         case = getattr(request.node, "callspec", None)
-        if case is not None and case.params.get("case") in ("node", "boundaries"):
-            # The Node.js transport case has no Access process; the plugin's
+        needs_stub = request.node.path.name == "test_transport.py" and (
+            case is not None and case.params.get("case") in ("node", "boundaries")
+        ) or request.node.path.name == "test_relay_transport.py"
+        if needs_stub:
+            # Broker-only Node.js cases have no Access process; the plugin's
             # deferred CONNECT callback is served by a loopback policy stub.
             policy_stub = start_connect_policy_stub()
     fixture = Broker(tmp_path)
@@ -329,6 +336,12 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
             value.mqtt_port = request.getfixturevalue("host_mqtt_relay").port
     else:
         value = Scenario(tmp_path, schema)
+    relay_marker = request.node.get_closest_marker("relay_directory")
+    if relay_marker is not None and not native:
+        value.configure_relay_directory(**relay_marker.kwargs)
+    access_transport = request.node.get_closest_marker("access_transport")
+    if access_transport is not None and not native:
+        value.configure_access_transport(access_transport.args[0])
     tls_marker = request.node.get_closest_marker("tls")
     tls_broker = None
     if not native and tls_marker is not None:

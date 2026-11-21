@@ -17,7 +17,7 @@ import { CommandService } from './commands/service.js'
 import { questionResponseBudget } from './commands/question-pager.js'
 import { WatchedEvents } from './events/watches.js'
 import { MqttAccess } from './access/mqtt.js'
-import { MESSAGE_BYTES } from './access/transport.js'
+import { MESSAGE_BYTES, RELAY_VERSION } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
 import { validateRequestTransportMetadata } from './contracts/transport.js'
 
@@ -32,6 +32,7 @@ const REQUEST_KINDS = new Set([
   'REQUEST_KIND_PAIRING_AUTHORIZE',
   'REQUEST_KIND_REVOCATION',
   'REQUEST_KIND_HOST_CLIENTS',
+  'REQUEST_KIND_ACCESS_READY',
 ])
 
 function sanitizeDetail(value) {
@@ -165,6 +166,8 @@ export class HostRuntime {
         hostId: this.#config.hostId,
         token: this.#config.hostToken,
         authorizationPublicKey: authorizationPublicKey(identity.privateKey),
+        authorizationPrivateKey: identity.privateKey,
+        accessOrigin: this.#config.accessUrl ?? '',
         caFile: this.#config.caFile,
         reconnectMinMs: this.#config.reconnectMinMs,
         reconnectMaxMs: this.#config.reconnectMaxMs,
@@ -441,6 +444,20 @@ export class HostRuntime {
         return
       }
       this.#logger?.info('host_request_received', { trace: request.trace_id, request: request.request_id, kind, bytes: request.body?.length ?? 0, layer: 'host' })
+      // One coordinated relay epoch. No v2 frame, unframed body or other epoch
+      // ever reaches business handling.
+      if (Number(request.relay_version) !== RELAY_VERSION) {
+        return await this.#reply(request, {
+          status: 'rejected',
+          errorCode: 'protocol_version_incompatible',
+          errorDetail: 'relay epoch is not 3; upgrade the sender',
+        })
+      }
+      if (kind === 'REQUEST_KIND_ACCESS_READY') {
+        // Control information for the Host -> Access hop; it is recorded by the
+        // MQTT adapter and is never business.
+        return
+      }
       if (kind === 'REQUEST_KIND_UNSPECIFIED') {
         return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'request kind is unspecified' })
       }
@@ -455,9 +472,6 @@ export class HostRuntime {
       if (!request.request_id) throw new PluginError('invalid_argument', 'request_id missing')
       if (request.host_id && request.host_id !== this.#config.hostId) {
         return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
-      }
-      if ((kind === 'REQUEST_KIND_PAIRING_CLAIM' || kind === 'REQUEST_KIND_PAIRING_AUTHORIZE') && request.relay_transport_version !== 2) {
-        return await this.#reply(request, { status: 'rejected', errorCode: 'protocol_version_incompatible', errorDetail: 'pairing requires relay transport version 2; upgrade Access' })
       }
       const compatibility = protocolVersionCompatibility(Number(request.protocol_version))
       if (!compatibility.compatible) {
@@ -491,7 +505,7 @@ export class HostRuntime {
         return await this.#security.withRequest(request, opened => this.#handleEncrypted(request, opened, requestTransport))
       }
       if (kind === 'REQUEST_KIND_HOST_CLIENTS') {
-        if (request.host_id !== this.#config.hostId || request.device_id || request.relay_transport_version !== 2) {
+        if (request.host_id !== this.#config.hostId || request.device_id) {
           return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
         }
         if (!this.#started || this.#stopping || !this.#access.connected || this.#security.revocationsPending) {
@@ -659,10 +673,13 @@ export class HostRuntime {
       completed_at_unix_ms: completedAt ?? this.now(),
       protocol_version: PROTOCOL_VERSION,
       channel_id: request.channel_id ?? '',
+      relay_version: RELAY_VERSION,
     }
     // The encoded HostResult, including the sealed result framing, is the hard
     // ceiling. The request metadata bound can only lower the local envelope.
-    const localLimit = MESSAGE_BYTES
+    const localLimit = Number.isSafeInteger(this.#access?.budget?.envelope_bytes)
+      ? this.#access.budget.envelope_bytes
+      : MESSAGE_BYTES
     const hardLimit = Number.isSafeInteger(resultMaxBytes) && resultMaxBytes > 0
       ? Math.min(localLimit, resultMaxBytes)
       : localLimit

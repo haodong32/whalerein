@@ -31,7 +31,10 @@ import (
 	"github.com/whalerein/whalerein/access/internal/httpapi"
 	"github.com/whalerein/whalerein/access/internal/line"
 	"github.com/whalerein/whalerein/access/internal/pairing"
+	"github.com/whalerein/whalerein/access/internal/payload"
+	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/serverready"
 	"github.com/whalerein/whalerein/access/internal/store"
 )
 
@@ -103,11 +106,16 @@ func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, ops s
 		}
 		fmt.Fprintf(stdout, "config ok: mode=%s listen=%s internal_listen=%s protocol=%d mqtt_public_url=%s (%s)\n",
 			cfg.Mode, cfg.Listen, cfg.InternalListen, cfg.Protocol.Version, mqttURL, source)
-		fmt.Fprintf(stdout, "transport: profile=%s packet_bytes=%d overhead_bytes=%d fragment_payload_bytes=%d fragment_count=%d envelope_bytes=%d bulk_concurrency=%d reserved_bytes=%d fragment_idle_timeout=%s transfer_timeout=%s result_limit_bytes=%d http_max_body_bytes=%d\n",
+		fmt.Fprintf(stdout, "storage: enabled=%t root=%s node=%s max_object_bytes=%d max_host_bytes=%d max_node_bytes=%d max_objects=%d max_active_uploads=%d free_space_reserve_bytes=%d retention=%s cleanup_interval=%s\n",
+			cfg.Storage.Enabled, cfg.Storage.RootDir, cfg.Storage.NodeID,
+			cfg.Storage.MaxObjectBytes, cfg.Storage.MaxHostBytes, cfg.Storage.MaxNodeBytes,
+			cfg.Storage.MaxObjects, cfg.Storage.MaxActiveUploads,
+			cfg.Storage.FreeSpaceReserveBytes, cfg.Storage.Retention.D(), cfg.Storage.CleanupInterval.D())
+		fmt.Fprintf(stdout, "transport: profile=%s packet_bytes=%d overhead_bytes=%d envelope_bytes=%d bulk_concurrency=%d reserved_bytes=%d transfer_timeout=%s receive_maximum=%d send_in_flight=%d send_queue_depth=%d send_queue_bytes=%d result_limit_bytes=%d http_max_body_bytes=%d\n",
 			effective.Profile, effective.PacketBytes, effective.PacketOverheadBytes,
-			effective.FragmentPayloadBytes, effective.FragmentCount, effective.EnvelopeBytes,
-			effective.BulkConcurrency, effective.ReservedBytes,
-			effective.FragmentIdleTimeout, effective.TransferTimeout,
+			effective.EnvelopeBytes, effective.BulkConcurrency, effective.ReservedBytes,
+			effective.TransferTimeout, effective.MaxReceive(), effective.MaxInFlight(),
+			effective.QueueDepth(), effective.QueueBytes(),
 			effective.ResultLimitBytes, effective.HTTPBodyBytes)
 		return 0
 	}
@@ -213,13 +221,14 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	logger.Info("transport configured",
 		"profile", transport.Profile,
 		"packet_bytes", transport.PacketBytes,
-		"fragment_payload_bytes", transport.FragmentPayloadBytes,
-		"fragment_count", transport.FragmentCount,
 		"envelope_bytes", transport.EnvelopeBytes,
 		"bulk_concurrency", transport.BulkConcurrency,
 		"reserved_bytes", transport.ReservedBytes,
-		"fragment_idle_timeout_ms", transport.FragmentIdleTimeout.Milliseconds(),
 		"transfer_timeout_ms", transport.TransferTimeout.Milliseconds(),
+		"receive_maximum", transport.MaxReceive(),
+		"send_in_flight", transport.MaxInFlight(),
+		"send_queue_depth", transport.QueueDepth(),
+		"send_queue_bytes", transport.QueueBytes(),
 		"result_limit_bytes", transport.ResultLimitBytes,
 		"http_max_body_bytes", transport.HTTPBodyBytes)
 
@@ -230,6 +239,23 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	defer ops.close(db)
 	if err := ops.migrate(ctx, db); err != nil {
 		return fmt.Errorf("migrate store: %w", err)
+	}
+
+	storageService, err := payload.New(payload.Dependencies{
+		Store:   db,
+		Config:  payloadConfig(cfg),
+		Metrics: metrics,
+		Logger:  logger,
+	})
+	if err != nil {
+		return fmt.Errorf("payload storage: %w", err)
+	}
+	if storageService.Enabled() {
+		// A bounded reconciliation pass repairs a crash before the node
+		// advertises readiness. Failures are retryable and stay charged.
+		if err := storageService.Recover(ctx); err != nil {
+			logger.Warn("payload storage reconciliation failed", "error", err.Error())
+		}
 	}
 
 	mqttPublicURL, derived := cfg.ResolveMQTTPublicURL()
@@ -324,11 +350,44 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return err
 	}
 
+	relayService, err := relay.New(relay.Dependencies{
+		Auth:     authService,
+		Store:    db,
+		Payloads: storageService,
+		Config: relay.Config{
+			Enabled:          cfg.Storage.Enabled,
+			NodeID:           cfg.Storage.NodeID,
+			OwnerID:          cfg.Storage.OwnerID,
+			UploadPathPrefix: "/v1/relay/objects",
+			Retention:        cfg.Storage.Retention.D(),
+			UploadTimeout:    cfg.Storage.UploadTimeout.D(),
+			ReadTimeout:      cfg.Storage.ReadTimeout.D(),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("relay directory: %w", err)
+	}
+
+	// Production staging adapter: exact ciphertext reservation, write and
+	// finish through the node-local payload service. The broker blocks a
+	// reference publish until Stage returns a readable object.
+	stager, err := relay.NewStager(db, storageService, relay.StagerConfig{
+		Enabled:   cfg.Storage.Enabled,
+		NodeID:    cfg.Storage.NodeID,
+		OwnerID:   cfg.Storage.OwnerID,
+		Retention: cfg.Storage.Retention.D(),
+	})
+	if err != nil {
+		return fmt.Errorf("payload stager: %w", err)
+	}
+	service.SetPayloadStager(stager)
+
 	requestDeps := requests.Dependencies{
 		Store:    db,
 		Broker:   service,
 		Presence: service,
 		Grants:   db,
+		Payloads: stager,
 		Config: requests.Config{
 			SessionAuthorityRevision: cfg.External.SessionAuthorityRevision,
 			ProtocolVersion:          cfg.Protocol.Version,
@@ -341,6 +400,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			MaxResultBytes:           transport.ResultLimitBytes,
 			MaxDeliveryBytes:         transport.HTTPBodyBytes,
 			EnvelopeBytes:            int64(transport.EnvelopeBytes),
+			PayloadOwnerID:           ownerNodeID(cfg),
+			NoticeInterval:           cfg.Requests.ForwardInterval.D(),
+			NoticeBatch:              cfg.Requests.BatchSize,
 		},
 		Metrics: metrics,
 		Masker:  masker,
@@ -391,15 +453,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	// A ping-only check would keep a read-only replica or an exhausted pool in
 	// rotation. The write probe is a no-op transaction that proves writability.
 	readiness.Add("database", diagnostics.DatabaseReadiness(db))
-	readiness.Add("broker", func(context.Context) error {
-		if !service.Ready() {
-			return errors.New("mqtt session is not ready")
-		}
-		if !presence.Available() {
-			return errors.New("broker presence is not reconciled")
-		}
-		return nil
-	})
+	serverready.AddChecks(readiness, service, presence, storageService)
 
 	if cfg.Mode == "external" && cfg.External.SessionAuthorityRevision != "" {
 		lineManager.SetSessionPolicy(authService.ManagedBrokerPolicy)
@@ -444,6 +498,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		MaxBodyBytes:             transport.HTTPBodyBytes,
 		ClientAddress:            resolver,
 		ClientReference:          referencer,
+		Relay:                    relayService,
 	}
 	// Assign through the interface only when external mode is configured. A
 	// typed nil *external.Service would make the interface non-nil and turn the
@@ -468,37 +523,48 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		return fmt.Errorf("listen internal: %w", err)
 	}
 
+	// A ciphertext upload or fetch may legitimately outlive the default HTTP
+	// read/write bounds. Keep the bounds at least as large as the configured
+	// payload transfer timeout plus a small grace, without changing the
+	// behavior of any other route.
+	readTimeout, writeTimeout := serverready.HTTPTimeouts(
+		cfg.HTTP.ReadTimeout.D(), cfg.HTTP.WriteTimeout.D(), storageService.Enabled(),
+		cfg.Storage.UploadTimeout.D(), cfg.Storage.ReadTimeout.D())
+
 	publicServer := &http.Server{
 		Handler:           api.PublicHandler(),
 		ErrorLog:          errorLog,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout.D(),
-		ReadTimeout:       cfg.HTTP.ReadTimeout.D(),
-		WriteTimeout:      cfg.HTTP.WriteTimeout.D(),
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       cfg.HTTP.IdleTimeout.D(),
 	}
 	internalServer := &http.Server{
 		Handler:           api.InternalHandler(),
 		ErrorLog:          errorLog,
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout.D(),
-		ReadTimeout:       cfg.HTTP.ReadTimeout.D(),
-		WriteTimeout:      cfg.HTTP.WriteTimeout.D(),
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       cfg.HTTP.IdleTimeout.D(),
 	}
 
 	service.SetReadyHook(lineManager.Reconcile)
 	return runServices(ctx, publicServer, internalServer, publicListener, internalListener,
-		service.Run, requestService.Run,
+		service.Run, requestService.Run, requestService.RunNotices,
 		func(runCtx context.Context) error {
 			return runLine(runCtx, lineManager, cfg, logger)
 		},
 		func(runCtx context.Context) {
+			if storageService.Enabled() {
+				go relay.RunPayloadStorage(runCtx, storageService, stager, cfg.Storage.CleanupInterval.D(), logger)
+			}
 			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger, metrics)
 		}, logger, 10*time.Second)
 }
 
 // runServices owns server and worker shutdown after resources are initialized.
 func runServices(ctx context.Context, publicServer, internalServer *http.Server, publicListener, internalListener net.Listener,
-	runBroker, runForwarder, runLineWorker func(context.Context) error, cleanup func(context.Context), logger *slog.Logger, shutdownTimeout time.Duration) error {
+	runBroker, runForwarder, runNotices, runLineWorker func(context.Context) error, cleanup func(context.Context), logger *slog.Logger, shutdownTimeout time.Duration) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -513,7 +579,7 @@ func runServices(ctx context.Context, publicServer, internalServer *http.Server,
 		"internal", internalListener.Addr().String())
 
 	var workers sync.WaitGroup
-	workers.Add(3)
+	workers.Add(4)
 	go func() {
 		defer workers.Done()
 		if err := runBroker(runCtx); err != nil {
@@ -524,6 +590,12 @@ func runServices(ctx context.Context, publicServer, internalServer *http.Server,
 		defer workers.Done()
 		if err := runForwarder(runCtx); err != nil {
 			logger.Warn("forward loop stopped", "error", err.Error())
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		if err := runNotices(runCtx); err != nil {
+			logger.Warn("notice loop stopped", "error", err.Error())
 		}
 	}()
 	go func() {
@@ -674,6 +746,36 @@ func drainCleanupTask(ctx context.Context, task cleanupTask, now time.Time, logg
 		}
 	}
 	logger.Warn("retention cleanup stopped after the per-tick round limit", "operation", task.operation)
+}
+
+// payloadConfig converts validated operator settings into the payload package
+// seam.
+func payloadConfig(cfg config.Config) payload.Config {
+	return payload.Config{
+		Enabled:               cfg.Storage.Enabled,
+		RootDir:               cfg.Storage.RootDir,
+		NodeID:                cfg.Storage.NodeID,
+		OwnerID:               cfg.Storage.OwnerID,
+		MaxObjectBytes:        cfg.Storage.MaxObjectBytes,
+		MaxHostBytes:          cfg.Storage.MaxHostBytes,
+		MaxNodeBytes:          cfg.Storage.MaxNodeBytes,
+		MaxObjects:            cfg.Storage.MaxObjects,
+		MaxActiveUploads:      cfg.Storage.MaxActiveUploads,
+		FreeSpaceReserveBytes: cfg.Storage.FreeSpaceReserveBytes,
+		Retention:             cfg.Storage.Retention.D(),
+		CleanupInterval:       cfg.Storage.CleanupInterval.D(),
+		CleanupBatch:          cfg.Storage.CleanupBatch,
+		UploadTimeout:         cfg.Storage.UploadTimeout.D(),
+		ReadTimeout:           cfg.Storage.ReadTimeout.D(),
+	}
+}
+
+// ownerNodeID resolves the configured reference owner for admission checks.
+func ownerNodeID(cfg config.Config) string {
+	if cfg.Storage.OwnerID != "" {
+		return cfg.Storage.OwnerID
+	}
+	return cfg.Storage.NodeID
 }
 
 // runLine keeps the broker policy validity window fresh and periodically

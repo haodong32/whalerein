@@ -55,7 +55,7 @@ to the service's authenticated management page without claiming revocation.
 | `commands/` | Query/control routing, durable deduplication and unknown outcomes. |
 | `events/` | Channel-scoped watches, leases, typed batching and per-device publication. |
 | `security/` | Identity, Noise channels, grants and authenticated payloads. |
-| `access/` | MQTT readiness and opaque logical fragmentation. |
+| `access/` | MQTT readiness, complete-message inline/reference relay and the Host-authority HTTPS ciphertext client. |
 | `state/` | Public peer/command metadata, ciphertext outbox and OS-released instance lock. |
 | `generated/` | Descriptor generated from the only schema, `proto/v1/whalerein.proto`. |
 
@@ -66,9 +66,20 @@ positions, never another plaintext conversation log.
 
 Source and subscription failures never revoke device grants. A refresh every
 five seconds reconciles authoritative history and state, including a lost final
-notification. A watch lease expires after 30 seconds without refresh. Text
-coalescing is bounded to 20 ms / 8 KiB; one slow recipient does not own another
-recipient's publication queue.
+notification. A watch lease expires after 30 seconds without refresh. Live text coalescing is bounded to 20 ms and the smallest authenticated packet
+budget of the active route, not a fixed 8 KiB cap. An oversized delta is split
+on UTF-8 boundaries into complete ordered previews before sealing; one slow
+recipient does not own another recipient's publication queue.
+
+## Relay objects
+
+One application message travels in one MQTT PUBLISH. It is inline when the full
+encoded packet fits the smallest of the local profile, broker and advertised
+Access limits. An oversized durable message is uploaded first to the Access
+temporary ciphertext directory over HTTPS (`POST/PUT/finish`) using the same
+Ed25519 key announced in `HostReady`, then published as a `PayloadReference`.
+The relay client uses the existing `accessUrl` (or the managed
+`accessOrigin`) configuration; no second identity or origin is introduced.
 
 Use `./repo test host --coverage` from the repository root for this
 package; see [repo commands](../../tools/repo/README.md) for other operations.

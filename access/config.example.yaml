@@ -77,13 +77,17 @@ transport:
   profile: default
   # packet_bytes: 65536
   # packet_overhead_bytes: 4096
-  # fragment_payload_bytes: 61440
-  # fragment_count: 274
   # envelope_bytes: 16777216
   # bulk_concurrency: 4
   # reserved_bytes: 33554432
-  # fragment_idle_timeout: 30s
   # transfer_timeout: 120s
+  # CONNECT Receive Maximum and the ordered publisher bounds. Each topic flow
+  # keeps FIFO order with bounded waiting depth and bytes; an exhausted queue
+  # returns a typed error instead of blocking unrelated flows.
+  # receive_maximum: 16
+  # send_in_flight: 16
+  # send_queue_depth: 1024
+  # send_queue_bytes: 33554432
   # Raw ciphertext retained per encrypted result. Omitted derives from the
   # profile envelope and may not exceed it.
   # result_limit_bytes: 16777216
@@ -115,6 +119,31 @@ presence:
 cleanup:
   interval: 1m
   pairing_token_retention: 24h
+
+storage:
+  # Node-owned temporary ciphertext for oversized relay payloads and
+  # attachment parts. Disabled by default: enable it only with a dedicated,
+  # writable quota directory on this Access node. All byte values are raw
+  # ciphertext bytes; the filesystem reserve is compared with actual free
+  # space before admission.
+  enabled: false
+  root_dir: "/var/lib/whalerein/payloads"
+  # Stable identity of this Access node and the opaque owner id carried in a
+  # reference. owner_id defaults to node_id when omitted.
+  node_id: "access"
+  # owner_id: "access"
+  max_object_bytes: 16777216
+  max_host_bytes: 268435456
+  max_node_bytes: 1073741824
+  max_objects: 1024
+  max_active_uploads: 16
+  free_space_reserve_bytes: 1073741824
+  # Hard lifetime cap. A parent request/transfer deadline can only shorten it.
+  retention: 24h
+  cleanup_interval: 30s
+  cleanup_batch: 100
+  upload_timeout: 2m
+  read_timeout: 60s
 
 protocol:
   version: 1

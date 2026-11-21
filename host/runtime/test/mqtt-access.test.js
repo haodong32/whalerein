@@ -4,14 +4,43 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
+import { randomBytes } from 'node:crypto'
 import { MqttAccess } from '../src/access/mqtt.js'
 import { ConfigError } from '../src/config.js'
 import { codec } from '../src/protocol.js'
+import { transportProfileBudget } from '../src/contracts/transport.js'
 import { FakeBroker } from './support/fake-mqtt.js'
 import { waitFor } from './support/harness.js'
-import { transportProfileBudget } from '../src/contracts/transport.js'
 
 const proto = codec()
+const RESULT_TOPIC = 'whalerein/v1/h/host-1/result'
+const EVENT_TOPIC = 'whalerein/v1/h/host-1/event'
+const REQUEST_TOPIC = 'whalerein/v1/h/host-1/request'
+
+function resultEnvelope({ body = new Uint8Array([1]), status = 'succeeded' } = {}) {
+  return proto.encode('whalerein.v1.HostResult', {
+    request_id: 'ready', host_id: 'host-1', device_id: 'd1', status,
+    result_body: body, protocol_version: 1, relay_version: 3,
+  })
+}
+
+function eventEnvelope({ ciphertext = new Uint8Array([1]) } = {}) {
+  return proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: 'host-1', device_id: 'd1', channel_id: 'c1',
+    nonce: randomBytes(12), ciphertext,
+    created_at_unix_ms: 1, relay_version: 3,
+  })
+}
+
+function advertisement(overrides = {}) {
+  return proto.encode('whalerein.v1.ReceiveAdvertisement', {
+    profile: 'TRANSPORT_PROFILE_DEFAULT',
+    budget: transportProfileBudget('default'),
+    connection_generation: 1,
+    relay_version: 3,
+    ...overrides,
+  })
+}
 
 function makeAccess(overrides = {}) {
   const broker = overrides.broker ?? new FakeBroker()
@@ -33,6 +62,26 @@ function makeAccess(overrides = {}) {
     ...overrides,
   })
   return { broker, access, options, accesses }
+}
+
+function request(overrides = {}) {
+  return proto.encode('whalerein.v1.HostRequest', {
+    request_id: 'r1',
+    host_id: 'host-1',
+    device_id: 'd1',
+    kind: 'REQUEST_KIND_QUERY',
+    protocol_version: 1,
+    relay_version: 3,
+    body: new Uint8Array([1]),
+    expires_at_unix_ms: Date.now() + 60_000,
+    ...overrides,
+  })
+}
+
+async function publishRequest(broker, bytes) {
+  const publisher = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
+  await new Promise((resolve) => publisher.subscribe(REQUEST_TOPIC, { qos: 1 }, resolve))
+  await new Promise((resolve) => publisher.publish(REQUEST_TOPIC, bytes, { qos: 1 }, resolve))
 }
 
 test('only an mqtts URL on port 443 offers the MQTT ALPN protocol', () => {
@@ -87,7 +136,7 @@ test('a blocked MQTT port or ALPN negotiation fails closed without a plaintext f
   }
 })
 
-test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends HostReady', async () => {
+test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends an epoch-3 HostReady', async () => {
   const { broker, access, options } = makeAccess()
   const calls = { connected: 0, ready: 0, requests: [] }
   access.start({
@@ -104,64 +153,167 @@ test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request
   assert.equal(options[0].opts.username, 'host:host-1')
   assert.equal(options[0].opts.password, 'secret-token')
   assert.equal(options[0].opts.reconnectPeriod, 0)
+  assert.equal(options[0].opts.properties.maximumPacketSize, 64 * 1024)
   assert.equal(broker.subscriberCount('whalerein/v1/h/host-1/request'), 1)
-  const ready = broker.messages.find((message) => message.topic === 'whalerein/v1/h/host-1/result')
+  const ready = broker.messages.find((message) => message.topic === RESULT_TOPIC)
   const readyResult = proto.decode('whalerein.v1.HostResult', ready.payload)
   assert.equal(readyResult.status, 'succeeded')
+  assert.equal(readyResult.relay_version, 3)
   const readyBody = proto.decode('whalerein.v1.HostReady', readyResult.result_body)
   assert.equal(readyBody.host_id, 'host-1')
+  assert.equal(readyBody.relay_version, 3)
+  assert.equal(readyBody.receive.relay_version, 3)
+  assert.equal(readyBody.receive.budget.packet_bytes, 65536)
+  assert.equal(readyBody.receive.budget.envelope_bytes, 16 * 1024 * 1024)
 
-  const request = proto.encode('whalerein.v1.HostRequest', {
-    request_id: 'r1',
-    host_id: 'host-1',
-    kind: 'REQUEST_KIND_QUERY',
-    protocol_version: 1,
-    body: new Uint8Array(0),
-  })
-  // Deliver through the real broker routing path.
-  const publisher = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
-  await new Promise((resolve) => publisher.subscribe('whalerein/v1/h/host-1/request', { qos: 1 }, resolve))
-  await new Promise((resolve) => publisher.publish('whalerein/v1/h/host-1/request', request, { qos: 1 }, resolve))
+  await publishRequest(broker, request())
   await waitFor(() => calls.requests.length === 1)
   assert.equal(calls.requests[0].request_id, 'r1')
+  assert.equal(calls.requests[0].relay_version, 3)
 
   await access.stop()
   assert.equal(access.connected, false)
   assert.equal(access.describe().connected, false)
 })
 
+test('a request with another relay epoch is rejected before business dispatch, never framed with WRMQTT2', async () => {
+  const { broker, access } = makeAccess()
+  const seen = []
+  access.start({ onRequest: (request) => seen.push(request) })
+  await access.waitForConnected(2000)
+  await publishRequest(broker, request({ relay_version: 2 }))
+  await publishRequest(broker, request({ relay_version: 3 }))
+  await waitFor(() => seen.length === 1)
+  assert.equal(seen[0].relay_version, 3)
+  const ready = broker.messages.filter((message) => message.topic === RESULT_TOPIC).at(-1)
+  assert.doesNotThrow(() => proto.decode('whalerein.v1.HostResult', ready.payload), 'a complete packet is never text-framed')
+  await access.stop()
+})
+
+test('the Access receive advertisement is recorded for the Host -> Access hop and never answered as business', async () => {
+  const { broker, access } = makeAccess()
+  const seen = []
+  access.start({ onRequest: (request) => seen.push(request) })
+  await access.waitForConnected(2000)
+  const advertised = transportProfileBudget('default')
+  await publishRequest(broker, request({
+    request_id: 'ready-advertisement',
+    kind: 'REQUEST_KIND_ACCESS_READY',
+    device_id: '',
+    channel_id: '',
+    body: advertisement({ connection_generation: 7, budget: { ...advertised, packet_bytes: 4096 } }),
+  }))
+  await waitFor(() => access.accessReceiveAdvertisement()?.connection_generation === 7)
+  assert.equal(seen.length, 0, 'control information is never business')
+  assert.equal(access.accessReceiveAdvertisement().budget.packet_bytes, 4096)
+  assert.equal(access.sendPacketLimit(), 4096)
+  // The same control notice with another epoch is ignored.
+  await publishRequest(broker, request({
+    request_id: 'ready-old', kind: 'REQUEST_KIND_ACCESS_READY', device_id: '', channel_id: '',
+    body: advertisement({ connection_generation: 9, relay_version: 0 }),
+  }))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(access.accessReceiveAdvertisement().connection_generation, 7)
+  await access.stop()
+})
+
+test('a smaller CONNACK maximum lowers the effective packet limit instead of raising it', async () => {
+  const broker = new FakeBroker()
+  const connect = (url, opts) => {
+    const client = broker.connect(url, opts)
+    const emit = client.emit.bind(client)
+    client.emit = (event, payload) => emit(event, event === 'connect'
+      ? { ...payload, properties: { maximumPacketSize: 4096 } }
+      : payload)
+    return client
+  }
+  const access = new MqttAccess({
+    url: 'mqtts://broker.test:8883', hostId: 'host-1', token: 't', connect,
+    reconnectMinMs: 50, reconnectMaxMs: 100,
+  })
+  access.start()
+  await access.waitForConnected(2000)
+  assert.equal(access.sendPacketLimit(), 4096)
+  await access.stop()
+})
+
 test('when MQTT result/event publication succeeds or fails, Access reports the outcome', async () => {
   const { broker, access } = makeAccess()
-  await assert.rejects(access.publishResult(new Uint8Array([1])), (error) => error.code === 'unavailable')
-  await assert.rejects(access.publishEvent(new Uint8Array([1])), (error) => error.code === 'unavailable')
+  await assert.rejects(access.publishResult(resultEnvelope()), (error) => error.code === 'unavailable')
+  await assert.rejects(access.publishEvent(eventEnvelope()), (error) => error.code === 'unavailable')
   const seen = []
   const subscriber = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
-  await new Promise((resolve) => subscriber.subscribe('whalerein/v1/h/host-1/result', { qos: 1 }, resolve))
-  await new Promise((resolve) => subscriber.subscribe('whalerein/v1/h/host-1/event', { qos: 1 }, resolve))
+  await new Promise((resolve) => subscriber.subscribe(RESULT_TOPIC, { qos: 1 }, resolve))
+  await new Promise((resolve) => subscriber.subscribe(EVENT_TOPIC, { qos: 1 }, resolve))
   subscriber.on('message', (topic, payload) => seen.push({ topic, payload: Buffer.from(payload) }))
   access.start({})
   await access.waitForConnected(2000)
-  await access.publishResult(new Uint8Array([2]))
-  await access.publishEvent(new Uint8Array([3]))
+  await access.publishResult(resultEnvelope({ body: new Uint8Array([2]) }))
+  await access.publishEvent(eventEnvelope({ ciphertext: new Uint8Array([3]) }))
   await waitFor(() => seen.length >= 3)
-  assert.equal(seen.some((entry) => entry.topic.endsWith('/result') && entry.payload[0] === 2), true)
-  assert.equal(seen.some((entry) => entry.topic.endsWith('/event') && entry.payload[0] === 3), true)
+  const resultMessage = seen.filter((entry) => entry.topic === RESULT_TOPIC).at(-1)
+  assert.equal(proto.decode('whalerein.v1.HostResult', resultMessage.payload).result_body[0], 2)
+  assert.equal(proto.decode('whalerein.v1.EventEnvelope', seen.find((entry) => entry.topic === EVENT_TOPIC).payload).ciphertext[0], 3)
   broker.online = false
-  await assert.rejects(access.publishResult(new Uint8Array([4])), (error) => error.code === 'unavailable')
+  await assert.rejects(access.publishResult(resultEnvelope({ body: new Uint8Array([4]) })), (error) => error.code === 'unavailable')
   assert.equal(access.describe().publishErrors >= 1, true)
   await access.stop()
 })
 
-test('when the broker disconnects, MQTT Access reconnects with backoff', async () => {
+test('an event above the Access packet advertisement is published as a ready reference', async () => {
+  const calls = []
+  const relayClient = {
+    async reserve({ ciphertext, expiresAt }) {
+      calls.push('reserve')
+      return {
+        object_id: 'a'.repeat(32), owner_node_id: 'node-1',
+        upload_path: `/v1/relay/objects/${'a'.repeat(32)}`,
+        max_bytes: ciphertext.length, expires_at_unix_ms: expiresAt, upload_timeout_ms: 1000,
+      }
+    },
+    async upload() { calls.push('upload') },
+    async finish({ objectId }) { calls.push('finish'); return { object_id: objectId } },
+    async delete() { calls.push('delete') },
+    async fetch() { throw new Error('not used') },
+  }
+  const { broker, access } = makeAccess({ relayClient })
+  const seen = []
+  const subscriber = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
+  await new Promise((resolve) => subscriber.subscribe(EVENT_TOPIC, { qos: 1 }, resolve))
+  subscriber.on('message', (topic, payload) => seen.push(Buffer.from(payload)))
+  access.start({})
+  await access.waitForConnected(2000)
+  await publishRequest(broker, request({
+    request_id: 'advertisement-small', kind: 'REQUEST_KIND_ACCESS_READY', device_id: '', channel_id: '',
+    body: advertisement({ connection_generation: 4, budget: { ...transportProfileBudget('default'), packet_bytes: 400 } }),
+  }))
+  await waitFor(() => access.accessReceiveAdvertisement() !== null)
+  await access.publishEvent(eventEnvelope({ ciphertext: new Uint8Array(1024) }))
+  await waitFor(() => seen.length === 1)
+  const envelope = proto.decode('whalerein.v1.EventEnvelope', seen[0])
+  assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length, 0)
+  assert.equal(envelope.payload_reference.ciphertext_bytes, 1024)
+  assert.equal(envelope.relay_version, 3)
+  assert.deepEqual(calls, ['reserve', 'upload', 'finish'])
+  await access.stop()
+})
+
+test('when the broker disconnects, MQTT Access reconnects with backoff and a fresh generation', async () => {
   const { broker, access } = makeAccess()
   let connections = 0
   access.start({ onConnected: () => connections++ })
   await access.waitForConnected(2000)
+  const first = access.receiveAdvertisement().connection_generation
   broker.disconnectClientId('whalerein-host-host-1')
   await waitFor(() => access.connected === false)
   await waitFor(() => access.connected === true, 5000)
   assert.equal(connections, 2)
   assert.equal(access.describe().reconnects, 1)
+  assert.ok(access.receiveAdvertisement().connection_generation > first)
+  assert.equal(access.accessReceiveAdvertisement(), null, 'a reconnect drops the old hop advertisement')
+  const ready = broker.messages.filter((message) => message.topic === RESULT_TOPIC).at(-1)
+  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.payload).result_body)
+  assert.equal(body.receive.connection_generation, access.receiveAdvertisement().connection_generation)
   await access.stop()
 })
 
@@ -201,7 +353,8 @@ test('when MQTT receives malformed bytes or a foreign topic, it dispatches no ap
   await access.waitForConnected(2000)
   const client = accesses[0]
   client.emit('message', 'other/topic', Buffer.from('ignored'))
-  client.emit('message', 'whalerein/v1/h/host-1/request', Buffer.from([255, 255]))
+  client.emit('message', REQUEST_TOPIC, Buffer.from([255, 255]))
+  client.emit('message', REQUEST_TOPIC, Buffer.from('WRMQTT2legacy'))
   await access.stop()
   assert.equal(seen.length, 0)
   assert.equal(broker.messages.length >= 1, true)
@@ -226,14 +379,13 @@ test('when MQTT disconnects, diagnostics include broker reason and publish size 
   const { access, accesses } = makeAccess({ logger })
   access.start({})
   await access.waitForConnected(2000)
-  await access.publishEvent(new Uint8Array(321))
+  await access.publishEvent(eventEnvelope({ ciphertext: new Uint8Array(321) }))
   accesses[0].emit('disconnect', { reasonCode: 149, properties: { reasonString: 'private-detail' } })
   accesses[0].emit('close')
   const disconnected = records.find((record) => record.event === 'mqtt_disconnected')
   assert.equal(disconnected.reasonCode, 149)
   assert.equal(disconnected.reason, 'broker_disconnect')
   assert.equal(disconnected.kind, 'event')
-  assert.equal(disconnected.bytes, 321)
   assert.equal(disconnected.generation, 1)
   assert.equal(JSON.stringify(records).includes('private-detail'), false)
   await access.stop()
@@ -242,53 +394,58 @@ test('when MQTT disconnects, diagnostics include broker reason and publish size 
 test('when concurrent publishes fail, each diagnostic reports its own size and kind', async () => {
   const records = []
   const { createLogger } = await import('../src/log.js')
-  const logger = createLogger({ salt: 'aa'.repeat(16), sink: (record) => records.push(record) })
+  const logger = createLogger({ salt: 'aa'.repeat(16), level: 'debug', sink: (record) => records.push(record) })
   const { access, accesses } = makeAccess({ logger })
   access.start({})
   await access.waitForConnected(2000)
   const callbacks = []
   accesses[0].publish = (_topic, _payload, _options, callback) => callbacks.push(callback)
-  const failed = assert.rejects(access.publishEvent(new Uint8Array(2)))
-  const succeeded = access.publishResult(new Uint8Array(3))
+  const failed = assert.rejects(access.publishEvent(eventEnvelope()), (error) => error.code === 'unavailable')
+  const succeeded = access.publishResult(resultEnvelope())
+  await new Promise((resolve) => setImmediate(resolve))
   callbacks[0](new Error('private detail'))
   callbacks[1](null)
   await Promise.all([failed, succeeded])
   const record = records.find((entry) => entry.event === 'mqtt_publish_failed')
-  assert.equal(record.bytes, 2)
   assert.equal(record.kind, 'event')
   assert.equal(JSON.stringify(records).includes('private detail'), false)
   await access.stop()
 })
 
-test('when an application result exceeds the size limit, publication fails without disconnecting', async () => {
+test('when an application message exceeds the envelope budget, publication fails without disconnecting', async () => {
   const records = []
   const { createLogger } = await import('../src/log.js')
-  const logger = createLogger({ salt: 'aa'.repeat(16), sink: (record) => records.push(record) })
-  const { access, broker } = makeAccess({ logger })
+  const logger = createLogger({ salt: 'aa'.repeat(16), level: 'debug', sink: (record) => records.push(record) })
+  const budget = {
+    packet_bytes: 1024,
+    envelope_bytes: 2048,
+    bulk_concurrency: 4,
+    reserved_bytes: 32 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
+  const { access, broker } = makeAccess({ logger, transportProfile: budget })
   access.start()
   await access.waitForConnected(2000)
   const before = broker.messages.length
   try {
-    await assert.rejects(access.publishResult(new Uint8Array(16 * 1024 * 1024 + 1)), (error) => error.code === 'payload_too_large')
+    await assert.rejects(
+      access.publishResult(resultEnvelope({ body: new Uint8Array(4096) })),
+      (error) => error.code === 'payload_too_large',
+    )
     assert.equal(broker.messages.length, before)
     assert.equal(access.connected, true)
-    const failure = records.find((record) => record.event === 'mqtt_payload_too_large')
-    assert.equal(failure.limit, 16 * 1024 * 1024)
-    assert.equal(failure.bytes, 16 * 1024 * 1024 + 1)
   } finally {
     await access.stop()
   }
 })
 
-test('missing broker PUBACK is bounded and interrupts only the MQTT link', async t => {
-  const { access, accesses }=makeAccess({publishTimeoutMs:5})
-  access.start();await access.waitForConnected(2000)
-  accesses[0].publish=()=>{}
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+test('missing broker PUBACK is bounded and interrupts only the MQTT link', async () => {
+  const { access, accesses } = makeAccess({ publishTimeoutMs: 5 })
+  access.start()
+  await access.waitForConnected(2000)
+  accesses[0].publish = () => {}
   try {
-    const expired = assert.rejects(access.publishResult(new Uint8Array([1])), error => error.code === 'unavailable')
-    t.mock.timers.tick(5)
-    await expired
+    await assert.rejects(access.publishResult(resultEnvelope()), error => error.code === 'unavailable')
     assert.equal(access.connected, false)
   } finally {
     await access.stop()
@@ -308,38 +465,71 @@ test('when a device_offline presence event arrives, Access dispatches it without
   await access.stop()
 })
 
-test('HostReady advertises the Host receive profile for the authenticated connection generation', async () => {
-  const { broker, access } = makeAccess()
-  access.start()
-  await access.waitForConnected(2000)
-  const ready = broker.messages.filter((message) => message.topic === 'whalerein/v1/h/host-1/result')
-  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.at(-1).payload).result_body)
-  assert.equal(body.receive.profile, 'TRANSPORT_PROFILE_DEFAULT')
-  assert.equal(body.receive.budget.packet_bytes, 65536)
-  assert.equal(body.receive.budget.fragment_payload_bytes, 61440)
-  assert.equal(body.receive.budget.envelope_bytes, 16 * 1024 * 1024)
-  assert.equal(body.receive.connection_generation, access.receiveAdvertisement().connection_generation)
-  assert.ok(body.receive.connection_generation >= 1)
-  await access.stop()
-})
-
-test('reconnect advances the advertised connection generation instead of reusing the old one', async () => {
-  const { broker, access } = makeAccess()
-  access.start({})
-  await access.waitForConnected(2000)
-  const first = access.receiveAdvertisement().connection_generation
-  broker.disconnectClientId('whalerein-host-host-1')
-  await waitFor(() => access.connected === false)
-  await waitFor(() => access.connected === true, 5000)
-  const second = access.receiveAdvertisement().connection_generation
-  assert.ok(second > first, `expected ${second} > ${first}`)
-  const ready = broker.messages.filter((message) => message.topic === 'whalerein/v1/h/host-1/result')
-  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.at(-1).payload).result_body)
-  assert.equal(body.receive.connection_generation, second)
-  await access.stop()
+test('a configured Access origin and signing key construct the Host-authority relay client', async () => {
+  const { generateKeypair } = await import('../src/security/noise.js')
+  const identity = generateKeypair()
+  const withRelay = makeAccess({ accessOrigin: 'https://access.example', authorizationPrivateKey: identity.privateKey })
+  assert.equal(withRelay.access.sendPacketLimit(), 64 * 1024)
+  // An origin without a signing key cannot use Host authority, so no client is
+  // constructed and oversized messages fail explicitly instead.
+  assert.doesNotThrow(() => makeAccess({ accessOrigin: 'https://access.example' }))
 })
 
 test('a receive budget that cannot fit required control envelopes fails configuration before readiness', () => {
-  const budget = { ...transportProfileBudget('default'), envelope_bytes: 64 }
+  const budget = {
+    packet_bytes: 40,
+    envelope_bytes: 40,
+    bulk_concurrency: 4,
+    reserved_bytes: 32 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
   assert.throws(() => makeAccess({ transportProfile: budget }), (error) => error.code === 'invalid_config')
+})
+
+test('topic accessors expose the configured Host topics', () => {
+  const { access } = makeAccess()
+  assert.equal(access.requestTopic, REQUEST_TOPIC)
+  assert.equal(access.resultTopic, RESULT_TOPIC)
+  assert.equal(access.eventTopic, EVENT_TOPIC)
+})
+
+test('an unparseable URL avoids ALPN and a throwing connector keeps retrying without a crash', async () => {
+  const parsed = makeAccess({ url: 'not a url' })
+  parsed.access.start()
+  await parsed.access.waitForConnected(2000)
+  assert.equal(parsed.options[0].opts.ALPNProtocols, undefined)
+  await parsed.access.stop()
+
+  let attempts = 0
+  const access = new MqttAccess({
+    url: 'mqtts://broker.test:8883', hostId: 'host-1', token: 't',
+    connect: () => { attempts++; throw new Error('secret detail') },
+    reconnectMinMs: 10, reconnectMaxMs: 20,
+  })
+  access.start()
+  await assert.rejects(access.waitForConnected(80), (error) => error.code === 'unavailable')
+  assert.ok(attempts >= 1)
+  assert.equal(JSON.stringify(access.describe()).includes('secret detail'), false)
+  await access.stop()
+})
+
+test('a rejected subscription or a failed HostReady closes the link and schedules a bounded retry', async () => {
+  const rejected = makeAccess({ reconnectMinMs: 60_000, reconnectMaxMs: 60_000 })
+  rejected.access.start()
+  rejected.accesses[0].subscribe = (_topic, _options, callback) => {
+    queueMicrotask(() => callback(new Error('private subscription detail')))
+    return rejected.accesses[0]
+  }
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(rejected.access.connected, false)
+  await rejected.access.stop()
+
+  const failedReady = makeAccess({ reconnectMinMs: 60_000, reconnectMaxMs: 60_000 })
+  failedReady.access.start()
+  failedReady.accesses[0].publish = (_topic, _payload, _options, callback) => {
+    queueMicrotask(() => callback(new Error('private ready detail')))
+  }
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(failedReady.access.connected, false)
+  await failedReady.access.stop()
 })

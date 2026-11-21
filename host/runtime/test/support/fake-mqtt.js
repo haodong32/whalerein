@@ -16,7 +16,10 @@ class FakeMqttClient extends EventEmitter {
     queueMicrotask(() => {
       if (this.closed) return
       this.connected = true
-      this.emit('connect', { sessionPresent: false })
+      this.emit('connect', {
+        sessionPresent: false,
+        ...(Number.isFinite(this.broker.maxPacketBytes) ? { properties: { maximumPacketSize: this.broker.maxPacketBytes } } : {}),
+      })
     })
   }
 
@@ -85,6 +88,14 @@ export class FakeBroker {
     const client = new FakeMqttClient(this, options)
     this.#clients.add(client)
     return client
+  }
+
+  /** Deliver one simulated out-of-band (HTTPS-resolved) payload to subscribers. */
+  deliverDirect(topic, payload) {
+    const bytes = Buffer.from(payload)
+    for (const client of this.#topics.get(topic) ?? []) {
+      if (!client.closed) queueMicrotask(() => client.emit('message', topic, bytes))
+    }
   }
 
   subscribe(client, topic) {

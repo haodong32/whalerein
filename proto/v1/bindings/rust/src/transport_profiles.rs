@@ -13,6 +13,9 @@ pub const TRANSPORT_PROFILES_SCHEMA: &str = "whalerein/transport-profiles/v1";
 /// Packaged default profile name.
 pub const DEFAULT_TRANSPORT_PROFILE: &str = "default";
 
+/// Checked broker PUBLISH ceiling.
+pub const BROKER_PACKET_LIMIT_BYTES: u64 = 1048576;
+
 /// One validated packaged transport profile. Byte counts are encoded bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportProfileValues {
@@ -20,12 +23,9 @@ pub struct TransportProfileValues {
     pub wire_name: &'static str,
     pub packet_bytes: u32,
     pub packet_overhead_bytes: u32,
-    pub fragment_payload_bytes: u32,
-    pub fragment_count: u32,
     pub envelope_bytes: u64,
     pub bulk_concurrency: u32,
     pub reserved_bytes: u64,
-    pub fragment_idle_timeout_ms: u32,
     pub transfer_timeout_ms: u32,
 }
 
@@ -36,12 +36,9 @@ pub const TRANSPORT_PROFILES: [TransportProfileValues; 3] = [
         wire_name: "TRANSPORT_PROFILE_DEFAULT",
         packet_bytes: 65536,
         packet_overhead_bytes: 4096,
-        fragment_payload_bytes: 61440,
-        fragment_count: 274,
         envelope_bytes: 16777216,
         bulk_concurrency: 4,
         reserved_bytes: 33554432,
-        fragment_idle_timeout_ms: 30000,
         transfer_timeout_ms: 120000,
     },
     TransportProfileValues {
@@ -49,12 +46,9 @@ pub const TRANSPORT_PROFILES: [TransportProfileValues; 3] = [
         wire_name: "TRANSPORT_PROFILE_COMPACT",
         packet_bytes: 32768,
         packet_overhead_bytes: 4096,
-        fragment_payload_bytes: 28672,
-        fragment_count: 293,
         envelope_bytes: 8388608,
         bulk_concurrency: 2,
         reserved_bytes: 8388608,
-        fragment_idle_timeout_ms: 30000,
         transfer_timeout_ms: 120000,
     },
     TransportProfileValues {
@@ -62,12 +56,9 @@ pub const TRANSPORT_PROFILES: [TransportProfileValues; 3] = [
         wire_name: "TRANSPORT_PROFILE_ROOMY",
         packet_bytes: 131072,
         packet_overhead_bytes: 8192,
-        fragment_payload_bytes: 122880,
-        fragment_count: 274,
         envelope_bytes: 33554432,
         bulk_concurrency: 8,
         reserved_bytes: 67108864,
-        fragment_idle_timeout_ms: 30000,
         transfer_timeout_ms: 300000,
     },
 ];
@@ -107,36 +98,23 @@ pub fn validate_transport_profile(
         profile: profile.name,
         reason,
     };
-    if profile.packet_bytes <= profile.fragment_payload_bytes {
-        return Err(error("packet budget must exceed the fragment payload"));
-    }
-    if u64::from(profile.fragment_payload_bytes) + u64::from(profile.packet_overhead_bytes)
-        > u64::from(profile.packet_bytes)
+    if profile.packet_bytes == 0
+        || profile.bulk_concurrency == 0
+        || profile.transfer_timeout_ms == 0
     {
-        return Err(error(
-            "fragment payload exceeds packetBytes - packetOverheadBytes",
-        ));
+        return Err(error("packet budget, bulk concurrency and timeout must be positive"));
     }
-    let required = profile
-        .envelope_bytes
-        .div_ceil(u64::from(profile.fragment_payload_bytes));
-    if u64::from(profile.fragment_count) < required {
-        return Err(error("fragment count does not cover the envelope"));
+    if profile.packet_overhead_bytes >= profile.packet_bytes {
+        return Err(error("packet overhead must be below the packet budget"));
+    }
+    if u64::from(profile.packet_bytes) > BROKER_PACKET_LIMIT_BYTES {
+        return Err(error("packet budget exceeds the broker limit"));
+    }
+    if profile.envelope_bytes < u64::from(profile.packet_bytes) {
+        return Err(error("envelope must cover one packet"));
     }
     if profile.reserved_bytes < profile.envelope_bytes {
         return Err(error("reserved bytes do not cover one envelope"));
-    }
-    let in_flight = u64::from(profile.bulk_concurrency) * u64::from(profile.fragment_payload_bytes);
-    if profile.reserved_bytes < in_flight {
-        return Err(error("reserved bytes do not cover in-flight fragments"));
-    }
-    if profile.fragment_idle_timeout_ms == 0
-        || profile.transfer_timeout_ms == 0
-        || profile.fragment_idle_timeout_ms >= profile.transfer_timeout_ms
-    {
-        return Err(error(
-            "fragment idle timeout must be positive and below the transfer timeout",
-        ));
     }
     Ok(())
 }

@@ -10,6 +10,7 @@ import {
   validateAttachmentPart,
 } from '../src/contracts/source.js'
 import {
+  BROKER_PACKET_LIMIT_BYTES,
   DEFAULT_TRANSPORT_PROFILE,
   TRANSPORT_PROFILES,
   TRANSPORT_PROFILES_SCHEMA,
@@ -156,19 +157,22 @@ test('attachment metadata and parts enforce bounded scope and terminal integrity
 
 test('packaged transport profiles and receive advertisements validate together',()=>{
  assert.equal(transportProfileBudget('default').packet_bytes,65536)
- assert.equal(transportProfileBudget('default').fragment_payload_bytes,61440)
  assert.equal(transportProfileBudget('default').envelope_bytes,16777216)
- assert.equal(transportProfileBudget('compact').fragment_count,293)
- assert.equal(transportProfileBudget('roomy').fragment_count,274)
- assert.equal(validateTransportBudget(transportProfileBudget('compact')).fragment_count,293)
- assert.equal(validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:3}).connection_generation,3)
+ assert.equal(transportProfileBudget('compact').packet_bytes,32768)
+ assert.equal(transportProfileBudget('roomy').packet_bytes,131072)
+ assert.equal(validateTransportBudget(transportProfileBudget('compact')).bulk_concurrency,2)
+ assert.equal(
+  validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:3,relay_version:3}).connection_generation,
+  3,
+ )
  // The protobuf codec decodes 64-bit integers as decimal strings.
  {
   const strings = { ...transportProfileBudget('default') }
   for (const key of ['envelope_bytes','reserved_bytes']) strings[key] = String(strings[key])
-  const advertisement = validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:strings,connection_generation:'9'})
+  const advertisement = validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:strings,connection_generation:'9',relay_version:3})
   assert.equal(advertisement.connection_generation,9)
   assert.equal(advertisement.budget.envelope_bytes,16777216)
+  assert.equal(advertisement.relay_version,3)
   assert.deepEqual(validateRequestTransportMetadata({result_max_bytes:'25165824',grant_generation:'7',revocation_generation:'3'}),{result_max_bytes:25165824,grant_generation:7,revocation_generation:3})
  }
  assert.deepEqual(validateRequestTransportMetadata({result_max_bytes:16777216,grant_generation:7,revocation_generation:2}),{result_max_bytes:16777216,grant_generation:7,revocation_generation:2})
@@ -178,13 +182,16 @@ test('packaged transport profiles and receive advertisements validate together',
  assert.doesNotThrow(()=>validateTransportProfiles())
  for(const profile of ['TRANSPORT_PROFILE_UNSPECIFIED','TRANSPORT_PROFILE_FUTURE','unknown'])assert.throws(()=>resolveTransportProfile(profile),e=>e.code==='invalid_argument')
  for(const budget of [
-  {...transportProfileBudget('default'),fragment_count:1},
-  {...transportProfileBudget('default'),packet_bytes:61440},
+  {...transportProfileBudget('default'),envelope_bytes:1},
+  {...transportProfileBudget('default'),packet_bytes:0},
+  {...transportProfileBudget('default'),packet_bytes:1048577},
   {...transportProfileBudget('default'),bulk_concurrency:0},
   {...transportProfileBudget('default'),reserved_bytes:1},
-  {...transportProfileBudget('default'),fragment_idle_timeout_ms:120000},
+  {...transportProfileBudget('default'),transfer_timeout_ms:0},
  ])assert.throws(()=>validateTransportBudget(budget),e=>e.code==='invalid_argument')
- assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:0}),e=>e.code==='invalid_argument')
+ assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:0,relay_version:3}),e=>e.code==='invalid_argument')
+ assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:1}),e=>e.code==='protocol_version_incompatible')
+ assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:1,relay_version:2}),e=>e.code==='protocol_version_incompatible')
  assert.throws(()=>validateRequestTransportMetadata({result_max_bytes:0,grant_generation:1,revocation_generation:1}),e=>e.code==='invalid_argument')
  assert.throws(()=>validateRequestTransportMetadata({result_max_bytes:1,grant_generation:-1,revocation_generation:1}),e=>e.code==='invalid_argument')
  assert.deepEqual(validateRequestTransportMetadata({result_max_bytes:1,grant_generation:1}),{result_max_bytes:1,grant_generation:1,revocation_generation:0})
@@ -193,41 +200,39 @@ test('packaged transport profiles and receive advertisements validate together',
 })
 
 test('a relation-valid receive budget override is accepted under a known profile label and never matches a packaged profile',()=>{
- // The profile label chooses the base vocabulary (including packet overhead);
- // the budget itself may be a directional operator override. It is returned
+ // The budget may carry directional operator overrides; it is returned
  // normalized and unclamped so the sender can take the minimum.
- const unpackaged = {...transportProfileBudget('default'),envelope_bytes:4*1024*1024,fragment_count:69}
- const accepted=validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_COMPACT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER})
+ const unpackaged = {
+  ...transportProfileBudget('default'),
+  packet_bytes: 32768,
+  envelope_bytes: 4 * 1024 * 1024,
+  reserved_bytes: 8 * 1024 * 1024,
+ }
+ const accepted=validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_COMPACT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER,relay_version:3})
  assert.equal(accepted.profile,'TRANSPORT_PROFILE_COMPACT')
  assert.equal(accepted.connection_generation,Number.MAX_SAFE_INTEGER)
  assert.deepEqual(accepted.budget,unpackaged)
  assert.ok(Object.isFrozen(accepted.budget))
  assert.ok(Object.isFrozen(accepted))
- // The compact label's 4 KiB overhead still applies even though the packet
- // geometry is the default profile's.
  const contradictory=[
-  {...unpackaged,packet_bytes:65535},
-  {...unpackaged,packet_bytes:61440},
-  {...unpackaged,fragment_count:68},
-  {...unpackaged,fragment_count:1},
+  {...unpackaged,packet_bytes:0},
+  {...unpackaged,packet_bytes:1048577},
+  {...unpackaged,envelope_bytes:32767},
+  {...unpackaged,envelope_bytes:0},
   {...unpackaged,reserved_bytes:1},
-  {...unpackaged,reserved_bytes:4*1024*1024,bulk_concurrency:128},
-  {...unpackaged,fragment_idle_timeout_ms:120000},
+  {...unpackaged,bulk_concurrency:0},
   {...unpackaged,transfer_timeout_ms:0},
-  {...unpackaged,fragment_payload_bytes:0},
-  {...unpackaged,packet_bytes:0x100000000},
-  {...unpackaged,fragment_count:0x100000000},
   {...unpackaged,reserved_bytes:-1},
  ]
- for(const budget of contradictory)assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget,connection_generation:1}),e=>e.code==='invalid_argument')
+ for(const budget of contradictory)assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget,connection_generation:1,relay_version:3}),e=>e.code==='invalid_argument')
  for(const advertisement of [
   null,
-  {profile:'TRANSPORT_PROFILE_DEFAULT',connection_generation:1},
-  {profile:'TRANSPORT_PROFILE_FUTURE',budget:unpackaged,connection_generation:1},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:0},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:-1},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:1.5},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER+1},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',connection_generation:1,relay_version:3},
+  {profile:'TRANSPORT_PROFILE_FUTURE',budget:unpackaged,connection_generation:1,relay_version:3},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:0,relay_version:3},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:-1,relay_version:3},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:1.5,relay_version:3},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER+1,relay_version:3},
  ])assert.throws(()=>validateReceiveAdvertisement(advertisement),e=>e.code==='invalid_argument')
 })
 
@@ -243,13 +248,12 @@ test('packaged transport profiles match the executable contract copy',async()=>{
   assert.deepEqual(TRANSPORT_PROFILES[name],profile)
   for(const [field,value] of Object.entries(profile))assert.equal(TRANSPORT_PROFILES[name][field],value,`${name}.${field}`)
   assert.equal(profile.packetBytes,executable.packet_bytes)
-  assert.equal(profile.fragmentPayloadBytes,executable.fragment_payload_bytes)
-  assert.equal(profile.fragmentCount,executable.fragment_count)
   assert.equal(profile.envelopeBytes,executable.envelope_bytes)
   assert.equal(profile.bulkConcurrency,executable.bulk_concurrency)
   assert.equal(profile.reservedBytes,executable.reserved_bytes)
-  assert.equal(profile.fragmentIdleTimeoutMs,executable.fragment_idle_timeout_ms)
   assert.equal(profile.transferTimeoutMs,executable.transfer_timeout_ms)
+  assert.equal(file.brokerPacketLimitBytes,BROKER_PACKET_LIMIT_BYTES)
+  assert.ok(profile.packetBytes<=BROKER_PACKET_LIMIT_BYTES,`${name}.packetBytes exceeds the broker limit`)
  }
 })
 

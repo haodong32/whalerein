@@ -16,7 +16,47 @@ import {
   seal,
 } from '../../src/security/noise.js'
 import { randomId, sha256Bytes } from '../../src/security/digest.js'
-import { LogicalTransport } from '../../src/access/transport.js'
+
+/** In-memory Access temporary ciphertext directory for the local harness. */
+export class MemoryRelayObjects {
+  #objects = new Map()
+  calls = []
+  async reserve({ ciphertext, ...scope }) {
+    this.calls.push('reserve')
+    const objectId = randomId(16)
+    this.#objects.set(objectId, { ciphertext: Buffer.from(ciphertext), scope })
+    return {
+      object_id: objectId,
+      owner_node_id: 'harness-node',
+      upload_path: `/v1/relay/objects/${objectId}`,
+      max_bytes: ciphertext.length,
+      expires_at_unix_ms: scope.expiresAt ?? Date.now() + 60_000,
+      upload_timeout_ms: 5000,
+    }
+  }
+  async upload({ reservation, ciphertext }) {
+    this.calls.push('upload')
+    const object = this.#objects.get(reservation.object_id)
+    if (!object) throw Object.assign(new Error('missing'), { code: 'not_found' })
+    object.ciphertext = Buffer.from(ciphertext)
+  }
+  async finish({ objectId }) {
+    this.calls.push('finish')
+    const object = this.#objects.get(objectId)
+    return { object_id: objectId, purpose: object?.scope?.purpose ?? 'PAYLOAD_PURPOSE_EVENT' }
+  }
+  async fetch({ reference }) {
+    this.calls.push('fetch')
+    const object = this.#objects.get(reference.object_id)
+    if (!object) throw Object.assign(new Error('missing'), { code: 'not_found' })
+    return object.ciphertext
+  }
+  async delete({ objectId }) {
+    this.calls.push('delete')
+    this.#objects.delete(objectId)
+    return { cancelled: true }
+  }
+}
 
 const PROTOCOL_VERSION = 1
 
@@ -43,8 +83,9 @@ export class FakeAccessSimulator {
    * @param {import('../../src/protocol.js').ProtoCodec} options.codec
    * @param {string} options.hostId
    */
-  constructor({ broker, codec, hostId, now = Date.now }) {
+  constructor({ broker, codec, hostId, now = Date.now, relay = null }) {
     this.broker = broker
+    this.relay = relay
     this.codec = codec
     this.hostId = hostId
     this.now = now
@@ -61,7 +102,6 @@ export class FakeAccessSimulator {
 
   #attach(client) {
     this.client = client
-    this.transport = new LogicalTransport({codec:this.codec, publish:(topic,bytes)=>new Promise((resolve,reject)=>client.publish(topic,bytes,{qos:1},error=>error?reject(error):resolve()))})
     this.ready = new Promise((resolve) => {
       client.on('connect', () => {
         client.subscribe(this.resultTopic, { qos: 1 }, () => {
@@ -81,14 +121,16 @@ export class FakeAccessSimulator {
   }
 
   #onMessage(topic, payload) {
-    this.transport.receive(topic,payload,this.requestTopic,bytes=>this.#deliver(topic,bytes))
-      .then(consumed=>{if(!consumed)return this.#deliver(topic,payload)})
-      .catch(()=>{})
+    this.#deliver(topic, Buffer.from(payload))
   }
 
   async #deliver(topic, payload) {
     if (topic === this.resultTopic) {
       const result = this.codec.decode('whalerein.v1.HostResult', payload)
+      if (result.result_reference && this.relay) {
+        result.result_body = await this.relay.fetch({ reference: result.result_reference })
+        delete result.result_reference
+      }
       if (!result.request_id) {
         this.hostReady = true
         this.#replayRevocations()
@@ -101,17 +143,28 @@ export class FakeAccessSimulator {
     }
     if (topic === this.eventTopic) {
       const envelope = this.codec.decode('whalerein.v1.EventEnvelope', payload)
+      if (envelope.payload_reference && this.relay) {
+        envelope.ciphertext = await this.relay.fetch({ reference: envelope.payload_reference })
+        delete envelope.payload_reference
+      }
       this.events.push(envelope)
       const deviceTopic = `whalerein/v1/h/${this.hostId}/d/${envelope.device_id}/event`
-      const ackTopic=`whalerein/v1/h/${this.hostId}/d/${envelope.device_id}/ack`
-      await new Promise(resolve=>this.client.subscribe(ackTopic,{qos:1},resolve))
-      await this.transport.send(deviceTopic,payload,ackTopic,true)
+      // The resolved ciphertext models an on-demand HTTPS read; it is delivered
+      // directly so raw MQTT packets stay within the broker limit.
+      this.broker.deliverDirect(deviceTopic, this.codec.encode('whalerein.v1.EventEnvelope', envelope))
     }
   }
 
   async send(request) {
     await this.ready
-    await this.transport.send(this.requestTopic,this.codec.encode('whalerein.v1.HostRequest',{...request,relay_transport_version:2}),this.resultTopic,true)
+    const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 3, ...request })
+    // The simulated Device -> Access hop may deliver an oversized complete
+    // request out of band; real Access would resolve it from HTTPS.
+    if (this.broker.maxPacketBytes !== Infinity && bytes.length > this.broker.maxPacketBytes) {
+      this.broker.deliverDirect(this.requestTopic, bytes)
+      return
+    }
+    await new Promise((resolve, reject) => this.client.publish(this.requestTopic, bytes, { qos: 1 }, error => error ? reject(error) : resolve()))
   }
 
   /** Queue revocation batches to replay on the next HostReady. */
@@ -129,8 +182,6 @@ export class FakeAccessSimulator {
         device_id: '',
         kind: 'REQUEST_KIND_REVOCATION',
         protocol_version: PROTOCOL_VERSION,
-      relay_transport_version: 2,
-      client_transport_version: 2,
         body: this.codec.encode('whalerein.v1.RevocationNotice', notice),
         expires_at_unix_ms: this.now() + 60_000,
       }
@@ -220,8 +271,6 @@ export class FakeAccessSimulator {
       device_id: deviceId,
       kind,
       protocol_version: PROTOCOL_VERSION,
-      relay_transport_version: 2,
-      client_transport_version: 2,
       channel_id: channelId,
       body,
       expires_at_unix_ms: this.now() + 60_000,
@@ -254,7 +303,6 @@ export class DeviceClient {
     this.pairing = null
     this.eventTopic = `whalerein/v1/h/${hostId}/d/${deviceId}/event`
     this.client = broker.connectFn()('mqtts://device.test', { clientId: `whalerein-device-${deviceId}` })
-    this.transport = new LogicalTransport({codec,publish:(topic,bytes)=>new Promise((resolve,reject)=>this.client.publish(topic,bytes,{qos:1},error=>error?reject(error):resolve()))})
     this.ready = new Promise((resolve) => {
       this.client.on('connect', () => {
         this.client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
@@ -268,9 +316,7 @@ export class DeviceClient {
   }
 
   #onEvent(topic, payload) {
-    this.transport.receive(topic,payload,`whalerein/v1/h/${this.hostId}/d/${this.deviceId}/ack`,bytes=>this.#deliverEvent(topic,bytes))
-      .then(consumed=>{if(!consumed)this.#deliverEvent(topic,payload)})
-      .catch(()=>{})
+    this.#deliverEvent(topic, Buffer.from(payload))
   }
 
   #deliverEvent(topic, payload) {
@@ -305,8 +351,6 @@ export class DeviceClient {
       device_id: this.deviceId,
       host_id: this.hostId,
       protocol_version: PROTOCOL_VERSION,
-      relay_transport_version: 2,
-      client_transport_version: 2,
       capabilities: { capabilities: ['sessions', 'events', 'messages', 'approvals', 'interrupt', 'sync', 'snapshot'], protocol_version: PROTOCOL_VERSION },
       device_nonce: randomId(8),
       display_name: displayName,
@@ -367,8 +411,6 @@ export class DeviceClient {
       device_id: this.deviceId,
       host_id: this.hostId,
       protocol_version: PROTOCOL_VERSION,
-      relay_transport_version: 2,
-      client_transport_version: 2,
       capabilities: { capabilities: ['sessions', 'events', 'messages', 'approvals', 'interrupt', 'sync', 'snapshot'], protocol_version: PROTOCOL_VERSION },
       client_nonce: randomId(8),
     })
@@ -422,8 +464,6 @@ export class DeviceClient {
       expires_at_unix_ms: expiresAt,
       trace_id: randomId(8),
       protocol_version: PROTOCOL_VERSION,
-      relay_transport_version: 2,
-      client_transport_version: 2,
       channel_id: this.channel.channelId,
       body: frame,
     }

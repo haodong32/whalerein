@@ -19,10 +19,12 @@ printf '%s' "${WHALEREIN_BROKER_PASSWORD}" > /run/whalerein/mqtt-access-password
 printf '%s' "${WHALEREIN_INTERNAL_TOKEN}" > /run/whalerein/internal-token
 chmod 0400 /run/whalerein/mqtt-access-password /run/whalerein/internal-token
 
-# Render the broker packet ceiling from the deployment environment. The source
-# configuration stays immutable in the image; the rendered copy is the one
-# mosquitto reads. Reject a non-numeric or non-positive value explicitly.
-max_packet_size="${WHALEREIN_MQTT_MAX_PACKET_SIZE:-4194304}"
+# Render the broker PUBLISH ceiling from the deployment environment (default
+# 1 MiB, matching brokerPacketLimitBytes). The source configuration stays
+# immutable in the image; the rendered copy is the one mosquitto reads. Reject
+# a non-numeric or non-positive value explicitly. Mosquitto's MQTT 5 Receive
+# Maximum is negotiated per connection and is not configured here.
+max_packet_size="${WHALEREIN_MQTT_MAX_PACKET_SIZE:-1048576}"
 case "$max_packet_size" in
   ''|*[!0-9]*)
     echo "WHALEREIN_MQTT_MAX_PACKET_SIZE must be a positive integer" >&2

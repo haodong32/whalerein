@@ -113,7 +113,7 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPolicyWithoutAStoreRead(t *testing
 	if device.Kind != policy.KindDevice || device.DeviceID != "d1" || device.Will != "whalerein/v1/presence/device/d1" {
 		t.Fatalf("device policy = %+v", device)
 	}
-	if len(device.Entries) != 4 { // three topic entries for h1 plus the will.
+	if len(device.Entries) != 6 { // five topic entries for h1 plus the will.
 		t.Fatalf("device entries = %+v", device.Entries)
 	}
 	for _, entry := range device.Entries {

@@ -87,7 +87,7 @@ func TestManagedAuthorizationScopesHTTPAndBroker(t *testing.T) {
 	connection, err := service.BrokerPolicy(ctx, brokerIdentity)
 	if err != nil || connection.SessionID != identity.SessionID || connection.Will != "" ||
 		connection.SessionRevision != 3 || connection.SessionExpiresAt != fixture.permit.ExpiresAt.UnixMilli() ||
-		len(connection.Entries) != 3 {
+		len(connection.Entries) != 5 {
 		t.Fatalf("connection=%+v err=%v", connection, err)
 	}
 	for _, entry := range connection.Entries {

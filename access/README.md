@@ -20,6 +20,7 @@ access/
    ├─ httpapi                 public and internal routes, protojson
    ├─ auth                    transport authorization, ACL, revocation
    ├─ pairing                 invitations and HELLO/FINISH registration
+   ├─ payload                 temporary ciphertext admission, staging and cleanup
    ├─ requests                request copy, dedupe and forwarding lease
    ├─ events                  device event routing by outer device_id
    ├─ broker                  MQTT 5 client, presence, callbacks support
@@ -27,8 +28,8 @@ access/
    └─ diagnostics             logs, /healthz, /readyz, /metrics
 ```
 
-Dependency direction: `httpapi -> auth,pairing,requests`; `requests,events ->
-store,broker`; `pairing -> store,broker`; `auth -> store`; `auth` never imports
+Dependency direction: `httpapi -> auth,pairing,requests,payload`; `requests,events ->
+store,broker`; `pairing -> store,broker`; `auth -> store`; `payload -> store`; `auth` never imports
 `broker`, `broker` never imports `auth`, and `httpapi` never touches
 PostgreSQL or MQTT directly.
 
@@ -103,6 +104,8 @@ rejects modified migration history or a newer database schema. Tables:
 | `grants` | Live/revoked device-to-host authorization and replay state |
 | `pairing_tokens` | SHA-256 invitation hash, expiry, failure count, used_at |
 | `requests` | the one request/status copy plus forwarding lease |
+| `temporary_ciphertext_objects` | node-local ciphertext scope, state, reserved/exact bytes, digest, hard expiry, reader count and cleanup retries |
+| `temporary_ciphertext_leases` | idempotent reader leases |
 
 Important constraints and indexes:
 
@@ -112,7 +115,17 @@ Important constraints and indexes:
 - partial `requests (forward_after)` index where `forward_state = 'pending'`.
 - partial `grants (host_id)` index where revoked and not replayed.
 - `requests (expires_at)` index for body-clearing cleanup.
+- partial `temporary_ciphertext_objects (expires_at)` and `(next_attempt_at)` indexes for expiry and cleanup.
+- partial `temporary_ciphertext_objects (node_id)` index for active uploads.
 
+Temporary ciphertext lives in one dedicated quota directory per node. Every
+object names one host, one purpose and exactly one authoritative parent
+identity (request, message or event), plus optional device, App session,
+channel and part fields. Its metadata is bounded by `storage.max_objects` and
+its files are deleted in bounded cleanup batches; expired and pending-cleanup
+bytes stay charged until deletion. The free-space reserve is measured on Unix
+filesystems; enabling the store on another platform fails startup instead of
+silently skipping the reserve. Object ids, paths, ciphertext and credentials are never logged.
 Presence remains broker-derived. No users, subscriptions or payment records
 are stored. Standalone is the default. External account mode validates signed
 Host and Device authorization against the configured issuer and region.
@@ -121,6 +134,9 @@ Cleanup runs every `cleanup.interval`:
 
 - expired pairing operations and `pairing_tokens` are deleted after `pairing_token_retention`;
 - expired requests lose both body columns;
+- expired temporary ciphertext is fenced, then its files are deleted in bounded
+  batches and its capacity released once; failed deletes stay charged and retry;
+- deleted temporary ciphertext tombstones older than the retention cap are removed;
 - handshake/query rows are deleted in batches of 2,000 once they have been expired
   for 24 hours; control and activation records retain IDs/digests/status for
   deduplication and recovery.
@@ -165,6 +181,7 @@ Configuration summary:
 | `revocation.ack_timeout` | host acknowledgement wait |
 | `presence.cache_ttl` | broker presence cache |
 | `cleanup.*` | cleanup interval and token retention |
+| `storage.*` | temporary ciphertext quota directory: enabled/root, node/owner id, per-object/host/node bytes, object and active-upload counts, free-space reserve, retention cap, cleanup and I/O timeouts |
 | `protocol.version` | supported wire version; only 1-1 is accepted, and any other value fails startup with the supported range |
 | `http.client_address.trusted_proxies` | CIDRs allowed to set `X-Whalerein-Client-IP`; empty means direct deployment |
 | `http.client_reference.key` / `window` | 256-bit master key (standard base64) and `monthly`/`daily` pseudonym window; the key is a secret and no reference is emitted without it |
@@ -513,12 +530,17 @@ is stored verbatim while the row has not expired. A late result may still advanc
 ## Diagnostics
 
 - `/healthz`: process liveness only.
-- `/readyz`: database ping plus an established, subscribed MQTT session.
+- `/readyz`: database ping plus an established, subscribed MQTT session; when
+  temporary storage is enabled it also requires a writable quota directory and
+  free space above the configured reserve.
 - `/metrics`: `http_request_duration_ms`, `http_request_errors_total{code}`,
   `host_request_duration_ms`, `host_request_errors_total`,
   `mqtt_route_errors_total`, `event_route_dropped_total`, `connected_hosts`,
   `connected_devices`, `revocation_latency_ms`,
-  `request_forward_retries_total`.
+  `request_forward_retries_total`, and the bounded `payload_*` series for
+  headroom, ready/reserved/expired bytes, object and upload counts, expiry
+  backlog, admission refusals, cleanup reclaims/retries and reconciliation
+  actions.
 - Logs are JSON with `trace_id`, request diagnostic id, status and duration.
   Host/device/request ids are masked with a per-process random HMAC salt,
   client addresses become `client_ref`/`client_ref_window`, and no plaintext
@@ -570,16 +592,23 @@ revocation. The device endpoint also accepts an administrator, so
 `device_request` identifies the entry point rather than a human actor. Replay
 logs include original revocation timestamps instead of implying a new revoke.
 
-### Stable identity and logical transport
+### Stable identity and complete-packet relay
 
-Access reassembles/acknowledges opaque logical MQTT envelopes before dispatch,
-using bounded state rather than raising broker limits. Device receivers may
-publish receipts only on their own active-grant ACK topic. Packet, fragment,
-envelope, concurrency, reservation and timeout budgets come from the `transport:`
-configuration block and its packaged profile; explicit overrides must satisfy the
-same relations. The HTTP result-body budget derives from the selected profile
-(24 MiB for the default 16 MiB envelope) so base64 expansion and JSON framing
-always fit. Configuration changes take effect only after a process restart.
+Access publishes one complete MQTT 5 message per PUBLISH and requires
+`relay_version=3` on requests, results, events, readiness proofs and receive
+advertisements. A hop selects inline or reference from the exact encoded
+packet and the minimum of the local profile, broker and receiver packet limits;
+an oversized durable body is staged as exact ciphertext and published only as a
+packet-sized reference after staging completes. Each connection uses ordered
+per-topic queues with bounded depth, waiting bytes and in-flight work. There are
+no fragments, reassembly buffers, transfer receipts or device ACK topics.
+Packet, envelope, concurrency, reservation and transfer budgets come from the
+`transport:` configuration block and its packaged profile; `receive_maximum`,
+`send_in_flight`, `send_queue_depth` and `send_queue_bytes` bound the ordered
+publisher. Explicit overrides must satisfy the same relations. The HTTP
+result-body budget derives from the selected profile (24 MiB for the default
+16 MiB envelope) so base64 expansion and JSON framing always fit. Configuration
+changes take effect only after a process restart.
 
 Pairing consumes the invitation and writes device/grant/activation-outbox state
 in one PostgreSQL transaction. The existing requests queue retries idempotent
@@ -587,8 +616,9 @@ host COMMIT delivery until its deadline, including after Access restart. IDs
 cannot be rebound to another public-key fingerprint. Pairing recovery reuses
 the identity; it never revokes an older active grant as compensation.
 
-Access requires negotiated transport-v2 capability before fragment delivery;
-keep it version-aligned with the plugin and clients.
+A Device publishes its own `.../d/{device_id}/ready` receive advertisement and
+subscribes to its own event and notice topics; it no longer publishes an
+acknowledgement. Keep the broker policy version-aligned with Access and clients.
 
 ## Managed Device sessions
 

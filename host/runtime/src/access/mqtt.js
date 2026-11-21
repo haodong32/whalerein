@@ -7,7 +7,14 @@ import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
-import { LogicalTransport, MESSAGE_BYTES, TRANSPORT_VERSION, PACKET_BYTES } from './transport.js'
+import {
+  BROKER_PACKET_LIMIT_BYTES,
+  PACKET_BYTES,
+  RELAY_VERSION,
+  RelayTransport,
+  publishPacketBytes,
+} from './transport.js'
+import { RelayObjectClient } from './relay-client.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   resolveTransportProfile,
@@ -17,7 +24,8 @@ import {
   validateTransportProfiles,
 } from '../contracts/transport.js'
 
-// Leave room for protobuf/MQTT headers and HTTP base64 wrapping in Access.
+// Kept for callers that imported the old constant; the live limit comes from
+// the resolved transport budget.
 export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
 
 export class MqttAccess {
@@ -36,7 +44,9 @@ export class MqttAccess {
   #handlers = {}
   #disconnectReason = -1
   #transport
-  #peerCapable = false
+  #relay = null
+  #brokerPacketBytes = BROKER_PACKET_LIMIT_BYTES
+  #accessReceive = null
   #lastPublish = { kind: 'none', bytes: 0 }
 
   /**
@@ -45,6 +55,11 @@ export class MqttAccess {
    * @param {string} options.hostId
    * @param {string} options.token broker password.
    * @param {string} [options.caFile]
+   * @param {string} [options.accessOrigin] configured Access HTTPS origin.
+   * @param {Uint8Array} [options.authorizationPrivateKey] Ed25519 seed already
+   *   announced in HostReady; used by the Host-authority relay client.
+   * @param {object} [options.relayClient] test seam for relay object HTTPS.
+   * @param {number} [options.relayObjectTtlMs]
    * @param {number} [options.reconnectMinMs]
    * @param {number} [options.reconnectMaxMs]
    * @param {(url: string, opts: object) => object} [options.connect] test seam.
@@ -59,6 +74,10 @@ export class MqttAccess {
     hostId,
     token,
     authorizationPublicKey = null,
+    authorizationPrivateKey = null,
+    accessOrigin = '',
+    relayClient = null,
+    relayObjectTtlMs = 5 * 60 * 1000,
     caFile = '',
     reconnectMinMs = 500,
     reconnectMaxMs = 30_000,
@@ -83,21 +102,37 @@ export class MqttAccess {
     this.logger = logger
     this.now = now
     this.codec = resolveCodec(codec)
+    this.relayObjectTtlMs = Number.isSafeInteger(relayObjectTtlMs) && relayObjectTtlMs > 0
+      ? relayObjectTtlMs
+      : 5 * 60 * 1000
     validateTransportProfiles()
     const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
     this.profile = resolved.wireName
     this.budget = typeof transportProfile === 'object' && transportProfile !== null
       ? validateTransportBudget(transportProfile)
       : transportProfileBudget(resolved.name)
-    this.#transport = new LogicalTransport({
+    if (!relayClient && accessOrigin && authorizationPrivateKey instanceof Uint8Array) {
+      relayClient = new RelayObjectClient({
+        origin: accessOrigin,
+        hostId,
+        privateKey: authorizationPrivateKey,
+        codec: this.codec,
+        now,
+        timeoutMs: this.budget.transfer_timeout_ms,
+        caFile,
+        logger,
+      })
+    }
+    this.#relay = relayClient
+    this.#transport = new RelayTransport({
       codec: this.codec,
-      onDeliveryError: () => this.logger?.error('logical_delivery_failed', { code: 'internal' }),
+      relay: this.#relay,
+      budget: this.budget,
+      brokerPacketBytes: BROKER_PACKET_LIMIT_BYTES,
       publish: (topic, bytes) => this.#publish(topic, bytes),
       now,
-      fragmentPayloadBytes: this.budget.fragment_payload_bytes,
-      envelopeBytes: this.budget.envelope_bytes,
-      profile: this.profile,
       logger: this.logger,
+      objectTtlMs: this.relayObjectTtlMs,
     })
     this.#verifyControlEnvelopes()
     this.#backoffMs = reconnectMinMs
@@ -127,21 +162,39 @@ export class MqttAccess {
       profile: this.profile,
       budget: this.budget,
       connection_generation: generation,
+      relay_version: RELAY_VERSION,
     })
   }
 
+  /** Access's authenticated receive advertisement for this Hop, or null. */
+  accessReceiveAdvertisement() {
+    return this.#accessReceive
+  }
+
+  /** Effective Host -> Access packet limit after Access advertised its budget. */
+  sendPacketLimit() {
+    return this.#transport.effectivePacketLimit(this.#accessReceive?.budget?.packet_bytes)
+  }
+
   #verifyControlEnvelopes() {
-    const limit = this.budget.envelope_bytes
+    const envelopeLimit = this.budget.envelope_bytes
     const samples = [
       ['host_ready', 'whalerein.v1.HostReady', {
-        host_id: this.hostId, connected_at_unix_ms: 1, transport_version: TRANSPORT_VERSION,
-        receive: { profile: this.profile, budget: this.budget, connection_generation: 1 },
+        host_id: this.hostId, connected_at_unix_ms: 1,
+        receive: {
+          profile: this.profile, budget: this.budget,
+          connection_generation: 1, relay_version: RELAY_VERSION,
+        },
+        relay_version: RELAY_VERSION,
       }],
       ['channel_ready', 'whalerein.v1.ChannelReady', {
         host_id: this.hostId, device_id: 'device', protocol_version: PROTOCOL_VERSION,
         capabilities: { capabilities: ['sessions', 'events'], protocol_version: PROTOCOL_VERSION },
         host_nonce: 'nonce',
-        receive: { profile: this.profile, budget: this.budget, connection_generation: 1 },
+        receive: {
+          profile: this.profile, budget: this.budget,
+          connection_generation: 1, relay_version: RELAY_VERSION,
+        },
       }],
       ['watch_ready', 'whalerein.v1.WatchReady', {
         watch_id: 'watch', lease_ms: 30000,
@@ -154,6 +207,7 @@ export class MqttAccess {
       ['result_too_large', 'whalerein.v1.HostResult', {
         request_id: 'request', host_id: this.hostId, device_id: 'device', status: 'failed',
         error_code: 'payload_too_large', protocol_version: PROTOCOL_VERSION, channel_id: 'channel',
+        relay_version: RELAY_VERSION,
       }],
       ['attachment_control', 'whalerein.v1.OpenAttachmentResult', {
         session: { host_id: this.hostId, session_id: 'session' }, attachment_ref: 'attachment',
@@ -164,10 +218,23 @@ export class MqttAccess {
     for (const [kind, type, value] of samples) {
       let size
       try { size = this.codec.encode(type, value).length } catch { throw new ConfigError('invalid_config', `control envelope ${kind} is not encodable`) }
-      if (size > limit) {
-        this.logger?.warn('transport_control_too_large', { code: 'invalid_config', kind, bytes: size, limit })
+      if (size > envelopeLimit) {
+        this.logger?.warn('transport_control_too_large', { code: 'invalid_config', kind, bytes: size, limit: envelopeLimit })
         throw new ConfigError('invalid_config', `control envelope ${kind} exceeds the receive budget`)
       }
+    }
+    // HostReady is a bootstrap body: it must travel inline in one packet.
+    const ready = this.codec.encode('whalerein.v1.HostReady', samples[0][2])
+    const result = this.codec.encode('whalerein.v1.HostResult', {
+      host_id: this.hostId, status: 'succeeded', result_body: ready,
+      completed_at_unix_ms: 1, protocol_version: PROTOCOL_VERSION, relay_version: RELAY_VERSION,
+    })
+    const packet = publishPacketBytes(this.topics.result, result.length)
+    if (packet > this.budget.packet_bytes) {
+      this.logger?.warn('transport_control_too_large', {
+        code: 'invalid_config', kind: 'host_ready', bytes: packet, limit: this.budget.packet_bytes,
+      })
+      throw new ConfigError('invalid_config', 'control envelope host_ready exceeds the packet budget')
     }
   }
 
@@ -197,7 +264,7 @@ export class MqttAccess {
     this.#connected = false
     this.#generation++
     this.#transport.reset()
-    this.#peerCapable = false
+    this.#accessReceive = null
     if (this.#reconnectTimer) {
       clearTimeout(this.#reconnectTimer)
       this.#reconnectTimer = null
@@ -227,7 +294,7 @@ export class MqttAccess {
   #options() {
     const options = {
       protocolVersion: 5,
-      properties: { maximumPacketSize: MAX_MQTT_PACKET_BYTES },
+      properties: { maximumPacketSize: this.budget.packet_bytes },
       clientId: `whalerein-host-${this.hostId}`,
       username: `host:${this.hostId}`,
       password: this.token,
@@ -302,7 +369,7 @@ export class MqttAccess {
       const wasConnected = this.#connected
       this.#connected = false
       this.#transport.reset()
-      this.#peerCapable = false
+      this.#accessReceive = null
       if (wasConnected) {
         this.logger?.warn('mqtt_disconnected', { code: 'unavailable', reasonCode: this.#disconnectReason, reason: this.#disconnectReason < 0 ? 'transport_closed' : 'broker_disconnect', generation, ...this.#lastPublish })
         this.#handlers.onDisconnected?.()
@@ -313,13 +380,12 @@ export class MqttAccess {
 
   async #onConnected(client, generation, connack) {
     const maximum = connack?.properties?.maximumPacketSize
-    if (maximum !== undefined && maximum < PACKET_BYTES) {
-      this.#lastErrorCode = 'protocol_version_incompatible'
-      for (const waiter of this.#connectWaiters) waiter.reject?.(new PluginError('protocol_version_incompatible', 'broker packet budget is below transport minimum'))
-      this.#connectWaiters.clear()
-      client.end(true)
-      return
-    }
+    // A smaller broker ceiling lowers the effective limit; it never raises it.
+    this.#brokerPacketBytes = Number.isSafeInteger(maximum) && maximum > 0
+      ? Math.min(maximum, BROKER_PACKET_LIMIT_BYTES)
+      : BROKER_PACKET_LIMIT_BYTES
+    this.#transport.brokerPacketBytes = this.#brokerPacketBytes
+    this.#accessReceive = null
     this.#connected = true
     if (this.#attempts > 1) this.#reconnects++
     this.#backoffMs = this.reconnectMinMs
@@ -370,8 +436,8 @@ export class MqttAccess {
     const ready = {
       host_id: this.hostId,
       connected_at_unix_ms: this.now(),
-      transport_version: TRANSPORT_VERSION,
       receive,
+      relay_version: RELAY_VERSION,
     }
     if (this.authorizationPublicKey) ready.authorization_public_key = this.authorizationPublicKey
     const body = this.codec.encode('whalerein.v1.HostReady', ready)
@@ -381,7 +447,14 @@ export class MqttAccess {
       result_body: body,
       completed_at_unix_ms: this.now(),
       protocol_version: PROTOCOL_VERSION,
+      relay_version: RELAY_VERSION,
     })
+    // Readiness is a bootstrap body and must stay one inline packet on the
+    // current hop even when the broker ceiling is lower than the local profile.
+    const packet = publishPacketBytes(this.topics.result, result.length)
+    if (packet > this.#transport.effectivePacketLimit(this.#accessReceive?.budget?.packet_bytes)) {
+      throw new PluginError('protocol_version_incompatible', 'HostReady exceeds the hop packet budget')
+    }
     await this.#publish(this.topics.result, result)
   }
 
@@ -396,28 +469,47 @@ export class MqttAccess {
       return
     }
     if (topic !== this.topics.request) return
-    this.#transport.receive(topic, payload, this.topics.result, (bytes) => this.#dispatchRequest(bytes))
-      .then((consumed) => { if (!consumed) this.#dispatchRequest(payload) })
+    this.#transport.receiveComplete(topic, payload)
+      .then((request) => this.#dispatchRequest(request))
       .catch((error) => this.logger?.warn('transport_receive_failed', {
         code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
         bytes: payload?.length ?? 0,
-        limit: PACKET_BYTES,
+        limit: this.budget.packet_bytes,
         generation: this.#generation,
       }))
   }
 
-  #dispatchRequest(payload) {
-    let request
-    try {
-      request = this.codec.decode('whalerein.v1.HostRequest', payload)
-    } catch {
-      this.logger?.warn('request_decode_failed', { code: 'invalid_argument' })
+  #dispatchRequest(request) {
+    // The Access receive advertisement for the Host -> Access hop is control
+    // information, never business. It is scoped to this authenticated broker
+    // generation and cannot raise a local limit.
+    if (request?.kind === 'REQUEST_KIND_ACCESS_READY') {
+      this.#adoptAccessReady(request)
       return
     }
-    this.#peerCapable = this.#peerCapable || request.relay_transport_version === TRANSPORT_VERSION
     return Promise.resolve()
       .then(() => this.#handlers.onRequest?.(request))
-      .catch(() => this.logger?.error('request_handler_failed', { code: 'internal', request: request.request_id }))
+      .catch(() => this.logger?.error('request_handler_failed', { code: 'internal', request: request?.request_id }))
+  }
+
+  #adoptAccessReady(request) {
+    let advertisement
+    try {
+      advertisement = this.codec.decode('whalerein.v1.ReceiveAdvertisement', request.body)
+      advertisement = validateReceiveAdvertisement(advertisement)
+    } catch (error) {
+      this.logger?.warn('access_ready_rejected', {
+        code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
+        generation: this.#generation,
+      })
+      return
+    }
+    this.#accessReceive = advertisement
+    this.logger?.info('access_receive_advertised', {
+      generation: advertisement.connection_generation,
+      packet_bytes: advertisement.budget.packet_bytes,
+      envelope_bytes: advertisement.budget.envelope_bytes,
+    })
   }
 
   #scheduleReconnect() {
@@ -437,10 +529,10 @@ export class MqttAccess {
   async #publish(topic, payload) {
     const client = this.#client
     if (!client || !this.#connected) throw new PluginError('unavailable', 'mqtt not connected')
-    if (payload.length > PACKET_BYTES) {
+    if (payload.length > this.budget.envelope_bytes) {
       this.#publishErrors++
-      this.logger?.warn('mqtt_payload_too_large', { code: 'unavailable', kind: topic === this.topics.result ? 'result' : 'event', bytes: payload.length, limit: PACKET_BYTES, generation: this.#generation })
-      throw new PluginError('unavailable', 'mqtt payload exceeds application limit')
+      this.logger?.warn('mqtt_payload_too_large', { code: 'payload_too_large', kind: topic === this.topics.result ? 'result' : 'event', bytes: payload.length, limit: this.budget.envelope_bytes, generation: this.#generation })
+      throw new PluginError('payload_too_large', 'mqtt payload exceeds the envelope budget')
     }
     const publication = { kind: topic === this.topics.result ? 'result' : 'event', bytes: payload.length }
     const generation = this.#generation
@@ -464,17 +556,23 @@ export class MqttAccess {
     } finally { clearTimeout(timer) }
   }
 
-  #sendLogical(topic, payload) {
-    if (payload.length > MESSAGE_BYTES) this.logger?.warn('mqtt_payload_too_large', {code:'payload_too_large', bytes:payload.length, limit:MESSAGE_BYTES})
-    return this.#transport.send(topic, payload, this.topics.request, this.#peerCapable)
-  }
-
+  /** Publish one complete HostResult, inline or as a ready reference. */
   publishResult(payload) {
-    return this.#sendLogical(this.topics.result, payload)
+    return this.#transport.sendComplete(this.topics.result, payload, {
+      kind: 'result',
+      receiverLimit: this.#accessReceive?.budget?.packet_bytes,
+      expiresAt: this.now() + this.relayObjectTtlMs,
+    })
   }
 
-  publishEvent(payload) {
-    return this.#sendLogical(this.topics.event, payload)
+  /** Publish one complete EventEnvelope, inline or as a ready reference. */
+  publishEvent(payload, { live = false } = {}) {
+    return this.#transport.sendComplete(this.topics.event, payload, {
+      kind: 'event',
+      live,
+      receiverLimit: this.#accessReceive?.budget?.packet_bytes,
+      expiresAt: this.now() + this.relayObjectTtlMs,
+    })
   }
 
   /** Wait until the first successful connect+subscribe+Ready cycle. */

@@ -88,14 +88,27 @@ async fn subscribe_with_reason(listener: &TcpListener, reason: u8) -> TcpStream 
         Packet::Connect(..)
     ));
     stream.write_all(&[0x20, 3, 0, 0, 0]).await.unwrap();
-    let Packet::Subscribe(subscription) = read_packet(&mut stream, &mut buffer).await else {
-        panic!("expected subscribe")
-    };
-    let [high, low] = subscription.pkid.to_be_bytes();
-    stream
-        .write_all(&[0x90, 4, high, low, 0, reason])
-        .await
-        .unwrap();
+    // The Device publishes its receive advertisement after CONNACK and then
+    // subscribes to its event and notice topics. Acknowledge both the QoS 1
+    // publication and each subscription so the event loop can progress.
+    let mut subscriptions = 0;
+    while subscriptions < 2 {
+        match read_packet(&mut stream, &mut buffer).await {
+            Packet::Publish(publish) => {
+                let [high, low] = publish.pkid.to_be_bytes();
+                stream.write_all(&[0x40, 2, high, low]).await.unwrap();
+            }
+            Packet::Subscribe(subscription) => {
+                let [high, low] = subscription.pkid.to_be_bytes();
+                stream
+                    .write_all(&[0x90, 4, high, low, 0, reason])
+                    .await
+                    .unwrap();
+                subscriptions += 1;
+            }
+            other => panic!("unexpected packet before subscribe: {other:?}"),
+        }
+    }
     stream
 }
 
@@ -154,6 +167,7 @@ fn event(core: &Core, session: &str, watch: &str) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 3,
         ..Default::default()
     }
 }
@@ -203,7 +217,11 @@ async fn invalid_live_ciphertext_is_reported_without_revoking_pairing() {
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         let mut frame = event(&peer_core, "session-1", "watch-1");
-        frame.nonce.clear();
+        // Tamper with the sealed ciphertext: AEAD must reject it before
+        // business handling without revoking the pairing.
+        if let Some(byte) = frame.ciphertext.last_mut() {
+            *byte ^= 1;
+        }
         publish(&mut stream, frame).await;
         let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
@@ -586,6 +604,7 @@ fn sealed_event(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 3,
         ..Default::default()
     }
 }

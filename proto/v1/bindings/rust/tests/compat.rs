@@ -793,17 +793,16 @@ fn expanded_conversation_attachment_and_transport_shapes_are_typed() {
         profile: TransportProfile::Default as i32,
         budget: Some(TransportBudget {
             packet_bytes: 65_536,
-            fragment_payload_bytes: 61_440,
-            fragment_count: 274,
             envelope_bytes: 16 * 1024 * 1024,
             bulk_concurrency: 4,
             reserved_bytes: 32 * 1024 * 1024,
-            fragment_idle_timeout_ms: 30_000,
             transfer_timeout_ms: 120_000,
         }),
         connection_generation: 3,
+        relay_version: 3,
     };
     assert_eq!(advertisement.connection_generation, 3);
+    assert_eq!(advertisement.relay_version, 3);
     assert!(advertisement.budget.is_some());
 }
 

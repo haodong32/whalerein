@@ -9,14 +9,31 @@ import { AdapterError } from '../errors.js'
 export const RESULT_ENVELOPE_OVERHEAD_BYTES = 2048
 export const RESULT_FRAMING_OVERHEAD_BYTES = 1024
 
-/** Default policy from one packaged transport profile. */
+/**
+ * Default policy from one packaged transport profile. A part travels as one
+ * complete HTTPS read; its raw chunk is bounded by the complete MQTT packet
+ * budget and the transfer by the single relay transfer timeout. There is no
+ * fragment width or idle-reassembly timeout in the epoch-3 contract.
+ */
 export function defaultAttachmentPolicy(profile) {
+  const overall = profile.transferTimeoutMs
+  // The receiver requires a strictly positive idle window below the overall
+  // transfer deadline. Keep the historical 30 s idle ceiling unless a shorter
+  // transfer timeout demands a smaller one.
+  const idle = Math.max(1, Math.min(30_000, Math.floor(overall / 2)))
+  // One part travels as a complete result envelope inside one MQTT packet.
+  // Reserve the profile's framing overhead so a 64 KiB hop carries about
+  // 60 KiB of part ciphertext instead of turning every part into an HTTPS
+  // reference and consuming the temporary-object budget.
+  const packet = Number.isSafeInteger(profile.packetBytes) && profile.packetBytes > 0
+    ? profile.packetBytes
+    : 65536
   return {
     max_total_bytes: 0,
-    max_chunk_bytes: profile.fragmentPayloadBytes,
+    max_chunk_bytes: Math.max(1024, packet - 4096),
     max_concurrent: profile.bulkConcurrency,
-    idle_timeout_ms: profile.fragmentIdleTimeoutMs,
-    overall_timeout_ms: profile.transferTimeoutMs,
+    idle_timeout_ms: idle,
+    overall_timeout_ms: overall,
   }
 }
 

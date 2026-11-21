@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -65,6 +66,7 @@ type Config struct {
 	Revocation            RevocationConfig `yaml:"revocation"`
 	Presence              PresenceConfig   `yaml:"presence"`
 	Cleanup               CleanupConfig    `yaml:"cleanup"`
+	Storage               StorageConfig    `yaml:"storage"`
 	Transport             TransportConfig  `yaml:"transport"`
 	Protocol              ProtocolConfig   `yaml:"protocol"`
 	Log                   LogConfig        `yaml:"log"`
@@ -234,6 +236,29 @@ type CleanupConfig struct {
 	PairingTokenRetention Duration `yaml:"pairing_token_retention"`
 }
 
+// StorageConfig bounds one node's temporary ciphertext quota directory.
+//
+// The store is disabled unless an operator enables it and supplies an absolute
+// writable root. Byte limits are ordered object <= host <= node and a minimum
+// filesystem reserve is checked against actual free space before admission.
+type StorageConfig struct {
+	Enabled               bool     `yaml:"enabled"`
+	RootDir               string   `yaml:"root_dir"`
+	NodeID                string   `yaml:"node_id"`
+	OwnerID               string   `yaml:"owner_id"`
+	MaxObjectBytes        int64    `yaml:"max_object_bytes"`
+	MaxHostBytes          int64    `yaml:"max_host_bytes"`
+	MaxNodeBytes          int64    `yaml:"max_node_bytes"`
+	MaxObjects            int      `yaml:"max_objects"`
+	MaxActiveUploads      int      `yaml:"max_active_uploads"`
+	FreeSpaceReserveBytes int64    `yaml:"free_space_reserve_bytes"`
+	Retention             Duration `yaml:"retention"`
+	CleanupInterval       Duration `yaml:"cleanup_interval"`
+	CleanupBatch          int      `yaml:"cleanup_batch"`
+	UploadTimeout         Duration `yaml:"upload_timeout"`
+	ReadTimeout           Duration `yaml:"read_timeout"`
+}
+
 // ProtocolConfig pins the supported wire protocol version.
 type ProtocolConfig struct {
 	Version uint32 `yaml:"version"`
@@ -332,6 +357,21 @@ func Default() Config {
 		Cleanup: CleanupConfig{
 			Interval:              Duration(time.Minute),
 			PairingTokenRetention: Duration(24 * time.Hour),
+		},
+		Storage: StorageConfig{
+			RootDir:               "/var/lib/whalerein/payloads",
+			NodeID:                "access",
+			MaxObjectBytes:        16 << 20,
+			MaxHostBytes:          256 << 20,
+			MaxNodeBytes:          1 << 30,
+			MaxObjects:            1024,
+			MaxActiveUploads:      16,
+			FreeSpaceReserveBytes: 1 << 30,
+			Retention:             Duration(24 * time.Hour),
+			CleanupInterval:       Duration(30 * time.Second),
+			CleanupBatch:          100,
+			UploadTimeout:         Duration(2 * time.Minute),
+			ReadTimeout:           Duration(60 * time.Second),
 		},
 		Transport: TransportConfig{Profile: whalereinv1.DefaultTransportProfile},
 		Protocol:  ProtocolConfig{Version: 1},
@@ -604,6 +644,7 @@ func (c Config) Validate() error {
 	if c.Cleanup.Interval <= 0 || c.Cleanup.PairingTokenRetention <= 0 {
 		problems = append(problems, "cleanup durations must be positive")
 	}
+	problems = append(problems, c.validateStorage()...)
 	if c.Protocol.Version < MinSupportedProtocolVersion || c.Protocol.Version > MaxSupportedProtocolVersion {
 		problems = append(problems, fmt.Sprintf(
 			"protocol.version %d is unsupported; supported versions: %d-%d",
@@ -622,6 +663,67 @@ func (c Config) Validate() error {
 	if len(problems) > 0 {
 		return errors.New("invalid config: " + strings.Join(problems, "; "))
 	}
+	return nil
+}
+
+// validateStorage checks the temporary ciphertext quota settings and proves
+// the root directory is writable before any listener opens.
+func (c Config) validateStorage() []string {
+	if !c.Storage.Enabled {
+		return nil
+	}
+	var problems []string
+	add := func(condition bool, message string) {
+		if condition {
+			problems = append(problems, message)
+		}
+	}
+	add(strings.TrimSpace(c.Storage.RootDir) == "" || !filepath.IsAbs(c.Storage.RootDir),
+		"storage.root_dir must be an absolute path")
+	add(strings.TrimSpace(c.Storage.NodeID) == "",
+		"storage.node_id is required")
+	add(c.Storage.MaxObjectBytes <= 0 || c.Storage.MaxHostBytes <= 0 || c.Storage.MaxNodeBytes <= 0,
+		"storage byte limits must be positive")
+	add(c.Storage.MaxHostBytes < c.Storage.MaxObjectBytes,
+		"storage.max_host_bytes must be at least storage.max_object_bytes")
+	add(c.Storage.MaxNodeBytes < c.Storage.MaxHostBytes,
+		"storage.max_node_bytes must be at least storage.max_host_bytes")
+	add(c.Storage.MaxObjects <= 0, "storage.max_objects must be positive")
+	add(c.Storage.MaxActiveUploads <= 0 || c.Storage.MaxActiveUploads > c.Storage.MaxObjects,
+		"storage.max_active_uploads must be positive and at most storage.max_objects")
+	add(c.Storage.FreeSpaceReserveBytes <= 0,
+		"storage.free_space_reserve_bytes must be positive")
+	add(c.Storage.Retention <= 0, "storage.retention must be positive")
+	add(c.Storage.CleanupInterval <= 0, "storage.cleanup_interval must be positive")
+	add(c.Storage.CleanupBatch <= 0, "storage.cleanup_batch must be positive")
+	add(c.Storage.UploadTimeout <= 0, "storage.upload_timeout must be positive")
+	add(c.Storage.ReadTimeout <= 0, "storage.read_timeout must be positive")
+	add(c.Storage.UploadTimeout.D() > c.Storage.Retention.D(),
+		"storage.upload_timeout must not exceed storage.retention")
+	if len(problems) == 0 {
+		if err := ensureStorageRoot(c.Storage.RootDir); err != nil {
+			problems = append(problems, "storage.root_dir: "+err.Error())
+		}
+	}
+	return problems
+}
+
+// ensureStorageRoot creates the quota directory and proves it is writable with
+// a short-lived probe file.
+func ensureStorageRoot(root string) error {
+	if err := os.MkdirAll(filepath.Join(root, "objects"), 0o750); err != nil {
+		return errors.New("cannot be created")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "tmp"), 0o750); err != nil {
+		return errors.New("cannot be created")
+	}
+	file, err := os.CreateTemp(filepath.Join(root, "tmp"), ".config-probe-*")
+	if err != nil {
+		return errors.New("is not writable")
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
 	return nil
 }
 
@@ -694,5 +796,15 @@ func (c Config) Redacted() map[string]any {
 		"client_address_trusted_proxies": len(c.HTTP.ClientAddress.TrustedProxies),
 		"client_reference_enabled":       strings.TrimSpace(c.HTTP.ClientReference.Key) != "",
 		"client_reference_window":        c.HTTP.ClientReference.Window,
+		"storage_enabled":                c.Storage.Enabled,
+		"storage_root_configured":        c.Storage.RootDir != "",
+		"storage_node_id":                c.Storage.NodeID,
+		"storage_max_object_bytes":       c.Storage.MaxObjectBytes,
+		"storage_max_host_bytes":         c.Storage.MaxHostBytes,
+		"storage_max_node_bytes":         c.Storage.MaxNodeBytes,
+		"storage_max_objects":            c.Storage.MaxObjects,
+		"storage_max_active_uploads":     c.Storage.MaxActiveUploads,
+		"storage_free_space_reserve":     c.Storage.FreeSpaceReserveBytes,
+		"storage_retention":              c.Storage.Retention.D().String(),
 	}
 }

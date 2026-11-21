@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use prost::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use whalerein_proto::{
@@ -692,7 +693,7 @@ async fn run_connection(
         let mqtt = client.run(
             stop_requested,
             |envelope| {
-                let bytes = envelope.ciphertext.len();
+                let bytes = envelope.encoded_len();
                 if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > event_queue_bytes {
                     task_queued.fetch_sub(bytes, Ordering::SeqCst);
                     task_overflow.store(true, Ordering::SeqCst);
@@ -704,6 +705,9 @@ async fn run_connection(
                 }
                 true
             },
+            // Result notices are command-scoped; the observation receiver
+            // ignores them instead of printing or fetching anything.
+            |_| true,
             |state| match state {
                 MqttConnectionEvent::Subscribed => {
                     if let Some(sender) = ready_tx.take() {
@@ -942,7 +946,10 @@ async fn conversation_loop(
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 };
-                queued.fetch_sub(envelope.ciphertext.len(), Ordering::SeqCst);
+                queued.fetch_sub(envelope.encoded_len(), Ordering::SeqCst);
+                // A referenced event is fetched and verified over HTTPS before
+                // AEAD; a partial or failed fetch never becomes an event.
+                let envelope = core.resolve_event_envelope(&envelope).await?;
                 let update = match crate::sync::open_event(&channel, &envelope)? {
                     crate::sync::OpenedEvent::Update(update) => update,
                     crate::sync::OpenedEvent::Closed(closed) => {

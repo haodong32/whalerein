@@ -3,8 +3,6 @@
 package broker
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,8 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -127,9 +123,19 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 	}
 
 	// Host Ready triggers the readiness handler and confirms presence.
-	readyBody, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h-e2e", ConnectedAtUnixMs: time.Now().UnixMilli()})
+	readyBody, _ := proto.Marshal(&whalereinv1.HostReady{
+		HostId: "h-e2e", ConnectedAtUnixMs: time.Now().UnixMilli(), RelayVersion: RelayEpoch,
+		Receive: &whalereinv1.ReceiveAdvertisement{
+			Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
+			Budget: &whalereinv1.TransportBudget{
+				PacketBytes: 64 * 1024, EnvelopeBytes: 16 << 20, BulkConcurrency: 4,
+				ReservedBytes: 32 << 20, TransferTimeoutMs: 120000,
+			},
+			ConnectionGeneration: 1, RelayVersion: RelayEpoch,
+		},
+	})
 	publishProto(t, host, ResultTopic("h-e2e"), &whalereinv1.HostResult{
-		HostId: "h-e2e", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: readyBody,
+		HostId: "h-e2e", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: readyBody, RelayVersion: RelayEpoch,
 	})
 	select {
 	case hostID := <-ready:
@@ -159,7 +165,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 
 	// Host -> Access result reaches the permanent result handler.
 	publishProto(t, host, ResultTopic("h-e2e"), &whalereinv1.HostResult{
-		RequestId: "permanent-result", HostId: "h-e2e", DeviceId: "d-e2e", Status: whalereinv1.OnlineStatus_host_accepted,
+		RequestId: "permanent-result", HostId: "h-e2e", DeviceId: "d-e2e", Status: whalereinv1.OnlineStatus_host_accepted, RelayVersion: RelayEpoch,
 	})
 	select {
 	case result := <-results:
@@ -171,7 +177,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 	}
 
 	// Host -> Access event reaches the event handler.
-	eventPayload, _ := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h-e2e", DeviceId: "d-e2e", Ciphertext: []byte("x")})
+	eventPayload, _ := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h-e2e", DeviceId: "d-e2e", Ciphertext: []byte("x"), RelayVersion: RelayEpoch})
 	publishRaw(t, host, EventTopic("h-e2e"), eventPayload)
 	select {
 	case deviceID := <-events:
@@ -196,7 +202,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 					continue
 				}
 				publishProto(t, host, ResultTopic("h-e2e"), &whalereinv1.HostResult{
-					RequestId: sent.GetRequestId(), HostId: "h-e2e", Status: whalereinv1.OnlineStatus_succeeded,
+					RequestId: sent.GetRequestId(), HostId: "h-e2e", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: RelayEpoch,
 				})
 				return
 			case <-time.After(100 * time.Millisecond):
@@ -328,7 +334,9 @@ func integrationDevicePolicy(hostID, deviceID string) string {
 	fmt.Fprintf(&builder, "will %s\n", DeviceWillTopic(deviceID))
 	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
-	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceAckTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceReadyTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 - %s\n", DeviceWillTopic(deviceID))
 	return builder.String()
 }
@@ -390,102 +398,12 @@ func publishRaw(t *testing.T, client *paho.Client, topic string, payload []byte)
 	}
 }
 
-// TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust uses the
-// case-scoped 1 MiB Mosquitto line. CONNECT admission is exercised separately;
-// here the callback admits only the synthetic Host and device fixtures. No
-// production broker or user devices are modified.
+// TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust was the
+// fragment-based cross-language relay case. The fragment transport, its
+// WRMQTT2 framing and its receipt topics no longer exist; the epoch-3 inline
+// and reference relay is covered by tests/integration/drivers/transport/
+// mqtt-boundary-message.test.js and mqtt-large-message.test.js. This case is
+// retained only to record that the old fixture cannot speak the new relay.
 func TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust(t *testing.T) {
-	mqttURL := os.Getenv("WHALEREIN_TEST_MQTT_URL")
-	if mqttURL == "" {
-		mqttURL = "mqtt://127.0.0.1:1883"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	startIntegrationCallback(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	presence := NewPresence(time.Minute, nil, logger)
-	var service *Service
-	cfg := config.BrokerConfig{URL: mqttURL, ClientID: "transport-access-probe", Username: "access", Password: integrationCredential(t, "WHALEREIN_TEST_ACCESS_PASSWORD"), ConnectTimeout: config.Duration(5 * time.Second), PublishTimeout: config.Duration(10 * time.Second), KeepAlive: config.Duration(10 * time.Second)}
-	connector, err := NewPahoConnector(cfg, func(topic string, payload []byte) { service.HandleMessage(topic, payload) }, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err = New(Dependencies{Config: cfg, Presence: presence, Connector: connector, Logger: logger})
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- service.Run(ctx) }()
-	defer func() { cancel(); <-done }()
-	root, err := filepath.Abs("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	host := exec.CommandContext(ctx, "node", filepath.Join(root, "tests/integration/drivers/transport/node_host.mjs"))
-	host.Env = append(os.Environ(), "WHALEREIN_TEST_MQTT_URL="+mqttURL)
-	stdout, err := host.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var hostError bytes.Buffer
-	host.Stderr = &hostError
-	if err := host.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = host.Process.Kill(); _ = host.Wait() }()
-	scanner := bufio.NewScanner(stdout)
-	if !scanner.Scan() || scanner.Text() != "transport-host-ready" {
-		t.Fatalf("JS host did not start: %s", hostError.String())
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !service.SupportsPairing("h-e2e") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !service.SupportsPairing("h-e2e") {
-		t.Fatal("host capability not negotiated")
-	}
-	request := &whalereinv1.HostRequest{RequestId: "transport-cross-language", HostId: "h-e2e", DeviceId: "transport-device", ClientTransportVersion: 2, Kind: whalereinv1.RequestKind_REQUEST_KIND_QUERY, Body: make([]byte, 2*1024*1024), ProtocolVersion: 1, ExpiresAtUnixMs: time.Now().Add(time.Minute).UnixMilli()}
-	result, err := service.PublishAndAwait(ctx, "h-e2e", request, 10*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.ResultBody) != 2*1024*1024 {
-		t.Fatal("partial logical result delivered")
-	}
-	// Start the real Rust MQTT receiver and wait until its subscription is active.
-	device := exec.CommandContext(ctx, filepath.Join(root, "target/debug/examples/mqtt_transport_driver"))
-	device.Env = append(os.Environ(), "WHALEREIN_TEST_MQTT_URL="+mqttURL)
-	device.Stderr = io.Discard
-	deviceOutput, err := device.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := device.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if device.ProcessState == nil {
-			_ = device.Process.Kill()
-			_ = device.Wait()
-		}
-	}()
-	deviceReady := false
-	scan := bufio.NewScanner(deviceOutput)
-	for scan.Scan() {
-		if strings.Contains(scan.Text(), "transport-device-ready") {
-			deviceReady = true
-			break
-		}
-	}
-	if !deviceReady {
-		t.Fatal("Rust subscription did not become ready")
-	}
-	envelope, _ := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h-e2e", DeviceId: "transport-device", ChannelId: "synthetic", Ciphertext: make([]byte, 2*1024*1024)})
-	if err := service.PublishDeviceEvent(ctx, "h-e2e", "transport-device", envelope); err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.Copy(io.Discard, deviceOutput)
-	if err := device.Wait(); err != nil {
-		t.Fatal("Rust logical receiver failed")
-	}
+	t.Skip("legacy fragment driver was removed; epoch-3 relay is covered by the boundary and large-message transport cases")
 }

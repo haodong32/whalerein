@@ -120,6 +120,21 @@ bounded; no test automatically retries an uncertain control operation. This grou
 uses file SecretStore and headless Linux Chromium. Keychain, desktop shell,
 production TLS, external model quality and other DSH versions remain release work.
 
+## Inline/reference relay
+
+The `transport` leaf includes the epoch-3 relay evidence. `test_relay_transport.py`
+runs the real Host `RelayTransport`/`MqttAccess` against the real broker and
+asserts the encoded PUBLISH boundary, one complete packet per message, a
+reference only after its object is readable, asymmetric hop budgets, legacy
+epoch rejection and the absence of fragment, receipt or device-ACK traffic.
+`test_relay_cutover.py` proves Access rejects epoch 0/2 and mixed
+representations. `test_relay_authorization.py` and `test_relay_storage.py`
+exercise the real Access ciphertext directory, its scope checks and its quota
+limits. The real Host-to-Access reference and exact-bytes resolution case is
+`test_relay_chain.py` in the `chain` leaf. The quota subcase remains explicitly
+unsupported until a measurable Receive Maximum is available; it is reported as a
+skip, never as a pass.
+
 ## Protocol
 
 `protocol-vectors` covers protocol compatibility checks. Existing fixed fixtures

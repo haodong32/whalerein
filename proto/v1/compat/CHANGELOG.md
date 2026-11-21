@@ -27,3 +27,14 @@ Rationale: Hard cut within application protocol v1 (OpenSpec complete-conversati
 Compatible additions in the same reviewed change:
 
 - added field `RequestTransportMetadata.revocation_generation` (tag 3); `grant_generation` and `revocation_generation` are both captured at submission and both must match for ciphertext release
+## Breaking change accepted
+
+Rationale: Coordinated relay epoch 3 hard cut: inline-or-reference transport replaces TransportFrame, fragment budgets and per-direction transport flags; application protocol version stays 1.
+
+- removed field HostReady.transport_version (tag 4)
+- removed field HostRequest.client_transport_version (tag 12)
+- removed field HostRequest.relay_transport_version (tag 13)
+- removed field TransportBudget.fragment_payload_bytes (tag 2)
+- removed field TransportBudget.fragment_count (tag 3)
+- removed field TransportBudget.fragment_idle_timeout_ms (tag 7)
+- removed message TransportFrame

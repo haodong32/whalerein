@@ -1,8 +1,9 @@
 //! MQTT 5 device connection.
 //!
-//! The device subscribes only to its own event topic. Connection state lives in
-//! `runtime` memory; this module never writes it to disk. A revoked device
-//! stops reconnecting when the caller's stop predicate becomes true.
+//! The device subscribes to its own event and notice topics and publishes its
+//! receive advertisement after every successful connection. Connection state
+//! lives in `runtime` memory; this module never writes it to disk. A revoked
+//! device stops reconnecting when the caller's stop predicate becomes true.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +17,9 @@ use rumqttc::{TlsConfiguration, Transport};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
 use url::Url;
-use whalerein_proto::EventEnvelope;
+use whalerein_proto::{EventEnvelope, RequestStateNotice};
 
-use super::transport::TransportBudget;
+use super::transport::{self, TransportBudget};
 use super::AccessError;
 use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 
@@ -198,6 +199,18 @@ pub fn device_event_topic(host_id: &str, device_id: &str) -> String {
     format!("{EVENT_TOPIC_PREFIX}/{host_id}/d/{device_id}/event")
 }
 
+/// Packet-sized result notice topic for this Device. Notices carry metadata
+/// only; complete results are read on demand over HTTPS.
+pub fn device_notice_topic(host_id: &str, device_id: &str) -> String {
+    format!("{EVENT_TOPIC_PREFIX}/{host_id}/d/{device_id}/notice")
+}
+
+/// The Device receive-advertisement topic. A Device publishes only here; Access
+/// registers the advertisement against the authenticated connection.
+pub fn device_ready_topic(host_id: &str, device_id: &str) -> String {
+    format!("{EVENT_TOPIC_PREFIX}/{host_id}/d/{device_id}/ready")
+}
+
 /// Device-scoped last-will topic. It carries no host id because one device may
 /// be authorized by several hosts; Access fans the event out to each grant.
 pub fn device_presence_topic(device_id: &str) -> String {
@@ -316,15 +329,30 @@ impl DeviceMqttClient {
         device_event_topic(&self.host_id, &self.device_id)
     }
 
-    pub async fn run<S, F, G>(
+    pub fn notice_topic(&self) -> String {
+        device_notice_topic(&self.host_id, &self.device_id)
+    }
+
+    pub fn ready_topic(&self) -> String {
+        device_ready_topic(&self.host_id, &self.device_id)
+    }
+
+    /// Run the Device connection until stopped. After every successful
+    /// `CONNACK` the Device publishes its receive advertisement with the
+    /// coordinated relay epoch, then subscribes to its own event and notice
+    /// topics. An envelope or notice with another epoch is a hard protocol
+    /// mismatch: there is no unframed or fragment fallback.
+    pub async fn run<S, E, N, G>(
         &self,
         mut should_stop: S,
-        mut on_event: F,
+        mut on_event: E,
+        mut on_notice: N,
         mut on_state: G,
     ) -> Result<(), AccessError>
     where
         S: FnMut() -> bool,
-        F: FnMut(&EventEnvelope) -> bool,
+        E: FnMut(&EventEnvelope) -> bool,
+        N: FnMut(&RequestStateNotice) -> bool,
         G: FnMut(MqttConnectionEvent),
     {
         let options = self.settings.options_with_client(
@@ -334,11 +362,12 @@ impl DeviceMqttClient {
             self.session_id.as_deref(),
         )?;
         let (client, mut eventloop) = AsyncClient::new(options, 32);
-        let topic = self.topic();
+        let event_topic = self.topic();
+        let notice_topic = self.notice_topic();
+        let ready_topic = self.ready_topic();
         let mut attempt = 0u32;
         let mut subscribed = false;
-        let mut receiver = super::transport::Receiver::new(self.settings.budget);
-        let mut queued_receipts = 0usize;
+        let mut generation = 0u64;
 
         loop {
             if should_stop() {
@@ -353,12 +382,27 @@ impl DeviceMqttClient {
             match polled {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     attempt = 0;
+                    generation = generation.saturating_add(1);
                     on_state(MqttConnectionEvent::Connected);
+                    // Advertise this connection's receive limits before any
+                    // Access packet can be routed back to the new session.
+                    let advertisement = self
+                        .settings
+                        .budget
+                        .advertisement(generation)
+                        .map_err(|_| AccessError::protocol("invalid receive advertisement"))?
+                        .encode_to_vec();
+                    client
+                        .publish(ready_topic.clone(), QoS::AtLeastOnce, false, advertisement)
+                        .await
+                        .map_err(|_| AccessError::transport("MQTT ready publish failed"))?;
                     if !subscribed {
-                        client
-                            .subscribe(topic.clone(), QoS::AtLeastOnce)
-                            .await
-                            .map_err(|_| AccessError::transport("MQTT subscribe failed"))?;
+                        for topic in [event_topic.clone(), notice_topic.clone()] {
+                            client
+                                .subscribe(topic, QoS::AtLeastOnce)
+                                .await
+                                .map_err(|_| AccessError::transport("MQTT subscribe failed"))?;
+                        }
                         subscribed = true;
                     }
                 }
@@ -375,59 +419,48 @@ impl DeviceMqttClient {
                     on_state(MqttConnectionEvent::Subscribed);
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    if publish.topic.as_ref() != topic.as_bytes() {
-                        continue;
-                    }
-                    let mut receipt_pending = false;
-                    let bytes = if let Some(receipt) = receiver.receive(&topic, &publish.payload)? {
-                        let ack_topic = format!(
-                            "{EVENT_TOPIC_PREFIX}/{}/d/{}/ack",
-                            self.host_id, self.device_id
-                        );
-                        client
-                            .publish(ack_topic, QoS::AtMostOnce, false, receipt.ack)
-                            .await
-                            .map_err(|_| AccessError::transport("transport receipt failed"))?;
-                        queued_receipts += 1;
-                        match receipt.logical {
-                            Some(bytes) => {
-                                receipt_pending = true;
-                                bytes
+                    let topic = publish.topic.as_ref();
+                    if topic == event_topic.as_bytes() {
+                        let envelope = EventEnvelope::decode(publish.payload.as_ref())
+                            .map_err(|_| AccessError::protocol("invalid MQTT event envelope"))?;
+                        transport::validate_event_representation(&envelope).map_err(|error| {
+                            if error.code
+                                == Some(whalerein_proto::ErrorCode::ProtocolVersionIncompatible)
+                            {
+                                transport::protocol_incompatible(
+                                    "incoming event does not advertise relay epoch 3",
+                                )
+                            } else {
+                                AccessError::protocol("invalid MQTT event envelope")
                             }
-                            None => continue,
+                        })?;
+                        if !on_event(&envelope) {
+                            let _ = client.disconnect().await;
+                            return Ok(());
                         }
-                    } else {
-                        publish.payload.to_vec()
-                    };
-                    let envelope = EventEnvelope::decode(bytes.as_slice())
-                        .map_err(|_| AccessError::protocol("invalid MQTT event envelope"))?;
-                    if !on_event(&envelope) {
-                        // Drive the queued receipt onto the socket before a
-                        // once-only consumer closes its MQTT connection.
-                        if receipt_pending {
-                            while queued_receipts > 0 {
-                                match eventloop.poll().await {
-                                    Ok(Event::Outgoing(rumqttc::Outgoing::Publish(_))) => {
-                                        queued_receipts = queued_receipts.saturating_sub(1)
-                                    }
-                                    Err(_) => break,
-                                    _ => {}
-                                }
-                            }
+                    } else if topic == notice_topic.as_bytes() {
+                        let notice = RequestStateNotice::decode(publish.payload.as_ref())
+                            .map_err(|_| AccessError::protocol("invalid MQTT result notice"))?;
+                        transport::require_relay_epoch(notice.relay_version).map_err(|_| {
+                            transport::protocol_incompatible(
+                                "incoming result notice does not advertise relay epoch 3",
+                            )
+                        })?;
+                        if notice.request_id.is_empty() {
+                            return Err(AccessError::protocol("invalid MQTT result notice"));
                         }
-                        let _ = client.disconnect().await;
-                        return Ok(());
+                        if !on_notice(&notice) {
+                            let _ = client.disconnect().await;
+                            return Ok(());
+                        }
                     }
-                }
-                Ok(Event::Outgoing(rumqttc::Outgoing::Publish(_))) => {
-                    queued_receipts = queued_receipts.saturating_sub(1);
+                    // A packet on any other topic is a broker/ACL defect, not a
+                    // message for this receiver; it is never printed or read.
                 }
                 Ok(_) => {}
                 Err(error) => {
                     let (reason, reason_code, bytes, limit) = connection_failure(&error);
                     subscribed = false;
-                    receiver.clear();
-                    queued_receipts = 0;
                     on_state(MqttConnectionEvent::Disconnected);
                     let delay = if should_stop() {
                         None
@@ -693,6 +726,7 @@ mod tests {
             Duration::from_secs(5),
             client.run(
                 move || flag.load(std::sync::atomic::Ordering::SeqCst),
+                |_| true,
                 |_| true,
                 move |event| {
                     if event == MqttConnectionEvent::Disconnected {

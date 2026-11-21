@@ -49,15 +49,29 @@ transport:
   # Render the profile from the deployment environment. Both Access and the
   # Host/client profile must select the same packaged name.
   profile: "${WHALEREIN_TRANSPORT_PROFILE:-default}"
+  # The packaged default is a 64 KiB complete encoded MQTT packet and a 16 MiB
+  # logical envelope. Every profile packet budget must stay <= the broker
+  # ceiling in proto/v1/transport_profiles.json (1 MiB) and the rendered
+  # Mosquitto max_packet_size. Override only with the same values on Access,
+  # the Host and clients.
   # packet_bytes: 65536
   # packet_overhead_bytes: 4096
-  # fragment_payload_bytes: 61440
-  # fragment_count: 274
   # envelope_bytes: 16777216
   # bulk_concurrency: 4
   # reserved_bytes: 33554432
-  # fragment_idle_timeout: 30s
   # transfer_timeout: 120s
+  # Ordered MQTT 5 publisher flow control. Receive Maximum is advertised in
+  # CONNECT; the CONNACK value can only lower the in-flight bound. There is no
+  # application ACK topic in relay epoch 3.
+  receive_maximum: 16
+  send_in_flight: 16
+  # Per-destination ordered queue bound and the total waiting bytes across the
+  # publisher. Exhaustion returns a typed error instead of blocking a sibling
+  # flow.
+  send_queue_depth: 1024
+  send_queue_bytes: 33554432
+  # Raw ciphertext retained for one encrypted result. Omitted derives from the
+  # profile envelope and may not exceed it.
   # result_limit_bytes: 16777216
 
 requests:
@@ -81,6 +95,41 @@ presence:
 cleanup:
   interval: 1m
   pairing_token_retention: 1h
+
+# Temporary ciphertext directory for oversized relay payloads and attachment
+# parts. The values below are development defaults that match the packaged
+# default profile (64 KiB packet / 16 MiB envelope) and the Compose payload
+# volume. An operator must size max_node_bytes plus free_space_reserve_bytes
+# inside the provisioned volume and keep this directory on one dedicated
+# filesystem. Production TLS/ingress and multi-node owner paths are operator
+# inputs, not settings in this file.
+storage:
+  enabled: true
+  # Mounted by the Compose payload volume. Access creates objects/ and tmp/
+  # here and proves the directory writable before /readyz turns green.
+  root_dir: "/var/lib/whalerein/payloads"
+  # Stable node identity and the opaque owner id carried in a PayloadReference.
+  # Keep node_id unique per Access node; owner_id defaults to node_id.
+  node_id: "access-1"
+  owner_id: "access-1"
+  # Raw ciphertext bytes: one object, one Host, the whole node. Keep
+  # max_object_bytes at or below the packaged default envelope (16 MiB); the
+  # profile envelope bounds every relay upload.
+  max_object_bytes: 16777216
+  max_host_bytes: 268435456
+  max_node_bytes: 1073741824
+  max_objects: 1024
+  max_active_uploads: 16
+  # No admission below this much free space on the payload filesystem.
+  free_space_reserve_bytes: 1073741824
+  # Hard lifetime cap; a parent request/transfer deadline can only shorten it.
+  retention: 24h
+  cleanup_interval: 30s
+  cleanup_batch: 100
+  # One upload or fetch is bounded by these; upload_timeout must not exceed
+  # retention.
+  upload_timeout: 2m
+  read_timeout: 60s
 
 protocol:
   version: 1

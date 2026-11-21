@@ -347,12 +347,12 @@ async fn send_handshake(
         command_id: String::new(),
         payload_digest: Vec::new(),
         expires_at_unix_ms: now_unix_ms() + HANDSHAKE_TIMEOUT_MS,
-        client_transport_version: 2,
-        relay_transport_version: 0,
+        relay_version: crate::access::transport::RELAY_EPOCH_V3,
         trace_id: access.trace_id().to_owned(),
         protocol_version: PROTOCOL_VERSION,
         channel_id: negotiation_id.to_owned(),
         body,
+        body_reference: None,
         transport: None,
     };
     let receipt = access.submit_request(host_id, &request).await?;
@@ -367,7 +367,12 @@ async fn send_handshake(
 
     let state = access.wait_for_request(&request, false).await?;
     match OnlineStatus::from_proto(state.status) {
-        Some(OnlineStatus::Succeeded) => Ok(state.result_body),
+        Some(OnlineStatus::Succeeded) => {
+            let body = crate::access::transport::resolve_request_state_body(access, &state)
+                .await
+                .map_err(CoreError::from)?;
+            Ok(body.unwrap_or_default())
+        }
         Some(OnlineStatus::HostOffline) => Err(CoreError::HostOffline),
         Some(OnlineStatus::Rejected) => Err(CoreError::HostRejected),
         Some(OnlineStatus::Failed) | Some(OnlineStatus::Unknown) => Err(CoreError::UnknownResult),
@@ -476,12 +481,9 @@ mod fake_host_tests {
         {
             let budget = host_receive.budget.as_mut().unwrap();
             budget.packet_bytes = 48 * 1024;
-            budget.fragment_payload_bytes = 40 * 1024;
-            budget.fragment_count = 205;
             budget.envelope_bytes = 8 * 1024 * 1024;
             budget.bulk_concurrency = 3;
             budget.reserved_bytes = 8 * 1024 * 1024;
-            budget.fragment_idle_timeout_ms = 10_000;
             budget.transfer_timeout_ms = 60_000;
         }
         access.host.lock().unwrap().channel_receive = Some(host_receive);
@@ -504,7 +506,7 @@ mod fake_host_tests {
         assert_eq!(hello.profile, TransportProfile::Default.wire() as i32);
         let installed = runtime.host_receive("host-1").unwrap();
         assert_eq!(installed.envelope_bytes, 8 * 1024 * 1024);
-        assert_eq!(installed.fragment_payload_bytes, 40 * 1024);
+        assert_eq!(installed.packet_bytes, 48 * 1024);
         assert_eq!(runtime.host_receive_generation("host-1"), Some(9));
 
         // Reconnect on the same Host broker connection: the local generation
@@ -560,12 +562,9 @@ mod fake_host_tests {
             profile: TransportProfile::Default,
             overrides: Some(TransportOverrides {
                 packet_bytes: Some(48 * 1024),
-                fragment_payload_bytes: Some(40 * 1024),
-                fragment_count: Some(205),
                 envelope_bytes: Some(8 * 1024 * 1024),
                 bulk_concurrency: Some(3),
                 reserved_bytes: Some(8 * 1024 * 1024),
-                fragment_idle_timeout_ms: Some(10_000),
                 transfer_timeout_ms: Some(60_000),
                 ..Default::default()
             }),
@@ -614,9 +613,9 @@ mod fake_host_tests {
         let mut invalid = crate::access::transport::TransportBudget::default()
             .advertisement(1)
             .unwrap();
-        // A positive envelope increment is now a relation-valid override; a
-        // contradictory fragment count remains invalid.
-        invalid.budget.as_mut().unwrap().fragment_count = 1;
+        // A positive packet increment is a relation-valid override; lowering
+        // the reserved bytes below one envelope remains invalid.
+        invalid.budget.as_mut().unwrap().reserved_bytes = 1024;
         access.host.lock().unwrap().channel_receive = Some(invalid);
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)

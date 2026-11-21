@@ -362,20 +362,30 @@ type Request struct {
 	Kind                   whalereinv1.RequestKind
 	ProtocolVersion        uint32
 	ClientTransportVersion uint32
-	Status                 whalereinv1.OnlineStatus
-	RequestBody            []byte
-	ResultBody             []byte
-	ErrorCode              whalereinv1.ErrorCode
-	ErrorMessage           string
-	ChannelID              string
-	TraceID                string
-	ExpiresAt              time.Time
-	ForwardState           ForwardState
-	ForwardAfter           time.Time
-	ForwardAttempts        int
-	PublishedOnce          bool
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// RelayVersion is the coordinated relay epoch admitted with the row. A
+	// historical row carries zero and is never admitted again.
+	RelayVersion uint32
+	Status       whalereinv1.OnlineStatus
+	// RequestBody is the inline representation. BodyReference is the
+	// serialized opaque PayloadReference for a referenced representation.
+	// Exactly one is used for QUERY/COMMAND; Access never inspects ciphertext.
+	RequestBody   []byte
+	BodyReference []byte
+	ResultBody    []byte
+	// ResultReference is the serialized opaque PayloadReference recorded with
+	// the outcome. It is returned only while the object is readable.
+	ResultReference []byte
+	ErrorCode       whalereinv1.ErrorCode
+	ErrorMessage    string
+	ChannelID       string
+	TraceID         string
+	ExpiresAt       time.Time
+	ForwardState    ForwardState
+	ForwardAfter    time.Time
+	ForwardAttempts int
+	PublishedOnce   bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 	// Stamp is nil for rows retained from before migration 019 and for
 	// Access-authored control rows that never carried device grant metadata.
 	Stamp *GrantStamp
@@ -386,6 +396,14 @@ type Request struct {
 	CancelPending     bool
 	CancelPublishedAt *time.Time
 	CancelAttempts    int
+	// Durable notice intent. The transaction that applies the status change
+	// writes these fields; the notice worker publishes and records success.
+	NoticePending     bool
+	NoticeAttempts    int
+	NoticeNextAttempt *time.Time
+	NoticePublishedAt *time.Time
+	NoticeStatus      whalereinv1.OnlineStatus
+	NoticeUpdatedAt   *time.Time
 }
 
 // CreateOutcome reports the result of inserting or deduplicating a request.
@@ -403,6 +421,7 @@ type HostResultUpdate struct {
 	Status             whalereinv1.OnlineStatus
 	TransportPreflight bool
 	ResultBody         []byte
+	ResultReference    []byte
 	ErrorCode          whalereinv1.ErrorCode
 	ErrorMessage       string
 	ChannelID          string
@@ -422,7 +441,10 @@ var requestColumns = `request_id, host_id, device_id, command_id, payload_digest
 	channel_id, trace_id, expires_at, forward_state, forward_after, forward_attempts,
 	published_once, created_at, updated_at, client_transport_version,
 	client_lease_until, client_lease_state, cancel_pending, cancel_published_at, cancel_attempts,
-	grant_generation, revocation_generation, device_revocation_generation, result_limit_bytes`
+	grant_generation, revocation_generation, device_revocation_generation, result_limit_bytes,
+	relay_version, body_reference, result_reference,
+	notice_pending, notice_attempts, notice_next_attempt, notice_published_at,
+	notice_status, notice_updated_at`
 
 // requestScan holds the temporary wire-typed columns while a request row is
 // scanned, so callers can append release-decision columns to the same scan.
@@ -437,6 +459,9 @@ type requestScan struct {
 	revocationGeneration       *int64
 	deviceRevocationGeneration *int64
 	resultLimitBytes           *int64
+	relayVersion               int32
+	noticeStatus               string
+	noticeUpdatedAt            *time.Time
 }
 
 func (s *requestScan) targets() []any {
@@ -472,6 +497,15 @@ func (s *requestScan) targets() []any {
 		&s.revocationGeneration,
 		&s.deviceRevocationGeneration,
 		&s.resultLimitBytes,
+		&s.relayVersion,
+		&s.req.BodyReference,
+		&s.req.ResultReference,
+		&s.req.NoticePending,
+		&s.req.NoticeAttempts,
+		&s.req.NoticeNextAttempt,
+		&s.req.NoticePublishedAt,
+		&s.noticeStatus,
+		&s.noticeUpdatedAt,
 	}
 }
 
@@ -482,6 +516,9 @@ func (s *requestScan) finish() Request {
 	req.ErrorCode = whalereinv1.ErrorCode(s.errorCode)
 	req.ForwardState = ForwardState(s.forwardState)
 	req.ClientLeaseState = ClientLeaseState(s.clientLeaseState)
+	req.RelayVersion = uint32(s.relayVersion)
+	req.NoticeStatus = parseStatus(s.noticeStatus)
+	req.NoticeUpdatedAt = s.noticeUpdatedAt
 	if s.grantGeneration != nil && s.revocationGeneration != nil && s.deviceRevocationGeneration != nil && s.resultLimitBytes != nil {
 		req.Stamp = &GrantStamp{
 			GrantGeneration:            uint64(*s.grantGeneration),

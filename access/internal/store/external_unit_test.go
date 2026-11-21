@@ -55,6 +55,7 @@ type externalTx struct {
 	execErr    error
 	committed  bool
 	rolledBack bool
+	commitErr  error
 }
 
 func (tx *externalTx) QueryRow(context.Context, string, ...any) pgx.Row {
@@ -238,6 +239,7 @@ type scriptedTx struct {
 	execFn     func(context.Context, string, ...any) (pgconn.CommandTag, error)
 	committed  bool
 	rolledBack bool
+	commitErr  error
 }
 
 func (tx *scriptedTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -249,7 +251,7 @@ func (tx *scriptedTx) Query(ctx context.Context, sql string, args ...any) (pgx.R
 func (tx *scriptedTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	return tx.execFn(ctx, sql, args...)
 }
-func (tx *scriptedTx) Commit(context.Context) error   { tx.committed = true; return nil }
+func (tx *scriptedTx) Commit(context.Context) error   { tx.committed = true; return tx.commitErr }
 func (tx *scriptedTx) Rollback(context.Context) error { tx.rolledBack = true; return nil }
 
 func TestMarkEnrollmentReadyAdvancesAndRecordsTheOutcomeAtomically(t *testing.T) {

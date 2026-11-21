@@ -630,7 +630,7 @@ test('chunk allowance derives from encoded result and envelope geometry', () => 
   assert.ok(small > 0 && small < 8192)
   assert.equal(effectiveChunkBytes({ maxChunkBytes: 60 * 1024, resultMaxBytes: 2048 }), 0)
   assert.equal(effectiveChunkBytes({ maxChunkBytes: 60 * 1024, envelopeBytes: 4096 }), 4096 - 2048 - 1024)
-  assert.equal(defaultAttachmentPolicy({ fragmentPayloadBytes: 100, bulkConcurrency: 2, fragmentIdleTimeoutMs: 30, transferTimeoutMs: 60 }).max_chunk_bytes, 100)
+  assert.equal(defaultAttachmentPolicy({ packetBytes: 8192, bulkConcurrency: 2, transferTimeoutMs: 60 }).max_chunk_bytes, 4096)
   assert.equal(safeSuggestion('../../etc/passwd'), 'passwd')
   assert.equal(safeSuggestion('a\u0000b.txt'), 'ab.txt')
 })

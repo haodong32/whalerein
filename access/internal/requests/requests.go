@@ -9,12 +9,15 @@ package requests
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -58,16 +61,29 @@ type Store interface {
 	MarkPublishFailure(ctx context.Context, requestID string, now time.Time, retryAfter time.Duration, maxAttempts int) error
 	ApplyHostResult(ctx context.Context, update store.HostResultUpdate) (bool, error)
 	RenewClientLease(ctx context.Context, deviceID, requestID string, lease time.Duration) (bool, error)
+	HeartbeatRequest(ctx context.Context, deviceID, sessionID, requestID string, lease time.Duration) (store.HeartbeatOutcome, error)
 	ExpireClientLeases(ctx context.Context, limit int) ([]store.Request, error)
 	PendingCancelRequests(ctx context.Context, limit int) ([]store.Request, error)
 	MarkCancelPublished(ctx context.Context, requestID string) error
 	MarkCancelAttempt(ctx context.Context, requestID string) error
+	ClaimNoticeIntents(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]store.Request, error)
+	MarkNoticePublished(ctx context.Context, requestID string, status whalereinv1.OnlineStatus, updatedAt time.Time, now time.Time) (bool, error)
+	MarkNoticeFailure(ctx context.Context, requestID string, now, nextAttempt time.Time) error
+	NoticeStats(ctx context.Context) (store.NoticeBacklog, error)
 }
 
-// Broker publishes one HostRequest after the transaction commits.
+// Broker publishes one HostRequest after the transaction commits, the exact
+// cancellation notice and one packet-sized RequestStateNotice.
 type Broker interface {
 	PublishRequest(ctx context.Context, hostID string, request *whalereinv1.HostRequest) error
 	PublishPresence(ctx context.Context, hostID string, payload []byte) error
+	PublishDeviceNotice(ctx context.Context, hostID, deviceID string, notice *whalereinv1.RequestStateNotice) error
+}
+
+// PayloadChecker answers whether an opaque reference is readable under the
+// exact stored scope. It never returns ciphertext and never logs an object id.
+type PayloadChecker interface {
+	CheckPayload(ctx context.Context, reference *whalereinv1.PayloadReference, scope store.PayloadCheckScope) error
 }
 
 // Presence is broker-derived host connectivity.
@@ -99,6 +115,14 @@ type Config struct {
 	// EnvelopeBytes is the effective logical envelope budget for one forwarded
 	// HostRequest, including Access-bound transport metadata.
 	EnvelopeBytes int64
+	// PayloadOwnerID is this node's configured reference owner. An empty value
+	// accepts any non-empty owner carried by a reference.
+	PayloadOwnerID string
+	// Notice publication bounds. A pending intent is retried with capped
+	// backoff until it is published or superseded.
+	NoticeInterval time.Duration
+	NoticeBatch    int
+	NoticeLease    time.Duration
 }
 
 // GrantAuthority reads durable grant revisions. It is deliberately a store
@@ -120,6 +144,7 @@ type Dependencies struct {
 	Broker   Broker
 	Presence Presence
 	Grants   GrantAuthority
+	Payloads PayloadChecker
 	Config   Config
 	Metrics  *diagnostics.Metrics
 	Masker   *diagnostics.Masker
@@ -134,6 +159,7 @@ type Service struct {
 	broker   Broker
 	presence Presence
 	grants   GrantAuthority
+	payloads PayloadChecker
 	cfg      Config
 	metrics  *diagnostics.Metrics
 	masker   *diagnostics.Masker
@@ -184,6 +210,15 @@ func New(deps Dependencies) (*Service, error) {
 	if deps.Config.EnvelopeBytes <= 0 {
 		deps.Config.EnvelopeBytes = 16 << 20
 	}
+	if deps.Config.NoticeInterval <= 0 {
+		deps.Config.NoticeInterval = time.Second
+	}
+	if deps.Config.NoticeBatch <= 0 {
+		deps.Config.NoticeBatch = 50
+	}
+	if deps.Config.NoticeLease <= 0 {
+		deps.Config.NoticeLease = 30 * time.Second
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -199,6 +234,7 @@ func New(deps Dependencies) (*Service, error) {
 		broker:   deps.Broker,
 		presence: deps.Presence,
 		grants:   deps.Grants,
+		payloads: deps.Payloads,
 		cfg:      deps.Config,
 		metrics:  deps.Metrics,
 		masker:   deps.Masker,
@@ -227,6 +263,23 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		return store.Request{}, false, stampErr
 	}
 	req.Stamp = stamp
+	if len(req.BodyReference) > 0 {
+		reference, err := decodeReference(req.BodyReference)
+		if err != nil {
+			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			return store.Request{}, false, err
+		}
+		if err := s.checkReference(ctx, reference, store.PayloadCheckScope{
+			HostID:     req.HostID,
+			DeviceID:   req.DeviceID,
+			AppSession: input.SessionID,
+			ChannelID:  req.ChannelID,
+			Purpose:    whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST,
+		}); err != nil {
+			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			return store.Request{}, false, err
+		}
+	}
 	if sizeErr := s.checkForwardedSize(req); sizeErr != nil {
 		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
 		return store.Request{}, false, sizeErr
@@ -375,6 +428,9 @@ func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
 	return limit
 }
 
+// RelayEpoch is the only relay contract this build admits.
+const RelayEpoch uint32 = 3
+
 func (s *Service) validate(input SubmitInput) (store.Request, error) {
 	req := input.Request
 	if req == nil || input.DeviceID == "" || input.HostID == "" || req.GetRequestId() == "" {
@@ -386,7 +442,9 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 	if req.GetDeviceId() != "" && req.GetDeviceId() != input.DeviceID {
 		return store.Request{}, ErrForbidden
 	}
-	if req.GetProtocolVersion() != s.cfg.ProtocolVersion || (req.ClientTransportVersion != 0 && req.ClientTransportVersion != 2) {
+	// A foreign or missing relay epoch is rejected before admission. A v2
+	// frame is never accepted in place of a HostRequest.
+	if req.GetProtocolVersion() != s.cfg.ProtocolVersion || req.GetRelayVersion() != RelayEpoch {
 		return store.Request{}, ErrProtocolVersion
 	}
 	expiresAt := time.UnixMilli(req.GetExpiresAtUnixMs()).UTC()
@@ -398,42 +456,146 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 		return store.Request{}, fmt.Errorf("%w: expires_at exceeds max_ttl", ErrInvalidRequest)
 	}
 
+	hasBody := len(req.GetBody()) > 0
+	hasReference := req.GetBodyReference() != nil
+	reference := store.Request{}
 	switch req.GetKind() {
-	case whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE,
-		whalereinv1.RequestKind_REQUEST_KIND_QUERY:
+	case whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE:
+		// Bootstrap bodies stay inline-only. A reference here would make a
+		// handshake depend on the ciphertext directory before it is admitted.
+		if hasReference {
+			return store.Request{}, fmt.Errorf("%w: handshake must be inline", ErrInvalidRequest)
+		}
 		if req.GetCommandId() != "" || len(req.GetPayloadDigest()) != 0 {
 			return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
 		}
-	case whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
-		if req.GetCommandId() == "" {
-			return store.Request{}, fmt.Errorf("%w: command_id is required", ErrInvalidRequest)
+	case whalereinv1.RequestKind_REQUEST_KIND_QUERY,
+		whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
+		if hasBody == hasReference {
+			return store.Request{}, fmt.Errorf("%w: exactly one of body and body_reference is required", ErrInvalidRequest)
 		}
-		if len(req.GetPayloadDigest()) == 0 {
-			return store.Request{}, fmt.Errorf("%w: payload_digest is required", ErrInvalidRequest)
+		if req.GetKind() == whalereinv1.RequestKind_REQUEST_KIND_COMMAND {
+			if req.GetCommandId() == "" {
+				return store.Request{}, fmt.Errorf("%w: command_id is required", ErrInvalidRequest)
+			}
+			if len(req.GetPayloadDigest()) == 0 {
+				return store.Request{}, fmt.Errorf("%w: payload_digest is required", ErrInvalidRequest)
+			}
+		} else {
+			if req.GetCommandId() != "" {
+				return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
+			}
+			if !hasReference && len(req.GetPayloadDigest()) != 0 {
+				return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
+			}
+		}
+		if hasReference {
+			// A referenced body is bound by its ciphertext digest. The request
+			// must carry the same digest so admission and forwarding cannot
+			// disagree about which object the command names.
+			if len(req.GetPayloadDigest()) == 0 {
+				return store.Request{}, fmt.Errorf("%w: payload_digest is required with body_reference", ErrInvalidRequest)
+			}
+			encoded, err := proto.Marshal(req.GetBodyReference())
+			if err != nil {
+				return store.Request{}, ErrInvalidRequest
+			}
+			if err := s.validateReference(req.GetBodyReference(), whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST,
+				req.GetPayloadDigest(), 0); err != nil {
+				return store.Request{}, err
+			}
+			reference.BodyReference = encoded
 		}
 	default:
 		return store.Request{}, fmt.Errorf("%w: request kind is not accepted over HTTP", ErrInvalidRequest)
 	}
 
 	return store.Request{
-		RequestID:              req.GetRequestId(),
-		DeviceSessionID:        input.SessionID,
-		HostID:                 input.HostID,
-		DeviceID:               input.DeviceID,
-		CommandID:              req.GetCommandId(),
-		PayloadDigest:          append([]byte(nil), req.GetPayloadDigest()...),
-		Kind:                   req.GetKind(),
-		ProtocolVersion:        req.GetProtocolVersion(),
-		ClientTransportVersion: req.GetClientTransportVersion(),
-		RequestBody:            append([]byte(nil), req.GetBody()...),
-		ChannelID:              req.GetChannelId(),
-		TraceID:                req.GetTraceId(),
-		ExpiresAt:              expiresAt,
-		CreatedAt:              now,
-		UpdatedAt:              now,
-		ClientLeaseUntil:       leaseDeadline(&expiresAt, now, clientPollLease),
-		ClientLeaseState:       store.ClientLeaseLive,
+		RequestID:        req.GetRequestId(),
+		DeviceSessionID:  input.SessionID,
+		HostID:           input.HostID,
+		DeviceID:         input.DeviceID,
+		CommandID:        req.GetCommandId(),
+		PayloadDigest:    append([]byte(nil), req.GetPayloadDigest()...),
+		Kind:             req.GetKind(),
+		ProtocolVersion:  req.GetProtocolVersion(),
+		RelayVersion:     req.GetRelayVersion(),
+		RequestBody:      append([]byte(nil), req.GetBody()...),
+		BodyReference:    reference.BodyReference,
+		ChannelID:        req.GetChannelId(),
+		TraceID:          req.GetTraceId(),
+		ExpiresAt:        expiresAt,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		ClientLeaseUntil: leaseDeadline(&expiresAt, now, clientPollLease),
+		ClientLeaseState: store.ClientLeaseLive,
 	}, nil
+}
+
+// validateReference checks the opaque reference structure, purpose, owner,
+// exact length/digest binding and expiry. It never inspects ciphertext.
+func (s *Service) validateReference(reference *whalereinv1.PayloadReference, purpose whalereinv1.PayloadPurpose, digest []byte, length int64) error {
+	if reference == nil {
+		return fmt.Errorf("%w: missing payload reference", ErrInvalidRequest)
+	}
+	if !objectIDPattern.MatchString(reference.GetObjectId()) {
+		return fmt.Errorf("%w: invalid object id", ErrInvalidRequest)
+	}
+	owner := reference.GetOwnerNodeId()
+	if owner == "" || len(owner) > 200 || strings.ContainsAny(owner, "|\x00\r\n") {
+		return fmt.Errorf("%w: invalid owner node", ErrInvalidRequest)
+	}
+	if s.cfg.PayloadOwnerID != "" && owner != s.cfg.PayloadOwnerID {
+		return fmt.Errorf("%w: reference belongs to another owner", ErrInvalidRequest)
+	}
+	if reference.GetCiphertextBytes() == 0 {
+		return fmt.Errorf("%w: reference length is required", ErrInvalidRequest)
+	}
+	if length > 0 && reference.GetCiphertextBytes() != uint64(length) {
+		return fmt.Errorf("%w: reference length mismatch", ErrInvalidRequest)
+	}
+	if len(reference.GetSha256()) != sha256.Size {
+		return fmt.Errorf("%w: reference digest is not SHA-256", ErrInvalidRequest)
+	}
+	if len(digest) > 0 && !bytes.Equal(reference.GetSha256(), digest) {
+		return ErrDigestMismatch
+	}
+	if reference.GetPurpose() != purpose {
+		return fmt.Errorf("%w: reference purpose mismatch", ErrInvalidRequest)
+	}
+	if reference.GetExpiresAtUnixMs() <= 0 {
+		return fmt.Errorf("%w: reference expiry is required", ErrInvalidRequest)
+	}
+	return nil
+}
+
+var objectIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// checkReference proves an opaque reference is readable under the authorized
+// scope. A missing or unreadable object is reported as unavailable; it is
+// never replaced by an inline body Access cannot produce.
+func (s *Service) checkReference(ctx context.Context, reference *whalereinv1.PayloadReference, scope store.PayloadCheckScope) error {
+	if reference == nil {
+		return nil
+	}
+	if s.payloads == nil {
+		return ErrUnavailable
+	}
+	if err := s.payloads.CheckPayload(ctx, reference, scope); err != nil {
+		return fmt.Errorf("%w: referenced ciphertext is not readable", ErrUnavailable)
+	}
+	return nil
+}
+
+func decodeReference(encoded []byte) (*whalereinv1.PayloadReference, error) {
+	if len(encoded) == 0 {
+		return nil, nil
+	}
+	var reference whalereinv1.PayloadReference
+	if err := proto.Unmarshal(encoded, &reference); err != nil {
+		return nil, fmt.Errorf("%w: invalid stored reference", ErrInvalidResult)
+	}
+	return &reference, nil
 }
 
 // leaseDeadline bounds the exact-request liveness deadline by the original
@@ -452,19 +614,24 @@ func leaseDeadline(expiresAt *time.Time, now time.Time, lease time.Duration) *ti
 // same function so the size it accepts is the size the broker later publishes.
 func (s *Service) envelopeFor(row store.Request) *whalereinv1.HostRequest {
 	envelope := &whalereinv1.HostRequest{
-		RequestId:              row.RequestID,
-		HostId:                 row.HostID,
-		DeviceId:               row.DeviceID,
-		Kind:                   row.Kind,
-		CommandId:              row.CommandID,
-		PayloadDigest:          row.PayloadDigest,
-		ExpiresAtUnixMs:        row.ExpiresAt.UnixMilli(),
-		TraceId:                row.TraceID,
-		ProtocolVersion:        row.ProtocolVersion,
-		ClientTransportVersion: row.ClientTransportVersion,
-		RelayTransportVersion:  2,
-		ChannelId:              row.ChannelID,
-		Body:                   row.RequestBody,
+		RequestId:       row.RequestID,
+		HostId:          row.HostID,
+		DeviceId:        row.DeviceID,
+		Kind:            row.Kind,
+		CommandId:       row.CommandID,
+		PayloadDigest:   row.PayloadDigest,
+		ExpiresAtUnixMs: row.ExpiresAt.UnixMilli(),
+		TraceId:         row.TraceID,
+		ProtocolVersion: row.ProtocolVersion,
+		RelayVersion:    RelayEpoch,
+		ChannelId:       row.ChannelID,
+	}
+	// Preserve the representation admitted for this exact row. Access never
+	// converts a reference back into ciphertext it cannot read.
+	if reference, err := decodeReference(row.BodyReference); err == nil && reference != nil {
+		envelope.BodyReference = reference
+	} else {
+		envelope.Body = row.RequestBody
 	}
 	if row.Stamp != nil {
 		// Forward only durable metadata captured at admission. The device's
@@ -514,6 +681,35 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			return nil
+		}
+		if len(row.BodyReference) > 0 {
+			// A referenced request is forwarded only while its exact object is
+			// readable. The Host cannot resolve an expired or fenced reference;
+			// fail explicitly before publish so the client gets a typed outcome.
+			reference, decodeErr := decodeReference(row.BodyReference)
+			checkErr := decodeErr
+			if checkErr == nil {
+				checkErr = s.checkReference(ctx, reference, store.PayloadCheckScope{
+					HostID:     row.HostID,
+					DeviceID:   row.DeviceID,
+					AppSession: row.DeviceSessionID,
+					ChannelID:  row.ChannelID,
+					Purpose:    whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST,
+				})
+			}
+			if checkErr != nil {
+				if _, applyErr := s.store.ApplyHostResult(ctx, store.HostResultUpdate{
+					RequestID: row.RequestID, HostID: row.HostID, DeviceID: row.DeviceID,
+					Status: whalereinv1.OnlineStatus_rejected, ErrorCode: whalereinv1.ErrorCode_unavailable,
+					At: now,
+				}); applyErr != nil {
+					return applyErr
+				}
+				s.metrics.ResultRejected()
+				s.logger.Warn("referenced request no longer readable",
+					"request", s.masker.Request(row.RequestID), "trace_id", row.TraceID)
+				continue
+			}
 		}
 		if !s.presence.IsHostOnline(ctx, row.HostID) {
 			if row.Kind == whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE {
@@ -613,6 +809,53 @@ func (s *Service) Touch(ctx context.Context, deviceID, requestID string) (bool, 
 		return false, fmt.Errorf("touch request: %w", err)
 	}
 	return renewed, nil
+}
+
+// Heartbeat renews only the exact live, non-terminal, unexpired request for
+// the authenticated device and session. It returns a typed non-renewal
+// (404 not found, 410 expired, 409 conflict) instead of a silent success and
+// never extends expires_at.
+func (s *Service) Heartbeat(ctx context.Context, deviceID, sessionID, requestID string) (store.Request, error) {
+	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
+	outcome, err := s.store.HeartbeatRequest(ctx, deviceID, sessionID, requestID, clientPollLease)
+	if err != nil {
+		return store.Request{}, fmt.Errorf("heartbeat request: %w", err)
+	}
+	if outcome.Renewed {
+		return outcome.Request, nil
+	}
+	switch outcome.Failure {
+	case store.HeartbeatNotFound, store.HeartbeatDeviceForeign:
+		return store.Request{}, ErrNotFound
+	case store.HeartbeatHardDeadline, store.HeartbeatLeaseElapsed:
+		return store.Request{}, ErrExpired
+	case store.HeartbeatTerminal, store.HeartbeatSessionEnded:
+		return store.Request{}, ErrConflict
+	default:
+		return store.Request{}, ErrConflict
+	}
+}
+
+// readableResultReference returns the stored result reference only while its
+// exact object is readable under the recorded scope. An opaque reference is
+// never advertised from metadata alone.
+func (s *Service) readableResultReference(ctx context.Context, row store.Request) *whalereinv1.PayloadReference {
+	reference, err := decodeReference(row.ResultReference)
+	if err != nil || reference == nil {
+		return nil
+	}
+	scope := store.PayloadCheckScope{
+		HostID:     row.HostID,
+		DeviceID:   row.DeviceID,
+		AppSession: row.DeviceSessionID,
+		ChannelID:  row.ChannelID,
+		RequestID:  row.RequestID,
+		Purpose:    whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT,
+	}
+	if err := s.checkReference(ctx, reference, scope); err != nil {
+		return nil
+	}
+	return reference
 }
 
 // cancellationPayload is the bounded exact-scope cancellation published to the
@@ -733,6 +976,125 @@ func (s *Service) publishCancellation(ctx context.Context, row store.Request, no
 		"request", s.masker.Request(row.RequestID), "command", s.masker.Request(row.CommandID))
 }
 
+// NoticeRetryDelay is the capped backoff between publication attempts for one
+// durable intent. Duplicate notices are harmless, so retries stay bounded in
+// frequency rather than being dropped.
+func NoticeRetryDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 6 {
+		attempts = 6
+	}
+	delay := 500 * time.Millisecond << uint(attempts-1)
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return delay
+}
+
+// PublishDueNotices claims a bounded batch of durable notice intents and
+// publishes one packet-sized RequestStateNotice each. Publication happens
+// after the authoritative commit and coalesces to the latest stored state.
+func (s *Service) PublishDueNotices(ctx context.Context) error {
+	now := s.now()
+	batch := s.cfg.NoticeBatch
+	if batch <= 0 {
+		batch = 50
+	}
+	rows, err := s.store.ClaimNoticeIntents(ctx, now, batch, s.cfg.NoticeLease)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if ctx.Err() != nil {
+			return nil
+		}
+		updatedAt := row.UpdatedAt
+		if row.NoticeUpdatedAt != nil {
+			updatedAt = *row.NoticeUpdatedAt
+		}
+		if row.DeviceID == "" || row.NoticeStatus == whalereinv1.OnlineStatus_online_status_unspecified {
+			// An Access-internal control row has no device receiver. Record the
+			// intent as handled instead of retrying a notice nobody can read.
+			if _, err := s.store.MarkNoticePublished(ctx, row.RequestID, row.NoticeStatus, updatedAt, now); err != nil {
+				return err
+			}
+			continue
+		}
+		notice := &whalereinv1.RequestStateNotice{
+			RequestId:       row.RequestID,
+			HostId:          row.HostID,
+			DeviceId:        row.DeviceID,
+			Status:          row.NoticeStatus,
+			CommandId:       row.CommandID,
+			UpdatedAtUnixMs: updatedAt.UnixMilli(),
+			RelayVersion:    RelayEpoch,
+		}
+		if reference := s.readableResultReference(ctx, row); reference != nil {
+			notice.ResultReference = reference
+		}
+		if err := s.broker.PublishDeviceNotice(ctx, row.HostID, row.DeviceID, notice); err != nil {
+			if s.metrics != nil {
+				s.metrics.NoticePublishRetry()
+			}
+			next := now.Add(NoticeRetryDelay(row.NoticeAttempts))
+			if markErr := s.store.MarkNoticeFailure(ctx, row.RequestID, now, next); markErr != nil {
+				s.logger.Warn("notice retry not recorded",
+					"request", s.masker.Request(row.RequestID), "error", markErr.Error())
+			}
+			s.logger.Warn("request state notice publish failed",
+				"host", s.masker.Host(row.HostID), "device", s.masker.Device(row.DeviceID),
+				"request", s.masker.Request(row.RequestID), "attempt", row.NoticeAttempts,
+				"status", store.StatusName(row.NoticeStatus))
+			continue
+		}
+		if _, err := s.store.MarkNoticePublished(ctx, row.RequestID, row.NoticeStatus, updatedAt, now); err != nil {
+			s.logger.Warn("notice publication not recorded",
+				"request", s.masker.Request(row.RequestID), "error", err.Error())
+		}
+	}
+	s.observeNoticeBacklog(ctx)
+	return nil
+}
+
+func (s *Service) observeNoticeBacklog(ctx context.Context) {
+	if s.metrics == nil {
+		return
+	}
+	stats, err := s.store.NoticeStats(ctx)
+	if err != nil {
+		return
+	}
+	s.metrics.NoticeBacklog(stats.Pending, stats.OldestAge.Seconds())
+}
+
+// RunNotices drives durable notice publication until ctx is cancelled. It
+// runs one pass immediately so a restart drains committed intents before the
+// first interval.
+func (s *Service) RunNotices(ctx context.Context) error {
+	interval := s.cfg.NoticeInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	publish := func() {
+		if err := s.PublishDueNotices(ctx); err != nil && ctx.Err() == nil {
+			s.logger.Warn("notice loop failed", "error", err.Error())
+		}
+	}
+	publish()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			publish()
+		}
+	}
+}
+
 // Run drives the forwarding retry loop until ctx is cancelled.
 func (s *Service) Run(ctx context.Context) error {
 	interval := s.cfg.ForwardInterval
@@ -782,6 +1144,9 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 		// host_accepted. Returning the row would make the CLI poll a status
 		// that can never change.
 		return req, ErrExpired
+	}
+	if req.ResultReference != nil && s.readableResultReference(ctx, req) == nil {
+		req.ResultReference = nil
 	}
 	return req, nil
 }
@@ -836,6 +1201,14 @@ func (s *Service) Release(ctx context.Context, deviceID, sessionID, requestID st
 	case whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
 		if !allowed {
 			req.ResultBody = nil
+			req.ResultReference = nil
+		}
+	}
+	// The stored reference is returned only while its exact object is
+	// readable. Metadata alone never advertises unavailable ciphertext.
+	if len(req.ResultReference) > 0 {
+		if s.readableResultReference(ctx, req) == nil {
+			req.ResultReference = nil
 		}
 	}
 	return req, nil
@@ -845,6 +1218,15 @@ func (s *Service) Release(ctx context.Context, deviceID, sessionID, requestID st
 // retained ciphertext cap and the current HTTP delivery budget. A legacy row
 // without a stamp falls back to the current Access limits; it can never widen
 // beyond them.
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Service) resultIngestLimit(row store.Request) int64 {
 	limit := s.resultLimitBase()
 	if row.Stamp != nil && row.Stamp.ResultLimitBytes < limit {
@@ -896,24 +1278,69 @@ func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result
 		result.GetStatus() == whalereinv1.OnlineStatus_received {
 		return fmt.Errorf("%w: status %s", ErrInvalidResult, whalereinv1.OnlineStatus_name[int32(result.GetStatus())])
 	}
-	if limit := s.resultIngestLimit(row); int64(len(result.GetResultBody())) > limit {
+	if result.GetRelayVersion() != RelayEpoch {
+		return fmt.Errorf("%w: unsupported relay epoch", ErrProtocolVersion)
+	}
+	// A result carries exactly one representation when a body exists. A
+	// packet-sized terminal result may carry neither when the bulk body could
+	// not be admitted.
+	hasBody := len(result.GetResultBody()) > 0
+	hasReference := result.GetResultReference() != nil
+	if hasBody && hasReference {
+		return fmt.Errorf("%w: result carries both representations", ErrInvalidResult)
+	}
+	var referenceBytes []byte
+	if hasReference {
+		reference := result.GetResultReference()
+		if err := s.validateReference(reference, whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT, nil, 0); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidResult, err)
+		}
+		encoded, err := proto.Marshal(reference)
+		if err != nil {
+			return fmt.Errorf("%w: encode result reference", ErrInvalidResult)
+		}
+		referenceBytes = encoded
+		// Persist the reference opaquely even when its object is currently
+		// unreadable. The terminal outcome must not be lost to storage
+		// availability; GET and notices return the reference only while it is
+		// actually readable.
+		if err := s.checkReference(ctx, reference, store.PayloadCheckScope{
+			HostID:     row.HostID,
+			DeviceID:   row.DeviceID,
+			AppSession: row.DeviceSessionID,
+			ChannelID:  firstNonEmptyString(result.GetChannelId(), row.ChannelID),
+			RequestID:  row.RequestID,
+			Purpose:    whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT,
+		}); err != nil {
+			s.metrics.ResultRejected()
+			s.logger.Warn("host result reference is not readable; keeping outcome",
+				"host", s.masker.Host(topicHost), "device", s.masker.Device(row.DeviceID),
+				"request", s.masker.Request(row.RequestID), "trace_id", row.TraceID)
+		}
+	}
+	resultBody := append([]byte(nil), result.GetResultBody()...)
+	if limit := s.resultIngestLimit(row); int64(len(resultBody)) > limit {
+		// Refusal of the bulk body never changes the authoritative outcome,
+		// error code or command identity. It becomes a packet-sized terminal
+		// result with scoped recovery guidance.
 		s.metrics.ResultRejected()
-		s.logger.Warn("host result rejected before storage",
+		s.logger.Warn("host result body refused; outcome retained",
 			"host", s.masker.Host(topicHost), "device", s.masker.Device(row.DeviceID),
 			"request", s.masker.Request(row.RequestID), "kind", row.Kind,
-			"bytes", len(result.GetResultBody()), "limit", limit, "trace_id", row.TraceID)
-		return fmt.Errorf("%w: result body %d bytes exceeds limit %d", ErrResultTooLarge, len(result.GetResultBody()), limit)
+			"bytes", len(resultBody), "limit", limit, "trace_id", row.TraceID)
+		resultBody = nil
 	}
 	applied, err := s.store.ApplyHostResult(ctx, store.HostResultUpdate{
-		RequestID:    row.RequestID,
-		HostID:       topicHost,
-		DeviceID:     row.DeviceID,
-		Status:       result.GetStatus(),
-		ResultBody:   append([]byte(nil), result.GetResultBody()...),
-		ErrorCode:    result.GetErrorCode(),
-		ErrorMessage: result.GetErrorMessage(),
-		ChannelID:    result.GetChannelId(),
-		At:           s.now(),
+		RequestID:       row.RequestID,
+		HostID:          topicHost,
+		DeviceID:        row.DeviceID,
+		Status:          result.GetStatus(),
+		ResultBody:      resultBody,
+		ResultReference: referenceBytes,
+		ErrorCode:       result.GetErrorCode(),
+		ErrorMessage:    result.GetErrorMessage(),
+		ChannelID:       result.GetChannelId(),
+		At:              s.now(),
 	})
 	if err != nil {
 		return fmt.Errorf("apply host result: %w", err)

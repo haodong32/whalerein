@@ -25,6 +25,19 @@ visible text; reset replaces a provisional block. Adjacent deltas can coalesce f
 20 ms or an 8 KiB UTF-8 target without crossing identity/block/order boundaries.
 Provider internal chunks do not create gaps in this normalized sequence.
 
+On relay epoch 3 the Host publishes complete packet-sized preview messages, not
+fragments or acknowledged transfer frames. It takes the smallest usable outbound
+budget across its local profile, Access's advertised receive budget and the
+Device `ChannelHello.receive` budget, splits only on valid UTF-8 boundaries,
+assigns contiguous normalized intervals and rechecks the fully encoded MQTT
+PUBLISH before publication. A complete body that does not fit is published as a
+reference and fetched over HTTPS. A Device publishes its `ready`
+`ReceiveAdvertisement` after each authenticated connect and budget change; Access
+publishes a packet-sized `RequestStateNotice` on the Device `notice` topic only
+from durably committed state. A lost notice is repaired from authoritative state
+and the watch lease refresh, and a notice is never proof that native execution
+completed.
+
 A committed Message has a stable identity, role and ordered typed blocks. When
 it settles a live Attempt, MessageUpsert carries the origin reference. That is the
 single authoritative content/Attempt association. AttemptEnded reports outcome
@@ -99,9 +112,11 @@ repairs them. Approval decisions revalidate the real pending action at execution
 Per-recipient live and committed lanes are independent. One stalled receiver does
 not block another. Preview admission is bounded to 64 publications / 256 KiB, with
 a one-second queue-age target. History pages target 256 KiB plus a count cap;
-a single indivisible Message can exceed that target. MQTT transparently fragments
-complete encrypted envelopes into 60 KiB parts under a 64 KiB physical budget;
-its logical envelope ceiling remains 16 MiB.
+a single indivisible Message can exceed that target. MQTT carries one complete
+message per PUBLISH under the active profile; a body above the packet budget is
+carried as a reference and read as a complete HTTPS ciphertext object. There is
+no application fragmentation, reassembly, transfer receipt or device ACK topic.
+The logical envelope ceiling remains 16 MiB in the default profile.
 
 The Source owns conversation content; Host SQLite stores operational/identifier
 metadata and pending ciphertext, not a second plaintext session log. A persistent
@@ -121,3 +136,13 @@ history, state, Watch baselines, capabilities and live updates alongside securit
 vectors. Isolated stack cases use real CLI/Core, Access, PostgreSQL, Mosquitto and the
 plugin with FakeDSH. Native DSH, OS keyring and deployment acceptance remain
 separate gates; fixtures do not certify another Harness or a running profile.
+
+AC-19 is a separate black-box gate. It requires the committed netem harness,
+matched same-profile A/A and A/B runs at 0 ms and 280 ms, and a declared A/A
+noise band and comparison procedure before candidates are inspected. Its two
+primary metrics are the paired P95 longest visible gap and the largest output
+share; final-output share is diagnostic, and the same two metrics must be
+reported for the paired idle and concurrent bulk-read run with correct once-only
+output. The v3 harness, comparator metrics and A/B artifact pinning are not
+committed in this revision, so AC-19 remains blocked and no timing claim is made
+from the existing pilot or unit evidence.

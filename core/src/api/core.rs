@@ -686,6 +686,31 @@ impl Core {
             .map_or(local, |peer| local.min(peer.envelope_bytes))
     }
 
+    /// Resolve one live event to its complete verified ciphertext. A reference
+    /// is fetched from the Access HTTPS directory with the current Device
+    /// bearer; inline events pass through unchanged.
+    pub(crate) async fn resolve_event_envelope(
+        &self,
+        envelope: &whalerein_proto::EventEnvelope,
+    ) -> CoreResult<whalerein_proto::EventEnvelope> {
+        let access = self.access_client().await?;
+        crate::access::transport::resolve_event_envelope(&access, envelope)
+            .await
+            .map_err(CoreError::from)
+    }
+
+    /// Fetch one referenced ciphertext with the current Device bearer.
+    #[allow(dead_code)]
+    pub(crate) async fn fetch_relay_payload(
+        &self,
+        reference: &whalerein_proto::PayloadReference,
+    ) -> CoreResult<Vec<u8>> {
+        let access = self.access_client().await?;
+        crate::access::transport::resolve_reference(&access, reference)
+            .await
+            .map_err(CoreError::from)
+    }
+
     fn current_config(&self) -> Option<PersistedConfig> {
         self.config.read().expect("config lock").clone()
     }
@@ -1142,13 +1167,31 @@ impl Core {
         if access.cloud_session_id() != expected {
             return Err(CoreError::AuthenticationRequired);
         }
-        Ok(CommandService::new(access, self.cache()?)
+        let mut service = CommandService::new(access, self.cache()?)
             .with_transport_budget(self.transport_budget())
             .with_admission(
                 self.config_store(),
                 self.options.data_dir.clone(),
                 self.options.secrets.clone(),
-            ))
+            );
+        // A foreground command attaches its own scoped MQTT receiver under the
+        // same Device. A watch or sibling command keeps its separate
+        // connection and is never displaced by this attachment.
+        let config = self.require_config()?;
+        let regional = self.cloud_transport().await.ok().flatten();
+        let token = match &regional {
+            Some(session) => Some(session.token.clone()),
+            None => crate::security::load_device_token(&self.options.secrets, &config.device_id)?,
+        };
+        if let Some(token) = token {
+            service = service.with_foreground_transport(
+                self.mqtt_settings(&config)?,
+                config.device_id.clone(),
+                token,
+                regional.map(|session| session.id),
+            );
+        }
+        Ok(service)
     }
 
     fn cache_or_empty(&self) -> CoreResult<Arc<Cache>> {

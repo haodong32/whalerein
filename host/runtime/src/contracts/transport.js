@@ -3,10 +3,11 @@
 // The executable values are generated from proto/v1/transport_profiles.json by
 // `./repo proto`; this module owns only the normalization seam and relation
 // validation. A profile is validated before readiness or connection use. It
-// never changes application protocol version 1.
+// never changes application protocol version 1 or the relay epoch.
 
 import { AdapterError } from '../errors.js'
 import {
+  BROKER_PACKET_LIMIT_BYTES,
   DEFAULT_TRANSPORT_PROFILE,
   TRANSPORT_PROFILES,
   TRANSPORT_PROFILES_SCHEMA,
@@ -14,11 +15,15 @@ import {
 } from '../generated/transport-profiles.js'
 
 export {
+  BROKER_PACKET_LIMIT_BYTES,
   DEFAULT_TRANSPORT_PROFILE,
   TRANSPORT_PROFILES,
   TRANSPORT_PROFILES_SCHEMA,
   TRANSPORT_PROFILE_WIRE_NAMES,
 }
+
+/** The one coordinated MQTT relay epoch. There is no fragment fallback. */
+export const RELAY_VERSION = 3
 
 const safe = (value) => Number.isSafeInteger(value) && value >= 0
 const positive = (value) => Number.isSafeInteger(value) && value > 0
@@ -54,57 +59,28 @@ function validateProfileValues(name, profile) {
   const {
     packetBytes,
     packetOverheadBytes,
-    fragmentPayloadBytes,
-    fragmentCount,
     envelopeBytes,
     bulkConcurrency,
     reservedBytes,
-    fragmentIdleTimeoutMs,
     transferTimeoutMs,
   } = profile
-  if (
-    !positive(packetBytes) ||
-    !safe(packetOverheadBytes) ||
-    !positive(fragmentPayloadBytes) ||
-    !positive(fragmentCount)
-  ) {
-    throw new AdapterError('invalid_argument', `transport profile ${name} byte budget invalid`)
+  if (!positive(packetBytes) || !safe(packetOverheadBytes)) {
+    throw new AdapterError('invalid_argument', `transport profile ${name} packet budget invalid`)
   }
-  if (fragmentPayloadBytes + packetOverheadBytes > packetBytes) {
+  if (packetBytes > BROKER_PACKET_LIMIT_BYTES) {
     throw new AdapterError(
       'invalid_argument',
-      `transport profile ${name} fragment payload exceeds the packet budget`,
+      `transport profile ${name} packet budget exceeds the broker ceiling`,
     )
   }
-  if (!positive(envelopeBytes) || !safe(reservedBytes) || !positive(bulkConcurrency)) {
+  if (!positive(envelopeBytes) || envelopeBytes < packetBytes) {
     throw new AdapterError('invalid_argument', `transport profile ${name} envelope budget invalid`)
   }
-  if (fragmentCount < Math.ceil(envelopeBytes / fragmentPayloadBytes)) {
-    throw new AdapterError(
-      'invalid_argument',
-      `transport profile ${name} fragment count does not cover the envelope`,
-    )
+  if (!positive(bulkConcurrency) || !safe(reservedBytes) || reservedBytes < envelopeBytes) {
+    throw new AdapterError('invalid_argument', `transport profile ${name} reserved bytes invalid`)
   }
-  if (reservedBytes < fragmentPayloadBytes * bulkConcurrency) {
-    throw new AdapterError(
-      'invalid_argument',
-      `transport profile ${name} reserved bytes do not cover in-flight fragments`,
-    )
-  }
-  if (reservedBytes < envelopeBytes) {
-    throw new AdapterError(
-      'invalid_argument',
-      `transport profile ${name} reserved bytes do not cover one envelope`,
-    )
-  }
-  if (!positive(fragmentIdleTimeoutMs) || !positive(transferTimeoutMs)) {
-    throw new AdapterError('invalid_argument', `transport profile ${name} timeout invalid`)
-  }
-  if (fragmentIdleTimeoutMs >= transferTimeoutMs) {
-    throw new AdapterError(
-      'invalid_argument',
-      `transport profile ${name} idle timeout must be below the transfer timeout`,
-    )
+  if (!positive(transferTimeoutMs) || transferTimeoutMs > MAX_UINT32) {
+    throw new AdapterError('invalid_argument', `transport profile ${name} transfer timeout invalid`)
   }
 }
 
@@ -123,69 +99,43 @@ export function resolveTransportProfile(profile) {
 /**
  * Validate one transport budget and return a frozen normalized copy.
  *
- * `packetOverheadBytes` is the overhead of the profile label that names the
- * budget's base vocabulary. It is not itself on the wire, so a local budget
- * may omit it; an advertisement always passes the named profile's overhead.
- * Values are checked, never clamped: a sender takes the minimum instead.
+ * Values are checked, never clamped: a sender takes the minimum of its local
+ * limit, the broker limit and every advertised receiver limit.
  */
-export function validateTransportBudget(budget, packetOverheadBytes = 0) {
+export function validateTransportBudget(budget) {
   if (!budget || typeof budget !== 'object' || Array.isArray(budget)) {
     throw new AdapterError('invalid_argument', 'transport budget missing')
   }
-  if (!safe(packetOverheadBytes)) {
-    throw new AdapterError('invalid_argument', 'packet overhead invalid')
-  }
   const {
     packet_bytes: packetBytes,
-    fragment_payload_bytes: fragmentPayloadBytes,
-    fragment_count: fragmentCount,
     envelope_bytes: envelopeBytes,
     bulk_concurrency: bulkConcurrency,
     reserved_bytes: reservedBytes,
-    fragment_idle_timeout_ms: fragmentIdleTimeoutMs,
     transfer_timeout_ms: transferTimeoutMs,
   } = budget
   const packet = wireUint32(packetBytes)
-  const fragmentPayload = wireUint32(fragmentPayloadBytes)
-  const fragments = wireUint32(fragmentCount)
   const envelope = wireInteger(envelopeBytes)
   const reserved = wireInteger(reservedBytes)
   const concurrency = wireUint32(bulkConcurrency)
-  const idleTimeout = wireUint32(fragmentIdleTimeoutMs)
   const transferTimeout = wireUint32(transferTimeoutMs)
-  if (packet === null || fragmentPayload === null || fragments === null) {
-    throw new AdapterError('invalid_argument', 'transport byte budget invalid')
+  if (packet === null) throw new AdapterError('invalid_argument', 'transport packet budget invalid')
+  if (packet > BROKER_PACKET_LIMIT_BYTES) {
+    throw new AdapterError('invalid_argument', 'transport packet budget exceeds the broker ceiling')
   }
-  if (packet <= fragmentPayload || fragmentPayload + packetOverheadBytes > packet) {
-    throw new AdapterError('invalid_argument', 'fragment payload does not fit the packet budget')
-  }
-  if (envelope === null || envelope <= 0 || reserved === null || reserved < 0) {
+  if (envelope === null || envelope <= 0 || envelope < packet) {
     throw new AdapterError('invalid_argument', 'transport envelope budget invalid')
   }
-  if (concurrency === null || idleTimeout === null || transferTimeout === null) {
+  if (reserved === null || reserved < envelope) {
+    throw new AdapterError('invalid_argument', 'transport reserved bytes do not cover one envelope')
+  }
+  if (concurrency === null || transferTimeout === null) {
     throw new AdapterError('invalid_argument', 'transport concurrency or timeout invalid')
-  }
-  if (fragments < Math.ceil(envelope / fragmentPayload)) {
-    throw new AdapterError('invalid_argument', 'fragment count does not cover the envelope')
-  }
-  const inFlightBytes = fragmentPayload * concurrency
-  if (!Number.isSafeInteger(inFlightBytes) || reserved < inFlightBytes) {
-    throw new AdapterError('invalid_argument', 'reserved bytes do not cover in-flight fragments')
-  }
-  if (reserved < envelope) {
-    throw new AdapterError('invalid_argument', 'reserved bytes do not cover one envelope')
-  }
-  if (idleTimeout >= transferTimeout) {
-    throw new AdapterError('invalid_argument', 'fragment idle timeout must be below the transfer timeout')
   }
   return Object.freeze({
     packet_bytes: packet,
-    fragment_payload_bytes: fragmentPayload,
-    fragment_count: fragments,
     envelope_bytes: envelope,
     bulk_concurrency: concurrency,
     reserved_bytes: reserved,
-    fragment_idle_timeout_ms: idleTimeout,
     transfer_timeout_ms: transferTimeout,
   })
 }
@@ -195,26 +145,20 @@ export function transportProfileBudget(profile = DEFAULT_TRANSPORT_PROFILE) {
   const resolved = resolveTransportProfile(profile)
   return validateTransportBudget({
     packet_bytes: resolved.packetBytes,
-    fragment_payload_bytes: resolved.fragmentPayloadBytes,
-    fragment_count: resolved.fragmentCount,
     envelope_bytes: resolved.envelopeBytes,
     bulk_concurrency: resolved.bulkConcurrency,
     reserved_bytes: resolved.reservedBytes,
-    fragment_idle_timeout_ms: resolved.fragmentIdleTimeoutMs,
     transfer_timeout_ms: resolved.transferTimeoutMs,
-  }, resolved.packetOverheadBytes)
+  })
 }
 
 /**
  * Validate an event receive advertisement and return its normalized budget.
  *
- * The named profile selects the base vocabulary, including its packet
- * overhead, but the budget may carry relation-valid operator overrides and
- * directional limits. A peer cannot raise a local limit: senders take the
- * minimum of local and advertised values, so nothing is clamped here.
- * `connection_generation` is scoped to the leg that carried the advertisement
- * and is validated only as a positive value; generations from different legs
- * are never comparable.
+ * An advertisement is the only exchange of receive limits. It applies to the
+ * authenticated connection generation that carried it, and it must name the
+ * one relay epoch. A peer cannot raise a local limit: senders take the minimum
+ * of local and advertised values, so nothing is clamped here.
  */
 export function validateReceiveAdvertisement(advertisement) {
   if (!advertisement || typeof advertisement !== 'object' || Array.isArray(advertisement)) {
@@ -225,11 +169,19 @@ export function validateReceiveAdvertisement(advertisement) {
   if (generation === null || generation < 1) {
     throw new AdapterError('invalid_argument', 'connection generation invalid')
   }
-  const budget = validateTransportBudget(advertisement.budget, profile.packetOverheadBytes)
+  const relay = wireInteger(advertisement.relay_version)
+  if (relay !== RELAY_VERSION) {
+    throw new AdapterError(
+      'protocol_version_incompatible',
+      'receive advertisement relay epoch is incompatible',
+    )
+  }
+  const budget = validateTransportBudget(advertisement.budget)
   return Object.freeze({
     profile: profile.wireName,
     budget,
     connection_generation: generation,
+    relay_version: RELAY_VERSION,
   })
 }
 

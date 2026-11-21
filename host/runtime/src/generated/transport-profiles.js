@@ -4,41 +4,34 @@ export const TRANSPORT_PROFILES_SCHEMA = 'whalerein/transport-profiles/v1'
 
 export const DEFAULT_TRANSPORT_PROFILE = 'default'
 
+export const BROKER_PACKET_LIMIT_BYTES = 1048576
+
 export const TRANSPORT_PROFILES = Object.freeze({
   'default': Object.freeze({
     wireName: 'TRANSPORT_PROFILE_DEFAULT',
     packetBytes: 65536,
     packetOverheadBytes: 4096,
-    fragmentPayloadBytes: 61440,
-    fragmentCount: 274,
     envelopeBytes: 16777216,
     bulkConcurrency: 4,
     reservedBytes: 33554432,
-    fragmentIdleTimeoutMs: 30000,
     transferTimeoutMs: 120000,
   }),
   'compact': Object.freeze({
     wireName: 'TRANSPORT_PROFILE_COMPACT',
     packetBytes: 32768,
     packetOverheadBytes: 4096,
-    fragmentPayloadBytes: 28672,
-    fragmentCount: 293,
     envelopeBytes: 8388608,
     bulkConcurrency: 2,
     reservedBytes: 8388608,
-    fragmentIdleTimeoutMs: 30000,
     transferTimeoutMs: 120000,
   }),
   'roomy': Object.freeze({
     wireName: 'TRANSPORT_PROFILE_ROOMY',
     packetBytes: 131072,
     packetOverheadBytes: 8192,
-    fragmentPayloadBytes: 122880,
-    fragmentCount: 274,
     envelopeBytes: 33554432,
     bulkConcurrency: 8,
     reservedBytes: 67108864,
-    fragmentIdleTimeoutMs: 30000,
     transferTimeoutMs: 300000,
   }),
 })

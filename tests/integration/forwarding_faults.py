@@ -11,7 +11,6 @@ import threading
 
 PUBLISH = 3
 COMMAND_REQUEST_KIND = 3
-TRANSPORT_PREFIX = b"WRMQTT2"
 
 
 def _varint(data, index):
@@ -58,11 +57,11 @@ def _field(payload, number):
 
 
 def _host_request_kind(payload):
-    """Return HostRequest.kind, unwrapping Access' logical transport frame."""
-    if payload.startswith(TRANSPORT_PREFIX):
-        payload = _field(payload[len(TRANSPORT_PREFIX) :], 8)
-        if not isinstance(payload, (bytes, bytearray)):
-            return None
+    """Return the complete HostRequest.kind from one relay PUBLISH.
+
+    Epoch 3 carries exactly one envelope per packet, so the payload is the
+    protobuf message itself. There is no legacy prefix to unwrap.
+    """
     kind = _field(payload, 4)
     return kind if isinstance(kind, int) else None
 
@@ -86,9 +85,10 @@ class AmbiguousHostRequestProxy:
     Access connects through this loopback proxy instead of the broker. When
     Access publishes a COMMAND HostRequest for the selected Host, the packet is
     written to the real broker and the connection is then closed before the
-    broker acknowledgement or the Host's logical-transport ACK can come back.
-    The command may therefore already have executed while the publish returns
-    an error, which is exactly the documented ambiguous-delivery window.
+    broker acknowledgement can come back. The command may therefore already
+    have executed while the publish returns an error, which is exactly the
+    documented ambiguous-delivery window. There is no application receipt in
+    epoch 3, so this proxy withholds the only remaining confirmation.
     """
 
     def __init__(self, host_id, upstream=("127.0.0.1", 1883)):

@@ -56,6 +56,33 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 		internalPort = parsed
 	}
 	path := writeConfig(t, configValues{publicPort: port, internalPort: internalPort, databaseURL: db.DSN, brokerURL: brokerURL})
+	// The epoch-3 live event is larger than one packet, so the Host stages it
+	// in the temporary ciphertext directory and the CLI resolves the reference.
+	payloadRoot := t.TempDir()
+	configText, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText = append(configText, []byte(fmt.Sprintf(`
+storage:
+  enabled: true
+  root_dir: %q
+  node_id: "identity-node"
+  max_object_bytes: 16777216
+  max_host_bytes: 33554432
+  max_node_bytes: 67108864
+  max_objects: 16
+  max_active_uploads: 8
+  free_space_reserve_bytes: 1048576
+  retention: 1h
+  cleanup_interval: 1h
+  cleanup_batch: 16
+  upload_timeout: 2m
+  read_timeout: 1m
+`, payloadRoot))...)
+	if err := os.WriteFile(path, configText, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +151,7 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := exec.CommandContext(ctx, "node", filepath.Join(root, "tests/integration/drivers/transport/node_runtime.mjs"))
-	host.Env = append(os.Environ(), "WHALEREIN_TEST_MQTT_URL="+brokerURL, "WHALEREIN_TEST_STATE_DIR="+t.TempDir())
+	host.Env = append(os.Environ(), "WHALEREIN_TEST_MQTT_URL="+brokerURL, "WHALEREIN_TEST_STATE_DIR="+t.TempDir(), "WHALEREIN_ACCESS_URL="+base)
 	output, err := host.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

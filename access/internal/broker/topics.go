@@ -13,27 +13,31 @@ const (
 	// ResultFilter receives HostResult messages from every host.
 	ResultFilter = "whalerein/v1/h/+/result"
 	// EventFilter receives event envelopes from every host.
-	EventFilter     = "whalerein/v1/h/+/event"
-	DeviceAckFilter = "whalerein/v1/h/+/d/+/ack"
+	EventFilter = "whalerein/v1/h/+/event"
+	// DeviceReadyFilter receives Device receive advertisements. Access is the
+	// only subscriber; a Device may publish only its own ready topic.
+	DeviceReadyFilter = "whalerein/v1/h/+/d/+/ready"
 	// DeviceWillFilter receives non-retained MQTT last wills published by the
 	// broker for disconnected device connections.
 	DeviceWillFilter = presenceRoot + "+"
 )
 
-// TopicKind is one of the four wire topic shapes.
+// TopicKind is one of the complete-message wire topic shapes.
 type TopicKind string
 
-// Wire topic kinds.
+// Wire topic kinds. There is no device acknowledgement topic: the relay epoch
+// carries one complete message per PUBLISH and no application receipts.
 const (
-	KindRequest     TopicKind = "request"
-	KindResult      TopicKind = "result"
-	KindEvent       TopicKind = "event"
-	KindDeviceEvent TopicKind = "device_event"
-	KindDeviceAck   TopicKind = "device_ack"
-	KindPresence    TopicKind = "presence"
+	KindRequest      TopicKind = "request"
+	KindResult       TopicKind = "result"
+	KindEvent        TopicKind = "event"
+	KindDeviceEvent  TopicKind = "device_event"
+	KindDeviceNotice TopicKind = "device_notice"
+	KindDeviceReady  TopicKind = "device_ready"
+	KindPresence     TopicKind = "presence"
 )
 
-// ErrInvalidTopic is returned for topics outside the four wire templates.
+// ErrInvalidTopic is returned for topics outside the wire templates.
 var ErrInvalidTopic = errors.New("invalid topic")
 
 // Topic is a parsed wire topic.
@@ -61,8 +65,15 @@ func DeviceEventTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/event"
 }
 
-func DeviceAckTopic(hostID, deviceID string) string {
-	return topicRoot + hostID + "/d/" + deviceID + "/ack"
+// DeviceNoticeTopic is the Access -> device result-notice topic. Only Access
+// may publish it; a Device may subscribe to its own topic.
+func DeviceNoticeTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/notice"
+}
+
+// DeviceReadyTopic is the device -> Access receive-advertisement topic.
+func DeviceReadyTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/ready"
 }
 
 // PresenceTopic is the Access -> host device-presence topic.
@@ -103,12 +114,19 @@ func ParseTopic(topic string) (Topic, error) {
 			return Topic{}, ErrInvalidTopic
 		}
 	case 4:
-		if !validID(parts[0]) || parts[1] != "d" || !validID(parts[2]) || (parts[3] != "event" && parts[3] != "ack") {
+		if !validID(parts[0]) || parts[1] != "d" || !validID(parts[2]) {
 			return Topic{}, ErrInvalidTopic
 		}
-		kind := KindDeviceEvent
-		if parts[3] == "ack" {
-			kind = KindDeviceAck
+		var kind TopicKind
+		switch parts[3] {
+		case "event":
+			kind = KindDeviceEvent
+		case "notice":
+			kind = KindDeviceNotice
+		case "ready":
+			kind = KindDeviceReady
+		default:
+			return Topic{}, ErrInvalidTopic
 		}
 		return Topic{HostID: parts[0], DeviceID: parts[2], Kind: kind}, nil
 	default:

@@ -63,7 +63,7 @@ type RequestService interface {
 	Submit(ctx context.Context, input requests.SubmitInput) (store.Request, bool, error)
 	Release(ctx context.Context, deviceID, sessionID, requestID string, deliveryLimitBytes int64) (store.Request, error)
 	Get(ctx context.Context, deviceID, requestID string) (store.Request, error)
-	Touch(ctx context.Context, deviceID, requestID string) (bool, error)
+	Heartbeat(ctx context.Context, deviceID, sessionID, requestID string) (store.Request, error)
 }
 
 // Dependencies wires the HTTP server.
@@ -82,6 +82,9 @@ type Dependencies struct {
 	ClientAddress            *clientaddr.Resolver
 	ClientReference          *clientaddr.Referencer
 	HostPresence             external.HostPresence
+	// Relay is the temporary ciphertext directory. A nil value keeps the
+	// routes registered and answers unsupported_capability.
+	Relay RelayService
 	// External serves external account mode when it is configured. Standalone
 	// deployments leave it nil and keep the invitation routes only.
 	External ExternalService
@@ -124,6 +127,9 @@ func New(deps Dependencies) (*Server, error) {
 	if deps.MaxBodyBytes <= 0 {
 		deps.MaxBodyBytes = 24 << 20
 	}
+	if deps.Relay == nil {
+		deps.Relay = disabledRelay{}
+	}
 	if deps.ClientAddress == nil {
 		resolver, err := clientaddr.NewResolver(nil)
 		if err != nil {
@@ -156,6 +162,11 @@ func (s *Server) publicRoutes() []routeSpec {
 		{method: http.MethodPost, pattern: "/v1/requests/{request_id}/heartbeat", handler: s.handleHeartbeat},
 		{method: http.MethodDelete, pattern: "/v1/devices/{device_id}", handler: s.handleDeleteDevice},
 		{method: http.MethodPost, pattern: "/v1/hosts/{host_id}/devices/{device_id}/revocation", handler: s.handleHostRevocation},
+		{method: http.MethodPost, pattern: "/v1/relay/objects", handler: s.handleRelayReserve},
+		{method: http.MethodPut, pattern: "/v1/relay/objects/{object_id}", handler: s.handleRelayUpload},
+		{method: http.MethodPost, pattern: "/v1/relay/objects/{object_id}/finish", handler: s.handleRelayFinish},
+		{method: http.MethodGet, pattern: "/v1/relay/objects/{object_id}", handler: s.handleRelayFetch},
+		{method: http.MethodDelete, pattern: "/v1/relay/objects/{object_id}", handler: s.handleRelayDelete},
 		{method: http.MethodGet, pattern: "/healthz", handler: s.handleHealth},
 		{method: http.MethodGet, pattern: "/readyz", handler: s.handleReady},
 		{method: http.MethodGet, pattern: "/metrics", handler: s.handleMetrics},

@@ -23,13 +23,15 @@ Unknown modes fail configuration validation; there is no external-account fallba
 | `internal/requests/` | Validation, dedupe, forwarding leases/retries, result application. |
 | `internal/events/` | Route opaque events by outer device ID. |
 | `internal/broker/` | MQTT, topics, transient correlation, presence, disconnect. |
+| `internal/payload/` | Node-local temporary ciphertext admission, staged write, hard expiry, reader leases, reconciliation and cleanup. |
 | `internal/store/` | SQL, transactions, migrations, cleanup. |
 | `internal/clientaddr/` | Ingress client address resolution, windowed pseudonyms, log redaction. |
 | `internal/config/`, `internal/diagnostics/` | Validated configuration, redacted logs, metrics. |
 
 ```text
-httpapi -> auth, pairing, requests
+httpapi -> auth, pairing, requests, payload
 pairing / requests / events -> store, broker
+payload -> store, quota directory
 store -> PostgreSQL
 broker -> Mosquitto plugin
 ```
@@ -65,13 +67,18 @@ and use the `[client]` placeholder.
 | `schema_migrations` | Applied migration names and SHA-256 checksums. |
 | `grants` | Host/device authorization, revocation, replay acknowledgement. |
 | `pairing_tokens` | Invitation hash, expiry, use marker, failure count. |
-| `requests` | Bodies/status, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay. |
+| `requests` | Bodies/status, relay epoch, inline or opaque reference representation, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay and durable notice intent. |
+| `temporary_ciphertext_objects` | Node-owned temporary ciphertext reservation, scope, state, exact length/digest, hard expiry, reader count, cleanup retries and grant fence revisions. |
+| `temporary_ciphertext_leases` | Idempotent reader leases that keep capacity charged until close. |
 
-Nine tables use checksummed, apply-once migrations under an advisory lock.
+Application tables use checksummed, apply-once migrations under an advisory lock.
 Unversioned installations are adopted without deletion; changed historical
 migrations or a database with unknown newer migrations prevent startup.
 A partial unique `(host_id, device_id, command_id)` index enforces control dedupe.
 Forwarding work stays on the request row; revocation replay stays on the grant.
+Temporary ciphertext capacity is charged from reservation until successful file
+deletion: partial, ready and pending-cleanup bytes count against per-object,
+per-host and per-node limits, and only a committed object is readable.
 Migrations remove the former fixed `local` workspace table and the duplicate
 `devices.auth_hash`; no account/tenant model is pre-installed in Standalone mode.
 
@@ -118,11 +125,13 @@ results cannot restore expired bodies. Access never generates DSH success.
 ## Exact request liveness and cancellation
 
 A non-terminal one-shot request owns one client lease on its existing request
-row. Only that authenticated device and request pair renews it, through its own
-`GET /v1/requests/{id}` or `POST /v1/requests/{id}/heartbeat`; renewal uses
-database time, cannot pass the original `expires_at`, and cannot revive an
-expired lease. Unrelated requests, sibling polling and observation traffic never
-renew it. A lease that is absent on a historical row is unknown, not expired.
+row. Only an explicit `POST /v1/requests/{id}/heartbeat` from the exact
+authenticated device and session renews it. `GET /v1/requests/{id}`, result
+reads, observation traffic, sibling heartbeats and foreign devices never renew
+it. Renewal uses database time, cannot pass the original `expires_at`, and
+cannot revive a terminal or elapsed lease. A non-renewal is a typed `404`, `410`
+or `409` response, never a silent `204`. A lease that is absent on a historical
+row is unknown, not expired.
 
 A bounded sweep atomically moves one elapsed live lease to an irreversible
 `expired` state, stops forwarding, and records a retryable pending cancellation
@@ -132,6 +141,34 @@ content. Publish success is not native release, and a notice that cannot be
 published replays after restart or broker recovery. A late read may return the
 recorded outcome but cannot reopen execution. Authorization revocation remains
 independent and stronger than transport or lease liveness.
+
+## Temporary ciphertext storage
+
+Oversized relay payloads and attachment parts use one dedicated quota directory
+per Access node. PostgreSQL records the opaque object id, owning node/owner,
+complete scope (host, optional device/session/channel, exactly one request,
+message or event identity, purpose and part), grant fence revisions, state,
+charged and exact bytes, SHA-256 digest, hard expiry, reader count and bounded
+cleanup retry state. Capacity is charged from reservation until the file is
+deleted: partial, ready and expired bytes all count against per-object,
+per-host and per-node limits plus object and active-upload counts.
+
+Admission reserves atomically under node- and host-scoped advisory locks and
+also checks actual filesystem headroom against the configured reserve. A body
+is staged in a same-volume temp file, capped at the reserved length, digest
+verified, fsynced and atomically renamed before the metadata commit to `ready`.
+A reserved object is never readable, and only a committed object can be opened.
+Opening records an idempotent reader lease; the charge survives expiry and
+active readers and is released once after file deletion. Expiry is fixed at
+reservation and can only be shortened by the parent deadline or retention cap;
+retries and fetches never extend it.
+
+Startup reconciliation repairs stale reservations, publishes a verified file
+that was renamed before a metadata commit, fences ready rows whose file is
+missing, and removes orphan files without live metadata in bounded batches.
+Cleanup failures remain charged and retry with a bounded backoff. The package
+emits bounded aggregate metrics only; object ids, paths, content and
+credentials never appear in logs or metrics.
 
 ## Pairing and revocation
 
@@ -231,11 +268,50 @@ not the normal host's topic permissions or protocol execution.
 [`server.go`](../../access/internal/httpapi/server.go); encoding is defined by the
 [wire contract](../../proto/v1/WIRE.md).
 
-See the [wire contract](../../proto/v1/WIRE.md#logical-mqtt-transport) for transport framing.
+See the [wire contract](../../proto/v1/WIRE.md#logical-mqtt-transport) for the
+complete-packet relay. Access publishes one MQTT 5 PUBLISH per application
+message and requires `relay_version=3` on every request, result, event,
+readiness proof and receive advertisement. A hop computes the exact encoded
+packet for its topic and publishes inline when the packet fits the minimum of
+the local profile, the broker CONNACK/configured packet limit and the receiver
+advertisement. An oversized durable body is staged as exact ciphertext and
+published only as a packet-sized reference after staging completes; a reference
+that cannot itself fit fails explicitly with no publish.
+
+Access owns the forwarding order. Each MQTT connection has one FIFO queue per
+destination topic, a bounded global in-flight semaphore and bounded waiting
+bytes, so a blocked flow cannot stall an unrelated small message. There are no
+application fragments, reassembly buffers, transfer receipts or device ACK
+topics.
+
+## Durable request notices
+
+The transaction that applies an authoritative status change also writes a
+notice intent on the same request row. Publication happens only after that
+commit. A bounded `FOR UPDATE SKIP LOCKED` worker claims due intents, coalesces
+intermediate transitions into the latest stored state and publishes one
+packet-sized `RequestStateNotice` with the request/command identity, status,
+update time and — only while the exact result object is readable — an opaque
+`result_reference`. A terminal transition stays pending until it is published,
+and a publication failure is retried with capped backoff from durable state.
+Duplicate notices are harmless, a stale notice never reopens an expired request
+or a closed execution, and no request/command identity, reference or content is
+logged. `/metrics` exposes only the pending count, oldest intent age and retry
+count.
+
+Broker ACLs follow the same topics: a Device publishes only its own
+`.../d/{device_id}/ready` advertisement and last will, subscribes to its own
+event and notice topics, and never publishes an acknowledgement. Access
+publishes the request, device event and device notice topics and subscribes to
+results, events, device advertisements and last wills. Per-connection receive
+advertisements are keyed by the broker-derived connection generation, so a
+sibling reconnect never clears another receiver's budget; a grant or App-session
+revocation fences all of them.
 
 Conversation payloads remain opaque to Access. The typed v1 Harness contract changes Host/Core domain handling, not grant ownership or server session authority. Bulk MQTT admission waits within bounded count/byte/context limits; controls bypass bulk admission.
 
-Completed v2-framed Host replies re-establish transport capability after an Access
-restart even when the Host stayed connected. A small HELLO can bootstrap an unknown
-peer, but capability must be confirmed before pairing advances to grant creation.
-No persistent capability table or periodic Host heartbeat is required.
+A valid epoch-3 HostReady re-establishes transport capability after an Access
+restart even when the Host stayed connected. Access answers it with one
+`REQUEST_KIND_ACCESS_READY` request carrying Access's own receive advertisement
+and refreshes it only when the effective budget or connection generation
+changes. No persistent capability table or periodic Host heartbeat is required.

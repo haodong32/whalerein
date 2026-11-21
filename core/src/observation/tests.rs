@@ -56,11 +56,24 @@ async fn subscribe(listener: &TcpListener) -> TcpStream {
         Packet::Connect(..)
     ));
     stream.write_all(&[0x20, 3, 0, 0, 0]).await.unwrap();
-    let Packet::Subscribe(subscription) = read_packet(&mut stream, &mut buffer).await else {
-        panic!("expected subscribe")
-    };
-    let [high, low] = subscription.pkid.to_be_bytes();
-    stream.write_all(&[0x90, 4, high, low, 0, 0]).await.unwrap();
+    // The Device publishes its receive advertisement after CONNACK and then
+    // subscribes to its event and notice topics. Acknowledge both the QoS 1
+    // publication and each subscription so the event loop can progress.
+    let mut subscriptions = 0;
+    while subscriptions < 2 {
+        match read_packet(&mut stream, &mut buffer).await {
+            Packet::Publish(publish) => {
+                let [high, low] = publish.pkid.to_be_bytes();
+                stream.write_all(&[0x40, 2, high, low]).await.unwrap();
+            }
+            Packet::Subscribe(subscription) => {
+                let [high, low] = subscription.pkid.to_be_bytes();
+                stream.write_all(&[0x90, 4, high, low, 0, 0]).await.unwrap();
+                subscriptions += 1;
+            }
+            other => panic!("unexpected packet before subscribe: {other:?}"),
+        }
+    }
     stream
 }
 
@@ -93,6 +106,7 @@ fn seal(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 3,
         ..Default::default()
     }
 }

@@ -417,7 +417,7 @@ type hostResultTx struct {
 func (tx *hostResultTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if strings.Contains(sql, "UPDATE requests") {
 		tx.steps = append(tx.steps, "request-update")
-		if len(args) != 14 || args[0] != "request" || args[1] != "host" || args[2] != "device" || args[7] != "channel" || args[8] != tx.at {
+		if len(args) != 15 || args[0] != "request" || args[1] != "host" || args[2] != "device" || args[7] != "channel" || args[8] != tx.at {
 			tx.t.Fatal("host result scope changed")
 		}
 		if tx.hostMode == "update-error" {

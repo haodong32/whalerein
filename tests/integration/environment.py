@@ -114,6 +114,152 @@ class Process:
         raise TimeoutError("Fixture control timed out")
 
 
+def relay_http(path, method="GET", body=None, token=None, headers=None, timeout=10):
+    """One raw Access directory request; returns (status, headers, bytes).
+
+    The exact ciphertext routes carry raw bytes, so the generic JSON helper is
+    not sufficient. Error statuses are returned rather than raised so a case can
+    assert the documented terminal code without parsing product logs.
+    """
+    request = urllib.request.Request(
+        "http://127.0.0.1:18080" + path,
+        data=body,
+        method=method,
+        headers={
+            **({"Authorization": "Bearer " + token} if token else {}),
+            **(headers or {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, dict(response.headers), response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, dict(error.headers), error.read()
+
+
+class RelayDirectory:
+    """Client for the node-scoped temporary ciphertext directory.
+
+    It uses the Device bearer path so a case can exercise reserve/upload/finish/
+    fetch/delete and their stored scope without reading the Host signing key.
+    The origin is the same loopback Access origin the product uses in this
+    container; production uses HTTPS.
+    """
+
+    def __init__(self, origin="http://127.0.0.1:18080"):
+        self.origin = origin.rstrip("/")
+
+    def reserve(
+        self,
+        token,
+        *,
+        host_id,
+        device_id,
+        ciphertext,
+        session_id="",
+        channel_id="channel-fixture",
+        purpose="PAYLOAD_PURPOSE_RESULT",
+        part_id="",
+        expires_at_ms=None,
+        epoch=3,
+        owner_node=None,
+    ):
+        import base64
+        import hashlib
+        import time
+
+        digest = hashlib.sha256(ciphertext).digest()
+        expiry = expires_at_ms if expires_at_ms is not None else int((time.time() + 60) * 1000)
+        body = json.dumps(
+            {
+                "relayVersion": epoch,
+                "hostId": host_id,
+                "deviceId": device_id,
+                "sessionId": session_id,
+                "channelId": channel_id,
+                "purpose": purpose,
+                "partId": part_id,
+                "ciphertextBytes": str(len(ciphertext)),
+                "sha256": base64.b64encode(digest).decode(),
+                "expiresAtUnixMs": str(expiry),
+            }
+        ).encode()
+        headers = {"Content-Type": "application/json"}
+        if owner_node is not None:
+            headers["WhaleRein-Owner-Node"] = owner_node
+        status, response_headers, payload = relay_http(
+            "/v1/relay/objects", "POST", body, token, headers
+        )
+        return status, response_headers, payload
+
+    def upload(self, token, reservation, ciphertext, epoch=3, headers=None):
+        status, response_headers, payload = relay_http(
+            reservation["uploadPath"],
+            "PUT",
+            ciphertext,
+            token,
+            {
+                "Content-Type": "application/octet-stream",
+                "WhaleRein-Relay-Epoch": str(epoch),
+                **(headers or {}),
+            },
+        )
+        return status, response_headers, payload
+
+    def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None, epoch=3):
+        import base64
+        import hashlib
+
+        sha = digest if digest is not None else hashlib.sha256(ciphertext).digest()
+        body = json.dumps(
+            {
+                "relayVersion": epoch,
+                "ciphertextBytes": str(
+                    len(ciphertext) if declared_bytes is None else declared_bytes
+                ),
+                "sha256": base64.b64encode(sha).decode(),
+            }
+        ).encode()
+        return relay_http(
+            f"/v1/relay/objects/{object_id}/finish",
+            "POST",
+            body,
+            token,
+            {"Content-Type": "application/json"},
+        )
+
+    def fetch(self, token, object_id, epoch=3):
+        return relay_http(
+            f"/v1/relay/objects/{object_id}",
+            "GET",
+            None,
+            token,
+            {"WhaleRein-Relay-Epoch": str(epoch)},
+        )
+
+    def delete(self, token, object_id, epoch=3):
+        return relay_http(
+            f"/v1/relay/objects/{object_id}",
+            "DELETE",
+            None,
+            token,
+            {"WhaleRein-Relay-Epoch": str(epoch)},
+        )
+
+    def store(self, token, *, ciphertext, purpose="PAYLOAD_PURPOSE_RESULT", **scope):
+        """Reserve, upload and finish one complete object; returns reference dict."""
+        status, _, payload = self.reserve(
+            token, ciphertext=ciphertext, purpose=purpose, **scope
+        )
+        assert status == 200, payload
+        reservation = json.loads(payload)
+        status, _, payload = self.upload(token, reservation, ciphertext)
+        assert status == 204, payload
+        status, _, payload = self.finish(token, reservation["objectId"], ciphertext)
+        assert status == 200, payload
+        return json.loads(payload)
+
+
 def http(path, body=None, token=None, *, return_status=False, include_conflict_code=False):
     request = urllib.request.Request(
         "http://127.0.0.1:18080" + path,
@@ -658,6 +804,49 @@ log:
   level: error
 """.replace("__ACCESS_CLIENT_ID__", self.access_client_id))
 
+    def configure_relay_directory(self, **limits):
+        """Enable the node-scoped ciphertext directory for one relay case.
+
+        The storage root stays inside the case directory. Limits default to a
+        small, fast directory; a case can lower one bound through the marker
+        keyword without changing product defaults.
+        """
+        import json as _json
+
+        root = self.directory / "payloads"
+        root.mkdir(parents=True, exist_ok=True)
+        values = {
+            "max_object_bytes": limits.get("max_object_bytes", 20 << 20),
+            "max_host_bytes": limits.get("max_host_bytes", 64 << 20),
+            "max_node_bytes": limits.get("max_node_bytes", 128 << 20),
+            "max_objects": limits.get("max_objects", 8),
+            "max_active_uploads": limits.get("max_active_uploads", 4),
+            "free_space_reserve_bytes": limits.get("free_space_reserve_bytes", 1 << 20),
+            "retention": limits.get("retention", "10m"),
+            "cleanup_interval": limits.get("cleanup_interval", "2s"),
+            "cleanup_batch": limits.get("cleanup_batch", 16),
+            "upload_timeout": limits.get("upload_timeout", "10s"),
+            "read_timeout": limits.get("read_timeout", "10s"),
+        }
+        # A production-shaped absolute root is required; values are YAML scalars.
+        self.config.write_text(
+            self.config.read_text().rstrip("\n")
+            + "\nstorage:\n  enabled: true\n"
+            + f'  root_dir: {_json.dumps(str(root))}\n'
+            + '  node_id: "node-integration"\n'
+            + '  owner_id: "node-integration"\n'
+            + "".join(f"  {key}: {value}\n" for key, value in values.items())
+        )
+        self.access_url = "http://127.0.0.1:18080"
+        self.relay_directory = RelayDirectory()
+
+    def configure_access_transport(self, profile):
+        """Select one packaged transport profile for the Access hop."""
+        assert profile in {"default", "compact", "roomy"}
+        text = self.config.read_text().rstrip("\n")
+        assert "\ntransport:\n" not in text
+        self.config.write_text(text + f"\ntransport:\n  profile: {profile}\n")
+
     def configure_tls(self, ca_file, broker_url="mqtts://127.0.0.1:8883"):
         """Point Access, the plugin and future devices at the case TLS listener.
 
@@ -742,6 +931,12 @@ log:
                 "WHALEREIN_HOST_CREDENTIAL_FILE": str(
                     self.directory / "credentials.json"
                 ),
+                "WHALEREIN_LOG_LEVEL": getattr(self, "plugin_log_level", "warn"),
+                **(
+                    {"WHALEREIN_ACCESS_URL": self.access_url}
+                    if getattr(self, "access_url", "")
+                    else {}
+                ),
                 **policy_env,
                 **(
                     {
@@ -825,7 +1020,7 @@ log:
         query = f"""SELECT json_build_object(
             'requestId',request_id,'hostId',host_id,'deviceId',device_id,
             'commandId',command_id,'kind',kind,'protocolVersion',protocol_version,
-            'channelId',channel_id,'clientTransportVersion',client_transport_version,
+            'channelId',channel_id,'relayVersion',relay_version,
             'body',encode(request_body,'base64'),
             'payloadDigest',encode(payload_digest,'base64'))
             FROM {self.schema}.requests WHERE command_id <> '' ORDER BY created_at DESC LIMIT 1"""

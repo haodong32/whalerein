@@ -37,9 +37,11 @@ func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
 	}
 	want := []Entry{
 		{Access: "read", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/event"},
+		{Access: "read", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/notice"},
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/event"},
+		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/notice"},
 		{Access: "write", Revision: 1, Filter: "whalerein/v1/presence/device/d1"},
-		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/ack"},
+		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/ready"},
 	}
 	if !reflect.DeepEqual(connection.Entries, want) {
 		t.Fatalf("entries = %+v", connection.Entries)
@@ -113,9 +115,11 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 			}),
 			want: "whalerein/1\nok\nkind device\ndevice d1\nrevision 1\nready 1\nwill whalerein/v1/presence/device/d1\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/event\n" +
+				"acl read 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/event\n" +
+				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
 				"acl write 1 - whalerein/v1/presence/device/d1\n" +
-				"acl write 1 h1 whalerein/v1/h/h1/d/d1/ack\n",
+				"acl write 1 h1 whalerein/v1/h/h1/d/d1/ready\n",
 		},
 		{
 			name:       "probe",
@@ -163,9 +167,11 @@ func TestControlMessagesRenderTheSetRequest(t *testing.T) {
 		"revision 2",
 		"ttl 10000",
 		"acl read 2 h1 whalerein/v1/h/h1/d/d1/event",
+		"acl read 2 h1 whalerein/v1/h/h1/d/d1/notice",
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/event",
+		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/notice",
 		"acl write 2 - whalerein/v1/presence/device/d1",
-		"acl write 2 h1 whalerein/v1/h/h1/d/d1/ack",
+		"acl write 2 h1 whalerein/v1/h/h1/d/d1/ready",
 	}
 	if got := ControlMessages(connection, "whalerein-device-d1", 10000); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ControlMessages() = %#v", got)

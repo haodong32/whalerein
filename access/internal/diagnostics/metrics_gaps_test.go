@@ -11,43 +11,48 @@ import (
 // when a caller passes an unknown code, direction, operation or route.
 func TestTransportAndCleanupMetricsBoundTheirLabels(t *testing.T) {
 	metrics := NewMetrics()
-	metrics.TransportRejected("frame_packet", 10, 100)
+	metrics.TransportRejected("packet_limit", 10, 100)
 	metrics.TransportRejected("not-a-code", 0, 0)
-	metrics.TransportFrame("in", 2048)
-	metrics.TransportFrame("out", 0)
-	metrics.TransportFrame("sideways", 5)
-	metrics.TransportReservations(2, 4096)
-	metrics.TransportReservations(0, -1)
+	metrics.TransportPacket("inline", 2048)
+	metrics.TransportPacket("reference", 0)
+	metrics.TransportPacket("sideways", 5)
+	metrics.TransportQueue("request", 2)
+	metrics.TransportQueue("not-a-flow", -1)
+	metrics.TransportInFlightCount("event", 1)
+	metrics.TransportInFlightCount("not-a-flow", -1)
 	metrics.CleanupCompleted("bodies")
 	metrics.CleanupCompleted("not-an-operation")
 	metrics.TransportBudgetFallback("device")
 	metrics.TransportBudgetFallback("not-a-route")
 
 	for code, want := range map[string]float64{
-		"frame_packet": 1,
+		"packet_limit": 1,
 		"frame_header": 1, // unknown codes collapse to the header code
 	} {
 		if got := testutil.ToFloat64(metrics.TransportRejections.WithLabelValues(code)); got != want {
 			t.Fatalf("rejections %q = %v, want %v", code, got, want)
 		}
 	}
-	if got := testutil.ToFloat64(metrics.TransportRejectedBytes.WithLabelValues("frame_packet")); got != 10 {
+	if got := testutil.ToFloat64(metrics.TransportRejectedBytes.WithLabelValues("packet_limit")); got != 10 {
 		t.Fatalf("rejected bytes = %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.TransportFrames.WithLabelValues("in")); got != 2 {
-		t.Fatalf("in frames = %v", got)
+	if got := testutil.ToFloat64(metrics.TransportPackets.WithLabelValues("inline")); got != 2 {
+		t.Fatalf("inline packets = %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.TransportFrames.WithLabelValues("out")); got != 1 {
-		t.Fatalf("unknown direction did not normalize: %v", got)
+	if got := testutil.ToFloat64(metrics.TransportPackets.WithLabelValues("reference")); got != 1 {
+		t.Fatalf("unknown representation did not normalize: %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.TransportBytes.WithLabelValues("in")); got != 2053 {
-		t.Fatalf("in bytes = %v", got)
+	if got := testutil.ToFloat64(metrics.TransportPacketBytes.WithLabelValues("inline")); got != 2053 {
+		t.Fatalf("inline bytes = %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.TransportIncoming); got != 0 {
-		t.Fatalf("incoming gauge = %v", got)
+	if got := testutil.ToFloat64(metrics.TransportQueueDepth.WithLabelValues("request")); got != 2 {
+		t.Fatalf("queue depth = %v", got)
 	}
-	if got := testutil.ToFloat64(metrics.TransportReserved); got != 0 {
-		t.Fatalf("negative reservation was not clamped: %v", got)
+	if got := testutil.ToFloat64(metrics.TransportQueueDepth.WithLabelValues("other")); got != 0 {
+		t.Fatalf("negative queue depth was not clamped: %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.TransportInFlightWork.WithLabelValues("event")); got != 1 {
+		t.Fatalf("in flight = %v", got)
 	}
 	if got := testutil.ToFloat64(metrics.CleanupLastRun.WithLabelValues("bodies")); got <= 0 {
 		t.Fatalf("cleanup completion = %v", got)
@@ -86,9 +91,10 @@ func TestZeroValueMetricsIgnoreUninitializedSubsystems(t *testing.T) {
 	metrics.ResultRejected()
 	metrics.ReleaseDenied()
 	metrics.RequestClaimStale()
-	metrics.TransportRejected("frame_packet", 1, 1)
-	metrics.TransportFrame("in", 1)
-	metrics.TransportReservations(1, 1)
+	metrics.TransportRejected("packet_limit", 1, 1)
+	metrics.TransportPacket("inline", 1)
+	metrics.TransportQueue("request", 1)
+	metrics.TransportInFlightCount("request", 1)
 	metrics.CleanupCompleted("bodies")
 	metrics.TransportBudgetFallback("device")
 
@@ -97,8 +103,9 @@ func TestZeroValueMetricsIgnoreUninitializedSubsystems(t *testing.T) {
 	nilMetrics.ReleaseDenied()
 	nilMetrics.RequestClaimStale()
 	nilMetrics.TransportRejected("frame_header", 0, 0)
-	nilMetrics.TransportFrame("out", 0)
-	nilMetrics.TransportReservations(0, 0)
+	nilMetrics.TransportPacket("reference", 0)
+	nilMetrics.TransportQueue("request", 0)
+	nilMetrics.TransportInFlightCount("request", 0)
 	nilMetrics.CleanupCompleted("tokens")
 	nilMetrics.TransportBudgetFallback("device")
 }

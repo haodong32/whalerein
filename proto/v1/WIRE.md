@@ -18,10 +18,21 @@ golden artifacts and `tests/integration/drivers/protobuf/proto_compat.py`
 fails a build that removes a field, reuses a tag number, changes a type or
 JSON name, changes oneof membership, or reuses an enum number.
 
+The MQTT relay carries a separate, required `relay_version` whose only
+supported value is **3** (`RELAY_EPOCH_V3`). It is independent of the
+application protocol version, which stays 1. `relay_version` appears on
+`HostRequest`, `HostResult`, `EventEnvelope`, `HostReady`,
+`ReceiveAdvertisement`, `RelayObjectReserveRequest`,
+`RelayObjectFinishRequest`, `RequestStateNotice` and the relay
+`application/json` error surface. A peer that does not advertise epoch 3 is
+rejected explicitly with `protocol_version_incompatible`; there is no
+unframed v2 acceptance, no fragment fallback and no mixed-epoch route.
+
 This revision is the single revised conversation and transport contract inside
 version 1. It intentionally replaces the earlier text-only live frame, flattened
-tool/notice blocks, flattened send reply, cursor-only history read and compiled
-transport ceilings. `WatchSession.interests` is required, `WatchReady.questions`,
+tool/notice blocks, flattened send reply, cursor-only history read, compiled
+transport ceilings, MQTT fragmentation and application receipts.
+`WatchSession.interests` is required, `WatchReady.questions`,
 `SessionState.questions`, `SessionUpdate.questions` and the `QuestionDescriptor`
 and `QuestionStamp` payloads remain part of the only supported contract, and the
 expanded content, attachment and budget families below are now mandatory where
@@ -35,8 +46,11 @@ material.
 
 The immutable protobuf baseline records this hard cut through the repository
 compatibility path (`--update-baseline --rationale`) because fields and message
-shapes are replaced, not added. Keys, pins, grants, Source sessions, pager keys
-and durable command recovery identities are retained. Content positions,
+shapes are replaced, not added. The same cut removes `TransportFrame`, the
+`WRMQTT2` prefix, fragment geometry and every receipt/acknowledgement topic and
+replaces them with one inline-or-reference relay epoch. Keys, pins, grants,
+Source sessions, pager keys and durable command recovery identities are
+retained. Content positions,
 cursors and receipt namespaces are bound to a projection identity: Core fences
 old projected rows from readable history and atomically installs a rebuilt
 snapshot over a fixed Source cut before it serves the new projection.
@@ -78,9 +92,12 @@ diagnostic id.
 |---|---|---|
 | `request_id` | client | Correlates one `HostRequest` with its results. |
 | `command_id` | client | Idempotency key for control commands. Empty for handshakes, queries and pairing. |
-| `payload_digest` | client | `SHA-256(body)` for control commands. Empty otherwise. |
+| `payload_digest` | client | `SHA-256` of the complete command body. For a referenced body it equals `body_reference.sha256`. Empty otherwise. |
 | `channel_id` | client | Random secure-channel id, new for every handshake. |
 | `trace_id` | client | Diagnostic correlation only. Never business, never idempotency. |
+| `object_id` | Access | Opaque temporary ciphertext identity, exactly 32 lowercase hexadecimal characters. Never authority. |
+| `owner_node_id` | Access | Opaque identity of the Access node that owns one ciphertext object. |
+| `part_id` | Host/client | Attachment occurrence or part identity bound at reservation. Empty for non-part purposes. |
 | History cursor | Source | Opaque, session/view-bound committed position. |
 | Attempt reference | Source adapter | Live epoch plus Attempt ID, independent of Message identity. |
 | `delivery_id` | Source adapter | Opaque acceptance identity; it does not establish execution or a committed Message. |
@@ -94,7 +111,9 @@ AAD inputs ambiguous. The shared validator is `whalerein_proto::validate_id`.
 | `request_id`, `command_id`, `channel_id`, `claim_id`, `approval_id`, `delivery_id`, `message_id`, `block_id`, `batch_id`, `item_id`, `call_id`, `transfer_id`, `projection_id` | 128 | printable ASCII, no `|`; `command_id` may be empty |
 | `host_id`, `device_id` | 200 | printable ASCII, no `|` |
 | `trace_id`, `watch_id`, `wait_id` | 64 | printable ASCII, no `|` |
-| `session_id`, `attachment_ref` | 512 | UTF-8 without control characters or `|` |
+| `session_id`, `attachment_ref`, `part_id` | 512 | UTF-8 without control characters or `|` |
+| `object_id` | 32 | exactly 32 lowercase hexadecimal characters |
+| `owner_node_id` | 128 | printable ASCII, no `|` |
 | History cursor, `source_locator`, `continuation` | 4096 | UTF-8 without control characters or `|`; a cursor may be empty at the origin |
 
 `attachment_ref` is an opaque Source occurrence identity, not a path or digest.
@@ -102,6 +121,11 @@ AAD inputs ambiguous. The shared validator is `whalerein_proto::validate_id`.
 parsed by a client. A transfer is additionally bound to the authenticated
 device, Host, session, channel and occurrence by the Host; the transfer handle
 alone is never authority.
+
+`object_id`, `owner_node_id`, a digest and a length locate an object only. They
+never authorize a read, replace a grant, or extend an expiry. Access resolves
+the owning node from `owner_node_id` and rechecks the authenticated principal
+and stored scope before releasing any ciphertext.
 
 A request whose identifier violates these bounds is `invalid_argument` and is
 not forwarded. An identifier near the limit is never truncated on the wire.
@@ -123,16 +147,38 @@ whalerein/v1/h/{host_id}/request
 whalerein/v1/h/{host_id}/result
 whalerein/v1/h/{host_id}/event
 whalerein/v1/h/{host_id}/d/{device_id}/event
-whalerein/v1/h/{host_id}/d/{device_id}/ack
+whalerein/v1/h/{host_id}/d/{device_id}/notice
+whalerein/v1/h/{host_id}/d/{device_id}/ready
 ```
 
-Access publishes `request`; the host subscribes only
-to its own `request` and publishes only its own `result` and `event`. Access
-subscribes to `result` and `event` and republishes an event to
-`.../d/{device_id}/event` using only the outer `device_id`. A device subscribes
-only to its own event topic and publishes transport receipts only to its own
-`ack` topic. Access subscribes to device ACKs. Cross-host wildcard subscriptions
-are denied by broker ACL.
+Every topic carries exactly one complete message per MQTT PUBLISH. There is no
+device acknowledgement topic, receipt topic or fragment topic.
+
+| Topic | Publisher | Subscriber | Payload |
+|---|---|---|---|
+| `.../request` | Access | that Host | `HostRequest`, including `REQUEST_KIND_ACCESS_READY` |
+| `.../result` | Host | Access | `HostResult`, including `HostReady` |
+| `.../event` | Host | Access | `EventEnvelope` |
+| `.../d/{device_id}/event` | Access | that Device | `EventEnvelope` |
+| `.../d/{device_id}/notice` | Access | that Device | `RequestStateNotice` |
+| `.../d/{device_id}/ready` | that Device | Access | `ReceiveAdvertisement` |
+
+Access publishes only `request` and the two Device topics; a Host publishes only
+its own `result` and `event`; a Device publishes only its own `ready` topic. The
+host subscribes only to its own `request`. A device subscribes only to its own
+event and notice topics and publishes only to its own ready topic. Access
+republishes an event to `.../d/{device_id}/event` using only the authenticated
+outer `device_id`. Cross-host wildcard subscriptions are denied by broker ACL.
+
+`.../d/{device_id}/ready` is the Device receive-advertisement path. The Device
+publishes its own `ReceiveAdvertisement` after each successful broker connect
+and whenever its effective budget changes. Access registers it against the
+broker-derived connection generation for that authenticated Device connection.
+An old generation never refreshes a newer one, and Access never treats a
+Device-supplied value as authority to raise a limit. The Host learns the Device
+receive budget through the authenticated Noise `ChannelHello.receive`, and
+learns Access's own Host-to-Access budget through the Access
+`REQUEST_KIND_ACCESS_READY` reply described below.
 
 Client IDs and usernames:
 
@@ -279,8 +325,12 @@ A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls:
    Both sides now derive keys.
 
 Noise payloads are `ChannelHello` / `ChannelReady`; they carry the negotiated
-protocol version and capabilities. A version mismatch rejects the handshake
-with `protocol_version_incompatible` before any command executes.
+application protocol version, capabilities and the endpoint's
+`ReceiveAdvertisement` (including its own `relay_version`, which must be 3).
+`ChannelHello.receive` is the Device receive budget the Host uses for preview
+splitting; `ChannelReady.receive` is the Host budget the Device uses. A
+version or relay-epoch mismatch rejects the handshake with
+`protocol_version_incompatible` before any command executes.
 
 Key schedule:
 
@@ -316,23 +366,41 @@ history intervals and live Attempt sequences. None is a nonce.
 ## Requests and results
 
 `POST /v1/hosts/{host_id}/requests` accepts a `HostRequest` from an authorized
-device. Access:
+device. Every request validates the application `protocol_version` (1) and
+`relay_version` (3). A non-matching relay epoch is rejected with
+`protocol_version_incompatible` before admission; Access never accepts a v2
+frame in place of a `HostRequest`. Access:
 
 1. authenticates the device transport token and an active grant;
-2. checks `expires_at` and protocol version;
-3. for a command, looks up `(host_id, device_id, command_id)`:
+2. checks `expires_at`, `protocol_version` and `relay_version`;
+3. validates exactly one body representation. `HANDSHAKE`, `PAIRING_CLAIM` and
+   internal Access notices must carry inline `body` and no `body_reference`.
+   `QUERY` and `COMMAND` carry exactly one of `body` and `body_reference`; both
+   or neither is `invalid_argument`. When `body_reference` is set,
+   `payload_digest` must equal its `sha256`;
+4. for a command, looks up `(host_id, device_id, command_id)`:
    same digest returns the existing row, different digest returns
    `payload_digest_mismatch` without forwarding;
-4. if the host has no broker connection, writes `host_offline` with
+5. if the host has no broker connection, writes `host_offline` with
    `forward_state=none` and returns;
-5. otherwise inserts `received`, `forward_state=pending`, publishes after the
+6. otherwise inserts `received`, `forward_state=pending`, publishes after the
    transaction commits, and records `published_once`.
 
-`GET /v1/requests/{request_id}` returns the status copy. There is no HTTP route
-for sessions, messages, interrupts or approvals.
+The representation is per hop, not per message. Access may receive an inline
+`body` and publish the same complete ciphertext as a `body_reference` on the
+Host hop, or receive a `body_reference` and reuse it. It may also stage an
+inline body under the original `request_id`, `command_id`, digest and expiry
+before publishing the reference. The same rule applies in reverse. The Host
+always validates and dispatches the same complete message; it never sees a
+fragment and cannot tell which hop changed representation except from the
+carrier fields.
 
-`HostResult` from the host conditionally updates the same row. Allowed
-transitions:
+`GET /v1/requests/{request_id}` returns the status copy. There is no HTTP route
+for sessions, messages, interrupts or approvals. When the complete result body
+was stored rather than inlined, `RequestState.result_reference` locates it.
+
+`HostResult` from the host conditionally updates the same row. It carries the
+same required `relay_version=3`. Allowed transitions:
 
 ```text
 received      -> host_offline, rejected, host_accepted, succeeded, failed, unknown
@@ -345,10 +413,60 @@ commands the host first publishes `host_accepted`, then a terminal result.
 `received` never means the host accepted. `host_accepted` never means DSH
 finished. `unknown` never means success.
 
+`HostResult` carries exactly one of `result_body` and `result_reference` when a
+body exists. `HostReady`, pairing results and internal control results are
+small bootstrap bodies and stay inline. Access may replace an inline
+`result_body` with a `result_reference` for the Device hop, staging the exact
+ciphertext under `PAYLOAD_PURPOSE_RESULT` with the same request and command
+identity. A
+packet-sized terminal status may carry neither representation when the complete
+body could not be admitted; the recorded outcome, error code and command
+identity are unchanged, and the client reports confirmed completion with scoped
+recovery.
+
 Results are read only by `request_id`. The result body stays encrypted for the
 channel that produced it; after a reconnect the client reuses the same
 `command_id` (host dedupe) or queries `GetCommandResult` to obtain the terminal
 payload over the new channel.
+
+### Access receive advertisement
+
+`HostReady` (Host to Access) carries the Host receive budget for the
+Access-to-Host `request` hop. After Access registers a valid epoch-3
+`HostReady`, it publishes one `HostRequest{kind=REQUEST_KIND_ACCESS_READY}` on
+`.../request` whose inline `body` is Access's own `ReceiveAdvertisement`. The
+Host records it as the Access receive budget for the Host-to-Access
+`result`/`event` hop. Access republishes this control notice when its effective
+budget or connection generation changes. The Host does not answer it and does
+not treat it as a business request. This is how the Host obtains the middle-hop
+budget; `ChannelHello.receive` supplies the Device budget used for preview
+splitting. A Device cannot submit `REQUEST_KIND_ACCESS_READY`.
+
+### Result notices
+
+Access commits durable notice intent in the same transaction as the
+authoritative outcome, before any MQTT publication. A publication failure is
+retried from that intent; a lost notice never loses the recorded fact. A
+reference is eligible for delivery only after its complete matching ciphertext
+is readable, and a notice never advertises an unfinished upload.
+
+After an outcome and its durable notice intent commit, Access publishes a
+`RequestStateNotice` on `.../d/{device_id}/notice`. The notice is always a
+single packet-sized metadata message. It carries `request_id`, `command_id`,
+status, update time and, only after the complete matching ciphertext is
+readable, `result_reference`. It carries no plaintext content, preview text or
+business payload. Duplicate notices are harmless. A receiver that missed one
+reconciles through `GET /v1/requests/{request_id}` and the original command
+identity, and performs one final authoritative lookup before an authorized,
+unconfirmed wait expires.
+
+The same rules apply to live observation: Access forwards a validated
+`EventEnvelope` or its reference only after the durable event copy exists, and
+a reconnecting receiver reconciles from its original watch and history cursor.
+A stale notice never reopens expired content, a revoked scope or a closed
+execution. No new plaintext content is added to MQTT; previews remain sealed,
+notices carry metadata only, and complete bodies travel inline when they fit or
+through the HTTPS directory.
 
 ## Pairing and revocation replay
 
@@ -484,9 +602,106 @@ POST   /v1/enrollments/hosts/{host_id}/devices/{device_id}/revocation  admin bea
 GET    /v1/enrollments/hosts/{host_id} admin bearer (device/Host proof pending)
 GET    /v1/enrollments/hosts/{host_id}/clients  admin bearer
 GET    /v1/operations/{operation_id}   admin bearer (original-endpoint proof pending)
+POST   /v1/relay/objects               Host authority or Device bearer token
+PUT    /v1/relay/objects/{object_id}   Host authority or Device bearer token
+POST   /v1/relay/objects/{object_id}/finish  Host authority or Device bearer token
+GET    /v1/relay/objects/{object_id}   Host authority or Device bearer token
+DELETE /v1/relay/objects/{object_id}   Host authority or Device bearer token
 GET    /healthz
 GET    /readyz
 GET    /metrics
+```
+
+### Temporary ciphertext directory
+
+`/v1/relay/objects` is the Access-owned temporary ciphertext directory. The
+routes use a node-scoped owner path under the configured Access origin: the
+caller resolves `owner_node_id` to that node's configured base path (for
+example an ingress prefix or node host). A single node serves its own path
+directly. No route accepts a filename, MIME type or content metadata outside
+the sealed ciphertext.
+
+| Route | Request | Success | Purpose |
+|---|---|---|---|
+| `POST /v1/relay/objects` | `RelayObjectReserveRequest` | `RelayObjectReservation` | Reserve exact bytes, scope and expiry; return object id, owner and upload path |
+| `PUT /v1/relay/objects/{object_id}` | raw ciphertext, exact `Content-Length` | `204` | Upload exactly the reserved length |
+| `POST /v1/relay/objects/{object_id}/finish` | `RelayObjectFinishRequest` | `RelayObject` | Publish the object only after complete validated upload |
+| `GET /v1/relay/objects/{object_id}` | no body | raw ciphertext stream | Fetch the complete object |
+| `DELETE /v1/relay/objects/{object_id}` | no body | `RelayObjectDeleteResult` | Bounded cancel and release |
+
+Every request carries the relay epoch. `POST`/`finish` carry it in the JSON
+body; `PUT`/`GET`/`DELETE` require `WhaleRein-Relay-Epoch: 3`. A missing or
+different value is `protocol_version_incompatible`.
+
+Authentication is one of:
+
+- **Host authority.** The Host uses the Ed25519 signing key registered on its
+  authenticated `HostReady`. `POST`/`finish` carry `signed_at_unix_ms` and
+  `signature` in the body. `PUT`, `GET` and `DELETE` carry
+  `WhaleRein-Host-Signed-At-Unix-Ms` and `WhaleRein-Host-Signature`
+  (base64url). The signed text forms are fixed:
+
+  ```text
+  whalerein/v1/relay|reserve|{relay_version}|{host_id}|{device_id}|{session_id}|{channel_id}|{purpose}|{part_id}|{ciphertext_bytes}|{hex(sha256)}|{expires_at_unix_ms}|{signed_at_unix_ms}
+  whalerein/v1/relay|upload|{relay_version}|{object_id}|{ciphertext_bytes}|{hex(sha256)}|{signed_at_unix_ms}
+  whalerein/v1/relay|finish|{relay_version}|{object_id}|{ciphertext_bytes}|{hex(sha256)}|{signed_at_unix_ms}
+  whalerein/v1/relay|object|{relay_version}|{object_id}|{signed_at_unix_ms}
+  ```
+
+  `hex(sha256)` is 64 lowercase hexadecimal characters. Every component is
+  `|`-free by the identifier rules. The signature time window matches pairing:
+  two minutes in the past through one minute in the future.
+
+- **Device token.** A Device sends its transport bearer. Access derives the
+  Device principal and requires an active grant plus the bound session,
+  channel, purpose and part scope. A Device cannot use the directory to read
+  another Device's object.
+
+The checked purposes are `REQUEST` (complete query/command body), `RESULT`
+(complete result body), `EVENT` (complete live event payload),
+`ATTACHMENT_PART` (one bounded attachment part) and `HISTORY_PAGE` (one
+complete history page). A fetch for a different purpose is denied.
+
+The reservation binds the object to `host_id`, `device_id`, `session_id`,
+`channel_id`, `purpose`, `part_id`, `ciphertext_bytes`, `sha256`, the fixed
+`expires_at_unix_ms`, `owner_node_id`, the original `grant_generation` and
+`revocation_generation`, and a single reserved upload. `sha256` and
+`ciphertext_bytes` describe the ciphertext, never plaintext. `finish` requires
+the uploaded bytes to equal the reserved length and digest. On every ciphertext
+release Access rechecks the active grant, both stored revisions and the exact
+scope. A re-grant or revocation leaves an old reference fenced; an independently
+authorized new read can create a new object. No release decision is cached.
+
+The wrong-owner path answers `409 conflict` with `ErrorCode.conflict`,
+`ErrorResponse.reason = "wrong_owner_path"`, and a `WhaleRein-Owner-Node`
+header naming the authoritative owner. It is distinct from `404 not_found`
+(no such object on the owner) and `410 expired` (object lifetime ended).
+Terminal relay errors use existing codes only:
+
+| Condition | Status | `ErrorCode` |
+|---|---|---|
+| Malformed scope, length or epoch | `400` | `invalid_argument` / `protocol_version_incompatible` |
+| Missing or bad Host signature or Device token | `401` | `unauthorized` |
+| Foreign scope, revoked grant or revision mismatch | `403` | `forbidden` |
+| Object absent for this authorized scope | `404` | `not_found` |
+| Wrong owner path, incomplete upload or digest mismatch | `409` | `conflict` / `payload_digest_mismatch` |
+| Fixed expiry reached | `410` | `expired` |
+| Object above the per-body or part bound | `413` | `payload_too_large` |
+| Node, Host or active-upload quota refused this attempt | `429` | `rate_limited` (`reason=quota_exceeded`) |
+| Filesystem headroom reserve refused | `503` | `unavailable` (`reason=storage_pressure`) |
+
+`PUT` requires `Content-Length`; a missing, shorter or longer body is rejected
+without reading past the reserved bound. `GET` returns the exact ciphertext
+with `Content-Length`, `Digest: sha-256=...` and
+`WhaleRein-Object-Expires-At-Unix-Ms`; a partial or truncated stream is never a
+complete object. `DELETE` is bounded and idempotent for the same authorized
+scope. Body budgets stay aligned with `TransportBudget`:
+
+```text
+reserve/finish JSON body  <= envelope_bytes
+upload/resolved ciphertext <= envelope_bytes and <= reserved bytes
+active uploads             <= bulk_concurrency
+one upload/fetch           <= transfer_timeout_ms
 ```
 
 `POST /v1/requests/{request_id}/heartbeat` renews the non-terminal request
@@ -818,52 +1033,137 @@ or late resolve returns `approval_expired`, `approval_version_mismatch` or
 
 ## Logical MQTT transport
 
-Current source uses transport version 2 independently of application protocol
-version 1. HostReady advertises `transport_version`; HostRequest carries
-`client_transport_version` and `relay_transport_version` for capability checks.
-Legacy small envelopes remain raw protobuf; large messages require a capable peer.
+One coordinated relay epoch (`relay_version=3`) replaces transport v2. A
+complete application message travels in exactly one MQTT PUBLISH. Each hop
+picks the representation for its own outgoing packet:
 
-Framed packets start with `WRMQTT2` followed by protobuf `TransportFrame`.
-A frame identifies the logical topic, transfer ID, index/count, total bytes,
-SHA-256 digest and payload, or receipt/rejection. It also carries the selected
-`fragment_payload_bytes` width and named `profile`; the width must stay identical
-for every part of a transfer and must not exceed the negotiated receive budget.
-Receivers check bounds and metadata, reassemble the entire envelope, and verify
-the digest before application dispatch. AEAD verification remains the security
-boundary; transport receipts acknowledge transfer, not command execution. Part
-receipts alone do not confirm success: the sender also requires `complete=true`
-after whole-envelope integrity verification.
+- **inline** — the serialized outer envelope carries the complete opaque body
+  (`HostRequest.body`, `HostResult.result_body`, or `EventEnvelope.ciphertext`);
+- **reference** — the same envelope carries an opaque `PayloadReference` to the
+  exact ciphertext stored on its owning Access node. An `EventEnvelope` keeps
+  its `nonce` in either representation; only the ciphertext moves. The reader
+  fetches the complete ciphertext over the HTTPS directory, verifies length and
+  SHA-256, and then applies the same AEAD and business validation as for an
+  inline packet.
 
-| Data topic | Receipt topic |
+Only routing, expiry and size metadata travel outside the seal. Application
+message identity, AEAD keys, channel binding and authoritative ordering do not
+change with the representation. A business handler receives one resolved
+complete body.
+
+```text
+HostRequest      body                    | body_reference
+HostResult      result_body              | result_reference
+EventEnvelope    nonce + ciphertext      | nonce + payload_reference
+```
+
+### Per-hop packet fit
+
+`TransportBudget.packet_bytes` is the largest complete encoded MQTT PUBLISH a
+receiver accepts. The full packet counts, not just ciphertext:
+
+```text
+remaining_length = 2 + len(topic) + 2 + varint(len(properties))
+                 + len(properties) + len(payload)
+encoded_publish  = 1 + varint(remaining_length) + remaining_length
+```
+
+The leading `1` is the PUBLISH fixed header with QoS 1; the `2` before the topic
+is its length prefix; the following `2` is the packet identifier required by
+QoS 1; `properties` are the MQTT 5 PUBLISH properties; `payload` is the binary
+protobuf outer envelope. The outer envelope already contains every protocol
+field, the reference or inline body, nonce, and the 16-byte ChaCha20-Poly1305
+tag. A sender computes `encoded_publish` with the actual topic and properties it
+will use; it never estimates from ciphertext length alone.
+
+For one hop:
+
+```text
+limit = min(local send packet limit,
+            broker packet limit (brokerPacketLimitBytes),
+            receiver ReceiveAdvertisement.budget.packet_bytes)
+```
+
+The sender then applies exact semantics:
+
+| Complete encoded packet | Action |
 |---|---|
-| Host `request` | Host `result` |
-| Host `result` or `event` | Host `request` |
-| Device `event` | Device `ack` |
+| `< limit` (below) | Publish one inline packet. |
+| `== limit` (at) | Publish one inline packet; the boundary is inclusive. |
+| `> limit` with a ready object | Publish one reference packet only. |
+| `> limit` and reference packet also `> limit` | Publish nothing; use a bounded route with a larger limit or fail explicitly before publish. |
 
-Senders retry missing receipts within bounded attempts/time. Disconnect clears
-partial transfers. Completed-transfer tracking suppresses duplicate delivery;
-command IDs and event sequences still enforce application idempotency.
+A reference is never published before its complete ciphertext is readable.
+`envelope_bytes` is checked separately on the complete serialized message; a
+message above it fails with `payload_too_large` and no partial representation is
+sent. The relay never truncates, fragments, reassembles or retries at the
+application packet layer. A receiver with a smaller limit than the minimum
+reference envelope makes that route ineligible instead of receiving a broken
+packet.
+
+### Per-hop rewrite
+
+Access is a ciphertext relay. It can receive an inline envelope and publish a
+reference for the next hop, or reuse a reference:
+
+1. keep the same message identity (`request_id` + `command_id` +
+   `payload_digest`, or the event channel and creation identity);
+2. store the exact received ciphertext if no readable object exists, under the
+   matching `PayloadPurpose`, owner, scope and fixed expiry;
+3. publish a `PayloadReference` only after length, digest and publication
+   complete.
+
+The reverse rewrite is also allowed when the complete ciphertext is readable
+and the inline packet fits. Access never inspects, re-encrypts or reorders the
+body, and the Host always dispatches the same complete message once.
+
+### Ordered packet delivery
+
+MQTT is QoS 1 with the broker's negotiated receive maximum and connection flow
+control. Each publisher uses ordered submission and bounded native in-flight
+work; Access uses a flow-preserving forwarding queue. There are no application
+fragment, transfer or receipt acknowledgements, and no device ACK topic. A
+failed publication is retried only at the same complete-message identity, so
+duplicate MQTT delivery is handled by the existing `request_id`,
+`command_id`/digest and typed event-sequence rules. A blocked bulk HTTPS
+transfer cannot stall an eligible small MQTT packet.
 
 ## Transport budgets and configuration
 
 `proto/v1/transport_profiles.json` is the single packaged profile vocabulary
 shared by Access, Host and Core. `default` preserves the measured operating
-profile: 64 KiB packet, 60 KiB fragment payload and 16 MiB logical envelope.
-`compact` and `roomy` are valid alternate profiles. Each profile records packet
-bytes, packet overhead, fragment payload bytes, derived fragment count, envelope
-bytes, bulk concurrency, reserved bytes, fragment idle timeout and transfer
-timeout. A budget is valid only when the fragment payload plus the named
-profile's packet overhead fits the packet budget, the fragment count covers the
-envelope at that width, reserved bytes cover one envelope, and reserved bytes
-also cover the configured in-flight fragments. Timeouts are positive and the
-fragment idle timeout stays below the transfer timeout, and each value stays
-representable in its wire field. A budget may carry validated operator overrides
-instead of matching a packaged profile exactly; the profile label selects the
-base vocabulary and its packet overhead, and the relations above are checked
-against the advertised values. Values are never clamped: a sender takes the
-minimum of its local limit and every advertised limit. Invalid or contradictory
-settings fail before readiness or connection use, and a tiny fragment width
-cannot bypass aggregate resource accounting.
+profile: a 64 KiB complete MQTT packet and a 16 MiB logical envelope.
+`compact` and `roomy` are valid alternate profiles.
+
+`TransportBudget` is packet-based:
+
+| Field | Meaning |
+|---|---|
+| `packet_bytes` | Largest complete encoded MQTT PUBLISH accepted, including fixed header, topic, MQTT 5 properties, outer envelope and ciphertext framing. |
+| `envelope_bytes` | Largest complete encoded message accepted in any representation. |
+| `bulk_concurrency` | Concurrent HTTPS ciphertext transfers admitted per receiver. |
+| `reserved_bytes` | Ciphertext bytes the receiver may hold reserved or in flight. |
+| `transfer_timeout_ms` | One bound for a complete HTTPS upload or fetch. |
+
+The retired fragment geometry (`fragment_payload_bytes`, `fragment_count`,
+`fragment_idle_timeout_ms`) no longer exists. The profile document may still
+carry a local `packetOverheadBytes` planning reserve, but it is not a wire
+budget: the actual encoded packet is authoritative.
+
+| Limit | Default | Compact | Roomy | Validation |
+|---|---|---|---|---|
+| Complete MQTT packet | 64 KiB | 32 KiB | 128 KiB | Positive, representable, and `<= brokerPacketLimitBytes` (1 MiB). |
+| Logical envelope | 16 MiB | 8 MiB | 32 MiB | Positive, representable, and `>= packet_bytes`. |
+| Concurrent HTTPS transfers | 4 | 2 | 8 | Positive. |
+| Reserved bytes | 32 MiB | 8 MiB | 64 MiB | `>= envelope_bytes`. |
+| Transfer timeout | 120 s | 120 s | 300 s | Positive and representable in `uint32`. |
+
+The default profile must retain the 64 KiB packet / 16 MiB envelope semantic.
+A budget may carry validated operator overrides instead of matching a packaged
+profile exactly. Values are never clamped: a sender takes the minimum of its
+local limit, the broker limit and every advertised receiver limit. Invalid or
+contradictory settings fail before readiness or connection use. Every value is
+validated at admission, never repaired by truncation.
 
 `proto/v1/transport_profiles.json` is authoritative. `./repo proto` generates
 three committed runtime artifacts from it, and `./repo check proto` fails on any
@@ -878,22 +1178,38 @@ drift:
 Edit the JSON, then run `./repo proto`; never hand-edit a generated profile
 artifact.
 
-`ReceiveAdvertisement` is the only exchange of event receive limits. It carries
-a named `profile`, the validated `budget` and an authenticated
-`connection_generation`. It appears in HostReady and in the authenticated
-ChannelHello/ChannelReady handshakes. `connection_generation` is scoped to the
-leg that carries the advertisement: in HostReady it is the Host's broker
-connection generation as seen by Access, while in ChannelHello and ChannelReady
-it is scoped to that authenticated Noise channel. Generations from different
-legs are never compared. Each new channel handshake carries a fresh
-advertisement and freezes it on that channel; reconnect starts a new channel
-generation, delayed readiness cannot refresh a newer broker connection, and
-replayed requests never update the connection budget. Access registers
-HostReady limits against the broker-derived receiver identity. A shared event
-route uses the minimum for its eligible receivers, and this entry stays out of
-the request-forwarding loop. A peer cannot raise local limits.
+### Authenticated receive advertisements
 
-`HostRequest.transport` binds three request-scoped values at submission:
+`ReceiveAdvertisement` is the only exchange of receive limits. It carries a
+named `profile`, the validated `budget`, an authenticated
+`connection_generation` and the required `relay_version=3`. A generation is
+scoped to the leg that carries the advertisement; generations from different
+legs are never compared. A delayed or replayed advertisement cannot update a
+newer connection, and a peer cannot raise another peer's limit.
+
+| Leg | Carrier | Registered against |
+|---|---|---|
+| Access -> Host request hop | `HostReady.receive` | Host's authenticated broker connection generation |
+| Host -> Access result/event hop | `REQUEST_KIND_ACCESS_READY` body | Access's advertised generation for that Host connection |
+| Access -> Device event/notice hop | Device `ReceiveAdvertisement` on `.../d/{device_id}/ready` | Device's authenticated broker connection generation |
+| Host <-> Device end-to-end | `ChannelHello.receive` / `ChannelReady.receive` | That authenticated Noise channel generation |
+
+A shared event route uses the minimum eligible receiver budget for its hop. For
+preview splitting, the Host uses the smallest usable payload budget across:
+
+```text
+min(Host local send packet limit,
+    Access REQUEST_KIND_ACCESS_READY receive budget,
+    Device ChannelHello.receive budget)
+```
+
+It splits only on valid UTF-8 boundaries, assigns contiguous normalized preview
+intervals, and rechecks the fully encoded packet against that minimum before
+publication. Reconnect binds a fresh advertisement to the new generation.
+Access registers only receive information across these seams; it never lets a
+Device, Host or stored reference raise a local or broker limit.
+
+`HostRequest.transport` still binds three request-scoped values at submission:
 `result_max_bytes` is the device's validated HTTPS result bound, while
 `grant_generation` and `revocation_generation` are the two durable Access
 revisions for the `(host_id, device_id)` grant. Access captures both revisions
@@ -924,27 +1240,46 @@ valid, the batch does not advance, and a later read with sufficient capacity can
 progress. Packing and admission never truncate canonical content or rewrite a
 committed message.
 
-| Limit | Default profile | Validation |
+| Limit | Value | Validation |
 |---|---|---|
-| Framed transport packet | 64 KiB budget, 60 KiB fragment payload | Packet must exceed fragment payload; width is encoded per transfer. |
-| Logical envelope | 16 MiB | Fragment count must cover the envelope. |
-| Concurrent inbound reassembly | 4 transfers, 32 MiB reserved bytes, 30-second idle | Reserved bytes cover in-flight fragments and one envelope. |
-| Transfer timeout | 120 seconds | Positive duration. |
 | Access default HTTP request body | 24 MiB, allowing base64 expansion and envelope overhead | Independent of profile bytes. |
-| Compose broker packet ceiling | 1 MiB; larger live overrides are not required by framing | Broker/ingress limits remain independently enforced. |
+| Broker packet ceiling | `brokerPacketLimitBytes`, 1 MiB in the packaged profiles | Every profile packet budget must not exceed it; ingress limits remain independently enforced. |
+| Relay object upload | Reserved exact length, `<= envelope_bytes` | Missing, shorter, longer or digest-mismatched bodies never publish. |
+| Relay object fetch | Exact stored length | A truncated stream is never a complete object. |
 
-Oversized messages fail explicitly; snapshots must not silently become successful
-partial results. Keep clients, broker ACLs, and HTTP/reverse-proxy limits aligned.
-The previous 4 MiB envelope / 8 MiB HTTP limits do not describe current source.
-This source description does not imply that interoperability has been verified.
+Oversized messages fail explicitly; snapshots must not silently become
+successful partial results. Keep clients, broker ACLs, and HTTP/reverse-proxy
+limits aligned. This source description does not imply that interoperability
+has been verified.
 
-Transport version 2 is negotiated through `client_transport_version`,
-`relay_transport_version`, and HostReady's `transport_version`. Upgrade Access,
-the plugin, and clients together. Receipts confirm fragment delivery, not command
-execution.
-`payload_too_large` is an explicit logical resource-budget failure (CLI exit 5),
-not an authorization failure. Transport-v2 requires at least a 64 KiB broker
-packet budget and rejects smaller negotiated budgets before sending frames.
+## Relay cutover
+
+The cutover is one coordinated hard cut:
+
+- **One required epoch.** `relay_version=3` is the only accepted MQTT relay.
+  There is no v2 acceptance, no unframed fallback, no `WRMQTT2` prefix and no
+  compatibility bridge. `TransportFrame`, fragment fields, transfer receipts
+  and every acknowledgement topic are removed from the contract.
+- **Readiness gate.** Access marks a Host ready only after a valid
+  `HostReady` with `relay_version=3` and a valid advertisement. Access rejects
+  a Device or Host advertisement with another epoch. Admission of a
+  `HostRequest`, `HostResult`, `EventEnvelope`, `RequestStateNotice` or relay
+  object request requires the matching epoch and application
+  `protocol_version=1`.
+- **Legacy artifact rejection.** An older Access, Host, Core, CLI, mobile build
+  or broker ACL that attempts v2 framing, a removed receipt/ack topic, or a
+  missing/other epoch fails explicitly with `protocol_version_incompatible`
+  before business delivery. A mixed artifact set is not a supported release.
+- **Unchanged application version.** The application protocol version stays 1.
+  The epoch is the transport cut: it changes representation, not the semantics
+  of grants, keys, sessions, history, approvals or command identity. Existing
+  pairing credentials, Noise identities, pins, grants and durable command
+  recovery identities remain valid across the cut.
+- **Operator coordination.** Access, Host, broker policy, Core and supported
+  clients deploy together. Quiesce old admissions, preserve original command
+  identities and ambiguity, then gate readiness on the new contract. Rollback
+  requires its own fenced admission and verified recovery; a live mixed-epoch
+  rollback is outside the contract.
 
 ## Model operations
 
@@ -961,8 +1296,8 @@ passive reads are independently gated by the Host. Native DSH exposes `next`
 and `last_used`; `pending_known=false` means that projection cannot prove
 whether a pending record exists, even when a next choice is present.
 For model queries, the complete encoded `HostResult`, including the encrypted
-response envelope, is checked against the existing 16 MiB logical-transport
-limit; an oversized result fails with `payload_too_large`.
+response envelope, is checked against the effective `envelope_bytes`; an
+oversized result fails with `payload_too_large`.
 ### Session lifecycle receipts
 
 `ForkSession` is a session-scoped control with a source session ID and no native

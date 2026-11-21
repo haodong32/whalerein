@@ -15,7 +15,7 @@
 //    misleading conflict.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { AdapterError } from '../errors.js'
-import { MESSAGE_BYTES } from '../access/transport.js'
+import { MESSAGE_BYTES, RELAY_VERSION } from '../access/transport.js'
 import { validateQuestionStamp } from '../contracts/source.js'
 
 const CURSOR_VERSION = 2
@@ -37,6 +37,7 @@ export function questionResponseBudget(codec, request, hostId, completedAt, prot
     payload_digest: request.payload_digest instanceof Uint8Array ? request.payload_digest : new Uint8Array(0),
     error_code: 'error_code_unspecified', trace_id: request.trace_id ?? '', error_message: '',
     completed_at_unix_ms: completedAt, protocol_version: protocolVersion, channel_id: request.channel_id ?? '',
+    relay_version: RELAY_VERSION,
   }).length
   const frameBase = codec.encode('whalerein.v1.EncryptedFrame', {
     channel_id: request.channel_id ?? '', nonce: new Uint8Array(12),

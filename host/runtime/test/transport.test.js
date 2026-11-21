@@ -1,217 +1,528 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { LogicalTransport, encodeFrame, decodeFrame, CHUNK_BYTES, PACKET_BYTES, MESSAGE_BYTES } from '../src/access/transport.js'
-const hash = (bytes) => createHash('sha256').update(bytes).digest()
-const frame = (overrides = {}) => ({version:2,transfer_id:'a'.repeat(32),topic:'data',index:0,count:2,total_bytes:CHUNK_BYTES+1,digest:hash(Buffer.alloc(CHUNK_BYTES+1)),payload:Buffer.alloc(CHUNK_BYTES),...overrides})
+import { randomBytes } from 'node:crypto'
+import {
+  RelayTransport,
+  assertEventRepresentation,
+  assertRelayEpoch,
+  assertRequestRepresentation,
+  assertResultRepresentation,
+  effectivePacketBytes,
+  maxPlaintextBytes,
+  publishPacketBytes,
+  varintBytes,
+  RELAY_VERSION,
+} from '../src/access/transport.js'
+import { codec } from '../src/protocol.js'
 
-test('when an envelope is empty or exceeds the 16 MiB wire budget, sending rejects before publishing any frame', async () => {
-  let publications = 0
-  const sender = new LogicalTransport({ publish: async () => { publications++ } })
-  assert.equal(MESSAGE_BYTES, 16 * 1024 * 1024)
-  await assert.rejects(sender.send('data', Buffer.alloc(0), 'ack', true), error => error.code === 'invalid_argument')
-  await assert.rejects(sender.send('data', Buffer.alloc(16 * 1024 * 1024 + 1), 'ack', true), error => error.code === 'payload_too_large')
-  assert.equal(publications, 0)
+const proto = codec()
+const HOST = 'host-1'
+const DEVICE = 'device-1'
+const CHANNEL = 'channel-1'
+const RESULT_TOPIC = `whalerein/v1/h/${HOST}/result`
+const EVENT_TOPIC = `whalerein/v1/h/${HOST}/event`
+const REQUEST_TOPIC = `whalerein/v1/h/${HOST}/request`
+
+const budget = (packet = 64 * 1024, envelope = 16 * 1024 * 1024) => ({
+  packet_bytes: packet,
+  envelope_bytes: envelope,
+  bulk_concurrency: 4,
+  reserved_bytes: Math.max(envelope, 32 * 1024 * 1024),
+  transfer_timeout_ms: 120_000,
 })
 
-test('when receipts are lost, logical transfer retries within bounds and delivers the message once', async () => {
-  const delivered = []; const packets = []; let drop = true
-  let sender
-  const receiver = new LogicalTransport({publish:async (topic,bytes) => { const ack=decodeFrame(bytes);if(ack.index===0 && drop){drop=false;return}await sender.receive(topic,bytes,'',()=>{}) }})
-  sender = new LogicalTransport({ackTimeoutMs:5,publish:async(topic,bytes)=>{packets.push(bytes);const consumed=await receiver.receive(topic,bytes,'ack',async(body)=>delivered.push(body.length));if(!consumed)delivered.push(bytes.length)}})
-  await sender.send('data',Buffer.alloc(2*1024*1024),'ack',true)
-  assert.deepEqual(delivered,[2*1024*1024]);assert.ok(packets.every(bytes=>bytes.length<=PACKET_BYTES))
-  await receiver.receive('data',packets[0],'ack',()=>{throw new Error('duplicate delivered')})
-  await sender.send('data',Buffer.alloc(3),'ack',false);assert.equal(delivered.at(-1),3)
-  await assert.rejects(sender.send('data',Buffer.alloc(CHUNK_BYTES+1),'ack',false),error=>error.code==='protocol_version_incompatible')
-  await assert.rejects(sender.send('data',Buffer.alloc(MESSAGE_BYTES+1),'ack',true))
-})
-
-test('when a transport frame is malformed, mismatched, conflicting, or corrupted, the receiver rejects it', async () => {
-  const receiver=new LogicalTransport({publish:async()=>{}})
-  for(const item of [frame({version:3}),frame({transfer_id:'bad'}),frame({digest:Buffer.alloc(1)}),frame({topic:'other'}),frame({count:3}),frame({total_bytes:0}),frame({index:2}),frame({payload:Buffer.alloc(2)})]) await assert.rejects(receiver.receive('data',encodeFrame(item),'ack',()=>{}))
-  assert.throws(()=>decodeFrame(Buffer.concat([Buffer.from('WRMQTT2'),Buffer.alloc(PACKET_BYTES)])))
-  assert.equal(await receiver.receive('data',Buffer.from('legacy'),'ack',()=>{}),false)
-  await receiver.receive('data',encodeFrame(frame()),'ack',()=>{throw new Error('incomplete')})
-  await assert.rejects(receiver.receive('data',encodeFrame(frame({payload:Buffer.alloc(CHUNK_BYTES,1)})),'ack',()=>{}))
-  await assert.rejects(receiver.receive('data',encodeFrame(frame({digest:Buffer.alloc(32,1)})),'ack',()=>{}))
-  await assert.rejects(receiver.receive('data',encodeFrame(frame({index:1,payload:Buffer.from([1])})),'ack',()=>{}))
-  await assert.rejects(receiver.receive('data',encodeFrame(frame()),'',()=>{}))
-})
-
-test('when four bulk receive slots are occupied, the fifth is rate-limited and expired slots admit a new transfer', async () => {
-  let now = 0
-  let delivered = 0
-  const receiver = new LogicalTransport({ now: () => now, ttlMs: 10, publish: async () => {} })
-  for (let index = 0; index < 4; index++) {
-    await receiver.receive('data', encodeFrame(frame({ transfer_id: index.toString(16).padStart(32, '0') })), 'ack', () => { delivered++ })
-  }
-  await assert.rejects(receiver.receive('data', encodeFrame(frame()), 'ack', () => { delivered++ }), error => error.code === 'rate_limited')
-  assert.equal(delivered, 0)
-  now = 10
-  await receiver.receive('data', encodeFrame(frame()), 'ack', () => { delivered++ })
-  assert.equal(delivered, 0, 'Admission of one chunk must not dispatch an incomplete transfer')
-  await receiver.receive('data', encodeFrame(frame({ index: 1, payload: Buffer.alloc(1) })), 'ack', () => { delivered++ })
-  await new Promise(resolve => queueMicrotask(resolve))
-  assert.equal(delivered, 1)
-  receiver.reset()
-})
-
-test('when business delivery rejects, completion still deduplicates the transfer and reports one delivery error', async () => {
-  let deliveryErrors = 0
-  let deliveries = 0
-  const receiver = new LogicalTransport({ publish: async () => {}, onDeliveryError: () => { deliveryErrors++ } })
-  const body = Buffer.alloc(1)
-  const complete = frame({ transfer_id: 'b'.repeat(32), count: 1, total_bytes: 1, payload: body, digest: hash(body) })
-  await receiver.receive('data', encodeFrame(complete), 'ack', () => { deliveries++; throw new Error('delivery rejected') })
-  await new Promise(resolve => queueMicrotask(resolve))
-  await receiver.receive('data', encodeFrame(complete), 'ack', () => { deliveries++ })
-  assert.equal(deliveryErrors, 1)
-  assert.equal(deliveries, 1)
-  await assert.rejects(receiver.receive('data', encodeFrame({ ...complete, total_bytes: 2, payload: Buffer.alloc(2) }), 'ack', () => { deliveries++ }), error => error.code === 'invalid_argument')
-  assert.equal(deliveries, 1)
-  receiver.reset()
-})
-
-test('when a link reset interrupts an in-flight send, it rejects unavailable', async () => {
-  let sent
-  const started = new Promise(resolve => { sent = resolve })
-  const sender = new LogicalTransport({ publish: async () => sent(), ackTimeoutMs: 20 })
-  const pending = sender.send('data', Buffer.alloc(CHUNK_BYTES + 1), 'ack', true)
-  const rejected = assert.rejects(pending, error => error.code === 'unavailable')
-  await started
-  sender.reset()
-  await rejected
-})
-
-test('when no receipt arrives, each chunk retries at most three times and the send rejects unavailable', async () => {
-  const packets = []
-  const sender = new LogicalTransport({ publish: async (_topic, bytes) => packets.push(decodeFrame(bytes)), ackTimeoutMs: 2 })
-  await assert.rejects(sender.send('data', Buffer.alloc(CHUNK_BYTES + 1), 'ack', true), error => error.code === 'unavailable')
-  const counts = new Map()
-  for (const packet of packets) counts.set(packet.index, (counts.get(packet.index) ?? 0) + 1)
-  assert.ok(counts.size > 0)
-  for (const count of counts.values()) assert.equal(count, 3)
-  sender.reset()
-})
-
-test('when a receiver explicitly rejects a transfer, the sender reports unavailable without reporting delivery', async () => {
-  const sender = new LogicalTransport({ publish: async (_topic, bytes) => {
-    const value = decodeFrame(bytes)
-    await sender.receive('ack', encodeFrame({ ...value, payload: undefined, ack: true, rejected: true }), '', () => { throw new Error('An ACK must not dispatch business data') })
-  }, ackTimeoutMs: 2 })
-  await assert.rejects(sender.send('data', Buffer.alloc(CHUNK_BYTES + 1), 'ack', true), error => error.code === 'unavailable')
-  sender.reset()
-})
-
-test('when bulk receive slots are full, small control frames remain admissible', async () => {
-  let delivered=0
-  const receiver=new LogicalTransport({publish:async()=>{}})
-  for(let index=0;index<4;index++) await receiver.receive('data',encodeFrame(frame({transfer_id:index.toString(16).padStart(32,'0')})),'ack',()=>{})
-  const bytes=Buffer.alloc(1)
-  await receiver.receive('data',encodeFrame(frame({transfer_id:'f'.repeat(32),count:1,total_bytes:1,payload:bytes,digest:hash(bytes)})),'ack',()=>{delivered++})
-  assert.equal(delivered,1)
-})
-
-test('part receipts across a receiver reset cannot masquerade as message completion', async () => {
-  let sender;let parts=0;let delivered=0
-  const receiver=new LogicalTransport({publish:(topic,bytes)=>sender.receive(topic,bytes,'',()=>{})})
-  sender=new LogicalTransport({ackTimeoutMs:2,publish:async(topic,bytes)=>{
-    await receiver.receive(topic,bytes,'ack',()=>{delivered++})
-    if(++parts===4)receiver.reset()
-  }})
-  await assert.rejects(sender.send('data',Buffer.alloc(CHUNK_BYTES*4+1),'ack',true))
-  assert.equal(delivered,0)
-})
-
-test('wire completion does not wait for business execution', async () => {
-  let sender;let finish
-  const pending=new Promise(resolve=>{finish=resolve})
-  const receiver=new LogicalTransport({publish:(topic,bytes)=>sender.receive(topic,bytes,'',()=>{})})
-  sender=new LogicalTransport({ackTimeoutMs:2,publish:(topic,bytes)=>receiver.receive(topic,bytes,'ack',()=>pending)})
-  await sender.send('data',Buffer.alloc(1),'ack',true)
-  finish()
-})
-
-test('concurrent bulk sends wait for bounded transport admission instead of failing application operations',async()=>{
- let sender,receiver,delivered=0
- const gate=[]
- sender=new LogicalTransport({publish:async(topic,bytes)=>{
-   if(gate.length<2&&decodeFrame(bytes).index===0)await new Promise(resolve=>gate.push(resolve))
-   await receiver.receive(topic,bytes,'ack',()=>{delivered++})
- },ackTimeoutMs:100})
- receiver=new LogicalTransport({publish:async(topic,bytes)=>sender.receive(topic,bytes,'',()=>{})})
- const sends=Array.from({length:3},()=>sender.send('data',Buffer.alloc(CHUNK_BYTES+1),'ack',true))
- await new Promise(resolve=>setTimeout(resolve,5))
- for(const release of gate)release()
- await Promise.all(sends)
- assert.equal(delivered,3)
-})
-
-test('logical transport accepts envelopes at and immediately below its encoded limit', async () => {
-  const delivered = []
-  let sender
-  const receiver = new LogicalTransport({publish: async (topic, bytes) => sender.receive(topic, bytes, '', () => {})})
-  sender = new LogicalTransport({publish: async (topic, bytes) => receiver.receive(topic, bytes, 'ack', body => delivered.push(body.length))})
-  for (const size of [MESSAGE_BYTES - 1, MESSAGE_BYTES]) {
-    await sender.send('data', Buffer.alloc(size), 'ack', true)
-  }
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(delivered, [MESSAGE_BYTES - 1, MESSAGE_BYTES])
-})
-
-test('a receiver rejects a declared fragment width above its negotiated budget or inconsistent geometry', async () => {
-  const receiver = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 28672 })
-  const wide = frame({ fragment_payload_bytes: 61440 })
-  await assert.rejects(receiver.receive('data', encodeFrame(wide), 'ack', () => {}), error => error.code === 'payload_too_large')
-  const badCount = frame({ fragment_payload_bytes: 28672, count: 1, total_bytes: 28672 * 2, payload: Buffer.alloc(28672) })
-  await assert.rejects(receiver.receive('data', encodeFrame(badCount), 'ack', () => {}), error => error.code === 'invalid_argument')
-  const first = frame({ fragment_payload_bytes: 28672, count: 2, total_bytes: 28672 + 1, payload: Buffer.alloc(28672) })
-  await receiver.receive('data', encodeFrame(first), 'ack', () => {})
-  const changed = frame({ fragment_payload_bytes: 1024, count: 2, total_bytes: 28672 + 1, index: 1, payload: Buffer.alloc(1) })
-  await assert.rejects(receiver.receive('data', encodeFrame(changed), 'ack', () => {}), error => error.code === 'invalid_argument')
-  receiver.reset()
-})
-
-test('the sender encodes the selected profile width and every part keeps it', async () => {
-  const packets = []
-  const sender = new LogicalTransport({
-    publish: async (topic, bytes) => { packets.push(decodeFrame(bytes)) },
-    fragmentPayloadBytes: 28672,
-    profile: 'TRANSPORT_PROFILE_COMPACT',
+function hostResult({ body = new Uint8Array([1, 2, 3, 4]), status = 'succeeded', reference } = {}) {
+  return proto.encode('whalerein.v1.HostResult', {
+    request_id: 'request-1',
+    host_id: HOST,
+    device_id: DEVICE,
+    status,
+    result_body: reference ? new Uint8Array(0) : body,
+    ...(reference ? { result_reference: reference } : {}),
+    channel_id: CHANNEL,
+    protocol_version: 1,
+    relay_version: RELAY_VERSION,
   })
-  // The sender requires receipts; stub the pending resolution by receiving from a peer.
-  const peer = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 28672 })
-  const originalPublish = sender.publish
-  sender.publish = async (topic, bytes) => {
-    const decoded = decodeFrame(bytes)
-    if (decoded.ack) return originalPublish(topic, bytes)
-    packets.push(decoded)
-    queueMicrotask(() => peer.receive(topic, bytes, 'ack', () => {}))
+}
+
+function eventEnvelope({ ciphertext = new Uint8Array([1, 2, 3]), reference } = {}) {
+  return proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: HOST,
+    device_id: DEVICE,
+    channel_id: CHANNEL,
+    nonce: randomBytes(12),
+    ...(reference ? { payload_reference: reference } : { ciphertext }),
+    created_at_unix_ms: 1,
+    relay_version: RELAY_VERSION,
+  })
+}
+
+class FakeRelay {
+  constructor() {
+    this.objects = new Map()
+    this.calls = []
+    this.events = []
+    this.fail = null
   }
-  const payload = Buffer.alloc(28672 * 2 + 7, 1)
-  const sending = sender.send('data', payload, 'ack', true)
-  // The peer's acknowledgement is published back with the sender's own publish seam.
-  peer.publish = async (topic, bytes) => sender.receive(topic, bytes, 'ack', () => {})
-  await sending
-  assert.ok(packets.length >= 3)
-  for (const packet of packets) {
-    assert.equal(packet.fragment_payload_bytes, 28672)
-    assert.equal(packet.profile, 'TRANSPORT_PROFILE_COMPACT')
-    assert.ok(packet.payload.length <= 28672)
+
+  async reserve({ ciphertext, expiresAt, purpose }) {
+    this.calls.push('reserve')
+    if (this.fail === 'reserve') throw Object.assign(new Error('quota'), { code: 'rate_limited' })
+    const objectId = randomBytes(16).toString('hex')
+    this.objects.set(objectId, { ciphertext, purpose })
+    const reservation = {
+      object_id: objectId,
+      owner_node_id: 'node-1',
+      upload_path: `/v1/relay/objects/${objectId}`,
+      max_bytes: ciphertext.length,
+      expires_at_unix_ms: expiresAt,
+      upload_timeout_ms: 1000,
+    }
+    this.events.push('reserve')
+    return reservation
+  }
+
+  async upload({ reservation, ciphertext }) {
+    this.calls.push('upload')
+    if (this.fail === 'upload') throw Object.assign(new Error('upload'), { code: 'unavailable' })
+    this.events.push('upload')
+    this.objects.get(reservation.object_id).uploaded = ciphertext
+  }
+
+  async finish({ objectId }) {
+    this.calls.push('finish')
+    if (this.fail === 'finish') throw Object.assign(new Error('finish'), { code: 'unavailable' })
+    const object = this.objects.get(objectId)
+    this.events.push('finish')
+    return { object_id: objectId, purpose: object.purpose, ciphertext_bytes: object.ciphertext.length }
+  }
+
+  async fetch({ reference }) {
+    this.calls.push('fetch')
+    if (this.fail === 'fetch') throw Object.assign(new Error('corrupt'), { code: 'payload_digest_mismatch' })
+    return this.objects.get(reference.object_id)?.ciphertext ?? new Uint8Array(0)
+  }
+
+  async delete({ objectId }) {
+    this.calls.push('delete')
+    this.events.push('delete')
+    this.objects.delete(objectId)
+    return { cancelled: true }
+  }
+}
+
+function transport({ relay = null, packet = 64 * 1024, envelope = 16 * 1024 * 1024, publish } = {}) {
+  return new RelayTransport({
+    budget: budget(packet, envelope),
+    relay,
+    publish: publish ?? (async () => {}),
+    codec: proto,
+  })
+}
+
+test('exact MQTT PUBLISH arithmetic counts header, varints, topic, packet id, properties and payload', () => {
+  assert.equal(varintBytes(0), 1)
+  assert.equal(varintBytes(127), 1)
+  assert.equal(varintBytes(128), 2)
+  assert.equal(varintBytes(16_384), 3)
+  // remaining = 2 (topic length) + 4 (topic) + 2 (packet id) + 1 (properties) + 0
+  assert.equal(publishPacketBytes('data', 0), 1 + 1 + 9)
+  assert.equal(publishPacketBytes('data', 0, { propertiesBytes: 5 }), 1 + 1 + 14)
+  assert.equal(publishPacketBytes('data', 0, { qos: 0 }), 1 + 1 + 7)
+  // The remaining-length varint pushes the packet size at its 127/128 edge.
+  assert.equal(publishPacketBytes('data', 118), 1 + 1 + 127)
+  assert.equal(publishPacketBytes('data', 119), 1 + 2 + 128)
+  // Topic length is measured in encoded bytes and counts fully.
+  assert.equal(publishPacketBytes('da\u00e9ta', 0), 1 + 1 + (2 + 6 + 2 + 1))
+})
+
+test('the effective hop limit is the minimum of local, broker and receiver limits and is never clamped up', () => {
+  assert.equal(effectivePacketBytes(64 * 1024, 1024 * 1024, 32 * 1024), 32 * 1024)
+  assert.equal(effectivePacketBytes(64 * 1024, 1024 * 1024), 64 * 1024)
+  assert.equal(effectivePacketBytes(64 * 1024, 4096, undefined), 4096)
+  assert.throws(() => effectivePacketBytes(0), (error) => error.code === 'invalid_argument')
+})
+
+test('maxPlaintextBytes finds the largest body that still fits the complete packet', () => {
+  const envelopeSize = (textBytes) => publishPacketBytes('topic', textBytes + 32)
+  const limit = envelopeSize(100)
+  assert.equal(maxPlaintextBytes(envelopeSize, limit), 100)
+  assert.equal(maxPlaintextBytes(envelopeSize, limit - 1), 99)
+  assert.equal(maxPlaintextBytes(() => 1000, 10), 0)
+})
+
+test('representation validation rejects both, neither and the wrong epoch', () => {
+  const result = proto.decode('whalerein.v1.HostResult', hostResult())
+  assert.doesNotThrow(() => assertResultRepresentation(result))
+  assert.doesNotThrow(() => assertResultRepresentation({ ...result, result_body: new Uint8Array(0) }))
+  assert.throws(
+    () => assertResultRepresentation({ ...result, status: 'online_status_unspecified', result_body: new Uint8Array(0) }),
+    (error) => error.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => assertResultRepresentation({ ...result, result_reference: { object_id: 'a'.repeat(32) } }),
+    (error) => error.code === 'invalid_argument',
+  )
+  assert.throws(() => assertRelayEpoch({ relay_version: 2 }), (error) => error.code === 'protocol_version_incompatible')
+  assert.throws(() => assertRelayEpoch({}), (error) => error.code === 'protocol_version_incompatible')
+  assert.throws(
+    () => assertEventRepresentation({ nonce: new Uint8Array(12) }),
+    (error) => error.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => assertRequestRepresentation({ kind: 'REQUEST_KIND_QUERY' }),
+    (error) => error.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => assertRequestRepresentation({
+      kind: 'REQUEST_KIND_QUERY',
+      body: new Uint8Array([1]),
+      body_reference: { object_id: 'a'.repeat(32) },
+    }),
+    (error) => error.code === 'invalid_argument',
+  )
+  assert.doesNotThrow(() => assertRequestRepresentation({ kind: 'REQUEST_KIND_HANDSHAKE', body: new Uint8Array([1]) }))
+  assert.throws(
+    () => assertRequestRepresentation({ kind: 'REQUEST_KIND_HANDSHAKE', body_reference: { object_id: 'a'.repeat(32) } }),
+    (error) => error.code === 'invalid_argument',
+  )
+})
+
+test('a complete message below, at and above the encoded boundary is inline, inline and a ready reference', async () => {
+  const envelope = hostResult({ body: new Uint8Array(1024) })
+  const limit = publishPacketBytes(RESULT_TOPIC, envelope.length)
+  for (const [label, receiverLimit, representation] of [
+    ['below', limit + 1, 'inline'],
+    ['at', limit, 'inline'],
+    ['above', limit - 1, 'reference'],
+  ]) {
+    const relay = new FakeRelay()
+    const published = []
+    const sender = transport({ relay, publish: async (topic, bytes) => published.push({ topic, bytes }) })
+    const outcome = await sender.sendComplete(RESULT_TOPIC, envelope, { kind: 'result', receiverLimit })
+    assert.equal(outcome.representation, representation, label)
+    assert.equal(published.length, 1)
+    if (label === 'above') {
+      const decoded = proto.decode('whalerein.v1.HostResult', published[0].bytes)
+      assert.equal((decoded.result_body ?? new Uint8Array(0)).length, 0, 'inline body is cleared')
+      assert.equal(decoded.result_reference.ciphertext_bytes, 1024)
+      assert.equal(decoded.result_reference.purpose, 'PAYLOAD_PURPOSE_RESULT')
+      assert.equal(decoded.request_id, 'request-1', 'message identity is unchanged')
+    } else {
+      assert.deepEqual(published[0].bytes, Buffer.from(envelope))
+    }
+    assert.equal(published[0].topic, RESULT_TOPIC)
   }
 })
 
-test('size and reassembly rejection diagnostics carry stable codes and safe counts only', async () => {
-  const records = []
-  const logger = { warn: (event, fields) => records.push({ event, ...fields }) }
-  const receiver = new LogicalTransport({ publish: async () => {}, fragmentPayloadBytes: 1024, logger })
+test('no reference is published before the exact ciphertext is reserved, uploaded and finished', async () => {
+  const relay = new FakeRelay()
+  const published = []
+  const order = []
+  const sender = new RelayTransport({
+    budget: budget(),
+    relay,
+    codec: proto,
+    publish: async (topic, bytes) => {
+      order.push('publish')
+      published.push(bytes)
+    },
+  })
+  const originalReserve = relay.reserve.bind(relay)
+  relay.reserve = async (options) => { order.push('reserve'); return originalReserve(options) }
+  const originalUpload = relay.upload.bind(relay)
+  relay.upload = async (options) => { order.push('upload'); return originalUpload(options) }
+  const originalFinish = relay.finish.bind(relay)
+  relay.finish = async (options) => { order.push('finish'); return originalFinish(options) }
+
+  await sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), { kind: 'result', receiverLimit: 400 })
+  assert.deepEqual(order, ['reserve', 'upload', 'finish', 'publish'])
+  const decoded = proto.decode('whalerein.v1.HostResult', published[0])
+  assert.equal((decoded.result_body ?? new Uint8Array(0)).length, 0)
+  assert.equal(decoded.result_reference.object_id, [...relay.objects.keys()][0])
+})
+
+test('a failed upload never publishes a reference and cancels the reservation', async () => {
+  const relay = new FakeRelay()
+  relay.fail = 'upload'
+  let published = 0
+  const sender = transport({ relay, publish: async () => { published++ } })
   await assert.rejects(
-    receiver.receive('data', encodeFrame(frame({ fragment_payload_bytes: 61440, secret: 'private-body' })), 'ack', () => {}),
-    error => error.code === 'payload_too_large',
+    sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), { kind: 'result', receiverLimit: 400 }),
+    (error) => error.code === 'unavailable',
   )
-  assert.ok(records.some(record => record.event === 'transport_frame_rejected' && record.code === 'payload_too_large'))
-  assert.equal(JSON.stringify(records).includes('private-body'), false)
-  assert.ok(records.some(record => Number.isSafeInteger(record.limit) && Number.isSafeInteger(record.bytes)))
-  receiver.reset()
+  assert.equal(published, 0)
+  assert.deepEqual(relay.calls, ['reserve', 'upload', 'delete'])
+})
+
+test('a reference packet that itself exceeds the hop limit fails explicitly before publication', async () => {
+  const relay = new FakeRelay()
+  let published = 0
+  const sender = transport({ relay, publish: async () => { published++ } })
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), { kind: 'result', receiverLimit: 100 }),
+    (error) => error.code === 'payload_too_large',
+  )
+  assert.equal(published, 0)
+  assert.ok(relay.calls.includes('delete'))
+})
+
+test('a message above envelope_bytes fails with payload_too_large and no relay traffic', async () => {
+  const relay = new FakeRelay()
+  const sender = transport({ relay, packet: 512, envelope: 1024 })
+  const large = hostResult({ body: new Uint8Array(4096) })
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, large, { kind: 'result', receiverLimit: 64 }),
+    (error) => error.code === 'payload_too_large',
+  )
+  assert.equal(relay.calls.length, 0)
+})
+
+test('per-topic publication is ordered even when a later message is ready first', async () => {
+  const published = []
+  const gates = []
+  const sender = transport({
+    publish: async (topic, bytes) => {
+      const id = proto.decode('whalerein.v1.HostResult', bytes).request_id
+      published.push(id)
+      if (id === 'one') await new Promise((resolve) => gates.push(resolve))
+    },
+  })
+  const make = (requestId) => proto.encode('whalerein.v1.HostResult', {
+    request_id: requestId, host_id: HOST, device_id: DEVICE, status: 'succeeded',
+    result_body: new Uint8Array([1]), relay_version: RELAY_VERSION,
+  })
+  const first = sender.sendComplete(RESULT_TOPIC, make('one'), { kind: 'result' })
+  const second = sender.sendComplete(RESULT_TOPIC, make('two'), { kind: 'result' })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(published, ['one'])
+  gates.forEach((resolve) => resolve())
+  await Promise.all([first, second])
+  assert.deepEqual(published, ['one', 'two'])
+})
+
+test('receiveComplete resolves an inline request body directly and validates its representation and epoch', async () => {
+  const sender = transport()
+  const request = proto.encode('whalerein.v1.HostRequest', {
+    request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_QUERY',
+    body: new Uint8Array([9, 9]), protocol_version: 1, relay_version: RELAY_VERSION,
+  })
+  const resolved = await sender.receiveComplete(REQUEST_TOPIC, request)
+  assert.equal(resolved.kind, 'REQUEST_KIND_QUERY')
+  assert.deepEqual(Buffer.from(resolved.body), Buffer.from([9, 9]))
+
+  const old = proto.encode('whalerein.v1.HostRequest', {
+    request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_QUERY',
+    body: new Uint8Array([9]), protocol_version: 1,
+  })
+  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, old), (error) => error.code === 'protocol_version_incompatible')
+  await assert.rejects(
+    sender.receiveComplete(REQUEST_TOPIC, proto.encode('whalerein.v1.HostRequest', {
+      request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_COMMAND',
+      protocol_version: 1, relay_version: RELAY_VERSION,
+    })),
+    (error) => error.code === 'invalid_argument',
+  )
+  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, Buffer.from('WRMQTT2legacy')), (error) => error.code === 'invalid_argument')
+})
+
+test('receiveComplete resolves a reference to the same complete body', async () => {
+  const body = new Uint8Array([4, 5, 6])
+  const relay = new FakeRelay()
+  const objectId = 'b'.repeat(32)
+  relay.objects.set(objectId, { ciphertext: body, purpose: 'PAYLOAD_PURPOSE_REQUEST' })
+  const sender = transport({ relay })
+  const reference = {
+    object_id: objectId,
+    owner_node_id: 'node-1',
+    ciphertext_bytes: body.length,
+    sha256: new Uint8Array(32),
+    expires_at_unix_ms: Date.now() + 60_000,
+    purpose: 'PAYLOAD_PURPOSE_REQUEST',
+  }
+  const request = proto.encode('whalerein.v1.HostRequest', {
+    request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_COMMAND',
+    body_reference: reference, protocol_version: 1, relay_version: RELAY_VERSION,
+  })
+  const resolved = await sender.receiveComplete(REQUEST_TOPIC, request)
+  assert.deepEqual(Buffer.from(resolved.body), Buffer.from(body))
+  assert.equal(resolved.body_reference, undefined)
+  assert.deepEqual(relay.calls, ['fetch'])
+
+  // A corrupt or partial fetch is terminal and never becomes a message.
+  relay.fail = 'fetch'
+  await assert.rejects(
+    sender.receiveComplete(REQUEST_TOPIC, request),
+    (error) => error.code === 'payload_digest_mismatch',
+  )
+})
+
+test('a reference that cannot fit the envelope budget is rejected before any fetch', async () => {
+  const relay = new FakeRelay()
+  const sender = transport({ relay, packet: 256, envelope: 512 })
+  const request = proto.encode('whalerein.v1.HostRequest', {
+    request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_QUERY',
+    body_reference: {
+      object_id: 'c'.repeat(32), owner_node_id: 'node-1', ciphertext_bytes: 1024,
+      sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
+      purpose: 'PAYLOAD_PURPOSE_REQUEST',
+    },
+    protocol_version: 1, relay_version: RELAY_VERSION,
+  })
+  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, request), (error) => error.code === 'payload_too_large')
+  assert.equal(relay.calls.length, 0)
+})
+
+test('events use the same complete-message contract and stage only their ciphertext', async () => {
+  const relay = new FakeRelay()
+  const published = []
+  const sender = transport({ relay, publish: async (topic, bytes) => published.push({ topic, bytes }) })
+  await sender.sendComplete(EVENT_TOPIC, eventEnvelope({ ciphertext: new Uint8Array(1024) }), { kind: 'event', receiverLimit: 400 })
+  const decoded = proto.decode('whalerein.v1.EventEnvelope', published[0].bytes)
+  assert.equal((decoded.ciphertext ?? new Uint8Array(0)).length, 0)
+  assert.equal(decoded.payload_reference.purpose, 'PAYLOAD_PURPOSE_EVENT')
+  assert.equal(decoded.nonce.length, 12, 'the nonce is preserved in either representation')
+  assert.equal([...relay.objects.values()][0].ciphertext.length, 1024)
+})
+
+test('invalid send and receive shapes fail before publication', async () => {
+  const sender = transport()
+  await assert.rejects(sender.sendComplete(RESULT_TOPIC, new Uint8Array(0)), (error) => error.code === 'invalid_argument')
+  await assert.rejects(
+    sender.sendComplete('other/topic', hostResult(), { kind: 'request' }),
+    (error) => error.code === 'invalid_argument',
+  )
+  const envelope = hostResult({ body: new Uint8Array(1024) })
+  const limit = publishPacketBytes(RESULT_TOPIC, envelope.length)
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, envelope, { kind: 'result', receiverLimit: limit - 1, inlineOnly: true }),
+    (error) => error.code === 'payload_too_large',
+  )
+  await assert.rejects(
+    transport({ relay: null }).sendComplete(RESULT_TOPIC, envelope, { kind: 'result', receiverLimit: 100 }),
+    (error) => error.code === 'payload_too_large',
+  )
+  assert.throws(() => new RelayTransport({ budget: budget(), codec: proto }), (error) => error.code === 'invalid_argument')
+  assert.equal(sender.envelopeBytes, 16 * 1024 * 1024)
+  sender.reset()
+})
+
+test('already referenced envelopes publish as one packet or fail before publish', async () => {
+  const reference = {
+    object_id: 'd'.repeat(32), owner_node_id: 'node-1', ciphertext_bytes: 100,
+    sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
+    purpose: 'PAYLOAD_PURPOSE_RESULT',
+  }
+  const referenced = hostResult({ reference })
+  const limit = publishPacketBytes(RESULT_TOPIC, referenced.length)
+  const published = []
+  const sender = transport({ publish: async (topic, bytes) => published.push(bytes) })
+  const outcome = await sender.sendComplete(RESULT_TOPIC, referenced, { kind: 'result', receiverLimit: limit })
+  assert.equal(outcome.representation, 'reference')
+  assert.equal(published.length, 1)
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, referenced, { kind: 'result', receiverLimit: limit - 1 }),
+    (error) => error.code === 'payload_too_large',
+  )
+  assert.equal(published.length, 1)
+})
+
+test('relay-object scope is validated before reservation and an expired scope is terminal', async () => {
+  const relay = new FakeRelay()
+  const sender = transport({ relay })
+  const noDevice = proto.encode('whalerein.v1.HostResult', {
+    request_id: 'r', host_id: HOST, status: 'succeeded',
+    result_body: new Uint8Array(1024), relay_version: RELAY_VERSION,
+  })
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, noDevice, { kind: 'result', receiverLimit: 100 }),
+    (error) => error.code === 'invalid_argument',
+  )
+  const noChannel = hostResult({ body: new Uint8Array(1024) })
+  const decodedNoChannel = proto.decode('whalerein.v1.HostResult', noChannel)
+  decodedNoChannel.device_id = DEVICE
+  delete decodedNoChannel.channel_id
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, proto.encode('whalerein.v1.HostResult', decodedNoChannel), {
+      kind: 'result', receiverLimit: 100,
+    }),
+    (error) => error.code === 'invalid_argument',
+  )
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), {
+      kind: 'result', receiverLimit: 100, expiresAt: 1,
+    }),
+    (error) => error.code === 'expired',
+  )
+  assert.equal(relay.calls.length, 0)
+})
+
+test('a reservation with no owner and an interrupted relay both cancel before publication', async () => {
+  const missingOwner = new FakeRelay()
+  missingOwner.reserve = async () => ({
+    object_id: 'e'.repeat(32), owner_node_id: '',
+    upload_path: `/v1/relay/objects/${'e'.repeat(32)}`,
+    max_bytes: 1024, expires_at_unix_ms: Date.now() + 60_000, upload_timeout_ms: 1000,
+  })
+  let published = 0
+  const sender = transport({ relay: missingOwner, publish: async () => { published++ } })
+  await assert.rejects(
+    sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), { kind: 'result', receiverLimit: 400 }),
+    (error) => error.code === 'protocol_version_incompatible',
+  )
+  assert.equal(published, 0)
+  assert.ok(missingOwner.calls.includes('delete'))
+
+  const interrupted = new FakeRelay()
+  let interruptedSender
+  const originalReserve = interrupted.reserve.bind(interrupted)
+  interrupted.reserve = async (options) => { const value = await originalReserve(options); interruptedSender.reset(); return value }
+  interruptedSender = transport({ relay: interrupted, publish: async () => { published++ } })
+  await assert.rejects(
+    interruptedSender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), { kind: 'result', receiverLimit: 400 }),
+    (error) => error.code === 'unavailable',
+  )
+  assert.equal(published, 0)
+})
+
+test('receiveComplete resolves referenced events and rejects malformed event representations', async () => {
+  const body = new Uint8Array([7, 8, 9])
+  const relay = new FakeRelay()
+  const objectId = 'f'.repeat(32)
+  relay.objects.set(objectId, { ciphertext: body, purpose: 'PAYLOAD_PURPOSE_EVENT' })
+  const sender = transport({ relay })
+  const envelope = proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: HOST, device_id: DEVICE, channel_id: CHANNEL, nonce: new Uint8Array(12),
+    payload_reference: {
+      object_id: objectId, owner_node_id: 'node-1', ciphertext_bytes: body.length,
+      sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
+      purpose: 'PAYLOAD_PURPOSE_EVENT',
+    },
+    created_at_unix_ms: 1, relay_version: RELAY_VERSION,
+  })
+  const resolved = await sender.receiveComplete(EVENT_TOPIC, envelope, { kind: 'event' })
+  assert.deepEqual(Buffer.from(resolved.ciphertext), Buffer.from(body))
+  assert.equal(resolved.payload_reference, undefined)
+  await assert.rejects(sender.receiveComplete(EVENT_TOPIC, new Uint8Array(0)), (error) => error.code === 'invalid_argument')
+  await assert.rejects(
+    sender.receiveComplete(EVENT_TOPIC, proto.encode('whalerein.v1.EventEnvelope', {
+      host_id: HOST, device_id: DEVICE, channel_id: CHANNEL, nonce: new Uint8Array(12),
+      created_at_unix_ms: 1, relay_version: RELAY_VERSION,
+    })),
+    (error) => error.code === 'invalid_argument',
+  )
+  // A referenced event without a configured client is unavailable, not a message.
+  await assert.rejects(
+    transport().receiveComplete(EVENT_TOPIC, envelope, { kind: 'event' }),
+    (error) => error.code === 'unavailable',
+  )
+})
+
+test('packet arithmetic rejects invalid lengths and topic names', () => {
+  assert.throws(() => varintBytes(-1), (error) => error.code === 'invalid_argument')
+  assert.throws(() => varintBytes(1.5), (error) => error.code === 'invalid_argument')
+  assert.throws(() => publishPacketBytes('', 1), (error) => error.code === 'invalid_argument')
+  assert.throws(() => publishPacketBytes('t', -1), (error) => error.code === 'invalid_argument')
+  assert.throws(() => publishPacketBytes('t', 1, { propertiesBytes: -1 }), (error) => error.code === 'invalid_argument')
+  assert.equal(maxPlaintextBytes(() => 1, 1), 0)
 })

@@ -138,6 +138,61 @@ reclaimed. Acceptance evidence: `TestRequestMetadataRetentionPolicy` proves an
 expired query row is deleted, the expired command bodies are cleared, and the
 command deduplication row survives exactly once.
 
+## Temporary ciphertext capacity
+
+Oversized relay payloads and attachment parts use one quota directory per Access
+node (`storage.root_dir`), backed in Compose by the named
+`whalerein-access-payloads` volume. PostgreSQL records every reservation; the
+files are disposable. Capacity is charged from reservation until file deletion,
+so partial, ready and expired ciphertext all count against the configured
+object/host/node limits plus the object and active-upload counts.
+
+The Compose values are development defaults, not a sizing plan:
+
+| Key | Value | Operational consequence |
+|---|---|---|
+| `max_object_bytes` | 16 MiB | One object; keep it at or below the profile envelope (16 MiB). |
+| `max_host_bytes` / `max_node_bytes` | 256 MiB / 1 GiB | Charged ciphertext bytes per Host and node. |
+| `max_objects` | 1024 | Reserved, ready and expired metadata objects. |
+| `max_active_uploads` | 16 | Concurrent upload bodies for the node. |
+| `free_space_reserve_bytes` | 1 GiB | Admission is refused below this free-space headroom. |
+| `retention` | 24 h | Hard lifetime cap; parent deadlines can only shorten it. |
+| `upload_timeout` / `read_timeout` | 2 min / 60 s | One complete upload or fetch. |
+
+Size the volume for `max_node_bytes` plus `free_space_reserve_bytes` plus
+filesystem overhead, and keep it on one dedicated filesystem. Do not share the
+directory with PostgreSQL or Host state. A new Compose named volume inherits the
+image directory ownership; a pre-existing volume or bind mount must be chowned
+to the unprivileged Access user before startup or `/readyz` fails the storage
+check. Startup reconciliation repairs stale
+reservations, orphan files and missing ready files in bounded batches; cleanup
+failures stay charged and retry with bounded backoff.
+
+`/readyz` adds a `storage` check when storage is enabled. It proves the temp
+directory is writable and that free space is at least the reserve. It does not
+prove that the volume is large enough for future growth, that cleanup has
+reclaimed everything, or that no reserved writer is stalled. Watch these bounded
+metrics:
+
+```text
+payload_free_bytes
+payload_headroom_bytes
+payload_ready_bytes
+payload_reserved_bytes
+payload_cleanup_reclaimed_bytes_total
+payload_admission_refusals_total
+payload_expired_backlog_seconds
+```
+
+When the reserve is reached, admission fails closed (`429 quota_exceeded` or
+`503 storage_pressure`); MQTT delivery is not paused by a full payload volume.
+Disabling storage removes the `/readyz` storage check but also disables reference
+resolution, so keep it enabled whenever the envelope can exceed the packet
+budget. Access does not currently validate `max_object_bytes <= envelope_bytes`
+at startup; treat that relation as an operator invariant.
+A real disk-full drill is an environment-specific acceptance item. Do not point
+the volume at a network filesystem or delete files behind Access's back.
+
 ## PostgreSQL restart, read-only storage and disk-full
 
 Access connects through a pool and reconnects after a PostgreSQL restart. An
@@ -169,8 +224,10 @@ pg_isready -h 127.0.0.1 -p 55432
 ```
 
 `/readyz` requires PostgreSQL, the subscribed MQTT session and broker policy
-reconciliation. It does not prove that a historical restore or a read-only
-storage event was handled; use the acceptance cases for those semantics.
+reconciliation; when storage is enabled it also requires a writable payload
+directory with headroom. It does not prove that a historical restore, a
+read-only storage event or a matching Host/client relay epoch was handled; use
+the acceptance cases and the cutover gate for those semantics.
 
 ## Backup and restore validation
 
@@ -215,9 +272,23 @@ path and no "roll back the binary against a newer schema" support.
 | New version to an older binary | Not supported | The old binary rejects the newer migration ledger. Restore a coordinated backup with the explicit re-enrollment procedure instead. |
 | Skip versions (N-2 or older) | Not supported without rehearsal | The repository does not publish an N-2 compatibility promise. Rehearse the exact path in an isolated installation. |
 | Mixed Access versions behind one database | Not supported | One Access process per standalone installation is the current design. |
-| Access, plugin and clients across the wire-version boundary | Not supported | Upgrade Access, the broker plugin and clients together before changing negotiated transport limits. Reconnect clients after limit changes. |
+| Access, plugin and clients across the relay-epoch boundary | Not supported | Relay epoch 3 is a hard cut: upgrade Access, the broker plugin/policy, Host runtime, Core, CLI, mobile bindings and clients together. Reconnect clients after the cut so both directions renegotiate. |
+| Epoch-2 Access or client against epoch-3 Access | Not supported | Rejected with `protocol_version_incompatible`; there is no fallback, fragment path or ACK topic. |
+| Older binary against the epoch-3 migration ledger | Not supported | Restore a coordinated pre-cut backup with matching older artifacts, or use an explicitly compatible binary. |
 
-Run the adjacent-version matrix against a throwaway PostgreSQL instance:
+The static preflight runs without Docker:
+
+```bash
+deploy/tests/rolling-upgrade-matrix.sh --static
+```
+
+It parses the Compose Access config and stack, asserts the payload volume is
+mounted and writable by design, checks `storage.enabled` and the byte/count
+limits, asserts the broker ceiling equals the packaged
+`brokerPacketLimitBytes` and every profile packet budget is within it, and
+checks the epoch-3/relay-topic prerequisites. It does not start a container.
+
+Run the full adjacent-version matrix against a throwaway PostgreSQL instance:
 
 ```bash
 OLD_REF=<older-git-ref> NEW_REF=<newer-git-ref> \
@@ -228,47 +299,121 @@ or pass prebuilt images with `OLD_IMAGE=... NEW_IMAGE=...`. The script builds
 both Access images from `git archive`, starts a disposable `postgres:18-alpine`
 on loopback port 55490, applies the old schema, applies the new schema, asserts
 that the old binary rejects the newer ledger, and confirms the new binary is
-still usable.
+still usable. Its static preflight (`--static`) needs neither Docker nor a
+running stack.
 
 Current limitations, recorded honestly:
 
-- the matrix is a manual, Docker-dependent script; it is **not** wired into the
-  scheduled CI job because the repository publishes no adjacent-version images
-  and the runner does not retain release artifacts;
-- it validates Access schema compatibility only. It does not establish
-  compatibility for the Mosquitto plugin, clients, mobile bindings or a
-  multi-instance deployment;
+- the full matrix is a manual, Docker-dependent script; it is **not** wired into
+  the scheduled CI job because the repository publishes no adjacent-version
+  images and the runner does not retain release artifacts. Only the static
+  preflight is environment-independent;
+- it validates Access schema compatibility and the static deployment inputs. It
+  does not establish compatibility for the Mosquitto plugin, clients, mobile
+  bindings, TLS ingress or a multi-instance deployment;
 - there is no zero-downtime promise when a release adds a migration. Plan a
   maintenance stop and rehearse the exact upgrade in an isolated installation;
 - an actual production rollout also needs TLS/trust, credential-store and
   broker-policy reconciliation checks that are environment-specific.
 
-## Coordinated version-one cutover
+## Coordinated relay epoch-3 cutover
 
-The session-observation contract is a coordinated replacement inside application
-protocol version 1. The version number does not identify every older build, so
-mixed Access/Host/Core/CLI/mobile sets are unsupported and must not run
-concurrently. Stop all old clients and connectors, record the exact Access image
-digest plus Host/CLI/mobile revisions, take a coordinated backup, stop the old
-Access process, and only then start the matching new set. Access applies its
-migrations and starts; start the Host plugin and clients afterward and rebuild
-transient observations from current authority.
+The MQTT relay is replaced in one coordinated hard cut. Application protocol
+stays 1; the MQTT relay epoch is 3. There is no v2 acceptance, unframed
+fallback, fragment/reassembly path, transfer receipt or device ACK topic.
+Access, the broker plugin/policy, Host runtime/DSH plugin, Core, CLI, mobile
+bindings, iOS builds and every supported client must come from one release
+revision. A mixed artifact set is not a supported release.
 
-Retained device/Host keys, pins, grants, invitations, Source sessions, pager keys
-and terminal/uncertain command identities survive. A retained non-terminal
-command is never forwarded automatically by the new Access: a row that was
-already published keeps its conservative status but stops retrying, and a row
-that never left `pending` becomes `unknown`. Historical rows without an exact
-client lease keep a NULL deadline and are never treated as expired. Old question
-pager cursors are reported as `snapshot_required`, never reinterpreted.
+### Prepare
 
-Do not resend old signed pairing FINISH material or old queued observation
-events; replace them from current authority. An uncertain outcome remains
-`unknown` and recoverable by its original command identity; it is not proof that
-no native action occurred. Rollback is a stopped-stack restore of the
-coordinated backup plus matching older artifacts (then the documented restore
-invalidation/re-enrollment), never a reset of keys, pins or revocation
-generation.
+1. Provision the node payload volume and filesystem from
+   [Temporary ciphertext capacity](#temporary-ciphertext-capacity). Confirm
+   permissions, free space above `max_node_bytes` plus the reserve, and that
+   only Access writes the directory.
+2. Configure public TLS for the Access origin and the five relay routes, plus
+   broker TLS/hostnames. Set ingress body limits to at least
+   `max(http.max_body_bytes, storage.max_object_bytes)` and request/response
+   timeouts to at least `storage.upload_timeout` / `storage.read_timeout` (and
+   the profile `transfer_timeout`). Ingress manifests are operator inputs; this
+   repository contains only the loopback Compose stack.
+3. Select the same profile or explicit overrides on Access, Host and clients.
+   Every packet budget must stay at or below the rendered broker
+   `max_packet_size` and the packaged `brokerPacketLimitBytes` (1 MiB).
+4. Deploy the matching broker config/plugin and confirm the six relay topics
+   and the denied `ack` topic. Access computes ACLs from the authenticated
+   grant; do not duplicate policy in ad-hoc broker files.
+5. Record artifact digests and take a coordinated PostgreSQL backup. Preserve
+   Host command-deduplication records and identity with it.
+6. Export unresolved operations before stopping anything: `request_id`,
+   `command_id`, `payload_digest`, status and whether native execution is
+   possible. Never resend one with a new identity.
+
+### Cut over
+
+1. **Quiesce old admissions.** Stop new client submissions at the ingress or by
+   stopping clients. Let old in-flight requests reach terminal state or expire to
+   `unknown`. The v2 path has no durable fragment directory to migrate; drain or
+   expire its transient state. Preserve grants, revocations, pins, keys, pairing
+   records, command identities and proved/unknown outcomes.
+2. **Stop the old set.** Stop old clients and Host, then old Access. Keep
+   PostgreSQL and its migration ledger.
+3. **Deploy the matching set.** Start PostgreSQL, broker, Access (wait for
+   `/readyz`), Host runtime/DSH plugin, then clients. The order prevents a Host
+   from registering against an incomplete broker.
+4. **Gate readiness on epoch 3.**
+   - `/readyz` is green: database write probe, MQTT session,
+     presence/policy reconciliation, and storage writability/headroom.
+   - Access accepted the Host's `HostReady` with `relay_version=3` and a valid
+     receive advertisement.
+   - Each client connected with epoch 3, subscribed its own `event` and
+     `notice` topics, and published `ready` on its own topic; Access registered
+     the current connection generation.
+   - An old/mixed artifact fails with `protocol_version_incompatible` before
+     business delivery.
+   - The broker shows the six topics and no `ack` acceptance.
+   - Payload free space remains above the reserve.
+5. **Reattach and recover.** Reconnect Host and clients, publish fresh `ready`
+   advertisements, rerun the original watch/history reads. Recover an
+   interrupted foreground command by its original identity with
+   `whalerein operation recover <request-id>` (or Core `GetCommandResult`).
+   Treat a missing body as the recorded terminal status, never as success, and
+   preserve `unknown` when execution is possible.
+
+`/readyz` is necessary but not sufficient for the epoch gate. This repository
+has no endpoint that reports a connected Host's or client's relay epoch, so the
+operator must record the Host/client epoch evidence and broker policy evidence
+separately.
+
+### Rollback
+
+A live mixed-contract rollback is unsupported. Rollback requires, in order:
+
+1. fenced admission so no new work crosses the boundary;
+2. quiesced receivers (stop Host and clients);
+3. matching old artifacts and broker policy for the whole set;
+4. a verified recovery procedure for commands admitted under the new release.
+
+Epoch 3 applies new migrations, and the old binary refuses a newer migration
+ledger. Rollback is therefore a coordinated pre-cut restore with matching older
+artifacts plus the documented invalidation/re-enrollment, or a compatible binary
+built for the new schema. It is not an in-place binary swap, and it must not
+lower keys, pins or revocation generations. Commands executed after the backup
+cannot be proved by the restored database; keep their original identity and
+report `unknown` rather than claiming they did not run.
+
+### Verified versus operator procedure
+
+Verified by repository tests: storage/transport config validation and readiness,
+storage headroom behavior, relay epoch rejection, broker topic/ACL policy, the
+static deployment preflight, and the migration-adjacency gate. The Docker matrix
+proves an old binary rejects a newer ledger.
+
+Operator procedure that this repository cannot prove: production TLS/DNS,
+multi-node owner paths, ingress body/timeout limits, real volume pressure and
+reclaim, broker HA, coordinated live backup/restore, Cloud adoption inputs, and
+the AC-19 netem measurement. Rehearse the exact procedure on a disposable native
+Linux installation and record the result with the release evidence.
 
 ## Deployment acceptance in CI
 

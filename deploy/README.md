@@ -32,8 +32,13 @@ deploy/
 ├─ docker/mosquitto.Dockerfile      # Pinned Mosquitto image with the plugin
 ├─ docker/mosquitto-entrypoint.sh   # Materializes broker-local secrets
 ├─ docker/access.Dockerfile         # Access server image
+├─ tests/rolling-upgrade-matrix.sh  # static + Docker migration preflight
 └─ postgres/init/01-test-db.sql     # creates whalerein_test on a fresh volume
 ```
+
+The Compose stack mounts a named `whalerein-access-payloads` volume at
+`/var/lib/whalerein/payloads` for disposable node-local ciphertext. It is not a
+backup target: PostgreSQL owns all admission, expiry and command state.
 
 ## One-command stack
 
@@ -74,6 +79,10 @@ Stop the stack while preserving PostgreSQL data (broker state is disposable):
 ```bash
 docker compose -f deploy/compose/stack.yaml down
 ```
+
+`down` keeps the named `whalerein-access-payloads` volume. Its ciphertext is
+disposable and is not part of backup/restore; remove the volume explicitly only
+when decommissioning the node.
 
 ## PostgreSQL
 
@@ -127,7 +136,7 @@ The image is built from `deploy/docker/access.Dockerfile`. Its config is
 | `WHALEREIN_BROKER_PASSWORD` | Access's own broker credential |
 | `WHALEREIN_INTERNAL_TOKEN` | Fixed header shared with the broker plugin |
 | `WHALEREIN_TRANSPORT_PROFILE` | Packaged transport profile (`default`, `compact` or `roomy`); must match the Host and clients |
-| `WHALEREIN_MQTT_MAX_PACKET_SIZE` | Rendered Mosquitto packet ceiling (default 4 MiB) |
+| `WHALEREIN_MQTT_MAX_PACKET_SIZE` | Rendered Mosquitto PUBLISH ceiling (default 1 MiB) |
 
 Development defaults are in `deploy/compose/stack.yaml`. Replace them before
 sharing the stack.
@@ -140,72 +149,330 @@ curl --fail --silent --show-error http://127.0.0.1:8080/readyz
 pg_isready -h 127.0.0.1 -p 55432
 ```
 
-`/healthz` reports process liveness. `/readyz` additionally requires PostgreSQL,
-an established subscribed MQTT session, a reconciled broker presence snapshot and
-a confirmed policy reconciliation.
+`/healthz` reports process liveness. `/readyz` additionally requires PostgreSQL
+(including a write probe), an established subscribed MQTT session, a reconciled
+broker presence snapshot, a confirmed policy reconciliation, and — when
+`storage.enabled` is true — a writable payload directory with at least
+`storage.free_space_reserve_bytes` free. It does not prove the relay epoch of a
+connected Host or client, ingress TLS, or broker ACL correctness; those need the
+epoch and policy checks in [the cutover procedure](#coordinated-relay-cutover-epoch-3).
 
 ## Transport operations
 
 `proto/v1/transport_profiles.json` is the single packaged profile vocabulary
-shared by Access, the Host plugin and clients. The standalone Compose stack
+shared by Access, the Host runtime and clients. The standalone Compose stack
 selects a profile in [`compose/access.yaml`](compose/access.yaml) through
-`WHALEREIN_TRANSPORT_PROFILE` and may override individual values. The same profile name must be selected for Access,
-the Host and clients; a mismatch is a coordinated hard-cut failure, not a silent
-downgrade.
+`WHALEREIN_TRANSPORT_PROFILE` and may override individual values. Access, the
+Host and every client must select the same profile; a mismatch is a coordinated
+hard-cut failure, not a silent downgrade.
 
-| Setting | Default profile | Owner |
+| Limit | Default profile | Owner and behavior |
 |---|---|---|
-| Packet budget | 64 KiB | Access transport, broker and clients |
-| Fragment payload | 60 KiB | Access transport and clients |
-| Fragment count | 274 (covers one 16 MiB envelope) | Access transport and clients |
-| Logical envelope | 16 MiB | Access transport, Host and clients |
-| Bulk concurrency / reserved bytes | 4 / 32 MiB | Access admission |
-| Fragment idle / transfer timeout | 30 s / 120 s | Access transport |
-| Retained encrypted result | 16 MiB (profile envelope) | Access HTTP and storage |
-| HTTP result body | 24 MiB (derived from base64 + JSON) | Access HTTP and ingress |
-| Broker packet ceiling | 4 MiB (parameterized) | Mosquitto |
+| Complete encoded MQTT packet | 64 KiB | Access, Host, Core and broker. The whole PUBLISH counts, not only ciphertext. |
+| Logical envelope | 16 MiB | Access, Host, Core and clients. Independent of packet size. |
+| Bulk HTTPS transfers / reserved ciphertext | 4 / 32 MiB | Access admission and HTTP. |
+| Upload or fetch timeout | 120 s | Access transport and relay directory. |
+| Receive Maximum / send in-flight | 16 / 16 | Access MQTT 5 CONNECT and ordered publisher. A CONNACK value can only lower the in-flight bound. |
+| Per-destination queue / waiting bytes | 1024 / 32 MiB | Access ordered publisher. Exhaustion is a typed error, never a blocked sibling flow. |
+| Retained encrypted result | 16 MiB | Access HTTP/storage; derived from the profile envelope. |
+| HTTP result body | 24 MiB | Access HTTP and ingress; base64 expansion plus JSON framing. |
+| Broker PUBLISH ceiling | 1 MiB | Mosquitto `max_packet_size`; equals packaged `brokerPacketLimitBytes`. |
+
+There is no application fragmentation, reassembly, transfer receipt or device
+ACK topic. Each topic carries exactly one complete message per MQTT PUBLISH:
+
+```text
+whalerein/v1/h/{host_id}/request
+whalerein/v1/h/{host_id}/result
+whalerein/v1/h/{host_id}/event
+whalerein/v1/h/{host_id}/d/{device_id}/event
+whalerein/v1/h/{host_id}/d/{device_id}/notice
+whalerein/v1/h/{host_id}/d/{device_id}/ready
+```
+
+Access publishes `request` and the two Device topics (`event`, `notice`); a Host
+publishes its own `result` and `event`; a Device publishes its own `ready`
+`ReceiveAdvertisement` after each authenticated connect and budget change.
+Access registers each advertisement against the broker-derived connection
+generation. The former `.../d/{device_id}/ack` topic is denied in both
+directions.
 
 Run `whalerein-access --check-config --config <file>` to print the resolved
-`transport:` line. The command fails before any listener opens for an unknown
-profile, zero/negative/overflowing value, a fragment width that does not fit the
-packet budget, too few fragments for the envelope, reserved bytes below one
-envelope or the in-flight fragments, out-of-order timeouts, or an HTTP body
-bound below the encoded result minimum. Configuration changes take effect on
-process restart only; reconnect clients after a change so both directions
-renegotiate.
+`transport:` and `storage:` lines. It fails before any listener opens for an
+unknown profile, a non-positive or overflowing value, a packet budget above
+`brokerPacketLimitBytes`, an envelope below the packet budget, reserved bytes
+below one envelope, invalid queue bounds, invalid storage limits, a
+`storage.upload_timeout` above `storage.retention`, or an unwritable payload
+directory. Configuration changes take effect on process restart only; reconnect
+clients after a change so both directions renegotiate.
 
 The limits are independent and must stay aligned:
 
-1. **Broker packet ceiling** (`WHALEREIN_MQTT_MAX_PACKET_SIZE`, rendered by
-   `docker/mosquitto-entrypoint.sh` into `/run/whalerein/mosquitto.conf`). The
-   image default is 4 MiB. Access refuses to start on a broker whose CONNACK
-   `maximum_packet_size` is below the configured transport packet budget.
-2. **Framed packet and logical envelope** (Access `transport:` and the matching
-   Host/client profile). Fragmentation happens inside MQTT; the broker sees
-   individual packets, not the reconstructed envelope.
-3. **HTTP result body** (`http.max_body_bytes`, derived when omitted). This is
-   the base64-expanded encrypted result plus JSON framing. Any reverse proxy in
-   front of Access must allow at least this body size. The Cloud deployment
-   templates set nginx `client_max_body_size`; the standalone Compose stack
-   publishes Access directly and has no ingress equivalent. A proxy left at
-   nginx's 1 MiB default rejects normal envelopes.
-4. **Retained result bounds**: `requests.max_result_bytes` must not exceed the
+1. **Broker PUBLISH ceiling.** `WHALEREIN_MQTT_MAX_PACKET_SIZE` (default
+   1048576) is rendered by `docker/mosquitto-entrypoint.sh`. The packaged
+   `brokerPacketLimitBytes` is also 1 MiB, and every profile packet budget must
+   not exceed it. Rendering a lower broker value lowers the effective hop;
+   Access takes the minimum of its profile, the packaged ceiling and the
+   broker's CONNACK `maximum_packet_size`.
+2. **Packet and envelope budgets.** Access `transport:` and the matching Host
+   and client profiles. An inline body that does not fit the complete encoded
+   packet is stored and sent as a reference, provided the reference itself fits.
+3. **HTTP result body.** `http.max_body_bytes`, derived when omitted. A reverse
+   proxy in front of Access must allow at least this body size and the relay
+   upload bound below.
+4. **Retained result bounds.** `requests.max_result_bytes` must not exceed the
    logical envelope, and `http.max_body_bytes` must fit its encoded form.
    Access refuses a stored result that cannot be returned without changing its
    durable outcome.
 
-Operational signals: `transport_rejections_total{code}` and
-`transport_rejected_bytes_total{code}` use only stable size/code labels;
-`transport_incoming_transfers` and `transport_reserved_bytes` show reassembly
-reservation; `cleanup_last_run_timestamp_seconds{operation}` and the existing
-`cleanup_*` counters expose retention drain after load stops. No metric label
-contains a host, device, request, topic or content identity.
+### Temporary ciphertext directory
 
-Validate rendered limits and reject invalid transport configuration with
-`deploy/tests/rolling-upgrade-matrix.sh`. It runs `--check-config` against the
-Compose mount, checks the rendered default geometry, asserts the broker packet
-ceiling, and requires invalid profile and relation cases to fail before
-readiness.
+Oversized relay payloads and attachment parts use the Access node's payload
+volume. The Compose config enables it with development values that match the
+packaged default profile:
+
+| Key | Compose development value | Meaning |
+|---|---|---|
+| `storage.enabled` | `true` | Admission is refused when the directory is unavailable. |
+| `storage.root_dir` | `/var/lib/whalerein/payloads` | Dedicated quota directory; Access creates `objects/` and `tmp/`. |
+| `storage.node_id` / `owner_id` | `access-1` / `access-1` | Stable node identity and opaque reference owner. Keep `node_id` unique per node. |
+| `storage.max_object_bytes` | 16777216 (16 MiB) | One ciphertext object; keep it at or below the profile envelope (16 MiB). |
+| `storage.max_host_bytes` | 268435456 (256 MiB) | Charged bytes for one Host. |
+| `storage.max_node_bytes` | 1073741824 (1 GiB) | Charged bytes for the node. |
+| `storage.max_objects` | 1024 | Reserved, ready and expired objects combined. |
+| `storage.max_active_uploads` | 16 | Concurrent upload bodies; keep the profile `bulk_concurrency` within it. |
+| `storage.free_space_reserve_bytes` | 1073741824 (1 GiB) | No admission below this free-space headroom. |
+| `storage.retention` | 24h | Hard lifetime cap; a parent deadline can only shorten it. |
+| `storage.cleanup_interval` / `batch` | 30s / 100 | Bounded expiry cleanup. |
+| `storage.upload_timeout` / `read_timeout` | 2m / 60s | One upload or fetch; upload timeout must not exceed retention. |
+
+The profile envelope remains the upload bound; keep `max_object_bytes` at or
+below it. Access does not currently cross-check that relation at startup. If
+storage is disabled, `/readyz` has no storage check and any message that needs a
+reference fails at admission; keep it enabled whenever the profile envelope can
+exceed the packet budget. These are development values, not a capacity plan. Size `max_node_bytes` plus
+`free_space_reserve_bytes` inside the provisioned volume, and keep the directory
+on one dedicated filesystem. Do not place the payload directory on a bind mount
+that the unprivileged Access user cannot write; the Compose image creates the
+path with matching ownership for a new named volume. A pre-existing volume or
+bind mount must be chowned to the Access container user before startup.
+
+The five routes are:
+
+```text
+POST   /v1/relay/objects
+PUT    /v1/relay/objects/{object_id}
+POST   /v1/relay/objects/{object_id}/finish
+GET    /v1/relay/objects/{object_id}
+DELETE /v1/relay/objects/{object_id}
+```
+
+Every request carries relay epoch 3; `PUT`, `GET` and `DELETE` use the
+`WhaleRein-Relay-Epoch: 3` header. Host authority uses the existing Ed25519 Host
+key; a Device uses its bearer token and bound grant/session/channel/purpose
+scope. A reference is published only after the exact ciphertext is readable. A
+wrong-node request returns `409 conflict` with `reason=wrong_owner_path` and the
+authoritative `WhaleRein-Owner-Node` header.
+
+### Public ingress requirements (operator inputs)
+
+The repository contains no production ingress template. The operator must
+provide and verify all of the following for the public Access origin:
+
+1. **TLS termination** for `public_url`, with the certificate/trust chain used by
+   Hosts and clients. The Compose loopback HTTP stack is development-only.
+2. **Route exposure** for all five relay routes under the same origin (or their
+   node-scoped owner base path), preserving method, body, headers and streaming
+   responses.
+3. **Body-size limits** at least:
+   - `max(http.max_body_bytes, storage.max_object_bytes)` for the origin, so
+     `POST` reserve/finish JSON up to the envelope and `PUT` ciphertext up to
+     one object are accepted;
+   - the encoded HTTP result body bound for ordinary result reads.
+   A proxy left at nginx's 1 MiB default rejects normal envelopes.
+4. **Request/response timeouts** at least the configured
+   `storage.upload_timeout` and `storage.read_timeout` (plus a small grace),
+   and at least the profile `transfer_timeout`. Access raises its own HTTP
+   read/write bounds for storage routes, but an edge that closes earlier still
+   breaks an upload or fetch.
+5. **Node-scoped owner base paths** for a multi-node deployment. A reservation
+   returns `owner_node_id` and `upload_path`; the caller resolves that owner to
+   its configured base path (for example a per-node host or an ingress prefix).
+   A single node can serve its own path directly. The repository has no
+   multi-node ingress, DNS or certificate automation.
+
+The same operator decision covers broker TLS (`mqtts://`), certificates, DNS,
+and credential distribution. Only the loopback plaintext MQTT/HTTP ports are
+defined in this repository.
+
+### Flow control and observability
+
+MQTT is QoS 1 with the negotiated Receive Maximum and connection flow control.
+Each Access connection has one FIFO queue per destination topic, a bounded
+global in-flight semaphore and bounded waiting bytes, so a blocked bulk flow
+cannot stall an unrelated small message. There are no application ACKs, so a
+failed publication is retried only at the same complete-message identity and
+duplicates are handled by the existing `request_id`, `command_id`/digest and
+typed event-sequence rules.
+
+Operational signals: `transport_rejections_total{code}`,
+`transport_rejected_bytes_total{code}`, the relay queue/staging counters, and
+`payload_free_bytes`, `payload_headroom_bytes`, `payload_ready_bytes`,
+`payload_reserved_bytes`, `payload_expired_backlog_seconds`,
+`payload_admission_refusals_total`, `payload_cleanup_*` and
+`payload_reconcile_actions_total`. No metric label contains a host, device,
+request, topic, object path or content identity.
+
+Validate the static deployment inputs and the schema matrix with
+`deploy/tests/rolling-upgrade-matrix.sh`. The static preflight runs without
+Docker and checks the storage volume/config, relay topics, profile/broker
+alignment and epoch constants. The Docker portion runs `--check-config`, checks
+the rendered geometry, and proves an old binary rejects the newer migration
+ledger.
+
+## Coordinated relay cutover (epoch 3)
+
+This release replaces the MQTT relay contract in one hard cut. Application
+protocol stays v1, but `relay_version=3` is the only accepted relay epoch. There
+is no v2 acceptance, unframed fallback, fragment path, receipt/ACK topic or
+compatibility bridge. A mixed Access/Host/broker/client artifact set is not a
+supported release.
+
+### Supported artifact set
+
+Build every artifact below from one release revision:
+
+- Access binary or `whalerein-access` image (`deploy/docker/access.Dockerfile`);
+- Mosquitto image and WhaleRein plugin (`deploy/docker/mosquitto.Dockerfile`,
+  `deploy/mosquitto/`), including the epoch-3 topic policy;
+- shared Host runtime and DSH adapter (`host/runtime`, `host/dsh`);
+- Core library and CLI (`core`, `apps/cli`);
+- mobile bindings and any shipped iOS build (`apps/mobile-bindings`,
+  `apps/ios`);
+- `proto/v1/transport_profiles.json` and the generated Go/Rust/Node profile
+  artifacts from the same revision.
+
+These paths are the supported client/runtime set in this repository. Other
+builds are not covered by this contract. Pairing credentials, Noise identities,
+pins, grants and command-recovery identities survive the cut; relay epoch 3
+changes representation, not those application identities.
+
+### 1. Prepare inputs
+
+1. Provision the payload volume/filesystem, permissions and capacity from the
+   table above. Confirm free space exceeds `max_node_bytes` plus the reserve.
+2. Configure production TLS, the public HTTPS origin, the five relay routes,
+   body limits and upload/read timeouts. Configure broker TLS and hostnames.
+3. Set the same transport profile (or the same explicit overrides) on Access,
+   Host and clients. Keep every packet budget at or below the broker ceiling.
+4. Deploy the matching broker configuration/plugin and confirm the six relay
+   topics and the denied `ack` topic. Do not duplicate or re-derive ACLs outside
+   the authenticated policy.
+5. Record the release artifact digests and take a coordinated PostgreSQL backup
+   using [Backup and restore](#backup-and-restore).
+6. Record unresolved operations: `request_id`, `command_id`, `payload_digest`,
+   status and whether native execution is possible. Do not resend them with new
+   identities.
+
+### 2. Quiesce old admissions and drain transient state
+
+Stop accepting new client submissions (at the ingress or by stopping clients)
+and keep the old Access and Host running long enough for in-flight requests to
+reach a terminal state or expire to `unknown`. The v2 transport has no durable
+fragment directory to migrate. Record unresolved operations before forcing them
+terminal, then stop the old Host and Access and keep PostgreSQL. Do not delete or
+rewrite grants, keys, pins, pairing records, command identities or
+proved/unknown outcomes. The new Access never replays an old fragment, ACK or
+mixed-epoch delivery.
+
+### 3. Deploy the epoch-3 set
+
+Start PostgreSQL, then the broker, then Access with the prepared config. Wait for
+`/readyz` to report database, broker and storage readiness. Start the Host
+runtime/DSH plugin, then the supported clients. Start order prevents a Host or
+client from establishing a policy under an incomplete broker.
+
+### 4. Gate readiness on the matching epoch
+
+All of these must hold before reopening traffic:
+
+- `/readyz` is green (database write probe, MQTT session, presence, policy and
+  storage headroom);
+- Access accepted the Host's `HostReady` with `relay_version=3` and a valid
+  `ReceiveAdvertisement`;
+- each client connected with epoch 3, subscribed its own `event` and `notice`
+  topics, and published `ready`; Access registered the new connection
+  generation;
+- a mixed/old artifact is rejected with `protocol_version_incompatible` and no
+  business delivery;
+- the broker policy shows the six topics and no `ack` acceptance;
+- payload free space remains above the reserve.
+
+`/readyz` alone does not prove the Host or client epoch, ingress TLS, body limits
+or broker ACLs. This repository has no standalone epoch-readiness endpoint, so
+record the Host/client epoch evidence from their diagnostics and the broker
+policy test instead of inferring it from `/readyz`.
+
+### 5. Reattach notifications and recover
+
+Reconnect Host and clients, let each Device publish a fresh `ready`
+advertisement, and rerun the original watch/history reads. A foreground command
+that was interrupted is recovered by its original identity with
+`whalerein operation recover <request-id>` (or the equivalent Core
+`GetCommandResult` path); do not resend it with a new ID. Reconcile notifications
+from authoritative state and treat missing bodies as `unknown`/`payload_too_large`
+according to the terminal status, not as success.
+
+### Rollback
+
+A live mixed-contract rollback is unsupported. A rollback requires all of the
+following, in order:
+
+1. Fenced admission: stop new submissions and keep the old/new boundary closed.
+2. Quiesced receivers: stop Host and clients so no receiver observes both
+   contracts.
+3. Matching old artifacts and broker policy for the entire set.
+4. A verified recovery path for commands admitted under the new release.
+
+Because epoch 3 applies the new migrations, an old binary refuses the newer
+migration ledger. Rollback therefore means restoring the coordinated pre-cut
+backup with the matching older artifacts and running the documented restore
+invalidation/re-enrollment, or deploying an operator-built binary that is
+explicitly compatible with the new schema. It is not an in-place binary swap.
+Any command executed after that backup cannot be proved by the restored
+database: preserve its original identity and report `unknown` rather than
+claiming it did not run.
+
+### Verified versus operator procedure
+
+Verified in this repository: configuration parsing and validation for the
+storage and transport keys, storage readiness/headroom behavior, broker topic and
+ACL policy tests, relay epoch rejection, the static deployment preflight, and the
+migration-adjacency gate. The Docker matrix additionally proves an old binary
+rejects a newer ledger.
+
+Operator procedure, not proven here: production TLS termination, DNS and
+multi-node owner paths, ingress body/timeout configuration, volume provisioning
+and real disk-pressure drills, coordinated backup/restore of a live installation,
+broker HA, Cloud adoption inputs, and the AC-19 netem measurement. Treat the
+procedure as a rehearsal checklist until it has been executed on the target
+environment.
+
+### Dependent Cloud adoption inputs
+
+Cloud adoption is a separate deployment change. It depends on these inputs,
+which are not defined in this repository:
+
+- public HTTPS and MQTT(S) endpoints, certificates and DNS for each Access node;
+- a node storage contract (volume class, size, node identity, free-space
+  reserve, snapshot/backup and disposal policy);
+- per-node owner base paths and routing for the five relay routes;
+- quota, TLS and body/timeout ingress policy mapped to the settings above;
+- the artifact registry/release digests and supported client distribution set;
+- external account service trust and regional identity configuration.
+
+Do not infer Cloud endpoints, storage classes or paths from the standalone
+Compose values.
 
 ## Standalone setup and credential loss
 

@@ -67,6 +67,7 @@ def test_question_unicode_content_round_trips(scenario, paired_device, session_i
 
 
 @pytest.mark.description("Adding or answering a batch mid-pagination never turns a valid cursor into a conflict.")
+@pytest.mark.relay_directory
 def test_question_pagination_survives_source_changes(scenario, paired_device, session_id):
     scenario.dsh.process.control("request_question_pages", session_id=session_id)
     first = paired_device.call("session", "question", "list", "--session", session_id)
@@ -89,6 +90,7 @@ def test_question_pagination_survives_source_changes(scenario, paired_device, se
 
 
 @pytest.mark.description("A question pagination cursor continues paging across a Host restart.")
+@pytest.mark.relay_directory
 def test_question_pagination_cursor_survives_plugin_restart(scenario, paired_device, session_id):
     scenario.dsh.process.control("request_question_pages", session_id=session_id)
     first = paired_device.call("session", "question", "list", "--session", session_id)

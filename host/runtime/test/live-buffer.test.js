@@ -38,8 +38,7 @@ test('large or noncontiguous deltas flush without crossing stream positions', ()
   const buffer = new LiveBuffer((update) => out.push(update))
   buffer.push(frame(1))
   buffer.push(frame(3))
-  buffer.push(frame(4, 'x'.repeat(MAX_PREVIEW_BYTES + 1)))
-  assert.equal(out.length, 3)
+  assert.equal(out.length, 1)
   buffer.flush()
 })
 
@@ -74,15 +73,40 @@ test('a reset or attempt change flushes the pending preview first', () => {
   assert.equal(out[0].live.last_seq, 1)
 })
 
-test('a pending preview never exceeds the bounded UTF-8 target', () => {
+test('the route packet budget, not a fixed 8 KiB cap, bounds a coalesced preview', () => {
   const out = []
-  const buffer = new LiveBuffer((update) => out.push(update))
-  const half = 'x'.repeat(MAX_PREVIEW_BYTES / 2)
-  buffer.push(frame(1, half))
-  buffer.push(frame(2, half))
-  assert.equal(out.length, 1)
-  assert.equal(Buffer.byteLength(out[0].live.delta.text, 'utf8'), MAX_PREVIEW_BYTES)
+  const buffer = new LiveBuffer((update) => out.push(update), 20, 16)
+  assert.equal(buffer.maxBytes, 16)
+  buffer.push(frame(1, 'x'.repeat(10)))
+  buffer.push(frame(2, 'x'.repeat(6)))
+  assert.equal(out.length, 1, 'exactly at the budget flushes')
+  assert.equal(out[0].live.delta.text.length, 16)
   buffer.push(frame(3, 'y'))
+  buffer.setMaxBytes(4)
+  buffer.push(frame(4, 'zzz'))
+  buffer.push(frame(5, 'z'))
   buffer.flush()
-  assert.equal(out.length, 2, 'the next preview starts a fresh bounded batch')
+  assert.equal(out.length, 3, 'the smaller budget flushes before crossing it')
+})
+
+test('a pending preview never exceeds the configured UTF-8 byte target', () => {
+  const out = []
+  const buffer = new LiveBuffer((update) => out.push(update), 20, 9)
+  buffer.push(frame(1, 'ééé')) // 6 bytes
+  buffer.push(frame(2, 'é')) // 8 bytes, still inside
+  assert.equal(out.length, 0)
+  buffer.push(frame(3, 'é')) // would be 10 bytes, flush first
+  assert.equal(out.length, 1)
+  assert.equal(Buffer.byteLength(out[0].live.delta.text, 'utf8'), 8)
+  buffer.flush()
+  assert.equal(Buffer.byteLength(out[1].live.delta.text, 'utf8'), 2)
+})
+
+test('an invalid budget falls back to the conservative default', () => {
+  const buffer = new LiveBuffer(() => {}, 20, 0)
+  assert.equal(buffer.maxBytes, MAX_PREVIEW_BYTES)
+  buffer.setMaxBytes(-1)
+  assert.equal(buffer.maxBytes, MAX_PREVIEW_BYTES)
+  buffer.setMaxBytes(64)
+  assert.equal(buffer.maxBytes, 64)
 })
