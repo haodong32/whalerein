@@ -28,7 +28,7 @@
 - [x] 3.2 Implement pure `reduce` transitions and state tests for every event, including uncertain, rejected, stale approval, cancelled wait and cached-only history; prove illegal combinations fail (AC-01, AC-02).
 - [x] 3.3 Rewrite `ConversationModel` as intent + service orchestration over the reducer; preserve activation fencing and late-event drops; add model tests with `FakeSessionService`, `FakeClock` and `FakeUUIDSource` (AC-03, AC-10).
 - [ ] 3.4 Split queue, wait, history, attachment and recovery controllers out of `ConversationModel`; keep a thin facade exposing state and intents (AC-01, AC-11).
-- [ ] 3.5 Rewrite `ConversationView` and subviews to switch on the state; enforce no service access, no `as?`, and the file budget; keep accessibility identifiers and localization keys (AC-03, AC-12).
+- [x] 3.5 Rewrite `ConversationView` and subviews to switch on the state; enforce no service access, no `as?`, and the file budget; keep accessibility identifiers and localization keys (AC-03, AC-12).
 - [x] 3.6 Migrate conversation UI tests to conversation scenarios via `-ui-scenario`; record scenario-to-flow mapping (AC-07, AC-12).
 
 ## 4. Remaining feature slices
