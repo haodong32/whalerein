@@ -611,6 +611,8 @@ enum AppErrorCode: String, CaseIterable, Codable, Sendable {
     /// A history continuation or exact reference is stale, expired or belongs
     /// to another scope or content projection. A fresh traversal is required.
     case staleHistory
+    /// Core rejected the request shape. This is not a pairing failure.
+    case invalidInput
 }
 
 struct SessionServiceError: Error, Equatable, LocalizedError, Sendable {

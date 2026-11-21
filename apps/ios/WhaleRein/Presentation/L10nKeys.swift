@@ -45,6 +45,8 @@ extension L10nKey {
             return .errorConfiguration
         case .staleHistory:
             return .errorStaleHistory
+        case .invalidInput:
+            return .errorInvalidInput
         }
     }
 

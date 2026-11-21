@@ -394,6 +394,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case approvalStatusOutOfScope = "approval.status.outOfScope"
     case pairingLinkQueued = "pairing.linkQueued"
     case errorStaleHistory = "error.staleHistory"
+    case errorInvalidInput = "error.invalidInput"
     case settingsAppSection = "settings.appSection"
     case settingsReasoning = "settings.reasoning"
     case settingsReasoningNote = "settings.reasoningNote"
@@ -761,6 +762,7 @@ enum L10n {
     static let approvalUnavailableBody = L10nKey.approvalUnavailableBody
     static let pairingLinkQueued = L10nKey.pairingLinkQueued
     static let errorStaleHistory = L10nKey.errorStaleHistory
+    static let errorInvalidInput = L10nKey.errorInvalidInput
     static let settingsAppSection = L10nKey.settingsAppSection
     static let settingsReasoning = L10nKey.settingsReasoning
     static let settingsReasoningNote = L10nKey.settingsReasoningNote
