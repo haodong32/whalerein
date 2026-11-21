@@ -25,6 +25,14 @@ final class AccountSettingsUITests: WhaleReinUITestCase {
         XCTAssertTrue(waitFor("settings.coreRevision").exists)
     }
 
+    func testLocalEnvironmentIsVisibleInDebugSettings() {
+        openSettings()
+        XCTAssertTrue(
+            revealInSettings("service.option.cloud-local").waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(element("service.option.cloud-staging").exists)
+    }
+
     func testSettingsShowsTypedStatusAndScopedAppSessions() {
         openSettings()
 

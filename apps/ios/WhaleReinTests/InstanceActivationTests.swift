@@ -160,6 +160,30 @@ struct InstanceActivationTests {
         #expect(harness.app.activeInstance?.id == "standalone")
     }
 
+    @Test("Local is exposed and created only in a debug build flavor")
+    func localOptionCreation() async throws {
+        let harness = try makeHarness()
+        let hidden = AppConfigurationStore.serviceOptions(
+            for: harness.store.instances,
+            showsStaging: false,
+            showsLocal: false
+        )
+        #expect(!hidden.contains { $0.environment == .local })
+
+        let options = AppConfigurationStore.serviceOptions(
+            for: harness.store.instances,
+            showsStaging: true,
+            showsLocal: true
+        )
+        let local = try #require(options.first { $0.environment == .local })
+        #expect(local.kind == .createLocal)
+
+        let error = await harness.app.switchToService(local)
+        #expect(error == nil, "switchToService returned \(String(describing: error))")
+        #expect(harness.app.activeInstance?.id == "cloud-local")
+        #expect(harness.store.instances.contains { $0.id == "cloud-local" })
+    }
+
     @Test("Staging options are exposed only when the build flavor allows them")
     func stagingOptionCreation() async throws {
         let harness = try makeHarness()

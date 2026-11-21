@@ -112,7 +112,7 @@ struct AppConfigurationTests {
         return (store, binding)
     }
 
-    @Test("production options hide Staging and always hide Local")
+    @Test("production options hide Staging and Local; debug exposes both")
     func productionOptionVisibility() {
         var instances = fixtureConfiguration().instances
         instances.append(
@@ -128,17 +128,21 @@ struct AppConfigurationTests {
         )
         let production = AppConfigurationStore.serviceOptions(
             for: instances,
-            showsStaging: false
+            showsStaging: false,
+            showsLocal: false
         )
         #expect(production.map(\.id) == ["cloud-production", "standalone"])
         #expect(production.map(\.environment) == [.production, nil])
 
         let debug = AppConfigurationStore.serviceOptions(
             for: instances,
-            showsStaging: true
+            showsStaging: true,
+            showsLocal: true
         )
-        #expect(debug.map(\.id) == ["cloud-production", "cloud-staging", "standalone"])
-        #expect(!debug.contains { $0.environment == .local })
+        #expect(debug.map(\.id) == [
+            "cloud-production", "cloud-staging", "cloud-local", "standalone"
+        ])
+        #expect(debug.map(\.environment) == [.production, .staging, .local, nil])
     }
 
     @Test("an existing Staging instance is selected instead of creating a new one")
@@ -155,7 +159,11 @@ struct AppConfigurationTests {
                 standaloneCAPath: nil
             )
         )
-        let options = AppConfigurationStore.serviceOptions(for: instances, showsStaging: true)
+        let options = AppConfigurationStore.serviceOptions(
+            for: instances,
+            showsStaging: true,
+            showsLocal: false
+        )
         #expect(options.map(\.id) == ["cloud-production", "staging", "standalone"])
         #expect(options[1].kind == .existing(instanceID: "staging"))
     }

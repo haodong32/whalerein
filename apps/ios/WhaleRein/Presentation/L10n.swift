@@ -280,6 +280,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case serviceActive = "service.active"
     case serviceCloudProduction = "service.cloudProduction"
     case serviceCloudStaging = "service.cloudStaging"
+    case serviceCloudLocal = "service.cloudLocal"
     case serviceStandalone = "service.standalone"
     case serviceSwitchTitle = "service.switchTitle"
     case serviceSwitchAction = "service.switchAction"
@@ -713,6 +714,7 @@ enum L10n {
     static let serviceActive = L10nKey.serviceActive
     static let serviceCloudProduction = L10nKey.serviceCloudProduction
     static let serviceCloudStaging = L10nKey.serviceCloudStaging
+    static let serviceCloudLocal = L10nKey.serviceCloudLocal
     static let serviceStandalone = L10nKey.serviceStandalone
     static let serviceSwitchTitle = L10nKey.serviceSwitchTitle
     static let serviceSwitchAction = L10nKey.serviceSwitchAction

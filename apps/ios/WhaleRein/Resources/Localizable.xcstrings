@@ -5407,6 +5407,23 @@
         }
       }
     },
+    "service.cloudLocal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local (developer)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地环境（开发）"
+          }
+        }
+      }
+    },
     "service.cloudProduction": {
       "extractionState": "manual",
       "localizations": {

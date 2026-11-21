@@ -308,6 +308,20 @@ final class AppModel {
                 return reportInstanceError(error)
             }
             return await switchInstance(id: "cloud-staging")
+        case .createLocal:
+            let input = AppInstanceInput(
+                id: "cloud-local",
+                service: .cloud,
+                environment: .local,
+                dataDirectory: "instances/cloud-local/data",
+                standaloneCAPEM: nil
+            )
+            do {
+                try configuration.save(input)
+            } catch {
+                return reportInstanceError(error)
+            }
+            return await switchInstance(id: "cloud-local")
         }
     }
 

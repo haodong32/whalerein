@@ -1,9 +1,9 @@
 // Shared client-service selector for the welcome surface and Settings.
 //
 // Production builds offer official Cloud production and Standalone. A Debug or
-// test build may also offer Staging. Local stays hidden until iOS trust for the
-// desktop mkcert root is verified; it is intentionally not exposed here.
-// Switching always requires an explicit confirmation.
+// test build may also offer Staging and Local. Local still needs the desktop
+// mkcert root to be trusted by iOS at runtime, so a connection may fail when it
+// is not installed. Switching always requires an explicit confirmation.
 
 import SwiftUI
 import UniformTypeIdentifiers

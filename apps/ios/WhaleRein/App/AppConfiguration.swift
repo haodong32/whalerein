@@ -63,6 +63,8 @@ struct AppServiceOption: Identifiable, Equatable, Sendable {
         case existing(instanceID: String)
         /// A Staging instance is created on first selection in a debug build.
         case createStaging
+        /// A Local instance is created on first selection in a debug build.
+        case createLocal
     }
 
     let id: String
@@ -310,14 +312,15 @@ final class AppConfigurationStore {
 
     /// Builds the options shown by the welcome and Settings selectors.
     ///
-    /// Production builds never show Staging. Local stays hidden until iOS trust
-    /// for the desktop mkcert root is verified (tracked as BLOCKED); an existing
-    /// Local entry is filtered out rather than exposed.
+    /// Production builds never show Staging or Local. A Debug or test build may
+    /// show both; Local still needs the desktop mkcert root to be trusted by iOS
+    /// before it can connect.
     nonisolated static func serviceOptions(
         for instances: [AppInstance],
-        showsStaging: Bool = AppConfigurationStore.defaultShowsStaging
+        showsStaging: Bool = AppConfigurationStore.defaultShowsStaging,
+        showsLocal: Bool = AppConfigurationStore.defaultShowsLocal
     ) -> [AppServiceOption] {
-        let visible = instances.filter { $0.environment != .local }
+        let visible = instances.filter { showsLocal || $0.environment != .local }
         var options: [AppServiceOption] = []
         if let production = visible.first(where: {
             $0.service == .cloud && $0.environment == .production
@@ -359,6 +362,31 @@ final class AppConfigurationStore {
                 )
             }
         }
+        if showsLocal {
+            if let local = visible.first(where: {
+                $0.service == .cloud && $0.environment == .local
+            }) {
+                options.append(
+                    AppServiceOption(
+                        id: local.id,
+                        titleKey: .serviceCloudLocal,
+                        kind: .existing(instanceID: local.id),
+                        service: .cloud,
+                        environment: .local
+                    )
+                )
+            } else {
+                options.append(
+                    AppServiceOption(
+                        id: "cloud-local",
+                        titleKey: .serviceCloudLocal,
+                        kind: .createLocal,
+                        service: .cloud,
+                        environment: .local
+                    )
+                )
+            }
+        }
         if let standalone = visible.first(where: { $0.service == .standalone }) {
             options.append(
                 AppServiceOption(
@@ -374,6 +402,16 @@ final class AppConfigurationStore {
     }
 
     nonisolated static var defaultShowsStaging: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// Local is a developer-only environment. It is exposed only in Debug/test
+    /// builds; the desktop mkcert CA must still be trusted by iOS at runtime.
+    nonisolated static var defaultShowsLocal: Bool {
         #if DEBUG
         true
         #else
