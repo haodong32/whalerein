@@ -1,9 +1,8 @@
 """Container benchmark entry point: one scripted streaming-reply scenario.
 
-The response schedule is independent of the observer. Once the fixture accepts
-the scripted send, fixed relative times drive the visible updates and the
-commit; the observer only records when it reads each matching output record.
-Every timestamp comes from one monotonic clock in this driver process.
+Once Watch has attached, local fixture control starts the independent source
+schedule. The source and observer use the same Linux monotonic clock. Reports
+use the first actual source increment as time zero.
 """
 
 import hashlib
@@ -20,63 +19,50 @@ import time
 import traceback
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, "/workspace/tests/integration")
 
+from benchmark import network, workflow
 from client_environment import CutoverClient, isolated_keyring
 from environment import ROOT, Process, Scenario, http, wait
+from repo.benchmark import model
 
 REPORTS = Path("/reports")
 CONFIG = json.loads(os.environ.get("WHALEREIN_BENCHMARK_CONFIG", "{}"))
-DEADLINE_MS = CONFIG.get("deadline_ms", 5000)
+DEADLINE_MS = CONFIG.get("deadline_ms", 10000)
 OBSERVATION_WINDOW_MS = CONFIG.get("observation_window_ms", 1000)
 DELAY_MS = CONFIG.get("delay_ms", 0)
-SEED = str(CONFIG.get("seed", 0))
 ATTEMPTS = CONFIG.get("attempts", 30)
 WARMUP = CONFIG.get("warmup_attempts", 3)
+NETWORK = CONFIG.get("network", model.network_settings("normal", "host"))
 # Optional fault schedule (attempt index -> fault) used only to validate that
 # each failure mode is accounted for; the default scenario has no faults.
 FAULTS = {int(key): value for key, value in (CONFIG.get("faults") or {}).items()}
 
 SETTLE_SECONDS = float(os.environ.get("WHALEREIN_BENCHMARK_SETTLE", "3"))
 
-SCENARIO_ID = "streaming-reply"
-SCENARIO_VERSION = 1
-
-# Fixed workload: five visible updates starting at FIRST_UPDATE_MS, one per
-# cadence step, then the final reply after one more step. A cadence at or below
-# the product's own 20 ms coalescing window makes that window the thing being
-# observed instead of hidden noise.
-UPDATES = ["Stream", "ed ", "reply", " for", " benchmark"]
-FINAL_TEXT = "".join(UPDATES)
-GAP_MS = int(CONFIG.get("cadence_ms", 100))
-FIRST_UPDATE_MS = 0
-FINAL_AT_MS = FIRST_UPDATE_MS + GAP_MS * (len(UPDATES) - 1) + GAP_MS
-DUPLICATE_AFTER_MS = 300
-DUPLICATE_FINAL_MS = FINAL_AT_MS + DUPLICATE_AFTER_MS
-SEND_TEXT = "benchmark streaming reply request"
-
-SCENARIO = {
-    "id": SCENARIO_ID,
-    "version": SCENARIO_VERSION,
-    "seed": SEED,
+# The scheduled first increment bounds the observer's watchdog. Outcomes use
+# the actual emission time, including when the fixture timer wakes slightly late.
+SOURCE_START_ALLOWANCE_MS = 1000
+RUN_CONFIG = {
+    "attempts": ATTEMPTS,
+    "warmup_attempts": WARMUP,
+    "concurrency": 1,
+    "profile": "warm-client",
+    "delay_ms": DELAY_MS,
+    "cadence_ms": CONFIG.get("cadence_ms", 100),
+    "network": NETWORK,
+    "workflow": CONFIG.get("workflow", "watch"),
     "deadline_ms": DEADLINE_MS,
     "observation_window_ms": OBSERVATION_WINDOW_MS,
-    "workload": {"updates": UPDATES, "gap_ms": GAP_MS, "delivery": "accepted"},
-    "response": {
-        "start_ms": FIRST_UPDATE_MS,
-        "final_ms": FINAL_AT_MS,
-        "delay_ms": DELAY_MS,
-        "duplicate_final_ms": DUPLICATE_FINAL_MS,
-        "final_text": FINAL_TEXT,
-    },
+    "seed": CONFIG.get("seed", 0),
 }
-
-GAP_SAMPLES = ("first_text_ms", "final_ms", "update_gaps_ms")
-# A tail is reported only when its declared sample floor is met.
-TAILS = (("median", 1), ("p95", 20), ("p99", 100))
-UNAVAILABLE_TAIL = "insufficient_samples"
+SCENARIO = model.scenario(RUN_CONFIG)
+FINAL_TEXT = SCENARIO["response"]["final_text"]
+FINAL_BYTES = FINAL_TEXT.encode()
+SOURCE_SIZES = model.source_sizes(SCENARIO)
 
 
 class Run:
@@ -90,16 +76,8 @@ class Run:
         self.state = "complete"
         self.cleanup = {"result": "verified", "reason": None}
         self.fixture = "unknown"
-        self.configured = {
-            "attempts": ATTEMPTS,
-            "warmup_attempts": WARMUP,
-            "concurrency": 1,
-            "profile": "warm-client",
-            "delay_ms": DELAY_MS,
-            "deadline_ms": DEADLINE_MS,
-            "observation_window_ms": OBSERVATION_WINDOW_MS,
-            "seed": SEED,
-        }
+        self.network_probe = None
+        self.network_counters = None
         self.session = None
 
     def fail(self, reason, state="invalid"):
@@ -125,11 +103,15 @@ class Attempt:
         self.outcome = None
         self.first_text_ms = None
         self.final_ms = None
-        self.send_exit_ms = None
         self.update_times = []
+        self.source_times_ms = []
+        self.outputs = []
         self.finals = 0
+        self.preview_after_final = False
+        self.watch_failed = False
+        self.recovery = None
+        self.history_reads = None
         self.content = None
-        self.send_code = None
         self.session = None
 
     def gaps(self):
@@ -146,11 +128,17 @@ class Attempt:
             "deadline_ms": DEADLINE_MS,
             "first_text_ms": self.first_text_ms,
             "final_ms": self.final_ms,
-            "send_exit_ms": self.send_exit_ms,
             "update_gaps_ms": self.gaps(),
             "update_count": len(self.update_times),
             "duplicate_finals": max(0, self.finals - 1),
+            "preview_after_final": self.preview_after_final,
+            "source_times_ms": self.source_times_ms,
+            "outputs": self.outputs,
         }
+        if self.recovery is not None:
+            document["recovery"] = self.recovery
+        if self.history_reads is not None:
+            document["history_reads"] = self.history_reads
         if self.session:
             document["session_id"] = self.session
             document["host_id"] = host
@@ -170,7 +158,11 @@ def main():
         run.fixture = fingerprint(ROOT / "tests/integration/fixtures/dsh.mjs")
         fixture = Fixture(run)
         fixture.start()
+        before = network.counters()
         execute(run, fixture)
+        run.network_counters = {
+            key: value - before[key] for key, value in network.counters().items()
+        }
     except KeyboardInterrupt:
         run.fail("run_interrupted", state="incomplete")
     except Exception:  # noqa: BLE001 - any setup failure still publishes what it knows
@@ -186,6 +178,11 @@ def main():
     measured = [item for item in run.attempts if item["phase"] == "measured"]
     if run.state != "complete" or any(
         item["outcome"] != "completed" for item in measured
+    ):
+        return 1
+    if any(
+        read["outcome"] != "completed"
+        for attempt in measured for read in attempt.get("history_reads", [])
     ):
         return 1
     return 0
@@ -213,18 +210,46 @@ class Fixture:
         self.schema = None
 
     def start(self):
+        network.configure(NETWORK)
         self.start_database()
         self.schema = "bench_" + uuid.uuid4().hex
         sql("CREATE SCHEMA " + self.schema)
         directory = REPORTS / "fixture"
         directory.mkdir(exist_ok=True)
         self.scenario = Scenario(directory, self.schema)
+        # The shared Access/broker fabric stays on the reference address. Both
+        # of the CLI's public endpoints use its separate address, including
+        # HTTP recovery when MQTT delivery is disrupted.
+        config = self.scenario.config.read_text()
+        config = config.replace('listen: "127.0.0.1:18080"', 'listen: "0.0.0.0:18080"', 1)
+        config = config.replace(
+            'public_url: "http://127.0.0.1:18080"',
+            f'public_url: "http://{network.CLIENT_ADDRESS}:18080"',
+            1,
+        )
+        config = config.replace(
+            'public_url: "mqtt://127.0.0.1:1883"',
+            f'public_url: "mqtt://{network.CLIENT_ADDRESS}:{network.BROKER_PORT}"',
+            1,
+        )
+        self.scenario.config.write_text(config)
         self.run.session = self.scenario
         self.scenario.start_dsh()
+        before = time.monotonic_ns()
+        source_clock = int(self.scenario.dsh.process.control("bench_clock_ns"))
+        if not before <= source_clock <= time.monotonic_ns():
+            raise RuntimeError("DSH and observer do not share a monotonic epoch")
         # The broker must be reachable before Access can report readiness here.
         self.start_broker()
-        self.scenario.start_access()
-        self.scenario.start_plugin()
+        self.run.network_probe = network.probe()
+        if not model.link_probe_matches(self.run.network_probe, NETWORK):
+            raise RuntimeError("TCP RTT probes did not match the selected network link and profile")
+        self.scenario.start_access(wildcard=True)
+        self.scenario.start_plugin(
+            extra_env={
+                "WHALEREIN_MQTT_URL": f"mqtt://{network.HOST_BROKER_ADDRESS}:{network.BROKER_PORT}"
+            }
+        )
         # Give the hosted connection time to finish its first subscriptions
         # before the first attempt starts; this is setup, never measured.
         ready_at = time.monotonic() + SETTLE_SECONDS
@@ -236,7 +261,6 @@ class Fixture:
         # initdb must chmod its data directory, which a host bind mount cannot
         # honor; the container tmpfs is discarded with it, like the test harness.
         directory = Path("/tmp/benchmark-postgres")
-        directory.mkdir(parents=True, exist_ok=True)
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o755)
         data = directory / "data"
@@ -326,7 +350,11 @@ class Fixture:
         config_path.write_text(
             "\n".join(
                 [
-                    "listener 1883 127.0.0.1",
+                    f"listener {network.BROKER_PORT} {network.BROKER_ADDRESS}",
+                    "protocol mqtt",
+                    f"listener {network.BROKER_PORT} {network.HOST_BROKER_ADDRESS}",
+                    "protocol mqtt",
+                    f"listener {network.BROKER_PORT} {network.CLIENT_ADDRESS}",
                     "protocol mqtt",
                     "set_tcp_nodelay true",
                     "allow_anonymous false",
@@ -351,7 +379,7 @@ class Fixture:
         )
 
         def broker_ready():
-            with socket.create_connection(("127.0.0.1", 1883), timeout=1):
+            with socket.create_connection((network.BROKER_ADDRESS, network.BROKER_PORT), timeout=1):
                 return True
 
         wait(broker_ready, timeout=120, process=self.broker)
@@ -411,23 +439,27 @@ def sql(statement):
 
 
 def execute(run, fixture):
-    # The observer and sender are independent client instances. Keep the
-    # keyring outside the report directory so credentials are never exported.
+    # Keep the Watch credentials outside the reports.
     with tempfile.TemporaryDirectory(prefix="whalerein-bench-keyring-") as directory:
         with isolated_keyring(Path(directory)) as keyring:
-            observer_device = pair_device(fixture.scenario, "observer", keyring)
-            sender_device = pair_device(fixture.scenario, "sender", keyring)
-            dsh = fixture.scenario.dsh.process
+            scenario = fixture.scenario
+            dsh = scenario.dsh.process
+            history_spec = SCENARIO["workload"].get("history")
+            history = None
+            if history_spec:
+                reader = pair_device(scenario, "history-reader", keyring)
+                history = workflow.prepare_history(scenario, reader, history_spec)
             for index in range(WARMUP + ATTEMPTS):
                 phase = "warmup" if index < WARMUP else "measured"
                 attempt = Attempt(len(run.attempts), phase)
+                # A fresh Device keeps previous CLI channels out of this attempt.
+                device = pair_device(fixture.scenario, attempt.identity, keyring)
                 session = fixture.scenario.dsh.create_session()
                 attempt.session = session
-                observer_device.call(
-                    "session", "show", session, "--host", fixture.scenario.host
-                )
-                measure(observer_device, sender_device, fixture, dsh, session, attempt)
+                measure(device, fixture, dsh, session, attempt, history)
                 run.attempts.append(attempt.record(fixture.scenario.host))
+            if dsh.control("gx_effect_counts")["sendUserMessage"] != 0:
+                raise RuntimeError("the Watch-only benchmark invoked a native send")
 
 
 def pair_device(scenario, name, keyring):
@@ -438,47 +470,61 @@ def pair_device(scenario, name, keyring):
     return device
 
 
-def measure(observer_device, sender_device, fixture, dsh, session, attempt):
-    observer = Observer(observer_device, fixture.scenario, session, attempt.stream)
+def measure(device, fixture, dsh, session, attempt, history):
+    observer = Observer(device, fixture.scenario, session, attempt.stream)
     try:
         wait(observer.ready, timeout=120, process=observer.process)
         observer.arm()
-        # Arm the schedule before any acceptance can happen: the observer is
-        # already reading, so start-up cost never hides the first milestone.
-        schedule(dsh, session, attempt)
-        observer.dispatch(sender_device, session)
-        observer.settle(attempt)
+        planned_start = start_source(dsh, session, attempt)
+        specification = SCENARIO["workload"]
+        if outage := specification.get("outage"):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                interrupted = executor.submit(
+                    workflow.blackout, planned_start + outage["start_ms"] * 1_000_000,
+                    outage["duration_ms"], NETWORK,
+                )
+                source_start = observer.settle(attempt, planned_start, dsh, session)
+                attempt.recovery = workflow.recovery_observation(
+                    attempt, *interrupted.result(), source_start, SOURCE_SIZES
+                )
+        elif history is not None:
+            offsets = specification["history"]["start_ms"]
+            with ThreadPoolExecutor(max_workers=len(offsets)) as executor:
+                reads = [
+                    executor.submit(history.read, planned_start + offset * 1_000_000, DEADLINE_MS)
+                    for offset in offsets
+                ]
+                source_start = observer.settle(attempt, planned_start, dsh, session)
+                attempt.history_reads = []
+                for read in reads:
+                    observation = read.result()
+                    observation["at_ms"] = workflow.milliseconds(
+                        observation.pop("started_ns") - source_start
+                    )
+                    attempt.history_reads.append(observation)
+        else:
+            observer.settle(attempt, planned_start, dsh, session)
     finally:
         observer.close()
     settle(attempt)
 
 
-def schedule(dsh, session, attempt):
-    """Arm the fixture's scripted reply; the measured CLI send starts it.
-
-    The plan carries only fixed relative times, so the fixture's schedule is
-    independent of what the observer reads.
-    """
-    dsh.control(
-        "bench_schedule",
+def start_source(dsh, session, attempt):
+    """Start FakeDSH directly, with no CLI work besides the active Watch."""
+    workload, response = SCENARIO["workload"], SCENARIO["response"]
+    return int(dsh.control(
+        "bench_start",
         session_id=session,
         stream_id=attempt.stream,
-        updates=list(UPDATES),
-        gap_ms=GAP_MS,
-        start_ms=FIRST_UPDATE_MS,
-        final_ms=FINAL_AT_MS,
-        delay_ms=DELAY_MS,
-        duplicate_after_ms=DUPLICATE_AFTER_MS if attempt.fault == "duplicate" else None,
+        updates=workload["updates"],
+        gap_ms=workload["gap_ms"],
+        start_ms=response["start_ms"],
+        final_ms=response["final_ms"],
+        delay_ms=response["delay_ms"],
+        duplicate_after_ms=response["duplicate_final_ms"] - response["final_ms"]
+        if attempt.fault == "duplicate" else None,
         fault=attempt.fault,
-    )
-
-
-def sleep_until(deadline):
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(remaining, 0.02))
+    ))
 
 
 class Observer:
@@ -487,11 +533,12 @@ class Observer:
     def __init__(self, device, scenario, session, stream):
         self.stream = stream
         self.buffer = bytearray()
-        self.dispatch_at = None
-        self.send = None
+        self.armed = False
+        self.preview = b""
         self.final = None
         self.finals = 0
-        self.updates = []
+        self.preview_after_final = False
+        self.outputs = []
         self.content = None
         self.host = scenario.host
         self.session = session
@@ -512,26 +559,7 @@ class Observer:
 
     def arm(self):
         self.read(0.05)
-        self.buffer.clear()
-
-    def dispatch(self, device, session):
-        """Invoke the measured send on its own paired device."""
-        self.dispatch_at = time.monotonic()
-        self.send = subprocess.Popen(
-            device.args("session", "send", session, SEND_TEXT, "--detach", "--host", self.host),
-            cwd=ROOT,
-            env={
-                **device.env,
-                "WHALEREIN_LOG": "error",
-                "NO_COLOR": "1",
-            },
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-    def elapsed(self):
-        return (time.monotonic() - self.dispatch_at) * 1000
+        self.armed = True
 
     def read(self, seconds):
         end = time.monotonic() + seconds
@@ -540,12 +568,13 @@ class Observer:
             if not ready:
                 continue
             chunk = os.read(self.process.child.stdout.fileno(), 65536)
+            observed_at = time.monotonic_ns()
             if not chunk:
                 return
             self.buffer.extend(chunk)
-            self.consume()
+            self.consume(observed_at)
 
-    def consume(self):
+    def consume(self, observed_at):
         """Only complete newline-delimited envelopes are parseable."""
         lines = bytes(self.buffer).split(bytes([10]))
         self.buffer = bytearray(lines.pop())
@@ -565,70 +594,92 @@ class Observer:
                 continue
             if event.get("type") == "state":
                 self.attached = True
-            elif self.dispatch_at is not None:
-                self.observe(event)
+            elif self.armed:
+                self.observe(event, observed_at)
 
-    def observe(self, event):
+    def observe(self, event, at_ns):
         kind = event.get("type")
         if kind == "preview":
-            if event.get("attempt_id") != self.stream:
+            if event.get("attempt_id") != self.stream or event.get("kind") != "TEXT":
                 return
             text = event.get("text") or ""
-            if not text.strip():
+            if not text:
                 return
-            self.updates.append(round(self.elapsed(), 3))
+            if self.finals:
+                self.preview_after_final = True
+                return
+            visible = text.encode()
+            self.preview = visible if event.get("replace") else self.preview + visible
+            prefix = 0
+            for actual, expected in zip(self.preview, FINAL_BYTES):
+                if actual != expected:
+                    break
+                prefix += 1
+            self.outputs.append({
+                "at_ns": at_ns, "bytes": len(visible), "prefix_bytes": prefix, "final": False,
+            })
+        elif kind == "reset":
+            self.preview = b""
         elif kind == "message":
             origin = event.get("origin") or {}
-            if origin.get("attempt_id") != self.stream:
+            if event.get("role") != "ASSISTANT" or (origin and origin.get("attempt_id") != self.stream):
                 return
             self.finals += 1
             if self.finals == 1:
-                self.final = round(self.elapsed(), 3)
-                self.content = text_of(event)
+                self.final = at_ns
+                self.content = workflow.text_of(event)
+                prefix_bytes = (event.get("preview_prefix") or {}).get("text_bytes", 0)
+                self.outputs.append({
+                    "at_ns": at_ns, "bytes": len(self.content.encode()) - prefix_bytes,
+                    "prefix_bytes": len(self.content.encode()), "final": True,
+                })
 
-    def settle(self, attempt):
-        """Stop at the deadline, then bound the observation window for duplicates."""
-        while True:
-            elapsed = self.elapsed()
-            if self.finals and elapsed >= self.final + OBSERVATION_WINDOW_MS:
+    def settle(self, attempt, planned_start, dsh, session):
+        """Collect output on the shared monotonic clock, then anchor it at source start."""
+        watchdog = planned_start + (DEADLINE_MS + OBSERVATION_WINDOW_MS + SOURCE_START_ALLOWANCE_MS) * 1_000_000
+        while time.monotonic_ns() < watchdog:
+            if self.final is not None and time.monotonic_ns() >= self.final + OBSERVATION_WINDOW_MS * 1_000_000:
                 break
-            if elapsed >= DEADLINE_MS + OBSERVATION_WINDOW_MS:
+            if self.process.child.poll() is not None:
+                attempt.watch_failed = True
                 break
             self.read(0.02)
-        if self.send.poll() is None:
-            self.send.kill()
-        try:
-            self.send.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.send.kill()
-            self.send.communicate(timeout=10)
-        attempt.send_exit_ms = round(self.elapsed(), 3)
-        attempt.send_code = self.send.returncode
-        attempt.first_text_ms = self.updates[0] if self.updates else None
-        attempt.update_times = list(self.updates)
-        attempt.final_ms = self.final
+
+        source = [int(value) for value in dsh.control("bench_text_times_ns", session_id=session)]
+        start = source[0] if source else planned_start
+        if source and abs(start - planned_start) > SOURCE_START_ALLOWANCE_MS * 1_000_000:
+            raise RuntimeError("source start missed the fixture watchdog allowance")
+
+        def relative(value):
+            return round((value - start) / 1_000_000, 3)
+
+        attempt.source_times_ms = [relative(value) for value in source]
+        attempt.preview_after_final = self.preview_after_final
+        attempt.outputs = [
+            {"at_ms": relative(event["at_ns"]), "bytes": event["bytes"],
+             "prefix_bytes": event["prefix_bytes"], "final": event["final"]}
+            for event in self.outputs
+        ]
+        attempt.update_times = [event["at_ms"] for event in attempt.outputs if not event["final"]]
+        attempt.first_text_ms = next(
+            (event["at_ms"] for event in attempt.outputs if event["bytes"] > 0), None
+        )
+        if attempt.first_text_ms is not None and attempt.first_text_ms > DEADLINE_MS:
+            attempt.first_text_ms = None
+        attempt.final_ms = relative(self.final) if self.final is not None else None
         attempt.finals = self.finals
         attempt.content = self.content
+        return start
 
     def close(self):
-        if self.send is not None and self.send.poll() is None:
-            self.send.kill()
-            self.send.communicate(timeout=10)
         self.process.close()
-
-
-def text_of(event):
-    parts = []
-    for block in event.get("blocks") or []:
-        if block.get("type") == "text":
-            parts.append(block.get("text") or "")
-    return "".join(parts)
 
 
 def settle(attempt):
     """One terminal outcome per attempt; observed partial milestones remain."""
-    if attempt.send_code != 0:
+    if attempt.watch_failed or attempt.preview_after_final:
         attempt.outcome = "product_error"
+        attempt.final_ms = None
         return
     if attempt.finals > 1:
         attempt.outcome = "duplicate_final"
@@ -641,14 +692,17 @@ def settle(attempt):
             else "timeout_before_text"
         )
         return
+    if attempt.final_ms > DEADLINE_MS:
+        attempt.outcome = "late_reply"
+        attempt.final_ms = None
+        return
     if attempt.content != FINAL_TEXT:
         attempt.outcome = "incorrect_content"
         return
-    if attempt.final_ms > DEADLINE_MS:
-        # A reply past its deadline is a timeout, never a completion.
-        attempt.outcome = "timeout_after_text"
-        attempt.final_ms = None
-        return
+    if len(attempt.source_times_ms) != len(model.UPDATES) or not (
+        0 <= attempt.source_times_ms[0] <= attempt.outputs[0]["at_ms"]
+    ):
+        raise RuntimeError("missing or invalid monotonic source timestamps")
     attempt.outcome = "completed"
 
 
@@ -669,7 +723,7 @@ def document_for(run):
     outcome_counts = {name: counts.get(name, 0) for name in order}
     warmup = [item for item in attempts if item["phase"] == "warmup"]
     samples = {}
-    for key in GAP_SAMPLES:
+    for key in (*model.MILESTONES, "update_gaps_ms"):
         values = []
         if key == "update_gaps_ms":
             values = sorted(
@@ -679,15 +733,15 @@ def document_for(run):
             values = sorted(
                 float(item[key]) for item in complete_ids if item[key] is not None
             )
-        samples[key] = entry(values)
+        samples[key] = model.sample_entry(values)
     return {
-        "schema_version": 1,
+        "schema_version": model.SCHEMA_VERSION,
         "scenario": SCENARIO,
         "run": {
             "id": run.id,
             "started_at": run.started_at,
             "surface": "cli-stdout",
-            "configuration": run.configured,
+            "configuration": RUN_CONFIG,
         },
         "environment": {
             "artifacts": artifacts(),
@@ -695,6 +749,7 @@ def document_for(run):
                 "database": "postgres-18-local",
                 "broker": "mosquitto-2.1.4-local",
                 "network": "none",
+                "links": "host-mqtt-and-client-public-loopback-netem",
                 "containers": 1,
             },
             "limits": {"cpus": os.cpu_count(), "memory_bytes": total_memory()},
@@ -710,6 +765,8 @@ def document_for(run):
                 "transport": "unix",
                 "connection": run.fixture,
             },
+            "network_probe": run.network_probe,
+            "network_counters": run.network_counters,
         },
         "attempts": attempts,
         "outcomes": {
@@ -725,6 +782,12 @@ def document_for(run):
             },
         },
         "latency": {"samples": samples},
+        "streaming": model.streaming_summary(
+            attempts, len(FINAL_BYTES), SOURCE_SIZES, model.BURST_WINDOW_MS,
+            display_delay=True,
+        ),
+        "diagnostics": model.diagnostic_summary(attempts, SOURCE_SIZES),
+        "workflow_results": model.workflow_summary(attempts, RUN_CONFIG["workflow"]),
         "status": {
             "state": run.state,
             "reasons": list(run.reasons),
@@ -735,34 +798,40 @@ def document_for(run):
     }
 
 
-def entry(values):
-    """Nearest-rank quantiles for the tails the sample count can support."""
-    document = {"count": len(values), "quantiles": {}, "unavailable": {}}
-    if not values:
-        document["reason"] = "no_samples"
-        return document
-    document["reason"] = None
-    for name, minimum in TAILS:
-        if len(values) < minimum:
-            document["unavailable"][name] = UNAVAILABLE_TAIL
-            continue
-        fraction = {"median": 0.50, "p95": 0.95, "p99": 0.99}[name]
-        document["quantiles"][name] = values[max(1, _ceil(fraction * len(values))) - 1]
-    return document
-
-
-def _ceil(value):
-    return int(value) if value == int(value) else int(value) + 1
-
-
 def artifacts():
     files = {
         "cli": ROOT / "target/debug/whalerein",
         "access": Path("/workspace/.verification/bin/whalerein-access"),
-        "plugin": ROOT / "host/dsh/package.json",
+        "broker_plugin": ROOT / ".verification/lib/whalerein.so",
         "fixture": ROOT / "tests/integration/fixtures/dsh.mjs",
     }
-    return {name: fingerprint(path) for name, path in files.items()}
+    values = {name: fingerprint(path) for name, path in files.items()}
+    values["host"] = source_fingerprint(
+        ("host/dsh", "host/runtime"),
+        ("package.json", "pnpm-lock.yaml"),
+    )
+    values["harness"] = source_fingerprint(
+        ("tests/integration/benchmark",),
+        ("tests/integration/environment.py", "tests/integration/fixtures/plugin.mjs",
+         "tests/integration/fixtures/adapter.mjs", "tests/integration/client_environment.py",
+         "tools/repo/src/repo/benchmark/model.py"),
+    )
+    return values
+
+
+def source_fingerprint(directories, files):
+    paths = {ROOT / name for name in files}
+    for folder in directories:
+        paths.update(
+            path for path in (ROOT / folder).rglob("*")
+            if path.is_file() and path.suffix in (".js", ".mjs", ".json", ".py")
+            and "node_modules" not in path.relative_to(ROOT).parts
+        )
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(ROOT)).encode() + b"\0")
+        digest.update(fingerprint(path).encode() + b"\n")
+    return "sha256:" + digest.hexdigest()
 
 
 def fingerprint(path):

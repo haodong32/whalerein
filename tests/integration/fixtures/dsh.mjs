@@ -10,39 +10,21 @@ const adapter=new FakeDshAdapter({hostId:process.env.WHALEREIN_HOST_ID||'',behav
 let queueReadCount=0
 const readQueue=adapter.readPendingQueue.bind(adapter)
 adapter.readPendingQueue=(...args)=>{queueReadCount++;return readQueue(...args)}
-// Benchmark script: the fixture drives its own reply from acceptance of the
-// measured CLI send, on fixed relative times. Nothing here reads CLI output, so
-// the observer can neither advance nor delay the schedule.
-const benchSends=new Map()
-const benchArmed=new Map()
-const acceptance=session=>{
-  benchSends.set(session,(benchSends.get(session)??0)+1)
-  const plan=benchArmed.get(session)
-  if(!plan)return
-  benchArmed.delete(session)
-  // Resume in a timer phase, outside the send's own call stack. A script
-  // failure is reported on stderr; it never changes the process-wide
-  // rejection/uncaught behaviour other harness cases rely on.
-  setImmediate(()=>{
-    runScript(session,plan).catch(error=>process.stderr.write('benchmark script failed: '+(error?.stack??error)+'\n'))
-  })
-}
-const rawSendUserMessage=adapter.sendUserMessage.bind(adapter)
-adapter.sendUserMessage=(...args)=>{const result=rawSendUserMessage(...args);acceptance(args[0]);return result}
+// Local fixture control starts each benchmark reply on a fixed schedule.
+const benchTextTimes=new Map()
 const emitPreview=(session,stream,revision,frame)=>adapter.emit(session,{
   type:'assistant/preview',kind:'output',ephemeral:true,
-  data:{stream_id:stream,revision,reply_id:stream,...frame}})
+  data:{stream_id:stream,revision,reply_id:stream,block_id:'text-0',...frame}})
 const emitFinal=(session,stream,text)=>adapter.emit(session,{
   type:'assistant/message',kind:'output',
   data:{reply_id:stream,message:{content:[{type:'text',text}]}}})
 const runScript=(session,plan)=>{
-  const {stream,updates,gapMs,startMs,finalMs,delayMs,duplicateAfterMs,fault}=plan
-  const started=Date.now()
-  const at=ms=>new Promise(resolve=>setTimeout(resolve,Math.max(0,started+ms+delayMs-Date.now())))
+  const {stream,updates,gapMs,startMs,finalMs,startedNs,duplicateAfterMs,fault}=plan
+  const at=ms=>new Promise(resolve=>setTimeout(resolve,Math.max(0,ms-Number(process.hrtime.bigint()-startedNs)/1e6)))
   let revision=1
   const settle=async text=>{
     const event=emitFinal(session,stream,text)
-    emitPreview(session,stream,++revision,{phase:'end',outcome:'committed',committed_seq:event.seq})
+    emitPreview(session,stream,++revision,{phase:'end',outcome:'committed',native_commit_seq:event.seq})
     if(duplicateAfterMs!=null){
       await at(finalMs+duplicateAfterMs)
       emitFinal(session,stream,text)
@@ -50,10 +32,13 @@ const runScript=(session,plan)=>{
   }
   const script=async()=>{
     if(fault==='silent')return
+    const times=[]
+    benchTextTimes.set(session,times)
     emitPreview(session,stream,++revision,{phase:'start'})
     for(let index=0;index<updates.length;index++){
       await at(startMs+index*gapMs)
-      emitPreview(session,stream,++revision,{phase:'chunk',index,text:updates[index]})
+      times.push(process.hrtime.bigint().toString())
+      emitPreview(session,stream,++revision,{phase:'chunk',index,block_kind:'BLOCK_KIND_TEXT',text:updates[index]})
     }
     if(fault==='partial')return
     await at(finalMs)
@@ -261,18 +246,24 @@ createInterface({input:process.stdin}).on('line',async line=>{
     }
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})
     else if(method==='emit')value=adapter.output(session_id,'fixture output')
-    // Node's internal `send` command: acceptance is counted by the wrapper above,
-    // then the armed schedule resumes in a timer phase without polling. The
-    // fixture mirror reply is suppressed so the script is the only reply source.
-    else if(method==='bench_schedule') {
-      // The scripted reply is the only reply source for a measured attempt. The
-      // fixture's immediate echo would commit out of script order and make the
-      // watch observe a history gap.
-      adapter.behavior.emitOutputOnMessage=false
-      benchArmed.set(session_id,{stream:stream_id,updates,gapMs:gap_ms,startMs:start_ms,finalMs:final_ms,delayMs:delay_ms,duplicateAfterMs:duplicate_after_ms,fault})
+    else if(method==='suppress_message_echo'){adapter.behavior.emitOutputOnMessage=false;value=true}
+    else if(method==='bench_seed_history') {
+      control.texts.forEach((text,index)=>emitFinal(session_id,`benchmark-history-${index}`,text))
       value=true
     }
-    else if(method==='bench_send_count') value=benchSends.get(session_id)??0
+    else if(method==='bench_start') {
+      const startedNs=process.hrtime.bigint()+BigInt(delay_ms)*1_000_000n
+      value=(startedNs+BigInt(start_ms)*1_000_000n).toString()
+      const plan={stream:stream_id,updates,gapMs:gap_ms,startMs:start_ms,finalMs:final_ms,startedNs,duplicateAfterMs:duplicate_after_ms,fault}
+      setImmediate(()=>{
+        runScript(session_id,plan).catch(error=>process.stderr.write('benchmark script failed: '+(error?.stack??error)+'\n'))
+      })
+    }
+    else if(method==='bench_clock_ns') value=process.hrtime.bigint().toString()
+    else if(method==='bench_text_times_ns') {
+      value=benchTextTimes.get(session_id)??[]
+      benchTextTimes.delete(session_id)
+    }
     else throw new Error('unsupported control')
     process.stdout.write(JSON.stringify({id,value})+'\n')
   }catch(error){

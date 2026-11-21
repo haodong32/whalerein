@@ -41,15 +41,19 @@ def wait(predicate, timeout=60, process=None):
     raise TimeoutError("Expected fixture condition was not observed")
 
 
-def owns_listener(process, port):
+def owns_listener(process, port, *, wildcard=False):
     """Tie a loopback health response to the exact fixture process."""
     proc = Path("/proc") / str(process.child.pid)
-    address = f"0100007F:{port:04X}"
     listeners = set()
-    for line in (proc / "net/tcp").read_text().splitlines()[1:]:
-        fields = line.split()
-        if fields[1] == address and fields[3] == "0A":
-            listeners.add(f"socket:[{fields[9]}]")
+    sockets = (("tcp", "00000000"), ("tcp6", "0" * 32)) if wildcard else (("tcp", "0100007F"),)
+    for table, address in sockets:
+        path = proc / "net" / table
+        if not path.is_file():
+            continue
+        for line in path.read_text().splitlines()[1:]:
+            fields = line.split()
+            if fields[1] == f"{address}:{port:04X}" and fields[3] == "0A":
+                listeners.add(f"socket:[{fields[9]}]")
     return any(str(descriptor.readlink()) in listeners for descriptor in (proc / "fd").iterdir())
 
 
@@ -709,19 +713,19 @@ log:
         )
         self.processes.append(self.access)
 
-    def wait_access_ready(self, *, listener_port=18080):
+    def wait_access_ready(self, *, listener_port=18080, wildcard=False):
         binary = ROOT / ".verification/bin/whalerein-access"
         executable = Path(f"/proc/{self.access.child.pid}/exe")
         wait(
             lambda: executable.samefile(binary)
-            and owns_listener(self.access, listener_port)
+            and owns_listener(self.access, listener_port, wildcard=wildcard)
             and http("/readyz"),
             process=self.access,
         )
 
-    def start_access(self, *, listener_port=18080):
+    def start_access(self, *, listener_port=18080, wildcard=False):
         self.start_access_process()
-        self.wait_access_ready(listener_port=listener_port)
+        self.wait_access_ready(listener_port=listener_port, wildcard=wildcard)
 
     def start_plugin(self, extra_env=None):
         policy_env = {}
