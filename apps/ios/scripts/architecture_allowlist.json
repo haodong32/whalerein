@@ -46,11 +46,6 @@
     },
     {
       "path": "Views/RootView.swift",
-      "rule": "environment-appmodel",
-      "reason": "Legacy environment injection of AppModel; removed with the aggregator model in task 6.1."
-    },
-    {
-      "path": "Views/RootView.swift",
       "rule": "view-size",
       "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
     },

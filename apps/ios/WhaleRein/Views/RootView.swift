@@ -110,7 +110,7 @@ struct RootView: View {
     @ViewBuilder
     private var content: some View {
         if model.isRevoked {
-            RevokedDeviceView()
+            RevokedDeviceView(app: model)
         } else if model.isPaired {
             pairedRoot
         } else if let cloud = model.cloudSignIn, !model.prefersInvitationAfterDeviceReset {
@@ -210,7 +210,7 @@ struct RootView: View {
                 // must not inherit the previous transcript's scroll position.
                 .id(ObjectIdentifier(conversation))
         } else {
-            ConversationRootPlaceholderView()
+            ConversationRootPlaceholderView(app: model)
         }
     }
 }
@@ -246,7 +246,7 @@ struct PrivacyShieldView: View {
 /// Blocking state after a remote revocation. Pairing and forgetting both leave
 /// this screen and clear navigation; neither requires finding Settings first.
 struct RevokedDeviceView: View {
-    @Environment(AppShellModel.self) private var app
+    let app: AppShellModel
     @State private var isForgetting = false
 
     var body: some View {
@@ -299,7 +299,7 @@ struct RevokedDeviceView: View {
 }
 
 private struct ConversationRootPlaceholderView: View {
-    @Environment(AppShellModel.self) private var app
+    let app: AppShellModel
 
     var body: some View {
         Group {
