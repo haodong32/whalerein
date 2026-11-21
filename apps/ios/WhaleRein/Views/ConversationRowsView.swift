@@ -8,8 +8,19 @@ struct ConversationRowsView: View {
     let reasoningVisible: Bool
 
     static let bottomAnchor = "conversation.bottom"
+    @State private var markedFirstRender = false
 
     var body: some View {
+        content
+            .onAppear {
+                guard !markedFirstRender else { return }
+                markedFirstRender = true
+                AppSignposts.markFirstConversation()
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if model.messages.isEmpty && model.livePreview == nil {
             Text(L10n.conversationEmpty.key)
                 .foregroundStyle(.secondary)

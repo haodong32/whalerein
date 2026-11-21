@@ -21,6 +21,12 @@ enum AppSignposts {
         signposter.endInterval("app.launch", state)
     }
 
+    /// Marks the first rendered conversation content as a point event.
+    static func markFirstConversation() {
+        signposter.emitEvent("conversation.first_render")
+        AppLog.shared.log(.info, .conversation, "conversation.first_render")
+    }
+
     /// First rendered conversation content. Emitted once per runtime group.
     static func beginFirstConversation() -> OSSignpostIntervalState {
         signposter.beginInterval("conversation.first_render", id: signposter.makeSignpostID())
