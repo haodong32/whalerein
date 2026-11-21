@@ -34,7 +34,7 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
     }
 
     func testUnreadCountMeaningWhileStreaming() {
-        launchAndOpenConversation(["-ui-stream-on-open"])
+        launchAndOpenConversation(scenario: "conversation.streaming")
         _ = waitFor("conversation.preview")
 
         scrollConversationUp(times: 4)

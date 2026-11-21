@@ -40,7 +40,7 @@ final class ApprovalUITests: WhaleReinUITestCase {
     }
 
     func testChangedApprovalRequiresAFreshDecision() {
-        launchAndOpenConversation(["-ui-approval-state", "changed"])
+        launchAndOpenConversation(scenario: "approvals.changed")
         waitFor("approval.card.\(Self.approvalId)")
 
         tap(waitFor("approval.allowOnce"))
@@ -58,7 +58,7 @@ final class ApprovalUITests: WhaleReinUITestCase {
     }
 
     func testExpiredApprovalOffersNoDecision() {
-        launchAndOpenConversation(["-ui-approval-state", "expired"])
+        launchAndOpenConversation(scenario: "approvals.expired")
         // The approval card is the last row of a long lazy transcript; scroll to
         // it when the initial bottom pin has not realised it yet.
         revealByScrolling("approval.card.\(Self.approvalId)")

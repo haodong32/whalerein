@@ -174,6 +174,28 @@ class WhaleReinUITestCase: XCTestCase {
         waitFor("composer.field")
     }
 
+    /// Launches one catalog scenario. New and migrated tests use this instead
+    /// of individual `-ui-*` flags.
+    @discardableResult
+    func launchScenario(_ id: String, extraArguments: [String] = []) -> XCUIApplication {
+        var arguments = ["-ui-scenario", id]
+        if !extraArguments.contains("-AppleLanguages") {
+            arguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        }
+        arguments += extraArguments
+        app.launchArguments = arguments
+        if app.state != .notRunning {
+            app.terminate()
+        }
+        app.launch()
+        return app
+    }
+
+    func launchAndOpenConversation(scenario id: String, extraArguments: [String] = []) {
+        launchScenario(id, extraArguments: extraArguments)
+        waitFor("composer.field")
+    }
+
     @discardableResult
     func waitForEnabled(
         _ identifier: String,
