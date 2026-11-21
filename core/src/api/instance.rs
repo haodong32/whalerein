@@ -38,6 +38,14 @@ pub struct ClientConfig {
     pub cloud_environment: Option<Environment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_ca_certificate: Option<PathBuf>,
+    /// Explicit CA bundle for the built-in local Cloud environment.
+    ///
+    /// The built-in local profile resolves a per-user mkcert root, which does
+    /// not exist on mobile clients. This additive override lets a client
+    /// (currently the iOS Debug build) import that public root bundle and pin it
+    /// to the local instance. It is restricted to the local Cloud environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_ca_certificate: Option<PathBuf>,
     /// Validated packaged transport profile and optional local overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportSettings>,
@@ -51,6 +59,7 @@ impl ClientConfig {
             data_dir: data_dir.into(),
             cloud_environment: None,
             standalone_ca_certificate: None,
+            cloud_ca_certificate: None,
             transport: None,
         }
     }
@@ -205,6 +214,13 @@ impl Instance {
                         "standalone_ca_certificate requires standalone service",
                     ));
                 }
+                if configuration.cloud_ca_certificate.is_some()
+                    && configuration.cloud_environment != Some(Environment::Local)
+                {
+                    return Err(error(
+                        "cloud_ca_certificate is only supported for the local Cloud environment",
+                    ));
+                }
                 let name = match configuration.cloud_environment {
                     None | Some(Environment::Production) => "production",
                     Some(Environment::Staging) => "staging",
@@ -237,15 +253,28 @@ impl Instance {
                         issuer: Some(entry.issuer.clone()),
                         native_client_id: Some(entry.native_client_id.clone()),
                         environment: Some(name.into()),
-                        tls: Some(TlsConfig {
-                            ca_provider,
-                            ca_file: entry.tls.ca_file.clone(),
+                        // An explicit local CA replaces mkcert discovery so
+                        // mobile clients can pin the imported root bundle.
+                        tls: Some(match configuration.cloud_ca_certificate.as_deref() {
+                            Some(path) => TlsConfig {
+                                ca_provider: TlsProvider::File,
+                                ca_file: Some(path.to_string_lossy().into_owned()),
+                            },
+                            None => TlsConfig {
+                                ca_provider,
+                                ca_file: entry.tls.ca_file.clone(),
+                            },
                         }),
                     },
                 })
             }
             ClientService::Standalone if configuration.cloud_environment.is_some() => {
                 return Err(error("cloud_environment requires whalerein_cloud service"));
+            }
+            ClientService::Standalone if configuration.cloud_ca_certificate.is_some() => {
+                return Err(error(
+                    "cloud_ca_certificate requires whalerein_cloud service",
+                ));
             }
             ClientService::Standalone => None,
         };
@@ -668,6 +697,37 @@ mod tests {
         assert_eq!(fs::read_dir(&legacy).unwrap().count(), 1);
         assert!(!root.path().join("new").exists());
         assert!(backend.is_empty());
+    }
+
+    #[test]
+    fn local_cloud_instance_accepts_an_explicit_ca_and_rejects_other_services() {
+        let root = tempfile::tempdir().unwrap();
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["app.whalerein.test".into()]).unwrap();
+        fs::write(root.path().join("local-ca.pem"), certificate.cert.pem()).unwrap();
+        let path = root.path().join("local.toml");
+        let mut config = ClientConfig::new(ClientService::WhaleReinCloud, "instance");
+        config.cloud_environment = Some(Environment::Local);
+        config.cloud_ca_certificate = Some("local-ca.pem".into());
+        Core::write_config(&path, &config).unwrap();
+        let instance = Instance::open(&path).unwrap();
+        assert!(instance.ca_pem.is_some());
+
+        // The override is restricted to the local environment.
+        let mut staging = config.clone();
+        staging.cloud_environment = Some(Environment::Staging);
+        staging.data_dir = "staging".into();
+        assert!(Core::write_config(&root.path().join("staging.toml"), &staging).is_err());
+
+        // Standalone trust uses its own field.
+        let mut standalone = ClientConfig::new(ClientService::Standalone, "standalone");
+        standalone.cloud_ca_certificate = Some("local-ca.pem".into());
+        assert!(Core::write_config(&root.path().join("standalone.toml"), &standalone).is_err());
+
+        // A missing or non-PEM bundle is rejected during open.
+        let mut missing = config.clone();
+        missing.cloud_ca_certificate = Some("missing-ca.pem".into());
+        assert!(Core::write_config(&root.path().join("missing.toml"), &missing).is_err());
     }
 
     #[test]

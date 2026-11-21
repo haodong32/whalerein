@@ -160,6 +160,43 @@ struct InstanceActivationTests {
         #expect(harness.app.activeInstance?.id == "standalone")
     }
 
+    @Test("Local is exposed and created only in a debug build flavor")
+    func localOptionCreation() async throws {
+        let harness = try makeHarness()
+        let hidden = AppConfigurationStore.serviceOptions(
+            for: harness.store.instances,
+            showsStaging: false,
+            showsLocal: false
+        )
+        #expect(!hidden.contains { $0.environment == .local })
+
+        let options = AppConfigurationStore.serviceOptions(
+            for: harness.store.instances,
+            showsStaging: true,
+            showsLocal: true
+        )
+        let local = try #require(options.first { $0.environment == .local })
+        #expect(local.kind == .createLocal)
+
+        // Local cannot be created without its imported mkcert root: the generic
+        // creation path refuses instead of saving an instance Core rejects.
+        let error = await harness.app.switchToService(local)
+        #expect(error == .configuration)
+        #expect(!harness.store.instances.contains { $0.id == "cloud-local" })
+
+        // Importing the bundle creates the isolated instance and selects it.
+        #expect(await harness.app.enableLocal(pem: "pem-bundle") == nil)
+        #expect(harness.app.activeInstance?.id == "cloud-local")
+        let created = try #require(harness.store.instances.first { $0.id == "cloud-local" })
+        #expect(created.hasCloudCA)
+        #expect(created.isLocal)
+
+        // Removing the CA clears the pin while leaving the instance in place.
+        #expect(await harness.app.removeLocalCA() == nil)
+        let cleared = try #require(harness.store.instances.first { $0.id == "cloud-local" })
+        #expect(!cleared.hasCloudCA)
+    }
+
     @Test("Staging options are exposed only when the build flavor allows them")
     func stagingOptionCreation() async throws {
         let harness = try makeHarness()

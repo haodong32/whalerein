@@ -29,6 +29,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_PEM_BYTES: usize = 1024 * 1024;
 const ACTIVE_CLOUD_ID: &str = "cloud-production";
 const STANDALONE_ID: &str = "standalone";
+const LOCAL_ENVIRONMENT: &str = "local";
 
 /// App-level settings exposed to Swift.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -50,6 +51,10 @@ pub struct InstanceView {
     pub has_standalone_ca: bool,
     /// Absolute CA bundle path when the instance references one.
     pub standalone_ca_path: Option<String>,
+    /// True when the local Cloud instance pins an imported root CA.
+    pub has_cloud_ca: bool,
+    /// Absolute local Cloud CA bundle path when one is referenced.
+    pub cloud_ca_path: Option<String>,
 }
 
 /// The whole authoritative document as Swift sees it.
@@ -69,6 +74,8 @@ pub struct InstanceInput {
     pub environment: Option<String>,
     pub data_dir: String,
     pub standalone_ca_pem: Option<String>,
+    /// Imported mkcert root bundle for the local Cloud instance.
+    pub cloud_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +84,7 @@ struct InstanceRecord {
     data_dir: String,
     cloud_environment: Option<String>,
     standalone_ca_certificate: Option<String>,
+    cloud_ca_certificate: Option<String>,
     /// Preserved verbatim so editing another field never drops a transport
     /// profile or a future supported field.
     transport: Option<Item>,
@@ -156,6 +164,7 @@ pub fn app_config_validate_instance(
         &input.id,
         &candidate,
         input.standalone_ca_pem.as_deref(),
+        input.cloud_ca_pem.as_deref(),
     )?;
     Ok(parsed.view())
 }
@@ -195,6 +204,50 @@ pub fn app_config_remove_instance(path: String, id: String) -> Result<AppConfigV
     read_document(path).map(|parsed| parsed.view())
 }
 
+/// Remove the local Cloud CA reference and delete its instance bundle.
+#[uniffi::export]
+pub fn app_config_remove_cloud_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
+    remove_ca_reference(Path::new(&path), &id, true)
+}
+
+/// Remove the Standalone CA reference and delete the instance-owned bundle.
+#[uniffi::export]
+pub fn app_config_remove_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
+    remove_ca_reference(Path::new(&path), &id, false)
+}
+
+fn remove_ca_reference(path: &Path, id: &str, cloud: bool) -> Result<AppConfigView, MobileError> {
+    let mut parsed = read_document(path)?;
+    validate_id(id)?;
+    let Some(record) = parsed.instances.get(id).cloned() else {
+        return Err(MobileError::not_found());
+    };
+    let reference = if cloud {
+        record.cloud_ca_certificate.clone()
+    } else {
+        record.standalone_ca_certificate.clone()
+    };
+    let Some(reference) = reference else {
+        return Ok(parsed.view());
+    };
+    let mut next = record;
+    if cloud {
+        next.cloud_ca_certificate = None;
+    } else {
+        next.standalone_ca_certificate = None;
+    }
+    write_instance_table(&mut parsed.doc, id, &next);
+    parsed.instances.insert(id.to_owned(), next);
+    materialize(&parsed, id)?;
+    commit_document(&parsed, &write_document)?;
+    match fs::remove_file(resolve_reference_path(&parsed.base(), &reference)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(MobileError::internal()),
+    }
+    read_document(path).map(|parsed| parsed.view())
+}
+
 /// Persist only the App-section reasoning visibility flag.
 #[uniffi::export]
 pub fn app_config_set_reasoning_visible(
@@ -206,33 +259,6 @@ pub fn app_config_set_reasoning_visible(
     parsed.reasoning_visible = visible;
     app_table_mut(&mut parsed.doc)?["reasoning_visible"] = value(visible);
     commit_document(&parsed, &write_document)?;
-    read_document(path).map(|parsed| parsed.view())
-}
-
-/// Remove the Standalone CA reference and delete the instance-owned bundle.
-#[uniffi::export]
-pub fn app_config_remove_ca(path: String, id: String) -> Result<AppConfigView, MobileError> {
-    let path = Path::new(&path);
-    let mut parsed = read_document(path)?;
-    validate_id(&id)?;
-    let Some(record) = parsed.instances.get(&id).cloned() else {
-        return Err(MobileError::not_found());
-    };
-    let Some(ca_reference) = record.standalone_ca_certificate.clone() else {
-        return Ok(parsed.view());
-    };
-    let mut next = record;
-    next.standalone_ca_certificate = None;
-    write_instance_table(&mut parsed.doc, &id, &next);
-    parsed.instances.insert(id.clone(), next);
-    materialize(&parsed, &id)?;
-    commit_document(&parsed, &write_document)?;
-    let ca_path = resolve_reference(&parsed.base(), &ca_reference);
-    match fs::remove_file(&ca_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(MobileError::internal()),
-    }
     read_document(path).map(|parsed| parsed.view())
 }
 
@@ -366,11 +392,25 @@ fn parse_instance(table: &Table) -> Result<InstanceRecord, MobileError> {
             return Err(MobileError::invalid_input());
         }
     }
+    let cloud_ca_certificate = match table.get("cloud_ca_certificate") {
+        None => None,
+        Some(item) => Some(
+            item.as_str()
+                .ok_or_else(MobileError::invalid_input)?
+                .to_owned(),
+        ),
+    };
+    if let Some(path) = &cloud_ca_certificate {
+        if path.is_empty() {
+            return Err(MobileError::invalid_input());
+        }
+    }
     Ok(InstanceRecord {
         service,
         data_dir,
         cloud_environment,
         standalone_ca_certificate,
+        cloud_ca_certificate,
         transport: table.get("transport").cloned(),
     })
 }
@@ -388,33 +428,23 @@ fn default_document() -> DocumentMut {
         "whalerein_cloud",
         "instances/cloud-production/data",
         Some("production"),
-        None,
     ));
     instances[STANDALONE_ID] = Item::Table(instance_table(
         "standalone",
         "instances/standalone/data",
-        None,
         None,
     ));
     doc["instances"] = Item::Table(instances);
     doc
 }
 
-fn instance_table(
-    service: &str,
-    data_dir: &str,
-    environment: Option<&str>,
-    ca: Option<&str>,
-) -> Table {
+fn instance_table(service: &str, data_dir: &str, environment: Option<&str>) -> Table {
     let mut table = Table::new();
     table["version"] = value(i64::from(INSTANCE_VERSION));
     table["service"] = value(service);
     table["data_dir"] = value(data_dir);
     if let Some(environment) = environment {
         table["cloud_environment"] = value(environment);
-    }
-    if let Some(ca) = ca {
-        table["standalone_ca_certificate"] = value(ca);
     }
     table
 }
@@ -431,77 +461,141 @@ fn save_instance(path: &Path, input: InstanceInput) -> Result<AppConfigView, Mob
         &input.id,
         &record,
         input.standalone_ca_pem.as_deref(),
+        input.cloud_ca_pem.as_deref(),
     )?;
 
-    // Stage a new CA under the instance directory before touching the app
-    // document. The previous valid bundle stays in place until commit.
-    let previous_ca = record.standalone_ca_certificate.clone();
-    let staged_ca = match input.standalone_ca_pem.as_deref() {
-        Some(pem) => Some(stage_ca(&parsed.base(), &input.id, pem)?),
-        None => None,
-    };
-    record.standalone_ca_certificate = match &staged_ca {
-        Some(_) => Some(format!("instances/{}/ca.pem", input.id)),
-        None => record.standalone_ca_certificate.clone(),
-    };
-    // A Cloud instance never keeps a Standalone CA reference.
-    if parse_service(&record.service)? == ClientService::WhaleReinCloud {
-        record.standalone_ca_certificate = None;
+    let base = parsed.base();
+    let previous_standalone = record.standalone_ca_certificate.clone();
+    let previous_cloud = record.cloud_ca_certificate.clone();
+
+    // Stage new bundles under the instance directory before touching the app
+    // document. The previous valid files stay in place until commit.
+    let standalone = prepare_ca(
+        &base,
+        &input.id,
+        "ca.pem",
+        "ca",
+        input.standalone_ca_pem.as_deref(),
+    )?;
+    let cloud = prepare_ca(
+        &base,
+        &input.id,
+        "cloud-ca.pem",
+        "cloud-ca",
+        input.cloud_ca_pem.as_deref(),
+    )?;
+    if standalone.staged.is_some() {
+        record.standalone_ca_certificate = Some(format!("instances/{}/ca.pem", input.id));
+    }
+    if cloud.staged.is_some() {
+        record.cloud_ca_certificate = Some(format!("instances/{}/cloud-ca.pem", input.id));
+    }
+    // A service never keeps the other service's CA reference.
+    match parse_service(&record.service)? {
+        ClientService::WhaleReinCloud => record.standalone_ca_certificate = None,
+        ClientService::Standalone => record.cloud_ca_certificate = None,
     }
 
-    let ca_target = instance_directory(&parsed.base(), &input.id).join("ca.pem");
-    let created_ca = match &staged_ca {
-        Some(staged) if !ca_target.exists() => {
-            // First import: install the validated bundle before materializing,
-            // because the materialized TOML must open on its own. This is not
-            // yet the commit point; a failed document write removes it.
-            fs::copy(staged, &ca_target).map_err(|_| MobileError::internal())?;
-            true
-        }
-        _ => false,
-    };
-
+    let standalone_cleared = record.standalone_ca_certificate.is_none();
+    let cloud_cleared = record.cloud_ca_certificate.is_none();
     write_instance_table(&mut parsed.doc, &input.id, &record);
     parsed.instances.insert(input.id.clone(), record);
 
     // The materialized instance file is written before the app document.
-    materialize(&parsed, &input.id)?;
-    if let Err(error) = commit_document(&parsed, &write_document) {
-        if let Some(staged) = &staged_ca {
-            let _ = fs::remove_file(staged);
-        }
-        if created_ca {
-            let _ = fs::remove_file(&ca_target);
-        }
+    if let Err(error) = materialize(&parsed, &input.id) {
+        standalone.discard();
+        cloud.discard();
         return Err(error);
     }
+    if let Err(error) = commit_document(&parsed, &write_document) {
+        standalone.discard();
+        cloud.discard();
+        return Err(error);
+    }
+    standalone.finish();
+    cloud.finish();
 
-    // Commit the staged CA last, keeping the old valid bundle until the
-    // document reference is durable. On the first import the validated copy is
-    // already in place and only the staged file is removed.
-    if let Some(staged) = staged_ca {
-        if created_ca {
-            let _ = fs::remove_file(&staged);
-        } else if fs::rename(&staged, &ca_target).is_err() {
-            let _ = fs::remove_file(&staged);
-            return Err(MobileError::internal());
+    // A service change or explicit removal drops the old instance-owned bundle
+    // after the document reference is gone.
+    if standalone_cleared {
+        if let Some(previous) = previous_standalone {
+            let _ = fs::remove_file(resolve_reference_path(&base, &previous));
         }
     }
-    // A service change away from Standalone drops the old instance-owned CA
-    // after the document reference is gone.
-    if record_ca_is_none(&parsed, &input.id) {
-        if let Some(previous) = previous_ca {
-            let _ = fs::remove_file(resolve_reference(&parsed.base(), &previous));
+    if cloud_cleared {
+        if let Some(previous) = previous_cloud {
+            let _ = fs::remove_file(resolve_reference_path(&base, &previous));
         }
     }
     read_document(path).map(|parsed| parsed.view())
 }
 
-fn record_ca_is_none(parsed: &ParsedDocument, id: &str) -> bool {
-    parsed
-        .instances
-        .get(id)
-        .is_some_and(|record| record.standalone_ca_certificate.is_none())
+/// One staged CA bundle plus its committed target.
+struct PreparedCa {
+    staged: Option<PathBuf>,
+    target: PathBuf,
+    created: bool,
+}
+
+impl PreparedCa {
+    fn discard(&self) {
+        if let Some(staged) = &self.staged {
+            let _ = fs::remove_file(staged);
+        }
+        if self.created {
+            let _ = fs::remove_file(&self.target);
+        }
+    }
+
+    fn finish(&self) {
+        let Some(staged) = &self.staged else { return };
+        // The first import already installed the validated copy; a replacement
+        // is published by rename now that the document reference is durable.
+        if !self.created {
+            let _ = fs::rename(staged, &self.target);
+        }
+        let _ = fs::remove_file(staged);
+    }
+}
+
+fn prepare_ca(
+    base: &Path,
+    id: &str,
+    file_name: &str,
+    prefix: &str,
+    pem: Option<&str>,
+) -> Result<PreparedCa, MobileError> {
+    let target = instance_directory(base, id).join(file_name);
+    let Some(pem) = pem else {
+        return Ok(PreparedCa {
+            staged: None,
+            target,
+            created: false,
+        });
+    };
+    let staged = stage_ca(base, id, pem, prefix)?;
+    if target.exists() {
+        return Ok(PreparedCa {
+            staged: Some(staged),
+            target,
+            created: false,
+        });
+    }
+    // First import: install the validated bundle before materializing because
+    // the materialized TOML must open on its own. This is not the commit point.
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|_| MobileError::internal())?;
+    }
+    if let Err(error) = fs::copy(&staged, &target) {
+        let _ = fs::remove_file(&staged);
+        let _ = error;
+        return Err(MobileError::internal());
+    }
+    Ok(PreparedCa {
+        staged: Some(staged),
+        target,
+        created: true,
+    })
 }
 
 fn set_active(path: &Path, id: &str) -> Result<AppConfigView, MobileError> {
@@ -553,6 +647,12 @@ fn candidate_record(
     if input.standalone_ca_pem.is_some() && service != ClientService::Standalone {
         return Err(MobileError::invalid_input());
     }
+    if input.cloud_ca_pem.is_some()
+        && (service != ClientService::WhaleReinCloud
+            || environment.as_deref() != Some(LOCAL_ENVIRONMENT))
+    {
+        return Err(MobileError::invalid_input());
+    }
     let existing = parsed.instances.get(&input.id);
     Ok(InstanceRecord {
         service: input.service.clone(),
@@ -564,6 +664,12 @@ fn candidate_record(
             }
             ClientService::WhaleReinCloud => None,
         },
+        cloud_ca_certificate: match service {
+            ClientService::WhaleReinCloud => {
+                existing.and_then(|record| record.cloud_ca_certificate.clone())
+            }
+            ClientService::Standalone => None,
+        },
         transport: existing.and_then(|record| record.transport.clone()),
     })
 }
@@ -572,40 +678,65 @@ fn validate_candidate(
     parsed: &ParsedDocument,
     id: &str,
     record: &InstanceRecord,
-    ca_pem: Option<&str>,
+    standalone_ca_pem: Option<&str>,
+    cloud_ca_pem: Option<&str>,
 ) -> Result<(), MobileError> {
     let instance_dir = instance_directory(&parsed.base(), id);
     let config_path = instance_dir.join("instance.toml");
-    let ca_override = match ca_pem {
+    fs::create_dir_all(&instance_dir).map_err(|_| MobileError::internal())?;
+    let mut temporary = Vec::new();
+    let stage = |pem: &str, suffix: &str| -> Result<PathBuf, MobileError> {
+        if pem.len() > MAX_PEM_BYTES {
+            return Err(MobileError::invalid_input());
+        }
+        let staged = instance_dir.join(format!(
+            ".ca-validate-{}-{}",
+            suffix,
+            Core::new_command_id()
+        ));
+        fs::write(&staged, pem.as_bytes()).map_err(|_| MobileError::internal())?;
+        Ok(staged)
+    };
+    let standalone_override = match standalone_ca_pem {
         Some(pem) => {
-            if pem.len() > MAX_PEM_BYTES {
-                return Err(MobileError::invalid_input());
-            }
-            let staged = instance_dir.join(format!(".ca-validate-{}", Core::new_command_id()));
-            fs::create_dir_all(&instance_dir).map_err(|_| MobileError::internal())?;
-            fs::write(&staged, pem.as_bytes()).map_err(|_| MobileError::internal())?;
-            let result = client_config(record, &parsed.base(), &instance_dir, Some(&staged))
-                .and_then(|config| {
-                    Core::validate_client_config(&config_path, &config)
-                        .map_err(|_| MobileError::invalid_input())
-                });
-            let _ = fs::remove_file(&staged);
-            result?;
-            return Ok(());
+            let staged = stage(pem, "standalone")?;
+            temporary.push(staged.clone());
+            Some(staged)
         }
         None => None,
     };
-    let config = client_config(record, &parsed.base(), &instance_dir, ca_override)?;
-    Core::validate_client_config(&config_path, &config).map_err(|_| MobileError::invalid_input())
+    let cloud_override = match cloud_ca_pem {
+        Some(pem) => {
+            let staged = stage(pem, "cloud")?;
+            temporary.push(staged.clone());
+            Some(staged)
+        }
+        None => None,
+    };
+    let result = client_config(
+        record,
+        &parsed.base(),
+        &instance_dir,
+        standalone_override.as_deref(),
+        cloud_override.as_deref(),
+    )
+    .and_then(|config| {
+        Core::validate_client_config(&config_path, &config)
+            .map_err(|_| MobileError::invalid_input())
+    });
+    for staged in temporary {
+        let _ = fs::remove_file(staged);
+    }
+    result
 }
 
-fn stage_ca(base: &Path, id: &str, pem: &str) -> Result<PathBuf, MobileError> {
+fn stage_ca(base: &Path, id: &str, pem: &str, prefix: &str) -> Result<PathBuf, MobileError> {
     if pem.is_empty() || pem.len() > MAX_PEM_BYTES {
         return Err(MobileError::invalid_input());
     }
     let directory = instance_directory(base, id);
     fs::create_dir_all(&directory).map_err(|_| MobileError::internal())?;
-    let staged = directory.join(format!(".ca-stage-{}", Core::new_command_id()));
+    let staged = directory.join(format!(".{prefix}-stage-{}", Core::new_command_id()));
     fs::write(&staged, pem.as_bytes()).map_err(|_| MobileError::internal())?;
     Ok(staged)
 }
@@ -617,7 +748,7 @@ fn materialize(parsed: &ParsedDocument, id: &str) -> Result<(), MobileError> {
         .ok_or_else(MobileError::not_found)?;
     let instance_dir = instance_directory(&parsed.base(), id);
     let config_path = instance_dir.join("instance.toml");
-    let config = client_config(record, &parsed.base(), &instance_dir, None)?;
+    let config = client_config(record, &parsed.base(), &instance_dir, None, None)?;
     Core::validate_client_config(&config_path, &config)
         .map_err(|_| MobileError::invalid_input())?;
     let text = toml_edit::ser::to_string(&config).map_err(|_| MobileError::internal())?;
@@ -632,6 +763,7 @@ fn client_config(
     base: &Path,
     instance_dir: &Path,
     ca_override: Option<&Path>,
+    cloud_ca_override: Option<&Path>,
 ) -> Result<ClientConfig, MobileError> {
     let service = parse_service(&record.service)?;
     let environment = match record.cloud_environment.as_deref() {
@@ -648,6 +780,12 @@ fn client_config(
                 relative_or_absolute(&resolve_reference_path(base, reference), instance_dir)
             }),
     };
+    let cloud_ca_certificate = match cloud_ca_override {
+        Some(staged) => Some(relative_or_absolute(staged, instance_dir)),
+        None => record.cloud_ca_certificate.as_deref().map(|reference| {
+            relative_or_absolute(&resolve_reference_path(base, reference), instance_dir)
+        }),
+    };
     let transport = match &record.transport {
         None => None,
         Some(item) => Some(
@@ -661,6 +799,7 @@ fn client_config(
         data_dir,
         cloud_environment: environment,
         standalone_ca_certificate,
+        cloud_ca_certificate,
         transport,
     })
 }
@@ -682,10 +821,6 @@ fn relative_or_absolute(path: &Path, directory: &Path) -> PathBuf {
         .unwrap_or(resolved_path)
 }
 
-fn resolve_reference(base: &Path, reference: &str) -> PathBuf {
-    resolve_reference_path(base, reference)
-}
-
 fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
     let path = Path::new(reference);
     if path.is_absolute() {
@@ -703,12 +838,16 @@ fn instance_view(base: &Path, id: &str, record: &InstanceRecord) -> InstanceView
     let ca_path = record
         .standalone_ca_certificate
         .as_deref()
-        .map(|reference| resolve_reference(base, reference));
+        .map(|reference| resolve_reference_path(base, reference));
+    let cloud_ca_path = record
+        .cloud_ca_certificate
+        .as_deref()
+        .map(|reference| resolve_reference_path(base, reference));
     InstanceView {
         id: id.to_owned(),
         service: record.service.clone(),
         environment: record.cloud_environment.clone(),
-        data_dir: resolve_reference(base, &record.data_dir)
+        data_dir: resolve_reference_path(base, &record.data_dir)
             .to_string_lossy()
             .into_owned(),
         config_path: instance_directory(base, id)
@@ -717,6 +856,8 @@ fn instance_view(base: &Path, id: &str, record: &InstanceRecord) -> InstanceView
             .into_owned(),
         has_standalone_ca: ca_path.as_ref().is_some_and(|path| path.is_file()),
         standalone_ca_path: ca_path.map(|path| path.to_string_lossy().into_owned()),
+        has_cloud_ca: cloud_ca_path.as_ref().is_some_and(|path| path.is_file()),
+        cloud_ca_path: cloud_ca_path.map(|path| path.to_string_lossy().into_owned()),
     }
 }
 
@@ -746,6 +887,12 @@ fn write_instance_table(doc: &mut DocumentMut, id: &str, record: &InstanceRecord
         Some(reference) => table["standalone_ca_certificate"] = value(reference),
         None => {
             table.remove("standalone_ca_certificate");
+        }
+    }
+    match record.cloud_ca_certificate.as_deref() {
+        Some(reference) => table["cloud_ca_certificate"] = value(reference),
+        None => {
+            table.remove("cloud_ca_certificate");
         }
     }
     // `transport` and any future supported key are preserved verbatim.
@@ -867,6 +1014,7 @@ kg3kmwrRgJT2uxIVgusk+cBIKzWjxMwkC7uvy8RsrQ==
             environment: None,
             data_dir: "instances/standalone/data".into(),
             standalone_ca_pem: ca.map(str::to_owned),
+            cloud_ca_pem: None,
         }
     }
 
@@ -1104,12 +1252,74 @@ kg3kmwrRgJT2uxIVgusk+cBIKzWjxMwkC7uvy8RsrQ==
                     environment: None,
                     data_dir: "instances/cloud-production/data".into(),
                     standalone_ca_pem: None,
+                    cloud_ca_pem: None,
                 },
             )
             .unwrap_err()
             .code(),
             "invalid_input"
         );
+    }
+
+    fn local_input(ca: Option<&str>, environment: &str) -> InstanceInput {
+        InstanceInput {
+            id: "cloud-local".into(),
+            service: "whalerein_cloud".into(),
+            environment: Some(environment.into()),
+            data_dir: "instances/cloud-local/data".into(),
+            standalone_ca_pem: None,
+            cloud_ca_pem: ca.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn local_cloud_ca_is_validated_materialized_and_removable() {
+        let root = tempfile::tempdir().unwrap();
+        bootstrap(root.path());
+
+        // A non-PEM bundle never becomes a local instance.
+        let invalid = save(root.path(), local_input(Some("not a certificate"), "local"));
+        assert_eq!(invalid.unwrap_err().code(), "invalid_input");
+
+        let view = save(root.path(), local_input(Some(VALID_PEM), "local")).unwrap();
+        let local = view
+            .instances
+            .iter()
+            .find(|instance| instance.id == "cloud-local")
+            .unwrap();
+        assert!(local.has_cloud_ca);
+        assert!(local
+            .cloud_ca_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
+        let materialized = fs::read_to_string(
+            instance_directory(&root.path().join("client"), "cloud-local").join("instance.toml"),
+        )
+        .unwrap();
+        assert!(materialized.contains("cloud_ca_certificate = \"cloud-ca.pem\""));
+
+        // The override is restricted to the local environment and to Cloud.
+        assert_eq!(
+            save(root.path(), local_input(Some(VALID_PEM), "staging"))
+                .unwrap_err()
+                .code(),
+            "invalid_input"
+        );
+
+        let cleared =
+            app_config_remove_cloud_ca(document(root.path()), "cloud-local".into()).unwrap();
+        assert!(
+            !cleared
+                .instances
+                .iter()
+                .find(|instance| instance.id == "cloud-local")
+                .unwrap()
+                .has_cloud_ca
+        );
+        assert!(!root
+            .path()
+            .join("client/instances/cloud-local/cloud-ca.pem")
+            .exists());
     }
 
     #[test]
