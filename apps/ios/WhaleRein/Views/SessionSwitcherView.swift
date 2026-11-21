@@ -13,18 +13,37 @@ enum SessionSwitcherStyle {
     case sidebar
 }
 
+/// Models and intents the switcher needs. The shell builds this once.
+struct SessionSwitcherModels {
+    let hosts: HostListModel
+    let sessions: SessionListModel
+    let management: SessionManagementModel
+    /// The conversation currently on screen, if any.
+    let currentConversation: SessionContext?
+}
+
+struct SessionSwitcherActions {
+    var refresh: () async -> Void
+    var selectHost: (String) async -> Void
+    var selectSession: (SessionSummary) -> Void
+    var openConversation: (String, SessionSummary) -> Void
+    var addHost: () -> Void
+    var close: () -> Void
+}
+
 struct SessionSwitcherView: View {
-    @Environment(AppShellModel.self) private var app
+    let models: SessionSwitcherModels
+    let actions: SessionSwitcherActions
 
     var body: some View {
         NavigationStack {
-            SessionSwitcherContent(style: .sheet)
+            SessionSwitcherContent(models: models, actions: actions, style: .sheet)
                 .navigationTitle(L10n.switcherTitle.key)
                 .inlineNavigationTitle()
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button(L10n.commonClose.key) {
-                            app.dismissSheet()
+                            actions.close()
                         }
                         .accessibilityIdentifier("switcher.close")
                     }
@@ -39,6 +58,9 @@ struct SessionSwitcherView: View {
 /// Persistent left sidebar for iPhone landscape, iPad and wide Mac Catalyst
 /// windows. It uses the same list content and model actions as the sheet.
 struct SessionSwitcherSidebar: View {
+    let models: SessionSwitcherModels
+    let actions: SessionSwitcherActions
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -50,7 +72,7 @@ struct SessionSwitcherSidebar: View {
             .padding(.top, 8)
             .padding(.bottom, 4)
 
-            SessionSwitcherContent(style: .sidebar)
+            SessionSwitcherContent(models: models, actions: actions, style: .sidebar)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.regularMaterial)
@@ -61,24 +83,25 @@ struct SessionSwitcherSidebar: View {
 /// Reusable Host/session list. Both presentations use the same actions, states
 /// and accessibility identifiers.
 struct SessionSwitcherContent: View {
-    @Environment(AppShellModel.self) private var app
+    let models: SessionSwitcherModels
+    let actions: SessionSwitcherActions
     var style: SessionSwitcherStyle = .sheet
 
     @State private var managementSheet: SessionManagementSheet?
 
     private var showsWorkspaceHeaders: Bool {
-        app.sessionList.hasMultipleWorkspaces
+        models.sessions.hasMultipleWorkspaces
     }
 
     var body: some View {
         list
             .modifier(SwitcherListStyle(style: style))
             .refreshable {
-                await app.refreshSwitcher()
+                await actions.refresh()
                 await loadManagementSupport()
             }
             .task {
-                await app.refreshSwitcher()
+                await actions.refresh()
                 await loadManagementSupport()
             }
             .sheet(item: $managementSheet) { sheet in
@@ -108,7 +131,7 @@ struct SessionSwitcherContent: View {
 
     private func loadManagementSupport() async {
         guard let host = currentHost else { return }
-        await app.sessionManagement.loadCreateSupport(hostId: host.hostId)
+        await models.management.loadCreateSupport(hostId: host.hostId)
     }
 
     /// Create is offered only for a Host that advertises native creation. The
@@ -116,7 +139,7 @@ struct SessionSwitcherContent: View {
     @ViewBuilder
     private var createSection: some View {
         if let host = currentHost,
-           app.sessionManagement.canCreate(hostId: host.hostId) {
+           models.management.canCreate(hostId: host.hostId) {
             Section {
                 Button {
                     managementSheet = .create(hostId: host.hostId)
@@ -135,8 +158,8 @@ struct SessionSwitcherContent: View {
 
     private var hostPickerSection: some View {
         Section {
-            if app.hostList.hosts.isEmpty {
-                switch app.hostList.loadState {
+            if models.hosts.hosts.isEmpty {
+                switch models.hosts.loadState {
                 case .idle, .loading:
                     HStack(spacing: 10) {
                         ProgressView()
@@ -152,7 +175,7 @@ struct SessionSwitcherContent: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         Button(L10n.commonRetry.key) {
-                            Task { await app.refreshSwitcher() }
+                            Task { await actions.refresh() }
                         }
                         .accessibilityIdentifier("hosts.retry")
                     }
@@ -167,10 +190,10 @@ struct SessionSwitcherContent: View {
         } footer: {
             Button {
                 // Replace the switcher sheet with the pairing sheet.
-                app.dismissSheet()
+                actions.close()
                 Task {
                     try? await Task.sleep(for: .milliseconds(350))
-                    app.openManualPairing()
+                    actions.addHost()
                 }
             } label: {
                 Label(L10n.hostsAdd.key, systemImage: "plus.circle")
@@ -181,11 +204,11 @@ struct SessionSwitcherContent: View {
 
     private var hostPicker: some View {
         Menu {
-            ForEach(app.hostList.hosts) { host in
+            ForEach(models.hosts.hosts) { host in
                 Button {
-                    Task { await app.selectHostInSwitcher(host.hostId) }
+                    Task { await actions.selectHost(host.hostId) }
                 } label: {
-                    if app.selectedHostId == host.hostId {
+                    if models.hosts.selectedHostId == host.hostId {
                         Label(host.hostId, systemImage: "checkmark")
                     } else {
                         Text(verbatim: host.hostId)
@@ -221,9 +244,9 @@ struct SessionSwitcherContent: View {
     }
 
     private var currentHost: HostSummary? {
-        app.hostList.hosts.first { $0.hostId == app.selectedHostId }
-            ?? app.hostList.hosts.first(where: \.online)
-            ?? app.hostList.hosts.first
+        models.hosts.hosts.first { $0.hostId == models.hosts.selectedHostId }
+            ?? models.hosts.hosts.first(where: \.online)
+            ?? models.hosts.hosts.first
     }
 
     private var hostStatusText: String {
@@ -234,7 +257,7 @@ struct SessionSwitcherContent: View {
     private var hostPickerAccessibilityValue: String {
         guard let host = currentHost else { return "" }
         var parts = [host.hostId, host.online ? L10n.hostsOnline.string : L10n.hostsOffline.string]
-        if app.selectedHostId == host.hostId {
+        if models.hosts.selectedHostId == host.hostId {
             parts.append(L10n.hostsSelected.string)
         }
         return parts.joined(separator: ", ")
@@ -244,7 +267,7 @@ struct SessionSwitcherContent: View {
 
     @ViewBuilder
     private var sessionSections: some View {
-        if app.sessionList.isShowingCached {
+        if models.sessions.isShowingCached {
             Section {
                 Label(L10n.sessionsCached.key, systemImage: "internaldrive")
                     .font(.callout)
@@ -253,7 +276,7 @@ struct SessionSwitcherContent: View {
             }
         }
 
-        switch app.sessionList.loadState {
+        switch models.sessions.loadState {
         case .idle, .loading:
             Section {
                 HStack(spacing: 10) {
@@ -273,12 +296,12 @@ struct SessionSwitcherContent: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Button(L10n.commonRetry.key) {
-                        Task { await app.refreshSwitcher() }
+                        Task { await actions.refresh() }
                     }
                     .accessibilityIdentifier("sessions.retry")
                 }
             }
-        case .loaded where app.sessionList.sessions.isEmpty:
+        case .loaded where models.sessions.sessions.isEmpty:
             Section {
                 Text(L10n.sessionsEmpty.key)
                     .foregroundStyle(.secondary)
@@ -286,7 +309,7 @@ struct SessionSwitcherContent: View {
             }
         case .loaded:
             if showsWorkspaceHeaders {
-                ForEach(app.sessionList.workspaceGroups) { group in
+                ForEach(models.sessions.workspaceGroups) { group in
                     Section {
                         sessionRows(in: group)
                     } header: {
@@ -300,7 +323,7 @@ struct SessionSwitcherContent: View {
                 }
             } else {
                 Section {
-                    sessionRows(in: app.sessionList.workspaceGroups.first)
+                    sessionRows(in: models.sessions.workspaceGroups.first)
                 } header: {
                     Text(L10n.sessionsTitle.key)
                 }
@@ -318,17 +341,17 @@ struct SessionSwitcherContent: View {
     }
 
     private func row(for session: SessionSummary) -> some View {
-        let hostId = app.sessionList.hostId
-        let cached = app.sessionList.isShowingCached
+        let hostId = models.sessions.hostId
+        let cached = models.sessions.isShowingCached
         return HStack(spacing: 8) {
             Button {
-                app.selectSessionInSwitcher(session)
+                actions.selectSession(session)
             } label: {
                 SwitcherSessionRow(
                     session: session,
                     hostId: hostId,
-                    isCurrent: app.conversation?.hostId == hostId
-                        && app.conversation?.sessionId == session.sessionId
+                    isCurrent: models.currentConversation?.hostId == hostId
+                        && models.currentConversation?.sessionId == session.sessionId
                 )
             }
             .accessibilityIdentifier("session.row.\(session.sessionId)")

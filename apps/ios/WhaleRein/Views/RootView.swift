@@ -58,13 +58,38 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: sheet(.sessionSwitcher)) {
-            SessionSwitcherView()
+            SessionSwitcherView(
+                models: switcherModels,
+                actions: switcherActions
+            )
         }
         #if DEBUG
         .sheet(isPresented: Bindable(runtime.router).showsStateGallery) {
             StateGalleryView()
         }
         #endif
+    }
+
+    private var switcherModels: SessionSwitcherModels {
+        SessionSwitcherModels(
+            hosts: model.hostList,
+            sessions: model.sessionList,
+            management: model.sessionManagement,
+            currentConversation: model.conversation.map {
+                SessionContext(hostId: $0.hostId, sessionId: $0.sessionId)
+            }
+        )
+    }
+
+    private var switcherActions: SessionSwitcherActions {
+        SessionSwitcherActions(
+            refresh: { await model.refreshSwitcher() },
+            selectHost: { await model.selectHostInSwitcher($0) },
+            selectSession: { model.selectSessionInSwitcher($0) },
+            openConversation: { model.openConversation(hostId: $0, session: $1) },
+            addHost: { model.openManualPairing() },
+            close: { model.dismissSheet() }
+        )
     }
 
     /// Binds one route to a sheet presentation. Dismissing clears only the
@@ -106,7 +131,10 @@ struct RootView: View {
             Group {
                 if showsSidebar {
                     HStack(spacing: 0) {
-                        SessionSwitcherSidebar()
+                        SessionSwitcherSidebar(
+                            models: switcherModels,
+                            actions: switcherActions
+                        )
                             .frame(width: AdaptiveLayout.sidebarWidth)
                         Divider()
                         conversationContent
