@@ -19,13 +19,36 @@ final class DiagnosticsModel {
         case failed(AppErrorCode)
     }
 
+    /// One state value for the screen; the legacy names below project from it.
+    private(set) var state = DiagnosticsState()
+
     private(set) var report: DiagnosticsReport?
     private(set) var previewText = ""
-    private(set) var loadState: LoadState = .idle
-    private(set) var errorKey: L10nKey?
-    private(set) var statusKey: L10nKey?
-    private(set) var shareFile: DiagnosticsShareFile?
-    private(set) var exportCount = 0
+
+    var loadState: LoadState {
+        switch state.load {
+        case .idle: .idle
+        case .loading: .loading
+        case .loaded: .loaded
+        case .failed(let code): .failed(code)
+        }
+    }
+
+    var errorKey: L10nKey? {
+        (state.loadError ?? state.shareError).map { L10nKey.errorKey(for: $0) }
+    }
+
+    var statusKey: L10nKey? {
+        if case .cancelled = state.share { return .diagnosticsCancelled }
+        if case .ready = state.share { return .diagnosticsExported }
+        return nil
+    }
+
+    var shareFile: DiagnosticsShareFile? {
+        state.share.fileURL.map(DiagnosticsShareFile.init(url:))
+    }
+
+    var exportCount: Int { state.exportCount }
 
     private let service: any SessionService
     /// App-owned staging directory for the redacted report. A file is written
@@ -47,30 +70,28 @@ final class DiagnosticsModel {
     var redactionFields: [String] { report?.redactionFields ?? [] }
 
     func load() async {
-        loadState = .loading
-        errorKey = nil
+        state = DiagnosticsReduce.reduce(state, .loadStarted)
         do {
             let loaded = try await service.diagnosticsPreview()
             report = loaded
             previewText = DiagnosticsRedactor.preview(report: loaded)
-            loadState = .loaded
+            state = DiagnosticsReduce.reduce(state, .loadSucceeded)
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            loadState = .failed(code)
-            errorKey = L10nKey.errorKey(for: code)
+            state = DiagnosticsReduce.reduce(state, .loadFailed(code))
         }
     }
 
     /// Call when the user cancels the confirmation. Nothing is exported.
     func cancelShare() {
-        statusKey = .diagnosticsCancelled
-        shareFile = nil
+        state = DiagnosticsReduce.reduce(state, .shareCancelled)
     }
 
     /// Exports the redacted file into app-owned staging and returns it for the
     /// system share sheet. Nothing is written before this confirmation.
     func confirmShare() async {
         guard let report else { return }
+        state = DiagnosticsReduce.reduce(state, .shareStarted)
         let url = stagingDirectory.appendingPathComponent("WhaleRein-diagnostics.json")
         do {
             try FileManager.default.createDirectory(
@@ -82,16 +103,14 @@ final class DiagnosticsModel {
             // guaranteed to match the preview even for a future live adapter.
             let text = DiagnosticsRedactor.exportText(report: report)
             try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-            exportCount += 1
-            statusKey = .diagnosticsExported
-            shareFile = DiagnosticsShareFile(url: url)
+            state = DiagnosticsReduce.reduce(state, .shareExported(url))
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            errorKey = L10nKey.errorKey(for: code)
+            state = DiagnosticsReduce.reduce(state, .shareFailed(code))
         }
     }
 
     func dismissShare() {
-        shareFile = nil
+        state = DiagnosticsReduce.reduce(state, .shareDismissed)
     }
 }
