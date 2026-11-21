@@ -63,3 +63,17 @@ struct ConversationRowsView: View {
             .id(Self.bottomAnchor)
     }
 }
+
+
+#if DEBUG
+#Preview("Conversation rows fixture") {
+    let directory = ScenarioBuilder.temporaryDirectory()
+    if let scenario = ScenarioCatalog.scenario(id: "conversation.baseline") {
+        ConversationRowsView(
+            model: ScenarioBuilder.conversationModel(for: scenario, directory: directory),
+            reasoningVisible: false
+        )
+        .padding()
+    }
+}
+#endif

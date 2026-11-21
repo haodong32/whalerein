@@ -207,3 +207,18 @@ struct ShareSheet: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
+
+
+#if DEBUG
+#Preview("Diagnostics fixture") {
+    if let scenario = ScenarioCatalog.scenario(id: "diagnostics.baseline") {
+        let directory = ScenarioBuilder.temporaryDirectory()
+        DiagnosticsView(
+            model: DiagnosticsModel(
+                service: ScenarioBuilder.service(for: scenario, directory: directory),
+                stagingDirectory: directory
+            )
+        )
+    }
+}
+#endif
