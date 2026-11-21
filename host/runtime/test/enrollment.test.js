@@ -414,6 +414,19 @@ test('approval validation rejects every route and binding mismatch before enroll
     for (const [override, code] of routeMatrix) {
       assert.throws(() => fixture.client.validateApproval({ authorization: authorization(), route: route(override) }), (error) => error.code === code, code)
     }
+    // A route whose raw origin matches the authorization is validated on its own.
+    const routeOriginMatrix = [
+      ['not a url', 'forbidden'],
+      ['http://access.example', 'forbidden'],
+      ['https://user@access.example', 'forbidden'],
+    ]
+    for (const [accessOrigin, code] of routeOriginMatrix) {
+      assert.throws(
+        () => fixture.client.validateApproval({ authorization: authorization({ audience: accessOrigin }), route: route({ accessOrigin }) }),
+        (error) => error.code === code,
+        accessOrigin,
+      )
+    }
     // Loopback development may use HTTP, but only for an explicit loopback host.
     const loopback = clientFixture({ fetch: async () => response(500, {}) }).client
     const loopbackAuth = authorization({ audience: 'http://127.0.0.1:8081' })
@@ -876,5 +889,473 @@ test('intent journal read failure other than missing is actionable', () => {
     assert.throws(() => journal.read(), (error) => error.code === 'corrupt_intent')
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('recovery intent creation signs a Host proof and accepts both payload spellings', async () => {
+  const requests = []
+  const fixture = clientFixture({
+    fetch: async (url, options) => {
+      requests.push({ url, options })
+      return response(201, {
+        intent_id: 'intent-1',
+        approval_url: 'https://app.whalerein.com/recover/intent-1',
+        poll_token: 'poll-1',
+        expires_at_unix_ms: NOW + 120_000,
+      })
+    },
+  })
+  try {
+    const intent = await fixture.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com', nonce: 'n1' })
+    assert.deepEqual(intent, {
+      intentId: 'intent-1',
+      approvalUrl: 'https://app.whalerein.com/recover/intent-1',
+      pollToken: 'poll-1',
+      expiresAtUnixMs: NOW + 120_000,
+    })
+    assert.equal(requests[0].url, 'https://app.whalerein.com/api/hosts/recovery-intents')
+    assert.equal(requests[0].options.method, 'POST')
+    assert.deepEqual(JSON.parse(requests[0].options.body), { host_id: HOST_ID })
+    const header = JSON.parse(Buffer.from(requests[0].options.headers['X-Whalerein-Host-Proof'], 'base64url').toString('utf8'))
+    const text = hostProofText({ purpose: 'recovery_intent', hostId: HOST_ID, subjectId: HOST_ID, issuedAt: header.issuedAt, nonce: 'n1' })
+    assert.equal(ed25519.verify(Buffer.from(header.signature, 'base64url'), new TextEncoder().encode(text), signingPublicKey), true)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+
+  const legacy = clientFixture({
+    fetch: async () => response(200, {
+      intentId: 'intent-2',
+      approvalUrl: 'https://app.whalerein.com/recover/intent-2',
+      pollToken: 'poll-2',
+    }),
+  })
+  try {
+    const intent = await legacy.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com' })
+    assert.equal(intent.intentId, 'intent-2')
+    assert.equal(intent.pollToken, 'poll-2')
+    assert.equal(intent.expiresAtUnixMs, 0, 'a missing expiry defaults to zero for an explicit deadline fallback')
+  } finally {
+    rmSync(legacy.root, { recursive: true, force: true })
+  }
+})
+
+test('recovery intent failures are typed and never retried on the wrong origin', async () => {
+  let mode = 'throw'
+  let reply = () => response(201, {})
+  const fixture = clientFixture({
+    fetch: async () => {
+      if (mode === 'throw') throw new TypeError('offline')
+      return reply()
+    },
+  })
+  try {
+    await assert.rejects(
+      fixture.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com/path' }),
+      (error) => error.code === 'invalid_argument',
+      'a path on the service origin is rejected',
+    )
+    await assert.rejects(
+      fixture.client.createRecoveryIntent({ apiOrigin: '' }),
+      (error) => error.code === 'invalid_argument',
+      'a missing service origin is rejected before any request',
+    )
+    await assert.rejects(fixture.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com' }), (error) => error.code === 'unavailable')
+    mode = 'reply'
+    await assert.rejects(fixture.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com' }), (error) => error.code === 'unavailable')
+    const cases = [
+      [response(401, {}), 'unauthorized'],
+      [response(403, {}), 'unauthorized'],
+      [response(409, {}), 'recovery_required'],
+      [response(429, {}), 'unavailable'],
+      [response(201, { intent_id: 'intent-1', approval_url: 'https://app.whalerein.com/recover/1' }), 'unavailable'],
+      [response(201, { intent_id: 4, approval_url: 'https://app.whalerein.com/recover/1', poll_token: 'p' }), 'unavailable'],
+      [response(200, { intentId: 'intent-1', approvalUrl: null, pollToken: 'p' }), 'unavailable'],
+      [response(201, null), 'protocol_version_incompatible'],
+    ]
+    for (const [payload, code] of cases) {
+      reply = () => payload
+      await assert.rejects(
+        fixture.client.createRecoveryIntent({ apiOrigin: 'https://app.whalerein.com' }),
+        (error) => error.code === code,
+        code,
+      )
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('recovery polling returns an approval with its route and backs off while pending', async () => {
+  const delays = []
+  let replies = [
+    response(200, { state: 'pending' }),
+    response(200, { state: 'pending' }),
+    response(200, { state: 'approved', authorization: { authorizationId: 'recovery-1' } }),
+  ]
+  const fixture = clientFixture({
+    sleep: async (ms) => { delays.push(ms) },
+    fetch: async () => replies.shift(),
+  })
+  try {
+    const approved = await fixture.client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-1', pollToken: 'poll-1' })
+    assert.equal(approved.state, 'approved')
+    assert.deepEqual(approved.authorization, { authorizationId: 'recovery-1' })
+    assert.deepEqual(approved.route, { accessOrigin: 'https://app.whalerein.com' })
+    assert.deepEqual(delays, [500, 1000], 'pending polls back off without a server interval')
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+
+  const delivered = clientFixture({
+    fetch: async () => response(200, {
+      state: 'delivered',
+      authorization: { authorizationId: 'recovery-2' },
+      route: { accessOrigin: 'https://access.example', region: 'r1' },
+    }),
+  })
+  try {
+    const result = await delivered.client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-2', pollToken: 'poll-2' })
+    assert.equal(result.state, 'approved')
+    assert.deepEqual(result.route, { accessOrigin: 'https://access.example', region: 'r1' })
+  } finally {
+    rmSync(delivered.root, { recursive: true, force: true })
+  }
+})
+
+test('recovery polling stops on terminal states, refusal statuses and a missing authorization', async () => {
+  const cases = [
+    [response(200, { state: 'denied' }), 'denied'],
+    [response(200, { state: 'failed' }), 'denied'],
+    [response(200, { state: 'expired' }), 'expired'],
+    [response(200, { state: 'approved' }), 'unavailable'],
+    [response(401, {}), 'unauthorized'],
+    [response(410, {}), 'expired'],
+    [response(404, {}), 'not_found'],
+    [response(500, {}), 'unavailable'],
+  ]
+  const fixture = clientFixture({ sleep: async () => {} })
+  try {
+    for (const [payload, code] of cases) {
+      const client = clientFixture({ fetch: async () => payload }).client
+      await assert.rejects(
+        client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-1', pollToken: 'poll-1' }),
+        (error) => error.code === code,
+        code,
+      )
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('recovery polling retries a transport failure, honours cancellation and expires at its deadline', async () => {
+  const delays = []
+  let calls = 0
+  const retrying = clientFixture({
+    sleep: async (ms) => { delays.push(ms) },
+    fetch: async () => {
+      calls += 1
+      if (calls === 1) throw new TypeError('offline')
+      return response(200, { state: 'approved', authorization: { authorizationId: 'recovery-1' } })
+    },
+  })
+  try {
+    const approved = await retrying.client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-1', pollToken: 'poll-1' })
+    assert.equal(approved.state, 'approved')
+    assert.deepEqual(delays, [500])
+  } finally {
+    rmSync(retrying.root, { recursive: true, force: true })
+  }
+
+  const cancelled = clientFixture({ fetch: async () => response(200, { state: 'pending' }) })
+  try {
+    await assert.rejects(
+      cancelled.client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-1', pollToken: 'poll-1', isActive: () => false }),
+      (error) => error.code === 'cancelled',
+    )
+    await assert.rejects(
+      cancelled.client.pollRecovery({ apiOrigin: 'https://app.whalerein.com', intentId: 'intent-1', pollToken: 'poll-1', deadlineMs: 0 }),
+      (error) => error.code === 'expired',
+    )
+  } finally {
+    rmSync(cancelled.root, { recursive: true, force: true })
+  }
+})
+
+test('operation status normalizes optional credential fields and unknown outcomes', async () => {
+  const replies = [
+    response(200, { hostId: HOST_ID, outcome: 'pending', operationId: 'op-1' }),
+    response(200, { hostId: HOST_ID, outcome: 'someday' }),
+  ]
+  const fixture = clientFixture({ fetch: async () => replies.shift() })
+  try {
+    const pending = await fixture.client.readOperation({ accessOrigin: ACCESS_ORIGIN, operationId: 'op-1' })
+    assert.equal(pending.outcome, 'pending')
+    assert.equal(pending.credentialIssued, false)
+    assert.equal(pending.credentialGeneration, 0)
+    assert.equal(pending.credentialOperationId, '')
+    assert.equal(pending.reason, '')
+
+    const unknown = await fixture.client.readOperation({ accessOrigin: ACCESS_ORIGIN, operationId: 'op-1' })
+    assert.equal(unknown.outcome, 'unknown')
+    assert.equal(unknown.operationId, 'op-1')
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('operation status transport failures stay typed and never expose an invalid reply', async () => {
+  const offline = clientFixture({ fetch: async () => { throw new TypeError('offline') } })
+  try {
+    await assert.rejects(
+      offline.client.readOperation({ accessOrigin: ACCESS_ORIGIN, operationId: 'op-1' }),
+      (error) => error.code === 'unavailable',
+    )
+  } finally {
+    rmSync(offline.root, { recursive: true, force: true })
+  }
+  const redirected = clientFixture({
+    fetch: async () => ({ status: 200, redirected: true, headers: { get: () => null }, json: async () => ({}) }),
+  })
+  try {
+    await assert.rejects(
+      redirected.client.readOperation({ accessOrigin: ACCESS_ORIGIN, operationId: 'op-1' }),
+      (error) => error.code === 'forbidden',
+      'a redirected proof request is refused instead of followed',
+    )
+  } finally {
+    rmSync(redirected.root, { recursive: true, force: true })
+  }
+  const notFound = clientFixture({ fetch: async () => response(404, {}) })
+  try {
+    assert.deepEqual(
+      await notFound.client.readOperation({ accessOrigin: ACCESS_ORIGIN, operationId: 'op-1' }),
+      { outcome: 'absent', reason: 'not_admitted', operationId: 'op-1' },
+    )
+  } finally {
+    rmSync(notFound.root, { recursive: true, force: true })
+  }
+})
+
+test('removal status reads are proof-scoped and normalize every lifecycle state', async () => {
+  const requests = []
+  const fixture = clientFixture({
+    fetch: async (url, options) => {
+      requests.push({ url, options })
+      return response(200, {
+        state: 'removing',
+        removal_operation_id: 'removal-1',
+        target: { hostId: HOST_ID },
+      })
+    },
+  })
+  try {
+    const observed = await fixture.client.readRemoval({ apiOrigin: 'https://app.whalerein.com', nonce: 'n1' })
+    assert.deepEqual(observed, { state: 'removing', removalOperationId: 'removal-1', target: { hostId: HOST_ID } })
+    assert.equal(requests[0].url, `https://app.whalerein.com/api/hosts/${HOST_ID}/removal`)
+    const header = JSON.parse(Buffer.from(requests[0].options.headers['X-Whalerein-Host-Proof'], 'base64url').toString('utf8'))
+    const text = hostProofText({ purpose: 'removal_status', hostId: HOST_ID, subjectId: HOST_ID, issuedAt: header.issuedAt, nonce: 'n1' })
+    assert.equal(ed25519.verify(Buffer.from(header.signature, 'base64url'), new TextEncoder().encode(text), signingPublicKey), true)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+
+  const unknown = clientFixture({ fetch: async () => response(200, { state: 'someday' }) })
+  try {
+    const observed = await unknown.client.readRemoval({ apiOrigin: 'https://app.whalerein.com' })
+    assert.equal(observed.state, 'unavailable')
+    assert.equal(observed.removalOperationId, '')
+    assert.equal(observed.target, null)
+  } finally {
+    rmSync(unknown.root, { recursive: true, force: true })
+  }
+
+  const absent = clientFixture({ fetch: async () => response(404, {}) })
+  try {
+    assert.deepEqual(await absent.client.readRemoval({ apiOrigin: 'https://app.whalerein.com' }), { state: 'none' })
+  } finally {
+    rmSync(absent.root, { recursive: true, force: true })
+  }
+})
+
+test('removal status failures are typed', async () => {
+  const cases = [
+    [response(401, {}), 'unauthorized'],
+    [response(403, {}), 'unauthorized'],
+    [response(500, {}), 'unavailable'],
+  ]
+  for (const [reply, code] of cases) {
+    const fixture = clientFixture({ fetch: async () => reply })
+    try {
+      await assert.rejects(
+        fixture.client.readRemoval({ apiOrigin: 'https://app.whalerein.com' }),
+        (error) => error.code === code,
+        code,
+      )
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  }
+  const offline = clientFixture({ fetch: async () => { throw new TypeError('offline') } })
+  try {
+    await assert.rejects(
+      offline.client.readRemoval({ apiOrigin: 'https://app.whalerein.com' }),
+      (error) => error.code === 'unavailable',
+    )
+    await assert.rejects(
+      offline.client.readRemoval({ apiOrigin: '' }),
+      (error) => error.code === 'invalid_argument',
+    )
+  } finally {
+    rmSync(offline.root, { recursive: true, force: true })
+  }
+})
+
+test('a response with an unparseable origin is refused before any payload is trusted', async () => {
+  const fixture = clientFixture({
+    fetch: async () => ({ ...response(200, { hostId: HOST_ID, state: 'enrollment_pending' }), url: '//bad-origin' }),
+  })
+  try {
+    await assert.rejects(
+      fixture.client.readStatus({ accessOrigin: ACCESS_ORIGIN }),
+      (error) => error.code === 'forbidden',
+    )
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('a persisted approval intent resumes without creating another request', async () => {
+  let creates = 0
+  const fixture = clientFixture({
+    fetch: async () => {
+      creates += 1
+      return response(201, createdBody())
+    },
+  })
+  try {
+    const created = await fixture.client.createIntent()
+    const resumed = await fixture.client.resume()
+    assert.equal(resumed.intentId, created.intentId)
+    assert.equal(creates, 1)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('poll resumes an uncertain create before using the missing one-time token', async () => {
+  let creates = 0
+  const fixture = clientFixture({
+    fetch: async (url, options) => {
+      if (options.method === 'POST') {
+        creates += 1
+        if (creates === 1) throw new TypeError('offline')
+        return response(201, createdBody())
+      }
+      return response(200, { id: 'request-1', state: 'approved', authorization: authorization(), route: route() })
+    },
+  })
+  try {
+    await assert.rejects(fixture.client.createIntent(), (error) => error.code === 'unavailable')
+    const approved = await fixture.client.poll()
+    assert.equal(approved.operationId, 'op-1')
+    assert.equal(creates, 2, 'the persisted create is replayed instead of minting a new intent')
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('credential validation rejects an unusable MQTT URL and a non-loopback plaintext broker', async () => {
+  const base = {
+    status: {
+      hostId: HOST_ID,
+      hostSigningPublicKey: b64(signingPublicKey),
+      hostNoisePublicKey: b64(noisePublicKey),
+    },
+    credential: { hostId: HOST_ID, username: `host:${HOST_ID}`, password: 'x' },
+  }
+  const cases = ['not a url', 'mqtt://broker.example']
+  for (const mqttUrl of cases) {
+    const fixture = clientFixture({
+      fetch: async () => response(200, { ...base, credential: { ...base.credential, mqttUrl } }),
+    })
+    try {
+      await assert.rejects(
+        fixture.client.enroll({ authorization: authorization(), route: route(), operationId: 'op-1' }),
+        (error) => error.code === 'forbidden',
+        mqttUrl,
+      )
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  }
+})
+
+test('recovery authorization must bind this profile keys when it lists keys', async () => {
+  const fixture = clientFixture({ fetch: async () => response(200, {}) })
+  try {
+    await assert.rejects(
+      fixture.client.replaceCredential({
+        accessOrigin: ACCESS_ORIGIN,
+        authorization: authorization({
+          purpose: 'host_credential_recovery',
+          authorizationId: 'recovery-1',
+          hostPublicKeys: [b64(Buffer.alloc(32, 9))],
+        }),
+      }),
+      (error) => error.code === 'forbidden',
+    )
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('a denied poll clears the token through an adapter without delete', async () => {
+  const credentials = new MemoryHostCredentials()
+  const store = new ProfileCredentialStore({ credentials, profileId: PROFILE_ID })
+  const noDelete = {
+    get: (purpose) => store.get(purpose),
+    set: (purpose, value) => store.set(purpose, value),
+    getJson: (purpose) => store.getJson(purpose),
+    setJson: (purpose, value) => store.setJson(purpose, value),
+  }
+  const root = mkdtempSync(join(tmpdir(), 'whalerein-enrollment-'))
+  try {
+    const client = new ManagedEnrollmentClient({
+      apiOrigin: 'https://app.whalerein.com',
+      metadata: metadata(),
+      hostId: HOST_ID,
+      signingPrivateKey,
+      signingPublicKey,
+      noisePublicKey,
+      credentialStore: noDelete,
+      journal: new IntentJournal({ stateDir: root }),
+      fetch: async (url, options) => (options.method === 'POST'
+        ? response(201, createdBody())
+        : response(200, { id: 'request-1', state: 'denied' })),
+      now: () => NOW,
+    })
+    await client.createIntent()
+    await assert.rejects(client.poll(), (error) => error.code === 'denied')
+    assert.equal(await noDelete.get(CREDENTIAL_PURPOSES.pollCredential), 'removed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a server-side expired approval is terminal and clears the one-time token', async () => {
+  const fixture = clientFixture({
+    fetch: async (url, options) => (options.method === 'POST'
+      ? response(201, createdBody())
+      : response(200, { id: 'request-1', state: 'expired' })),
+  })
+  try {
+    assert.equal(fixture.client.metadata.service, 'whalerein-cloud')
+    await fixture.client.createIntent()
+    await assert.rejects(fixture.client.poll(), (error) => error.code === 'expired')
+    assert.equal(await fixture.store.get(CREDENTIAL_PURPOSES.pollCredential), null)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
   }
 })

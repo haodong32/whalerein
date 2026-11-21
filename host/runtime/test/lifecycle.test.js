@@ -157,3 +157,52 @@ test('when host keys are created, private key bytes and encodings stay out of SQ
   }
 })
 
+
+test('a store close failure during teardown is contained', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-close-failure-'))
+  const broker = new FakeBroker()
+  const codec = new ProtoCodec()
+  const hostId = 'host-close-failure'
+  const config = testConfig({
+    adapter: 'fake',
+    mqtt_url: 'mqtts://fake-broker.test',
+    host_id: hostId,
+    host_token: 'token',
+    state_dir: dir,
+    event_batch_ms: 0,
+    shutdown_timeout_ms: 100,
+    reconnect_min_ms: 50,
+    reconnect_max_ms: 100,
+  }, {})
+  const adapter = new TestSource({ sessions: [{ sessionId: 's1' }] })
+  const mqtt = new MqttAccess({ url: config.mqttUrl, hostId, token: config.hostToken, connect: broker.connectFn(), logger: silentLogger, codec })
+  const host = new HostRuntime({
+    credentials: new MemoryHostCredentials(),
+    config,
+    adapter,
+    access: mqtt,
+    logger: silentLogger,
+    codec,
+  })
+  const originalClose = StateStore.prototype.close
+  try {
+    await host.start()
+    await mqtt.waitForConnected(5000)
+    // Force the teardown close path so its containment branch never depends
+    // on a platform- or timing-specific SQLite close failure.
+    StateStore.prototype.close = () => {
+      throw new Error('store close failed')
+    }
+    await host.stop()
+    assert.equal(host.started, false)
+    assert.equal(host.access, null)
+  } finally {
+    StateStore.prototype.close = originalClose
+    try {
+      if (host.store) originalClose.call(host.store)
+    } catch {
+      // the test closed the store best effort
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

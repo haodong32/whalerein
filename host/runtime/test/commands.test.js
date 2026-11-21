@@ -2748,3 +2748,34 @@ for (const scenario of [
     assert.equal(scenario.kind === 'create' ? hostCalls : forkCalls, 1, 'recovery and replay never invoke the native action again')
   })
 }
+
+test('an approval cancelled after its precheck resolved is reported as unavailable', async () => {
+  const { service, adapter } = makeService()
+  const approval = adapter.requestApproval({ sessionId: 's1', ttlMs: 1000 })
+  const request = makeRequest()
+  const original = adapter.getApproval.bind(adapter)
+  adapter.getApproval = async (approvalId) => {
+    const value = await original(approvalId)
+    // Cancel one microtask later: the precheck has already produced its value,
+    // but the request scope observes the abort before registering acceptance.
+    queueMicrotask(() => service.cancelRequest(request.device_id, request.request_id, 'unavailable'))
+    return value
+  }
+  try {
+    const result = await service.handle({
+      request,
+      payload: {
+        resolve_approval: {
+          approval_id: approval.approvalId,
+          decision: 'APPROVAL_DECISION_APPROVE',
+          expected_digest: approval.digest,
+          expected_version: approval.version,
+        },
+      },
+    })
+    assert.equal(result.status, 'failed')
+    assert.equal(result.errorCode, 'unavailable')
+  } finally {
+    adapter.getApproval = original
+  }
+})
