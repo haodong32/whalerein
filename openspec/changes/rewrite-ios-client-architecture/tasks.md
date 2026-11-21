@@ -24,12 +24,12 @@
 
 ## 3. Conversation rewrite
 
-- [ ] 3.1 Add `Features/Conversation/ConversationState.swift` with command, queue, wait, approval, history and provenance dimensions plus the transition table; remove parallel booleans and error fields (AC-01, AC-02).
-- [ ] 3.2 Implement pure `reduce` transitions and state tests for every event, including uncertain, rejected, stale approval, cancelled wait and cached-only history; prove illegal combinations fail (AC-01, AC-02).
-- [ ] 3.3 Rewrite `ConversationModel` as intent + service orchestration over the reducer; preserve activation fencing and late-event drops; add model tests with `FakeSessionService`, `FakeClock` and `FakeUUIDSource` (AC-03, AC-10).
+- [x] 3.1 Add `Features/Conversation/ConversationState.swift` with command, queue, wait, approval, history and provenance dimensions plus the transition table; remove parallel booleans and error fields (AC-01, AC-02).
+- [x] 3.2 Implement pure `reduce` transitions and state tests for every event, including uncertain, rejected, stale approval, cancelled wait and cached-only history; prove illegal combinations fail (AC-01, AC-02).
+- [x] 3.3 Rewrite `ConversationModel` as intent + service orchestration over the reducer; preserve activation fencing and late-event drops; add model tests with `FakeSessionService`, `FakeClock` and `FakeUUIDSource` (AC-03, AC-10).
 - [ ] 3.4 Split queue, wait, history, attachment and recovery controllers out of `ConversationModel`; keep a thin facade exposing state and intents (AC-01, AC-11).
 - [ ] 3.5 Rewrite `ConversationView` and subviews to switch on the state; enforce no service access, no `as?`, and the file budget; keep accessibility identifiers and localization keys (AC-03, AC-12).
-- [ ] 3.6 Migrate conversation UI tests to conversation scenarios via `-ui-scenario`; record scenario-to-flow mapping (AC-07, AC-12).
+- [x] 3.6 Migrate conversation UI tests to conversation scenarios via `-ui-scenario`; record scenario-to-flow mapping (AC-07, AC-12).
 
 ## 4. Remaining feature slices
 
@@ -38,7 +38,7 @@
 - [ ] 4.3 Rewrite Account/device/diagnostics with typed state and explicit `FeatureSet` capabilities; preserve revoke, forget, scoped sign-out, status and redacted preview/share (AC-03, AC-06).
 - [ ] 4.4 Rewrite Pairing, Sessions, Hosts and Attachments with the same feature shape; remove legacy models and unavailable probing (AC-03, AC-06).
 - [ ] 4.5 Move shared transitions used by two or more features into `Domain/Values` (`CommandLifecycle`, `ApprovalAuthority`) and delete the per-feature duplicates (AC-04; design D-09).
-- [ ] 4.6 Migrate the remaining UI tests to scenarios and update accessibility-depth checks (AC-07, AC-12).
+- [x] 4.6 Migrate the remaining UI tests to scenarios and update accessibility-depth checks (AC-07, AC-12).
 
 ## 5. Debug gallery and previews
 

@@ -45,7 +45,6 @@ final class ConversationModel {
     var approvals: [Approval] { state.approvals }
     /// Core-owned question facet. Only `current` may establish an empty list.
     /// Exact approval status refreshes keyed by the original approval identity.
-    private(set) var approvalStatusRefresh: [String: ApprovalStatusRefresh] = [:]
     /// The one business state of this screen. Every dimension below projects
     /// from it; the legacy property names stay read-only for existing views and
     /// are removed once each view is rewritten.
@@ -118,6 +117,59 @@ final class ConversationModel {
         set { state.previewFacet.toolActivities = newValue }
     }
 
+    var approvalStatusRefresh: [String: ApprovalStatusRefresh] {
+        get { state.approvalFacet.statusRefresh }
+        set { state.approvalFacet.statusRefresh = newValue }
+    }
+    var approvalClock: Date {
+        get { state.approvalFacet.clock }
+        set { state.approvalFacet.clock = newValue }
+    }
+    var approvalRefreshCount: Int {
+        get { state.approvalFacet.refreshCount }
+        set { state.approvalFacet.refreshCount = newValue }
+    }
+    private var trustedPendingApprovalIds: Set<String> {
+        get { state.approvalFacet.trustedPendingIds }
+        set { state.approvalFacet.trustedPendingIds = newValue }
+    }
+    var lastSendOperationId: String? {
+        get { state.operation.lastSendOperationId }
+        set { state.operation.lastSendOperationId = newValue }
+    }
+    var operationResult: OperationReceipt? {
+        get { state.operation.result }
+        set { state.operation.result = newValue }
+    }
+    var operationErrorKey: L10nKey? {
+        get { state.operation.errorKey }
+        set { state.operation.errorKey = newValue }
+    }
+    var operationReadErrorKey: L10nKey? {
+        get { state.operation.readErrorKey }
+        set { state.operation.readErrorKey = newValue }
+    }
+    var isRecoveringOperation: Bool {
+        get { state.operation.recovering }
+        set { state.operation.recovering = newValue }
+    }
+    var isReadingExactReply: Bool {
+        get { state.operation.readingExactReply }
+        set { state.operation.readingExactReply = newValue }
+    }
+    var watchEnded: Bool {
+        get { state.watch.ended }
+        set { state.watch.ended = newValue }
+    }
+    var isSuspended: Bool {
+        get { state.watch.suspended }
+        set { state.watch.suspended = newValue }
+    }
+    var isReconnecting: Bool {
+        get { state.watch.reconnecting }
+        set { state.watch.reconnecting = newValue }
+    }
+
     var connection: ConnectionStatus { state.connection }
     var loadState: LoadState {
         if let error = state.loadError { return .failed(error) }
@@ -138,12 +190,6 @@ final class ConversationModel {
     private(set) var lastStopStatus: CommandStatus?
     /// Original operation identity and the message-level recovery result for
     /// the last send. Submission status stays separate from these values.
-    private(set) var lastSendOperationId: String?
-    private(set) var operationResult: OperationReceipt?
-    private(set) var operationErrorKey: L10nKey?
-    private(set) var operationReadErrorKey: L10nKey?
-    private(set) var isRecoveringOperation = false
-    private(set) var isReadingExactReply = false
     var inFlightSend: CommandReceipt? {
         if case .uncertain(_, let receipt) = state.lifecycle { return receipt }
         return nil
@@ -156,9 +202,6 @@ final class ConversationModel {
         return command.kind.isStop ? .stop : .send
     }
     private(set) var stopSettled = false
-    private(set) var watchEnded = false
-    private(set) var isSuspended = false
-    private(set) var isReconnecting = false
     private(set) var resolvingApprovalId: String?
     private(set) var lastAppliedSequence = -1
     private(set) var expandedBlockIds: Set<String> = []
@@ -166,10 +209,8 @@ final class ConversationModel {
     private(set) var scrollRequest: ConversationScrollRequest?
     /// Timestamp used for expiry display. It advances on a timer and on every
     /// server refresh, not by reading `Date()` in the view body.
-    private(set) var approvalClock = Date()
     /// Number of clock-driven approval refresh attempts. Tests use it to prove
     /// expiry is advanced by the timer rather than by a redraw.
-    private(set) var approvalRefreshCount = 0
     private(set) var eventSubscriptionCount = 0
 
     // Older committed history is an independent one-shot read; it never
@@ -238,7 +279,6 @@ final class ConversationModel {
     /// clock says their TTL passed. This is how a fast device clock stops
     /// disabling a valid request without letting a genuinely expired request
     /// stay clickable while offline.
-    private var trustedPendingApprovalIds: Set<String> = []
     /// Per-batch answer edits. A draft is kept only while the batch guard is
     /// unchanged, so a changed owner/phase can never inherit a stale selection.
     private var questionDrafts: [String: QuestionDraft] = [:]
@@ -273,10 +313,10 @@ final class ConversationModel {
         self.onConnectionChange = onConnectionChange
         self.onReconnected = onReconnected
         self.now = now
-        self.approvalClock = now()
         self.attachments = AttachmentTransferModel(
             service: service as? any AttachmentTransferService
         )
+        self.approvalClock = now()
     }
 
     // MARK: - Derived state

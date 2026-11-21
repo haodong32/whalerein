@@ -151,3 +151,29 @@ struct PreviewFacet: Equatable, Sendable {
     var reasoning: String?
     var toolActivities: [ToolActivity] = []
 }
+
+/// Approval refresh bookkeeping: the exact-status refreshes, the local clock
+/// used for expiry display and the refresh counter.
+struct ApprovalFacet: Equatable, Sendable {
+    var statusRefresh: [String: ApprovalStatusRefresh] = [:]
+    var clock = Date(timeIntervalSince1970: 0)
+    var refreshCount = 0
+    var trustedPendingIds: Set<String> = []
+}
+
+/// The retained send operation and its exact-content read.
+struct OperationFacet: Equatable, Sendable {
+    var lastSendOperationId: String?
+    var result: OperationReceipt?
+    var errorKey: L10nKey?
+    var readErrorKey: L10nKey?
+    var recovering = false
+    var readingExactReply = false
+}
+
+/// Watch lifecycle beside the connection status.
+struct WatchFacet: Equatable, Sendable {
+    var ended = false
+    var suspended = false
+    var reconnecting = false
+}

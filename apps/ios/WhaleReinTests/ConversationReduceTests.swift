@@ -98,10 +98,10 @@ final class ConversationReduceTests: XCTestCase {
 
     func testWatchEndedIsClearedByOnlineConnection() {
         var state = ConversationState()
-        state.watchEnded = true
+        state.watch.ended = true
         state.connection = .offline
         let reconnected = ConversationReduce.reduce(state, .connectionChanged(.online))
-        XCTAssertFalse(reconnected.watchEnded)
+        XCTAssertFalse(reconnected.watch.ended)
         XCTAssertEqual(reconnected.connection, .online)
     }
 

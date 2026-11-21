@@ -25,6 +25,8 @@ struct ConversationState: Equatable, Sendable {
     var question = QuestionFacet()
     var historyFacet = HistoryFacet()
     var previewFacet = PreviewFacet()
+    var approvalFacet = ApprovalFacet()
+    var operation = OperationFacet()
     /// Terminal receipt of the most recent command, for the status row.
     var lastReceipt: CommandReceipt?
     /// Which command the last receipt belongs to (send or stop).
@@ -34,8 +36,7 @@ struct ConversationState: Equatable, Sendable {
     var loadError: AppErrorCode?
     var isLoading = false
     var isLoaded = false
-    /// Set when the watch ended and the screen must offer a reconnect.
-    var watchEnded = false
+    var watch = WatchFacet()
 
     var canSend: Bool {
         guard isLoaded else { return false }
