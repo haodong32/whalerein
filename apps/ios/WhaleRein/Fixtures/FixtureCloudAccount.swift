@@ -111,7 +111,7 @@ final class FixtureCloudAccountState {
 
     func connect(hostId: String) throws -> CloudConnectResult {
         guard let index = directory.firstIndex(where: {
-            $0.hostId == hostId && $0.pairingEligible && !$0.enrolled
+            $0.hostId == hostId && $0.access == .eligible && $0.pairingEligible
         }) else {
             throw SessionServiceError(.conflict)
         }
@@ -125,7 +125,7 @@ final class FixtureCloudAccountState {
             observation: host.observation,
             enrollmentState: "enrolled",
             pairingEligible: false,
-            deviceAccess: "granted"
+            deviceAccess: "ready"
         )
         connectedHostIds.append(hostId)
         return CloudConnectResult(
@@ -210,6 +210,10 @@ extension FixtureSessionService: CloudAccountService {
     }
 
     func connectCloud(hostId: String) async throws -> CloudConnectResult {
-        try cloudState.connect(hostId: hostId)
+        let result = try cloudState.connect(hostId: hostId)
+        // A confirmed device grant is exactly what makes the fixture Host
+        // reachable, mirroring Core persisting the pairing before it opens.
+        paired = true
+        return result
     }
 }

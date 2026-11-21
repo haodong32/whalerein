@@ -85,6 +85,17 @@ enum FixtureCatalog {
             deviceAccess: "none"
         ),
         CloudDirectoryHost(
+            hostId: "granted-mac",
+            displayName: "Pending Grant Mac",
+            enrolled: true,
+            online: true,
+            presence: "online",
+            observation: "enrolled, device not connected",
+            enrollmentState: "enrolled",
+            pairingEligible: true,
+            deviceAccess: "absent"
+        ),
+        CloudDirectoryHost(
             hostId: "old-server",
             displayName: "Old Server",
             enrolled: false,
@@ -98,6 +109,9 @@ enum FixtureCatalog {
     ]
 
     static let sessionsByHost: [String: [SessionSummary]] = [
+        "granted-mac": [
+            SessionSummary(sessionId: "s-grant", title: "Granted workspace", updatedAtUnixMs: 1_761_000_500_000, cwd: "/work/whalerein"),
+        ],
         "studio-mac": [
             SessionSummary(sessionId: "s-001", title: "Release checklist", updatedAtUnixMs: 1_761_000_300_000, cwd: "/work/whalerein"),
             SessionSummary(sessionId: "s-002", title: "Build triage", updatedAtUnixMs: 1_761_000_120_000, cwd: "/work/whalerein"),
