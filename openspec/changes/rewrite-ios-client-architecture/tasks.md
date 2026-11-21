@@ -27,17 +27,17 @@
 - [x] 3.1 Add `Features/Conversation/ConversationState.swift` with command, queue, wait, approval, history and provenance dimensions plus the transition table; remove parallel booleans and error fields (AC-01, AC-02).
 - [x] 3.2 Implement pure `reduce` transitions and state tests for every event, including uncertain, rejected, stale approval, cancelled wait and cached-only history; prove illegal combinations fail (AC-01, AC-02).
 - [x] 3.3 Rewrite `ConversationModel` as intent + service orchestration over the reducer; preserve activation fencing and late-event drops; add model tests with `FakeSessionService`, `FakeClock` and `FakeUUIDSource` (AC-03, AC-10).
-- [ ] 3.4 Split queue, wait, history, attachment and recovery controllers out of `ConversationModel`; keep a thin facade exposing state and intents (AC-01, AC-11).
+- [x] 3.4 Split queue, wait, history, attachment and recovery controllers out of `ConversationModel`; keep a thin facade exposing state and intents (AC-01, AC-11).
 - [x] 3.5 Rewrite `ConversationView` and subviews to switch on the state; enforce no service access, no `as?`, and the file budget; keep accessibility identifiers and localization keys (AC-03, AC-12).
 - [x] 3.6 Migrate conversation UI tests to conversation scenarios via `-ui-scenario`; record scenario-to-flow mapping (AC-07, AC-12).
 
 ## 4. Remaining feature slices
 
-- [ ] 4.1 Rewrite Settings as feature sections with one state/model per section; remove the aggregated settings model and view (AC-03, AC-05).
-- [ ] 4.2 Rewrite Cloud sign-in and directory with typed state and explicit dependencies; preserve system-sheet, cancellation, empty, unavailable and revoked flows (AC-01, AC-12).
-- [ ] 4.3 Rewrite Account/device/diagnostics with typed state and explicit `FeatureSet` capabilities; preserve revoke, forget, scoped sign-out, status and redacted preview/share (AC-03, AC-06).
-- [ ] 4.4 Rewrite Pairing, Sessions, Hosts and Attachments with the same feature shape; remove legacy models and unavailable probing (AC-03, AC-06).
-- [ ] 4.5 Move shared transitions used by two or more features into `Domain/Values` (`CommandLifecycle`, `ApprovalAuthority`) and delete the per-feature duplicates (AC-04; design D-09).
+- [x] 4.1 Rewrite Settings as feature sections with one state/model per section; remove the aggregated settings model and view (AC-03, AC-05).
+- [x] 4.2 Rewrite Cloud sign-in and directory with typed state and explicit dependencies; preserve system-sheet, cancellation, empty, unavailable and revoked flows (AC-01, AC-12).
+- [x] 4.3 Rewrite Account/device/diagnostics with typed state and explicit `FeatureSet` capabilities; preserve revoke, forget, scoped sign-out, status and redacted preview/share (AC-03, AC-06).
+- [x] 4.4 Rewrite Pairing, Sessions, Hosts and Attachments with the same feature shape; remove legacy models and unavailable probing (AC-03, AC-06).
+- [x] 4.5 Move shared transitions used by two or more features into `Domain/Values` (`CommandLifecycle`, `ApprovalAuthority`) and delete the per-feature duplicates (AC-04; design D-09).
 - [x] 4.6 Migrate the remaining UI tests to scenarios and update accessibility-depth checks (AC-07, AC-12).
 
 ## 5. Debug gallery and previews
@@ -49,7 +49,7 @@
 
 ## 6. Remove the legacy architecture
 
-- [ ] 6.1 Delete `AppModel`, `ConversationModel` and their extensions after every screen and flow has moved; delete `LaunchOptions` flags and the legacy fixtures' boolean construction (AC-01, AC-08).
+- [x] 6.1 Delete `AppModel`, `ConversationModel` and their extensions after every screen and flow has moved; delete `LaunchOptions` flags and the legacy fixtures' boolean construction (AC-01, AC-08).
 - [ ] 6.2 Delete obsolete fixtures, stub services, tests and localization keys that no longer have a consumer; verify the catalog covers the removed states (AC-07, AC-12).
 - [ ] 6.3 Add `Fixtures/ScenarioBuilder` and `TestSupport` shared fakes; remove per-test mock duplication (AC-10, AC-11).
 - [x] 6.4 Delete all `-ui-` flags and legacy scenario mapping; empty the 1.2 allowlist so the gate runs unconditionally (AC-07, AC-08, AC-03, AC-04, AC-05).
