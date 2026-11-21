@@ -13,7 +13,7 @@ import Foundation
 /// in `ConversationValues.swift`.
 struct ConversationState: Equatable, Sendable {
     var connection: ConnectionStatus = .offline
-    var capabilities: SessionCapabilities?
+    var capabilities: SessionCapabilities = .idle
     var lifecycle: CommandLifecycle = .idle
     var queue: QueueState = .unavailable
     var wait: WaitState = .idle
@@ -21,19 +21,21 @@ struct ConversationState: Equatable, Sendable {
     var history: HistoryState = .unavailable
     var provenance: ContentProvenance = .confirmed
     var messages: [ConversationMessage] = []
+    var approvals: [Approval] = []
     var loadError: AppErrorCode?
+    var isLoading = false
     var isLoaded = false
     /// Set when the watch ended and the screen must offer a reconnect.
     var watchEnded = false
 
     var canSend: Bool {
-        guard let capabilities, isLoaded else { return false }
+        guard isLoaded else { return false }
         guard !capabilities.running || capabilities.supportsSteer else { return false }
         return lifecycle.isSettled
     }
 
     var canStop: Bool {
-        guard let capabilities, isLoaded else { return false }
+        guard isLoaded else { return false }
         return capabilities.running && capabilities.supportsInterrupt
     }
 

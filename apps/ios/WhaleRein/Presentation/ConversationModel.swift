@@ -39,8 +39,8 @@ final class ConversationModel {
     let sessionId: String
     let sessionTitle: String
 
-    private(set) var messages: [ConversationMessage] = []
-    private(set) var approvals: [Approval] = []
+    var messages: [ConversationMessage] { state.messages }
+    var approvals: [Approval] { state.approvals }
     /// Core-owned question facet. Only `current` may establish an empty list.
     private(set) var questions: QuestionsState = .loading
     private(set) var questionReview: QuestionReview?
@@ -52,12 +52,21 @@ final class ConversationModel {
     private(set) var isLoadingTruncatedQuestions = false
     private(set) var previewText: String?
     private(set) var previewAttemptId: String?
-    private(set) var connection: ConnectionStatus = .offline
-    private(set) var loadState: LoadState = .idle
+    /// The one business state of this screen. Every dimension below projects
+    /// from it; the legacy property names stay read-only for existing views and
+    /// are removed once each view is rewritten.
+    private(set) var state = ConversationState()
+
+    var connection: ConnectionStatus { state.connection }
+    var loadState: LoadState {
+        if let error = state.loadError { return .failed(error) }
+        if state.isLoaded { return .loaded }
+        return state.isLoading ? .loading : .idle
+    }
     private(set) var errorKey: L10nKey?
     private(set) var approvalErrorKey: L10nKey?
     private(set) var sendErrorKey: L10nKey?
-    private(set) var capabilities: SessionCapabilities = .idle
+    var capabilities: SessionCapabilities { state.capabilities }
     private(set) var lastSendStatus: CommandStatus?
     private(set) var lastStopStatus: CommandStatus?
     /// Original operation identity and the message-level recovery result for
@@ -352,7 +361,7 @@ final class ConversationModel {
 
     func start() async {
         guard loadState != .loading, loadState != .loaded else { return }
-        loadState = .loading
+        state = ConversationReduce.reduce(state, .loadStarted)
         errorKey = nil
         watchEnded = false
         lastAppliedSequence = -1
@@ -365,7 +374,8 @@ final class ConversationModel {
         ensureSubscription()
         do {
             draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
-            capabilities = try await service.capabilities(hostId: hostId, sessionId: sessionId)
+            let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
+            state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))
             if capabilities.running {
                 delivery = .steer
             }
@@ -374,7 +384,7 @@ final class ConversationModel {
             await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            loadState = .failed(code)
+            state = ConversationReduce.reduce(state, .loadFailed(code))
             errorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
         }
@@ -392,7 +402,7 @@ final class ConversationModel {
         consumeTask = nil
         wait.close()
         service.stopWatch()
-        connection = .offline
+        state = ConversationReduce.reduce(state, .connectionChanged(.offline))
     }
 
     /// Restarts the watch and resyncs the visible session after returning to the
@@ -489,7 +499,7 @@ final class ConversationModel {
 
         switch envelope.event {
         case .reset(let messages, let approvals):
-            self.messages = messages
+            state.messages = messages
             liveMessageIds = Set(messages.map(\.messageId))
             pagedMessageIds.removeAll()
             historyGeneration &+= 1
@@ -503,8 +513,8 @@ final class ConversationModel {
             previewText = nil
             previewAttemptId = nil
             authoritativeRunEpoch += 1
-            connection = .online
-            loadState = .loaded
+            state = ConversationReduce.reduce(state, .connectionChanged(.online))
+            state = ConversationReduce.reduce(state, .contentLoaded)
             approvalClock = now()
             scroll.reset()
             onConnectionChange?(connection)
@@ -519,9 +529,9 @@ final class ConversationModel {
             guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
             let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
             if let echoIndex {
-                messages.insert(message, at: min(echoIndex, messages.count))
+                state.messages.insert(message, at: min(echoIndex, state.messages.count))
             } else {
-                messages.append(message)
+                state.messages.append(message)
             }
             if message.role == .assistant {
                 previewText = nil
@@ -536,11 +546,11 @@ final class ConversationModel {
             pagedMessageIds.remove(message.messageId)
             settleAuthoritativeContent(message)
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                messages[index] = message
+                state.messages[index] = message
             } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
-                messages.insert(message, at: min(echoIndex, messages.count))
+                state.messages.insert(message, at: min(echoIndex, state.messages.count))
             } else {
-                messages.append(message)
+                state.messages.append(message)
             }
             if message.role == .assistant {
                 previewText = nil
@@ -677,7 +687,7 @@ final class ConversationModel {
     }
 
     private func updateConnection(_ status: ConnectionStatus) {
-        connection = status
+        state = ConversationReduce.reduce(state, .connectionChanged(status))
         onConnectionChange?(status)
         // Reconnecting can make a locally-expired pending approval valid again
         // (the device clock was fast); recompute the display clock.
@@ -892,15 +902,15 @@ final class ConversationModel {
     private func insertCommittedMessage(_ message: ConversationMessage) {
         if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
             if messages[index] != message {
-                messages[index] = message
+                state.messages[index] = message
             }
             return
         }
         let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
         if let echoIndex {
-            messages.insert(message, at: min(echoIndex, messages.count))
+            state.messages.insert(message, at: min(echoIndex, state.messages.count))
         } else {
-            messages.append(message)
+            state.messages.append(message)
         }
     }
 
@@ -1189,10 +1199,10 @@ final class ConversationModel {
         guard approval.sessionId == sessionId else { return }
         if let index = approvals.firstIndex(where: { $0.approvalId == approval.approvalId }) {
             if shouldAccept(approval, over: approvals[index]) {
-                approvals[index] = approval
+                state.approvals[index] = approval
             }
         } else {
-            approvals.append(approval)
+            state.approvals.append(approval)
         }
     }
 
@@ -1206,7 +1216,7 @@ final class ConversationModel {
             incomingById[approval.approvalId] = approval
         }
 
-        var merged = approvals.filter { $0.sessionId == sessionId }
+        var merged = state.approvals.filter { $0.sessionId == sessionId }
         for index in merged.indices {
             let local = merged[index]
             if let server = incomingById[local.approvalId],
@@ -1231,7 +1241,7 @@ final class ConversationModel {
                 merged[index].state = missingPendingState
             }
         }
-        approvals = merged
+        state.approvals = merged
     }
 
     /// A decided local card must never be downgraded back to pending by an
@@ -1256,15 +1266,15 @@ final class ConversationModel {
     }
 
     private func markPendingApprovalsUnavailable() {
-        for index in approvals.indices where approvals[index].state == .pending {
-            approvals[index].state = .unavailable
+        for index in state.approvals.indices where state.approvals[index].state == .pending {
+            state.approvals[index].state = .unavailable
         }
     }
 
     private func markApprovalUnavailable(_ approvalID: String) {
-        guard let index = approvals.firstIndex(where: { $0.approvalId == approvalID }),
-              approvals[index].state == .pending else { return }
-        approvals[index].state = .unavailable
+        guard let index = state.approvals.firstIndex(where: { $0.approvalId == approvalID }),
+              state.approvals[index].state == .pending else { return }
+        state.approvals[index].state = .unavailable
     }
 
     private func restartWatch() async {
@@ -1276,11 +1286,12 @@ final class ConversationModel {
             if draft.isEmpty, !loadedDraft.isEmpty {
                 draft = loadedDraft
             }
-            capabilities = try await service.capabilities(hostId: hostId, sessionId: sessionId)
+            let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
+            state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
             errorKey = nil
             if loadState != .loaded {
-                loadState = .loading
+                state = ConversationReduce.reduce(state, .loadStarted)
             }
             queue.applyCapabilities(capabilities)
             await refreshApprovals()
@@ -1291,7 +1302,7 @@ final class ConversationModel {
             if case .failed = loadState {
                 // Keep the retry screen that is already visible.
             } else if loadState != .loaded {
-                loadState = .failed(code)
+                state = ConversationReduce.reduce(state, .loadFailed(code))
             } else {
                 watchEnded = true
             }
@@ -1438,7 +1449,7 @@ final class ConversationModel {
     func loadFreshHistory() async {
         guard canLoadFreshHistory else { return }
         historyGeneration &+= 1
-        messages.removeAll { message in
+        state.messages.removeAll { message in
             pagedMessageIds.contains(message.messageId)
                 && !liveMessageIds.contains(message.messageId)
         }
@@ -1475,9 +1486,9 @@ final class ConversationModel {
                   reference.hostId == hostId,
                   reference.sessionId == sessionId else { return }
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                messages[index] = message
+                state.messages[index] = message
             } else {
-                messages.append(message)
+                state.messages.append(message)
             }
             liveMessageIds.insert(message.messageId)
             pagedMessageIds.remove(message.messageId)
@@ -1506,7 +1517,7 @@ final class ConversationModel {
             pagedMessageIds.insert(message.messageId)
         }
         if !prepended.isEmpty {
-            messages.insert(contentsOf: prepended, at: 0)
+            state.messages.insert(contentsOf: prepended, at: 0)
         }
         historyContinuation = page.complete ? nil : page.continuation
         historyComplete = page.complete
@@ -1580,7 +1591,7 @@ final class ConversationModel {
             ],
             createdAtUnixMs: Int64(now().timeIntervalSince1970 * 1000)
         )
-        messages.append(message)
+        state.messages.append(message)
         scroll.recordIncoming(isOwnMessage: true)
         requestScroll(animated: true)
         return messageId
@@ -1601,7 +1612,7 @@ final class ConversationModel {
             return normalizedText(pending.text) == echoText
         }
         guard let match else { return nil }
-        let local = messages.remove(at: match)
+        let local = state.messages.remove(at: match)
         optimisticMessages.removeValue(forKey: local.messageId)
         return match
     }
@@ -1713,7 +1724,7 @@ final class ConversationModel {
 
     private func applyCapabilities(_ next: SessionCapabilities) {
         let wasRunning = capabilities.running
-        capabilities = next
+        state = ConversationReduce.reduce(state, .capabilitiesLoaded(next))
         queue.applyCapabilities(next)
         let options = DeliveryPolicy.choices(for: capabilities)
         // A run-state change returns the affordance to the ordinary queue

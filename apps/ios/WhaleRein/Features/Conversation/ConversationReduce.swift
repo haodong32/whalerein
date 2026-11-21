@@ -11,6 +11,7 @@ enum ConversationAction: Equatable, Sendable {
     // Load
     case loadStarted
     case loadFailed(AppErrorCode)
+    case contentLoaded
     case snapshot(messages: [ConversationMessage], approvals: [Approval])
     case watchEnded
     case connectionChanged(ConnectionStatus)
@@ -62,14 +63,22 @@ enum ConversationReduce {
         case .loadStarted:
             state.loadError = nil
             state.isLoaded = false
+            state.isLoading = true
 
         case .loadFailed(let code):
             state.loadError = code
             state.isLoaded = false
+            state.isLoading = false
+
+        case .contentLoaded:
+            state.loadError = nil
+            state.isLoaded = true
+            state.isLoading = false
 
         case .snapshot(let messages, let approvals):
             state.messages = messages
             state.isLoaded = true
+            state.isLoading = false
             state.loadError = nil
             state.provenance = .confirmed
             state.watchEnded = false
