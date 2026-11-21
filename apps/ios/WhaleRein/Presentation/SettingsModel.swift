@@ -19,10 +19,20 @@ final class SettingsModel {
         case revoked
     }
 
-    private(set) var isBusy = false
-    private(set) var statusKey: L10nKey?
-    private(set) var errorKey: L10nKey?
-    private(set) var lastOutcome: Outcome?
+    /// One business state for the screen. The legacy property names below are
+    /// read-only projections kept while the view migrates to `state`.
+    private(set) var state = SettingsState()
+
+    var isBusy: Bool { state.isBusy }
+    var statusKey: L10nKey? { state.statusKey }
+    var errorKey: L10nKey? { state.errorKey }
+    var lastOutcome: Outcome? {
+        switch state.phase {
+        case .finished(.forgetDevice): .forgotten
+        case .finished(.revokeDevice): .revoked
+        default: nil
+        }
+    }
 
     let coreRevision: String
     let appVersion: String
@@ -53,21 +63,16 @@ final class SettingsModel {
     }
 
     func perform(_ confirmation: Confirmation) async {
+        let action: SettingsAction = confirmation == .forget ? .forgetDevice : .revokeDevice
         guard !isBusy else { return }
-        isBusy = true
-        statusKey = nil
-        errorKey = nil
-        lastOutcome = nil
+        state = SettingsReduce.reduce(state, .confirmationRequested(action))
+        state = SettingsReduce.reduce(state, .performStarted(action))
         do {
-            switch confirmation {
-            case .forget:
+            switch action {
+            case .forgetDevice:
                 try await service.forgetDevice()
-                statusKey = .settingsForgotten
-                lastOutcome = .forgotten
-            case .revoke:
+            case .revokeDevice:
                 try await service.revoke()
-                statusKey = .settingsRevoked
-                lastOutcome = .revoked
             }
             preferences.update {
                 $0.paired = false
@@ -75,11 +80,11 @@ final class SettingsModel {
                 $0.lastSessionId = nil
                 $0.lastSessionTitle = nil
             }
+            state = SettingsReduce.reduce(state, .performSucceeded(action))
             onDeviceReset()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            errorKey = L10nKey.errorKey(for: code)
+            state = SettingsReduce.reduce(state, .performFailed(code))
         }
-        isBusy = false
     }
 }
