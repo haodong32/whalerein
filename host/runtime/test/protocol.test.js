@@ -135,3 +135,62 @@ test('old source capability bytes leave all question operations disabled', () =>
     assert.equal(Boolean(old[key]), false)
   }
 })
+
+test('peer protocol versions are classified by side and window', async () => {
+  const { protocolVersionCompatibility } = await import('../src/protocol.js')
+  for (const peer of [0, '0', undefined, null]) {
+    const result = protocolVersionCompatibility(peer)
+    assert.equal(result.compatible, false)
+    assert.equal(result.side, 'peer')
+  }
+  const malformed = protocolVersionCompatibility('not-a-number')
+  assert.equal(malformed.compatible, false)
+  assert.equal(malformed.side, 'peer')
+  const older = protocolVersionCompatibility(1, { min: 2, max: 3 })
+  assert.equal(older.compatible, false)
+  assert.equal(older.side, 'peer')
+  assert.match(older.message, /older than the supported window/)
+  const newer = protocolVersionCompatibility(4)
+  assert.equal(newer.compatible, false)
+  assert.equal(newer.side, 'local')
+  assert.match(newer.message, /newer than this build supports/)
+  const supported = protocolVersionCompatibility(2, { min: 2, max: 3 })
+  assert.equal(supported.compatible, true)
+  assert.equal(supported.side, 'none')
+})
+
+test('a custom descriptor file loads independently and an invalid descriptor is refused', async () => {
+  const { mkdtempSync, copyFileSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'whalerein-proto-'))
+  try {
+    const copy = join(dir, 'descriptor.json')
+    copyFileSync(DEFAULT_PROTO_PATH, copy)
+    const custom = codec(copy)
+    assert.equal(custom.decode('whalerein.v1.Ping', custom.encode('whalerein.v1.Ping', { client_time_unix_ms: 9 })).client_time_unix_ms, 9)
+
+    const invalid = join(dir, 'invalid.json')
+    writeFileSync(invalid, JSON.stringify({ nested: { broken: { fields: { x: { type: 'no.such.Type' } } } } }))
+    assert.throws(() => new ProtoCodec(invalid), (error) => error.code === 'internal')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an encode failure after conversion is reported as invalid input', async () => {
+  const proto = codec()
+  const type = proto.type('whalerein.v1.Ping')
+  const original = type.encode
+  type.encode = () => {
+    throw new Error('encode failed')
+  }
+  try {
+    assert.throws(
+      () => proto.encode('whalerein.v1.Ping', { client_time_unix_ms: 1 }),
+      (error) => error.code === 'invalid_argument',
+    )
+  } finally {
+    type.encode = original
+  }
+})
