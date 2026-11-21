@@ -66,11 +66,11 @@
 ## 8. Acceptance verification
 
 - [x] 8.1 Run the complete state and model suites for every feature and record focused evidence per AC (AC-01, AC-02, AC-03, AC-10).
-- [ ] 8.2 Run the parity suite against the local Core stack and record enabled/disabled capabilities and any environment blockers (AC-10, AC-13).
-- [ ] 8.3 Run the complete scenario-driven UI suite and compare every flow with the 1.1 baseline, including error, cancel, offline, accessibility size, Cloud and Standalone variants (AC-12).
+- [x] 8.2 Run the parity suite against the local Core stack and record enabled/disabled capabilities and any environment blockers (AC-10, AC-13).
+- [x] 8.3 Run the complete scenario-driven UI suite and compare every flow with the 1.1 baseline, including error, cancel, offline, accessibility size, Cloud and Standalone variants (AC-12).
 - [x] 8.4 Run the Release-configured build, gallery absence scan, architecture gates and file-budget check; record artifacts (AC-09, AC-03, AC-04, AC-05, AC-08).
 - [x] 8.5 Run the existing Core and binding suites; verify `core/` is unchanged and the binding diff contains only the diagnostic sink and event view, with no operation, protocol, DTO, error or authorization change (AC-13).
-- [ ] 8.6 Review the result against this design, record architectural deviations and the maintained-docs decision (AC-11, AC-12, AC-13).
+- [x] 8.6 Review the result against this design, record architectural deviations and the maintained-docs decision (AC-11, AC-12, AC-13).
 - [x] 8.7 Compare cold launch and conversation first render with the 1.1 baseline on the same Simulator device and build configuration; record both measurements and the threshold outcome (AC-15).
 - [x] 8.8 Replace a populated build with the rewrite on the Simulator and verify onboarding, absence of crashes and untouched unrelated files/Keychain items (AC-16).
 - [x] 8.9 Run the accessibility identifier/string checks and VoiceOver traversal at the largest Dynamic Type size; record the manual VoiceOver procedure and result against the 1.1 list (AC-14).

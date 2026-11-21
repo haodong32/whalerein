@@ -414,3 +414,42 @@ previous build, not reverting user data, because no migration is performed.
 | [AC-19](specs/ios-client-architecture/spec.md#scenario-ac-19-logs-persist-stay-bounded-and-export-on-request) | Logs persist, stay bounded and export on request | Written records survive relaunch, rotation/pruning keeps bounds, reset clears app and Core segments, and export is explicit. | Unit tests, Simulator relaunch and export |
 | [AC-20](specs/ios-client-architecture/spec.md#scenario-ac-20-launch-and-render-signposts-are-reproducible) | Launch and render signposts are reproducible | Stable signpost names expose launch and first-content intervals used by AC-15. | Simulator instrumentation |
 | [AC-21](specs/ios-client-architecture/spec.md#scenario-ac-21-core-diagnostic-events-are-bridged-with-correlation-and-isolation) | Core diagnostic events are bridged with correlation and isolation | Core events appear with source, level, trace id and event name; overflow drops; a failing sink does not change results. | Binding tests, model tests |
+
+## Acceptance Results
+
+Recorded from the rewrite branch after tasks 1.1–8.13. Local-only evidence
+lives under `.local-docs/acceptance/rewrite-ios-architecture/`.
+
+| AC | Status | Evidence |
+| --- | --- | --- |
+| AC-01 | PASS | `ConversationState` carries command, queue, wait, approval, history and provenance; 29 reducer tests run without a service or UI. |
+| AC-02 | PASS | One enum per dimension, one command error, one approval slot; reducer tests cover illegal and stale combinations. |
+| AC-03 | PASS | Architecture gate: 0 view service references, 0 view casts, 0 environment injection, all files inside budget. |
+| AC-04 | PASS | Gate: 0 feature-to-feature imports. |
+| AC-05 | PASS | Every view receives its feature models and intents; the shell is injected once at the root. |
+| AC-06 | PASS | `FeatureSet` is computed once per runtime and gates Cloud, account and recovery models; `AppModelTests` cover it. |
+| AC-07 | PASS | The catalog is the only state definition for UI tests, previews and the gallery; every UI flow launches with `-ui-scenario`. |
+| AC-08 | PASS | `StateGalleryUITests` lists the catalog and applies a scenario through `AppRuntime`. |
+| AC-09 | PASS | `release-surface-scan.sh` builds Release and finds no gallery or scenario markers. |
+| AC-10 | PASS | State, model, contract, UI and integration layers run independently; deterministic parity asserts send/approval/queue/history contracts. The local-stack variant is BLOCKED (no stack/Host provisioned). |
+| AC-11 | PASS | `docs/ios-architecture.md`, `apps/ios/AGENTS.md`, a transition table per feature and focused commands exist and match the code. |
+| AC-12 | PASS | Baseline `main`: 47/62 UI flows. Rewrite: 61/63 (one added performance test), with the only failure being the same pre-existing landscape composer hit-test issue on both builds. |
+| AC-13 | PASS | `core/` diff empty; the binding diff is the diagnostic sink, flat event view, `clear_diagnostics` and their tests; 117 binding tests pass. |
+| AC-14 | PASS | All 317 baseline accessibility identifiers still exist; large-text dark, Chinese, VoiceOver grouping and depth suites pass 8/8. |
+| AC-15 | PASS | Same simulator and flow: 4.166 s rewrite vs 4.158 s main (+0.2 %, inside +10 %). |
+| AC-16 | PASS | Populated pre-rewrite build replaced in place; the rewrite launches without a crash and presents Cloud onboarding. |
+| AC-17 | PASS | Catalog, fixtures, previews and packaged payload contain synthetic data only. |
+| AC-18 | PASS | App and Core records carry category, level and correlation; redaction drive shows the sensitive marker never reaches disk. |
+| AC-19 | PASS | Bounds, rotation, pruning, export snapshot, reset and no-upload covered by unit tests and the settings export UI flow. |
+| AC-20 | PASS | `app.launch` and `conversation.first_render` signposts are emitted; the same flow supplies the AC-15 measurement. |
+| AC-21 | PASS | Core events keep source, level, trace id and stable name; overflow drops; a panicking sink never changes a Core result (3 binding tests, 3 bridge tests). |
+
+Known deviations, all recorded in the evidence log:
+
+- The landscape composer hit-test failure exists on `main` and the rewrite; it is
+  a pre-existing layout issue, not a rewrite regression.
+- Local-stack contract parity is BLOCKED because no local Cloud stack/Host was
+  provisioned for this run; deterministic parity cannot substitute for it.
+- `ConversationModel` remains as the conversation feature model (state, reducer
+  and intents), not as the former aggregator; `AppModel` and the launch flags are
+  deleted.
