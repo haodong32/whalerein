@@ -715,19 +715,19 @@
         }
       }
     },
-    "cloud.useAnotherAccount": {
+    "cloud.completing": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use another account"
+            "value": "Completing sign-in…"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "使用其他账号登录"
+            "value": "正在完成登录…"
           }
         }
       }

@@ -59,6 +59,18 @@ struct LaunchOptions: Sendable {
     var questionsOnOpen: Bool
     /// Select deterministic Cloud sign-in and directory fixtures.
     var seedCloudSignedIn: Bool
+    /// Return a different account after a sign-out so a UI test can prove a
+    /// clean sheet really changed accounts.
+    var cloudSwitchAccounts: Bool
+    var cloudStartFailure: Bool
+    var cloudCompleteFailure: Bool
+    var cloudRevoked: Bool
+    /// Complete the fixture's ASWebAuthenticationSession sheet with a
+    /// cancellation error instead of a callback.
+    var cloudCancelSheet: Bool
+    /// Keep the real system sheet and point the fixture provider at a local
+    /// mock OIDC redirect page.
+    var cloudSystemSheet: Bool
     var cloudDirectoryEmpty: Bool
     var cloudDirectoryUnavailable: Bool
     /// Deliver a deterministic ordered pending queue.
@@ -103,6 +115,12 @@ struct LaunchOptions: Sendable {
         keychainLocked = flags.contains("-ui-keychain-locked")
         questionsOnOpen = flags.contains("-ui-questions")
         seedCloudSignedIn = flags.contains("-ui-cloud-signed-in")
+        cloudSwitchAccounts = flags.contains("-ui-cloud-switch")
+        cloudStartFailure = flags.contains("-ui-cloud-start-fail")
+        cloudCompleteFailure = flags.contains("-ui-cloud-complete-fail")
+        cloudRevoked = flags.contains("-ui-cloud-revoked")
+        cloudCancelSheet = flags.contains("-ui-cloud-cancel-sheet")
+        cloudSystemSheet = flags.contains("-ui-cloud-system-sheet")
         cloudDirectoryEmpty = flags.contains("-ui-cloud-empty")
         cloudDirectoryUnavailable = flags.contains("-ui-cloud-unavailable")
         queueOnOpen = flags.contains("-ui-queue")

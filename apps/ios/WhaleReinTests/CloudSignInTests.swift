@@ -187,14 +187,14 @@ struct CloudSignInModelTests {
         #expect(service.startCount == 1)
         #expect(authenticator.presentedURL == service.attempt.url)
         #expect(authenticator.callbackScheme == "whalerein")
-        #expect(authenticator.lastEphemeral == false)
+        #expect(authenticator.lastEphemeral == true)
         #expect(model.phase == .authorizing)
         #expect(model.isAuthPresented)
         #expect(model.errorCode == nil)
     }
 
-    @Test("a local sign-out makes the next primary sign-in choose an account")
-    func signOutForcesCleanNextAttempt() async {
+    @Test("a sign-out followed by sign-in keeps the clean-sheet guarantee")
+    func signOutThenSignInStaysClean() async {
         let service = StubCloudAccountService()
         let authenticator = FakeAuthenticator()
         let model = makeModel(service: service, authenticator: authenticator)
@@ -206,24 +206,6 @@ struct CloudSignInModelTests {
 
         await model.signIn()
         #expect(authenticator.lastEphemeral == true)
-
-        // The clean sheet is one-shot; a cancelled attempt shares again.
-        await model.cancelSignIn()
-        await model.signIn()
-        #expect(authenticator.lastEphemeral == false)
-    }
-
-    @Test("switching accounts starts from a clean browser session")
-    func switchAccountUsesEphemeralSheet() async {
-        let service = StubCloudAccountService()
-        let authenticator = FakeAuthenticator()
-        let model = makeModel(service: service, authenticator: authenticator)
-
-        await model.signIn(ephemeral: true)
-
-        #expect(service.startCount == 1)
-        #expect(authenticator.lastEphemeral == true)
-        #expect(model.phase == .authorizing)
     }
 
     @Test("the callback signs in and loads the Cloud directory")
@@ -331,6 +313,19 @@ struct CloudSignInModelTests {
         #expect(service.completeCount == 0)
         #expect(authenticator.cancelCount == 1)
         #expect(service.cancelCount == 1)
+    }
+
+    @Test("the app deep-link path completes an authorized attempt")
+    func deepLinkCompletes() async {
+        let service = StubCloudAccountService()
+        let model = makeModel(service: service, authenticator: FakeAuthenticator())
+
+        await model.signIn()
+        await model.receiveCallback(callbackURL)
+
+        #expect(model.phase.account == service.account)
+        #expect(service.completeCount == 1)
+        #expect(model.directory == .empty)
     }
 
     @Test("a replayed callback cannot disturb a signed-in session")
