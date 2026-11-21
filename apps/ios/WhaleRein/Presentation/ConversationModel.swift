@@ -48,7 +48,7 @@ final class ConversationModel {
     /// The one business state of this screen. Every dimension below projects
     /// from it; the legacy property names stay read-only for existing views and
     /// are removed once each view is rewritten.
-    private(set) var state = ConversationState()
+    var state = ConversationState()
 
     var questions: QuestionsState {
         get { state.question.questions }
@@ -205,7 +205,7 @@ final class ConversationModel {
     private(set) var resolvingApprovalId: String?
     private(set) var lastAppliedSequence = -1
     private(set) var expandedBlockIds: Set<String> = []
-    private(set) var scroll = ScrollAnchorState()
+    var scroll = ScrollAnchorState()
     private(set) var scrollRequest: ConversationScrollRequest?
     /// Timestamp used for expiry display. It advances on a timer and on every
     /// server refresh, not by reading `Date()` in the view body.
@@ -218,15 +218,15 @@ final class ConversationModel {
     /// Verified attachment transfers for committed attachment blocks.
     let attachments: AttachmentTransferModel
 
-    private var historyContinuation: String?
-    private var historyProjection: String?
-    private var historySource: HistorySource?
-    private var historyGeneration = 0
-    private var isClosed = false
-    private var pagedMessageIds: Set<String> = []
-    private var liveMessageIds: Set<String> = []
-    private let historyPageMessages = 50
-    private let historyPageBytes = 256 * 1024
+    var historyContinuation: String?
+    var historyProjection: String?
+    var historySource: HistorySource?
+    var historyGeneration = 0
+    var isClosed = false
+    var pagedMessageIds: Set<String> = []
+    var liveMessageIds: Set<String> = []
+    let historyPageMessages = 50
+    let historyPageBytes = 256 * 1024
 
     var draft: String = ""
     var delivery: DeliveryChoice = .queue
@@ -244,7 +244,7 @@ final class ConversationModel {
         let committedMessageId: String?
     }
 
-    private let service: any SessionService
+    let service: any SessionService
     /// Queue and wait are independent observations; neither owns the watch.
     let queue: ConversationQueueController
     let wait: ConversationWaitController
@@ -263,7 +263,7 @@ final class ConversationModel {
     /// Text submitted with the currently uncertain send. A later confirmation
     /// may only consume the draft that was actually submitted, never a newer
     /// draft the user typed while the response was in flight.
-    private var inFlightSendText: String?
+    var inFlightSendText: String?
     /// Monotonic epoch for authoritative running/preview state. A Stop receipt
     /// captured before this epoch advanced must not overwrite a newer run.
     private var authoritativeRunEpoch = 0
@@ -910,119 +910,6 @@ final class ConversationModel {
         }
     }
 
-    // MARK: - Operation recovery
-
-    /// Manual recovery for the original send. Uses Core's recorded operation
-    /// identity and never submits another message.
-    func recoverSendResult() async {
-        guard let operationId = lastSendOperationId, !isRecoveringOperation else { return }
-        guard let recovery = service as? any OperationRecoveryService else {
-            operationErrorKey = .errorIntegrationUnavailable
-            return
-        }
-        isRecoveringOperation = true
-        operationErrorKey = nil
-        defer { isRecoveringOperation = false }
-        do {
-            let receipt = try await recovery.recoverSend(operationId: operationId, follow: true)
-            applyOperationReceipt(receipt)
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            operationErrorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    /// Explicit exact reread for a confirmed reference. A failed read keeps the
-    /// confirmation and never resubmits.
-    func readExactReply() async {
-        guard let receipt = operationResult,
-              let reference = receipt.confirmedReference,
-              !isReadingExactReply else { return }
-        guard let recovery = service as? any OperationRecoveryService else {
-            operationErrorKey = .errorIntegrationUnavailable
-            return
-        }
-        guard reference.hostId == hostId, reference.sessionId == sessionId else {
-            operationErrorKey = .errorOperationScope
-            return
-        }
-        isReadingExactReply = true
-        defer { isReadingExactReply = false }
-        do {
-            let message = try await recovery.readMessage(reference)
-            insertCommittedMessage(message)
-            operationResult = OperationReceipt(
-                operationId: receipt.operationId,
-                kind: receipt.kind,
-                scope: receipt.scope,
-                status: receipt.status,
-                receipt: receipt.receipt,
-                reply: receipt.reply,
-                content: message,
-                readError: nil
-            )
-            operationReadErrorKey = nil
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            operationErrorKey = L10nKey.errorKey(for: code)
-            operationReadErrorKey = .conversationOperationReadFailed
-        }
-    }
-
-    /// Applies results from the one coalesced visible-session refresh. Only the
-    /// original send is updated; a foreign scope is rejected.
-    func applyRecoveredOperations(_ receipts: [OperationReceipt]) {
-        guard let operationId = lastSendOperationId else { return }
-        guard let receipt = receipts.first(where: { $0.operationId == operationId }) else {
-            return
-        }
-        applyOperationReceipt(receipt)
-    }
-
-    private func applyOperationReceipt(_ receipt: OperationReceipt) {
-        guard receipt.kind == .send else { return }
-        guard let scope = receipt.scope,
-              scope.hostId == hostId,
-              scope.sessionId == sessionId else {
-            operationErrorKey = .errorOperationScope
-            return
-        }
-        operationResult = receipt
-        operationErrorKey = nil
-        if let content = receipt.content {
-            insertCommittedMessage(content)
-        }
-        if receipt.readError != nil {
-            operationReadErrorKey = .conversationOperationReadFailed
-        } else if receipt.content != nil {
-            operationReadErrorKey = nil
-        }
-        if receipt.status == .confirmed || receipt.status == .failed {
-            if let commandReceipt = receipt.receipt {
-                settleUncertainCommand(with: commandReceipt)
-            }
-            inFlightSendText = nil
-        }
-    }
-
-    /// Deduplicates committed messages by stable identity, including a recovered
-    /// reply that also arrived through the live watch.
-    private func insertCommittedMessage(_ message: ConversationMessage) {
-        if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-            if messages[index] != message {
-                state.messages[index] = message
-            }
-            return
-        }
-        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-        if let echoIndex {
-            state.messages.insert(message, at: min(echoIndex, state.messages.count))
-        } else {
-            state.messages.append(message)
-        }
-    }
-
     // MARK: - Questions
 
     /// Current edits for one question item. Presentation reads this instead of
@@ -1419,7 +1306,7 @@ final class ConversationModel {
         }
     }
 
-    private func reportFatalIfNeeded(_ code: AppErrorCode) {
+    func reportFatalIfNeeded(_ code: AppErrorCode) {
         guard code == .revoked || code == .notPaired else { return }
         onFatalError?(code)
     }
@@ -1470,205 +1357,6 @@ final class ConversationModel {
         requestScroll(animated: true)
     }
 
-    // MARK: - Committed history
-
-    var canLoadOlderHistory: Bool {
-        capabilities.supportsHistoryPage
-            && loadState == .loaded
-            && !historyComplete
-            && !isLoadingOlderHistory
-            && !historyNeedsFreshTraversal
-    }
-
-    var canLoadFreshHistory: Bool {
-        capabilities.supportsHistoryPage
-            && historyNeedsFreshTraversal
-            && !isLoadingOlderHistory
-            && loadState == .loaded
-    }
-
-    var historyProvenanceKey: L10nKey? {
-        switch historyProvenance {
-        case .online: return .conversationHistoryOnline
-        case .cache: return .conversationHistoryCache
-        case .unavailable: return .conversationHistoryUnavailable
-        case nil: return nil
-        }
-    }
-
-    /// Live tool previews stay until their authoritative committed block
-    /// arrives; a committed identity always wins.
-    var visibleLiveToolActivities: [ToolActivity] {
-        let committed = Set(
-            messages.flatMap { message in
-                message.blocks.compactMap { $0.toolActivity?.callId }
-            }
-        )
-        return liveToolActivities.filter { !committed.contains($0.callId) }
-    }
-
-    /// Loads one older bounded page. `cacheFallback` explicitly serves the
-    /// encrypted local cache when the Host is unreachable, with cache
-    /// provenance shown to the reader.
-    func loadOlderHistory(cacheFallback: Bool = false) async {
-        guard canLoadOlderHistory,
-              let history = service as? any ConversationHistoryService else {
-            if !capabilities.supportsHistoryPage {
-                historyErrorKey = .errorUnsupportedCapability
-            }
-            return
-        }
-        let useCache = cacheFallback || historySource == .cache || !connection.isOnline
-        // Switching source requires a fresh traversal; a continuation belongs
-        // to one source, projection and scope.
-        if let historySource, historySource != (useCache ? .cache : .online) {
-            historyContinuation = nil
-            historyProjection = nil
-        }
-        let generation = historyGeneration
-        let anchor = scroll.anchorMessageId ?? messages.first?.messageId
-        scroll.capturePrependAnchor(anchor)
-        isLoadingOlderHistory = true
-        historyErrorKey = nil
-        defer {
-            if generation == historyGeneration {
-                isLoadingOlderHistory = false
-            }
-        }
-        do {
-            let page = try await history.historyPage(
-                hostId: hostId,
-                sessionId: sessionId,
-                source: useCache ? .cache : .online,
-                continuation: historyContinuation,
-                maxMessages: historyPageMessages,
-                maxBytes: historyPageBytes
-            )
-            // A replaced session/instance invalidates this late page.
-            guard generation == historyGeneration, !isClosed else { return }
-            applyHistoryPage(page, anchor: anchor)
-        } catch {
-            guard generation == historyGeneration, !isClosed else { return }
-            handleHistoryFailure(error)
-        }
-    }
-
-    /// Drops paged-only rows and starts a fresh latest-first traversal after a
-    /// stale continuation or content projection. Live rows are preserved.
-    func loadFreshHistory() async {
-        guard canLoadFreshHistory else { return }
-        historyGeneration &+= 1
-        state.messages.removeAll { message in
-            pagedMessageIds.contains(message.messageId)
-                && !liveMessageIds.contains(message.messageId)
-        }
-        pagedMessageIds.removeAll()
-        historyContinuation = nil
-        historyProjection = nil
-        historySource = nil
-        historyComplete = false
-        historyNeedsFreshTraversal = false
-        historyErrorKey = nil
-        await loadOlderHistory()
-    }
-
-    /// Resolve one exact scoped committed message. Stale or foreign content is
-    /// never applied: the model offers a fresh traversal instead.
-    func rereadMessage(_ reference: MessageReference) async {
-        guard reference.hostId == hostId, reference.sessionId == sessionId else {
-            historyErrorKey = .errorSecurity
-            return
-        }
-        guard capabilities.supportsHistoryExact,
-              let history = service as? any ConversationHistoryService else {
-            historyErrorKey = .errorUnsupportedCapability
-            return
-        }
-        if let historyProjection, reference.projectionId != historyProjection {
-            historyNeedsFreshTraversal = true
-            historyErrorKey = nil
-            return
-        }
-        do {
-            let message = try await history.historyMessage(reference)
-            guard !isClosed,
-                  reference.hostId == hostId,
-                  reference.sessionId == sessionId else { return }
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-            } else {
-                state.messages.append(message)
-            }
-            liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
-            settleAuthoritativeContent(message)
-            historyErrorKey = nil
-        } catch {
-            handleHistoryFailure(error)
-        }
-    }
-
-    private func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
-        if let historyProjection, historyProjection != page.projection {
-            historyNeedsFreshTraversal = true
-            historyContinuation = nil
-            return
-        }
-        historyProjection = page.projection
-        historySource = page.source
-        historyProvenance = page.source == .cache
-            ? .cache
-            : (connection.isOnline ? .online : .unavailable)
-        let existing = Set(messages.map(\.messageId))
-        var prepended: [ConversationMessage] = []
-        for message in page.messages where !existing.contains(message.messageId) {
-            prepended.append(message)
-            pagedMessageIds.insert(message.messageId)
-        }
-        if !prepended.isEmpty {
-            state.messages.insert(contentsOf: prepended, at: 0)
-        }
-        historyContinuation = page.complete ? nil : page.continuation
-        historyComplete = page.complete
-        historyErrorKey = nil
-        if !prepended.isEmpty {
-            historyPrepend = HistoryFacet.Prepend(
-                id: (historyPrepend?.id ?? 0) + 1,
-                anchorMessageId: anchor
-            )
-        }
-    }
-
-    private func handleHistoryFailure(_ error: Error) {
-        let code = (error as? SessionServiceError)?.code ?? .internalError
-        if code == .staleHistory {
-            historyNeedsFreshTraversal = true
-            historyContinuation = nil
-            historyProjection = nil
-            historyErrorKey = nil
-            return
-        }
-        historyErrorKey = L10nKey.errorKey(for: code)
-        if code == .unavailable || code == .hostOffline {
-            historyProvenance = .unavailable
-        }
-    }
-
-    /// Settles any live preview whose authoritative committed identity arrived.
-    private func settleAuthoritativeContent(_ message: ConversationMessage) {
-        let settledCallIds = Set(
-            message.blocks.compactMap { $0.toolActivity?.callId }
-        )
-        if !settledCallIds.isEmpty {
-            liveToolActivities.removeAll { settledCallIds.contains($0.callId) }
-        }
-        if message.role == .assistant {
-            previewText = nil
-            previewAttemptId = nil
-            reasoningPreviewText = nil
-        }
-    }
-
     // MARK: - Internals
 
     @discardableResult
@@ -1711,7 +1399,7 @@ final class ConversationModel {
     /// Matching uses the Core message id when the receipt supplied one; only
     /// Sources that never echo a correlation id fall back to exact text. Text
     /// fallback must not merge two distinct authoritative identities.
-    private func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
+    func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
         let echoText = normalizedText(message.plainText)
         let match = messages.firstIndex { local in
             guard let pending = optimisticMessages[local.messageId] else { return false }
@@ -1730,12 +1418,12 @@ final class ConversationModel {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func draftMatchesSubmission(_ submittedText: String) -> Bool {
+    func draftMatchesSubmission(_ submittedText: String) -> Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines) == submittedText
     }
 
     /// Settles the one uncertain command with a terminal receipt.
-    private func settleUncertainCommand(with receipt: CommandReceipt) {
+    func settleUncertainCommand(with receipt: CommandReceipt) {
         guard case .uncertain(let command, let inFlight) = state.lifecycle,
               inFlight.commandId == receipt.commandId else { return }
         state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
@@ -1818,7 +1506,7 @@ final class ConversationModel {
         return earlyCommandStatuses.removeValue(forKey: commandId)
     }
 
-    private func clearDraftAfterSubmission() {
+    func clearDraftAfterSubmission() {
         draft = ""
         draftSaveTask?.cancel()
         draftSaveTask = nil
