@@ -227,7 +227,10 @@ struct SettingsView: View {
                         : L10n.settingsForget.string,
                     role: .destructive
                 ) {
-                    Task { await app.settings.confirmPendingAction() }
+                    // Capture the action before the alert dismisses: dismissal
+                    // clears the confirmation in the model.
+                    guard let action = pendingAction else { return }
+                    Task { await app.settings.perform(action) }
                 }
                 .accessibilityIdentifier("settings.confirm")
             }
