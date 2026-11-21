@@ -360,7 +360,7 @@ func validRequest(now time.Time, commandID string) *whalereinv1.HostRequest {
 		PayloadDigest:   []byte("digest"),
 		ExpiresAtUnixMs: now.Add(5 * time.Minute).UnixMilli(),
 		ProtocolVersion: 1,
-		RelayVersion:    3,
+		RelayVersion:    4,
 		ChannelId:       "channel-1",
 		TraceId:         "trace-1",
 		Body:            []byte("ciphertext"),
@@ -892,7 +892,7 @@ func TestRelayEpochSurvivesDurableForwardingAndRejectsForeignEpochs(t *testing.T
 	if len(f.broker.published) == 0 || f.broker.published[len(f.broker.published)-1].RelayVersion != RelayEpoch {
 		t.Fatal("relay epoch lost on replay")
 	}
-	for _, version := range []uint32{0, 2, 4} {
+	for _, version := range []uint32{0, 2, 3, 5} {
 		request.RelayVersion = version
 		if _, _, err := f.service.Submit(context.Background(), input(request)); !errors.Is(err, ErrProtocolVersion) {
 			t.Fatalf("foreign epoch %d was admitted", version)

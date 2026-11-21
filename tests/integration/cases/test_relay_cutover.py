@@ -25,7 +25,7 @@ def request_body(scenario, device, **overrides):
         "expiresAtUnixMs": str(int((time.time() + 60) * 1000)),
         "protocolVersion": 1,
         "channelId": "channel-cutover",
-        "relayVersion": 3,
+        "relayVersion": 4,
         "body": base64.b64encode(b"opaque ciphertext").decode(),
     }
     payload.update(overrides)
@@ -59,10 +59,17 @@ def post_request(scenario, device, token, payload):
                 "When a request names relay epoch 2, Access rejects it with protocol_version_incompatible and never admits or forwards it."
             ),
         ),
+        pytest.param(
+            3,
+            id="AC-05.legacy-v3",
+            marks=pytest.mark.description(
+                "When a request names the retired relay epoch 3, Access rejects it with protocol_version_incompatible and never admits or forwards it; only epoch 4 is accepted."
+            ),
+        ),
     ],
 )
 def test_legacy_epoch_is_rejected(scenario, paired_device, epoch):
-    """A relay envelope that does not name epoch 3 is rejected with protocol_version_incompatible and is not admitted."""
+    """A relay envelope that does not name epoch 4 is rejected with protocol_version_incompatible and is not admitted."""
     with scenario.fixture_bearer(paired_device) as bearer:
         status, _, body = post_request(
             scenario,
@@ -73,8 +80,8 @@ def test_legacy_epoch_is_rejected(scenario, paired_device, epoch):
     assert status == 400
     payload = json.loads(body)
     assert payload["code"] == "protocol_version_incompatible"
-    # The same payload at epoch 3 is admitted, so the failure is the cutover,
-    # not a broken fixture.
+    # The same payload at epoch 4 is admitted, so the failure is the cutover,
+    # not a broken fixture. There is no fallback for the retired epoch 3.
     with scenario.fixture_bearer(paired_device) as bearer:
         accepted, _, _ = post_request(
             scenario, paired_device, bearer, request_body(scenario, paired_device)

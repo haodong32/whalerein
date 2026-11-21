@@ -17,7 +17,7 @@ use whalerein_proto::{
     RequestReceipt, RequestState,
 };
 
-use crate::access::transport::TransportBudget;
+use crate::access::transport::{TransportBudget, RELAY_EPOCH_V4};
 use crate::api::{error_code_name, CoreError, CoreResult};
 use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostics};
 use crate::util::now_unix_ms;
@@ -602,7 +602,7 @@ impl AccessClient {
             .http
             .put(url)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .header(RELAY_EPOCH_HEADER, "3")
+            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string())
             .header(reqwest::header::CONTENT_LENGTH, bytes.len().to_string())
             .header(TRACE_HEADER, self.trace_id())
             .timeout(self.transfer_timeout());
@@ -649,7 +649,7 @@ impl AccessClient {
         let mut request = self
             .http
             .get(url)
-            .header(RELAY_EPOCH_HEADER, "3")
+            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string())
             .header(reqwest::header::ACCEPT, "application/octet-stream")
             .header(TRACE_HEADER, self.trace_id())
             .timeout(self.transfer_timeout());
@@ -677,7 +677,7 @@ impl AccessClient {
         let url = self.endpoint(&["v1", "relay", "objects", object_id])?;
         self.send(
             self.request(reqwest::Method::DELETE, url, None)
-                .header(RELAY_EPOCH_HEADER, "3"),
+                .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string()),
         )
         .await
     }
@@ -1676,7 +1676,7 @@ mod relay_tests {
                     },
                 ),
                 ("PUT", path) if path == format!("/v1/relay/objects/{served_object_id}") => {
-                    assert_eq!(mock.headers.get("whalerein-relay-epoch").unwrap(), "3");
+                    assert_eq!(mock.headers.get("whalerein-relay-epoch").unwrap(), "4");
                     assert_eq!(mock.headers.get("content-length").unwrap(), "8");
                     assert_eq!(mock.body, b"cipher-!");
                     MockResponse::empty(204)
@@ -1703,7 +1703,7 @@ mod relay_tests {
         let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
         let reservation = client
             .reserve_relay_object(&RelayObjectReserveRequest {
-                relay_version: 3,
+                relay_version: RELAY_EPOCH_V4,
                 host_id: "h".into(),
                 device_id: "d".into(),
                 session_id: String::new(),
@@ -1726,7 +1726,7 @@ mod relay_tests {
             .finish_relay_object(
                 &object_id,
                 &RelayObjectFinishRequest {
-                    relay_version: 3,
+                    relay_version: RELAY_EPOCH_V4,
                     ciphertext_bytes: 8,
                     sha256: crate::util::sha256(b"cipher-!").to_vec(),
                     signed_at_unix_ms: 0,

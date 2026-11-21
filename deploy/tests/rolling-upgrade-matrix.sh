@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the supported adjacent-version upgrade window against a scratch
-# PostgreSQL instance, plus the static epoch-3 deployment prerequisites.
+# PostgreSQL instance, plus the static epoch-4 deployment prerequisites.
 #
 # Usage:
 #   deploy/tests/rolling-upgrade-matrix.sh --static
@@ -15,7 +15,7 @@
 #
 # It verifies:
 #   0. static prerequisites: payload volume/config, broker/profile alignment,
-#      relay epoch 3, relay topics, storage readiness and no legacy ack topic;
+#      relay epoch 4, relay topics, storage readiness and no legacy ack topic;
 #   1. the rendered standalone transport/storage settings validate and invalid
 #      profiles are rejected before any listener opens;
 #   2. an old binary migrates an empty database;
@@ -80,20 +80,25 @@ deny_static_file() {
   fi
 }
 
-echo "==> static preflight: relay epoch 3"
+echo "==> static preflight: relay epoch 4"
 require_static_file "broker relay epoch constant" \
-  '^const RelayEpoch uint32 = 3$' "$ROOT_DIR/access/internal/broker/budget.go"
+  '^const RelayEpoch uint32 = 4$' "$ROOT_DIR/access/internal/broker/budget.go"
 require_static_file "proto relay epoch value" \
-  'RELAY_EPOCH_V3 = 3;' "$ROOT_DIR/proto/v1/whalerein.proto"
-require_static_file "wire contract requires relay_version=3" \
-  'relay_version=3' "$ROOT_DIR/proto/v1/WIRE.md"
+  'RELAY_EPOCH_V4 = 4;' "$ROOT_DIR/proto/v1/whalerein.proto"
+require_static_file "wire contract requires relay_version=4" \
+  'relay_version=4' "$ROOT_DIR/proto/v1/WIRE.md"
+if grep -qE 'RELAY_EPOCH_V3 = 3;' "$ROOT_DIR/proto/v1/whalerein.proto"; then
+  fail "retired relay epoch 3 is still accepted"
+fi
 
 echo "==> static preflight: complete-message topics and retired ack topic"
 require_static_file "device notice topic" 'func DeviceNoticeTopic' "$ROOT_DIR/access/internal/broker/topics.go"
 require_static_file "device ready topic" 'func DeviceReadyTopic' "$ROOT_DIR/access/internal/broker/topics.go"
+require_static_file "host live topic" 'func LiveTopic' "$ROOT_DIR/access/internal/broker/topics.go"
+require_static_file "device live topic" 'func DeviceLiveTopic' "$ROOT_DIR/access/internal/broker/topics.go"
 require_static_file "readiness rejects foreign epoch" \
   'ErrRelayEpoch' "$ROOT_DIR/access/internal/broker/budget.go"
-for topic in request result event "/notice" "/ready"; do
+for topic in request result event "/notice" "/ready" "/live"; do
   require_static_file "wire topic $topic" "$topic" "$ROOT_DIR/proto/v1/WIRE.md"
 done
 deny_static_file "ACK topic in the broker topic parser" '"ack"' "$ROOT_DIR/access/internal/broker/topics.go"
@@ -134,8 +139,10 @@ require_static_file "Compose named payload volume" \
   'name: whalerein-access-payloads' "$STACK_CONFIG"
 require_static_file "Access image owns the payload directory" \
   'mkdir -p /var/lib/whalerein/payloads' "$ROOT_DIR/deploy/docker/access.Dockerfile"
-require_static_file "storage readiness check wired into /readyz" \
-  'readiness.Add\("storage", storageService.Ready\)' "$ROOT_DIR/access/cmd/server/main.go"
+require_static_file "database readiness check wired into /readyz" \
+  'readiness.Add\("database", diagnostics.DatabaseReadiness\(db\)\)' "$ROOT_DIR/access/cmd/server/main.go"
+require_static_file "broker and storage readiness checks wired into /readyz" \
+  'serverready.AddChecks\(readiness, service, presence, storageService\)' "$ROOT_DIR/access/cmd/server/main.go"
 require_static_file "Compose healthcheck uses /readyz" \
   'http://127.0.0.1:8080/readyz' "$STACK_CONFIG"
 
@@ -346,7 +353,7 @@ output="$(migrate "$OLD_IMAGE" "$OLD_CONFIG" 2>&1)"
 status=$?
 set -e
 if [ "$status" -eq 0 ]; then
-  echo "old image started against a newer schema; the compatibility gate is broken" >&2
+  echo "old image started against a newer schema; the schema downgrade gate is broken" >&2
   exit 1
 fi
 if ! grep -q "newer migration" <<<"$output"; then

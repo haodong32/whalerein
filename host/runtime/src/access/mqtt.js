@@ -1,7 +1,7 @@
 // MQTT 5 over TLS transport. This is the plugin's only network connection:
 // no HTTP server and no inbound listener. It subscribes to its own request
 // topic and its exact host presence topic, and publishes only its own
-// result/event topics.
+// result/event control topics plus the QoS 0 live topic.
 
 import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
@@ -147,7 +147,7 @@ export class MqttAccess {
       relay: this.#relay,
       budget: this.budget,
       brokerPacketBytes: BROKER_PACKET_LIMIT_BYTES,
-      publish: (topic, bytes) => this.#publish(topic, bytes),
+      publish: (topic, bytes, options) => this.#publish(topic, bytes, options),
       now,
       logger: this.logger,
       objectTtlMs: this.relayObjectTtlMs,
@@ -268,6 +268,10 @@ export class MqttAccess {
     return this.topics.event
   }
 
+  get liveTopic() {
+    return this.topics.live
+  }
+
   /** Begin connecting; reconnects continue in the background after failures. */
   start(handlers = {}) {
     if (!this.#stopped) return this
@@ -364,6 +368,15 @@ export class MqttAccess {
     })
     client.on('connect', (connack) => {
       if (generation !== this.#generation || this.#stopped) return
+      // Small ordered previews must not wait for a full RTT of Nagle
+      // coalescing on a high-latency link. MQTT already delimits packets, so
+      // disabling Nagle only removes an artificial per-packet delay.
+      try {
+        client.stream?.setNoDelay?.(true)
+      } catch {
+        // A transport without a socket (for example a test double) needs no
+        // tuning; the failure cannot affect message semantics.
+      }
       this.#onConnected(client, generation, connack)
     })
     client.on('message', (topic, payload) => {
@@ -579,32 +592,44 @@ export class MqttAccess {
     this.logger?.info('mqtt_reconnect_scheduled', { ms: delay })
   }
 
-  async #publish(topic, payload) {
+  #kindFor(topic) {
+    if (topic === this.topics.result) return 'result'
+    if (topic === this.topics.live) return 'live'
+    return 'event'
+  }
+
+  async #publish(topic, payload, { qos = 1 } = {}) {
     const client = this.#client
     if (!client || !this.#connected) throw new PluginError('unavailable', 'mqtt not connected')
     if (payload.length > this.budget.envelope_bytes) {
       this.#publishErrors++
-      this.logger?.warn('mqtt_payload_too_large', { code: 'payload_too_large', kind: topic === this.topics.result ? 'result' : 'event', bytes: payload.length, limit: this.budget.envelope_bytes, generation: this.#generation })
+      this.logger?.warn('mqtt_payload_too_large', { code: 'payload_too_large', kind: this.#kindFor(topic), bytes: payload.length, limit: this.budget.envelope_bytes, generation: this.#generation })
       throw new PluginError('payload_too_large', 'mqtt payload exceeds the envelope budget')
     }
-    const publication = { kind: topic === this.topics.result ? 'result' : 'event', bytes: payload.length }
+    const publication = { kind: this.#kindFor(topic), bytes: payload.length }
     const generation = this.#generation
     this.#lastPublish = publication
-    this.logger?.debug('mqtt_publish_started', { ...publication, generation })
+    this.logger?.debug('mqtt_publish_started', { ...publication, qos, generation })
     let timer
     try {
       await new Promise((resolve, reject) => {
-        timer=setTimeout(()=>{
-          this.logger?.warn('mqtt_publish_timeout',{code:'unavailable',generation,ms:this.publishTimeoutMs,...publication})
+        if (qos === 0) {
+          // Live is fire-and-forget: the packet is released when the client
+          // accepts it. There is no PUBACK timer and no acknowledgement error.
+          client.publish(topic, Buffer.from(payload), { qos: 0 }, (error) => (error ? reject(error) : resolve()))
+          return
+        }
+        timer = setTimeout(() => {
+          this.logger?.warn('mqtt_publish_timeout', { code: 'unavailable', generation, ms: this.publishTimeoutMs, ...publication })
           client.end(true)
-          reject(new PluginError('unavailable','MQTT acknowledgement timed out'))
-        },this.publishTimeoutMs)
+          reject(new PluginError('unavailable', 'MQTT acknowledgement timed out'))
+        }, this.publishTimeoutMs)
         client.publish(topic, Buffer.from(payload), { qos: 1 }, (error) => (error ? reject(error) : resolve()))
       })
       this.#published++
     } catch {
       this.#publishErrors++
-      this.logger?.warn('mqtt_publish_failed', { code: 'unavailable', ...publication, generation })
+      this.logger?.warn('mqtt_publish_failed', { code: 'unavailable', qos, ...publication, generation })
       throw new PluginError('unavailable', 'mqtt publish failed')
     } finally { clearTimeout(timer) }
   }
@@ -618,13 +643,25 @@ export class MqttAccess {
     })
   }
 
-  /** Publish one complete EventEnvelope, inline or as a ready reference. */
-  publishEvent(payload, { live = false } = {}) {
+  /** Publish one complete control EventEnvelope, inline or as a ready reference. */
+  publishEvent(payload) {
     return this.#transport.sendComplete(this.topics.event, payload, {
       kind: 'event',
-      live,
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
       expiresAt: this.now() + this.relayObjectTtlMs,
+    })
+  }
+
+  /**
+   * Publish one complete live preview at QoS 0 on the Host live topic.
+   *
+   * Resolves after the client accepts the packet, or false when the preview
+   * cannot be carried. It never waits for an acknowledgement, never stages a
+   * reference and never retries.
+   */
+  publishLive(payload) {
+    return this.#transport.sendLive(this.topics.live, payload, {
+      receiverLimit: this.#accessReceive?.budget?.packet_bytes,
     })
   }
 

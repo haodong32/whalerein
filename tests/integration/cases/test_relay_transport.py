@@ -17,7 +17,7 @@ from environment import BROKER_PASSWORD, ROOT
 
 pytestmark = pytest.mark.transport
 
-PROBE = ROOT / "tests/integration/drivers/transport/relay-v3-probe.mjs"
+PROBE = ROOT / "tests/integration/drivers/transport/relay-epoch-probe.mjs"
 
 
 def run_probe(case, broker):
@@ -90,7 +90,7 @@ def run_probe(case, broker):
             "AC-05.legacy",
             id="AC-05.legacy",
             marks=pytest.mark.description(
-                "When a relay envelope names epoch 0 or 2, or mixes inline and reference representations, it is rejected as protocol_version_incompatible or invalid_argument and never reaches Host business handling."
+                "When a relay envelope names epoch 0, 2 or the retired epoch 3, or mixes inline and reference representations, it is rejected as protocol_version_incompatible or invalid_argument and never reaches Host business handling."
             ),
         ),
         pytest.param(
@@ -98,7 +98,7 @@ def run_probe(case, broker):
             "AC-05.matched",
             id="AC-05.matched",
             marks=pytest.mark.description(
-                "When a matching epoch-3 release publishes six small results at the negotiated budget, every body arrives intact, the publisher does not reconnect, and no fragment, receipt or acknowledgement packet appears."
+                "When a matching epoch-4 release publishes six small results at the negotiated budget, every body arrives intact, the publisher does not reconnect, and no fragment, receipt or acknowledgement packet appears."
             ),
         ),
         pytest.param(
@@ -106,7 +106,7 @@ def run_probe(case, broker):
             "AC-05.no-fragments",
             id="AC-05.no-fragments",
             marks=pytest.mark.description(
-                "When a matching epoch-3 release publishes complete packets, the capture contains no WRMQTT2 prefix, no receipt topic and no device acknowledgement topic."
+                "When a matching epoch-4 release publishes complete packets, the capture contains no WRMQTT2 prefix, no receipt topic and no device acknowledgement topic."
             ),
         ),
         pytest.param(
@@ -115,6 +115,22 @@ def run_probe(case, broker):
             id="AC-05.bulk-fairness",
             marks=pytest.mark.description(
                 "When a bulk reference publication waits for its object to become readable, a small inline flow on another topic is still published within the same connection."
+            ),
+        ),
+        pytest.param(
+            "live-class",
+            "AC-15.live-topic-class",
+            id="AC-15.live-topic-class",
+            marks=pytest.mark.description(
+                "When a Host publishes a preview, it arrives only on the QoS 0 live topic, the control event topic carries no preview, and the same complete envelope on the control path stays QoS 1."
+            ),
+        ),
+        pytest.param(
+            "live-inline-and-drop",
+            "AC-15.live-inline-and-drop",
+            id="AC-15.live-inline-and-drop",
+            marks=pytest.mark.description(
+                "When live delivery is disconnected, above the packet budget or would need an HTTPS reference, the preview is dropped without a retry or reference and the control event is still delivered at QoS 1."
             ),
         ),
         pytest.param(
@@ -136,7 +152,7 @@ def run_probe(case, broker):
     ],
 )
 def test_relay_transport(case, subcase, broker):
-    """Passes the named epoch-3 relay subcase on the real broker."""
+    """Passes the named epoch-4 relay subcase on the real broker."""
     facts = run_probe(case, broker)
     if subcase == "AC-01.receiver-budget":
         assert facts["inlineBytes"] <= facts["limit"]
@@ -151,7 +167,12 @@ def test_relay_transport(case, subcase, broker):
     elif subcase == "AC-05.oversize":
         assert facts["code"] == "payload_too_large" and facts["packets"] == 0
     elif subcase == "AC-05.legacy":
-        assert facts["codes"] == {"0": "protocol_version_incompatible", "2": "protocol_version_incompatible", "mixed": "invalid_argument"}
+        assert facts["codes"] == {
+            "0": "protocol_version_incompatible",
+            "2": "protocol_version_incompatible",
+            "3": "protocol_version_incompatible",
+            "mixed": "invalid_argument",
+        }
         assert facts["legacyDelivered"] == 0 and facts["validDelivered"] == 1
     elif subcase == "AC-05.matched":
         assert facts["packets"] == 6 and facts["reconnects"] == 0
@@ -163,6 +184,12 @@ def test_relay_transport(case, subcase, broker):
         assert facts["codes"]["inline"] == "payload_digest_mismatch"
     elif subcase == "AC-02.truncated":
         assert facts["codes"]["truncated"] in {"invalid_argument", "unavailable"}
+    elif subcase == "AC-15.live-topic-class":
+        assert facts["liveQos"] == 0 and facts["controlQos"] == 1
+        assert facts["livePackets"] == 1 and facts["eventPackets"] == 1
+    elif subcase == "AC-15.live-inline-and-drop":
+        assert facts["dropped"] is False and facts["oversized"] is False and facts["referenced"] is False
+        assert facts["control"] == "inline" and facts["controlQos"] == 1
     else:  # pragma: no cover - the parametrization is exhaustive
         raise AssertionError(f"unbound relay subcase {subcase}")
 

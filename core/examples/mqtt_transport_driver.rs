@@ -22,13 +22,16 @@ async fn main() {
         client.run(
             || false,
             |event| {
-                assert_eq!(event.relay_version, 3);
+                assert_eq!(event.relay_version, 4);
                 let inline = !event.ciphertext.is_empty();
                 let referenced = event.payload_reference.is_some();
                 assert!(inline != referenced);
                 received += 1;
                 false
             },
+            // The driver observes the control class only; a live preview is
+            // derived state and never the committed message it waits for.
+            |_| true,
             |_| true,
             |state| {
                 if state == MqttConnectionEvent::Subscribed {

@@ -59,7 +59,7 @@ def _field(payload, number):
 def _host_request_kind(payload):
     """Return the complete HostRequest.kind from one relay PUBLISH.
 
-    Epoch 3 carries exactly one envelope per packet, so the payload is the
+    Epoch 4 carries exactly one envelope per packet, so the payload is the
     protobuf message itself. There is no legacy prefix to unwrap.
     """
     kind = _field(payload, 4)
@@ -88,7 +88,7 @@ class AmbiguousHostRequestProxy:
     broker acknowledgement can come back. The command may therefore already
     have executed while the publish returns an error, which is exactly the
     documented ambiguous-delivery window. There is no application receipt in
-    epoch 3, so this proxy withholds the only remaining confirmation.
+    epoch 4, so this proxy withholds the only remaining confirmation.
     """
 
     def __init__(self, host_id, upstream=("127.0.0.1", 1883)):

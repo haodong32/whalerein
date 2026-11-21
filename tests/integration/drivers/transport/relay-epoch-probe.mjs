@@ -1,4 +1,4 @@
-// One epoch-3 transport probe per AC subcase. Each invocation prints one JSON
+// One epoch-4 transport probe per AC subcase. Each invocation prints one JSON
 // fact object; the Python case asserts the named identity. Only counts, sizes
 // and stable codes are printed, never ciphertext or message content.
 
@@ -12,6 +12,7 @@ import { publishPacketBytes } from '../../../../host/runtime/src/access/packet.j
 import { codec } from '../../../../host/runtime/src/protocol.js'
 import {
   capturePublishes,
+  collectMessages,
   createRelayStub,
   hasLegacyFraming,
   nextMessage,
@@ -35,7 +36,7 @@ function envelope(hostId, body, requestId = randomUUID(), extra = {}) {
     result_body: body,
     completed_at_unix_ms: 1,
     protocol_version: 1,
-    relay_version: 3,
+    relay_version: 4,
     ...extra,
   })
 }
@@ -58,7 +59,7 @@ function eventEnvelope(hostId, length) {
     nonce: Buffer.alloc(12),
     ciphertext: bytes(length),
     created_at_unix_ms: 1,
-    relay_version: 3,
+    relay_version: 4,
   })
 }
 
@@ -156,7 +157,7 @@ async function caseReferenceLimit() {
     purpose: 'PAYLOAD_PURPOSE_RESULT',
   }
   const payload = proto.encode('whalerein.v1.HostResult', {
-    request_id: randomUUID(), host_id: hostId, status: 'succeeded', relay_version: 3,
+    request_id: randomUUID(), host_id: hostId, status: 'succeeded', relay_version: 4,
     result_reference: reference,
   })
   let code = ''
@@ -198,7 +199,7 @@ async function caseLegacy() {
   const stub = createRelayStub()
   const transport = new RelayTransport({ publish: async () => {}, relay: stub.relay })
   const codes = {}
-  for (const epoch of [0, 2]) {
+  for (const epoch of [0, 2, 3]) {
     try {
       await transport.sendComplete(topic, proto.encode('whalerein.v1.HostResult', {
         request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: epoch,
@@ -211,7 +212,7 @@ async function caseLegacy() {
   // A mixed artifact with both representations is never admitted either.
   try {
     await transport.sendComplete(topic, proto.encode('whalerein.v1.HostResult', {
-      request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: 3,
+      request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: 4,
       result_reference: { object_id: 'f'.repeat(32), owner_node_id: 'n', ciphertext_bytes: 16, sha256: Buffer.alloc(32), expires_at_unix_ms: Date.now() + 60000, purpose: 'PAYLOAD_PURPOSE_RESULT' },
     }), { kind: 'result' })
     codes.mixed = 'accepted'
@@ -235,11 +236,11 @@ async function caseLegacy() {
         request_id: 'legacy', host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 2,
         body: Buffer.from('WRMQTT2legacy'), protocol_version: 1,
       }), { qos: 1 })
-      const validId = 'valid-v3'
+      const validId = 'valid-v4'
       await new Promise((resolve) => setTimeout(resolve, 300))
       assert.equal(delivered, 0, 'a legacy epoch must not reach the Host business handler')
       await publisher.publishAsync(requestTopic, proto.encode('whalerein.v1.HostRequest', {
-        request_id: validId, host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 3,
+        request_id: validId, host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 4,
         body: Buffer.from('valid'), protocol_version: 1,
       }), { qos: 1 })
       const deadline = Date.now() + 2000
@@ -368,6 +369,122 @@ async function caseBulkFairness() {
   }
 }
 
+async function caseLiveClass() {
+  const hostId = `probe-live-${randomUUID().slice(0, 10)}`
+  const liveTopic = `whalerein/v1/h/${hostId}/live`
+  const eventTopic = `whalerein/v1/h/${hostId}/event`
+  const stub = createRelayStub()
+  const subscriber = await subscribe(MQTT_URL, `whalerein/v1/h/${hostId}/#`, { qos: 1 })
+  const messages = collectMessages(subscriber)
+  const published = []
+  const transport = new RelayTransport({
+    publish: async (topic, payload, options) => {
+      const qos = options?.qos ?? 1
+      published.push({ topic, qos })
+      await subscriber.publishAsync(topic, payload, { qos })
+    },
+    relay: stub.relay,
+  })
+  try {
+    const preview = eventEnvelope(hostId, 64)
+    const accepted = await transport.sendLive(liveTopic, preview, { receiverLimit: 65536 })
+    assert.equal(accepted, true)
+    const delivered = await nextMessage(subscriber, (topic) => topic === liveTopic)
+    assert.equal(delivered.qos, 0, 'live previews are published at QoS 0')
+    assert.deepEqual(Buffer.from(delivered.bytes), Buffer.from(preview))
+    // A live preview never appears on the control event topic.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    assert.equal(
+      messages.filter((message) => message.topic === eventTopic).length,
+      0,
+      'a live preview must not be published on the control event topic',
+    )
+    // The same complete envelope delivered as control uses the event topic at QoS 1.
+    const controlReceived = nextMessage(subscriber, (topic) => topic === eventTopic)
+    const control = await transport.sendComplete(eventTopic, preview, { kind: 'event', receiverLimit: 65536 })
+    assert.equal(control.representation, 'inline')
+    const controlMessage = await controlReceived
+    assert.equal(controlMessage.qos, 1, 'control events stay QoS 1')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    assert.equal(messages.filter((message) => message.topic === liveTopic).length, 1)
+    assert.equal(messages.filter((message) => message.topic === eventTopic).length, 1)
+    assert.deepEqual(published.map((entry) => entry.qos), [0, 1])
+    result({
+      liveQos: delivered.qos,
+      controlQos: controlMessage.qos,
+      livePackets: messages.filter((message) => message.topic === liveTopic).length,
+      eventPackets: messages.filter((message) => message.topic === eventTopic).length,
+    })
+  } finally {
+    await subscriber.endAsync(true)
+  }
+}
+
+async function caseLiveInlineAndDrop() {
+  const hostId = `probe-live-drop-${randomUUID().slice(0, 10)}`
+  const liveTopic = `whalerein/v1/h/${hostId}/live`
+  const eventTopic = `whalerein/v1/h/${hostId}/event`
+  const stub = createRelayStub()
+  const subscriber = await subscribe(MQTT_URL, `whalerein/v1/h/${hostId}/#`, { qos: 1 })
+  let livePublishes = 0
+  let failLive = true
+  const transport = new RelayTransport({
+    publish: async (topic, payload, options) => {
+      if (topic === liveTopic) {
+        livePublishes++
+        if (failLive) throw new Error('live delivery is disconnected')
+      }
+      await subscriber.publishAsync(topic, payload, { qos: options?.qos ?? 1 })
+    },
+    relay: stub.relay,
+  })
+  try {
+    // A live publish failure drops only the preview; control still works.
+    const preview = eventEnvelope(hostId, 64)
+    const dropped = await transport.sendLive(liveTopic, preview, { receiverLimit: 65536 })
+    assert.equal(dropped, false)
+    failLive = false
+    const oversized = await transport.sendLive(liveTopic, eventEnvelope(hostId, 5000), { receiverLimit: 4096 })
+    assert.equal(oversized, false, 'a preview above the packet budget is dropped, never referenced')
+    const publishesBeforeReference = livePublishes
+    const referenceEnvelope = proto.encode('whalerein.v1.EventEnvelope', {
+      host_id: hostId,
+      device_id: 'device-fixture',
+      channel_id: 'channel-fixture',
+      nonce: Buffer.alloc(12),
+      ciphertext: bytes(8),
+      created_at_unix_ms: 1,
+      relay_version: 4,
+      payload_reference: {
+        object_id: 'f'.repeat(32),
+        owner_node_id: 'node-fixture',
+        ciphertext_bytes: 8,
+        sha256: Buffer.alloc(32),
+        expires_at_unix_ms: Date.now() + 60000,
+        purpose: 'PAYLOAD_PURPOSE_EVENT',
+      },
+    })
+    const referenced = await transport.sendLive(liveTopic, referenceEnvelope, { receiverLimit: 65536 })
+    assert.equal(referenced, false, 'live never uses the HTTPS reference carrier')
+    assert.equal(livePublishes, publishesBeforeReference)
+    // Control is delivered after the dropped preview at its own QoS.
+    const controlReceived = nextMessage(subscriber, (topic) => topic === eventTopic)
+    const control = await transport.sendComplete(eventTopic, preview, { kind: 'event', receiverLimit: 65536 })
+    assert.equal(control.representation, 'inline')
+    const controlMessage = await controlReceived
+    assert.equal(controlMessage.qos, 1)
+    result({
+      dropped,
+      oversized,
+      referenced,
+      control: control.representation,
+      controlQos: controlMessage.qos,
+    })
+  } finally {
+    await subscriber.endAsync(true)
+  }
+}
+
 const cases = {
   'receiver-budget': caseReceiverBudget,
   'second-hop-reference': caseSecondHop,
@@ -377,6 +494,8 @@ const cases = {
   'matched-no-fragments': caseMatchedAndNoFragments,
   'fetch-verification': caseFetchVerification,
   'bulk-fairness': caseBulkFairness,
+  'live-class': caseLiveClass,
+  'live-inline-and-drop': caseLiveInlineAndDrop,
 }
 
 const selected = cases[process.argv[2]]

@@ -25,18 +25,24 @@ visible text; reset replaces a provisional block. Adjacent deltas can coalesce f
 20 ms or an 8 KiB UTF-8 target without crossing identity/block/order boundaries.
 Provider internal chunks do not create gaps in this normalized sequence.
 
-On relay epoch 3 the Host publishes complete packet-sized preview messages, not
-fragments or acknowledged transfer frames. It takes the smallest usable outbound
-budget across its local profile, Access's advertised receive budget and the
-Device `ChannelHello.receive` budget, splits only on valid UTF-8 boundaries,
-assigns contiguous normalized intervals and rechecks the fully encoded MQTT
-PUBLISH before publication. A complete body that does not fit is published as a
-reference and fetched over HTTPS. A Device publishes its `ready`
-`ReceiveAdvertisement` after each authenticated connect and budget change; Access
-publishes a packet-sized `RequestStateNotice` on the Device `notice` topic only
-from durably committed state. A lost notice is repaired from authoritative state
-and the watch lease refresh, and a notice is never proof that native execution
-completed.
+On relay epoch 4 the Host publishes each live preview as one complete
+packet-sized message at QoS 0 on its `.../live` topic, not as a fragment,
+acknowledged transfer frame or HTTPS reference. It takes the smallest usable
+outbound budget across its local profile, Access's advertised receive budget and
+the Device `ChannelHello.receive` budget, splits only on valid UTF-8 boundaries,
+assigns contiguous normalized intervals and rechecks the fully encoded QoS 0
+MQTT PUBLISH before publication. A preview that does not fit the live hop is
+dropped; a gap or loss only marks the preview incomplete, and the committed
+control message or an authoritative HTTPS read repairs the final view. Live
+previews never use the reference carrier and never wait for an acknowledgement.
+Control messages remain QoS 1 and may inline a complete body or publish a
+reference to complete HTTPS ciphertext. A Device publishes its `ready`
+`ReceiveAdvertisement` after each authenticated connect and budget change, and
+subscribes to its own QoS 0 `.../d/{device_id}/live` topic beside its control
+event and notice topics. Access publishes a packet-sized `RequestStateNotice` on
+the Device `notice` topic only from durably committed state. A lost notice is
+repaired from authoritative state and the watch lease refresh, and a notice is
+never proof that native execution completed.
 
 A committed Message has a stable identity, role and ordered typed blocks. When
 it settles a live Attempt, MessageUpsert carries the origin reference. That is the
@@ -113,9 +119,11 @@ Per-recipient live and committed lanes are independent. One stalled receiver doe
 not block another. Preview admission is bounded to 64 publications / 256 KiB, with
 a one-second queue-age target. History pages target 256 KiB plus a count cap;
 a single indivisible Message can exceed that target. MQTT carries one complete
-message per PUBLISH under the active profile; a body above the packet budget is
-carried as a reference and read as a complete HTTPS ciphertext object. There is
-no application fragmentation, reassembly, transfer receipt or device ACK topic.
+message per PUBLISH under the active profile. On the QoS 1 control class a body
+above the packet budget is carried as a reference and read as a complete HTTPS
+ciphertext object; on the QoS 0 live class no reference exists and an
+over-budget preview is dropped. There is no application fragmentation,
+reassembly, transfer receipt or device ACK topic.
 The logical envelope ceiling remains 16 MiB in the default profile.
 
 The Source owns conversation content; Host SQLite stores operational/identifier

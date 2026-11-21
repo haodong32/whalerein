@@ -21,7 +21,9 @@ func TestFlowLabelCoversEveryWireKind(t *testing.T) {
 		RequestTopic("h1"):            "request",
 		ResultTopic("h1"):             "result",
 		EventTopic("h1"):              "event",
+		LiveTopic("h1"):               "other",
 		DeviceEventTopic("h1", "d1"):  "device_event",
+		DeviceLiveTopic("h1", "d1"):   "other",
 		DeviceNoticeTopic("h1", "d1"): "notice",
 		PresenceTopic("h1"):           "presence",
 		DeviceReadyTopic("h1", "d1"):  "other",
@@ -247,13 +249,13 @@ func TestAccessReceiveAdvertisementBindsEpochAndGeneration(t *testing.T) {
 	}
 }
 
-func TestConnectorDeliverMarksOnlyEpochThreeResultsAsCapable(t *testing.T) {
+func TestConnectorDeliverMarksOnlyEpochFourResultsAsCapable(t *testing.T) {
 	var delivered int
 	connector := &pahoConnector{dispatch: func(string, []byte) { delivered++ }, peers: sync.Map{}}
 	capable, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1", ProtocolVersion: 1, RelayVersion: RelayEpoch})
 	connector.deliver(ResultTopic("h1"), capable)
 	if value, ok := connector.peers.Load(RequestTopic("h1")); !ok || value != true {
-		t.Fatal("valid epoch-3 result did not establish capability")
+		t.Fatal("valid epoch-4 result did not establish capability")
 	}
 	foreign, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r2", HostId: "h2", ProtocolVersion: 1, RelayVersion: 2})
 	connector.deliver(ResultTopic("h2"), foreign)

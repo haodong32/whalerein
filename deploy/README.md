@@ -155,7 +155,7 @@ broker presence snapshot, a confirmed policy reconciliation, and — when
 `storage.enabled` is true — a writable payload directory with at least
 `storage.free_space_reserve_bytes` free. It does not prove the relay epoch of a
 connected Host or client, ingress TLS, or broker ACL correctness; those need the
-epoch and policy checks in [the cutover procedure](#coordinated-relay-cutover-epoch-3).
+epoch and policy checks in [the cutover procedure](#coordinated-relay-cutover-epoch-4).
 
 ## Transport operations
 
@@ -172,30 +172,37 @@ hard-cut failure, not a silent downgrade.
 | Logical envelope | 16 MiB | Access, Host, Core and clients. Independent of packet size. |
 | Bulk HTTPS transfers / reserved ciphertext | 4 / 32 MiB | Access admission and HTTP. |
 | Upload or fetch timeout | 120 s | Access transport and relay directory. |
-| Receive Maximum / send in-flight | 16 / 16 | Access MQTT 5 CONNECT and ordered publisher. A CONNACK value can only lower the in-flight bound. |
-| Per-destination queue / waiting bytes | 1024 / 32 MiB | Access ordered publisher. Exhaustion is a typed error, never a blocked sibling flow. |
+| Receive Maximum / send in-flight | 16 / 16 | Access MQTT 5 CONNECT and ordered control publisher. A CONNACK value can only lower the in-flight bound. Live QoS 0 has no in-flight acknowledgement. |
+| Per-destination queue / waiting bytes | 1024 / 32 MiB | Access ordered control publisher. Exhaustion is a typed error, never a blocked sibling flow. |
 | Retained encrypted result | 16 MiB | Access HTTP/storage; derived from the profile envelope. |
 | HTTP result body | 24 MiB | Access HTTP and ingress; base64 expansion plus JSON framing. |
 | Broker PUBLISH ceiling | 1 MiB | Mosquitto `max_packet_size`; equals packaged `brokerPacketLimitBytes`. |
 
-There is no application fragmentation, reassembly, transfer receipt or device
-ACK topic. Each topic carries exactly one complete message per MQTT PUBLISH:
+Both delivery classes use the same authenticated broker connection and carry
+exactly one complete message per MQTT PUBLISH. Control is QoS 1: ordered,
+acknowledged and durable, with the inline-or-HTTPS-reference representation.
+Live is QoS 0: fire-and-forget, lossy and coalescible, never a reference, never
+durable, and superseded by the final committed message.
 
 ```text
-whalerein/v1/h/{host_id}/request
-whalerein/v1/h/{host_id}/result
-whalerein/v1/h/{host_id}/event
-whalerein/v1/h/{host_id}/d/{device_id}/event
-whalerein/v1/h/{host_id}/d/{device_id}/notice
-whalerein/v1/h/{host_id}/d/{device_id}/ready
+whalerein/v1/h/{host_id}/request        control
+whalerein/v1/h/{host_id}/result         control
+whalerein/v1/h/{host_id}/event          control
+whalerein/v1/h/{host_id}/live           live
+whalerein/v1/h/{host_id}/d/{device_id}/event   control
+whalerein/v1/h/{host_id}/d/{device_id}/notice  control
+whalerein/v1/h/{host_id}/d/{device_id}/ready   control
+whalerein/v1/h/{host_id}/d/{device_id}/live    live
 ```
 
-Access publishes `request` and the two Device topics (`event`, `notice`); a Host
-publishes its own `result` and `event`; a Device publishes its own `ready`
-`ReceiveAdvertisement` after each authenticated connect and budget change.
-Access registers each advertisement against the broker-derived connection
-generation. The former `.../d/{device_id}/ack` topic is denied in both
-directions.
+Access publishes `request`, the Device control topics (`event`, `notice`) and
+the Device `live` topic; a Host publishes its own `result`, `event` and `live`;
+a Device publishes its own `ready` `ReceiveAdvertisement` after each
+authenticated connect and budget change. Access registers each advertisement
+against the broker-derived connection generation. There is no acknowledgement
+topic. Access republishes a Host `live` preview unchanged to the authenticated
+Device `live` topic at QoS 0, with no durable row, outbox entry, receipt or
+retry; on local backpressure it drops the preview rather than delaying control.
 
 Run `whalerein-access --check-config --config <file>` to print the resolved
 `transport:` and `storage:` lines. It fails before any listener opens for an
@@ -267,8 +274,8 @@ GET    /v1/relay/objects/{object_id}
 DELETE /v1/relay/objects/{object_id}
 ```
 
-Every request carries relay epoch 3; `PUT`, `GET` and `DELETE` use the
-`WhaleRein-Relay-Epoch: 3` header. Host authority uses the existing Ed25519 Host
+Every request carries relay epoch 4; `PUT`, `GET` and `DELETE` use the
+`WhaleRein-Relay-Epoch: 4` header. Host authority uses the existing Ed25519 Host
 key; a Device uses its bearer token and bound grant/session/channel/purpose
 scope. A reference is published only after the exact ciphertext is readable. A
 wrong-node request returns `409 conflict` with `reason=wrong_owner_path` and the
@@ -307,21 +314,31 @@ defined in this repository.
 
 ### Flow control and observability
 
-MQTT is QoS 1 with the negotiated Receive Maximum and connection flow control.
-Each Access connection has one FIFO queue per destination topic, a bounded
-global in-flight semaphore and bounded waiting bytes, so a blocked bulk flow
-cannot stall an unrelated small message. There are no application ACKs, so a
-failed publication is retried only at the same complete-message identity and
-duplicates are handled by the existing `request_id`, `command_id`/digest and
-typed event-sequence rules.
+The control class is QoS 1 with the negotiated Receive Maximum and connection
+flow control. Each Access connection has one FIFO queue per control destination
+topic, a bounded global in-flight semaphore and bounded waiting bytes, so a
+blocked bulk flow cannot stall an unrelated small message. A failed control
+publication is retried only at the same complete-message identity; duplicates
+are handled by the existing `request_id`, `command_id`/digest and typed
+event-sequence rules.
+
+The live class is QoS 0 on the two live topics and bypasses the control queue.
+The Host keeps a bounded per-connection live queue (64 packets / 256 KiB) and
+coalesces text on a 20 ms window; when the queue bound is reached it drops the
+preview instead of blocking control. Access bounds concurrent live handoffs and
+drops on local backpressure. No live preview is written to a durable row,
+outbox, receipt or notice, and none waits for an acknowledgement.
 
 Operational signals: `transport_rejections_total{code}`,
-`transport_rejected_bytes_total{code}`, the relay queue/staging counters, and
-`payload_free_bytes`, `payload_headroom_bytes`, `payload_ready_bytes`,
-`payload_reserved_bytes`, `payload_expired_backlog_seconds`,
-`payload_admission_refusals_total`, `payload_cleanup_*` and
-`payload_reconcile_actions_total`. No metric label contains a host, device,
-request, topic, object path or content identity.
+`transport_rejected_bytes_total{code}`, the relay queue/staging counters,
+`live_preview_dropped_total{reason}` (Access side; bounded reasons
+`disconnected`, `backpressure`, `publish`), and `payload_free_bytes`,
+`payload_headroom_bytes`, `payload_ready_bytes`, `payload_reserved_bytes`,
+`payload_expired_backlog_seconds`, `payload_admission_refusals_total`,
+`payload_cleanup_*` and `payload_reconcile_actions_total`. Alert on sustained
+live drops if preview latency matters; they never indicate control loss. No
+metric label contains a host, device, request, topic, object path or content
+identity.
 
 Validate the static deployment inputs and the schema matrix with
 `deploy/tests/rolling-upgrade-matrix.sh`. The static preflight runs without
@@ -330,13 +347,13 @@ alignment and epoch constants. The Docker portion runs `--check-config`, checks
 the rendered geometry, and proves an old binary rejects the newer migration
 ledger.
 
-## Coordinated relay cutover (epoch 3)
+## Coordinated relay cutover (epoch 4)
 
 This release replaces the MQTT relay contract in one hard cut. Application
-protocol stays v1, but `relay_version=3` is the only accepted relay epoch. There
-is no v2 acceptance, unframed fallback, fragment path, receipt/ACK topic or
-compatibility bridge. A mixed Access/Host/broker/client artifact set is not a
-supported release.
+protocol stays v1, but `relay_version=4` is the only accepted relay epoch. Every
+Access, broker ACL/plugin, Host, Core, CLI, mobile binding and client artifact
+must come from the same release revision. An epoch-3 peer is rejected with
+`protocol_version_incompatible`; there is no mixed rollout.
 
 ### Supported artifact set
 
@@ -344,7 +361,7 @@ Build every artifact below from one release revision:
 
 - Access binary or `whalerein-access` image (`deploy/docker/access.Dockerfile`);
 - Mosquitto image and WhaleRein plugin (`deploy/docker/mosquitto.Dockerfile`,
-  `deploy/mosquitto/`), including the epoch-3 topic policy;
+  `deploy/mosquitto/`), including the epoch-4 control and live topic policy;
 - shared Host runtime and DSH adapter (`host/runtime`, `host/dsh`);
 - Core library and CLI (`core`, `apps/cli`);
 - mobile bindings and any shipped iOS build (`apps/mobile-bindings`,
@@ -354,20 +371,26 @@ Build every artifact below from one release revision:
 
 These paths are the supported client/runtime set in this repository. Other
 builds are not covered by this contract. Pairing credentials, Noise identities,
-pins, grants and command-recovery identities survive the cut; relay epoch 3
-changes representation, not those application identities.
+pins, grants and command-recovery identities survive the cut; relay epoch 4
+changes the transport representation and adds the live class, not those
+application identities.
 
 ### 1. Prepare inputs
 
 1. Provision the payload volume/filesystem, permissions and capacity from the
    table above. Confirm free space exceeds `max_node_bytes` plus the reserve.
+   The live class adds no volume, filesystem or capacity requirement.
 2. Configure production TLS, the public HTTPS origin, the five relay routes,
    body limits and upload/read timeouts. Configure broker TLS and hostnames.
+   The live class adds no TLS route, listener or service; it uses the existing
+   broker connection.
 3. Set the same transport profile (or the same explicit overrides) on Access,
    Host and clients. Keep every packet budget at or below the broker ceiling.
-4. Deploy the matching broker configuration/plugin and confirm the six relay
-   topics and the denied `ack` topic. Do not duplicate or re-derive ACLs outside
-   the authenticated policy.
+4. Deploy the matching broker configuration/plugin and confirm the eight relay
+   topics, including the Host and Device live topics, and the absence of an
+   acknowledgement topic. Clients use QoS 1 control and QoS 0 live; the plugin
+   ACL is topic-based. Do not duplicate or re-derive ACLs outside the
+   authenticated policy.
 5. Record the release artifact digests and take a coordinated PostgreSQL backup
    using [Backup and restore](#backup-and-restore).
 6. Record unresolved operations: `request_id`, `command_id`, `payload_digest`,
@@ -378,14 +401,14 @@ changes representation, not those application identities.
 
 Stop accepting new client submissions (at the ingress or by stopping clients)
 and keep the old Access and Host running long enough for in-flight requests to
-reach a terminal state or expire to `unknown`. The v2 transport has no durable
+reach a terminal state or expire to `unknown`. The relay keeps no durable
 fragment directory to migrate. Record unresolved operations before forcing them
 terminal, then stop the old Host and Access and keep PostgreSQL. Do not delete or
 rewrite grants, keys, pins, pairing records, command identities or
-proved/unknown outcomes. The new Access never replays an old fragment, ACK or
-mixed-epoch delivery.
+proved/unknown outcomes. The new Access never replays an acknowledgement or a
+delivery admitted under another epoch.
 
-### 3. Deploy the epoch-3 set
+### 3. Deploy the epoch-4 set
 
 Start PostgreSQL, then the broker, then Access with the prepared config. Wait for
 `/readyz` to report database, broker and storage readiness. Start the Host
@@ -398,20 +421,23 @@ All of these must hold before reopening traffic:
 
 - `/readyz` is green (database write probe, MQTT session, presence, policy and
   storage headroom);
-- Access accepted the Host's `HostReady` with `relay_version=3` and a valid
+- Access accepted the Host's `HostReady` with `relay_version=4` and a valid
   `ReceiveAdvertisement`;
-- each client connected with epoch 3, subscribed its own `event` and `notice`
-  topics, and published `ready`; Access registered the new connection
+- each client connected with epoch 4, subscribed its own `event`, `notice` and
+  `live` topics, and published `ready`; Access registered the new connection
   generation;
-- a mixed/old artifact is rejected with `protocol_version_incompatible` and no
-  business delivery;
-- the broker policy shows the six topics and no `ack` acceptance;
+- an epoch-3 client or other old artifact is rejected at admission with
+  `protocol_version_incompatible` and no business delivery;
+- the broker policy shows the eight topics, and the deployed peers use QoS 1
+  control and QoS 0 live, with no acknowledgement acceptance;
 - payload free space remains above the reserve.
 
 `/readyz` alone does not prove the Host or client epoch, ingress TLS, body limits
 or broker ACLs. This repository has no standalone epoch-readiness endpoint, so
 record the Host/client epoch evidence from their diagnostics and the broker
-policy test instead of inferring it from `/readyz`.
+policy test instead of inferring it from `/readyz`. Observe
+`live_preview_dropped_total{reason}` when the live class is enabled: drops show
+preview loss only and never indicate control loss.
 
 ### 5. Reattach notifications and recover
 
@@ -425,7 +451,7 @@ according to the terminal status, not as success.
 
 ### Rollback
 
-A live mixed-contract rollback is unsupported. A rollback requires all of the
+A rollback that runs both contracts is unsupported. A rollback requires all of the
 following, in order:
 
 1. Fenced admission: stop new submissions and keep the old/new boundary closed.
@@ -434,11 +460,11 @@ following, in order:
 3. Matching old artifacts and broker policy for the entire set.
 4. A verified recovery path for commands admitted under the new release.
 
-Because epoch 3 applies the new migrations, an old binary refuses the newer
+Because epoch 4 applies the new migrations, an old binary refuses the newer
 migration ledger. Rollback therefore means restoring the coordinated pre-cut
 backup with the matching older artifacts and running the documented restore
-invalidation/re-enrollment, or deploying an operator-built binary that is
-explicitly compatible with the new schema. It is not an in-place binary swap.
+invalidation/re-enrollment, or deploying an operator-built binary that supports
+the new schema. It is not an in-place binary swap.
 Any command executed after that backup cannot be proved by the restored
 database: preserve its original identity and report `unknown` rather than
 claiming it did not run.
@@ -546,6 +572,7 @@ COMMIT;
 ```
 
 Do not edit applied migrations or remove ledger entries to force a binary rollback.
-Use a compatible binary, or restore a coordinated backup with the explicit
+Use an operator-built binary that supports the new schema, or restore a
+coordinated backup with the explicit
 re-enrollment procedure. Production TLS, historical backup recovery and platform
 credential-store behavior require their own environment-specific acceptance.

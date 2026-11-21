@@ -18,7 +18,7 @@ class Source extends SourceAdapter {
   watch(id,sink){this.sinks.set(id,sink);return {close:()=>{this.closed++;this.sinks.delete(id)}}}
   async readHistory(id){return {session:{session_id:id},batch:{from_cursor:'bookmark:start',to_cursor:'bookmark:alpha',batch_id:'record:alpha',changes:[]},cut_cursor:'bookmark:alpha',complete:true}}
 }
-function fixture(access={connected:true,published:[],async publishEvent(value){this.published.push(value)}},source=new Source(),config={}) {
+function fixture(access={connected:true,published:[],liveTopic:'whalerein/v1/h/h/live',async publishEvent(value){this.published.push(value)},async publishLive(value){this.published.push(value);return true}},source=new Source(),config={}) {
   let now=100
   const store=new StateStore({path:':memory:'})
   const security=new SecurityManager({hostId:'h',identity:generateKeypair(),store,codec:codec(),now:()=>now})
@@ -103,15 +103,20 @@ test('watch registration precedes the baseline, shares native watches, and deliv
 })
 
 test('a stalled preview does not block committed updates, and a changed channel drops its watch',async()=>{
- let release,calls=0
+ let release,liveCalls=0,committedCalls=0
  const blocked=new Promise(r=>{release=r})
- const ctx=fixture({connected:true,async publishEvent(){if(++calls===1)await blocked}})
+ const ctx=fixture({
+   connected:true,
+   async publishLive(){liveCalls++;await blocked;return true},
+   async publishEvent(){committedCalls++},
+ })
  await ctx.events.watch('d',ctx.channel.channelId,'s',undefined,CONV)
  ctx.source.sinks.get('s')(live())
  await settle()
  ctx.source.sinks.get('s')({session:{session_id:'s'},history:{from_cursor:'bookmark:a',to_cursor:'bookmark:b',batch_id:'b',changes:[]}})
  await settle()
- assert.equal(calls,2)
+ assert.equal(liveCalls,1)
+ assert.equal(committedCalls,1,'the committed QoS 1 publication never queues behind the live preview')
  assert.equal(ctx.store.countOutbox(),0)
  ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
  assert.equal(ctx.events.describe().watches,0)
@@ -132,10 +137,11 @@ test('a slow recipient cannot block another device subscribed to the same source
   let release
   const blocked = new Promise(resolve => { release = resolve })
   const published = []
-  const ctx = fixture({ connected: true, async publishEvent(bytes) {
+  const ctx = fixture({ connected: true, async publishLive(bytes) {
     const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
     published.push(envelope.device_id)
     if (envelope.device_id === 'd') await blocked
+    return true
   } })
   t.after(async () => { release(); await ctx.events.stop() })
   const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
@@ -293,11 +299,12 @@ test('a rejected shared source registration fails every attached observer and a 
   assert.equal(successfulRegistrations, 1, 'the retry registers one shared native source')
   const delivered = deferred()
   const awaiting = new Set(['d', 'second'])
-  ctx.access.publishEvent = async function (bytes) {
+  ctx.access.publishLive = async function (bytes) {
     ctx.access.published.push(bytes)
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
     awaiting.delete(outer.device_id)
     if (awaiting.size === 0) delivered.resolve()
+    return true
   }
   ctx.source.sinks.get('s')(live())
   await bounded(delivered.promise, 'both intended observers did not receive the retried live update')
@@ -317,42 +324,41 @@ test('a rejected shared source registration fails every attached observer and a 
 
 test('a stalled committed publication for one recipient does not block another recipient and later releases in order', async (t) => {
   const ctx = fixture()
-  t.after(async () => { releaseLive.resolve(); releaseCommitted.resolve(); await ctx.events.stop() })
+  t.after(async () => { releaseCommitted.resolve(); await ctx.events.stop() })
   const second = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
   const channels = new Map([['d', ctx.channel], ['second', second]])
-  const releaseLive = deferred()
   const releaseCommitted = deferred()
   const bReady = deferred()
   const aReady = deferred()
   const published = []
-  let blockedLive = false
   let blockedCommitted = false
+  ctx.access.publishLive = async function (bytes) {
+    const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    const payload = openEventEnvelope({ envelope: outer, channel: channels.get(outer.device_id), hostId: 'h', deviceId: outer.device_id })
+    published.push({ deviceId: outer.device_id, kind: 'live', batchId: null, watchId: payload.update.watch_id })
+    return true
+  }
   ctx.access.publishEvent = async function (bytes) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
     const payload = openEventEnvelope({ envelope: outer, channel: channels.get(outer.device_id), hostId: 'h', deviceId: outer.device_id })
     const update = payload.update
-    const entry = { deviceId: outer.device_id, kind: update.live ? 'live' : 'committed',
-      batchId: update.history?.batch_id ?? null, watchId: update.watch_id }
-    published.push(entry)
-    if (outer.device_id === 'd' && update.live && !blockedLive) {
-      blockedLive = true
-      await releaseLive.promise
-    }
-    if (outer.device_id === 'd' && !update.live && !blockedCommitted) {
+    published.push({ deviceId: outer.device_id, kind: 'committed',
+      batchId: update.history?.batch_id ?? null, watchId: update.watch_id })
+    if (outer.device_id === 'd' && !blockedCommitted) {
       blockedCommitted = true
       await releaseCommitted.promise
     }
     const committed = published.filter(item => item.deviceId === 'second' && item.kind === 'committed')
     if (committed.length === 3) bReady.resolve()
     const aCommitted = published.filter(item => item.deviceId === 'd' && item.kind === 'committed')
-    if (aCommitted.length === 3 && published.some(item => item.deviceId === 'd' && item.kind === 'live')) aReady.resolve()
+    if (aCommitted.length === 3) aReady.resolve()
   }
 
   await ctx.events.watch('d', ctx.channel.channelId, 's',undefined,CONV)
   await ctx.events.watch('second', second.channelId, 's',undefined,CONV)
 
-  // Live traffic is stalled for A first, then A's first committed publication.
-  // B must keep advancing on its own committed lane.
+  // A live preview is fire-and-forget, then A's first committed publication
+  // stalls. B must keep advancing on its own committed lane.
   ctx.source.sinks.get('s')({ session: { session_id: 's' }, live: {
     attempt: { live_epoch: 'run-native', attempt_id: 'generation' }, first_seq: 1, last_seq: 1, started: {},
   } })
@@ -368,11 +374,10 @@ test('a stalled committed publication for one recipient does not block another r
   const bCommitted = published.filter(item => item.deviceId === 'second' && item.kind === 'committed')
   assert.deepEqual(bCommitted.map(item => item.batchId), ['batch-1', 'batch-2', 'batch-3'])
   assert.equal(published.filter(item => item.deviceId === 'second' && item.kind === 'live').length, 1,
-    'B also receives live traffic while A is stalled')
+    'B also receives the live preview while A is stalled')
   assert.equal(published.filter(item => item.deviceId === 'd' && item.kind === 'committed').length, 1,
     'A has not fabricated later committed delivery while its first publication is pending')
 
-  releaseLive.resolve()
   releaseCommitted.resolve()
   await bounded(aReady.promise, 'A did not receive its committed updates after release')
   const aCommitted = published.filter(item => item.deviceId === 'd' && item.kind === 'committed')
@@ -712,7 +717,7 @@ test('a shared event route uses a relation-valid overridden receive budget as it
   }
   const other = establishChannel({
     hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
-    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9, relay_version: 3 },
+    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9, relay_version: 4 },
   })
   assert.equal(ctx.security.getChannelReceive(other.channelId).budget.envelope_bytes, 2048)
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -754,14 +759,14 @@ test('an oversized live delta is split before sealing into packet-sized previews
   })
   await settle()
   assert.ok(ctx.access.published.length > 1, 'a 8 KiB delta cannot be one 2 KiB packet')
-  const topic = 'whalerein/v1/h/h/event'
+  const topic = 'whalerein/v1/h/h/live'
   const intervals = []
   const texts = []
   for (const bytes of ctx.access.published) {
-    const packetSize = publishPacketBytes(topic, bytes.length)
+    const packetSize = publishPacketBytes(topic, bytes.length, { qos: 0 })
     assert.ok(packetSize <= transportBudget.packet_bytes, `${packetSize} > ${transportBudget.packet_bytes}`)
     const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
-    assert.equal(envelope.relay_version, 3)
+    assert.equal(envelope.relay_version, 4)
     assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length > 0, true, 'previews stay inline on MQTT')
     const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
     assert.equal(payload.update.reset, undefined, 'a live preview never becomes a HistoryReset')
@@ -792,7 +797,7 @@ test('a shared route uses the smallest authenticated receive budget for every pr
     hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
     receive: {
       profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override,
-      connection_generation: 9, relay_version: 3,
+      connection_generation: 9, relay_version: 4,
     },
   })
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -808,9 +813,9 @@ test('a shared route uses the smallest authenticated receive budget for every pr
   })
   await settle()
   assert.ok(ctx.access.published.length >= 2, 'both recipients receive bounded previews')
-  const topic = 'whalerein/v1/h/h/event'
+  const topic = 'whalerein/v1/h/h/live'
   for (const bytes of ctx.access.published) {
-    assert.ok(publishPacketBytes(topic, bytes.length) <= 3000, 'the smaller receiver budget governs the shared route')
+    assert.ok(publishPacketBytes(topic, bytes.length, { qos: 0 }) <= 3000, 'the smaller receiver budget governs the shared route')
   }
   const perDevice = new Map()
   for (const bytes of ctx.access.published) {
@@ -847,6 +852,144 @@ test('an unsplittable one-unit live delta is never replaced by a HistoryReset', 
   const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
   assert.equal(payload.update.reset, undefined)
   assert.equal(payload.update.live.delta.text.length, 5000)
+})
+
+test('previews use only the live class and the committed message stays on the ordered control class', async (t) => {
+  const control = []
+  const liveUpdates = []
+  const ctx = fixture({
+    connected: true,
+    liveTopic: 'whalerein/v1/h/h/live',
+    async publishEvent(bytes) { control.push(bytes) },
+    async publishLive(bytes) { liveUpdates.push(bytes); return true },
+  })
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1))
+  await settle()
+  assert.equal(liveUpdates.length, 1, 'the preview goes to the live class')
+  assert.equal(control.length, 0, 'no preview is published on the control event topic')
+
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, history: {
+    from_cursor: 'bookmark:a', to_cursor: 'bookmark:b', batch_id: 'commit',
+    changes: [{ origin: { live_epoch: 'run-native', attempt_id: 'generation' },
+      message: { message_id: 'm1', role: 'ASSISTANT', blocks: [{ block_id: 'visible', text: { text: 'done' } }] } }],
+  } })
+  await settle()
+  assert.equal(control.length, 1, 'the committed message is control')
+  const committed = openEventEnvelope({
+    envelope: codec().decode('whalerein.v1.EventEnvelope', control[0]),
+    channel: ctx.channel, hostId: 'h', deviceId: 'd',
+  })
+  assert.equal(committed.update.history.batch_id, 'commit')
+
+  // The committed message settles the Attempt; a late preview cannot reopen it.
+  ctx.source.sinks.get('s')(live(2))
+  await settle()
+  assert.equal(liveUpdates.length, 1, 'a preview after the commit is dropped')
+  assert.equal(control.length, 1)
+})
+
+test('two previews can be in flight at once and neither waits for an acknowledgement', async (t) => {
+  const gates = []
+  const ctx = fixture({
+    connected: true,
+    async publishLive() {
+      const gate = deferred()
+      gates.push(gate)
+      return gate.promise
+    },
+  })
+  t.after(async () => { for (const gate of gates) gate.resolve(); await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1, { kind: 'BLOCK_KIND_TEXT', text: 'a' }))
+  const other = live(2)
+  other.live.block_id = 'other'
+  ctx.source.sinks.get('s')(other)
+  await settle()
+  assert.equal(gates.length, 2, 'both previews are in flight before either resolves')
+  gates.forEach(gate => gate.resolve(false))
+  await settle()
+  assert.equal(ctx.store.countOutbox(), 0)
+})
+
+test('a disconnected Host drops previews without falling back to the control topic', async (t) => {
+  const control = []
+  const liveUpdates = []
+  const ctx = fixture({
+    connected: false,
+    async publishEvent(bytes) { control.push(bytes) },
+    async publishLive(bytes) { liveUpdates.push(bytes); return true },
+  })
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1))
+  await settle()
+  assert.equal(liveUpdates.length, 0)
+  assert.equal(control.length, 0)
+  assert.equal(ctx.store.countOutbox(), 0, 'a dropped preview is never durable')
+})
+
+test('an unsplittable preview never becomes a reference or a control reset', async (t) => {
+  const transportBudget = {
+    packet_bytes: 1024,
+    envelope_bytes: 16 * 1024,
+    bulk_concurrency: 4,
+    reserved_bytes: 32 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
+  const control = []
+  const liveUpdates = []
+  const ctx = fixture({
+    connected: true,
+    liveTopic: 'whalerein/v1/h/h/live',
+    async publishEvent(bytes) { control.push(bytes) },
+    async publishLive(bytes) { liveUpdates.push(bytes); return true },
+  }, new Source(), { transportBudget, eventBatchMs: 1 })
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  // One code unit larger than any packet-sized preview can carry.
+  ctx.source.sinks.get('s')({
+    session: { session_id: 's' },
+    live: {
+      attempt: { live_epoch: 'run-native', attempt_id: 'generation' },
+      block_id: 'visible', first_seq: 1, last_seq: 1,
+      delta: { kind: 'BLOCK_KIND_TEXT', text: 'x'.repeat(5000) },
+    },
+  })
+  await settle()
+  assert.equal(control.length, 0, 'an unsplittable preview never becomes control or a reset')
+  assert.equal(ctx.store.countOutbox(), 0, 'an unsplittable preview is never durable')
+  for (const bytes of liveUpdates) {
+    const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    assert.equal(envelope.payload_reference, undefined, 'live never uses the reference carrier')
+  }
+})
+
+test('two previews for one watch are not serialized behind each other', async (t) => {
+  const order = []
+  const first = deferred()
+  const ctx = fixture({
+    connected: true,
+    async publishLive(bytes) {
+      const payload = openEventEnvelope({
+        envelope: codec().decode('whalerein.v1.EventEnvelope', bytes),
+        channel: ctx.channel, hostId: 'h', deviceId: 'd',
+      })
+      order.push(payload.update.live.block_id)
+      if (order.length === 1) await first.promise
+      return true
+    },
+  })
+  t.after(async () => { first.resolve(); await ctx.events.stop(); ctx.store.close() })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1))
+  const other = live(2)
+  other.live.block_id = 'other'
+  ctx.source.sinks.get('s')(other)
+  await settle()
+  assert.deepEqual(order, ['visible', 'other'], 'the second preview is published while the first is still pending')
+  first.resolve()
 })
 
 test('a cleared channel cannot replay a parked preview into the next observation', async (t) => {

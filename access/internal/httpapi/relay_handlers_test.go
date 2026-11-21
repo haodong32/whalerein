@@ -119,7 +119,7 @@ func relayReserveBody(epoch uint32) []byte {
 
 func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 	f, fake := newRelayFixture(t)
-	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(3), nil)
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(4), nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -133,7 +133,7 @@ func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 		t.Fatalf("reservation = %+v", &reservation)
 	}
 	got := fake.lastReserve
-	if got.RelayVersion != 3 || got.HostID != "h1" || got.DeviceID != "d1" || got.SessionID != "s1" ||
+	if got.RelayVersion != 4 || got.HostID != "h1" || got.DeviceID != "d1" || got.SessionID != "s1" ||
 		got.ChannelID != "c1" || got.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT ||
 		got.CiphertextBytes != 4 || !bytes.Equal(got.SHA256, []byte("digest")) ||
 		got.ExpiresAtUnixMs != 2 || got.SignedAtUnixMs != 1 || !bytes.Equal(got.Signature, []byte("signature")) {
@@ -143,7 +143,7 @@ func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 
 func TestRelayReserveRoutePassesBearerAndOwnerHeader(t *testing.T) {
 	f, fake := newRelayFixture(t)
-	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(3), map[string]string{
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(4), map[string]string{
 		"Authorization":      "Bearer device-token",
 		RelayOwnerNodeHeader: "node-2",
 	})
@@ -192,7 +192,7 @@ func TestRelayUploadRequiresEpochAndStreamsExactBody(t *testing.T) {
 	fake.prepareErr = nil
 
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodPut, path, []byte("body"), map[string]string{
-		RelayEpochHeader:         "3",
+		RelayEpochHeader:         "4",
 		RelayHostSignedAtHeader:  "1700000000000",
 		RelayHostSignatureHeader: base64.RawURLEncoding.EncodeToString([]byte("sig")),
 		RelayOwnerNodeHeader:     "",
@@ -214,7 +214,7 @@ func TestRelayUploadRequiresEpochAndStreamsExactBody(t *testing.T) {
 func TestRelayUploadCapsBodyAtReservedLength(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPut, "/v1/relay/objects/"+relayTestObjectID,
-		[]byte("0123456789"), map[string]string{RelayEpochHeader: "3"})
+		[]byte("0123456789"), map[string]string{RelayEpochHeader: "4"})
 	// The handler caps the stream at the reserved length plus one; the extra
 	// byte is a conflict, never an internal error and never a complete upload.
 	assertError(t, recorder, http.StatusConflict, whalereinv1.ErrorCode_conflict)
@@ -227,7 +227,7 @@ func TestRelayUploadMissingContentLength(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	req := httptest.NewRequest(http.MethodPut, "/v1/relay/objects/"+relayTestObjectID, bytes.NewReader(nil))
 	req.ContentLength = -1
-	req.Header.Set(RelayEpochHeader, "3")
+	req.Header.Set(RelayEpochHeader, "4")
 	recorder := httptest.NewRecorder()
 	f.server.PublicHandler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNoContent {
@@ -241,7 +241,7 @@ func TestRelayUploadMissingContentLength(t *testing.T) {
 func TestRelayFinishRoute(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	body, _ := protojson.Marshal(&whalereinv1.RelayObjectFinishRequest{
-		RelayVersion: 3, CiphertextBytes: 4, Sha256: []byte("digest"),
+		RelayVersion: 4, CiphertextBytes: 4, Sha256: []byte("digest"),
 		SignedAtUnixMs: 1, Signature: []byte("signature"),
 	})
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost,
@@ -257,7 +257,7 @@ func TestRelayFinishRoute(t *testing.T) {
 		object.GetPurpose() != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT {
 		t.Fatalf("object = %+v", &object)
 	}
-	if fake.lastFinish.ObjectID != relayTestObjectID || fake.lastFinish.RelayVersion != 3 ||
+	if fake.lastFinish.ObjectID != relayTestObjectID || fake.lastFinish.RelayVersion != 4 ||
 		fake.lastFinish.CiphertextBytes != 4 || !bytes.Equal(fake.lastFinish.SHA256, []byte("digest")) {
 		t.Fatalf("finish request = %+v", fake.lastFinish)
 	}
@@ -276,7 +276,7 @@ func TestRelayFetchStreamsExactCiphertextHeaders(t *testing.T) {
 		Digest: digest, ExpiresAtUnixMs: 1_700_000_000_000,
 	}
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -307,7 +307,7 @@ func TestRelayFetchRequiresEpoch(t *testing.T) {
 func TestRelayDeleteRoute(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodDelete,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -321,7 +321,7 @@ func TestRelayDeleteRoute(t *testing.T) {
 
 	fake.deleteResult = relay.DeleteResult{Cancelled: false}
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodDelete,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
 	}
@@ -337,7 +337,7 @@ func TestRelayWrongOwnerHeaderAndReason(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	fake.fetchErr = &relay.WrongOwnerError{Requested: "node-2"}
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	assertError(t, recorder, http.StatusConflict, whalereinv1.ErrorCode_conflict)
 	if recorder.Header().Get(RelayOwnerNodeHeader) != "node-2" {
 		t.Fatalf("owner header = %q", recorder.Header().Get(RelayOwnerNodeHeader))
@@ -376,7 +376,7 @@ func TestRelayErrorMappingAndDisabledCapability(t *testing.T) {
 			f, fake := newRelayFixture(t)
 			fake.fetchErr = test.err
 			recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet,
-				"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+				"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 			assertError(t, recorder, test.status, test.code)
 			if test.reason != "" {
 				var response whalereinv1.ErrorResponse
@@ -401,7 +401,7 @@ func TestRelayErrorMappingAndDisabledCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := doRequest(t, server.PublicHandler(), http.MethodGet,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	assertError(t, recorder, http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability)
 }
 
@@ -409,7 +409,7 @@ func TestRelayErrorsDoNotEchoSecrets(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	fake.fetchErr = errors.New("ciphertext=topsecret token=abc")
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet,
-		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "3"})
+		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", recorder.Code)
 	}

@@ -6,10 +6,12 @@ the exact content. A small result stays inline and creates no directory object.
 """
 
 import json
+import os
+import select
 import subprocess
 
 import pytest
-from environment import ROOT
+from environment import ROOT, wait
 
 pytestmark = pytest.mark.chain
 
@@ -94,3 +96,148 @@ def test_ac02_duplicate_result_read_is_harmless(scenario, paired_device):
         f"SELECT count(*) FROM {scenario.schema}.requests WHERE kind=2",
     )
     assert int(rows) >= 1
+
+
+class LiveTopicObserver:
+    """Record Host live and control event PUBLISHes through the real broker."""
+
+    def __init__(self, scenario):
+        self.process = subprocess.Popen(
+            ["node", "tests/integration/drivers/transport/live-topic-observer.mjs"],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "WHALEREIN_MQTT_URL": "mqtt://127.0.0.1:1883",
+                "WHALEREIN_TEST_ACCESS_PASSWORD": scenario.env["WHALEREIN_BROKER_PASSWORD"],
+                "WHALEREIN_OBSERVER_HOST_ID": scenario.host,
+            },
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._expect({"type": "ready"})
+
+    def _read(self, timeout=10):
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+        assert ready, "live topic observer produced no response"
+        line = self.process.stdout.readline()
+        assert line, "live topic observer produced no line"
+        return json.loads(line)
+
+    def _expect(self, expected):
+        value = self._read()
+        assert value == expected, value
+        return value
+
+    def snapshot(self):
+        self.process.stdin.write(json.dumps({"op": "snapshot"}) + "\n")
+        self.process.stdin.flush()
+        value = self._read()
+        assert value.get("type") == "snapshot", value
+        return value
+
+    def close(self):
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.write(json.dumps({"op": "stop"}) + "\n")
+                self.process.stdin.flush()
+                self.process.wait(timeout=10)
+            except (BrokenPipeError, subprocess.TimeoutExpired):
+                self.process.kill()
+                self.process.wait(timeout=5)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def _event(value):
+    return value.get("data", {}).get("event", {})
+
+
+def _event_text(event):
+    # A preview carries its displayable text directly; a committed message
+    # carries typed blocks.
+    if isinstance(event.get("text"), str):
+        return event["text"]
+    return "".join(block.get("text", "") for block in event.get("blocks", []))
+
+
+@pytest.mark.description(
+    "When an active Watch receives an incomplete live preview, the preview arrives only on the QoS 0 live topic, a concurrent HTTPS history read returns committed state, the control event topic carries no preview, and the committed message is still delivered once at QoS 1."
+)
+def test_ac15_live_preview_only_and_committed_authority(scenario, paired_device, session_id):
+    """An incomplete live preview stays on the live class; the committed message supersedes it."""
+    fixture = scenario.dsh.process
+    observer = LiveTopicObserver(scenario)
+    watcher = paired_device.start_watch("session", "watch", session_id, "--timeout", "20")
+    try:
+        watcher.wait(lambda value: _event(value).get("type") == "state", timeout=15)
+        baseline = observer.snapshot()
+        fixture.control("preview_start", session_id=session_id)
+        fixture.control("preview_chunk", session_id=session_id, index=0, text="live-preview")
+        wait(lambda: len(observer.snapshot()["live"]) > len(baseline["live"]), timeout=10)
+        wait(lambda: len(observer.snapshot()["device_live"]) > len(baseline["device_live"]), timeout=10)
+        during = observer.snapshot()
+        assert len(during["live"]) > len(baseline["live"]), "the preview must arrive on the Host live topic"
+        device_live_topic = f"whalerein/v1/h/{scenario.host}/d/{paired_device.identity['device_id']}/live"
+        republished = during["device_live"][len(baseline["device_live"]):]
+        assert republished, "Access must republish the preview on the Device live topic"
+        assert all(entry["topic"] == device_live_topic for entry in republished), republished
+        assert all(entry["qos"] == 0 for entry in during["live"][len(baseline["live"]):]), during["live"]
+        assert all(entry["qos"] == 0 for entry in republished), republished
+        assert len(during["event"]) == len(baseline["event"]), "a preview must never appear on the control event topic"
+        watcher.wait(
+            lambda value: _event(value).get("type") == "preview"
+            and "live-preview" in _event_text(_event(value)),
+            timeout=15,
+        )
+
+        # A concurrent HTTPS history read must coexist with the live watch.
+        history = paired_device.history(session_id)
+        assert isinstance(history, dict)
+        # Omit a native preview chunk so the preview is incomplete. The
+        # committed message must still arrive and supersede it.
+        fixture.control("preview_chunk", session_id=session_id, index=2, text="gap")
+        fixture.control("preview_final", session_id=session_id, text="committed-after-gap", count=3)
+        watcher.wait(
+            lambda value: _event(value).get("type") == "message"
+            and _event_text(_event(value)) == "committed-after-gap",
+            timeout=20,
+        )
+        after = observer.snapshot()
+        assert len(after["event"]) > len(baseline["event"]), "the committed message must travel on the control event topic"
+        assert all(entry["qos"] == 1 for entry in after["event"][len(baseline["event"]):]), after["event"]
+        assert all(entry["qos"] == 0 for entry in after["live"][len(baseline["live"]):]), after["live"]
+        assert len(after["live"]) >= len(during["live"])
+        assert [value for value in watcher.values if _event(value).get("type") == "message"][-1]
+    finally:
+        watcher.close()
+        observer.close()
+
+
+@pytest.mark.description(
+    "When the live Watch receiver is disconnected, a foreground send on the same Device still completes through the control path."
+)
+def test_ac16_disconnected_live_delivery_does_not_block_control(scenario, paired_device, session_id):
+    """A disconnected live receiver drops previews; the same Device still sends and commits."""
+    fixture = scenario.dsh.process
+    watcher = paired_device.start_watch("session", "watch", session_id, "--timeout", "20")
+    try:
+        watcher.wait(lambda value: _event(value).get("type") == "state", timeout=15)
+        fixture.control("preview_start", session_id=session_id)
+        fixture.control("preview_chunk", session_id=session_id, index=0, text="live-before-disconnect")
+        watcher.wait(
+            lambda value: _event(value).get("type") == "preview"
+            and "live-before-disconnect" in _event_text(_event(value)),
+            timeout=15,
+        )
+    finally:
+        watcher.close()
+
+    receipt = paired_device.send_confirmed(
+        session_id, "control after live disconnect", delivery="start-if-idle"
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["message_id"]

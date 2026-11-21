@@ -31,7 +31,7 @@ import (
 
 // Epoch is the only relay contract this build serves. Every request must carry
 // it or fails with ErrEpoch (protocol_version_incompatible).
-const Epoch uint32 = 3
+const Epoch uint32 = 4
 
 // Terminal relay errors. The HTTP layer maps each to the stable wire status and
 // error code from proto/v1/WIRE.md.

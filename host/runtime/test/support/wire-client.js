@@ -97,6 +97,8 @@ export class FakeAccessSimulator {
     this.requestTopic = `whalerein/v1/h/${hostId}/request`
     this.resultTopic = `whalerein/v1/h/${hostId}/result`
     this.eventTopic = `whalerein/v1/h/${hostId}/event`
+    this.liveTopic = `whalerein/v1/h/${hostId}/live`
+    this.liveEvents = []
     this.#attach(broker.connectFn()('mqtts://access.test', { clientId: 'access' }))
   }
 
@@ -105,7 +107,9 @@ export class FakeAccessSimulator {
     this.ready = new Promise((resolve) => {
       client.on('connect', () => {
         client.subscribe(this.resultTopic, { qos: 1 }, () => {
-          client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
+          client.subscribe(this.eventTopic, { qos: 1 }, () => {
+            client.subscribe(this.liveTopic, { qos: 0 }, () => resolve())
+          })
         })
       })
     })
@@ -152,12 +156,20 @@ export class FakeAccessSimulator {
       // The resolved ciphertext models an on-demand HTTPS read; it is delivered
       // directly so raw MQTT packets stay within the broker limit.
       this.broker.deliverDirect(deviceTopic, this.codec.encode('whalerein.v1.EventEnvelope', envelope))
+      return
+    }
+    if (topic === this.liveTopic) {
+      // Live stays opaque: no durable row, no reference fetch and no retry.
+      const envelope = this.codec.decode('whalerein.v1.EventEnvelope', payload)
+      this.liveEvents.push(envelope)
+      const deviceTopic = `whalerein/v1/h/${this.hostId}/d/${envelope.device_id}/live`
+      this.broker.deliverDirect(deviceTopic, payload)
     }
   }
 
   async send(request) {
     await this.ready
-    const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 3, ...request })
+    const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 4, ...request })
     // The simulated Device -> Access hop may deliver an oversized complete
     // request out of band; real Access would resolve it from HTTPS.
     if (this.broker.maxPacketBytes !== Infinity && bytes.length > this.broker.maxPacketBytes) {
@@ -302,10 +314,13 @@ export class DeviceClient {
     this.channel = null
     this.pairing = null
     this.eventTopic = `whalerein/v1/h/${hostId}/d/${deviceId}/event`
+    this.liveTopic = `whalerein/v1/h/${hostId}/d/${deviceId}/live`
     this.client = broker.connectFn()('mqtts://device.test', { clientId: `whalerein-device-${deviceId}` })
     this.ready = new Promise((resolve) => {
       this.client.on('connect', () => {
-        this.client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
+        this.client.subscribe(this.eventTopic, { qos: 1 }, () => {
+          this.client.subscribe(this.liveTopic, { qos: 0 }, () => resolve())
+        })
       })
     })
     this.client.on('message', (topic, payload) => this.#onEvent(topic, payload))
@@ -320,7 +335,7 @@ export class DeviceClient {
   }
 
   #deliverEvent(topic, payload) {
-    if (topic !== this.eventTopic || !this.channel) return
+    if ((topic !== this.eventTopic && topic !== this.liveTopic) || !this.channel) return
     let envelope
     try {
       envelope = this.codec.decode('whalerein.v1.EventEnvelope', payload)

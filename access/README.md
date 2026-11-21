@@ -401,9 +401,9 @@ grant. A Will topic outside the device policy is denied.
 
 | Principal | Subscribe | Publish |
 |---|---|---|
-| Access (plugin-local) | results, events, acks, device wills, control replies/events | own-host requests, device events, host presence, `$CONTROL/whalerein/v1` |
-| Host | own `whalerein/v1/h/{host}/request` and `presence` | own `result` and own `event` |
-| Device | `whalerein/v1/h/{host}/d/{device}/event` for each live grant | own `.../ack` and own Will topic |
+| Access (plugin-local) | results, events, live previews, device wills, device ready advertisements, control replies/events | own-host requests, device events/notices, device live previews, host presence, `$CONTROL/whalerein/v1` |
+| Host | own `whalerein/v1/h/{host}/request` and `presence` | own `result`, own `event` and own `live` |
+| Device | own `.../event`, `.../notice` and `.../live` for each live grant | own `.../ready` and own Will topic |
 | Probe | none | none |
 
 Host and device topics may not contain wildcards. A revoked grant removes its
@@ -595,13 +595,22 @@ logs include original revocation timestamps instead of implying a new revoke.
 ### Stable identity and complete-packet relay
 
 Access publishes one complete MQTT 5 message per PUBLISH and requires
-`relay_version=3` on requests, results, events, readiness proofs and receive
-advertisements. A hop selects inline or reference from the exact encoded
+`relay_version=4` on requests, results, events, readiness proofs and receive
+advertisements. Epoch 3 is retired and rejected with
+`protocol_version_incompatible`. A hop selects inline or reference from the exact encoded
 packet and the minimum of the local profile, broker and receiver packet limits;
 an oversized durable body is staged as exact ciphertext and published only as a
 packet-sized reference after staging completes. Each connection uses ordered
 per-topic queues with bounded depth, waiting bytes and in-flight work. There are
 no fragments, reassembly buffers, transfer receipts or device ACK topics.
+
+Live previews are the second delivery class: Access subscribes to
+`whalerein/v1/h/+/live`, checks the same grant as control events and republishes
+the exact opaque `EventEnvelope` to `whalerein/v1/h/{host}/d/{device}/live` at
+QoS 0. Live bypasses the ordered queue and every durable outbox, receipt or
+notice; a missing session, failed handoff or full bounded live slot set drops the
+preview instead of blocking control. Control remains QoS 1 and ordered.
+
 Packet, envelope, concurrency, reservation and transfer budgets come from the
 `transport:` configuration block and its packaged profile; `receive_maximum`,
 `send_in_flight`, `send_queue_depth` and `send_queue_bytes` bound the ordered
@@ -617,8 +626,9 @@ cannot be rebound to another public-key fingerprint. Pairing recovery reuses
 the identity; it never revokes an older active grant as compensation.
 
 A Device publishes its own `.../d/{device_id}/ready` receive advertisement and
-subscribes to its own event and notice topics; it no longer publishes an
-acknowledgement. Keep the broker policy version-aligned with Access and clients.
+subscribes to its own event, notice and live topics; it no longer publishes an
+acknowledgement. A Host publishes live previews only on its own
+`.../live` topic. Keep the broker policy version-aligned with Access and clients.
 
 ## Managed Device sessions
 

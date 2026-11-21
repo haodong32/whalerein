@@ -882,11 +882,11 @@
             "transferTimeoutMs": 120000
           },
           "connectionGeneration": "3",
-          "relayVersion": 3
+          "relayVersion": 4
         },
-        "relayVersion": 3
+        "relayVersion": 4
       },
-      "hex": "0a06686f73742d311080d095ffbc312a1c080112140880800420808080082804308080801040c0a907180320033003"
+      "hex": "0a06686f73742d311080d095ffbc312a1c080112140880800420808080082804308080801040c0a907180320043004"
     },
     {
       "caseId": "typed-payload-reference",

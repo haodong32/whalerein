@@ -165,7 +165,7 @@ class RelayDirectory:
         purpose="PAYLOAD_PURPOSE_RESULT",
         part_id="",
         expires_at_ms=None,
-        epoch=3,
+        epoch=4,
         owner_node=None,
     ):
         import base64
@@ -196,7 +196,7 @@ class RelayDirectory:
         )
         return status, response_headers, payload
 
-    def upload(self, token, reservation, ciphertext, epoch=3, headers=None):
+    def upload(self, token, reservation, ciphertext, epoch=4, headers=None):
         status, response_headers, payload = relay_http(
             reservation["uploadPath"],
             "PUT",
@@ -210,7 +210,7 @@ class RelayDirectory:
         )
         return status, response_headers, payload
 
-    def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None, epoch=3):
+    def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None, epoch=4):
         import base64
         import hashlib
 
@@ -232,7 +232,7 @@ class RelayDirectory:
             {"Content-Type": "application/json"},
         )
 
-    def fetch(self, token, object_id, epoch=3):
+    def fetch(self, token, object_id, epoch=4):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "GET",
@@ -241,7 +241,7 @@ class RelayDirectory:
             {"WhaleRein-Relay-Epoch": str(epoch)},
         )
 
-    def delete(self, token, object_id, epoch=3):
+    def delete(self, token, object_id, epoch=4):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "DELETE",
@@ -1103,6 +1103,7 @@ def _connect_policy(fields):
             ("read", f"whalerein/v1/h/{host}/presence"),
             ("write", f"whalerein/v1/h/{host}/result"),
             ("write", f"whalerein/v1/h/{host}/event"),
+            ("write", f"whalerein/v1/h/{host}/live"),
         ]
         lines = [
             "whalerein/1",

@@ -29,9 +29,11 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 		{Topic{HostID: "h1", Kind: KindRequest}, "whalerein/v1/h/h1/request"},
 		{Topic{HostID: "h1", Kind: KindResult}, "whalerein/v1/h/h1/result"},
 		{Topic{HostID: "h1", Kind: KindEvent}, "whalerein/v1/h/h1/event"},
+		{Topic{HostID: "h1", Kind: KindLive}, "whalerein/v1/h/h1/live"},
 		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceEvent}, "whalerein/v1/h/h1/d/d1/event"},
 		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceNotice}, "whalerein/v1/h/h1/d/d1/notice"},
 		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceReady}, "whalerein/v1/h/h1/d/d1/ready"},
+		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceLive}, "whalerein/v1/h/h1/d/d1/live"},
 	}
 	for _, tc := range cases {
 		var got string
@@ -42,12 +44,16 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 			got = ResultTopic(tc.topic.HostID)
 		case KindEvent:
 			got = EventTopic(tc.topic.HostID)
+		case KindLive:
+			got = LiveTopic(tc.topic.HostID)
 		case KindDeviceEvent:
 			got = DeviceEventTopic(tc.topic.HostID, tc.topic.DeviceID)
 		case KindDeviceNotice:
 			got = DeviceNoticeTopic(tc.topic.HostID, tc.topic.DeviceID)
 		case KindDeviceReady:
 			got = DeviceReadyTopic(tc.topic.HostID, tc.topic.DeviceID)
+		case KindDeviceLive:
+			got = DeviceLiveTopic(tc.topic.HostID, tc.topic.DeviceID)
 		}
 		if got != tc.want {
 			t.Fatalf("got %q want %q", got, tc.want)
@@ -62,7 +68,8 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"", "whalerein/v1/h/", "whalerein/v1/h/h1", "whalerein/v1/h/h1/other",
-		"whalerein/v1/h/h1/d/d1/other", "whalerein/v1/h/h1/d/d1", "whalerein/v1/h/+/request",
+		"whalerein/v1/h/h1/d/d1/other", "whalerein/v1/h/h1/d/d1", "whalerein/v1/h/+/live",
+		"whalerein/v1/h/h1/d/+/live", "whalerein/v1/h/+/request",
 		"whalerein/v1/h/h1/d/+/event", "other/v1/h/h1/request", "whalerein/v1/h/h1/request/",
 		"whalerein/v1/h/h1/d/d1/ack",
 	} {
@@ -128,16 +135,17 @@ func TestPresenceCacheTracksConnectionCountsAndExpiry(t *testing.T) {
 }
 
 type fakeSession struct {
-	mu           sync.Mutex
-	published    []string
-	payloads     [][]byte
-	subscribed   []string
-	publishErr   error
-	subscribeErr error
-	done         chan struct{}
-	closed       bool
-	onPublish    func(string, []byte)
-	qos          []byte
+	mu            sync.Mutex
+	published     []string
+	payloads      [][]byte
+	subscribed    []string
+	subscribedQoS []byte
+	publishErr    error
+	subscribeErr  error
+	done          chan struct{}
+	closed        bool
+	onPublish     func(string, []byte)
+	qos           []byte
 }
 
 func newFakeSession() *fakeSession {
@@ -156,9 +164,12 @@ func (f *fakeSession) Publish(_ context.Context, topic string, payload []byte, q
 	return f.publishErr
 }
 
-func (f *fakeSession) Subscribe(_ context.Context, topics []string, _ byte) error {
+func (f *fakeSession) Subscribe(_ context.Context, topics []string, qos byte) error {
 	f.mu.Lock()
 	f.subscribed = append(f.subscribed, topics...)
+	for range topics {
+		f.subscribedQoS = append(f.subscribedQoS, qos)
+	}
 	f.mu.Unlock()
 	return f.subscribeErr
 }
@@ -238,12 +249,21 @@ func TestBrokerReconnectsAfterFailureAndStopsOnCancellation(t *testing.T) {
 	}
 	session.mu.Lock()
 	subscribed := append([]string(nil), session.subscribed...)
+	subscribedQoS := append([]byte(nil), session.subscribedQoS...)
 	session.mu.Unlock()
-	if len(subscribed) != 6 {
+	if len(subscribed) != 7 {
 		t.Fatalf("subscribed = %v", subscribed)
 	}
 	if subscribed[3] != DeviceWillFilter {
 		t.Fatalf("device will filter not subscribed: %v", subscribed)
+	}
+	if subscribed[6] != LiveFilter || subscribedQoS[6] != 0 {
+		t.Fatalf("live filter subscription = %q qos=%d", subscribed[6], subscribedQoS[6])
+	}
+	for _, qos := range subscribedQoS[:6] {
+		if qos != 1 {
+			t.Fatalf("control subscription used qos %d", qos)
+		}
 	}
 	close(session.done)
 	time.Sleep(5 * time.Millisecond)

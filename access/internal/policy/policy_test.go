@@ -18,6 +18,7 @@ func TestBuildHostPolicyListsOnlyItsOwnScopedTopics(t *testing.T) {
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/request"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/event"},
+		{Access: "write", Filter: "whalerein/v1/h/h1/live"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/result"},
 	}
 	if !reflect.DeepEqual(connection.Entries, want) {
@@ -37,8 +38,10 @@ func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
 	}
 	want := []Entry{
 		{Access: "read", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/event"},
+		{Access: "read", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/live"},
 		{Access: "read", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/notice"},
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/event"},
+		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/live"},
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/notice"},
 		{Access: "write", Revision: 1, Filter: "whalerein/v1/presence/device/d1"},
 		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/ready"},
@@ -106,6 +109,7 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 				"acl subscribe 0 - whalerein/v1/h/h1/presence\n" +
 				"acl subscribe 0 - whalerein/v1/h/h1/request\n" +
 				"acl write 0 - whalerein/v1/h/h1/event\n" +
+				"acl write 0 - whalerein/v1/h/h1/live\n" +
 				"acl write 0 - whalerein/v1/h/h1/result\n",
 		},
 		{
@@ -115,8 +119,10 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 			}),
 			want: "whalerein/1\nok\nkind device\ndevice d1\nrevision 1\nready 1\nwill whalerein/v1/presence/device/d1\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/event\n" +
+				"acl read 1 h1 whalerein/v1/h/h1/d/d1/live\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/event\n" +
+				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/live\n" +
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
 				"acl write 1 - whalerein/v1/presence/device/d1\n" +
 				"acl write 1 h1 whalerein/v1/h/h1/d/d1/ready\n",
@@ -167,8 +173,10 @@ func TestControlMessagesRenderTheSetRequest(t *testing.T) {
 		"revision 2",
 		"ttl 10000",
 		"acl read 2 h1 whalerein/v1/h/h1/d/d1/event",
+		"acl read 2 h1 whalerein/v1/h/h1/d/d1/live",
 		"acl read 2 h1 whalerein/v1/h/h1/d/d1/notice",
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/event",
+		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/live",
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/notice",
 		"acl write 2 - whalerein/v1/presence/device/d1",
 		"acl write 2 h1 whalerein/v1/h/h1/d/d1/ready",

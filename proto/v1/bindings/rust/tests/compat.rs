@@ -799,10 +799,10 @@ fn expanded_conversation_attachment_and_transport_shapes_are_typed() {
             transfer_timeout_ms: 120_000,
         }),
         connection_generation: 3,
-        relay_version: 3,
+        relay_version: 4,
     };
     assert_eq!(advertisement.connection_generation, 3);
-    assert_eq!(advertisement.relay_version, 3);
+    assert_eq!(advertisement.relay_version, 4);
     assert!(advertisement.budget.is_some());
 }
 

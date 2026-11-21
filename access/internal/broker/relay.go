@@ -84,6 +84,20 @@ func encodedPublishBytes(topic string, payloadBytes, propertyBytes int) int {
 	return 1 + mqttVarintSize(remaining) + remaining
 }
 
+// encodedLivePublishBytes is the exact MQTT 5 QoS 0 PUBLISH size. A QoS 0
+// packet carries no packet identifier, so it is two bytes smaller than the
+// QoS 1 formula above.
+func encodedLivePublishBytes(topic string, payloadBytes, propertyBytes int) int {
+	if payloadBytes < 0 {
+		payloadBytes = 0
+	}
+	if propertyBytes < 0 {
+		propertyBytes = 0
+	}
+	remaining := 2 + len(topic) + mqttVarintSize(propertyBytes) + propertyBytes + payloadBytes
+	return 1 + mqttVarintSize(remaining) + remaining
+}
+
 // selectPacketLimit returns the smallest positive complete-packet limit among
 // the local send profile, the broker limit and (optionally) the advertised
 // receiver budget. A zero value means "not advertised" and is ignored.

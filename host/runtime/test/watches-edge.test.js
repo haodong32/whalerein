@@ -43,7 +43,11 @@ function fixture({ source = new TrackedSource(), access, config = {}, logger } =
   const security = new SecurityManager({ hostId: 'h', identity: generateKeypair(), store, codec: codec(), now: () => now })
   const channel = establishChannel({ hostId: 'h', deviceId: 'd', security, store })
   const published = []
-  const transport = access ?? { connected: true, published, async publishEvent(bytes) { published.push(bytes) } }
+  const transport = access ?? {
+    connected: true, published,
+    async publishEvent(bytes) { published.push(bytes) },
+    async publishLive(bytes) { published.push(bytes); return true },
+  }
   const events = new WatchedEvents({
     hostId: 'h', store, security, adapter: source, access: transport,
     codec: codec(), now: () => now, config, logger,
@@ -331,15 +335,17 @@ test('flushOutbox discards rows for a channel that is no longer authenticated', 
   }
 })
 
-test('live publication is bounded by the per-channel lane under a burst', async () => {
+test('the bounded per-connection live queue drops overflow instead of queueing unbounded work', async () => {
   let calls = 0
-  const ctx = fixture({ access: { connected: true, async publishEvent() { calls++ } } })
+  const blocked = new Promise(() => {})
+  const ctx = fixture({ access: { connected: true, async publishLive() { calls++; await blocked } } })
   try {
     await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
     const sink = ctx.source.sinks.get('s')
     for (let index = 1; index <= 70; index++) sink(live(index, { block_id: `block-${index}` }))
     await settle()
-    assert.ok(calls >= 1 && calls < 70, 'the live lane drops overflow instead of queueing unbounded work')
+    assert.equal(calls, 64, 'the live queue admits its packet bound and drops the rest')
+    assert.equal(ctx.store.countOutbox(), 0, 'a dropped preview is never durable')
   } finally {
     await ctx.events.stop(); ctx.store.close()
   }

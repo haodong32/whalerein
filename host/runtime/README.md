@@ -72,8 +72,22 @@ Source and subscription failures never revoke device grants. A refresh every
 five seconds reconciles authoritative history and state, including a lost final
 notification. A watch lease expires after 30 seconds without refresh. Live text coalescing is bounded to 20 ms and the smallest authenticated packet
 budget of the active route, not a fixed 8 KiB cap. An oversized delta is split
-on UTF-8 boundaries into complete ordered previews before sealing; one slow
-recipient does not own another recipient's publication queue.
+on UTF-8 boundaries into complete ordered previews before sealing. Previews are
+never serialized behind another watch or another recipient's acknowledgement.
+
+## Delivery classes
+
+The relay has two logical classes on the one authenticated broker connection;
+the class is selected by topic and QoS, never by a second connection.
+
+| Class | Topics | QoS | Semantics |
+| --- | --- | --- | --- |
+| control | `.../result`, `.../event`, `.../request` | 1 | Ordered, acknowledged and durable. Results and committed events stay on these topics and keep the inline or HTTPS-reference representation. |
+| live | `.../live`, `.../d/{device_id}/live` | 0 | Fire-and-forget derived state. Previews are inline `EventEnvelope`s only, have no acknowledgement, outbox entry or retry, and are dropped when the connection is not ready or the bounded live queue is full. |
+
+The final committed message or an authoritative HTTPS read supersedes every
+preview. A preview is never published on the control event topic and control is
+never queued behind a preview.
 
 ## Relay objects
 

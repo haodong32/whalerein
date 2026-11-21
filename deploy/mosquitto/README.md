@@ -69,7 +69,7 @@ External traffic is safe when:
 `/readyz` on Access reports these conditions. A broker that never receives a
 policy confirmation does not authorize external clients. `/readyz` does not
 report a Host's or client's relay epoch; use the Host/client diagnostics and the
-[cutover gate](../README.md#coordinated-relay-cutover-epoch-3).
+[cutover gate](../README.md#coordinated-relay-cutover-epoch-4).
 
 ## Operations
 
@@ -83,7 +83,7 @@ report a Host's or client's relay epoch; use the Host/client diagnostics and the
 - Revocation is complete only after PostgreSQL commit, a broker acknowledgement
   and the connection closure. `$CONTROL/whalerein/v1` returns the applied
   generation and the number of matched connections.
-- Schema compatibility: the broker itself keeps its schema, but relay epoch 3
+- Schema rollback: the broker itself keeps its schema, but relay epoch 4
   adds Access migrations for temporary ciphertext and request notices. The
   older Access binary rejects the newer ledger, so rollback is a whole-release
   restore, not a broker-only restart against the migrated database.
@@ -91,20 +91,34 @@ report a Host's or client's relay epoch; use the Host/client diagnostics and the
 ## Relay topics and ACLs
 
 The broker policy carries the complete-message relay topics and no legacy
-acknowledgement or fragment topics:
+acknowledgement or fragment topics. Both delivery classes use the same broker
+connection and the same per-connection policy:
 
 | Principal | Publish | Subscribe |
 |---|---|---|
-| Access | `.../request`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../presence`, `$CONTROL/whalerein/v1` | `.../result`, `.../event`, `.../d/{device_id}/ready`, device last wills, control replies/events |
-| Host | own `.../result`, own `.../event` | own `.../request`, own `.../presence` |
-| Device | own `.../d/{device_id}/ready`, own last will | own `.../d/{device_id}/event`, own `.../d/{device_id}/notice` |
+| Access | `.../request`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../d/{device_id}/live`, `.../presence`, `$CONTROL/whalerein/v1` | `.../result`, `.../event`, `.../live`, `.../d/{device_id}/ready`, device last wills, control replies/events |
+| Host | own `.../result`, own `.../event`, own `.../live` | own `.../request`, own `.../presence` |
+| Device | own `.../d/{device_id}/ready`, own last will | own `.../d/{device_id}/event`, own `.../d/{device_id}/notice`, own `.../d/{device_id}/live` |
 
-The former `.../d/{device_id}/ack` topic is denied in both directions. A grant
-revision change removes the old ACL entries, so a revoked Device cannot publish
-its ready advertisement. Access registers each advertisement against the
-broker-derived connection generation; a sibling reconnect does not clear
-another receiver's limits. Access publishes `notice` only from a durably
-committed status change, and a notice is not an execution acknowledgement.
+The control topics use QoS 1 and the Host live topic `.../live` and Device live
+topic `.../d/{device_id}/live` use QoS 0. The plugin ACL is topic-based: it
+authorizes the topic entry, while the client selects the publish/subscribe QoS.
+Live traffic uses only QoS 0: Access subscribes `h/+/live` and publishes the
+authenticated Device's `.../d/{device_id}/live`; a Host publishes only its own
+`.../live`; a Device subscribes only its own `.../live`. Access republishes the
+opaque live `EventEnvelope` without a durable row, outbox entry, receipt, notice
+or retry. A full Access live handoff slot or a failed QoS 0 publish drops the
+preview instead of blocking control traffic. The live class adds no broker
+volume, TLS route or service: it is the same connection with two extra topic
+shapes.
+
+The former `.../d/{device_id}/ack` topic does not exist and is denied in both
+directions. A grant revision change removes the old ACL entries, so a revoked
+Device cannot publish its ready advertisement or receive live previews. Access
+registers each advertisement against the broker-derived connection generation; a
+sibling reconnect does not clear another receiver's limits. Access publishes
+`notice` only from a durably committed status change, and a notice is not an
+execution acknowledgement.
 
 There is no fragment or transfer-receipt topic. A PUBLISH larger than
 `max_packet_size` is a broker/protocol error; Access must select inline or a
@@ -120,10 +134,10 @@ change:
 2. Stop Access and Mosquitto.
 3. Deploy matching older Access, broker/plugin and client artifacts with a
    verified recovery for commands admitted under the new release. An old binary
-   cannot use the epoch-3 migration ledger, so a plain restart against the same
+   cannot use the epoch-4 migration ledger, so a plain restart against the same
    PostgreSQL state is not a rollback; restore the coordinated pre-cut backup
-   with the documented invalidation/re-enrollment, or use an explicitly
-   compatible binary.
+   with the documented invalidation/re-enrollment, or use an operator-built
+   binary that supports the new schema.
 4. Verify policy readiness, revoked grants, recovered/unknown command outcomes
    and presence before reopening traffic.
 

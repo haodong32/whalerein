@@ -122,13 +122,21 @@ production TLS, external model quality and other DSH versions remain release wor
 
 ## Inline/reference relay
 
-The `transport` leaf includes the epoch-3 relay evidence. `test_relay_transport.py`
-runs the real Host `RelayTransport`/`MqttAccess` against the real broker and
-asserts the encoded PUBLISH boundary, one complete packet per message, a
-reference only after its object is readable, asymmetric hop budgets, legacy
-epoch rejection and the absence of fragment, receipt or device-ACK traffic.
-`test_relay_cutover.py` proves Access rejects epoch 0/2 and mixed
-representations. `test_relay_authorization.py` and `test_relay_storage.py`
+The `transport` leaf includes the epoch-4 relay and live-class evidence.
+`test_relay_transport.py` runs the real Host `RelayTransport`/`MqttAccess`
+against the real broker and asserts the encoded PUBLISH boundary, one complete
+packet per message, a reference only after its object is readable, asymmetric
+hop budgets, retired-epoch rejection, the QoS 0 live topic without a preview on
+the control event topic, and the absence of fragment, receipt or device-ACK
+traffic. `test_relay_cutover.py` proves Access rejects epoch 0/2 and the retired
+epoch 3 with `protocol_version_incompatible`, accepts only epoch 4, and rejects
+mixed representations with no fallback. In the `chain` leaf,
+`test_relay_chain.py` observes the real broker to prove a preview travels only
+on the Host live topic and the Access device live topic at QoS 0, never on the
+control event topic; a committed message is delivered at QoS 1 over a missing
+preview; and a disconnected live receiver does not block a same-Device control
+send. Existing same-Device watch+send and AC-18 wait/gap cases remain.
+`test_relay_authorization.py` and `test_relay_storage.py`
 exercise the real Access ciphertext directory, its scope checks and its quota
 limits. The real Host-to-Access reference and exact-bytes resolution case is
 `test_relay_chain.py` in the `chain` leaf. The quota subcase remains explicitly

@@ -70,6 +70,7 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			{Access: "read", Filter: topicRoot + hostID + "/presence"},
 			{Access: "write", Filter: topicRoot + hostID + "/result"},
 			{Access: "write", Filter: topicRoot + hostID + "/event"},
+			{Access: "write", Filter: topicRoot + hostID + "/live"},
 		}
 	case KindDevice:
 		connection.Will = presenceRoot + deviceID
@@ -85,11 +86,14 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			revision := Revision(grant)
 			eventTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/event"
 			noticeTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/notice"
+			liveTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/live"
 			connection.Entries = append(connection.Entries,
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
+				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
+				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
 				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: topicRoot + grant.HostID + "/d/" + deviceID + "/ready"},
 			)
 			if revision > connection.Revision {

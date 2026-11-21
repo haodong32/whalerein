@@ -38,3 +38,9 @@ Rationale: Coordinated relay epoch 3 hard cut: inline-or-reference transport rep
 - removed field TransportBudget.fragment_count (tag 3)
 - removed field TransportBudget.fragment_idle_timeout_ms (tag 7)
 - removed message TransportFrame
+
+## Breaking change accepted
+
+Rationale: Hard cut to relay epoch 4: the live delivery class is QoS 0 on dedicated live topics; epoch 3 is rejected.
+
+- removed enum value RelayEpoch.RELAY_EPOCH_V3 (3)

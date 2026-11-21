@@ -41,6 +41,11 @@ type presenceEntry struct {
 	// being refreshed and eventually expires.
 	seenAt time.Time
 	connID uint64
+	// connections is the set of live broker connection identities for one
+	// device. A device can hold several authenticated connections at once (for
+	// example a long-lived watch connection and a short-lived send connection);
+	// presence is offline only when this set becomes empty. Hosts leave it nil.
+	connections map[uint64]struct{}
 	// ready records that a Host confirmed subscription readiness with HostReady
 	// (or that a broker snapshot already observed an established connection).
 	// A broker CONNECT alone is not enough: the Host may not have subscribed
@@ -176,8 +181,10 @@ func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
 }
 
 // applyDevice records device presence and emits at most one offline callback
-// per online -> offline edge. A non-zero connID limits the transition to its
-// own connection so a delayed disconnect cannot affect a newer one.
+// per online -> offline edge. A non-zero connID is added to or removed from the
+// device's live connection set; the device is offline only when that set becomes
+// empty. A delayed disconnect for a superseded connection therefore cannot
+// affect a newer or sibling live connection.
 //
 // allowOnlineOverride is false for a device last will. A will payload does not
 // name the connection that ended, so it cannot prove that the connection the
@@ -195,36 +202,71 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 		p.mu.Unlock()
 		return
 	}
-	// A device connection notification with a newer connection identity is a
-	// takeover and must be adopted. Only an offline event is fenced to its own
-	// connection: a delayed disconnect for a superseded connection cannot
-	// affect the newer one.
-	if !online && connID != 0 && previous.connID != 0 && previous.connID != connID {
-		p.mu.Unlock()
-		p.logger.Debug("presence event for a superseded connection ignored", "source", source)
-		return
-	}
-	if !online && !allowOnlineOverride && exists && previous.online {
-		p.mu.Unlock()
-		// Not a duplicate edge: the notification is unverifiable against the
-		// live connection, so it is dropped without changing presence counts.
-		p.logger.Debug("device will could not override a live connection", "source", source)
-		return
-	}
-	transition := false
-	duplicate := false
-	if !online {
-		if !exists || previous.online {
-			transition = true
-		} else {
-			duplicate = true
+	connections := cloneConnections(previous.connections)
+	if online {
+		nextConnID := previous.connID
+		if connID != 0 {
+			connections[connID] = struct{}{}
+			if connID > nextConnID {
+				nextConnID = connID
+			}
 		}
+		p.devices[deviceID] = presenceEntry{
+			online: true, at: at, seenAt: now, connID: nextConnID,
+			connections: connections, seq: seq,
+		}
+		p.mu.Unlock()
+		p.publishCounts()
+		if p.metrics != nil {
+			p.metrics.PresenceEvent(source, "online")
+		}
+		return
 	}
-	next := presenceEntry{online: online, at: at, seenAt: now, connID: previous.connID, seq: seq}
 	if connID != 0 {
-		next.connID = connID
+		if _, tracked := connections[connID]; !tracked {
+			// A delayed disconnect for a superseded connection cannot remove
+			// the newer live connection or mark it offline.
+			if exists && previous.connID != 0 && previous.connID != connID {
+				p.mu.Unlock()
+				p.logger.Debug("presence event for a superseded connection ignored", "source", source)
+				return
+			}
+			// The entry has no tracked connection for this identity; treat it
+			// as the disconnect of the last known connection.
+			clear(connections)
+		} else {
+			delete(connections, connID)
+		}
+	} else {
+		// A last will names no connection. It can only prove an offline edge
+		// when no tracked connection remains; a sibling connection may still be
+		// live.
+		if !allowOnlineOverride && len(connections) > 0 {
+			p.mu.Unlock()
+			p.logger.Debug("device will could not override a live connection", "source", source)
+			return
+		}
+		clear(connections)
 	}
-	p.devices[deviceID] = next
+	if len(connections) > 0 {
+		nextConnID := uint64(0)
+		for liveConn := range connections {
+			if liveConn > nextConnID {
+				nextConnID = liveConn
+			}
+		}
+		p.devices[deviceID] = presenceEntry{
+			online: true, at: at, seenAt: now, connID: nextConnID,
+			connections: connections, seq: seq,
+		}
+		p.mu.Unlock()
+		p.publishCounts()
+		p.logger.Debug("presence event for a sibling connection ignored", "source", source)
+		return
+	}
+	transition := !exists || previous.online
+	duplicate := exists && !previous.online
+	p.devices[deviceID] = presenceEntry{online: false, at: at, seenAt: now, connID: previous.connID, seq: seq}
 	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
 
@@ -235,16 +277,22 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 		}
 		return
 	}
-	state := "offline"
-	if online {
-		state = "online"
-	}
 	if p.metrics != nil {
-		p.metrics.PresenceEvent(source, state)
+		p.metrics.PresenceEvent(source, "offline")
 	}
 	if transition && handler != nil {
 		handler(deviceID, source, at)
 	}
+}
+func cloneConnections(connections map[uint64]struct{}) map[uint64]struct{} {
+	if len(connections) == 0 {
+		return map[uint64]struct{}{}
+	}
+	clone := make(map[uint64]struct{}, len(connections))
+	for connID := range connections {
+		clone[connID] = struct{}{}
+	}
+	return clone
 }
 
 // Expire marks cached observations older than cache_ttl offline. Live broker
@@ -462,7 +510,24 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 					devices[client.DeviceID] = previous
 					continue
 				}
-				devices[client.DeviceID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, seq: boundary}
+				entry, seen := devices[client.DeviceID]
+				if !seen {
+					entry = presenceEntry{
+						at: at, seenAt: now,
+						connections: map[uint64]struct{}{}, seq: boundary,
+					}
+				}
+				if client.ConnID != 0 {
+					entry.connections[client.ConnID] = struct{}{}
+					if client.ConnID > entry.connID {
+						entry.connID = client.ConnID
+					}
+				}
+				if at.After(entry.at) {
+					entry.at = at
+				}
+				entry.online = len(entry.connections) > 0
+				devices[client.DeviceID] = entry
 			}
 		}
 	}

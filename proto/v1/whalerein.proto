@@ -10,9 +10,10 @@ option go_package = "github.com/whalerein/whalerein/proto/v1/bindings/go;whalere
 // binary protobuf encoding. There is no second OpenAPI or JSON Schema.
 //
 // The application protocol version stays 1. The MQTT relay uses one
-// coordinated epoch, RELAY_EPOCH_V3 (3): a complete message travels inline in
-// one MQTT PUBLISH when the full encoded packet fits, or as a packet-sized
-// PayloadReference to complete HTTPS ciphertext. There is no fragment,
+// coordinated epoch, RELAY_EPOCH_V4 (4): control messages travel inline in one
+// MQTT PUBLISH when the full encoded packet fits, or as a packet-sized
+// PayloadReference to complete HTTPS ciphertext, while live previews travel
+// fire-and-forget on dedicated QoS 0 live topics. There is no fragment,
 // reassembly or application receipt protocol and no legacy relay fallback.
 
 // ---------------------------------------------------------------------------
@@ -139,13 +140,20 @@ enum QuestionAvailability {
 
 // One coordinated relay contract. This value is carried as `relay_version` on
 // every relay envelope and advertisement and is independent of application
-// protocol version 1. A peer that does not advertise RELAY_EPOCH_V3 is
+// protocol version 1. A peer that does not advertise RELAY_EPOCH_V4 is
 // rejected with protocol_version_incompatible; there is no unframed or
 // fragment-based fallback.
+//
+// Epoch 4 hard-cuts epoch 3: it adds the QoS 0 live delivery class on dedicated
+// live topics next to the unchanged ordered/acked control topics. Epoch 3 is
+// reserved and never accepted; there is no dual epoch and no fallback.
 enum RelayEpoch {
   RELAY_EPOCH_UNSPECIFIED = 0;
-  // Inline-or-reference relay over MQTT QoS 1 and HTTPS ciphertext objects.
-  RELAY_EPOCH_V3 = 3;
+  reserved 3;
+  reserved "RELAY_EPOCH_V3";
+  // Inline-or-reference control relay over MQTT QoS 1 and HTTPS ciphertext
+  // objects, with lossy QoS 0 live previews on the live topics.
+  RELAY_EPOCH_V4 = 4;
 }
 
 // Shared packaged transport profile vocabulary. The executable defaults and
@@ -194,7 +202,7 @@ message ReceiveAdvertisement {
   TransportProfile profile = 1;
   TransportBudget budget = 2;
   uint64 connection_generation = 3;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
   uint32 relay_version = 4;
 }
 
@@ -334,7 +342,7 @@ message HostRequest {
   reserved "client_transport_version", "relay_transport_version";
   // Device result bound and grant generation bound by Access at admission.
   RequestTransportMetadata transport = 14;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3). Access rejects a
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access rejects a
   // Device request and Host rejects an Access-forwarded request otherwise with
   // protocol_version_incompatible.
   uint32 relay_version = 15;
@@ -364,7 +372,7 @@ message HostResult {
   int64 completed_at_unix_ms = 11;
   uint32 protocol_version = 12;
   string channel_id = 13;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
   uint32 relay_version = 14;
   // Exactly one of `result_body` and `result_reference` is set when a result
   // body exists. HostReady, pairing results and internal control results are
@@ -425,7 +433,7 @@ message RequestStateNotice {
   string command_id = 5;
   int64 updated_at_unix_ms = 6;
   PayloadReference result_reference = 7;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
   uint32 relay_version = 8;
 }
 
@@ -555,7 +563,7 @@ message HostReady {
   reserved "transport_version";
   // Host receive limits for the authenticated broker connection generation.
   ReceiveAdvertisement receive = 5;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3). Access refuses to
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access refuses to
   // mark an older or unknown epoch Host ready.
   uint32 relay_version = 6;
 }
@@ -978,7 +986,7 @@ message EventEnvelope {
   bytes ciphertext = 5;
   int64 created_at_unix_ms = 6;
   string trace_id = 7;
-  // Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
   uint32 relay_version = 8;
   // Complete ciphertext locator. Exactly one of `ciphertext` and
   // `payload_reference` is set; the reference resolves to the same ciphertext

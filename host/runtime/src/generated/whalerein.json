@@ -109,8 +109,15 @@
             "RelayEpoch": {
               "values": {
                 "RELAY_EPOCH_UNSPECIFIED": 0,
-                "RELAY_EPOCH_V3": 3
-              }
+                "RELAY_EPOCH_V4": 4
+              },
+              "reserved": [
+                [
+                  3,
+                  3
+                ],
+                "RELAY_EPOCH_V3"
+              ]
             },
             "TransportProfile": {
               "values": {

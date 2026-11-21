@@ -62,7 +62,9 @@ transport:
   # transfer_timeout: 120s
   # Ordered MQTT 5 publisher flow control. Receive Maximum is advertised in
   # CONNECT; the CONNACK value can only lower the in-flight bound. There is no
-  # application ACK topic in relay epoch 3.
+  # application ACK topic in relay epoch 4. This bounds the QoS 1 control class
+  # only; the separate QoS 0 live class is fire-and-forget and is not queued
+  # here.
   receive_maximum: 16
   send_in_flight: 16
   # Per-destination ordered queue bound and the total waiting bytes across the

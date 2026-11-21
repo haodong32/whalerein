@@ -28,9 +28,10 @@ const LEASE = 30000
 const SETTLED_LIMIT = 128
 const LIVE_SEEN_LIMIT = 128
 const BATCH_SEEN_LIMIT = 512
-// Per-channel live publication lane. It bounds latency, not canonical content.
-const LIVE_LANE_PUBLICATIONS = 64
-const LIVE_LANE_BYTES = 256 * 1024
+// Per-connection live queue bound. Live is lossy derived state: the Host drops
+// a preview instead of letting it consume unbounded memory or delay control.
+const LIVE_QUEUE_PACKETS = 64
+const LIVE_QUEUE_BYTES = 256 * 1024
 
 function attemptKey(attempt, projectionId) {
   return `${projectionId ?? ''}\u0000${attempt?.live_epoch ?? ''}\u0000${attempt?.attempt_id ?? ''}`
@@ -90,6 +91,8 @@ export class WatchedEvents {
   #outboxDrops = 0
   #snapshotRequired = new Map()
   #previewBudgetCache = new Map()
+  #livePendingBytes = 0
+  #livePendingPackets = 0
   constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger }) {
     Object.assign(this, { hostId, store, security, adapter, access, now, config, logger }); this.codec = resolveCodec(codec)
   }
@@ -97,7 +100,7 @@ export class WatchedEvents {
   async stop() {
     clearInterval(this.#timer); this.#timer = null
     for (const id of [...this.#watches.keys()]) this.#remove(id)
-    await Promise.all([...this.#lanes.values()].flatMap(l => [l.live, l.committed]))
+    await Promise.all([...this.#lanes.values()].map(l => l.committed))
     this.#lanes.clear()
   }
   #expire() { for (const [id, w] of this.#watches) if (w.expires <= this.now() || !this.security.getChannel(w.channelId)) this.#remove(id) }
@@ -548,7 +551,12 @@ export class WatchedEvents {
         envelopeLimit = Math.min(envelopeLimit, advertised.envelope_bytes)
       }
     }
-    return { packetLimit, envelopeLimit, topic: this.access?.eventTopic ?? `whalerein/v1/h/${this.hostId}/event` }
+    return {
+      packetLimit,
+      envelopeLimit,
+      topic: this.access?.eventTopic ?? `whalerein/v1/h/${this.hostId}/event`,
+      liveTopic: this.access?.liveTopic ?? `whalerein/v1/h/${this.hostId}/live`,
+    }
   }
 
   /**
@@ -562,7 +570,7 @@ export class WatchedEvents {
     const blockId = live.block_id ?? 'budget'
     const kind = live.delta?.kind ?? 'BLOCK_KIND_TEXT'
     const watchId = update?.watch_id ?? watch.id
-    const key = `${watch.deviceId}\u0000${watch.channelId}\u0000${watch.id}\u0000${attempt.live_epoch ?? ''}\u0000${attempt.attempt_id ?? ''}\u0000${blockId}\u0000${kind}\u0000${watchId}\u0000${route.packetLimit}\u0000${route.envelopeLimit}`
+    const key = `${watch.deviceId}\u0000${watch.channelId}\u0000${watch.id}\u0000${attempt.live_epoch ?? ''}\u0000${attempt.attempt_id ?? ''}\u0000${blockId}\u0000${kind}\u0000${watchId}\u0000${route.packetLimit}\u0000${route.envelopeLimit}\u0000${route.liveTopic}`
     const cached = this.#previewBudgetCache.get(key)
     if (cached !== undefined) return cached
     const at = this.now()
@@ -595,7 +603,7 @@ export class WatchedEvents {
         created_at_unix_ms: at,
         relay_version: RELAY_VERSION,
       })
-      return publishPacketBytes(route.topic, envelope.length)
+      return publishPacketBytes(route.liveTopic, envelope.length, { qos: 0 })
     }
     // Leave a small reserve so a created-at varint that grows while the split
     // is sealed cannot push the last preview over the limit.
@@ -696,26 +704,19 @@ export class WatchedEvents {
       this.#eventTooLarge(watch, update.history ? 'committed' : 'control', envelope.length, resolved.envelopeLimit)
       return
     }
-    let lane = this.#lanes.get(watch.channelId)
-    if (!lane) {
-      lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }
-      this.#lanes.set(watch.channelId, lane)
-    }
     if (update.live) {
-      if (!this.access?.connected || lane.count >= LIVE_LANE_PUBLICATIONS || lane.bytes + envelope.length > LIVE_LANE_BYTES) return
-      lane.count++
-      lane.bytes += envelope.length
-      lane.live = lane.live.then(() => {
-        if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) {
-          return this.access.publishEvent(envelope, { live: true })
-        }
-      }).catch(() => {}).finally(() => {
-        lane.count--
-        lane.bytes -= envelope.length
-      })
+      // Live is fire-and-forget: publish immediately, never behind a chain and
+      // never on the control event topic. A disconnected or over-bound live
+      // queue drops the preview and leaves the committed message authoritative.
+      this.#publishLive(envelope)
       return
     }
 
+    let lane = this.#lanes.get(watch.channelId)
+    if (!lane) {
+      lane = { committed: Promise.resolve() }
+      this.#lanes.set(watch.channelId, lane)
+    }
     const row = this.#addOutbox(watch, envelope, at)
     if (row.overflow) {
       this.#outboxDrops++
@@ -729,6 +730,38 @@ export class WatchedEvents {
       await this.access.publishEvent(envelope)
       this.store.removeOutbox(row.id)
     }).catch(() => this.logger?.warn('event_publish_failed', { code: 'unavailable' }))
+  }
+
+  /**
+   * Publish one complete preview on the live class. There is no per-watch or
+   * per-topic serialization: two previews may be in flight at once and QoS 0
+   * preserves their client order. Only the bounded per-connection queue can
+   * drop a preview.
+   */
+  #publishLive(envelope) {
+    if (!this.access?.connected || typeof this.access.publishLive !== 'function') return false
+    if (this.#livePendingPackets >= LIVE_QUEUE_PACKETS || this.#livePendingBytes + envelope.length > LIVE_QUEUE_BYTES) {
+      this.logger?.warn('live_preview_dropped', { code: 'rate_limited', reason: 'queue' })
+      return false
+    }
+    let pending
+    try {
+      pending = this.access.publishLive(envelope)
+    } catch {
+      return false
+    }
+    this.#livePendingPackets++
+    this.#livePendingBytes += envelope.length
+    Promise.resolve(pending)
+      .then((accepted) => {
+        if (accepted === false) this.logger?.warn('live_preview_dropped', { code: 'unavailable', reason: 'publish' })
+      })
+      .catch(() => this.logger?.warn('live_preview_dropped', { code: 'unavailable', reason: 'publish' }))
+      .finally(() => {
+        this.#livePendingPackets--
+        this.#livePendingBytes -= envelope.length
+      })
+    return true
   }
 
   async flushOutbox() {

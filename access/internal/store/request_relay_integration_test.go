@@ -22,7 +22,7 @@ func relayRequestFixture(t *testing.T, s *store.Store, requestID string, now tim
 		CommandID:        "command-" + requestID,
 		Kind:             whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
 		ProtocolVersion:  1,
-		RelayVersion:     3,
+		RelayVersion:     4,
 		Status:           whalereinv1.OnlineStatus_received,
 		PayloadDigest:    []byte("digest"),
 		BodyReference:    []byte("serialized-reference"),
@@ -35,7 +35,7 @@ func relayRequestFixture(t *testing.T, s *store.Store, requestID string, now tim
 	}
 }
 
-// TestRequestReferenceAndNoticeIntentRoundTrip stores an epoch-3 body and
+// TestRequestReferenceAndNoticeIntentRoundTrip stores an epoch-4 body and
 // result reference and records one durable, coalesced notice intent.
 func TestRequestReferenceAndNoticeIntentRoundTrip(t *testing.T) {
 	s, _ := storetest.New(t)
@@ -52,7 +52,7 @@ func TestRequestReferenceAndNoticeIntentRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.RelayVersion != 3 || !bytes.Equal(loaded.BodyReference, row.BodyReference) {
+	if loaded.RelayVersion != 4 || !bytes.Equal(loaded.BodyReference, row.BodyReference) {
 		t.Fatalf("reference representation lost: %+v", loaded)
 	}
 

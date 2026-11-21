@@ -22,8 +22,8 @@ export {
   TRANSPORT_PROFILE_WIRE_NAMES,
 }
 
-/** The one coordinated MQTT relay epoch. There is no fragment fallback. */
-export const RELAY_VERSION = 3
+/** The one coordinated MQTT relay epoch. There is no fallback or dual epoch. */
+export const RELAY_VERSION = 4
 
 const safe = (value) => Number.isSafeInteger(value) && value >= 0
 const positive = (value) => Number.isSafeInteger(value) && value > 0

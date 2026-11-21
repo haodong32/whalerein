@@ -565,26 +565,31 @@ func (QuestionAvailability) EnumDescriptor() ([]byte, []int) {
 
 // One coordinated relay contract. This value is carried as `relay_version` on
 // every relay envelope and advertisement and is independent of application
-// protocol version 1. A peer that does not advertise RELAY_EPOCH_V3 is
+// protocol version 1. A peer that does not advertise RELAY_EPOCH_V4 is
 // rejected with protocol_version_incompatible; there is no unframed or
 // fragment-based fallback.
+//
+// Epoch 4 hard-cuts epoch 3: it adds the QoS 0 live delivery class on dedicated
+// live topics next to the unchanged ordered/acked control topics. Epoch 3 is
+// reserved and never accepted; there is no dual epoch and no fallback.
 type RelayEpoch int32
 
 const (
 	RelayEpoch_RELAY_EPOCH_UNSPECIFIED RelayEpoch = 0
-	// Inline-or-reference relay over MQTT QoS 1 and HTTPS ciphertext objects.
-	RelayEpoch_RELAY_EPOCH_V3 RelayEpoch = 3
+	// Inline-or-reference control relay over MQTT QoS 1 and HTTPS ciphertext
+	// objects, with lossy QoS 0 live previews on the live topics.
+	RelayEpoch_RELAY_EPOCH_V4 RelayEpoch = 4
 )
 
 // Enum value maps for RelayEpoch.
 var (
 	RelayEpoch_name = map[int32]string{
 		0: "RELAY_EPOCH_UNSPECIFIED",
-		3: "RELAY_EPOCH_V3",
+		4: "RELAY_EPOCH_V4",
 	}
 	RelayEpoch_value = map[string]int32{
 		"RELAY_EPOCH_UNSPECIFIED": 0,
-		"RELAY_EPOCH_V3":          3,
+		"RELAY_EPOCH_V4":          4,
 	}
 )
 
@@ -1889,7 +1894,7 @@ type ReceiveAdvertisement struct {
 	Profile              TransportProfile       `protobuf:"varint,1,opt,name=profile,proto3,enum=whalerein.v1.TransportProfile" json:"profile,omitempty"`
 	Budget               *TransportBudget       `protobuf:"bytes,2,opt,name=budget,proto3" json:"budget,omitempty"`
 	ConnectionGeneration uint64                 `protobuf:"varint,3,opt,name=connection_generation,json=connectionGeneration,proto3" json:"connection_generation,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
 	RelayVersion  uint32 `protobuf:"varint,4,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2618,7 +2623,7 @@ type HostRequest struct {
 	Body []byte `protobuf:"bytes,11,opt,name=body,proto3" json:"body,omitempty"`
 	// Device result bound and grant generation bound by Access at admission.
 	Transport *RequestTransportMetadata `protobuf:"bytes,14,opt,name=transport,proto3" json:"transport,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3). Access rejects a
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access rejects a
 	// Device request and Host rejects an Access-forwarded request otherwise with
 	// protocol_version_incompatible.
 	RelayVersion uint32 `protobuf:"varint,15,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
@@ -2779,7 +2784,7 @@ type HostResult struct {
 	CompletedAtUnixMs int64  `protobuf:"varint,11,opt,name=completed_at_unix_ms,json=completedAtUnixMs,proto3" json:"completed_at_unix_ms,omitempty"`
 	ProtocolVersion   uint32 `protobuf:"varint,12,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	ChannelId         string `protobuf:"bytes,13,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
 	RelayVersion uint32 `protobuf:"varint,14,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	// Exactly one of `result_body` and `result_reference` is set when a result
 	// body exists. HostReady, pairing results and internal control results are
@@ -3231,7 +3236,7 @@ type RequestStateNotice struct {
 	CommandId       string                 `protobuf:"bytes,5,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
 	UpdatedAtUnixMs int64                  `protobuf:"varint,6,opt,name=updated_at_unix_ms,json=updatedAtUnixMs,proto3" json:"updated_at_unix_ms,omitempty"`
 	ResultReference *PayloadReference      `protobuf:"bytes,7,opt,name=result_reference,json=resultReference,proto3" json:"result_reference,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
 	RelayVersion  uint32 `protobuf:"varint,8,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4151,7 +4156,7 @@ type HostReady struct {
 	AuthorizationPublicKey []byte `protobuf:"bytes,3,opt,name=authorization_public_key,json=authorizationPublicKey,proto3" json:"authorization_public_key,omitempty"`
 	// Host receive limits for the authenticated broker connection generation.
 	Receive *ReceiveAdvertisement `protobuf:"bytes,5,opt,name=receive,proto3" json:"receive,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3). Access refuses to
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access refuses to
 	// mark an older or unknown epoch Host ready.
 	RelayVersion  uint32 `protobuf:"varint,6,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -8872,7 +8877,7 @@ type EventEnvelope struct {
 	Ciphertext      []byte `protobuf:"bytes,5,opt,name=ciphertext,proto3" json:"ciphertext,omitempty"`
 	CreatedAtUnixMs int64  `protobuf:"varint,6,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
 	TraceId         string `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V3 (3).
+	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
 	RelayVersion uint32 `protobuf:"varint,8,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	// Complete ciphertext locator. Exactly one of `ciphertext` and
 	// `payload_reference` is set; the reference resolves to the same ciphertext
@@ -14599,11 +14604,11 @@ const file_whalerein_proto_rawDesc = "" +
 	"!QUESTION_AVAILABILITY_UNSPECIFIED\x10\x00\x12%\n" +
 	"!QUESTION_AVAILABILITY_UNSUPPORTED\x10\x01\x12%\n" +
 	"!QUESTION_AVAILABILITY_UNAVAILABLE\x10\x02\x12#\n" +
-	"\x1fQUESTION_AVAILABILITY_AVAILABLE\x10\x03*=\n" +
+	"\x1fQUESTION_AVAILABILITY_AVAILABLE\x10\x03*S\n" +
 	"\n" +
 	"RelayEpoch\x12\x1b\n" +
 	"\x17RELAY_EPOCH_UNSPECIFIED\x10\x00\x12\x12\n" +
-	"\x0eRELAY_EPOCH_V3\x10\x03*\x90\x01\n" +
+	"\x0eRELAY_EPOCH_V4\x10\x04\"\x04\b\x03\x10\x03*\x0eRELAY_EPOCH_V3*\x90\x01\n" +
 	"\x10TransportProfile\x12!\n" +
 	"\x1dTRANSPORT_PROFILE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19TRANSPORT_PROFILE_DEFAULT\x10\x01\x12\x1d\n" +

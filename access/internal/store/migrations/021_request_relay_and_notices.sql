@@ -26,7 +26,7 @@ ALTER TABLE requests
 
 ALTER TABLE requests
     ADD CONSTRAINT requests_relay_version_check
-        CHECK (relay_version IN (0, 3));
+        CHECK (relay_version IN (0, 4));
 
 ALTER TABLE requests
     ADD CONSTRAINT requests_notice_attempts_check

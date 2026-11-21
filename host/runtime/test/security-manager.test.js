@@ -638,7 +638,7 @@ test('a device receive advertisement keeps its own channel-scoped generation, in
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 3,
-        relay_version: 3,
+        relay_version: 4,
       },
     })
     // HostReady's broker generation (7) is never compared with the device's
@@ -668,7 +668,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 11,
-        relay_version: 3,
+        relay_version: 4,
       },
     })
     const second = establishChannel({
@@ -677,7 +677,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_ROOMY',
         budget: transportProfileBudget('roomy'),
         connection_generation: 12,
-        relay_version: 3,
+        relay_version: 4,
       },
     })
     assert.notEqual(first.ready.receive.connection_generation, second.ready.receive.connection_generation,
@@ -695,7 +695,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 11,
-        relay_version: 3,
+        relay_version: 4,
       },
     })
     assert.equal(security.getChannelReceive(stale.channelId).connection_generation, 11)
@@ -738,11 +738,11 @@ test('an absent channel receive advertisement adds no cap and a malformed one fa
       return () => security.handleChannelHandshake({ channel_id: channelId, device_id: 'device-1', protocol_version: 1, body: noise.writeMessage(hello) })
     }
     // A per-leg generation is accepted without any cross-leg comparison.
-    assert.ok(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 2, relay_version: 3 })() instanceof Uint8Array)
+    assert.ok(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 2, relay_version: 4 })() instanceof Uint8Array)
     // Malformed, contradictory, missing and unknown-profile advertisements
     // fail explicitly before the channel becomes usable.
     assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', connection_generation: 1 }), (error) => error.code === 'invalid_argument')
-    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: { ...transportProfileBudget('default'), envelope_bytes: 1 }, connection_generation: 1, relay_version: 3 }), (error) => error.code === 'invalid_argument')
+    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: { ...transportProfileBudget('default'), envelope_bytes: 1 }, connection_generation: 1, relay_version: 4 }), (error) => error.code === 'invalid_argument')
     assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 0 }), (error) => error.code === 'invalid_argument')
     assert.throws(() => attempt({ profile: 'TRANSPORT_PROFILE_FUTURE', budget: transportProfileBudget('default'), connection_generation: 1 }), (error) => error.code === 'protocol_version_incompatible')
     assert.equal(security.listChannels().length, 1, 'only the advertisement-free channel was installed')

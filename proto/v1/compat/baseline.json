@@ -596,8 +596,8 @@
         "number": 0
       },
       {
-        "name": "RELAY_EPOCH_V3",
-        "number": 3
+        "name": "RELAY_EPOCH_V4",
+        "number": 4
       }
     ],
     "RequestKind": [

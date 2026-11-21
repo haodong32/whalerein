@@ -347,7 +347,7 @@ async fn send_handshake(
         command_id: String::new(),
         payload_digest: Vec::new(),
         expires_at_unix_ms: now_unix_ms() + HANDSHAKE_TIMEOUT_MS,
-        relay_version: crate::access::transport::RELAY_EPOCH_V3,
+        relay_version: crate::access::transport::RELAY_EPOCH_V4,
         trace_id: access.trace_id().to_owned(),
         protocol_version: PROTOCOL_VERSION,
         channel_id: negotiation_id.to_owned(),

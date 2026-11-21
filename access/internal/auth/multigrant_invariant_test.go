@@ -22,13 +22,16 @@ func TestACLUsesExactHostDeviceGrantForEventsNoticesAndReady(t *testing.T) {
 		}
 	}
 	check(first, ActionSubscribe, "whalerein/v1/h/h1/d/d1/event", true)
+	check(first, ActionSubscribe, "whalerein/v1/h/h1/d/d1/live", true)
 	check(first, ActionPublish, "whalerein/v1/h/h1/d/d1/ready", true)
 	fs.grants[grantKey("h1", "d1")] = false
 	check(first, ActionSubscribe, "whalerein/v1/h/h1/d/d1/event", false)
+	check(first, ActionSubscribe, "whalerein/v1/h/h1/d/d1/live", false)
 	check(first, ActionPublish, "whalerein/v1/h/h1/d/d1/ready", false)
 	check(first, ActionSubscribe, "whalerein/v1/h/h2/d/d1/event", true)
 	check(first, ActionPublish, "whalerein/v1/h/h2/d/d1/ready", true)
 	check(second, ActionSubscribe, "whalerein/v1/h/h1/d/d2/event", true)
+	check(second, ActionSubscribe, "whalerein/v1/h/h1/d/d2/live", true)
 	check(second, ActionPublish, "whalerein/v1/h/h1/d/d2/ready", true)
 	check(first, ActionSubscribe, "whalerein/v1/h/h1/d/d2/event", false)
 	check(first, ActionPublish, "whalerein/v1/h/h1/d/d2/ready", false)

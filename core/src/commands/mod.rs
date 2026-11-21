@@ -1089,7 +1089,7 @@ impl CommandService {
         digest: &[u8],
     ) -> CoreResult<PayloadReference> {
         let reserve = RelayObjectReserveRequest {
-            relay_version: crate::access::transport::RELAY_EPOCH_V3,
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
             host_id: request.host_id.clone(),
             device_id: request.device_id.clone(),
             session_id: self
@@ -1115,7 +1115,7 @@ impl CommandService {
             return Err(error.into());
         }
         let finish = RelayObjectFinishRequest {
-            relay_version: crate::access::transport::RELAY_EPOCH_V3,
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
             ciphertext_bytes: body.len() as u64,
             sha256: digest.to_vec(),
             signed_at_unix_ms: 0,
@@ -1176,7 +1176,11 @@ impl CommandService {
             &transport.device_id,
             transport.token.clone(),
             Arc::default(),
-        );
+        )
+        // Presence belongs to the long-lived watch observation. This
+        // short-lived command receiver must not publish the shared device
+        // last will when it stops while a watch is still attached.
+        .without_last_will();
         if let Some(session) = &transport.session_id {
             client = client.with_cloud_session(session.clone());
         }
@@ -1187,6 +1191,8 @@ impl CommandService {
                     stop_requested,
                     // The event stream belongs to a Watch receiver, not to a
                     // foreground command; never print or forward it here.
+                    |_| true,
+                    // Foreground commands never consume live previews.
                     |_| true,
                     |notice| {
                         let _ =
@@ -1443,7 +1449,7 @@ fn build_request(
         command_id: command_id.to_owned(),
         payload_digest,
         expires_at_unix_ms,
-        relay_version: crate::access::transport::RELAY_EPOCH_V3,
+        relay_version: crate::access::transport::RELAY_EPOCH_V4,
         trace_id: random_id(16),
         protocol_version: PROTOCOL_VERSION,
         channel_id: channel_id.to_owned(),
@@ -3668,7 +3674,7 @@ mod relay_command_tests {
             command_id: "c-1".into(),
             updated_at_unix_ms: updated,
             result_reference: None,
-            relay_version: crate::access::transport::RELAY_EPOCH_V3,
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
         }
     }
 

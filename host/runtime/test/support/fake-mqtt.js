@@ -13,6 +13,10 @@ class FakeMqttClient extends EventEmitter {
     this.closed = false
     this.subscriptions = new Set()
     this.delivered = []
+    this.stream = {
+      noDelay: false,
+      setNoDelay(value) { this.noDelay = value === true },
+    }
     queueMicrotask(() => {
       if (this.closed) return
       this.connected = true
@@ -45,7 +49,8 @@ class FakeMqttClient extends EventEmitter {
 
   publish(topic, payload, options, callback) {
     const cb = typeof options === 'function' ? options : callback
-    this.broker.publish(this, topic, Buffer.from(payload), (error) => cb?.(error ?? null))
+    const qos = typeof options === 'object' && options !== null ? (options.qos ?? 0) : 0
+    this.broker.publish(this, topic, Buffer.from(payload), (error) => cb?.(error ?? null), qos)
     return this
   }
 
@@ -119,12 +124,12 @@ export class FakeBroker {
     client.subscriptions.clear()
   }
 
-  publish(client, topic, payload, callback) {
+  publish(client, topic, payload, callback, qos = 1) {
     if (!this.online || client.closed || !client.connected || payload.length > this.maxPacketBytes) {
       queueMicrotask(() => callback(new Error('offline')))
       return
     }
-    this.messages.push({ topic, payload, clientId: client.options?.clientId ?? '' })
+    this.messages.push({ topic, payload, qos, clientId: client.options?.clientId ?? '' })
     queueMicrotask(() => {
       callback(null)
       const subscribers = this.#topics.get(topic)
@@ -132,7 +137,7 @@ export class FakeBroker {
       for (const subscriber of subscribers) {
         if (subscriber.closed || !subscriber.connected) continue
         subscriber.delivered.push({ topic, payload })
-        subscriber.emit('message', topic, payload, { qos: 1 })
+        subscriber.emit('message', topic, payload, { qos })
       }
     })
   }

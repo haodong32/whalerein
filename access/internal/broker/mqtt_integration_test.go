@@ -96,6 +96,15 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		events <- envelope.GetDeviceId()
 		return nil
 	})
+	liveEvents := make(chan string, 4)
+	service.SetLiveEventHandler(func(ctx context.Context, hostID string, payload []byte) error {
+		var envelope whalereinv1.EventEnvelope
+		if err := proto.Unmarshal(payload, &envelope); err != nil {
+			return err
+		}
+		liveEvents <- envelope.GetDeviceId()
+		return service.PublishDeviceLive(ctx, hostID, envelope.GetDeviceId(), payload)
+	})
 	ready := make(chan string, 4)
 	service.SetReadyHandler(func(_ context.Context, hostID string) error {
 		ready <- hostID
@@ -186,6 +195,19 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("event not delivered")
+	}
+
+	// Host -> Access live preview is republished on the device live topic at
+	// QoS 0 and never enters control event routing.
+	livePayload, _ := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h-e2e", DeviceId: "d-e2e", Ciphertext: []byte("preview"), RelayVersion: RelayEpoch})
+	publishRawQoS(t, host, LiveTopic("h-e2e"), livePayload, 0)
+	select {
+	case deviceID := <-liveEvents:
+		if deviceID != "d-e2e" {
+			t.Fatalf("live device = %q", deviceID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("live preview not delivered")
 	}
 
 	// Transient pairing-style request/result correlation.
@@ -320,6 +342,7 @@ func integrationHostPolicy(hostID string) string {
 		{"read", PresenceTopic(hostID)},
 		{"write", ResultTopic(hostID)},
 		{"write", EventTopic(hostID)},
+		{"write", LiveTopic(hostID)},
 	}
 	for _, entry := range entries {
 		fmt.Fprintf(&builder, "acl %s 1 %s %s\n", entry.access, hostID, entry.filter)
@@ -336,6 +359,8 @@ func integrationDevicePolicy(hostID, deviceID string) string {
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceLiveTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceLiveTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceReadyTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 - %s\n", DeviceWillTopic(deviceID))
 	return builder.String()
@@ -391,19 +416,24 @@ func publishProto(t *testing.T, client *paho.Client, topic string, message proto
 
 func publishRaw(t *testing.T, client *paho.Client, topic string, payload []byte) {
 	t.Helper()
+	publishRawQoS(t, client, topic, payload, 1)
+}
+
+func publishRawQoS(t *testing.T, client *paho.Client, topic string, payload []byte, qos byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Payload: payload}); err != nil {
+	if _, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: qos, Payload: payload}); err != nil {
 		t.Fatalf("publish %s: %v", topic, err)
 	}
 }
 
 // TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust was the
 // fragment-based cross-language relay case. The fragment transport, its
-// WRMQTT2 framing and its receipt topics no longer exist; the epoch-3 inline
+// WRMQTT2 framing and its receipt topics no longer exist; the epoch-4 inline
 // and reference relay is covered by tests/integration/drivers/transport/
 // mqtt-boundary-message.test.js and mqtt-large-message.test.js. This case is
 // retained only to record that the old fixture cannot speak the new relay.
 func TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust(t *testing.T) {
-	t.Skip("legacy fragment driver was removed; epoch-3 relay is covered by the boundary and large-message transport cases")
+	t.Skip("legacy fragment driver was removed; epoch-4 relay is covered by the boundary and large-message transport cases")
 }

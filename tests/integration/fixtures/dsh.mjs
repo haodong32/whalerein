@@ -10,6 +10,19 @@ const adapter=new FakeDshAdapter({hostId:process.env.WHALEREIN_HOST_ID||'',behav
 let queueReadCount=0
 const readQueue=adapter.readPendingQueue.bind(adapter)
 adapter.readPendingQueue=(...args)=>{queueReadCount++;return readQueue(...args)}
+// Hold one foreground send open until the AC-16 test has published its live
+// previews and explicitly ended the fixture turn. Without this the fixture's
+// immediate turn/end can settle the send as uncertain before preview_final.
+let holdNextSendTurn=false
+const sendUserMessage=adapter.sendUserMessage.bind(adapter)
+adapter.sendUserMessage=async(...args)=>{
+  if(!holdNextSendTurn)return sendUserMessage(...args)
+  holdNextSendTurn=false
+  const previous=adapter.behavior.longRunning
+  adapter.behavior.longRunning=true
+  try{return await sendUserMessage(...args)}
+  finally{adapter.behavior.longRunning=previous}
+}
 // Local fixture control starts each benchmark reply on a fixed schedule.
 const benchTextTimes=new Map()
 const emitPreview=(session,stream,revision,frame)=>adapter.emit(session,{
@@ -247,6 +260,12 @@ createInterface({input:process.stdin}).on('line',async line=>{
     else if(method==='emit_silent')value=adapter.emit(session_id,{type:'assistant/message',kind:'output',data:{text:'x'},suppressNotification:true})
     else if(method==='emit')value=adapter.output(session_id,'fixture output')
     else if(method==='suppress_message_echo'){adapter.behavior.emitOutputOnMessage=false;value=true}
+    else if(method==='hold_next_send_turn'){holdNextSendTurn=true;value=true}
+    else if(method==='finish_send_turn') {
+      adapter.emit(session_id,{type:'turn/end',kind:'session_state',data:{running:false}})
+      adapter.setRunning(session_id,false)
+      value=true
+    }
     else if(method==='bench_seed_history') {
       control.texts.forEach((text,index)=>emitFinal(session_id,`benchmark-history-${index}`,text))
       value=true

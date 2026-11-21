@@ -16,11 +16,12 @@ const proto = codec()
 const RESULT_TOPIC = 'whalerein/v1/h/host-1/result'
 const EVENT_TOPIC = 'whalerein/v1/h/host-1/event'
 const REQUEST_TOPIC = 'whalerein/v1/h/host-1/request'
+const LIVE_TOPIC = 'whalerein/v1/h/host-1/live'
 
 function resultEnvelope({ body = new Uint8Array([1]), status = 'succeeded' } = {}) {
   return proto.encode('whalerein.v1.HostResult', {
     request_id: 'ready', host_id: 'host-1', device_id: 'd1', status,
-    result_body: body, protocol_version: 1, relay_version: 3,
+    result_body: body, protocol_version: 1, relay_version: 4,
   })
 }
 
@@ -28,7 +29,7 @@ function eventEnvelope({ ciphertext = new Uint8Array([1]) } = {}) {
   return proto.encode('whalerein.v1.EventEnvelope', {
     host_id: 'host-1', device_id: 'd1', channel_id: 'c1',
     nonce: randomBytes(12), ciphertext,
-    created_at_unix_ms: 1, relay_version: 3,
+    created_at_unix_ms: 1, relay_version: 4,
   })
 }
 
@@ -37,7 +38,7 @@ function advertisement(overrides = {}) {
     profile: 'TRANSPORT_PROFILE_DEFAULT',
     budget: transportProfileBudget('default'),
     connection_generation: 1,
-    relay_version: 3,
+    relay_version: 4,
     ...overrides,
   })
 }
@@ -71,7 +72,7 @@ function request(overrides = {}) {
     device_id: 'd1',
     kind: 'REQUEST_KIND_QUERY',
     protocol_version: 1,
-    relay_version: 3,
+    relay_version: 4,
     body: new Uint8Array([1]),
     expires_at_unix_ms: Date.now() + 60_000,
     ...overrides,
@@ -136,7 +137,7 @@ test('a blocked MQTT port or ALPN negotiation fails closed without a plaintext f
   }
 })
 
-test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends an epoch-3 HostReady', async () => {
+test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request topic, and sends an epoch-4 HostReady', async () => {
   const { broker, access, options } = makeAccess()
   const calls = { connected: 0, ready: 0, requests: [] }
   access.start({
@@ -158,18 +159,18 @@ test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request
   const ready = broker.messages.find((message) => message.topic === RESULT_TOPIC)
   const readyResult = proto.decode('whalerein.v1.HostResult', ready.payload)
   assert.equal(readyResult.status, 'succeeded')
-  assert.equal(readyResult.relay_version, 3)
+  assert.equal(readyResult.relay_version, 4)
   const readyBody = proto.decode('whalerein.v1.HostReady', readyResult.result_body)
   assert.equal(readyBody.host_id, 'host-1')
-  assert.equal(readyBody.relay_version, 3)
-  assert.equal(readyBody.receive.relay_version, 3)
+  assert.equal(readyBody.relay_version, 4)
+  assert.equal(readyBody.receive.relay_version, 4)
   assert.equal(readyBody.receive.budget.packet_bytes, 65536)
   assert.equal(readyBody.receive.budget.envelope_bytes, 16 * 1024 * 1024)
 
   await publishRequest(broker, request())
   await waitFor(() => calls.requests.length === 1)
   assert.equal(calls.requests[0].request_id, 'r1')
-  assert.equal(calls.requests[0].relay_version, 3)
+  assert.equal(calls.requests[0].relay_version, 4)
 
   await access.stop()
   assert.equal(access.connected, false)
@@ -182,9 +183,9 @@ test('a request with another relay epoch is rejected before business dispatch, n
   access.start({ onRequest: (request) => seen.push(request) })
   await access.waitForConnected(2000)
   await publishRequest(broker, request({ relay_version: 2 }))
-  await publishRequest(broker, request({ relay_version: 3 }))
+  await publishRequest(broker, request({ relay_version: 4 }))
   await waitFor(() => seen.length === 1)
-  assert.equal(seen[0].relay_version, 3)
+  assert.equal(seen[0].relay_version, 4)
   const ready = broker.messages.filter((message) => message.topic === RESULT_TOPIC).at(-1)
   assert.doesNotThrow(() => proto.decode('whalerein.v1.HostResult', ready.payload), 'a complete packet is never text-framed')
   await access.stop()
@@ -241,6 +242,7 @@ test('when MQTT result/event publication succeeds or fails, Access reports the o
   const { broker, access } = makeAccess()
   await assert.rejects(access.publishResult(resultEnvelope()), (error) => error.code === 'unavailable')
   await assert.rejects(access.publishEvent(eventEnvelope()), (error) => error.code === 'unavailable')
+  assert.equal(await access.publishLive(eventEnvelope()), false, 'a disconnected live publish is a drop')
   const seen = []
   const subscriber = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
   await new Promise((resolve) => subscriber.subscribe(RESULT_TOPIC, { qos: 1 }, resolve))
@@ -293,7 +295,7 @@ test('an event above the Access packet advertisement is published as a ready ref
   const envelope = proto.decode('whalerein.v1.EventEnvelope', seen[0])
   assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length, 0)
   assert.equal(envelope.payload_reference.ciphertext_bytes, 1024)
-  assert.equal(envelope.relay_version, 3)
+  assert.equal(envelope.relay_version, 4)
   assert.deepEqual(calls, ['reserve', 'upload', 'finish'])
   await access.stop()
 })
@@ -475,6 +477,14 @@ test('a configured Access origin and signing key construct the Host-authority re
   assert.doesNotThrow(() => makeAccess({ accessOrigin: 'https://access.example' }))
 })
 
+test('the live connection disables Nagle so small previews do not wait a round trip', async () => {
+  const { access, accesses } = makeAccess()
+  await access.start()
+  await access.waitForConnected(1000)
+  assert.equal(accesses[0].stream.noDelay, true)
+  await access.stop()
+})
+
 test('a receive budget that cannot fit required control envelopes fails configuration before readiness', () => {
   const budget = {
     packet_bytes: 40,
@@ -491,6 +501,7 @@ test('topic accessors expose the configured Host topics', () => {
   assert.equal(access.requestTopic, REQUEST_TOPIC)
   assert.equal(access.resultTopic, RESULT_TOPIC)
   assert.equal(access.eventTopic, EVENT_TOPIC)
+  assert.equal(access.liveTopic, LIVE_TOPIC)
 })
 
 test('an unparseable URL avoids ALPN and a throwing connector keeps retrying without a crash', async () => {
@@ -587,5 +598,89 @@ test('a definitive broker credential refusal stops retrying with unauthorized', 
   assert.equal(access.describe().lastErrorCode, 'unauthorized')
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(attempts.length, 1, 'a refused credential does not retry forever')
+  await access.stop()
+})
+
+test('a live preview publishes only on the live topic at QoS 0 and never on the control event topic', async () => {
+  const { broker, access } = makeAccess()
+  const seen = []
+  const subscriber = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
+  await new Promise((resolve) => subscriber.subscribe(LIVE_TOPIC, { qos: 0 }, resolve))
+  subscriber.on('message', (topic, payload, packet) => seen.push({ topic, payload: Buffer.from(payload), qos: packet?.qos }))
+  access.start({})
+  await access.waitForConnected(2000)
+  const envelope = eventEnvelope({ ciphertext: new Uint8Array(512) })
+  assert.equal(await access.publishLive(envelope), true)
+  await waitFor(() => seen.length === 1)
+  assert.equal(seen[0].topic, LIVE_TOPIC)
+  assert.equal(seen[0].qos, 0)
+  const published = broker.messages.filter((message) => message.topic === LIVE_TOPIC)
+  assert.equal(published.length, 1)
+  assert.equal(published[0].qos, 0, 'live is one QoS 0 PUBLISH')
+  assert.equal(broker.messages.some((message) => message.topic === EVENT_TOPIC), false, 'no preview on the control topic')
+  assert.deepEqual(
+    Buffer.from(proto.decode('whalerein.v1.EventEnvelope', published[0].payload).ciphertext),
+    Buffer.from(proto.decode('whalerein.v1.EventEnvelope', envelope).ciphertext),
+    'the complete EventEnvelope is published unchanged',
+  )
+  await access.stop()
+})
+
+test('a live preview resolves when the client accepts the packet, without a PUBACK timer', async () => {
+  const { access, accesses } = makeAccess({ publishTimeoutMs: 5 })
+  access.start()
+  await access.waitForConnected(2000)
+  let qos = null
+  accesses[0].publish = (_topic, _payload, options, callback) => {
+    qos = options?.qos
+    // QoS 0 has no acknowledgement; the client reports acceptance after 20 ms,
+    // which is longer than the QoS 1 acknowledgement timeout configured above.
+    setTimeout(() => callback?.(null), 20)
+  }
+  assert.equal(await access.publishLive(eventEnvelope()), true)
+  assert.equal(qos, 0)
+  assert.equal(access.connected, true, 'a slow live acceptance never interrupts the link')
+  await access.stop()
+})
+
+test('a live preview that cannot fit is dropped instead of becoming a reference or control message', async () => {
+  const budget = {
+    packet_bytes: 1024,
+    envelope_bytes: 64 * 1024,
+    bulk_concurrency: 4,
+    reserved_bytes: 128 * 1024,
+    transfer_timeout_ms: 120_000,
+  }
+  const calls = []
+  const relayClient = {
+    async reserve() { calls.push('reserve') },
+    async upload() { calls.push('upload') },
+    async finish() { calls.push('finish') },
+    async delete() { calls.push('delete') },
+    async fetch() { throw new Error('not used') },
+  }
+  const { broker, access } = makeAccess({ transportProfile: budget, relayClient })
+  access.start()
+  await access.waitForConnected(2000)
+  const before = broker.messages.length
+  const oversized = eventEnvelope({ ciphertext: new Uint8Array(4096) })
+  assert.equal(await access.publishLive(oversized), false)
+  const reference = {
+    object_id: 'a'.repeat(32), owner_node_id: 'node-1', ciphertext_bytes: 100,
+    sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
+    purpose: 'PAYLOAD_PURPOSE_EVENT',
+  }
+  const referenced = proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: 'host-1', device_id: 'd1', channel_id: 'c1', nonce: new Uint8Array(12),
+    payload_reference: reference, created_at_unix_ms: 1, relay_version: 4,
+  })
+  assert.equal(await access.publishLive(referenced), false, 'live never uses the reference carrier')
+  const old = proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: 'host-1', device_id: 'd1', channel_id: 'c1', nonce: new Uint8Array(12),
+    ciphertext: new Uint8Array([1]), created_at_unix_ms: 1, relay_version: 3,
+  })
+  assert.equal(await access.publishLive(old), false, 'epoch 3 is never accepted')
+  assert.equal(broker.messages.length, before, 'a dropped preview publishes nothing')
+  assert.deepEqual(calls, [], 'a dropped live preview never stages an HTTPS object')
   await access.stop()
 })

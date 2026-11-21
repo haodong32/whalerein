@@ -450,7 +450,7 @@ export class HostRuntime {
         return await this.#reply(request, {
           status: 'rejected',
           errorCode: 'protocol_version_incompatible',
-          errorDetail: 'relay epoch is not 3; upgrade the sender',
+          errorDetail: 'relay epoch is not 4; upgrade the sender',
         })
       }
       if (kind === 'REQUEST_KIND_ACCESS_READY') {

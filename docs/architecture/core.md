@@ -37,7 +37,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `conversation` | Bounded provisional Attempts, typed blocks, one tool activity per call, order, resets and final-message precedence. |
 | `history` | Independent bounded committed-history pages, exact message references, source/cache selection and projection fencing. |
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
-| `access` | HTTPS and device MQTT, including the complete-message inline/reference relay epoch. |
+| `access` | HTTPS and device MQTT, including the complete-message inline/reference control relay and QoS 0 live preview reception. |
 | `diagnostics` | Redacted live events, bounded operation history and exports. |
 | `account` | Cloud App sessions, verified account scope, regional permission renewal, and durable sign-out retries. |
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
@@ -238,13 +238,21 @@ artifact and validated before any connection use: the complete MQTT packet
 budget, logical envelope, aggregate reservations, timeout ordering and the
 minimum control message must all fit. Invalid relations fail `Core::open`.
 Changes take effect on restart. The relay uses one coordinated epoch
-(`relay_version = 3`): every received `EventEnvelope` and `RequestStateNotice`
-must advertise it, and a peer without it is rejected with
-`protocol_version_incompatible`. An inline ciphertext or sealed body is used
-directly. A `*_reference` is fetched with the Device bearer from the Access HTTPS
-directory and its exact reserved length and SHA-256 are verified before AEAD or
-business handling; a failed, truncated, longer or corrupt fetch is terminal for
-that message and never a completed result. `ChannelHello` advertises the device
+(`relay_version = 4`): every received `EventEnvelope`, live preview and
+`RequestStateNotice` must advertise it, and a peer with any other epoch is
+rejected with `protocol_version_incompatible`. Core subscribes to its control
+event and notice topics at QoS 1 and to its own Device live topic
+`.../d/{device_id}/live` at QoS 0. A live preview must carry inline ciphertext
+at epoch 4; a reference, missing nonce or foreign epoch is rejected. Live
+frames feed the same observation pipeline and sequence/duplicate path as control
+events, with no acknowledgement, retransmission or control blocking: a gap or
+loss marks only the preview incomplete, and the committed message or an
+authoritative HTTPS read repairs the view. An inline ciphertext or sealed body
+is used directly. A control `*_reference` is fetched with the Device bearer from
+the Access HTTPS directory and its exact reserved length and SHA-256 are
+verified before AEAD or business handling; a failed, truncated, longer or
+corrupt fetch is terminal for that message and never a completed result.
+`ChannelHello` advertises the device
 receive budget with its own monotonic channel generation, and the Device
 publishes the same advertisement on its `.../ready` topic after every successful
 broker connect. `ChannelReady` must name a known packaged profile and carry a

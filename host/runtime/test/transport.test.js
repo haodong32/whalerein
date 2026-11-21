@@ -526,3 +526,79 @@ test('packet arithmetic rejects invalid lengths and topic names', () => {
   assert.throws(() => publishPacketBytes('t', 1, { propertiesBytes: -1 }), (error) => error.code === 'invalid_argument')
   assert.equal(maxPlaintextBytes(() => 1, 1), 0)
 })
+
+const LIVE_TOPIC = `whalerein/v1/h/${HOST}/live`
+
+test('live publication is one inline QoS 0 packet on the live topic with no chain, reference or retry', async () => {
+  const relay = new FakeRelay()
+  const published = []
+  const options = []
+  const sender = transport({
+    relay,
+    publish: async (topic, bytes, publishOptions) => {
+      options.push(publishOptions)
+      published.push({ topic, bytes })
+    },
+  })
+  const envelope = eventEnvelope({ ciphertext: new Uint8Array(1024) })
+  // The same envelope would become a reference on the control class; live must
+  // stay inline and is dropped if it cannot fit.
+  assert.equal(await sender.sendLive(LIVE_TOPIC, envelope, { receiverLimit: 400 }), false)
+  assert.equal(published.length, 0)
+  assert.equal(relay.calls.length, 0)
+
+  assert.equal(await sender.sendLive(LIVE_TOPIC, envelope), true)
+  assert.equal(published.length, 1)
+  assert.equal(published[0].topic, LIVE_TOPIC)
+  assert.deepEqual(options, [{ qos: 0 }])
+  assert.equal(relay.calls.length, 0, 'live never stages an HTTPS reference')
+  const decoded = proto.decode('whalerein.v1.EventEnvelope', published[0].bytes)
+  assert.equal(decoded.payload_reference, undefined)
+  assert.equal(decoded.ciphertext.length, 1024)
+})
+
+test('live publication drops a wrong epoch, a reference, an empty or an oversized packet', async () => {
+  const published = []
+  const sender = transport({ publish: async (topic, bytes) => published.push(bytes) })
+  const old = proto.encode('whalerein.v1.EventEnvelope', {
+    host_id: HOST, device_id: DEVICE, channel_id: CHANNEL, nonce: new Uint8Array(12),
+    ciphertext: new Uint8Array([1]), created_at_unix_ms: 1, relay_version: 3,
+  })
+  assert.equal(await sender.sendLive(LIVE_TOPIC, old), false)
+  assert.equal(await sender.sendLive(LIVE_TOPIC, new Uint8Array(0)), false)
+  const reference = {
+    object_id: 'a'.repeat(32), owner_node_id: 'node-1', ciphertext_bytes: 100,
+    sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
+    purpose: 'PAYLOAD_PURPOSE_EVENT',
+  }
+  assert.equal(await sender.sendLive(LIVE_TOPIC, eventEnvelope({ reference })), false)
+  const tooLarge = transport({ packet: 400 })
+  assert.equal(await tooLarge.sendLive(LIVE_TOPIC, eventEnvelope({ ciphertext: new Uint8Array(1024) })), false)
+  assert.equal(published.length, 0)
+})
+
+test('two live previews are in flight at once while control stays ordered on QoS 1', async () => {
+  const gates = []
+  const topics = []
+  const controlOptions = []
+  const sender = transport({
+    publish: async (topic, bytes, options) => {
+      topics.push(topic)
+      if (options?.qos === 0) {
+        await new Promise((resolve) => gates.push(resolve))
+        return
+      }
+      controlOptions.push(options)
+    },
+  })
+  const first = sender.sendLive(LIVE_TOPIC, eventEnvelope({ ciphertext: new Uint8Array([1]) }))
+  const second = sender.sendLive(LIVE_TOPIC, eventEnvelope({ ciphertext: new Uint8Array([2]) }))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(gates.length, 2, 'both previews reach the publish seam before either resolves')
+  gates.forEach((resolve) => resolve())
+  assert.deepEqual(await Promise.all([first, second]), [true, true])
+
+  await sender.sendComplete(EVENT_TOPIC, eventEnvelope({ ciphertext: new Uint8Array([3]) }), { kind: 'event' })
+  assert.deepEqual(controlOptions, [undefined], 'control keeps the default QoS 1 publication')
+  assert.equal(topics.filter((topic) => topic === LIVE_TOPIC).length, 2)
+})

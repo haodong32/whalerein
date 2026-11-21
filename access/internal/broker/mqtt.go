@@ -298,7 +298,53 @@ type pahoSession struct {
 }
 
 func (s *pahoSession) Publish(ctx context.Context, topic string, payload []byte, qos byte) error {
+	if qos == 0 {
+		return s.publishLive(ctx, topic, payload)
+	}
 	return s.publishComplete(ctx, topic, payload)
+}
+
+// publishLive sends one complete QoS 0 preview directly. It never enters the
+// ordered control queue, never rewrites to a reference and never retries. A
+// packet that does not fit the live hop is a drop, not a fallback.
+func (s *pahoSession) publishLive(ctx context.Context, topic string, payload []byte) error {
+	if len(payload) == 0 {
+		return transportReject(transportCodeHeader, ErrMessageBudget)
+	}
+	if uint64(len(payload)) > s.budget.EnvelopeBytes {
+		if s.metrics != nil {
+			s.metrics.TransportRejected(transportCodeEnvelope, int64(len(payload)), int64(s.budget.EnvelopeBytes))
+		}
+		return transportReject(transportCodeEnvelope, ErrMessageBudget)
+	}
+	parsed, err := ParseTopic(topic)
+	if err != nil || parsed.Kind != KindDeviceLive {
+		if s.metrics != nil {
+			s.metrics.TransportRejected(transportCodeTopic, int64(len(payload)), 0)
+		}
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
+	}
+	var peer *config.TransportEffective
+	if s.receivers != nil {
+		if budget, ok := s.receivers.Lookup(topic); ok {
+			peer = &budget
+		}
+	}
+	limit := selectPacketLimit(s.budget.PacketBytes, s.brokerLimit, peer)
+	if uint64(encodedLivePublishBytes(topic, len(payload), 0)) > limit {
+		if s.metrics != nil {
+			s.metrics.TransportRejected(transportCodePacket, int64(len(payload)), int64(limit))
+		}
+		return transportReject(transportCodePacket, ErrMessageBudget)
+	}
+	response, err := s.client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 0, Payload: payload})
+	if err != nil {
+		return err
+	}
+	if response != nil && response.ReasonCode >= 0x80 {
+		return fmt.Errorf("mqtt live publish rejected with reason %d", response.ReasonCode)
+	}
+	return nil
 }
 
 // publishComplete selects inline or reference for one outgoing hop. It never

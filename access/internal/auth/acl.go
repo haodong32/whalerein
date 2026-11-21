@@ -19,6 +19,7 @@ const (
 	topicPrefix       = "whalerein/v1/h/"
 	accessResult      = "whalerein/v1/h/+/result"
 	accessEvent       = "whalerein/v1/h/+/event"
+	accessLive        = "whalerein/v1/h/+/live"
 	accessDeviceReady = "whalerein/v1/h/+/d/+/ready"
 	accessDeviceWill  = "whalerein/v1/presence/device/+"
 	deviceWillPrefix  = "whalerein/v1/presence/device/"
@@ -49,10 +50,11 @@ func (s *Service) AuthorizeACL(ctx context.Context, identity BrokerIdentity, act
 func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 	switch action {
 	case ActionSubscribe:
-		// Access needs results, events, device advertisements, device last
-		// wills and broker presence system topics. There is no device ACK
-		// subscription in the relay epoch.
+		// Access needs results, control events, live previews, device
+		// advertisements, device last wills and broker presence system topics.
+		// There is no device ACK subscription in the relay epoch.
 		return topic == accessResult || topic == accessEvent ||
+			topic == accessLive ||
 			topic == sysConnected || topic == sysDisconnected ||
 			topic == accessDeviceWill || topic == accessDeviceReady
 	case ActionPublish:
@@ -63,6 +65,7 @@ func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 		return parsed.kind == "request" ||
 			(parsed.kind == "device_event" && parsed.hostID != "") ||
 			(parsed.kind == "device_notice" && parsed.hostID != "") ||
+			(parsed.kind == "device_live" && parsed.hostID != "") ||
 			parsed.kind == "presence"
 	}
 	return false
@@ -80,7 +83,7 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 	case ActionSubscribe:
 		return parsed.kind == "request" || parsed.kind == "presence"
 	case ActionPublish:
-		return parsed.kind == "result" || parsed.kind == "event"
+		return parsed.kind == "result" || parsed.kind == "event" || parsed.kind == "live"
 	}
 	return false
 }
@@ -100,7 +103,7 @@ func (s *Service) authorizeDeviceACL(ctx context.Context, identity BrokerIdentit
 	if !ok {
 		return false, nil
 	}
-	allowed := (action == ActionSubscribe && (parsed.kind == "device_event" || parsed.kind == "device_notice")) ||
+	allowed := (action == ActionSubscribe && (parsed.kind == "device_event" || parsed.kind == "device_notice" || parsed.kind == "device_live")) ||
 		(action == ActionPublish && parsed.kind == "device_ready")
 	if !allowed {
 		return false, nil
@@ -121,14 +124,16 @@ type parsedTopic struct {
 	kind     string
 }
 
-// parseTopic parses one of the four wire topics:
+// parseTopic parses one of the complete-message wire topics:
 //
 //	whalerein/v1/h/{host_id}/request
 //	whalerein/v1/h/{host_id}/result
 //	whalerein/v1/h/{host_id}/event
+//	whalerein/v1/h/{host_id}/live
 //	whalerein/v1/h/{host_id}/d/{device_id}/event
 //	whalerein/v1/h/{host_id}/d/{device_id}/notice
 //	whalerein/v1/h/{host_id}/d/{device_id}/ready
+//	whalerein/v1/h/{host_id}/d/{device_id}/live
 func parseTopic(topic string) (parsedTopic, bool) {
 	if !strings.HasPrefix(topic, topicPrefix) {
 		return parsedTopic{}, false
@@ -142,7 +147,7 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{}, false
 		}
 		switch leaf {
-		case "request", "result", "event", "presence":
+		case "request", "result", "event", "live", "presence":
 			return parsedTopic{hostID: hostID, kind: leaf}, true
 		default:
 			return parsedTopic{}, false
@@ -162,6 +167,8 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_notice"}, true
 		case "ready":
 			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_ready"}, true
+		case "live":
+			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_live"}, true
 		default:
 			return parsedTopic{}, false
 		}

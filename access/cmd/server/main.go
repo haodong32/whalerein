@@ -447,6 +447,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	service.SetResultHandler(requestService.HandleHostResult)
 	service.SetEventHandler(eventService.Handle)
+	service.SetLiveEventHandler(eventService.HandleLive)
 	service.SetHostKeyHandler(authService.RememberHostAuthorizationKey)
 
 	readiness := diagnostics.NewReadiness()

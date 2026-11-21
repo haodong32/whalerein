@@ -107,7 +107,7 @@ func TestSelectPacketLimitTakesTheStrictestPositiveLimit(t *testing.T) {
 }
 
 func TestRelayEpochIsRequired(t *testing.T) {
-	for _, version := range []uint32{0, 1, 2, 4} {
+	for _, version := range []uint32{0, 1, 2, 3, 5} {
 		err := validateRelayEpoch(version)
 		if err == nil || !errors.Is(err, ErrRelayEpoch) {
 			t.Fatalf("epoch %d accepted: %v", version, err)
@@ -117,7 +117,7 @@ func TestRelayEpochIsRequired(t *testing.T) {
 		}
 	}
 	if err := validateRelayEpoch(RelayEpoch); err != nil {
-		t.Fatalf("epoch 3 rejected: %v", err)
+		t.Fatalf("epoch 4 rejected: %v", err)
 	}
 }
 

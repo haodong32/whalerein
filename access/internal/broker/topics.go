@@ -14,6 +14,8 @@ const (
 	ResultFilter = "whalerein/v1/h/+/result"
 	// EventFilter receives event envelopes from every host.
 	EventFilter = "whalerein/v1/h/+/event"
+	// LiveFilter receives the lossy, QoS 0 live previews from every host.
+	LiveFilter = "whalerein/v1/h/+/live"
 	// DeviceReadyFilter receives Device receive advertisements. Access is the
 	// only subscriber; a Device may publish only its own ready topic.
 	DeviceReadyFilter = "whalerein/v1/h/+/d/+/ready"
@@ -31,9 +33,11 @@ const (
 	KindRequest      TopicKind = "request"
 	KindResult       TopicKind = "result"
 	KindEvent        TopicKind = "event"
+	KindLive         TopicKind = "live"
 	KindDeviceEvent  TopicKind = "device_event"
 	KindDeviceNotice TopicKind = "device_notice"
 	KindDeviceReady  TopicKind = "device_ready"
+	KindDeviceLive   TopicKind = "device_live"
 	KindPresence     TopicKind = "presence"
 )
 
@@ -57,8 +61,12 @@ func RequestTopic(hostID string) string { return topicRoot + hostID + "/request"
 // ResultTopic is the host -> Access result topic.
 func ResultTopic(hostID string) string { return topicRoot + hostID + "/result" }
 
-// EventTopic is the host -> Access event topic.
+// EventTopic is the host -> Access control event topic.
 func EventTopic(hostID string) string { return topicRoot + hostID + "/event" }
+
+// LiveTopic is the host -> Access lossy preview topic. It is published at QoS 0
+// and never carries a durable control envelope.
+func LiveTopic(hostID string) string { return topicRoot + hostID + "/live" }
 
 // DeviceEventTopic is the Access -> device event topic.
 func DeviceEventTopic(hostID, deviceID string) string {
@@ -74,6 +82,12 @@ func DeviceNoticeTopic(hostID, deviceID string) string {
 // DeviceReadyTopic is the device -> Access receive-advertisement topic.
 func DeviceReadyTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/ready"
+}
+
+// DeviceLiveTopic is the Access -> device lossy preview topic. It is published
+// at QoS 0 using only the authenticated outer device id.
+func DeviceLiveTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/live"
 }
 
 // PresenceTopic is the Access -> host device-presence topic.
@@ -108,7 +122,7 @@ func ParseTopic(topic string) (Topic, error) {
 			return Topic{}, ErrInvalidTopic
 		}
 		switch TopicKind(parts[1]) {
-		case KindRequest, KindResult, KindEvent, KindPresence:
+		case KindRequest, KindResult, KindEvent, KindLive, KindPresence:
 			return Topic{HostID: parts[0], Kind: TopicKind(parts[1])}, nil
 		default:
 			return Topic{}, ErrInvalidTopic
@@ -125,6 +139,8 @@ func ParseTopic(topic string) (Topic, error) {
 			kind = KindDeviceNotice
 		case "ready":
 			kind = KindDeviceReady
+		case "live":
+			kind = KindDeviceLive
 		default:
 			return Topic{}, ErrInvalidTopic
 		}

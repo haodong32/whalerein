@@ -25,6 +25,7 @@ type Metrics struct {
 	HostRequestErrors     prometheus.Counter
 	MQTTRouteErrors       prometheus.Counter
 	EventRouteDropped     prometheus.Counter
+	LiveDrops             *prometheus.CounterVec
 	ConnectedHosts        prometheus.Gauge
 	ConnectedDevices      prometheus.Gauge
 	RevocationLatency     prometheus.Histogram
@@ -116,6 +117,10 @@ func NewMetrics() *Metrics {
 			Name: "event_route_dropped_total",
 			Help: "Events dropped because the device grant is missing or revoked.",
 		}),
+		LiveDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "live_preview_dropped_total",
+			Help: "QoS 0 live previews dropped by bounded reason.",
+		}, []string{"reason"}),
 		ConnectedHosts: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "connected_hosts",
 			Help: "Broker-reported connected hosts.",
@@ -298,6 +303,7 @@ func NewMetrics() *Metrics {
 		m.HostRequestErrors,
 		m.MQTTRouteErrors,
 		m.EventRouteDropped,
+		m.LiveDrops,
 		m.ConnectedHosts,
 		m.ConnectedDevices,
 		m.RevocationLatency,
@@ -377,6 +383,20 @@ func (m *Metrics) RouteError() {
 	if m != nil {
 		m.MQTTRouteErrors.Inc()
 	}
+}
+
+// LiveDropped records one QoS 0 live preview dropped by a bounded reason.
+// Identities are never attached.
+func (m *Metrics) LiveDropped(reason string) {
+	if m == nil || m.LiveDrops == nil {
+		return
+	}
+	switch reason {
+	case "disconnected", "backpressure", "publish":
+	default:
+		reason = "publish"
+	}
+	m.LiveDrops.WithLabelValues(reason).Inc()
 }
 
 // EventDropped records an event dropped for a missing/revoked grant.

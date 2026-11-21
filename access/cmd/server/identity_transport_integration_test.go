@@ -56,7 +56,7 @@ func TestIdentityAndEncryptedTransportAgainstIsolatedStack(t *testing.T) {
 		internalPort = parsed
 	}
 	path := writeConfig(t, configValues{publicPort: port, internalPort: internalPort, databaseURL: db.DSN, brokerURL: brokerURL})
-	// The epoch-3 live event is larger than one packet, so the Host stages it
+	// The epoch-4 control event is larger than one packet, so the Host stages it
 	// in the temporary ciphertext directory and the CLI resolves the reference.
 	payloadRoot := t.TempDir()
 	configText, err := os.ReadFile(path)

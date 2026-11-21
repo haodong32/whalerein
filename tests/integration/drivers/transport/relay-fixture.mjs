@@ -1,4 +1,4 @@
-// Shared fixture for the epoch-3 inline/reference transport probes.
+// Shared fixture for the epoch-4 inline/reference and live transport probes.
 //
 // The relay object client is deliberately in-process: these probes exercise the
 // real Host RelayTransport and a real broker, while the HTTPS directory is a
@@ -109,7 +109,7 @@ export function hasLegacyFraming(packets) {
 }
 
 /** Connect a broker subscriber using the shared Access test account. */
-export async function subscribe(url, filter) {
+export async function subscribe(url, filter, { qos = 1 } = {}) {
   const client = await mqtt.connectAsync(url, {
     protocolVersion: 5,
     clientId: `relay-probe-${randomBytes(8).toString('hex')}`,
@@ -118,7 +118,7 @@ export async function subscribe(url, filter) {
     reconnectPeriod: 0,
     connectTimeout: 3000,
   })
-  await client.subscribeAsync(filter, { qos: 1 })
+  await client.subscribeAsync(filter, { qos })
   return client
 }
 
@@ -130,12 +130,21 @@ export function nextMessage(client, predicate, timeoutMs = 5000) {
       reject(new Error('expected relay message was not observed'))
     }, timeoutMs)
     timer.unref?.()
-    function onMessage(topic, bytes) {
+    function onMessage(topic, bytes, packet) {
       if (!predicate(topic, bytes)) return
       clearTimeout(timer)
       client.removeListener('message', onMessage)
-      resolve({ topic, bytes: Buffer.from(bytes) })
+      resolve({ topic, bytes: Buffer.from(bytes), qos: packet?.qos })
     }
     client.on('message', onMessage)
   })
+}
+
+/** Record every message that arrives on one subscriber. */
+export function collectMessages(client) {
+  const messages = []
+  client.on('message', (topic, bytes, packet) => {
+    messages.push({ topic, bytes: Buffer.from(bytes), qos: packet?.qos })
+  })
+  return messages
 }

@@ -13,7 +13,7 @@ export const RESULT_FRAMING_OVERHEAD_BYTES = 1024
  * Default policy from one packaged transport profile. A part travels as one
  * complete HTTPS read; its raw chunk is bounded by the complete MQTT packet
  * budget and the transfer by the single relay transfer timeout. There is no
- * fragment width or idle-reassembly timeout in the epoch-3 contract.
+ * fragment width or idle-reassembly timeout in the complete-message contract.
  */
 export function defaultAttachmentPolicy(profile) {
   const overall = profile.transferTimeoutMs

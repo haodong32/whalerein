@@ -1,6 +1,6 @@
 //! Complete-message relay transport.
 //!
-//! One coordinated relay epoch (`relay_version = 3`) carries a complete
+//! One coordinated relay epoch (`relay_version = 4`) carries a complete
 //! application message as exactly one MQTT PUBLISH. Each hop selects the
 //! representation for its own outgoing packet:
 //!
@@ -27,7 +27,7 @@ use whalerein_proto::{
 };
 
 /// The only accepted MQTT relay epoch.
-pub const RELAY_EPOCH_V3: u32 = 3;
+pub const RELAY_EPOCH_V4: u32 = 4;
 
 /// Default logical envelope retained for callers that only need the baseline.
 pub const MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -250,7 +250,7 @@ impl TransportBudget {
             profile: self.profile.wire() as i32,
             budget: Some(self.wire_budget()),
             connection_generation: generation,
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
         })
     }
 
@@ -277,7 +277,7 @@ impl TransportBudget {
         if advertisement.connection_generation == 0 {
             return Err("receive advertisement generation missing".into());
         }
-        if advertisement.relay_version != RELAY_EPOCH_V3 {
+        if advertisement.relay_version != RELAY_EPOCH_V4 {
             return Err("receive advertisement relay epoch is not supported".into());
         }
         let profile = match whalerein_proto::TransportProfile::try_from(advertisement.profile) {
@@ -315,7 +315,7 @@ pub fn resolve_transport_settings(settings: &TransportSettings) -> Result<Transp
     TransportBudget::resolve(settings)
 }
 
-/// A peer that does not advertise epoch 3 is rejected explicitly. There is no
+/// A peer that does not advertise epoch 4 is rejected explicitly. There is no
 /// unframed v2 acceptance, no fragment fallback and no mixed-epoch route.
 pub fn protocol_incompatible(detail: &'static str) -> AccessError {
     AccessError {
@@ -337,13 +337,13 @@ fn invalid(detail: &'static str) -> AccessError {
     }
 }
 
-/// Reject a relay envelope whose epoch is not the coordinated epoch 3.
+/// Reject a relay envelope whose epoch is not the coordinated epoch 4.
 pub fn require_relay_epoch(version: u32) -> Result<(), AccessError> {
-    if version == RELAY_EPOCH_V3 {
+    if version == RELAY_EPOCH_V4 {
         Ok(())
     } else {
         Err(protocol_incompatible(
-            "unsupported MQTT relay epoch; upgrade the peer to relay epoch 3",
+            "unsupported MQTT relay epoch; upgrade the peer to relay epoch 4",
         ))
     }
 }
@@ -428,6 +428,20 @@ pub fn validate_event_representation(envelope: &EventEnvelope) -> Result<(), Acc
     if has_ciphertext == has_reference {
         return Err(invalid(
             "exactly one of ciphertext and payload_reference is required",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a live-class event envelope. Live previews are QoS 0 derived
+/// state and are always an inline ciphertext: they never use the HTTPS
+/// reference carrier. The class payload rule is enforced again after
+/// decryption by observation.
+pub fn validate_live_event_representation(envelope: &EventEnvelope) -> Result<(), AccessError> {
+    validate_event_representation(envelope)?;
+    if envelope.payload_reference.is_some() {
+        return Err(invalid(
+            "a live preview must carry inline ciphertext, not a payload reference",
         ));
     }
     Ok(())
@@ -573,7 +587,7 @@ mod tests {
             host_id: "h".into(),
             device_id: "d".into(),
             kind: kind as i32,
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
             ..Default::default()
         }
     }
@@ -621,12 +635,13 @@ mod tests {
     }
 
     #[test]
-    fn epoch_zero_or_two_is_rejected_as_incompatible() {
-        for version in [0u32, 2, 4] {
+    fn only_epoch_four_is_accepted() {
+        // Epoch 3 is reserved: it is never accepted and has no dual path.
+        for version in [0u32, 2, RELAY_EPOCH_V4 - 1] {
             let error = require_relay_epoch(version).unwrap_err();
             assert_eq!(error.code, Some(ErrorCode::ProtocolVersionIncompatible));
         }
-        assert!(require_relay_epoch(RELAY_EPOCH_V3).is_ok());
+        assert!(require_relay_epoch(RELAY_EPOCH_V4).is_ok());
 
         let mut request = request(RequestKind::Command);
         request.body = b"abc".to_vec();
@@ -646,7 +661,7 @@ mod tests {
             channel_id: "c".into(),
             nonce: vec![1; 12],
             ciphertext: vec![2; 4],
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
             ..Default::default()
         };
         assert!(validate_event_representation(&inline).is_ok());
@@ -659,7 +674,7 @@ mod tests {
         assert!(validate_event_representation(&inline_only).is_ok());
         let mut neither = EventEnvelope {
             nonce: vec![1; 12],
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
             ..Default::default()
         };
         assert!(validate_event_representation(&neither).is_err());
@@ -678,6 +693,20 @@ mod tests {
                 .code,
             Some(ErrorCode::ProtocolVersionIncompatible)
         );
+        let mut live = EventEnvelope {
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 4],
+            relay_version: RELAY_EPOCH_V4,
+            ..Default::default()
+        };
+        assert!(validate_live_event_representation(&live).is_ok());
+        // Live previews never use the HTTPS reference carrier.
+        live.ciphertext.clear();
+        live.payload_reference = Some(reference());
+        assert_eq!(
+            validate_live_event_representation(&live).unwrap_err().code,
+            Some(ErrorCode::InvalidArgument)
+        );
         let _ = SessionUpdate::default();
         let _ = EventPayload::default();
         let _ = request_payload::Payload::Ping(Default::default());
@@ -688,7 +717,7 @@ mod tests {
         let mut result = HostResult {
             request_id: "r".into(),
             status: OnlineStatus::Succeeded as i32,
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
             ..Default::default()
         };
         assert!(validate_result_representation(&result).is_ok());
@@ -697,7 +726,7 @@ mod tests {
         assert!(validate_result_representation(&result).is_err());
         let mut referenced = HostResult {
             request_id: "r".into(),
-            relay_version: RELAY_EPOCH_V3,
+            relay_version: RELAY_EPOCH_V4,
             result_reference: Some(reference()),
             ..Default::default()
         };

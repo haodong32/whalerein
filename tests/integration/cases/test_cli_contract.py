@@ -98,6 +98,9 @@ def test_watch_streams_while_same_device_send_follows_reply(scenario, paired_cli
     try:
         _attached(watcher)
         resets_before_send = sum(_event(value).get("type") == "reset" for value in watcher.values)
+        # Keep the fixture turn open until preview_final so the sibling send
+        # cannot settle before the coexistence window is exercised.
+        fixture.control("hold_next_send_turn", session_id=session_id)
         sender = paired_client.watch("session", "send", session_id, "fixture", "--timeout", "30")
         try:
             def admitted_message():
@@ -120,6 +123,8 @@ def test_watch_streams_while_same_device_send_follows_reply(scenario, paired_cli
 
             assert sum(_event(value).get("type") == "reset" for value in watcher.values) == resets_before_send
             fixture.control("preview_final", session_id=session_id, message_id=message_id, count=2)
+            assert sender.process.poll() is None, "sibling send exited before the fixture turn ended"
+            fixture.control("finish_send_turn", session_id=session_id)
             assert sender.wait_exit(timeout=10) == 0
             assert sender.values[-1]["data"]["reply"]["state"] == "committed"
         finally:

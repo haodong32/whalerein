@@ -101,7 +101,7 @@ func TestTransportPreflightCannotRejectConcurrentPublication(t *testing.T) {
 	if stored.Status == whalereinv1.OnlineStatus_rejected || stored.Status == whalereinv1.OnlineStatus_host_offline {
 		t.Fatalf("possibly executed command was falsely finalized: %s", stored.Status)
 	}
-	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 3}); err != nil {
+	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}); err != nil {
 		t.Fatal(err)
 	}
 	stored, err = db.GetRequest(ctx, "r1")
@@ -179,7 +179,7 @@ func TestTransportFailureDistinguishesFreshFromUncertainHistory(t *testing.T) {
 			if mode != "fresh" && stored.ErrorCode != whalereinv1.ErrorCode_unavailable {
 				t.Fatal("uncertain execution was reported as a definitive transport rejection")
 			}
-			if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 3}); err != nil {
+			if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}); err != nil {
 				t.Fatal(err)
 			}
 			stored, err = db.GetRequest(ctx, "r1")
@@ -236,7 +236,7 @@ func TestTransportPreflightCannotRejectAnInFlightEarlierLease(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 3}); err != nil {
+	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}); err != nil {
 		t.Fatal(err)
 	}
 	stored, err = db.GetRequest(ctx, "r1")
@@ -285,7 +285,7 @@ func TestTransportAmbiguousFailureCannotAssertOfflineDuringEarlierPublication(t 
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 3}); err != nil {
+	if err := first.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}); err != nil {
 		t.Fatal(err)
 	}
 	stored, err = db.GetRequest(ctx, "r1")
@@ -328,7 +328,7 @@ func TestTransportAmbiguousFirstFailureAllowsLateSuccess(t *testing.T) {
 	if err != nil || stored.Status == whalereinv1.OnlineStatus_host_offline || stored.Status == whalereinv1.OnlineStatus_rejected {
 		t.Fatalf("ambiguous first publish was falsely finalized: status=%s err=%v", stored.Status, err)
 	}
-	if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 3}); err != nil {
+	if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}); err != nil {
 		t.Fatal(err)
 	}
 	stored, err = db.GetRequest(ctx, "r1")
@@ -394,7 +394,7 @@ func TestTransportUnknownPreservesLateResultTransitionContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, status := range []whalereinv1.OnlineStatus{whalereinv1.OnlineStatus_host_accepted, whalereinv1.OnlineStatus_rejected} {
-		if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: status, RelayVersion: 3}); err != nil {
+		if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: status, RelayVersion: 4}); err != nil {
 			t.Fatal(err)
 		}
 		current, err := db.GetRequest(ctx, "r1")
@@ -402,7 +402,7 @@ func TestTransportUnknownPreservesLateResultTransitionContract(t *testing.T) {
 			t.Fatalf("non-authoritative status=%s err=%v", current.Status, err)
 		}
 	}
-	if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_failed, RelayVersion: 3}); err != nil {
+	if err := service.HandleHostResult(ctx, "h1", &whalereinv1.HostResult{RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_failed, RelayVersion: 4}); err != nil {
 		t.Fatal(err)
 	}
 	current, err := db.GetRequest(ctx, "r1")

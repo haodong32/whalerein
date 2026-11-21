@@ -73,7 +73,7 @@ function present(value) {
 export function assertRelayEpoch(envelope) {
   const epoch = envelope?.relay_version
   if (Number(epoch) !== RELAY_VERSION) {
-    throw new PluginError('protocol_version_incompatible', 'relay epoch is not 3')
+    throw new PluginError('protocol_version_incompatible', 'relay epoch is not 4')
   }
   return envelope
 }
@@ -156,7 +156,6 @@ export function assertEventRepresentation(event) {
  */
 export class RelayTransport {
   #chains = new Map()
-  #liveChains = new Map()
   #generation = 0
 
   constructor({
@@ -194,15 +193,12 @@ export class RelayTransport {
   reset() {
     this.#generation++
     this.#chains.clear()
-    this.#liveChains.clear()
   }
 
-  #chain(topic, run, live = false) {
-    // Live previews use their own ordered chain. A committed event that is
-    // staging a large HTTPS reference must never stall a small preview behind
-    // it: previews are droppable and the committed message remains
-    // authoritative, while both lanes keep their own sequence order.
-    const chains = live ? this.#liveChains : this.#chains
+  #chain(topic, run) {
+    // Control is serial and ordered per topic: a later committed message never
+    // overtakes an earlier one, including one staging an HTTPS reference.
+    const chains = this.#chains
     const previous = chains.get(topic) ?? Promise.resolve()
     const next = previous.catch(() => {}).then(run)
     chains.set(topic, next)
@@ -226,7 +222,73 @@ export class RelayTransport {
       return Promise.reject(new PluginError('invalid_argument', 'empty relay envelope'))
     }
     const bytes = Buffer.from(envelopeBytes)
-    return this.#chain(topic, () => this.#sendComplete(topic, bytes, options), options.live === true)
+    return this.#chain(topic, () => this.#sendComplete(topic, bytes, options))
+  }
+
+  /**
+   * Publish one complete live preview at QoS 0 on the live topic.
+   *
+   * Live is derived state: it validates the same epoch and representation, has
+   * no acknowledgement, no chain, no reference and no retry. A preview that
+   * cannot fit the hop is a bug in the upstream split and is dropped here; it
+   * is never converted into a reference or a control message.
+   *
+   * @returns {Promise<boolean>} true when the client accepted the packet.
+   */
+  async sendLive(topic, envelopeBytes, options = {}) {
+    if (!(envelopeBytes instanceof Uint8Array) || envelopeBytes.length === 0) return false
+    if (envelopeBytes.length > this.budget.envelope_bytes) {
+      this.logger?.warn('relay_live_dropped', {
+        code: 'payload_too_large', scope: 'envelope', bytes: envelopeBytes.length, limit: this.budget.envelope_bytes,
+      })
+      return false
+    }
+    let envelope
+    try {
+      envelope = this.codec.decode(DESCRIPTORS.event.type, envelopeBytes)
+    } catch {
+      this.logger?.warn('relay_live_dropped', { code: 'invalid_argument', scope: 'decode' })
+      return false
+    }
+    try {
+      assertRelayEpoch(envelope)
+      assertEventRepresentation(envelope)
+    } catch (error) {
+      this.logger?.warn('relay_live_dropped', {
+        code: typeof error?.code === 'string' ? error.code : 'invalid_argument', scope: 'representation',
+      })
+      return false
+    }
+    // Live is always inline. A reference here means the caller took the control
+    // path and must be dropped instead of published.
+    if (envelope.payload_reference != null) {
+      this.logger?.warn('relay_live_dropped', { code: 'invalid_argument', scope: 'reference' })
+      return false
+    }
+    let limit
+    let encoded
+    try {
+      limit = this.effectivePacketLimit(options.receiverLimit)
+      encoded = publishPacketBytes(topic, envelopeBytes.length, { qos: 0 })
+    } catch (error) {
+      this.logger?.warn('relay_live_dropped', {
+        code: typeof error?.code === 'string' ? error.code : 'invalid_argument', scope: 'packet',
+      })
+      return false
+    }
+    if (encoded > limit) {
+      this.logger?.warn('relay_live_dropped', {
+        code: 'payload_too_large', scope: 'packet', bytes: encoded, limit,
+      })
+      return false
+    }
+    try {
+      await this.publish(topic, envelopeBytes, { qos: 0 })
+      return true
+    } catch {
+      this.logger?.warn('relay_live_dropped', { code: 'unavailable', scope: 'publish' })
+      return false
+    }
   }
 
   async #sendComplete(topic, envelopeBytes, options) {

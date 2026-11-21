@@ -19,14 +19,16 @@ fails a build that removes a field, reuses a tag number, changes a type or
 JSON name, changes oneof membership, or reuses an enum number.
 
 The MQTT relay carries a separate, required `relay_version` whose only
-supported value is **3** (`RELAY_EPOCH_V3`). It is independent of the
+supported value is **4** (`RELAY_EPOCH_V4`). It is independent of the
 application protocol version, which stays 1. `relay_version` appears on
 `HostRequest`, `HostResult`, `EventEnvelope`, `HostReady`,
 `ReceiveAdvertisement`, `RelayObjectReserveRequest`,
 `RelayObjectFinishRequest`, `RequestStateNotice` and the relay
-`application/json` error surface. A peer that does not advertise epoch 3 is
+`application/json` error surface. A peer that does not advertise epoch 4 is
 rejected explicitly with `protocol_version_incompatible`; there is no
 unframed v2 acceptance, no fragment fallback and no mixed-epoch route.
+Epoch 3 is retired: its number is reserved, it is never accepted and no
+compatibility value or fallback exists for it.
 
 This revision is the single revised conversation and transport contract inside
 version 1. It intentionally replaces the earlier text-only live frame, flattened
@@ -48,7 +50,9 @@ The immutable protobuf baseline records this hard cut through the repository
 compatibility path (`--update-baseline --rationale`) because fields and message
 shapes are replaced, not added. The same cut removes `TransportFrame`, the
 `WRMQTT2` prefix, fragment geometry and every receipt/acknowledgement topic and
-replaces them with one inline-or-reference relay epoch. Keys, pins, grants,
+replaces them with one inline-or-reference relay epoch. Epoch 4 keeps that
+inline-or-reference control relay and adds a second, lossy delivery class for
+live previews. Keys, pins, grants,
 Source sessions, pager keys and durable command recovery identities are
 retained. Content positions,
 cursors and receipt namespaces are bound to a projection identity: Core fences
@@ -146,29 +150,55 @@ the result body; callers must not infer business failure from that absence.
 whalerein/v1/h/{host_id}/request
 whalerein/v1/h/{host_id}/result
 whalerein/v1/h/{host_id}/event
+whalerein/v1/h/{host_id}/live
 whalerein/v1/h/{host_id}/d/{device_id}/event
 whalerein/v1/h/{host_id}/d/{device_id}/notice
 whalerein/v1/h/{host_id}/d/{device_id}/ready
+whalerein/v1/h/{host_id}/d/{device_id}/live
 ```
 
 Every topic carries exactly one complete message per MQTT PUBLISH. There is no
 device acknowledgement topic, receipt topic or fragment topic.
 
+The relay has two logical delivery classes on the same authenticated broker
+connection. The class is selected by topic and QoS, never by a second
+connection or a second publish path:
+
+| Class | Topics | QoS | Semantics |
+|---|---|---|---|
+| control | `.../request`, `.../result`, `.../event`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../d/{device_id}/ready` | 1 | Ordered, acknowledged and durable intent. Every control message is submitted in order and retried from the same complete-message identity. |
+| live | `.../live`, `.../d/{device_id}/live` | 0 | Fire-and-forget derived state. A live preview may drop, coalesce or be repaired; it never enters an outbox or receipt, never uses the HTTPS reference carrier, and the final committed message supersedes it. |
+
+Live is never used for control intent. Control is never carried on a live
+topic. Both classes use the same authenticated broker connection and the same
+encrypted `EventEnvelope` body.
+
 | Topic | Publisher | Subscriber | Payload |
 |---|---|---|---|
 | `.../request` | Access | that Host | `HostRequest`, including `REQUEST_KIND_ACCESS_READY` |
 | `.../result` | Host | Access | `HostResult`, including `HostReady` |
-| `.../event` | Host | Access | `EventEnvelope` |
-| `.../d/{device_id}/event` | Access | that Device | `EventEnvelope` |
+| `.../event` | Host | Access | `EventEnvelope` (control class) |
+| `.../live` | Host | Access | `EventEnvelope` (live class, QoS 0) |
+| `.../d/{device_id}/event` | Access | that Device | `EventEnvelope` (control class) |
 | `.../d/{device_id}/notice` | Access | that Device | `RequestStateNotice` |
 | `.../d/{device_id}/ready` | that Device | Access | `ReceiveAdvertisement` |
+| `.../d/{device_id}/live` | Access | that Device | `EventEnvelope` (live class, QoS 0) |
 
-Access publishes only `request` and the two Device topics; a Host publishes only
-its own `result` and `event`; a Device publishes only its own `ready` topic. The
-host subscribes only to its own `request`. A device subscribes only to its own
-event and notice topics and publishes only to its own ready topic. Access
-republishes an event to `.../d/{device_id}/event` using only the authenticated
-outer `device_id`. Cross-host wildcard subscriptions are denied by broker ACL.
+Access publishes only `request`, the Device control topics and the Device live
+topic; a Host publishes only its own `result`, `event` and `live`; a Device
+publishes only its own `ready` topic. The host subscribes only to its own
+`request`. A device subscribes only to its own event, notice and live topics
+and publishes only to its own ready topic. Access republishes a control event to
+`.../d/{device_id}/event` and the same opaque live `EventEnvelope` to
+`.../d/{device_id}/live`, using only the authenticated outer `device_id`.
+Cross-host wildcard subscriptions are denied by broker ACL.
+
+Live publication never waits for an acknowledgement and never uses the ordered
+control queue. A live preview that is lost, duplicated or coalesced leaves
+derived display state incomplete; it does not affect control delivery,
+authority or committed content. The final committed message travels on the
+control path (or is read over authoritative HTTPS) and repairs or replaces the
+preview.
 
 `.../d/{device_id}/ready` is the Device receive-advertisement path. The Device
 publishes its own `ReceiveAdvertisement` after each successful broker connect
@@ -326,7 +356,7 @@ A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls:
 
 Noise payloads are `ChannelHello` / `ChannelReady`; they carry the negotiated
 application protocol version, capabilities and the endpoint's
-`ReceiveAdvertisement` (including its own `relay_version`, which must be 3).
+`ReceiveAdvertisement` (including its own `relay_version`, which must be 4).
 `ChannelHello.receive` is the Device receive budget the Host uses for preview
 splitting; `ChannelReady.receive` is the Host budget the Device uses. A
 version or relay-epoch mismatch rejects the handshake with
@@ -367,7 +397,7 @@ history intervals and live Attempt sequences. None is a nonce.
 
 `POST /v1/hosts/{host_id}/requests` accepts a `HostRequest` from an authorized
 device. Every request validates the application `protocol_version` (1) and
-`relay_version` (3). A non-matching relay epoch is rejected with
+`relay_version` (4). A non-matching relay epoch is rejected with
 `protocol_version_incompatible` before admission; Access never accepts a v2
 frame in place of a `HostRequest`. Access:
 
@@ -400,7 +430,7 @@ for sessions, messages, interrupts or approvals. When the complete result body
 was stored rather than inlined, `RequestState.result_reference` locates it.
 
 `HostResult` from the host conditionally updates the same row. It carries the
-same required `relay_version=3`. Allowed transitions:
+same required `relay_version=4`. Allowed transitions:
 
 ```text
 received      -> host_offline, rejected, host_accepted, succeeded, failed, unknown
@@ -432,7 +462,7 @@ payload over the new channel.
 ### Access receive advertisement
 
 `HostReady` (Host to Access) carries the Host receive budget for the
-Access-to-Host `request` hop. After Access registers a valid epoch-3
+Access-to-Host `request` hop. After Access registers a valid epoch-4
 `HostReady`, it publishes one `HostRequest{kind=REQUEST_KIND_ACCESS_READY}` on
 `.../request` whose inline `body` is Access's own `ReceiveAdvertisement`. The
 Host records it as the Access receive budget for the Host-to-Access
@@ -460,13 +490,15 @@ reconciles through `GET /v1/requests/{request_id}` and the original command
 identity, and performs one final authoritative lookup before an authorized,
 unconfirmed wait expires.
 
-The same rules apply to live observation: Access forwards a validated
+The same rules apply to control observation: Access forwards a validated
 `EventEnvelope` or its reference only after the durable event copy exists, and
 a reconnecting receiver reconciles from its original watch and history cursor.
-A stale notice never reopens expired content, a revoked scope or a closed
-execution. No new plaintext content is added to MQTT; previews remain sealed,
-notices carry metadata only, and complete bodies travel inline when they fit or
-through the HTTPS directory.
+A live preview on the live topic has no durable event copy, no reference and no
+replay; losing it leaves derived display state incomplete until the committed
+control message or an authoritative read repairs it. A stale notice never
+reopens expired content, a revoked scope or a closed execution. No new plaintext
+content is added to MQTT; previews remain sealed, notices carry metadata only,
+and complete bodies travel inline when they fit or through the HTTPS directory.
 
 ## Pairing and revocation replay
 
@@ -630,7 +662,7 @@ the sealed ciphertext.
 | `DELETE /v1/relay/objects/{object_id}` | no body | `RelayObjectDeleteResult` | Bounded cancel and release |
 
 Every request carries the relay epoch. `POST`/`finish` carry it in the JSON
-body; `PUT`/`GET`/`DELETE` require `WhaleRein-Relay-Epoch: 3`. A missing or
+body; `PUT`/`GET`/`DELETE` require `WhaleRein-Relay-Epoch: 4`. A missing or
 different value is `protocol_version_incompatible`.
 
 Authentication is one of:
@@ -658,7 +690,7 @@ Authentication is one of:
   another Device's object.
 
 The checked purposes are `REQUEST` (complete query/command body), `RESULT`
-(complete result body), `EVENT` (complete live event payload),
+(complete result body), `EVENT` (complete control event payload),
 `ATTACHMENT_PART` (one bounded attachment part) and `HISTORY_PAGE` (one
 complete history page). A fetch for a different purpose is denied.
 
@@ -1033,9 +1065,9 @@ or late resolve returns `approval_expired`, `approval_version_mismatch` or
 
 ## Logical MQTT transport
 
-One coordinated relay epoch (`relay_version=3`) replaces transport v2. A
-complete application message travels in exactly one MQTT PUBLISH. Each hop
-picks the representation for its own outgoing packet:
+One coordinated relay epoch (`relay_version=4`) replaces transport v2. On the
+control class a complete application message travels in exactly one MQTT
+PUBLISH. Each hop picks the representation for its own outgoing packet:
 
 - **inline** — the serialized outer envelope carries the complete opaque body
   (`HostRequest.body`, `HostResult.result_body`, or `EventEnvelope.ciphertext`);
@@ -1075,6 +1107,12 @@ protobuf outer envelope. The outer envelope already contains every protocol
 field, the reference or inline body, nonce, and the 16-byte ChaCha20-Poly1305
 tag. A sender computes `encoded_publish` with the actual topic and properties it
 will use; it never estimates from ciphertext length alone.
+
+A QoS 0 live packet has no packet identifier: its `encoded_publish` is
+`1 + varint(remaining_length) + remaining_length` with
+`remaining_length = 2 + len(topic) + varint(len(properties)) +
+len(properties) + len(payload)`. The receiver budget and the packet-fit rule
+below apply identically; the QoS 0 packet identifier is not part of the count.
 
 For one hop:
 
@@ -1117,16 +1155,53 @@ The reverse rewrite is also allowed when the complete ciphertext is readable
 and the inline packet fits. Access never inspects, re-encrypts or reorders the
 body, and the Host always dispatches the same complete message once.
 
-### Ordered packet delivery
+### Ordered control delivery
 
-MQTT is QoS 1 with the broker's negotiated receive maximum and connection flow
-control. Each publisher uses ordered submission and bounded native in-flight
-work; Access uses a flow-preserving forwarding queue. There are no application
-fragment, transfer or receipt acknowledgements, and no device ACK topic. A
-failed publication is retried only at the same complete-message identity, so
-duplicate MQTT delivery is handled by the existing `request_id`,
+The control class is QoS 1 with the broker's negotiated receive maximum and
+connection flow control. Each publisher uses ordered submission and bounded
+native in-flight work; Access uses a flow-preserving forwarding queue. There are
+no application fragment, transfer or receipt acknowledgements, and no device ACK
+topic. A failed publication is retried only at the same complete-message
+identity, so duplicate MQTT delivery is handled by the existing `request_id`,
 `command_id`/digest and typed event-sequence rules. A blocked bulk HTTPS
 transfer cannot stall an eligible small MQTT packet.
+
+### Live delivery class
+
+The live class is QoS 0 on the dedicated live topics. It is not ordered by the
+control queue, never waits for an acknowledgement, never enters a durable
+outbox or receipt and never uses the HTTPS reference carrier. A live publication
+failure is a drop, not a retry. Control messages are never queued behind a live
+preview.
+
+**Host live publication.** The Host publishes each packet-sized preview as one
+QoS 0 `EventEnvelope` on `whalerein/v1/h/{host_id}/live`. The existing
+packet-fit and UTF-8-safe split rules still apply, so a preview above the route
+packet budget is split into ordered pieces before publication; a live preview
+never becomes a reference. There is no ACK wait and no per-watch or per-topic
+live serialization chain: QoS 0 preserves per-client order and has nothing to
+acknowledge. A bounded per-connection live queue (for example 256 KiB or 64
+packets) protects memory; when it is full the Host drops the oldest pending
+preview or coalesces text and never blocks or displaces a control message. If
+the connection or broker is not ready, the preview is dropped. Previews are
+never published on the control `event` topic.
+
+**Access live routing.** Access subscribes to the Host live topic at QoS 0,
+authenticates the actual publisher as it does for the control topics, and
+requires an active grant. It republishes the same opaque `EventEnvelope` to the
+authenticated Device live topic `.../d/{device_id}/live` at QoS 0, using only
+the authenticated outer `device_id`. Access adds no durable row, outbox entry,
+receipt or notice for a live preview. On local backpressure Access drops the
+preview instead of blocking or queuing it durably. Control paths
+(`request`/`result`/`event`) are unchanged.
+
+**Core live reception.** Core subscribes to its Device live topic at QoS 0 in
+addition to the control event topic and delivers live frames to the same
+observation pipeline with the same sequence and duplicate checks. A gap or loss
+marks the preview incomplete; it never fails the observation, never retries and
+never sends an ACK, and it never blocks control delivery. The committed message
+arriving on the control path or an explicit authoritative HTTPS read supplies
+the complete state and repairs the derived preview.
 
 ## Transport budgets and configuration
 
@@ -1182,7 +1257,7 @@ artifact.
 
 `ReceiveAdvertisement` is the only exchange of receive limits. It carries a
 named `profile`, the validated `budget`, an authenticated
-`connection_generation` and the required `relay_version=3`. A generation is
+`connection_generation` and the required `relay_version=4`. A generation is
 scoped to the leg that carries the advertisement; generations from different
 legs are never compared. A delayed or replayed advertisement cannot update a
 newer connection, and a peer cannot raise another peer's limit.
@@ -1254,29 +1329,40 @@ has been verified.
 
 ## Relay cutover
 
-The cutover is one coordinated hard cut:
+The cutover is one coordinated hard cut to epoch 4:
 
-- **One required epoch.** `relay_version=3` is the only accepted MQTT relay.
-  There is no v2 acceptance, no unframed fallback, no `WRMQTT2` prefix and no
-  compatibility bridge. `TransportFrame`, fragment fields, transfer receipts
-  and every acknowledgement topic are removed from the contract.
+- **One required epoch.** `relay_version=4` is the only accepted MQTT relay.
+  Epoch 3 is removed, its enum number is reserved, and it is rejected with
+  `protocol_version_incompatible`. There is no v2 acceptance, no unframed
+  fallback, no `WRMQTT2` prefix, no dual epoch and no compatibility bridge.
+  `TransportFrame`, fragment fields, transfer receipts and every
+  acknowledgement topic are removed from the contract.
+- **One delivery-class contract.** Epoch 4 adds the QoS 0 live topics to the
+  unchanged QoS 1 control topics. A preview is never published on the control
+  `event` topic, the control event router never publishes a live delta, and
+  `RelayTransport` never carries a live frame. There is no old-contract reader,
+  no feature flag and no dual publish path: one admission and one topic class
+  per message intent.
 - **Readiness gate.** Access marks a Host ready only after a valid
-  `HostReady` with `relay_version=3` and a valid advertisement. Access rejects
-  a Device or Host advertisement with another epoch. Admission of a
-  `HostRequest`, `HostResult`, `EventEnvelope`, `RequestStateNotice` or relay
-  object request requires the matching epoch and application
-  `protocol_version=1`.
+  `HostReady` with `relay_version=4` and a valid advertisement. Access rejects
+  a Device or Host advertisement with any other epoch, including epoch 3.
+  Admission of a `HostRequest`, `HostResult`, `EventEnvelope`,
+  `RequestStateNotice` or relay object request requires the matching epoch and
+  application `protocol_version=1`, and live delivery additionally requires a
+  live topic subscription and an active grant.
 - **Legacy artifact rejection.** An older Access, Host, Core, CLI, mobile build
-  or broker ACL that attempts v2 framing, a removed receipt/ack topic, or a
-  missing/other epoch fails explicitly with `protocol_version_incompatible`
-  before business delivery. A mixed artifact set is not a supported release.
+  or broker ACL that attempts v2 framing, a removed receipt/ack topic, an
+  epoch-3 advertisement, or an epoch-3 preview on the control topic fails
+  explicitly with `protocol_version_incompatible` before business delivery. A
+  mixed artifact set is not a supported release.
 - **Unchanged application version.** The application protocol version stays 1.
-  The epoch is the transport cut: it changes representation, not the semantics
-  of grants, keys, sessions, history, approvals or command identity. Existing
-  pairing credentials, Noise identities, pins, grants and durable command
-  recovery identities remain valid across the cut.
+  The epoch is the transport cut: it changes representation and adds a live
+  class, not the semantics of grants, keys, sessions, history, approvals or
+  command identity. Existing pairing credentials, Noise identities, pins,
+  grants and durable command recovery identities remain valid across the cut.
 - **Operator coordination.** Access, Host, broker policy, Core and supported
-  clients deploy together. Quiesce old admissions, preserve original command
+  clients deploy together. Add the live topics to the broker ACL and Mosquitto
+  policy in the same release. Quiesce old admissions, preserve original command
   identities and ambiguity, then gate readiness on the new contract. Rollback
   requires its own fenced admission and verified recovery; a live mixed-epoch
   rollback is outside the contract.

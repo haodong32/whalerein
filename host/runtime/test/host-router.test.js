@@ -79,7 +79,7 @@ function baseRequest(overrides = {}) {
     device_id: 'd1',
     kind: 'REQUEST_KIND_QUERY',
     protocol_version: 1,
-    relay_version: 3,
+    relay_version: 4,
     expires_at_unix_ms: Date.now() + 60_000,
     channel_id: 'channel-1',
     body: new Uint8Array(0),
@@ -115,7 +115,7 @@ function encryptedQuery({ security, store, channel, payload, plaintext: rawPaylo
     payload_digest: commandId === '' ? new Uint8Array(0) : sha256Bytes(frame),
     expires_at_unix_ms: expiresAt,
     protocol_version: 1,
-    relay_version: 3,
+    relay_version: 4,
     channel_id: channelId,
     body: frame,
     ...overrides,
@@ -1255,7 +1255,7 @@ test('typed send replies are scoped to the request and attachment transfers fail
   }
 })
 
-test('pairing requests require relay epoch 3 and safe expiry metadata', async () => {
+test('pairing requests require relay epoch 4 and safe expiry metadata', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()

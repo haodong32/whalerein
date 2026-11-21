@@ -270,19 +270,31 @@ not the normal host's topic permissions or protocol execution.
 
 See the [wire contract](../../proto/v1/WIRE.md#logical-mqtt-transport) for the
 complete-packet relay. Access publishes one MQTT 5 PUBLISH per application
-message and requires `relay_version=3` on every request, result, event,
-readiness proof and receive advertisement. A hop computes the exact encoded
-packet for its topic and publishes inline when the packet fits the minimum of
-the local profile, the broker CONNACK/configured packet limit and the receiver
-advertisement. An oversized durable body is staged as exact ciphertext and
-published only as a packet-sized reference after staging completes; a reference
-that cannot itself fit fails explicitly with no publish.
+message and requires `relay_version=4` on every request, result, event, live
+preview, readiness proof and receive advertisement. A hop computes the exact
+encoded packet for its topic and publishes inline when the packet fits the
+minimum of the local profile, the broker CONNACK/configured packet limit and the
+receiver advertisement. An oversized durable body is staged as exact ciphertext
+and published only as a packet-sized reference after staging completes; a
+reference that cannot itself fit fails explicitly with no publish.
 
-Access owns the forwarding order. Each MQTT connection has one FIFO queue per
-destination topic, a bounded global in-flight semaphore and bounded waiting
-bytes, so a blocked flow cannot stall an unrelated small message. There are no
-application fragments, reassembly buffers, transfer receipts or device ACK
-topics.
+For the QoS 1 control class Access owns the forwarding order. Each MQTT
+connection has one FIFO queue per control destination topic, a bounded global
+in-flight semaphore and bounded waiting bytes, so a blocked flow cannot stall an
+unrelated small message. There are no application fragments, reassembly
+buffers, transfer receipts or device ACK topics.
+
+The QoS 0 live class bypasses that control queue. Access subscribes to the Host
+live topic (`h/+/live`), authenticates the actual publisher, requires an active
+grant and republishes the same opaque `EventEnvelope` to the authenticated
+Device `.../d/{device_id}/live` topic using only the outer `device_id`. It adds
+no durable row, outbox entry, receipt or notice and never waits for an
+acknowledgement. A bounded set of live handoff slots drops the preview on local
+backpressure instead of blocking control delivery; a disconnected Access MQTT
+session or a rejected QoS 0 publish also drops it. `/metrics` exposes
+`live_preview_dropped_total{reason}` with the bounded reasons `disconnected`,
+`backpressure` and `publish`; no host, device, request or content identity is
+attached.
 
 ## Durable request notices
 
@@ -300,17 +312,20 @@ logged. `/metrics` exposes only the pending count, oldest intent age and retry
 count.
 
 Broker ACLs follow the same topics: a Device publishes only its own
-`.../d/{device_id}/ready` advertisement and last will, subscribes to its own
-event and notice topics, and never publishes an acknowledgement. Access
-publishes the request, device event and device notice topics and subscribes to
-results, events, device advertisements and last wills. Per-connection receive
-advertisements are keyed by the broker-derived connection generation, so a
-sibling reconnect never clears another receiver's budget; a grant or App-session
-revocation fences all of them.
+`.../d/{device_id}/ready` advertisement and last will; it subscribes to its own
+event, notice and live topics and never publishes an acknowledgement. A Host
+publishes its own result, event and live topics. Access publishes the request,
+device event, device notice and device live topics and subscribes to results,
+events, Host live previews, device advertisements and last wills. Traffic on the
+Host live and Device live topics is QoS 0; control topics stay QoS 1. The plugin
+policy is topic-based, so Access, Host and Core select the QoS by topic.
+Per-connection receive advertisements are keyed by the broker-derived connection
+generation, so a sibling reconnect never clears another receiver's budget; a
+grant or App-session revocation fences all of them.
 
 Conversation payloads remain opaque to Access. The typed v1 Harness contract changes Host/Core domain handling, not grant ownership or server session authority. Bulk MQTT admission waits within bounded count/byte/context limits; controls bypass bulk admission.
 
-A valid epoch-3 HostReady re-establishes transport capability after an Access
+A valid epoch-4 HostReady re-establishes transport capability after an Access
 restart even when the Host stayed connected. Access answers it with one
 `REQUEST_KIND_ACCESS_READY` request carrying Access's own receive advertisement
 and refreshes it only when the effective budget or connection generation
