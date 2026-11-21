@@ -18,26 +18,5 @@
     "Views/SettingsOperationsView.swift",
     "Views/SettingsView.swift"
   ],
-  "entries": [
-    {
-      "path": "Features/Shell/AppShellModel.swift",
-      "rule": "model-size",
-      "reason": "Legacy model over the 500-line budget; deleted or split by the rewrite."
-    },
-    {
-      "path": "Presentation/ConversationModel.swift",
-      "rule": "model-size",
-      "reason": "Legacy model over the 500-line budget; deleted or split by the rewrite."
-    },
-    {
-      "path": "Views/SessionSwitcherView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
-      "path": "Views/SettingsAccountView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    }
-  ]
+  "entries": []
 }

@@ -75,7 +75,7 @@ extension ConversationModel {
         applyOperationReceipt(receipt)
     }
 
-    private func applyOperationReceipt(_ receipt: OperationReceipt) {
+    func applyOperationReceipt(_ receipt: OperationReceipt) {
         guard receipt.kind == .send else { return }
         guard let scope = receipt.scope,
               scope.hostId == hostId,
@@ -103,7 +103,7 @@ extension ConversationModel {
 
     /// Deduplicates committed messages by stable identity, including a recovered
     /// reply that also arrived through the live watch.
-    private func insertCommittedMessage(_ message: ConversationMessage) {
+    func insertCommittedMessage(_ message: ConversationMessage) {
         if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
             if messages[index] != message {
                 state.messages[index] = message

@@ -145,7 +145,7 @@ extension ConversationModel {
         }
     }
 
-    private func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
+    func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
         if let historyProjection, historyProjection != page.projection {
             historyNeedsFreshTraversal = true
             historyContinuation = nil
@@ -176,7 +176,7 @@ extension ConversationModel {
         }
     }
 
-    private func handleHistoryFailure(_ error: Error) {
+    func handleHistoryFailure(_ error: Error) {
         let code = (error as? SessionServiceError)?.code ?? .internalError
         if code == .staleHistory {
             historyNeedsFreshTraversal = true

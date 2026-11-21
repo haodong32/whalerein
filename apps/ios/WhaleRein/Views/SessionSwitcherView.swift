@@ -136,147 +136,20 @@ struct SessionSwitcherContent: View {
 
     private var list: some View {
         List {
-            hostPickerSection
-            createSection
+            SessionSwitcherHostSection(
+                models: models,
+                actions: actions,
+                managementSheet: $managementSheet
+            )
             sessionSections
         }
         .listSectionSpacing(.compact)
     }
 
     private func loadManagementSupport() async {
-        guard let host = currentHost else { return }
+        guard let host = models.currentHost else { return }
         await models.management.loadCreateSupport(hostId: host.hostId)
     }
-
-    /// Create is offered only for a Host that advertises native creation. The
-    /// capability is probed, never assumed.
-    @ViewBuilder
-    private var createSection: some View {
-        if let host = currentHost,
-           models.management.canCreate(hostId: host.hostId) {
-            Section {
-                Button {
-                    managementSheet = .create(hostId: host.hostId)
-                } label: {
-                    Label(
-                        L10nKey.sessionsCreateTitle.string,
-                        systemImage: "plus.circle"
-                    )
-                }
-                .accessibilityIdentifier("sessions.create")
-            }
-        }
-    }
-
-    // MARK: - Host picker
-
-    private var hostPickerSection: some View {
-        Section {
-            if models.hosts.hosts.isEmpty {
-                switch models.hosts.loadState {
-                case .idle, .loading:
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text(L10n.commonLoading.key)
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityIdentifier("hosts.loading")
-                case .failed(let code):
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(L10n.hostsLoadError.key)
-                            .font(.headline)
-                        Text(L10nKey.errorKey(for: code).key)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        Button(L10n.commonRetry.key) {
-                            Task { await actions.refresh() }
-                        }
-                        .accessibilityIdentifier("hosts.retry")
-                    }
-                case .loaded:
-                    Text(L10n.hostsEmpty.key)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("hosts.empty")
-                }
-            } else {
-                hostPicker
-            }
-        } footer: {
-            Button {
-                // Replace the switcher sheet with the pairing sheet.
-                actions.close()
-                Task {
-                    try? await Task.sleep(for: .milliseconds(350))
-                    actions.addHost()
-                }
-            } label: {
-                Label(L10n.hostsAdd.key, systemImage: "plus.circle")
-            }
-            .accessibilityIdentifier("switcher.addHost")
-        }
-    }
-
-    private var hostPicker: some View {
-        Menu {
-            ForEach(models.hosts.hosts) { host in
-                Button {
-                    Task { await actions.selectHost(host.hostId) }
-                } label: {
-                    if models.hosts.selectedHostId == host.hostId {
-                        Label(host.hostId, systemImage: "checkmark")
-                    } else {
-                        Text(verbatim: host.hostId)
-                    }
-                }
-                .accessibilityIdentifier("host.row.\(host.hostId)")
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: currentHost?.online == true ? "desktopcomputer" : "wifi.slash")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                Text(verbatim: currentHost?.hostId ?? L10n.hostsPicker.string)
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 8)
-                Text(hostStatusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
-            }
-            .contentShape(Rectangle())
-            .foregroundStyle(.primary)
-        }
-        .tint(.primary)
-        .accessibilityIdentifier("host.picker")
-        .accessibilityLabel(Text(L10n.hostsPicker.key))
-        .accessibilityValue(Text(hostPickerAccessibilityValue))
-    }
-
-    private var currentHost: HostSummary? {
-        models.hosts.hosts.first { $0.hostId == models.hosts.selectedHostId }
-            ?? models.hosts.hosts.first(where: \.online)
-            ?? models.hosts.hosts.first
-    }
-
-    private var hostStatusText: String {
-        guard let host = currentHost else { return "" }
-        return host.online ? L10n.hostsOnline.string : L10n.hostsOffline.string
-    }
-
-    private var hostPickerAccessibilityValue: String {
-        guard let host = currentHost else { return "" }
-        var parts = [host.hostId, host.online ? L10n.hostsOnline.string : L10n.hostsOffline.string]
-        if models.hosts.selectedHostId == host.hostId {
-            parts.append(L10n.hostsSelected.string)
-        }
-        return parts.joined(separator: ", ")
-    }
-
     // MARK: - Sessions
 
     @ViewBuilder
@@ -407,101 +280,5 @@ struct SessionSwitcherContent: View {
     private func workspaceAccessibilityLabel(_ group: WorkspaceGroup) -> String {
         guard let path = group.path else { return group.name }
         return "\(group.name), \(path)"
-    }
-}
-
-private struct SwitcherListStyle: ViewModifier {
-    let style: SessionSwitcherStyle
-
-    func body(content: Content) -> some View {
-        switch style {
-        case .sheet:
-            // Plain lists are the dense list style; inset grouped lists are
-            // meant for forms and add ~20 pt of chrome per section.
-            content.listStyle(.plain)
-        case .sidebar:
-            content
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-        }
-    }
-}
-
-/// Single-line session row: running state, title and last-active time. The
-/// workspace lives in the section header instead of a per-row path.
-private struct SwitcherSessionRow: View {
-    let session: SessionSummary
-    let hostId: String
-    let isCurrent: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if session.running {
-                Image(systemName: "waveform")
-                    .font(.caption)
-                    .foregroundStyle(.tint)
-                    .accessibilityHidden(true)
-            }
-            Text(verbatim: session.title)
-                .font(.body)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            SessionActivityText(date: session.updatedAt)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            if isCurrent {
-                Image(systemName: "checkmark")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.tint)
-                    .accessibilityHidden(true)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(accessibilityLabel))
-        .accessibilityAddTraits(isCurrent ? [.isSelected] : [])
-    }
-
-    private var statusText: String {
-        session.running ? L10n.sessionsRunning.string : L10n.sessionsStatusIdle.string
-    }
-
-    private var accessibilityLabel: String {
-        SessionAccessibility.rowLabel(
-            title: session.title,
-            status: statusText,
-            activity: SessionActivityText.plainText(for: session.updatedAt),
-            hostId: hostId,
-            isCurrent: isCurrent,
-            selectedText: L10n.hostsSelected.string
-        )
-    }
-}
-
-/// System relative time for recent activity, switching to a short absolute date
-/// once a relative value stops being useful.
-struct SessionActivityText: View {
-    let date: Date
-    private let now = Date()
-
-    var body: some View {
-        if Self.isOldEnough(date, now: now) {
-            Text(date, format: .dateTime.month(.abbreviated).day())
-        } else {
-            Text(date, style: .relative)
-        }
-    }
-
-    static func plainText(for date: Date, now: Date = Date()) -> String {
-        if isOldEnough(date, now: now) {
-            return date.formatted(.dateTime.month(.abbreviated).day())
-        }
-        return date.formatted(.relative(presentation: .named))
-    }
-
-    static func isOldEnough(_ date: Date, now: Date) -> Bool {
-        let seconds = now.timeIntervalSince(date)
-        return seconds > 7 * 24 * 60 * 60
     }
 }
