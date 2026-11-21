@@ -192,6 +192,10 @@ enum L10nKey: String, CaseIterable, Sendable {
     case settingsLanguage = "settings.language"
     case settingsLanguageNote = "settings.languageNote"
     case settingsData = "settings.data"
+    case settingsLogs = "settings.logs"
+    case settingsExportLogs = "settings.exportLogs"
+    case settingsExportLogsNote = "settings.exportLogsNote"
+    case settingsShareLogs = "settings.shareLogs"
     case settingsForget = "settings.forget"
     case settingsForgetConfirm = "settings.forgetConfirm"
     case settingsRevoke = "settings.revoke"
@@ -680,6 +684,10 @@ enum L10n {
     static let settingsLanguage = L10nKey.settingsLanguage
     static let settingsLanguageNote = L10nKey.settingsLanguageNote
     static let settingsData = L10nKey.settingsData
+    static let settingsLogs = L10nKey.settingsLogs
+    static let settingsExportLogs = L10nKey.settingsExportLogs
+    static let settingsExportLogsNote = L10nKey.settingsExportLogsNote
+    static let settingsShareLogs = L10nKey.settingsShareLogs
     static let settingsForget = L10nKey.settingsForget
     static let settingsForgetConfirm = L10nKey.settingsForgetConfirm
     static let settingsRevoke = L10nKey.settingsRevoke

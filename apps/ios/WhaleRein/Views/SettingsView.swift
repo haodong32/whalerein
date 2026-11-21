@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var confirmation: SettingsModel.Confirmation?
     @State private var reasoningErrorKey: L10nKey?
     @State private var showDiagnostics = false
+    @State private var logExportURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -54,6 +55,25 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("settings.error")
                     }
+                }
+
+                Section(L10n.settingsLogs.key) {
+                    if let logExportURL {
+                        ShareLink(item: logExportURL) {
+                            Text(L10n.settingsShareLogs.key)
+                        }
+                        .accessibilityIdentifier("settings.shareLogs")
+                    } else {
+                        Button {
+                            logExportURL = try? AppLog.shared.exportSnapshot()
+                        } label: {
+                            Text(L10n.settingsExportLogs.key)
+                        }
+                        .accessibilityIdentifier("settings.exportLogs")
+                    }
+                    Text(L10n.settingsExportLogsNote.key)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section(L10n.settingsData.key) {

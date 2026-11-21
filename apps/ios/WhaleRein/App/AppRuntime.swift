@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import os
 import WhaleReinMobile
 
 @MainActor
@@ -20,19 +21,23 @@ final class AppRuntime {
     /// Monotonic fence. Every asynchronous result carries the generation it
     /// started under and is dropped when the runtime has moved on.
     private(set) var activationGeneration: UInt64 = 0
-    private let launchInterval = AppSignposts.beginLaunch()
+    private var launchInterval: OSSignpostIntervalState?
 
     init(environment: AppEnvironment, legacy: AppModel, router: AppRouter? = nil) {
         self.environment = environment
         self.legacy = legacy
         self.router = router ?? AppRouter()
+        self.launchInterval = AppSignposts.beginLaunch()
     }
 
     /// Launch restore for the runtime and its current group.
     func start() async {
         await legacy.launchRestore()
         applyScenarioEntry()
-        AppSignposts.endLaunch(launchInterval)
+        if let launchInterval {
+            AppSignposts.endLaunch(launchInterval)
+            self.launchInterval = nil
+        }
         AppLog.shared.log(.info, .runtime, "app.launched")
     }
 

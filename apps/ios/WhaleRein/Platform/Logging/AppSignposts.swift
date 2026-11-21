@@ -10,12 +10,11 @@ enum AppSignposts {
         category: "performance"
     )
 
-    static let launch = signposter.makeSignpostID()
-    static let firstConversation = signposter.makeSignpostID()
-
     /// Starts the cold-launch interval. Called from `AppRuntime.bootstrap`.
+    /// A fresh id each time keeps a runtime rebuild from reusing a finished
+    /// interval.
     static func beginLaunch() -> OSSignpostIntervalState {
-        signposter.beginInterval("app.launch", id: launch)
+        signposter.beginInterval("app.launch", id: signposter.makeSignpostID())
     }
 
     static func endLaunch(_ state: OSSignpostIntervalState) {
@@ -24,7 +23,7 @@ enum AppSignposts {
 
     /// First rendered conversation content. Emitted once per runtime group.
     static func beginFirstConversation() -> OSSignpostIntervalState {
-        signposter.beginInterval("conversation.first_render", id: firstConversation)
+        signposter.beginInterval("conversation.first_render", id: signposter.makeSignpostID())
     }
 
     static func endFirstConversation(_ state: OSSignpostIntervalState) {

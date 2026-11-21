@@ -26,7 +26,7 @@ struct RootView: View {
             }
         }
         .task {
-            await app.launchRestore()
+            await runtime.start()
         }
         .onChange(of: scenePhase) { _, phase in
             let mapped = AppScenePhase(phase)
