@@ -31,8 +31,26 @@ final class AppRuntime {
     /// Launch restore for the runtime and its current group.
     func start() async {
         await legacy.launchRestore()
+        applyScenarioEntry()
         AppSignposts.endLaunch(launchInterval)
         AppLog.shared.log(.info, .runtime, "app.launched")
+    }
+
+    /// Opens the surface a Debug scenario selects. Legacy surfaces still take
+    /// their flag from the model until each feature owns its route; the entry
+    /// mapping itself lives here so previews and the gallery get the same
+    /// destination as a test launch.
+    private func applyScenarioEntry() {
+        switch environment.scenario.entry {
+        case .settings:
+            legacy.showSettings = true
+        case .diagnostics:
+            legacy.showDiagnostics = true
+        case .sessionSwitcher:
+            legacy.showSessionSwitcher()
+        case .conversation, .invitation, .cloudSignIn, .serviceSelection:
+            break
+        }
     }
 
     func handleScenePhase(_ phase: AppScenePhase) async {
@@ -105,6 +123,18 @@ final class AppRuntime {
         )
         AppLog.install(appLog)
         let diagnosticBridge = CoreDiagnosticBridge(log: appLog)
+
+        if options.serviceMode == .fixtures, options.seedPairedFixture {
+            preferences.update {
+                $0.paired = true
+                if $0.lastHostId == nil {
+                    $0.lastHostId = LaunchOptions.fixtureInvitationHostId
+                }
+                if $0.lastSessionId == nil {
+                    $0.lastSessionId = "s-001"
+                }
+            }
+        }
 
         let environment = AppEnvironment(
             appVersion: Self.appVersion,

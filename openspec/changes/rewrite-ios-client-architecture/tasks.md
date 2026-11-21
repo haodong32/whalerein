@@ -3,23 +3,23 @@
 ## 1. Baseline and gates
 
 - [ ] 1.1 Record the pre-rewrite baseline in local acceptance evidence: every `WhaleReinUITests` flow with its launch state and expected outcome; the screen/state inventory expressed by `LaunchOptions`, `AppModel` and `ConversationModel`; cold-launch and first-conversation-render timings; and the accessibility identifier/string list (AC-12, AC-14, AC-15).
-- [ ] 1.2 Add the architecture gate script under `apps/ios/scripts/` and wire it into the iOS CI workflow. It rejects feature-to-feature Model/View/State imports, service references or `as?` in Views, `@Environment(AppModel)`, legacy `-ui-` flags, and files over the documented budget. Start with a shrinking allowlist for legacy files only; new files are never allowlisted (AC-03, AC-04, AC-05, AC-08).
+- [x] 1.2 Add the architecture gate script under `apps/ios/scripts/` and wire it into the iOS CI workflow. It rejects feature-to-feature Model/View/State imports, service references or `as?` in Views, `@Environment(AppModel)`, legacy `-ui-` flags, and files over the documented budget. Start with a shrinking allowlist for legacy files only; new files are never allowlisted (AC-03, AC-04, AC-05, AC-08).
 - [ ] 1.3 Add `apps/ios/AGENTS.md` with layer rules, naming, file budgets, the six invariants and the focused test commands (AC-11).
 
 ## 2. App shell and scenario foundation
 
-- [ ] 2.1 Introduce `App/AppEnvironment.swift` with the service factory, preferences factory, configuration store, clock, UUID source and app version; keep the legacy model temporarily driven from it (AC-05).
-- [ ] 2.2 Introduce `App/AppRuntime.swift` owning instance activation, switching, the activation-generation fence, background transitions and the current feature model group (AC-05).
-- [ ] 2.3 Introduce `App/AppRouter.swift` owning navigation only, and remove business/service state from navigation paths (AC-05).
-- [ ] 2.4 Introduce `Domain/FeatureSet.swift`; compute capabilities once per runtime; replace `as? any` probes with explicit adapters or unavailable implementations (AC-06).
-- [ ] 2.5 Introduce `Debug/Scenario/Scenario.swift` and `ScenarioCatalog.swift` with stable ids, categories, notes, owner, launch overrides, fixture scenario, presentation overrides and entry; seed the catalog from the 1.1 inventory; use synthetic identifiers and content only (AC-07, AC-17).
-- [ ] 2.6 Replace `LaunchOptions` state selection with `-ui-scenario <id>` and an applier that rebuilds through `AppRuntime`; keep legacy flags only until 6.4 (AC-07, AC-08).
+- [x] 2.1 Introduce `App/AppEnvironment.swift` with the service factory, preferences factory, configuration store, clock, UUID source and app version; keep the legacy model temporarily driven from it (AC-05).
+- [x] 2.2 Introduce `App/AppRuntime.swift` owning instance activation, switching, the activation-generation fence, background transitions and the current feature model group (AC-05).
+- [x] 2.3 Introduce `App/AppRouter.swift` owning navigation only, and remove business/service state from navigation paths (AC-05).
+- [x] 2.4 Introduce `Domain/FeatureSet.swift`; compute capabilities once per runtime; replace `as? any` probes with explicit adapters or unavailable implementations (AC-06).
+- [x] 2.5 Introduce `Debug/Scenario/Scenario.swift` and `ScenarioCatalog.swift` with stable ids, categories, notes, owner, launch overrides, fixture scenario, presentation overrides and entry; seed the catalog from the 1.1 inventory; use synthetic identifiers and content only (AC-07, AC-17).
+- [x] 2.6 Replace `LaunchOptions` state selection with `-ui-scenario <id>` and an applier that rebuilds through `AppRuntime`; keep legacy flags only until 6.4 (AC-07, AC-08).
 - [ ] 2.7 Add `DesignSystem/` primitives used by rewritten views (status row, empty/error state, primary button) with no business state (AC-03).
 - [ ] 2.8 Add the runtime coordination events for cross-feature flows (instance switch, selected session, selected Host) and verify no feature imports another feature's types (AC-04, AC-05).
-- [ ] 2.9 Expose Core's existing `DiagnosticSink` through the binding: add a flat `DiagnosticEventView` (receipt time, trace id, level, stable event name, allowlisted status/elapsed/layer/stage/outcome/code map), a foreign sink callback, and a constructor that installs it before Core opens; install a sink on every runtime rebuild. Do not change `core/`; add binding tests for event mapping and failure isolation (AC-21, AC-13).
-- [ ] 2.10 Add one small Swift sink adapter that validates event level/name, applies the shared redactor, assigns receipt timestamps, appends to the shared ring buffer and preserves the Core trace id (AC-21).
-- [ ] 2.11 Add `Platform/Logging/AppLog.swift` and `AppLogStore`: one facade, a 2 MB in-memory ring buffer, a JSON-lines file at `Library/Logs/WhaleRein/app-log.jsonl` with schema version/app version/Core revision, category/level policy, injected-clock timestamps, redaction-before-write and reset clearing (AC-18, AC-19).
-- [ ] 2.13 Add rotation, age/size pruning, `completeFileProtection`, private permissions, backup exclusion, periodic flush, background flush, export-staging cleanup and write-failure handling for the log file; verify bounds, relaunch persistence and no crash while locked (AC-19).
+- [x] 2.9 Expose Core's existing `DiagnosticSink` through the binding: add a flat `DiagnosticEventView` (receipt time, trace id, level, stable event name, allowlisted status/elapsed/layer/stage/outcome/code map), a foreign sink callback, and a constructor that installs it before Core opens; install a sink on every runtime rebuild. Do not change `core/`; add binding tests for event mapping and failure isolation (AC-21, AC-13).
+- [x] 2.10 Add one small Swift sink adapter that validates event level/name, applies the shared redactor, assigns receipt timestamps, appends to the shared ring buffer and preserves the Core trace id (AC-21).
+- [x] 2.11 Add `Platform/Logging/AppLog.swift` and `AppLogStore`: one facade, a 2 MB in-memory ring buffer, a JSON-lines file at `Library/Logs/WhaleRein/app-log.jsonl` with schema version/app version/Core revision, category/level policy, injected-clock timestamps, redaction-before-write and reset clearing (AC-18, AC-19).
+- [x] 2.13 Add rotation, age/size pruning, `completeFileProtection`, private permissions, backup exclusion, periodic flush, background flush, export-staging cleanup and write-failure handling for the log file; verify bounds, relaunch persistence and no crash while locked (AC-19).
 - [ ] 2.12 Verify early-event buffering and saturation: the sink adapter drops oldest records with a visible counter, never blocks Core, and a failing sink leaves operation results unchanged (AC-21).
 
 ## 3. Conversation rewrite
