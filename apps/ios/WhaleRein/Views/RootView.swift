@@ -35,18 +35,18 @@ struct RootView: View {
         .onOpenURL { url in
             Task { await app.handleOpenURL(url) }
         }
-        .sheet(isPresented: $app.showSettings) {
+        .sheet(isPresented: sheet(.settings)) {
             SettingsView()
         }
-        .sheet(isPresented: $app.showDiagnostics) {
+        .sheet(isPresented: sheet(.diagnostics)) {
             DiagnosticsView(model: app.diagnostics)
         }
-        .sheet(isPresented: $app.showInvitationSheet) {
+        .sheet(isPresented: sheet(.invitation)) {
             NavigationStack {
                 InvitationView(isModal: true)
             }
         }
-        .sheet(isPresented: $app.showSwitcher) {
+        .sheet(isPresented: sheet(.sessionSwitcher)) {
             SessionSwitcherView()
         }
         #if DEBUG
@@ -54,6 +54,19 @@ struct RootView: View {
             StateGalleryView()
         }
         #endif
+    }
+
+    /// Binds one route to a sheet presentation. Dismissing clears only the
+    /// route that is currently presented.
+    private func sheet(_ route: AppRoute) -> Binding<Bool> {
+        Binding(
+            get: { runtime.router.presented == route },
+            set: { presented in
+                if !presented, runtime.router.presented == route {
+                    runtime.router.dismiss()
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -108,7 +121,7 @@ struct RootView: View {
                         // redacted report stays available in Debug/Test.
                         #if DEBUG
                         Button {
-                            model.showDiagnostics = true
+                            runtime.router.present(.diagnostics)
                         } label: {
                             Image(systemName: "stethoscope")
                         }
@@ -125,7 +138,7 @@ struct RootView: View {
                         #endif
 
                         Button {
-                            model.showSettings = true
+                            runtime.router.present(.settings)
                         } label: {
                             Image(systemName: "gearshape")
                         }

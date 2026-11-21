@@ -82,6 +82,7 @@ struct DeepLinkQueueTests {
             dataDirectory: directory,
             options: testLaunchOptions()
         )
+        app.router = AppRouter()
         await app.bootstrapConversation()
         #expect(app.conversation != nil)
         #expect(!app.showInvitationSheet)

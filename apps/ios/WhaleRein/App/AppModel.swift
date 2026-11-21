@@ -97,10 +97,31 @@ final class AppModel {
     private(set) var isSwitchingInstance = false
     private(set) var instanceErrorKey: L10nKey?
 
-    var showSettings = false
-    var showDiagnostics = false
-    var showInvitationSheet = false
-    var showSwitcher = false
+    /// Navigation is owned by the router; the shell only sends intents. The
+    /// shell retains it because the router never refers back to the shell.
+    var router: AppRouter?
+
+    func present(_ route: AppRoute) { router?.present(route) }
+    func dismissSheet() { router?.dismiss() }
+
+    // Read-only navigation projections kept for tests and the transition; the
+    // router owns the state.
+    var showSettings: Bool {
+        get { router?.presented == .settings }
+        set { newValue ? present(.settings) : dismissSheet() }
+    }
+    var showDiagnostics: Bool {
+        get { router?.presented == .diagnostics }
+        set { newValue ? present(.diagnostics) : dismissSheet() }
+    }
+    var showInvitationSheet: Bool {
+        get { router?.presented == .invitation }
+        set { newValue ? present(.invitation) : dismissSheet() }
+    }
+    var showSwitcher: Bool {
+        get { router?.presented == .sessionSwitcher }
+        set { newValue ? present(.sessionSwitcher) : dismissSheet() }
+    }
 
     private let serviceFactory: (@MainActor (AppInstance) throws -> any SessionService)?
     private let preferencesFactory: (@MainActor (AppInstance) -> PreferencesStore)?
@@ -421,8 +442,8 @@ final class AppModel {
         self.rootState = .restoring
         self.didBootstrap = false
         self.isBootstrapping = false
-        self.showSwitcher = false
-        self.showDiagnostics = false
+        self.dismissSheet()
+        self.dismissSheet()
         self.hostList = HostListModel(service: service, preferences: preferences)
         self.sessionList = SessionListModel(service: service, preferences: preferences)
         self.diagnostics = DiagnosticsModel(
@@ -729,7 +750,7 @@ final class AppModel {
 
     func showSessionSwitcher() {
         guard isPaired else { return }
-        showSwitcher = true
+        present(.sessionSwitcher)
     }
 
     /// Refreshes the Host list and the selected Host's sessions. Never changes
@@ -831,7 +852,7 @@ final class AppModel {
             $0.lastSessionTitle = session.title
         }
         updateCachedBanner()
-        showSwitcher = false
+        dismissSheet()
         rootState = .ready
         Task { await model.start() }
     }
@@ -872,8 +893,8 @@ final class AppModel {
         isPaired = true
         isRevoked = false
         prefersInvitationAfterDeviceReset = false
-        showInvitationSheet = false
-        showSwitcher = false
+        dismissSheet()
+        dismissSheet()
         pairing.reset()
         didBootstrap = false
         isOfflineCached = false
@@ -892,7 +913,7 @@ final class AppModel {
             return
         }
         if isPaired {
-            showInvitationSheet = true
+            present(.invitation)
         }
         await pairing.handleOpenURL(url)
     }
@@ -935,11 +956,11 @@ final class AppModel {
     /// a stale invitation attempt cannot leak into the new flow.
     func openManualPairing() {
         pairing.reset()
-        showInvitationSheet = true
+        present(.invitation)
     }
 
     func dismissInvitationSheet() {
-        showInvitationSheet = false
+        dismissSheet()
         if !isPaired {
             pairing.reset()
         }
@@ -955,10 +976,10 @@ final class AppModel {
         conversation = nil
         isRevoked = true
         isPrivacyShieldVisible = false
-        showSettings = false
-        showDiagnostics = false
-        showSwitcher = false
-        showInvitationSheet = false
+        dismissSheet()
+        dismissSheet()
+        dismissSheet()
+        dismissSheet()
         selectedHostId = nil
         isOfflineCached = false
         resumeMarker = nil
@@ -1005,10 +1026,10 @@ final class AppModel {
 
     private func resetLocalNavigation() {
         isRevoked = false
-        showSettings = false
-        showDiagnostics = false
-        showSwitcher = false
-        showInvitationSheet = false
+        dismissSheet()
+        dismissSheet()
+        dismissSheet()
+        dismissSheet()
         selectedHostId = nil
         isOfflineCached = false
         resumeMarker = nil
@@ -1067,7 +1088,7 @@ final class AppModel {
         isPaired = false
         isRevoked = false
         prefersInvitationAfterDeviceReset = true
-        showSwitcher = false
+        dismissSheet()
         selectedHostId = nil
         isOfflineCached = false
         resumeMarker = nil
@@ -1075,9 +1096,9 @@ final class AppModel {
         hostList.reset()
         sessionList.reset()
         pairing.reset()
-        showInvitationSheet = false
-        showSettings = false
-        showDiagnostics = false
+        dismissSheet()
+        dismissSheet()
+        dismissSheet()
         rootState = .restoring
     }
 }

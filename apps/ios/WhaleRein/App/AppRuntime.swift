@@ -28,6 +28,7 @@ final class AppRuntime {
         self.legacy = legacy
         self.router = router ?? AppRouter()
         self.launchInterval = AppSignposts.beginLaunch()
+        legacy.router = self.router
     }
 
     /// Launch restore for the runtime and its current group.
@@ -48,11 +49,11 @@ final class AppRuntime {
     private func applyScenarioEntry() {
         switch environment.scenario.entry {
         case .settings:
-            legacy.showSettings = true
+            router.present(.settings)
         case .diagnostics:
-            legacy.showDiagnostics = true
+            router.present(.diagnostics)
         case .sessionSwitcher:
-            legacy.showSessionSwitcher()
+            router.present(.sessionSwitcher)
         case .conversation, .invitation, .cloudSignIn, .serviceSelection:
             break
         }
@@ -108,6 +109,7 @@ final class AppRuntime {
         )
         environment = group.environment
         legacy = group.model
+        legacy.router = router
         activationGeneration &+= 1
         applyScenarioEntry()
         #endif

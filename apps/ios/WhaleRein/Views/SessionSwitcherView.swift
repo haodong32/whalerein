@@ -24,7 +24,7 @@ struct SessionSwitcherView: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button(L10n.commonClose.key) {
-                            app.showSwitcher = false
+                            app.dismissSheet()
                         }
                         .accessibilityIdentifier("switcher.close")
                     }
@@ -167,7 +167,7 @@ struct SessionSwitcherContent: View {
         } footer: {
             Button {
                 // Replace the switcher sheet with the pairing sheet.
-                app.showSwitcher = false
+                app.dismissSheet()
                 Task {
                     try? await Task.sleep(for: .milliseconds(350))
                     app.openManualPairing()
