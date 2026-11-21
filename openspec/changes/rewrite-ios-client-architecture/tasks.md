@@ -45,7 +45,7 @@
 - [x] 5.1 Add `Debug/StateGallery/StateGalleryView.swift` and model: group by category, search, show notes/owner/entry, apply a scenario and open its entry (AC-08).
 - [x] 5.2 Add the Debug-only Settings entry and the fallback gesture; verify it is absent from Release configuration (AC-08, AC-09).
 - [ ] 5.3 Add previews for the rewritten screens, each constructed from a scenario through `TestSupport`; no network, no real data (AC-07, AC-11).
-- [ ] 5.4 Add the Release surface scan to CI. Emit a Debug-only marker string/constant for the gallery and scenario entry, build a Release-configured app, scan symbols and strings for that marker and `-ui-scenario`, and record the artifact (AC-09).
+- [x] 5.4 Add the Release surface scan to CI. Emit a Debug-only marker string/constant for the gallery and scenario entry, build a Release-configured app, scan symbols and strings for that marker and `-ui-scenario`, and record the artifact (AC-09).
 
 ## 6. Remove the legacy architecture
 
@@ -58,7 +58,7 @@
 
 ## 7. Agent navigation and documentation
 
-- [ ] 7.1 Write `docs/ios-architecture.md`: layer map, feature map, state ownership, dependency rules, "where does this belong", scenario workflow, focused commands, catalog ownership/cleanup and review checklist (AC-11).
+- [x] 7.1 Write `docs/ios-architecture.md`: layer map, feature map, state ownership, dependency rules, "where does this belong", scenario workflow, focused commands, catalog ownership/cleanup and review checklist (AC-11).
 - [ ] 7.2 Add one state transition table per feature next to its State, covering events, target states and invariants (AC-11).
 - [ ] 7.3 Add per-feature focused test commands to `docs/ios-architecture.md` and verify each command runs only the named layer (AC-10, AC-11).
 - [ ] 7.4 Update `docs/ios.md` composition sections to describe the rewritten client; record that no other maintained guide needs changes or update the ones that do (AC-11).

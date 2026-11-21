@@ -176,6 +176,16 @@ jobs:
             .data/ios-build/source/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+      - name: Scan the Release product for the debug surface
+        if: matrix.name == 'unit'
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+          DERIVED_DATA: .data/ios-release-scan
+        run: |
+          set -euo pipefail
+          DESTINATION="platform=iOS Simulator,id=${SIMULATOR}" \
+            apps/ios/scripts/release-surface-scan.sh
+
       - name: Upload native results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
