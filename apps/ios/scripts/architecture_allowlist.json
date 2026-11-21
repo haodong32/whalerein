@@ -30,31 +30,6 @@
       "reason": "Legacy model over the 500-line budget; deleted or split by the rewrite."
     },
     {
-      "path": "Views/InvitationView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
-      "path": "Views/QuestionCardView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
-      "path": "Views/RootView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
-      "path": "Views/ServiceSelectionView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
-      "path": "Views/SessionManagementView.swift",
-      "rule": "view-size",
-      "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
-    },
-    {
       "path": "Views/SessionSwitcherView.swift",
       "rule": "view-size",
       "reason": "Legacy view over the 300-line budget; split or deleted by the rewrite."
