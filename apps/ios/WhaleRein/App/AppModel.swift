@@ -10,36 +10,6 @@
 import Foundation
 import Observation
 
-enum ConversationEmptyReason: Equatable, Sendable {
-    case noHosts
-    case noSessions
-}
-
-enum ConversationRootState: Equatable, Sendable {
-    case restoring
-    case ready
-    case empty(ConversationEmptyReason)
-    case failed(AppErrorCode)
-    /// The authorized Host reports a protocol line this client cannot use.
-    case incompatible(hostId: String, version: String)
-    /// Core reported a non-retryable upgrade condition while loading. This is
-    /// distinct from a generic unavailable error and never offers a blind retry
-    /// as the primary route.
-    case upgradeRequired(AppErrorCode)
-}
-
-enum AppScenePhase: Equatable, Sendable {
-    case active
-    case inactive
-    case background
-}
-
-struct AppResumeMarker: Equatable, Sendable {
-    let recordedAt: Date
-    let hostId: String?
-    let sessionId: String?
-}
-
 @MainActor
 @Observable
 final class AppModel {
@@ -68,23 +38,15 @@ final class AppModel {
     private(set) var accountSettings: AccountSettingsModel?
 
     private(set) var conversation: ConversationModel?
-    private(set) var isPaired: Bool
-    private(set) var rootState: ConversationRootState = .restoring
-    private(set) var selectedHostId: String?
-    private(set) var isOfflineCached = false
     /// True while the app is not active. The root renders an opaque shield so
     /// the app-switcher snapshot never contains conversation content.
-    private(set) var isPrivacyShieldVisible = false
     /// Present after a background transition; used by tests and diagnostics to
     /// distinguish a resume from a cold launch.
-    private(set) var resumeMarker: AppResumeMarker?
     /// The device was revoked remotely. The root blocks conversation content
     /// and offers re-pair/forget instead of a generic error or stale transcript.
-    private(set) var isRevoked = false
     /// After an explicit forget/revoke, return to the invitation flow even for
     /// a Cloud instance so the local identity reset is visible and re-pairing
     /// (or Cloud onboarding) starts from an explicit choice.
-    private(set) var prefersInvitationAfterDeviceReset = false
 
     /// Authoritative configuration document. `nil` for the direct unit-test
     /// composition that only owns one service.
@@ -94,8 +56,6 @@ final class AppModel {
     /// Monotonic activation fence. Every callback and every in-flight launch
     /// captures this value and drops its result after a newer activation.
     private(set) var activationGeneration: UInt64 = 0
-    private(set) var isSwitchingInstance = false
-    private(set) var instanceErrorKey: L10nKey?
 
     /// Navigation is owned by the router; the shell only sends intents. The
     /// shell retains it because the router never refers back to the shell.
@@ -147,8 +107,6 @@ final class AppModel {
         self.activeInstance = activeInstance
         self.serviceFactory = serviceFactory
         self.preferencesFactory = preferencesFactory
-        self.isPaired = preferences.value.paired
-        self.selectedHostId = preferences.value.lastHostId
 
         let models = Self.makeModels(
             service: service,
@@ -180,6 +138,8 @@ final class AppModel {
         self.accountSettings = featureSet.sessionManagement
             ? makeAccountSettingsModel(service: service, instance: activeInstance)
             : nil
+        self.shell.isPaired = preferences.value.paired
+        self.shell.selectedHostId = preferences.value.lastHostId
         installCallbacks()
     }
 
@@ -241,6 +201,45 @@ final class AppModel {
 
     private func isCurrentActivation(_ generation: UInt64) -> Bool {
         generation == activationGeneration
+    }
+
+    /// One shell state value. The properties below are read/write projections so
+    /// the migration can move call sites without changing behaviour.
+    private(set) var shell = AppShellState()
+
+    var isPaired: Bool { get { shell.isPaired } set { shell.isPaired = newValue } }
+    var rootState: ConversationRootState {
+        get { shell.rootState }
+        set { shell.rootState = newValue }
+    }
+    var selectedHostId: String? {
+        get { shell.selectedHostId }
+        set { shell.selectedHostId = newValue }
+    }
+    var isOfflineCached: Bool {
+        get { shell.isOfflineCached }
+        set { shell.isOfflineCached = newValue }
+    }
+    var isPrivacyShieldVisible: Bool {
+        get { shell.isPrivacyShieldVisible }
+        set { shell.isPrivacyShieldVisible = newValue }
+    }
+    var isRevoked: Bool { get { shell.isRevoked } set { shell.isRevoked = newValue } }
+    var prefersInvitationAfterDeviceReset: Bool {
+        get { shell.prefersInvitationAfterDeviceReset }
+        set { shell.prefersInvitationAfterDeviceReset = newValue }
+    }
+    var isSwitchingInstance: Bool {
+        get { shell.isSwitchingInstance }
+        set { shell.isSwitchingInstance = newValue }
+    }
+    var instanceErrorKey: L10nKey? {
+        get { shell.instanceErrorKey }
+        set { shell.instanceErrorKey = newValue }
+    }
+    var resumeMarker: AppResumeMarker? {
+        get { shell.resumeMarker }
+        set { shell.resumeMarker = newValue }
     }
 
     var isUsingFixtures: Bool { service is FixtureSessionService }

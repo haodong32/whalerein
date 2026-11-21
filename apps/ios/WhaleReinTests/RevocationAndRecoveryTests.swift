@@ -21,6 +21,7 @@ struct RevocationAndRecoveryTests {
             dataDirectory: directory,
             options: testLaunchOptions()
         )
+        app.router = AppRouter()
         return (app, preferences)
     }
 
