@@ -18,7 +18,7 @@ struct WhaleReinApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(model: runtime.legacy, runtime: runtime)
                 .environment(runtime.legacy)
                 .environment(runtime)
                 .id(runtime.activationGeneration)

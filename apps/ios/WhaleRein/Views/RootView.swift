@@ -10,8 +10,10 @@
 import SwiftUI
 
 struct RootView: View {
-    @Environment(AppShellModel.self) private var model
-    @Environment(AppRuntime.self) private var runtime
+    /// The shell injects its model and runtime directly; only the remaining
+    /// feature views still read the environment while they migrate.
+    let model: AppShellModel
+    let runtime: AppRuntime
     @Environment(\.scenePhase) private var scenePhase
     @State private var availableWidth: CGFloat = 0
 
