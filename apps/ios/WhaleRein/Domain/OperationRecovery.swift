@@ -44,19 +44,8 @@ enum OperationStatus: String, Codable, Hashable, Sendable {
     }
 }
 
-/// Exact scoped reference to a canonical committed message. The Source locator
-/// is required to rebuild Core's reference for a content read.
-struct MessageReference: Hashable, Sendable {
-    let hostId: String
-    let sessionId: String
-    let messageId: String
-    let sourceLocator: String
-    let projectionId: String
-
-    var session: SessionContext {
-        SessionContext(hostId: hostId, sessionId: sessionId)
-    }
-}
+// `MessageReference` lives in Models.swift; history and recovery share the
+// same scoped value.
 
 /// Proof-backed reply outcome for the original send.
 enum MessageReply: Hashable, Sendable {

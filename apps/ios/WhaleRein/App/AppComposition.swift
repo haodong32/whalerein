@@ -5,6 +5,7 @@
 // `config_path` produced by `AppConfigurationStore` for the committed instance.
 
 import Foundation
+import WhaleReinMobile
 
 @MainActor
 enum AppComposition {
@@ -32,6 +33,24 @@ enum AppComposition {
         )
     }
 
+    /// True when this build and instance use the developer file store instead
+    /// of the Keychain. Only the local Cloud instance qualifies, and only in
+    /// Debug builds where Local is exposed.
+    static func usesFileSecrets(for instance: AppInstance) -> Bool {
+        #if DEBUG
+        instance.isLocal
+        #else
+        false
+        #endif
+    }
+
+    /// The developer file store lives beside the materialized instance TOML.
+    static func secretsDirectory(for instance: AppInstance) -> URL {
+        instance.dataDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("secrets", isDirectory: true)
+    }
+
     /// Builds the live service for one materialized instance. Throws a typed
     /// error so a failed switch can keep the previous runtime.
     static func makeLiveService(
@@ -39,10 +58,23 @@ enum AppComposition {
         options: LaunchOptions,
         appVersion: String
     ) throws -> any SessionService {
-        let service = keychainService(for: instance, options: options)
-        let secretStore = KeychainSecretStore(service: service)
-        guard secretStore.availability() == .available else {
-            throw SessionServiceError(.keychainUnavailable)
+        let secretStore: any SecretStore
+        if usesFileSecrets(for: instance) {
+            do {
+                secretStore = try FileSecretStore(
+                    directory: secretsDirectory(for: instance)
+                )
+            } catch {
+                throw SessionServiceError(.internalError)
+            }
+        } else {
+            let keychain = KeychainSecretStore(
+                service: keychainService(for: instance, options: options)
+            )
+            guard keychain.availability() == .available else {
+                throw SessionServiceError(.keychainUnavailable)
+            }
+            secretStore = keychain
         }
         do {
             return try LiveSessionService(
@@ -78,7 +110,8 @@ enum AppComposition {
             options: options,
             draftStore: draftStore,
             initiallyPaired: initiallyPaired,
-            instanceId: instance.id
+            instanceId: instance.id,
+            serviceKind: instance.service
         )
     }
 }

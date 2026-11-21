@@ -1,5 +1,6 @@
 // Capability-aware delivery selection for idle, running, queue and unsupported
-// cases.
+// cases. Ordinary Send uses the native queue; steer and start-if-idle are
+// explicit alternatives.
 
 import Foundation
 import Testing
@@ -7,24 +8,31 @@ import Testing
 
 @Suite("Delivery policy")
 struct DeliveryPolicyTests {
-    @Test("idle work offers only Send")
+    @Test("idle work defaults to the native queue and offers explicit alternatives")
     func idle() {
-        #expect(DeliveryPolicy.choices(for: .idle) == [.send])
-        #expect(DeliveryPolicy.defaultChoice(for: .idle) == .send)
+        #expect(DeliveryPolicy.choices(for: .idle) == [.queue, .send, .steer])
+        #expect(DeliveryPolicy.defaultChoice(for: .idle) == .queue)
     }
 
-    @Test("running work defaults to Steer")
-    func runningDefaultsToSteer() {
+    @Test("running work defaults to the native queue")
+    func runningDefaultsToQueue() {
         let capabilities = SessionCapabilities(running: true, supportsSteer: true, supportsQueue: true)
-        #expect(DeliveryPolicy.defaultChoice(for: capabilities) == .steer)
-        #expect(DeliveryPolicy.choices(for: capabilities) == [.steer, .queue])
+        #expect(DeliveryPolicy.defaultChoice(for: capabilities) == .queue)
+        #expect(DeliveryPolicy.choices(for: capabilities) == [.queue, .steer])
     }
 
-    @Test("running work without Steer defaults to Queue when supported")
-    func runningWithoutSteer() {
-        let capabilities = SessionCapabilities(running: true, supportsSteer: false, supportsQueue: true)
-        #expect(DeliveryPolicy.choices(for: capabilities) == [.queue])
-        #expect(DeliveryPolicy.defaultChoice(for: capabilities) == .queue)
+    @Test("a running Source without Queue falls back to Steer")
+    func runningWithoutQueue() {
+        let capabilities = SessionCapabilities(running: true, supportsSteer: true, supportsQueue: false)
+        #expect(DeliveryPolicy.choices(for: capabilities) == [.steer])
+        #expect(DeliveryPolicy.defaultChoice(for: capabilities) == .steer)
+    }
+
+    @Test("an idle Source without Queue falls back to start-if-idle")
+    func idleWithoutQueue() {
+        let capabilities = SessionCapabilities(running: false, supportsSteer: false, supportsQueue: false)
+        #expect(DeliveryPolicy.choices(for: capabilities) == [.send])
+        #expect(DeliveryPolicy.defaultChoice(for: capabilities) == .send)
     }
 
     @Test("running work with no supported mode offers nothing")
@@ -36,12 +44,16 @@ struct DeliveryPolicyTests {
 
     @Test("unsupported explicitly selected modes throw a localized error")
     func unsupportedMode() {
-        let idleCapabilities = SessionCapabilities.idle
+        let noModes = SessionCapabilities(running: false, supportsSteer: false, supportsQueue: false)
         #expect(throws: SessionServiceError(.unsupportedDelivery)) {
-            _ = try DeliveryPolicy.resolve(.steer, for: idleCapabilities)
+            _ = try DeliveryPolicy.resolve(.steer, for: noModes)
         }
         #expect(throws: SessionServiceError(.unsupportedDelivery)) {
-            _ = try DeliveryPolicy.resolve(.queue, for: idleCapabilities)
+            _ = try DeliveryPolicy.resolve(.queue, for: noModes)
+        }
+        let running = SessionCapabilities(running: true, supportsSteer: true, supportsQueue: true)
+        #expect(throws: SessionServiceError(.unsupportedDelivery)) {
+            _ = try DeliveryPolicy.resolve(.send, for: running)
         }
     }
 

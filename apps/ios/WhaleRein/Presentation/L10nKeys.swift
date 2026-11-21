@@ -43,6 +43,8 @@ extension L10nKey {
             return .errorKeychainUnavailable
         case .configuration:
             return .errorConfiguration
+        case .staleHistory:
+            return .errorStaleHistory
         }
     }
 
@@ -90,6 +92,39 @@ extension L10nKey {
             return .conversationSendRejected
         case .cancelled:
             return .errorCancelled
+        }
+    }
+
+    static func approvalStatusKey(for status: ApprovalStatusRefresh) -> L10nKey {
+        switch status {
+        case .refreshing, .current:
+            return .approvalStatusCurrent
+        case .changed:
+            return .approvalStatusChanged
+        case .resolved:
+            return .approvalStatusResolved
+        case .unavailable:
+            return .approvalStatusUnavailable
+        case .outOfScope:
+            return .approvalStatusOutOfScope
+        }
+    }
+
+    static func waitOutcomeKey(for outcome: WaitOutcome) -> L10nKey {
+        switch outcome {
+        case .idle: return .waitIdle
+        case .inputRequired: return .waitInputRequired
+        case .timeout: return .waitTimeout
+        case .cancelled: return .waitCancelled
+        case .failed: return .waitFailed
+        }
+    }
+
+    static func queueMutationKey(for status: CommandStatus) -> L10nKey {
+        switch status {
+        case .accepted, .confirmed: return .queueMutationSaved
+        case .uncertain: return .queueMutationUncertain
+        case .rejected, .cancelled: return .queueMutationFailed
         }
     }
 

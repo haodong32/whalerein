@@ -281,13 +281,27 @@ struct QuestionAnswerStatusView: View {
     }
 
     var body: some View {
-        if let statusKey {
-            Text(statusKey.key)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("questions.answerState")
-                .accessibilityLabel(L10nKey.questionsTitle.key)
-                .accessibilityValue(statusKey.key)
+        VStack(alignment: .leading, spacing: 4) {
+            if let statusKey {
+                Text(statusKey.key)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("questions.answerState")
+                    .accessibilityLabel(L10nKey.questionsTitle.key)
+                    .accessibilityValue(statusKey.key)
+            }
+            if model.canCancelQuestionAnswer {
+                Button(role: .destructive) {
+                    Task { await model.cancelQuestionAnswer() }
+                } label: {
+                    Label(L10nKey.questionsCancelAnswer.key, systemImage: "xmark.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("questions.cancelAnswer")
+                .accessibilityLabel(L10nKey.questionsCancelAnswer.key)
+                .accessibilityValue(Text(L10nKey.questionsAnswerUncertain.key))
+            }
         }
     }
 }
