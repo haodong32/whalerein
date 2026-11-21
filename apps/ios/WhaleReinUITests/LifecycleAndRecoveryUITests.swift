@@ -37,7 +37,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testRemoteRevocationBlocksConversationAndPairsAgain() {
-        launchApp(["-ui-revoked-on-open"])
+        launchScenario("onboarding.revoked-on-open")
         pairWithoutWaitingForConversation()
 
         XCTAssertTrue(waitFor("revoked.title", timeout: 20).waitForExistence(timeout: 20))
@@ -49,7 +49,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testRemoteRevocationForgetReturnsToOnboarding() {
-        launchApp(["-ui-revoked-on-open"])
+        launchScenario("onboarding.revoked-on-open")
         pairWithoutWaitingForConversation()
         _ = waitFor("revoked.title", timeout: 20)
 
@@ -183,7 +183,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testIncompatibleProtocolShowsUpgradeGuidance() {
-        launchApp(["-ui-incompatible-protocol"])
+        launchScenario("onboarding.incompatible-protocol")
         let field = waitFor("invitation.field")
         tap(field)
         field.typeText(Self.invitationLink + "\n")
@@ -196,7 +196,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testLegacyHostWithoutProtocolVersionShowsUpgradeGuidance() {
-        launchApp(["-ui-legacy-protocol"])
+        launchScenario("onboarding.legacy-protocol")
         let field = waitFor("invitation.field")
         tap(field)
         field.typeText(Self.invitationLink + "\n")
@@ -255,7 +255,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testDiagnosticsFailureShowsRetryBranch() {
-        launchAndOpenConversation(["-ui-diagnostics-failure"])
+        launchAndOpenConversation(scenario: "conversation.diagnostics-failure")
         tap(waitFor("conversation.diagnostics"))
 
         XCTAssertTrue(waitFor("diagnostics.error", timeout: 15).exists)

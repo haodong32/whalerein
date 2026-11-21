@@ -86,6 +86,33 @@ enum ScenarioCatalog {
                 entry: .conversation
             ),
             Scenario(
+                id: "onboarding.revoked-on-open",
+                category: .onboarding,
+                title: "Revocation after pairing",
+                notes: "Pairing a Host whose watch reports a remote revocation.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(revokedOnOpen: true),
+                entry: .invitation
+            ),
+            Scenario(
+                id: "onboarding.incompatible-protocol",
+                category: .onboarding,
+                title: "Pair an incompatible Host",
+                notes: "Pairing a Host that speaks an unsupported protocol line.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(incompatibleProtocol: true),
+                entry: .invitation
+            ),
+            Scenario(
+                id: "onboarding.legacy-protocol",
+                category: .onboarding,
+                title: "Pair a legacy Host",
+                notes: "Pairing a Host without a usable protocol version.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(legacyProtocol: true),
+                entry: .invitation
+            ),
+            Scenario(
                 id: "onboarding.slow-pairing",
                 category: .onboarding,
                 title: "Slow pairing",
@@ -214,6 +241,15 @@ enum ScenarioCatalog {
                 notes: "Paired fixture launched with the staging identity.",
                 launch: LaunchOverrides(serviceMode: .fixtures, resetState: true, staging: true),
                 fixture: FixtureScenario(initiallyPaired: true),
+                entry: .conversation
+            ),
+            Scenario(
+                id: "conversation.diagnostics-failure",
+                category: .conversation,
+                title: "Conversation with a failing diagnostics preview",
+                notes: "Paired conversation whose diagnostics preview fails so the retry branch shows.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(initiallyPaired: true, diagnosticsFailure: true),
                 entry: .conversation
             ),
             Scenario(

@@ -75,7 +75,7 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
     func testReadingOlderRowsWhileStreamingRetainsAnchorAndJumps() {
         // Restoring the conversation starts the scripted stream.
         // Opening the switcher first could let the short stream end.
-        launchAndOpenConversation(["-ui-stream-on-open"])
+        launchAndOpenConversation(scenario: "conversation.streaming")
         XCTAssertTrue(waitFor("conversation.preview").exists)
 
         scrollConversationUp(times: 4)
@@ -112,7 +112,7 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
     }
 
     func testSwitchingHostsDropsLateEventsFromThePreviousWatch() {
-        launchAndOpenConversation(["-ui-late-event"])
+        launchAndOpenConversation(scenario: "conversation.late-event")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         openSwitcher()

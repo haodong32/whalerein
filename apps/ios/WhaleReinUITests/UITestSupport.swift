@@ -24,20 +24,10 @@ class WhaleReinUITestCase: XCTestCase {
 
     @discardableResult
     func launchApp(_ extraArguments: [String] = []) -> XCUIApplication {
-        var arguments = ["-ui-fixtures", "-ui-test-reset"]
-        if !extraArguments.contains("-AppleLanguages") {
-            arguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-        }
-        arguments += extraArguments
-        app.launchArguments = arguments
-        // XCTest can fail to terminate a previous test's app instance when it
-        // is still settling. Terminate explicitly first so launch starts from
-        // a known state instead of failing the whole test at launch().
-        if app.state != .notRunning {
-            app.terminate()
-        }
-        app.launch()
-        return app
+        // Every flow starts from a catalog scenario. The legacy flag path is
+        // gone; integration tests pass `-integration-fixtures` and keep the
+        // real service.
+        launchScenario("onboarding.unpaired", extraArguments: extraArguments)
     }
 
     func element(_ identifier: String) -> XCUIElement {
@@ -170,8 +160,7 @@ class WhaleReinUITestCase: XCTestCase {
     }
 
     func launchAndOpenConversation(_ extraArguments: [String] = []) {
-        launchApp(extraArguments + ["-ui-fixture-paired"])
-        waitFor("composer.field")
+        launchAndOpenConversation(scenario: "onboarding.paired", extraArguments: extraArguments)
     }
 
     /// Launches one catalog scenario. New and migrated tests use this instead
