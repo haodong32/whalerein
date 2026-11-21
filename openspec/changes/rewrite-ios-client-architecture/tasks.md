@@ -14,7 +14,7 @@
 - [x] 2.4 Introduce `Domain/FeatureSet.swift`; compute capabilities once per runtime; replace `as? any` probes with explicit adapters or unavailable implementations (AC-06).
 - [x] 2.5 Introduce `Debug/Scenario/Scenario.swift` and `ScenarioCatalog.swift` with stable ids, categories, notes, owner, launch overrides, fixture scenario, presentation overrides and entry; seed the catalog from the 1.1 inventory; use synthetic identifiers and content only (AC-07, AC-17).
 - [x] 2.6 Replace `LaunchOptions` state selection with `-ui-scenario <id>` and an applier that rebuilds through `AppRuntime`; keep legacy flags only until 6.4 (AC-07, AC-08).
-- [ ] 2.7 Add `DesignSystem/` primitives used by rewritten views (status row, empty/error state, primary button) with no business state (AC-03).
+- [x] 2.7 Add `DesignSystem/` primitives used by rewritten views (status row, empty/error state, primary button) with no business state (AC-03).
 - [ ] 2.8 Add the runtime coordination events for cross-feature flows (instance switch, selected session, selected Host) and verify no feature imports another feature's types (AC-04, AC-05).
 - [x] 2.9 Expose Core's existing `DiagnosticSink` through the binding: add a flat `DiagnosticEventView` (receipt time, trace id, level, stable event name, allowlisted status/elapsed/layer/stage/outcome/code map), a foreign sink callback, and a constructor that installs it before Core opens; install a sink on every runtime rebuild. Do not change `core/`; add binding tests for event mapping and failure isolation (AC-21, AC-13).
 - [x] 2.10 Add one small Swift sink adapter that validates event level/name, applies the shared redactor, assigns receipt timestamps, appends to the shared ring buffer and preserves the Core trace id (AC-21).
@@ -60,8 +60,8 @@
 
 - [x] 7.1 Write `docs/ios-architecture.md`: layer map, feature map, state ownership, dependency rules, "where does this belong", scenario workflow, focused commands, catalog ownership/cleanup and review checklist (AC-11).
 - [ ] 7.2 Add one state transition table per feature next to its State, covering events, target states and invariants (AC-11).
-- [ ] 7.3 Add per-feature focused test commands to `docs/ios-architecture.md` and verify each command runs only the named layer (AC-10, AC-11).
-- [ ] 7.4 Update `docs/ios.md` composition sections to describe the rewritten client; record that no other maintained guide needs changes or update the ones that do (AC-11).
+- [x] 7.3 Add per-feature focused test commands to `docs/ios-architecture.md` and verify each command runs only the named layer (AC-10, AC-11).
+- [x] 7.4 Update `docs/ios.md` composition sections to describe the rewritten client; record that no other maintained guide needs changes or update the ones that do (AC-11).
 
 ## 8. Acceptance verification
 
