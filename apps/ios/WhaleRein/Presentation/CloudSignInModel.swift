@@ -62,16 +62,23 @@ final class CloudSignInModel {
     /// Called after a local sign-out or a confirmed remote revocation.
     var onSignedOut: (() -> Void)?
 
-    private(set) var phase: CloudSignInPhase = .signedOut
-    private(set) var directory: CloudDirectoryState = .idle
-    private(set) var errorCode: AppErrorCode?
-    private(set) var logoutPending = false
-    private(set) var isAuthPresented = false
-    private(set) var wasCancelled = false
+    /// One business state. The legacy names below are read-only projections.
+    private(set) var state = CloudState()
+
+    var phase: CloudSignInPhase { state.phase }
+    var directory: CloudDirectoryState { state.directory }
+    var errorCode: AppErrorCode? { state.errorCode }
+    var logoutPending: Bool { state.logoutPending }
+    var isAuthPresented: Bool { state.authPresented }
+    var wasCancelled: Bool { state.wasCancelled }
+
+    private func apply(_ event: CloudEvent) {
+        state = CloudReduce.reduce(state, event)
+    }
     /// Set by an explicit local sign-out so the next primary sign-in opens a
     /// clean provider sheet instead of resuming the previous account.
 
-    private(set) var isConnectingHostId: String?
+    var isConnectingHostId: String? { state.connectingHostId }
     /// True while the system sheet owns the attempt. A completion that races a
     /// local cancellation is ignored rather than completing the old attempt.
     private var isAuthenticationActive = false
@@ -108,24 +115,17 @@ final class CloudSignInModel {
     /// Cloud. A revoked session leaves no signed-in state.
     func restore() async {
         guard phase == .signedOut else { return }
-        phase = .restoring
+        apply(.restoreStarted)
         do {
             let status = try await service.cloudStatus()
             guard stillCurrent() else { return }
-            logoutPending = status.logoutPending
-            guard let account = status.account else {
-                phase = .signedOut
-                directory = .idle
-                return
-            }
-            phase = .signedIn(account)
+            apply(.restored(account: status.account, logoutPending: status.logoutPending))
+            guard status.account != nil else { return }
             await loadDirectory()
             await verifySession()
         } catch {
             guard stillCurrent() else { return }
-            phase = .signedOut
-            directory = .idle
-            errorCode = Self.code(for: error)
+            apply(.restoreFailed(Self.code(for: error)))
         }
     }
 
@@ -141,15 +141,12 @@ final class CloudSignInModel {
         do {
             let account = try await service.cloudRefreshStatus()
             guard stillCurrent() else { return }
-            phase = .signedIn(account)
+            apply(.sessionVerified(account))
         } catch {
             let code = Self.code(for: error)
             guard code == .security || code == .revoked else { return }
             guard stillCurrent() else { return }
-            logoutPending = true
-            phase = .signedOut
-            directory = .idle
-            errorCode = .revoked
+            apply(.sessionRevoked)
             onSignedOut?()
         }
     }
@@ -161,17 +158,14 @@ final class CloudSignInModel {
     /// account.
     func signIn() async {
         guard !isBusy, phase == .signedOut else { return }
-        errorCode = nil
-        wasCancelled = false
-        phase = .starting
+        apply(.signInStarted)
         do {
             let attempt = try await service.cloudAuthStart()
             guard stillCurrent() else {
                 await service.cloudAuthCancel()
                 return
             }
-            phase = .authorizing
-            isAuthPresented = true
+            apply(.authorizing)
             isAuthenticationActive = true
             authenticator.authenticate(
                 url: attempt.url,
@@ -184,8 +178,7 @@ final class CloudSignInModel {
             }
         } catch {
             guard stillCurrent() else { return }
-            phase = .signedOut
-            errorCode = Self.code(for: error)
+            apply(.signInFailed(Self.code(for: error)))
         }
     }
 
@@ -193,12 +186,10 @@ final class CloudSignInModel {
     func cancelSignIn() async {
         isAuthenticationActive = false
         authenticator.cancel()
-        isAuthPresented = false
+        apply(.authSheetDismissed)
         await service.cloudAuthCancel()
         guard !phase.isSignedIn else { return }
-        phase = .signedOut
-        wasCancelled = true
-        errorCode = nil
+        apply(.signInCancelled)
     }
 
     /// App-level deep-link entry. `ASWebAuthenticationSession` normally invokes
@@ -220,42 +211,35 @@ final class CloudSignInModel {
     private func authenticationDidFinish(callbackURL: URL?, error: Error?) async {
         guard isAuthenticationActive else { return }
         isAuthenticationActive = false
-        isAuthPresented = false
+        apply(.authSheetDismissed)
         guard stillCurrent() else { return }
         if let error {
             await service.cloudAuthCancel()
-            phase = .signedOut
             if cloudAuthenticationWasCancelled(error) {
-                wasCancelled = true
-                errorCode = nil
+                apply(.signInCancelled)
             } else {
-                errorCode = .unavailable
+                apply(.signInFailed(.unavailable))
             }
             return
         }
         guard let callbackURL, Self.isCloudCallback(callbackURL) else {
             await service.cloudAuthCancel()
-            phase = .signedOut
-            errorCode = .security
+            apply(.signInFailed(.security))
             return
         }
         await complete(callbackURL: callbackURL)
     }
 
     private func complete(callbackURL: URL) async {
-        phase = .completing
+        apply(.completionStarted)
         do {
             let account = try await service.cloudAuthComplete(callbackURL: callbackURL)
             guard stillCurrent() else { return }
-            phase = .signedIn(account)
-            logoutPending = false
-            errorCode = nil
+            apply(.completed(account))
             await loadDirectory()
         } catch {
             guard stillCurrent() else { return }
-            phase = .signedOut
-            directory = .idle
-            errorCode = Self.code(for: error)
+            apply(.completionFailed(Self.code(for: error)))
         }
     }
 
@@ -263,14 +247,14 @@ final class CloudSignInModel {
 
     func loadDirectory() async {
         guard case .signedIn = phase else { return }
-        directory = .loading
+        apply(.directoryStarted)
         do {
             let hosts = try await service.cloudHosts()
             guard stillCurrent() else { return }
-            directory = hosts.isEmpty ? .empty : .loaded(hosts)
+            apply(.directoryLoaded(hosts))
         } catch {
             guard stillCurrent() else { return }
-            directory = .unavailable(Self.code(for: error))
+            apply(.directoryFailed(Self.code(for: error)))
         }
     }
 
@@ -286,25 +270,23 @@ final class CloudSignInModel {
     func connect(_ host: CloudDirectoryHost) async {
         guard case .signedIn = phase, host.access == .eligible else { return }
         guard isConnectingHostId == nil else { return }
-        errorCode = nil
-        isConnectingHostId = host.hostId
+        apply(.connectStarted(host.hostId))
         do {
             _ = try await service.connectCloud(hostId: host.hostId)
             guard stillCurrent() else {
-                isConnectingHostId = nil
+                apply(.connectFinished)
                 return
             }
             await loadDirectory()
-            isConnectingHostId = nil
+            apply(.connectFinished)
             guard case .loaded(let hosts) = directory,
                   hosts.contains(where: { $0.hostId == host.hostId && $0.enrolled }) else {
                 return
             }
             onOpenHost?(host.hostId)
         } catch {
-            isConnectingHostId = nil
+            apply(.connectFailed(Self.code(for: error)))
             guard stillCurrent() else { return }
-            errorCode = Self.code(for: error)
         }
     }
 
@@ -314,10 +296,7 @@ final class CloudSignInModel {
     /// revocation. Core already owns the pending remote sign-out record, so this
     /// only clears presentation; it never issues a second revocation.
     func markSignedOutLocally(pending: Bool) {
-        logoutPending = pending
-        phase = .signedOut
-        directory = .idle
-        errorCode = nil
+        apply(.signedOutLocally(pending: pending))
     }
 
     /// Local sign-out. `logoutPending` records that Cloud could not confirm the
@@ -327,14 +306,11 @@ final class CloudSignInModel {
         do {
             let complete = try await service.cloudSignOut()
             guard stillCurrent() else { return }
-            logoutPending = !complete
-            phase = .signedOut
-            directory = .idle
-            errorCode = nil
+            apply(.signedOut(pending: !complete))
             onSignedOut?()
         } catch {
             guard stillCurrent() else { return }
-            errorCode = Self.code(for: error)
+            apply(.errorRaised(Self.code(for: error)))
         }
     }
 
