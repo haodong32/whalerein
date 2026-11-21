@@ -12,12 +12,123 @@ use whalerein_core::api::{
     QuestionBatchInfo, QuestionFreshness, QuestionPageInfo, SendReply, SessionCapabilities,
     SessionKey, SessionSummary,
 };
+use whalerein_core::attachments::{AttachmentReference, DownloadOutcome, DownloadProgress};
 use whalerein_core::conversation::{
     content_block, ApprovalState, AttemptOutcome, BlockKind, ConversationMessage, MessageRole,
     NoticeCategory, NoticeState, RunPhase, ToolActivity, ToolResultPart, ToolStage, ToolState,
     ViewUpdate,
 };
-use whalerein_core::history::MessageReference;
+use whalerein_core::history::{HistoryPage, HistorySource as CoreHistorySource, MessageReference};
+
+/// One pending native iOS sign-in attempt. Only the hosted URL and the
+/// attempt identity cross the boundary; state, PKCE material and the local
+/// credential stay in Core's SecretStore.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAuthAttemptView {
+    pub url: String,
+    pub attempt_id: String,
+}
+
+/// The verified Cloud account and workspace bound to this instance.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountView {
+    pub account_id: String,
+    pub email: String,
+    pub issuer: String,
+    pub subject: String,
+    pub workspace_id: String,
+}
+
+impl From<core_api::SignedInAccount> for CloudAccountView {
+    fn from(value: core_api::SignedInAccount) -> Self {
+        Self {
+            account_id: value.account.id,
+            email: value.account.email,
+            issuer: value.account.issuer,
+            subject: value.account.subject,
+            workspace_id: value.workspace.id,
+        }
+    }
+}
+
+/// Local account state: the verified account (if any) and whether a prior
+/// local sign-out still needs remote confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountStatusView {
+    pub account: Option<CloudAccountView>,
+    pub logout_pending: bool,
+}
+
+/// One Cloud app session visible to the signed-in account. No token is exposed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudAccountSessionView {
+    pub session_id: String,
+    pub instance_id: String,
+    pub expires_at: u64,
+    pub state: String,
+}
+
+impl From<core_api::AccountSessionInfo> for CloudAccountSessionView {
+    fn from(value: core_api::AccountSessionInfo) -> Self {
+        Self {
+            session_id: value.session_id,
+            instance_id: value.instance_id,
+            expires_at: value.expires_at,
+            state: value.state.as_str().to_owned(),
+        }
+    }
+}
+
+/// One computer in the signed-in account's Cloud directory.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudDirectoryHostView {
+    pub host_id: String,
+    pub display_name: String,
+    pub enrolled: bool,
+    pub online: bool,
+    pub presence: String,
+    pub observation: String,
+    pub enrollment_state: String,
+    pub pairing_eligible: bool,
+    pub device_access: String,
+}
+
+impl From<core_api::AccountHost> for CloudDirectoryHostView {
+    fn from(value: core_api::AccountHost) -> Self {
+        Self {
+            host_id: value.host_id,
+            display_name: value.display_name,
+            enrolled: value.enrolled,
+            online: value.online,
+            presence: value.presence,
+            observation: value.observation,
+            enrollment_state: value.enrollment_state,
+            pairing_eligible: value.pairing_eligible,
+            device_access: value.device_access,
+        }
+    }
+}
+
+/// The result of connecting one eligible Cloud computer. The access URL and
+/// any device token remain inside Core.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CloudConnectResultView {
+    pub operation_id: Option<String>,
+    pub host_id: String,
+    pub device_id: String,
+    pub fingerprint: String,
+}
+
+impl From<core_api::PairingOutcome> for CloudConnectResultView {
+    fn from(value: core_api::PairingOutcome) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            host_id: value.host_id,
+            device_id: value.device_id,
+            fingerprint: value.fingerprint,
+        }
+    }
+}
 
 /// A paired Host as reported by Access. `fingerprint` is the confirmed pin.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -227,6 +338,9 @@ pub enum ToolResultPartView {
         name: String,
         size: u64,
         available: bool,
+        /// Opaque Source occurrence reference used to request a verified
+        /// download. It is never bytes or an authorization token.
+        attachment_ref: String,
     },
 }
 
@@ -239,6 +353,7 @@ impl From<&ToolResultPart> for ToolResultPartView {
                 name: attachment.name.clone(),
                 size: attachment.size,
                 available: attachment.available,
+                attachment_ref: attachment.attachment_ref.clone(),
             },
         }
     }
@@ -343,8 +458,9 @@ fn notice_state_name(value: NoticeState) -> String {
 /// One content block of a committed message. `kind` is stable text:
 /// `text`, `reasoning`, `tool`, `notice`, `attachment` or `unknown`.
 ///
-/// `tool_activity` is present for tool blocks and `notice` for notice blocks;
-/// `text` stays the display body so existing clients keep rendering.
+/// `tool_activity` is present for tool blocks, `notice` for notice blocks and
+/// `attachment` for attachment blocks; `text` stays the display body so
+/// existing clients keep rendering.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BlockView {
     pub block_id: String,
@@ -353,6 +469,30 @@ pub struct BlockView {
     pub tool_name: Option<String>,
     pub tool_activity: Option<ToolActivityView>,
     pub notice: Option<NoticeView>,
+    pub attachment: Option<AttachmentView>,
+}
+
+/// One canonical committed attachment occurrence. `attachment_ref` is opaque
+/// Source evidence, not a path, digest or authorization token.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentView {
+    pub media_type: String,
+    pub name: String,
+    pub size: u64,
+    pub available: bool,
+    pub attachment_ref: String,
+}
+
+impl From<&content_block::AttachmentContent> for AttachmentView {
+    fn from(value: &content_block::AttachmentContent) -> Self {
+        Self {
+            media_type: value.media_type.clone(),
+            name: value.name.clone(),
+            size: value.size,
+            available: value.available,
+            attachment_ref: value.attachment_ref.clone(),
+        }
+    }
 }
 
 /// A committed conversation message.
@@ -393,6 +533,7 @@ fn block_view(block_id: &str, content: Option<&content_block::Content>) -> Block
         tool_name: None,
         tool_activity: None,
         notice: None,
+        attachment: None,
     };
     match content {
         Some(content_block::Content::Text(text)) => {
@@ -419,6 +560,7 @@ fn block_view(block_id: &str, content: Option<&content_block::Content>) -> Block
         Some(content_block::Content::Attachment(attachment)) => {
             view.kind = "attachment".into();
             view.text = attachment.name.clone();
+            view.attachment = Some(AttachmentView::from(attachment));
         }
         None => {}
     }
@@ -599,6 +741,158 @@ impl From<&MessageReference> for MessageReferenceView {
             projection_id: value.projection_id().to_owned(),
         }
     }
+}
+
+impl MessageReferenceView {
+    /// Rebuild the Core reference from its typed fields.
+    pub(crate) fn to_core(&self) -> Result<MessageReference, ()> {
+        if self.message_id.is_empty()
+            || self.message_id.len() > 512
+            || self.source_locator.is_empty()
+            || self.source_locator.len() > 4096
+            || self.projection_id.is_empty()
+            || self.projection_id.len() > 128
+        {
+            return Err(());
+        }
+        let session = SessionKey::new(
+            self.session.host_id.clone(),
+            self.session.session_id.clone(),
+        )
+        .map_err(|_| ())?;
+        MessageReference::new(
+            session,
+            self.message_id.clone(),
+            self.source_locator.clone(),
+            self.projection_id.clone(),
+        )
+        .map_err(|_| ())
+    }
+}
+
+/// One bounded committed-history page. `source` is `online` or `cache`; the
+/// opaque `continuation` is only valid for the original Host/session scope and
+/// content projection. Messages are chronological within the page; later pages
+/// step toward older history.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryPageView {
+    pub source: String,
+    pub projection: String,
+    pub complete: bool,
+    pub messages: Vec<MessageView>,
+    pub activities: Vec<ToolActivityView>,
+    pub continuation: Option<String>,
+}
+
+impl From<&HistoryPage> for HistoryPageView {
+    fn from(value: &HistoryPage) -> Self {
+        Self {
+            source: match value.source {
+                CoreHistorySource::Online => "online".into(),
+                CoreHistorySource::Cache => "cache".into(),
+            },
+            projection: value.projection.clone(),
+            complete: value.complete,
+            messages: value.messages.iter().map(message_view).collect(),
+            activities: value
+                .activities
+                .iter()
+                .map(ToolActivityView::from)
+                .collect(),
+            continuation: value
+                .continuation
+                .as_ref()
+                .map(std::string::ToString::to_string),
+        }
+    }
+}
+
+/// Scoped committed attachment occurrence used to request a verified save.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentReferenceView {
+    pub session: SessionKeyView,
+    pub attachment_ref: String,
+}
+
+impl AttachmentReferenceView {
+    pub(crate) fn to_core(&self) -> Result<AttachmentReference, ()> {
+        let session = SessionKey::new(
+            self.session.host_id.clone(),
+            self.session.session_id.clone(),
+        )
+        .map_err(|_| ())?;
+        Ok(AttachmentReference::new(
+            session,
+            self.attachment_ref.clone(),
+        ))
+    }
+}
+
+/// One verified attachment save into an app-owned destination directory.
+/// `file_name` absent uses the Source suggestion or a media-derived name.
+/// `overwrite` false preserves an existing final file.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentDownloadRequestView {
+    pub reference: AttachmentReferenceView,
+    pub destination: String,
+    pub file_name: Option<String>,
+    pub overwrite: bool,
+}
+
+/// Bounded transfer progress. The first event declares the total with
+/// `received == 0`; the final verified commit is only reported through the
+/// download result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentProgressView {
+    pub received: u64,
+    pub total: u64,
+}
+
+impl From<DownloadProgress> for AttachmentProgressView {
+    fn from(value: DownloadProgress) -> Self {
+        Self {
+            received: value.received,
+            total: value.total,
+        }
+    }
+}
+
+/// One verified local save. `path` exists only after verification and an
+/// atomic commit; `verified` is always true for a returned download.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentDownloadView {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub media_type: String,
+    pub verified: bool,
+}
+
+impl From<DownloadOutcome> for AttachmentDownloadView {
+    fn from(value: DownloadOutcome) -> Self {
+        Self {
+            path: value.path.to_string_lossy().into_owned(),
+            name: value.name,
+            bytes: value.bytes,
+            sha256: value.sha256,
+            media_type: value.media_type,
+            verified: value.verified,
+        }
+    }
+}
+
+/// State of one app-started attachment transfer. `state` is `running`,
+/// `succeeded`, `failed` or `cancelled`. `error_code` is a stable mobile error
+/// code and never carries Core text.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentTransferView {
+    pub download_id: String,
+    pub state: String,
+    pub progress: AttachmentProgressView,
+    pub download: Option<AttachmentDownloadView>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 /// Proof-backed outcome of following one submitted message. `Committed` names
@@ -964,6 +1258,17 @@ pub struct QuestionAnswerView {
     pub id: String,
     pub selected: Vec<String>,
     pub custom: Option<String>,
+}
+
+/// Receipt for asking Core to cancel one in-flight open answer.
+///
+/// `cancellation_requested == false` never means the answer did not happen: it
+/// may have completed already or not yet reached the Host. `command_id` keeps
+/// the original attempt identity so the caller can recover its native result.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct QuestionCancelReceiptView {
+    pub command_id: String,
+    pub cancellation_requested: bool,
 }
 
 impl From<QuestionAnswerView> for core_api::QuestionAnswer {
@@ -1484,6 +1789,7 @@ mod tests {
                         tool_name: None,
                         tool_activity: None,
                         notice: None,
+                        attachment: None,
                     }],
                     created_at_unix_ms: 7,
                 }

@@ -96,6 +96,31 @@ struct DiagnosticsTests {
         #expect(contents?.contains("mqtt_subscription_failed") == true)
     }
 
+
+    @Test("confirmed export stages in the selected instance's app-owned directory")
+    func appOwnedStaging() async {
+        guard let service = try? await makePairedFixture() else {
+            Issue.record("fixture service could not pair")
+            return
+        }
+        let staging = makeTempDirectory()
+        let model = DiagnosticsModel(service: service, stagingDirectory: staging)
+        await model.load()
+        await model.confirmShare()
+
+        guard let file = model.shareFile else {
+            Issue.record("expected a share file")
+            return
+        }
+        #expect(file.url.deletingLastPathComponent() == staging)
+        let contents = try? String(contentsOf: file.url, encoding: .utf8)
+        #expect(contents?.contains("inv_SENSITIVE_VALUE") == false)
+        #expect(contents?.contains("PRIVATE_KEY_MATERIAL") == false)
+        #expect(contents?.contains("Do not export this sentence") == false)
+        #expect(contents?.contains("SENSITIVE_ARGUMENT") == false)
+        #expect(contents?.contains("mqtt_subscription_failed") == true)
+    }
+
     @Test("a diagnostics load failure is localized")
     func loadFailure() async {
         let service = StubSessionService()

@@ -7,6 +7,8 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: SettingsModel.Confirmation?
+    @State private var reasoningErrorKey: L10nKey?
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -29,20 +31,6 @@ struct SettingsView: View {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("settings.languageNote")
-                }
-
-                Section(L10n.settingsData.key) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L10n.settingsStorage.key)
-                        Text(verbatim: app.dataDirectory.path)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                        Text(L10n.settingsStorageNote.key)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("settings.dataPath")
                 }
 
                 Section {
@@ -68,25 +56,18 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsOperationsView()
-
-                Section {
-                    ServiceSelectionView(showsStandaloneCA: true)
-                }
-
-                Section(L10n.hostsTitle.key) {
-                    Button {
-                        // Dismiss this sheet first: two sheets cannot be
-                        // presented from the same root at once.
-                        dismiss()
-                        Task {
-                            try? await Task.sleep(for: .milliseconds(350))
-                            app.openManualPairing()
-                        }
-                    } label: {
-                        Label(L10n.settingsAddHost.key, systemImage: "plus.circle")
+                Section(L10n.settingsData.key) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L10n.settingsStorage.key)
+                        Text(verbatim: app.dataDirectory.path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text(L10n.settingsStorageNote.key)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
-                    .accessibilityIdentifier("settings.addHost")
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("settings.dataPath")
                 }
 
                 Section {
@@ -106,6 +87,92 @@ struct SettingsView: View {
                     .disabled(app.settings.isBusy)
                     .accessibilityIdentifier("settings.revoke")
                 }
+
+                Section(L10n.settingsAppSection.key) {
+                    Toggle(
+                        L10n.settingsReasoning.key,
+                        isOn: Binding(
+                            get: { app.reasoningVisible },
+                            set: { visible in
+                                if let code = app.setReasoningVisible(visible) {
+                                    reasoningErrorKey = L10nKey.errorKey(for: code)
+                                } else {
+                                    reasoningErrorKey = nil
+                                }
+                            }
+                        )
+                    )
+                    .accessibilityIdentifier("settings.reasoning")
+                    Text(L10n.settingsReasoningNote.key)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let reasoningErrorKey {
+                        Text(reasoningErrorKey.key)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("settings.reasoningError")
+                    }
+                }
+
+                SettingsOperationsView()
+
+                Section {
+                    ServiceSelectionView(showsStandaloneCA: true)
+                }
+
+                if let cloud = app.cloudSignIn {
+                    Section(L10n.cloudSettingsTitle.key) {
+                        if let account = cloud.account {
+                            LabeledContent(L10n.cloudAccountLabel.key) {
+                                Text(verbatim: account.email)
+                                    .accessibilityIdentifier("settings.cloudAccount")
+                            }
+                            if cloud.logoutPending {
+                                Text(L10n.cloudSignOutPending.key)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("settings.cloudLogoutPending")
+                            }
+                            Button(role: .destructive) {
+                                Task { await app.signOutCloud() }
+                            } label: {
+                                Text(L10n.cloudSignOut.key)
+                            }
+                            .accessibilityIdentifier("settings.cloudSignOut")
+                        } else {
+                            Text(L10n.cloudSignedOut.key)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("settings.cloudSignedOut")
+                            Button(L10n.cloudSignIn.key) {
+                                dismiss()
+                                Task {
+                                    try? await Task.sleep(for: .milliseconds(350))
+                                    await cloud.signIn()
+                                }
+                            }
+                            .accessibilityIdentifier("settings.cloudSignIn")
+                        }
+                    }
+                }
+
+                SettingsAccountView(showDiagnostics: $showDiagnostics)
+
+                Section(L10n.hostsTitle.key) {
+                    Button {
+                        // Dismiss this sheet first: two sheets cannot be
+                        // presented from the same root at once.
+                        dismiss()
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(350))
+                            app.openManualPairing()
+                        }
+                    } label: {
+                        Label(L10n.settingsAddHost.key, systemImage: "plus.circle")
+                    }
+                    .accessibilityIdentifier("settings.addHost")
+                }
+
             }
             .navigationTitle(L10n.settingsTitle.key)
             .inlineNavigationTitle()
@@ -116,6 +183,9 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.done")
                 }
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsView()
             }
             .alert(
                 confirmation == .revoke ? L10n.settingsRevokeConfirm.string : L10n.settingsForgetConfirm.string,

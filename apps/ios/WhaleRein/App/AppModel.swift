@@ -55,6 +55,14 @@ final class AppModel {
     private(set) var settings: SettingsModel
     /// Shared retained-operation list and the one coalesced visible refresh.
     private(set) var operationRecovery: OperationRecoveryModel?
+    /// Cloud sign-in/directory presentation for the active instance. `nil` for
+    /// standalone instances and unavailable services.
+    private(set) var cloudSignIn: CloudSignInModel?
+    /// Host-scoped create/details/fork/model presentation. It reads through the
+    /// active service adapter and keeps no session cache of its own.
+    private(set) var sessionManagement: SessionManagementModel
+    /// Selected-instance status, default computer and Cloud app sign-ins.
+    private(set) var accountSettings: AccountSettingsModel?
 
     private(set) var conversation: ConversationModel?
     private(set) var isPaired: Bool
@@ -70,6 +78,10 @@ final class AppModel {
     /// The device was revoked remotely. The root blocks conversation content
     /// and offers re-pair/forget instead of a generic error or stale transcript.
     private(set) var isRevoked = false
+    /// After an explicit forget/revoke, return to the invitation flow even for
+    /// a Cloud instance so the local identity reset is visible and re-pairing
+    /// (or Cloud onboarding) starts from an explicit choice.
+    private(set) var prefersInvitationAfterDeviceReset = false
 
     /// Authoritative configuration document. `nil` for the direct unit-test
     /// composition that only owns one service.
@@ -126,9 +138,17 @@ final class AppModel {
         self.sessionList = models.sessionList
         self.diagnostics = models.diagnostics
         self.settings = models.settings
+        self.sessionManagement = Self.makeManagementModel(service: service)
+        self.cloudSignIn = nil
+        self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
         self.operationRecovery = Self.makeOperationRecovery(
             service: service,
             instanceId: activeInstance?.id ?? service.instanceId
+        )
+        self.cloudSignIn = makeCloudSignInModel(service: service, instance: activeInstance)
+        self.accountSettings = makeAccountSettingsModel(
+            service: service,
+            instance: activeInstance
         )
         installCallbacks()
     }
@@ -150,7 +170,10 @@ final class AppModel {
             PairingModel(service: service),
             HostListModel(service: service, preferences: preferences),
             SessionListModel(service: service, preferences: preferences),
-            DiagnosticsModel(service: service),
+            DiagnosticsModel(
+                service: service,
+                stagingDirectory: Self.diagnosticsStagingDirectory(dataDirectory)
+            ),
             SettingsModel(
                 service: service,
                 preferences: preferences,
@@ -159,6 +182,16 @@ final class AppModel {
                 isFixtureBacked: service is FixtureSessionService,
                 onDeviceReset: {}
             )
+        )
+    }
+
+    /// Builds the management adapter from the active service. A service that
+    /// does not implement the adapter (a stub or an older composition) gets an
+    /// explicit unavailable implementation instead of invented data.
+    private static func makeManagementModel(service: any SessionService) -> SessionManagementModel {
+        SessionManagementModel(
+            service: (service as? any SessionManagementService)
+                ?? UnavailableSessionManagementService()
         )
     }
 
@@ -275,7 +308,51 @@ final class AppModel {
                 return reportInstanceError(error)
             }
             return await switchInstance(id: "cloud-staging")
+        case .createLocal:
+            // Local needs an imported mkcert root bundle; the selector collects
+            // it before calling `enableLocal`. Creating the instance here would
+            // fail Core validation with a generic configuration error.
+            return reportInstanceError(SessionServiceError(.configuration))
         }
+    }
+
+    /// Imports the mkcert root bundle for the local Cloud instance and selects
+    /// it. An invalid bundle leaves the previous document and trust unchanged.
+    @discardableResult
+    func enableLocal(pem: String) async -> AppErrorCode? {
+        guard let configuration else { return .configuration }
+        do {
+            try configuration.enableLocal(pem: pem)
+        } catch {
+            return reportInstanceError(error)
+        }
+        // Creating the instance is an explicit selection, not a refresh.
+        return await switchInstance(id: "cloud-local", force: true)
+    }
+
+    @discardableResult
+    func removeLocalCA() async -> AppErrorCode? {
+        guard let configuration,
+              let local = configuration.instances.first(where: { $0.isLocal }) else {
+            return nil
+        }
+        // A local instance cannot open without its CA, so it is removed rather
+        // than left half-configured. Leave it first because the active instance
+        // cannot be deleted.
+        if activeInstance?.id == local.id {
+            guard let fallback = configuration.instances.first(where: { $0.isCloudProduction }) else {
+                return reportInstanceError(SessionServiceError(.configuration))
+            }
+            if let code = await switchInstance(id: fallback.id) {
+                return code
+            }
+        }
+        do {
+            try configuration.removeCloudCA(instanceID: local.id)
+        } catch {
+            return reportInstanceError(error)
+        }
+        return nil
     }
 
     /// Imports a validated private CA for the Standalone instance. An invalid
@@ -291,8 +368,13 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
-        guard activeInstance?.id == standalone.id else { return nil }
-        return await switchInstance(id: standalone.id, force: true)
+        return await reselectIfActive(id: standalone.id)
+    }
+
+    /// Rebuild the runtime for a CA change only when that instance is active.
+    private func reselectIfActive(id: String) async -> AppErrorCode? {
+        guard activeInstance?.id == id else { return nil }
+        return await switchInstance(id: id, force: true)
     }
 
     @discardableResult
@@ -306,8 +388,7 @@ final class AppModel {
         } catch {
             return reportInstanceError(error)
         }
-        guard activeInstance?.id == standalone.id else { return nil }
-        return await switchInstance(id: standalone.id, force: true)
+        return await reselectIfActive(id: standalone.id)
     }
 
     private func replaceRuntime(
@@ -324,6 +405,7 @@ final class AppModel {
         self.isPaired = preferences.value.paired
         self.selectedHostId = preferences.value.lastHostId
         self.isRevoked = false
+        self.prefersInvitationAfterDeviceReset = false
         self.isOfflineCached = false
         self.isPrivacyShieldVisible = false
         self.resumeMarker = nil
@@ -334,7 +416,10 @@ final class AppModel {
         self.showDiagnostics = false
         self.hostList = HostListModel(service: service, preferences: preferences)
         self.sessionList = SessionListModel(service: service, preferences: preferences)
-        self.diagnostics = DiagnosticsModel(service: service)
+        self.diagnostics = DiagnosticsModel(
+            service: service,
+            stagingDirectory: Self.diagnosticsStagingDirectory(dataDirectory)
+        )
         self.pairing = PairingModel(service: service)
         self.settings = SettingsModel(
             service: service,
@@ -344,9 +429,15 @@ final class AppModel {
             isFixtureBacked: service is FixtureSessionService,
             onDeviceReset: {}
         )
+        self.sessionManagement = Self.makeManagementModel(service: service)
         self.operationRecovery = Self.makeOperationRecovery(
             service: service,
             instanceId: instance?.id ?? service.instanceId
+        )
+        self.cloudSignIn = makeCloudSignInModel(service: service, instance: instance)
+        self.accountSettings = makeAccountSettingsModel(
+            service: service,
+            instance: instance
         )
         installCallbacks()
     }
@@ -357,6 +448,69 @@ final class AppModel {
     ) -> OperationRecoveryModel? {
         guard let recovery = service as? any OperationRecoveryService else { return nil }
         return OperationRecoveryModel(service: recovery, instanceId: instanceId)
+    }
+
+    /// Redacted diagnostic exports go to an app-owned staging directory for the
+    /// selected instance, not a process-wide temporary drop box.
+    static func diagnosticsStagingDirectory(_ dataDirectory: URL) -> URL {
+        dataDirectory
+            .appendingPathComponent("diagnostics", isDirectory: true)
+    }
+
+    /// Builds the status/default-computer/app-sign-in model for the activation
+    /// that owns `service`. Revoking the current app session fences through the
+    /// same signed-out path as Cloud sign-out.
+    private func makeAccountSettingsModel(
+        service: any SessionService,
+        instance: AppInstance?
+    ) -> AccountSettingsModel {
+        let generation = activationGeneration
+        let instanceId = instance?.id ?? service.instanceId
+        let model = AccountSettingsModel(service: service)
+        model.onSignedOut = { [weak self] in
+            guard let self,
+                  self.activationGeneration == generation,
+                  (self.activeInstance?.id ?? self.service.instanceId) == instanceId else {
+                return
+            }
+            self.cloudSignIn?.markSignedOutLocally(pending: true)
+            self.handleCloudSignedOut()
+        }
+        return model
+    }
+
+    /// Builds the Cloud model for the activation that owns `service`. Callbacks
+    /// capture both the instance ID and activation generation, so a late sheet
+    /// or deep link from a replaced runtime can never mutate the new one.
+    private func makeCloudSignInModel(
+        service: any SessionService,
+        instance: AppInstance?
+    ) -> CloudSignInModel? {
+        guard let cloud = service as? any CloudAccountService else { return nil }
+        let generation = activationGeneration
+        let instanceId = instance?.id ?? service.instanceId
+        let model = CloudSignInModel(
+            service: cloud,
+            fence: CloudSignInFence(
+                instanceId: instanceId,
+                activationGeneration: generation
+            ),
+            authenticator: WebAuthenticationSessionRunner(),
+            fenceIsCurrent: { [weak self] in
+                guard let self else { return false }
+                return self.activationGeneration == generation
+                    && (self.activeInstance?.id ?? self.service.instanceId) == instanceId
+            }
+        )
+        model.onOpenHost = { [weak self] hostId in
+            guard let self, self.activationGeneration == generation else { return }
+            Task { @MainActor in self.finishPairing(hostId: hostId) }
+        }
+        model.onSignedOut = { [weak self] in
+            guard let self, self.activationGeneration == generation else { return }
+            self.handleCloudSignedOut()
+        }
+        return model
     }
 
     @discardableResult
@@ -374,6 +528,13 @@ final class AppModel {
     func launchRestore() async {
         guard !isRevoked else { return }
         let generation = activationGeneration
+        if let cloudSignIn {
+            // Restore the locally verified Cloud session before deciding
+            // whether this instance has a computer to open. A paired instance
+            // still needs its account restored for Settings and sign-out.
+            await cloudSignIn.restore()
+            guard isCurrentActivation(generation) else { return }
+        }
         if !isPaired {
             await adoptExistingCorePairing()
         }
@@ -680,6 +841,7 @@ final class AppModel {
         }
         isPaired = true
         isRevoked = false
+        prefersInvitationAfterDeviceReset = false
         showInvitationSheet = false
         showSwitcher = false
         pairing.reset()
@@ -693,10 +855,49 @@ final class AppModel {
 
     func handleOpenURL(_ url: URL) async {
         guard !isRevoked else { return }
+        // The Cloud authorization callback is consumed by the Cloud model and
+        // must never be offered to the self-hosted invitation parser.
+        if CloudSignInModel.isCloudCallback(url) {
+            await cloudSignIn?.receiveCallback(url)
+            return
+        }
         if isPaired {
             showInvitationSheet = true
         }
         await pairing.handleOpenURL(url)
+    }
+
+    /// Local Cloud sign-out from Settings. Core keeps a scoped pending remote
+    /// revocation when Cloud is unreachable and retries it later.
+    func signOutCloud() async {
+        await cloudSignIn?.signOut()
+    }
+
+    /// Leaves the Cloud-authorized root after a local sign-out or a confirmed
+    /// remote revocation. The device identity is preserved.
+    private func handleCloudSignedOut() {
+        conversation?.close()
+        conversation = nil
+        isPaired = false
+        preferences.update {
+            $0.paired = false
+            $0.lastHostId = nil
+            $0.lastSessionId = nil
+            $0.lastSessionTitle = nil
+        }
+        selectedHostId = nil
+        isOfflineCached = false
+        resumeMarker = nil
+        didBootstrap = false
+        hostList.reset()
+        sessionList.reset()
+        pairing.reset()
+        rootState = .restoring
+        // The signed-out status and pending remote sign-out stay visible in
+        // Settings even though the conversation root has been retired.
+        Task { @MainActor [weak self] in
+            await self?.accountSettings?.load()
+        }
     }
 
     /// Entry point for pairing an additional Host while already paired, or for
@@ -835,6 +1036,7 @@ final class AppModel {
         conversation = nil
         isPaired = false
         isRevoked = false
+        prefersInvitationAfterDeviceReset = true
         showSwitcher = false
         selectedHostId = nil
         isOfflineCached = false

@@ -57,6 +57,16 @@ struct LaunchOptions: Sendable {
     var keychainLocked: Bool
     /// Deliver a deterministic pending question with the first watch.
     var questionsOnOpen: Bool
+    /// Select deterministic Cloud sign-in and directory fixtures.
+    var seedCloudSignedIn: Bool
+    var cloudDirectoryEmpty: Bool
+    var cloudDirectoryUnavailable: Bool
+    /// Deliver a deterministic ordered pending queue.
+    var queueOnOpen: Bool
+    /// Report queue reading as unsupported for the active Source.
+    var queueUnsupported: Bool
+    /// Make the refresh after a confirmed queue mutation fail.
+    var queueMutationRefreshFails: Bool
     var arguments: [String]
 
     init(arguments: [String] = CommandLine.arguments, defaults: UserDefaults = .standard) {
@@ -92,6 +102,12 @@ struct LaunchOptions: Sendable {
         diagnosticsFailure = flags.contains("-ui-diagnostics-failure")
         keychainLocked = flags.contains("-ui-keychain-locked")
         questionsOnOpen = flags.contains("-ui-questions")
+        seedCloudSignedIn = flags.contains("-ui-cloud-signed-in")
+        cloudDirectoryEmpty = flags.contains("-ui-cloud-empty")
+        cloudDirectoryUnavailable = flags.contains("-ui-cloud-unavailable")
+        queueOnOpen = flags.contains("-ui-queue")
+        queueUnsupported = flags.contains("-ui-queue-unsupported")
+        queueMutationRefreshFails = flags.contains("-ui-queue-refresh-fails")
         approvalVariant = FixtureApprovalVariant(
             rawValue: defaults.string(forKey: "ui-approval-state") ?? ""
         ) ?? .current

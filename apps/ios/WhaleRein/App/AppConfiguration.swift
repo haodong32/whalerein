@@ -26,10 +26,22 @@ struct AppInstance: Identifiable, Equatable, Sendable {
     let dataDirectory: URL
     /// Absolute materialized Core TOML passed to `MobileCore`.
     let configPath: URL
-    let hasStandaloneCA: Bool
-    let standaloneCAPath: URL?
+    var hasStandaloneCA: Bool
+    var standaloneCAPath: URL?
+    /// True when the local Cloud instance pins an imported mkcert root bundle.
+    var hasCloudCA: Bool = false
+    /// Absolute imported local Cloud CA bundle.
+    var cloudCAPath: URL? = nil
 
     var isStandalone: Bool { service == .standalone }
+
+    var isLocal: Bool {
+        service == .cloud && environment == .local
+    }
+
+    var isCloudProduction: Bool {
+        service == .cloud && (environment == .production || environment == nil)
+    }
 }
 
 struct AppConfiguration: Equatable, Sendable {
@@ -55,6 +67,8 @@ struct AppInstanceInput: Equatable, Sendable {
     var environment: AppCloudEnvironment?
     var dataDirectory: String
     var standaloneCAPEM: String?
+    /// Imported mkcert root for the local Cloud instance.
+    var cloudCAPEM: String? = nil
 }
 
 /// One selectable service entry on the welcome/settings surface.
@@ -63,6 +77,8 @@ struct AppServiceOption: Identifiable, Equatable, Sendable {
         case existing(instanceID: String)
         /// A Staging instance is created on first selection in a debug build.
         case createStaging
+        /// A Local instance is created on first selection in a debug build.
+        case createLocal
     }
 
     let id: String
@@ -83,6 +99,7 @@ protocol AppConfigurationBinding {
     func remove(path: String, id: String) throws -> AppConfiguration
     func setReasoningVisible(path: String, visible: Bool) throws -> AppConfiguration
     func removeCA(path: String, id: String) throws -> AppConfiguration
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration
 }
 
 @MainActor
@@ -117,6 +134,10 @@ final class BindingAppConfigurationBinding: AppConfigurationBinding {
 
     func removeCA(path: String, id: String) throws -> AppConfiguration {
         try map { try WhaleReinMobile.appConfigRemoveCa(path: path, id: id) }
+    }
+
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration {
+        try map { try WhaleReinMobile.appConfigRemoveCloudCa(path: path, id: id) }
     }
 
     private func map(_ body: () throws -> WhaleReinMobile.AppConfigView) throws -> AppConfiguration {
@@ -233,6 +254,36 @@ final class AppConfigurationStore {
         return try apply { try $0.setReasoningVisible(path: documentPath, visible: visible) }
     }
 
+    /// Save the local Cloud instance with its imported mkcert root and select it.
+    @discardableResult
+    func enableLocal(pem: String) throws -> AppConfiguration {
+        let input = AppInstanceInput(
+            id: "cloud-local",
+            service: .cloud,
+            environment: .local,
+            dataDirectory: "instances/cloud-local/data",
+            standaloneCAPEM: nil,
+            cloudCAPEM: pem
+        )
+        return try save(input)
+    }
+
+    @discardableResult
+    func removeCloudCA(instanceID: String) throws -> AppConfiguration {
+        guard binding != nil else {
+            let instances = configuration.instances.filter { $0.id != instanceID }
+            configuration = AppConfiguration(
+                documentURL: configuration.documentURL,
+                version: configuration.version,
+                activeInstanceID: configuration.activeInstanceID,
+                reasoningVisible: configuration.reasoningVisible,
+                instances: instances
+            )
+            return configuration
+        }
+        return try apply { try $0.removeCloudCA(path: documentPath, id: instanceID) }
+    }
+
     @discardableResult
     func importCA(instanceID: String, pem: String) throws -> AppConfiguration {
         guard let instance = configuration.instance(id: instanceID), instance.isStandalone else {
@@ -253,15 +304,10 @@ final class AppConfigurationStore {
         guard binding != nil else {
             let instances = configuration.instances.map { instance in
                 guard instance.id == instanceID else { return instance }
-                return AppInstance(
-                    id: instance.id,
-                    service: instance.service,
-                    environment: instance.environment,
-                    dataDirectory: instance.dataDirectory,
-                    configPath: instance.configPath,
-                    hasStandaloneCA: false,
-                    standaloneCAPath: nil
-                )
+                var next = instance
+                next.hasStandaloneCA = false
+                next.standaloneCAPath = nil
+                return next
             }
             configuration = AppConfiguration(
                 documentURL: configuration.documentURL,
@@ -279,7 +325,9 @@ final class AppConfigurationStore {
         let environmentIsValid = input.service == .standalone
             ? input.environment == nil
             : input.environment != nil
-        guard !input.id.isEmpty, environmentIsValid else {
+        let cloudCAIsValid = input.cloudCAPEM == nil
+            || (input.service == .cloud && input.environment == .local)
+        guard !input.id.isEmpty, environmentIsValid, cloudCAIsValid else {
             throw SessionServiceError(.configuration)
         }
         let client = configuration.documentURL.deletingLastPathComponent()
@@ -294,7 +342,13 @@ final class AppConfigurationStore {
             hasStandaloneCA: input.standaloneCAPEM != nil,
             standaloneCAPath: input.standaloneCAPEM == nil
                 ? nil
-                : client.appendingPathComponent("instances/\(input.id)/ca.pem")
+                : client.appendingPathComponent("instances/\(input.id)/ca.pem"),
+            hasCloudCA: input.service == .cloud
+                && input.environment == .local
+                && input.cloudCAPEM != nil,
+            cloudCAPath: input.cloudCAPEM == nil
+                ? nil
+                : client.appendingPathComponent("instances/\(input.id)/cloud-ca.pem")
         )
         var instances = configuration.instances.filter { $0.id != input.id }
         instances.append(instance)
@@ -310,14 +364,15 @@ final class AppConfigurationStore {
 
     /// Builds the options shown by the welcome and Settings selectors.
     ///
-    /// Production builds never show Staging. Local stays hidden until iOS trust
-    /// for the desktop mkcert root is verified (tracked as BLOCKED); an existing
-    /// Local entry is filtered out rather than exposed.
+    /// Production builds never show Staging or Local. A Debug or test build may
+    /// show both; Local still needs the desktop mkcert root to be trusted by iOS
+    /// before it can connect.
     nonisolated static func serviceOptions(
         for instances: [AppInstance],
-        showsStaging: Bool = AppConfigurationStore.defaultShowsStaging
+        showsStaging: Bool = AppConfigurationStore.defaultShowsStaging,
+        showsLocal: Bool = AppConfigurationStore.defaultShowsLocal
     ) -> [AppServiceOption] {
-        let visible = instances.filter { $0.environment != .local }
+        let visible = instances.filter { showsLocal || $0.environment != .local }
         var options: [AppServiceOption] = []
         if let production = visible.first(where: {
             $0.service == .cloud && $0.environment == .production
@@ -359,6 +414,31 @@ final class AppConfigurationStore {
                 )
             }
         }
+        if showsLocal {
+            if let local = visible.first(where: {
+                $0.service == .cloud && $0.environment == .local
+            }) {
+                options.append(
+                    AppServiceOption(
+                        id: local.id,
+                        titleKey: .serviceCloudLocal,
+                        kind: .existing(instanceID: local.id),
+                        service: .cloud,
+                        environment: .local
+                    )
+                )
+            } else {
+                options.append(
+                    AppServiceOption(
+                        id: "cloud-local",
+                        titleKey: .serviceCloudLocal,
+                        kind: .createLocal,
+                        service: .cloud,
+                        environment: .local
+                    )
+                )
+            }
+        }
         if let standalone = visible.first(where: { $0.service == .standalone }) {
             options.append(
                 AppServiceOption(
@@ -374,6 +454,16 @@ final class AppConfigurationStore {
     }
 
     nonisolated static var defaultShowsStaging: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// Local is a developer-only environment. It is exposed only in Debug/test
+    /// builds; the desktop mkcert CA must still be trusted by iOS at runtime.
+    nonisolated static var defaultShowsLocal: Bool {
         #if DEBUG
         true
         #else
@@ -428,6 +518,10 @@ extension AppConfiguration {
                 configPath: URL(fileURLWithPath: instance.configPath),
                 hasStandaloneCA: instance.hasStandaloneCa,
                 standaloneCAPath: instance.standaloneCaPath.map {
+                    URL(fileURLWithPath: $0)
+                },
+                hasCloudCA: instance.hasCloudCa,
+                cloudCAPath: instance.cloudCaPath.map {
                     URL(fileURLWithPath: $0)
                 }
             )
@@ -486,7 +580,8 @@ extension AppInstanceInput {
             service: service.rawValue,
             environment: environment?.rawValue,
             dataDir: dataDirectory,
-            standaloneCaPem: standaloneCAPEM
+            standaloneCaPem: standaloneCAPEM,
+            cloudCaPem: cloudCAPEM
         )
     }
 }

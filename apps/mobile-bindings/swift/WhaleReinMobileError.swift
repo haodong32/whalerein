@@ -19,6 +19,7 @@ public extension MobileError {
         case .Conflict: return "conflict"
         case .Timeout: return "timeout"
         case .Cancelled: return "cancelled"
+        case .StaleHistory: return "stale_history"
         case .Security: return "security"
         case .Internal: return "internal"
         case .ProtocolVersionIncompatible: return "protocol_version_incompatible"
@@ -39,6 +40,7 @@ public extension MobileError {
         case let .Conflict(message): return message
         case let .Timeout(message): return message
         case let .Cancelled(message): return message
+        case let .StaleHistory(message): return message
         case let .Security(message): return message
         case let .Internal(message): return message
         case let .ProtocolVersionIncompatible(message): return message

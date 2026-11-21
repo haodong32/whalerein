@@ -45,7 +45,11 @@ final class StubAppConfigurationBinding: AppConfigurationBinding {
             hasStandaloneCA: input.standaloneCAPEM != nil,
             standaloneCAPath: input.standaloneCAPEM == nil
                 ? nil
-                : base.appendingPathComponent("instances/\(input.id)/ca.pem")
+                : base.appendingPathComponent("instances/\(input.id)/ca.pem"),
+            hasCloudCA: input.cloudCAPEM != nil,
+            cloudCAPath: input.cloudCAPEM == nil
+                ? nil
+                : base.appendingPathComponent("instances/\(input.id)/cloud-ca.pem")
         )
         var instances = configuration.instances.filter { $0.id != input.id }
         instances.append(instance)
@@ -93,6 +97,19 @@ final class StubAppConfigurationBinding: AppConfigurationBinding {
         if let removeCAError { throw removeCAError }
         return configuration
     }
+
+    func removeCloudCA(path: String, id: String) throws -> AppConfiguration {
+        if let removeCAError { throw removeCAError }
+        let instances = configuration.instances.filter { $0.id != id }
+        configuration = AppConfiguration(
+            documentURL: configuration.documentURL,
+            version: configuration.version,
+            activeInstanceID: configuration.activeInstanceID,
+            reasoningVisible: configuration.reasoningVisible,
+            instances: instances
+        )
+        return configuration
+    }
 }
 
 @Suite("App configuration")
@@ -112,7 +129,7 @@ struct AppConfigurationTests {
         return (store, binding)
     }
 
-    @Test("production options hide Staging and always hide Local")
+    @Test("production options hide Staging and Local; debug exposes both")
     func productionOptionVisibility() {
         var instances = fixtureConfiguration().instances
         instances.append(
@@ -128,17 +145,35 @@ struct AppConfigurationTests {
         )
         let production = AppConfigurationStore.serviceOptions(
             for: instances,
-            showsStaging: false
+            showsStaging: false,
+            showsLocal: false
         )
         #expect(production.map(\.id) == ["cloud-production", "standalone"])
         #expect(production.map(\.environment) == [.production, nil])
 
         let debug = AppConfigurationStore.serviceOptions(
             for: instances,
-            showsStaging: true
+            showsStaging: true,
+            showsLocal: true
         )
-        #expect(debug.map(\.id) == ["cloud-production", "cloud-staging", "standalone"])
-        #expect(!debug.contains { $0.environment == .local })
+        #expect(debug.map(\.id) == [
+            "cloud-production", "cloud-staging", "cloud-local", "standalone"
+        ])
+        #expect(debug.map(\.environment) == [.production, .staging, .local, nil])
+    }
+
+    @Test("a local instance pins the imported mkcert root and can clear it")
+    func localInstancePinsCA() throws {
+        let document = URL(fileURLWithPath: "/tmp/WhaleRein/client/app.toml")
+        let store = AppConfigurationStore(fixture: .fixture(documentURL: document))
+        let view = try store.enableLocal(pem: "pem-bundle")
+        let local = try #require(view.instance(id: "cloud-local"))
+        #expect(local.isLocal)
+        #expect(local.hasCloudCA)
+        #expect(local.cloudCAPath?.lastPathComponent == "cloud-ca.pem")
+
+        _ = try store.removeCloudCA(instanceID: "cloud-local")
+        #expect(store.configuration.instance(id: "cloud-local") == nil)
     }
 
     @Test("an existing Staging instance is selected instead of creating a new one")
@@ -155,7 +190,11 @@ struct AppConfigurationTests {
                 standaloneCAPath: nil
             )
         )
-        let options = AppConfigurationStore.serviceOptions(for: instances, showsStaging: true)
+        let options = AppConfigurationStore.serviceOptions(
+            for: instances,
+            showsStaging: true,
+            showsLocal: false
+        )
         #expect(options.map(\.id) == ["cloud-production", "staging", "standalone"])
         #expect(options[1].kind == .existing(instanceID: "staging"))
     }
