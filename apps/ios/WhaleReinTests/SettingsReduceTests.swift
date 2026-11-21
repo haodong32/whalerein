@@ -63,6 +63,14 @@ final class SettingsReduceTests: XCTestCase {
         XCTAssertEqual(state.logExport, .failed)
     }
 
+    func testDismissedExportReturnsToIdle() {
+        var state = SettingsState()
+        state = SettingsReduce.reduce(state, .logExportStarted)
+        state = SettingsReduce.reduce(state, .logExportReady(URL(fileURLWithPath: "/tmp/x")))
+        state = SettingsReduce.reduce(state, .logExportDismissed)
+        XCTAssertEqual(state.logExport, .idle)
+    }
+
     func testFinishedActionIsTerminalUntilReset() {
         var state = SettingsState()
         state = SettingsReduce.reduce(state, .confirmationRequested(.forgetDevice))
