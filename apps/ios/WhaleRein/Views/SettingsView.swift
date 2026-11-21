@@ -207,7 +207,7 @@ struct SettingsView: View {
                 }
             }
             .sheet(isPresented: $showDiagnostics) {
-                DiagnosticsView()
+                DiagnosticsView(model: app.diagnostics)
             }
             .alert(
                 pendingAction == .revokeDevice

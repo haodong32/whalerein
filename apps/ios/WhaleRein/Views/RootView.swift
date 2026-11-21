@@ -39,7 +39,7 @@ struct RootView: View {
             SettingsView()
         }
         .sheet(isPresented: $app.showDiagnostics) {
-            DiagnosticsView()
+            DiagnosticsView(model: app.diagnostics)
         }
         .sheet(isPresented: $app.showInvitationSheet) {
             NavigationStack {
