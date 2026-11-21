@@ -68,6 +68,9 @@ final class CloudSignInModel {
     private(set) var logoutPending = false
     private(set) var isAuthPresented = false
     private(set) var wasCancelled = false
+    /// Set by an explicit local sign-out so the next primary sign-in opens a
+    /// clean provider sheet instead of resuming the previous account.
+    private var preferAccountChoiceOnce = false
     private(set) var isConnectingHostId: String?
     /// True while the system sheet owns the attempt. A completion that races a
     /// local cancellation is ignored rather than completing the old attempt.
@@ -153,8 +156,14 @@ final class CloudSignInModel {
 
     // MARK: - Sign-in
 
-    func signIn() async {
+    /// `ephemeral` forces the provider's account chooser instead of reusing the
+    /// shared browser session, which otherwise signs the previous account back
+    /// in after a local sign-out.
+    func signIn(ephemeral: Bool = false) async {
         guard !isBusy, phase == .signedOut else { return }
+        // An explicit sign-out starts the next attempt from a clean sheet so the
+        // previous account cannot silently return. The chooser is one-shot.
+        let startsClean = ephemeral || preferAccountChoiceOnce
         errorCode = nil
         wasCancelled = false
         phase = .starting
@@ -169,12 +178,14 @@ final class CloudSignInModel {
             isAuthenticationActive = true
             authenticator.authenticate(
                 url: attempt.url,
-                callbackURLScheme: CloudSignInModel.callbackScheme
+                callbackURLScheme: CloudSignInModel.callbackScheme,
+                ephemeral: startsClean
             ) { [weak self] callbackURL, error in
                 Task { @MainActor [weak self] in
                     await self?.authenticationDidFinish(callbackURL: callbackURL, error: error)
                 }
             }
+            preferAccountChoiceOnce = false
         } catch {
             guard stillCurrent() else { return }
             phase = .signedOut
@@ -324,6 +335,7 @@ final class CloudSignInModel {
             phase = .signedOut
             directory = .idle
             errorCode = nil
+            preferAccountChoiceOnce = true
             onSignedOut?()
         } catch {
             guard stillCurrent() else { return }
