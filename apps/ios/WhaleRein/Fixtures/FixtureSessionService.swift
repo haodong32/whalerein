@@ -991,6 +991,10 @@ final class FixtureSessionService: SessionService {
         return FixtureCatalog.diagnostics(now: now)
     }
 
+    func clearDiagnostics() async throws {
+        // The fixture has no Core journal to clear.
+    }
+
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         try requirePaired()
         let report = try await diagnosticsPreview()

@@ -640,6 +640,14 @@ impl MobileCore {
         Self::new(config_path, MemorySecretStore::new(), app_version)
     }
 
+    /// Clear Core's bounded diagnostic journal for this instance.
+    ///
+    /// The app calls this when the device state is destroyed; the journal is
+    /// diagnostic state, not user content. Core owns the retention policy.
+    pub fn clear_diagnostics(&self) -> Result<(), MobileError> {
+        self.core.clear_diagnostics().map_err(MobileError::from)
+    }
+
     /// Build-time provenance: `<git-sha>[-dirty] core:<version>`.
     pub fn core_revision(&self) -> String {
         core_revision()

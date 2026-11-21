@@ -125,6 +125,7 @@ extension AppShellModel {
         // staging snapshot go with it. Core owns its own diagnostic journal.
         AppLog.shared.discardExportStaging()
         AppLog.shared.reset()
+        Task { try? await service.clearDiagnostics() }
         conversation?.close()
         conversation = nil
         isPaired = false

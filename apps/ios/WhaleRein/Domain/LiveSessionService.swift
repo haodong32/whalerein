@@ -742,6 +742,10 @@ final class LiveSessionService: SessionService {
         return Self.map(diagnostics: view)
     }
 
+    func clearDiagnostics() async throws {
+        try core.clearDiagnostics()
+    }
+
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         let core = self.core
         let view = try await call { try core.exportDiagnostics(path: url.path) }

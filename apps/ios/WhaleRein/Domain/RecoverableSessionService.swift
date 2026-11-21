@@ -254,6 +254,10 @@ final class RecoverableSessionService: SessionService {
         try await current().diagnosticsPreview()
     }
 
+    func clearDiagnostics() async throws {
+        try await current().clearDiagnostics()
+    }
+
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         try await current().exportDiagnostics(to: url)
     }

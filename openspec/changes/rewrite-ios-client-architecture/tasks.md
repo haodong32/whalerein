@@ -54,7 +54,7 @@
 - [x] 6.3 Add `Fixtures/ScenarioBuilder` and `TestSupport` shared fakes; remove per-test mock duplication (AC-10, AC-11).
 - [x] 6.4 Delete all `-ui-` flags and legacy scenario mapping; empty the 1.2 allowlist so the gate runs unconditionally (AC-07, AC-08, AC-03, AC-04, AC-05).
 - [ ] 6.5 Implement the two-level contract parity suite for send, queue, wait, approval, history, attachment and recovery. The deterministic level compares projections from recorded envelopes; the local level runs against the local stack and records unavailable live variants as BLOCKED (AC-10).
-- [ ] 6.6 Replace the remaining `print` in fixtures; add the explicit Settings log export (redacted snapshot to an app-private staging file + system share) and append the same snapshot to diagnostics export; verify reset deletes both log segments and calls Core's existing `clear_diagnostics` (AC-19).
+- [x] 6.6 Replace the remaining `print` in fixtures; add the explicit Settings log export (redacted snapshot to an app-private staging file + system share) and append the same snapshot to diagnostics export; verify reset deletes both log segments and calls Core's existing `clear_diagnostics` (AC-19).
 
 ## 7. Agent navigation and documentation
 

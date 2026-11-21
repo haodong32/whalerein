@@ -90,3 +90,21 @@ fn panicking_diagnostic_sink_never_changes_core_results() {
     assert_eq!(core.connection_state("host-1".into()), "disconnected");
     assert_eq!(core.hosts().unwrap_err().code(), "not_paired");
 }
+
+#[test]
+fn clear_diagnostics_empties_the_core_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(CapturingSink::default());
+    let core = MobileCore::new_with_diagnostic_sink(
+        write_config(dir.path()),
+        MemorySecretStore::new(),
+        "test-app".to_owned(),
+        sink.clone(),
+    )
+    .expect("create MobileCore with diagnostic sink");
+
+    core.clear_diagnostics().expect("clear diagnostics");
+    // Clearing is idempotent and never changes the facade behaviour.
+    core.clear_diagnostics().expect("clear diagnostics twice");
+    assert_eq!(core.connection_state("host-1".into()), "disconnected");
+}

@@ -512,6 +512,8 @@ class StubSessionService: SessionService {
         return try await diagnosticsHandler()
     }
 
+    func clearDiagnostics() async throws {}
+
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         exportCount += 1
         guard let exportHandler else { return try await diagnosticsPreview() }
