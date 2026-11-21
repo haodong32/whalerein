@@ -4,7 +4,7 @@ import XCTest
 
 final class CloudSignInFailureUITests: WhaleReinUITestCase {
     func testStartFailureShowsAnErrorAndKeepsTheLoginAvailable() {
-        let app = launchApp(["-ui-cloud-start-fail"])
+        let app = launchScenario("cloud.start-failure")
         waitFor("cloud.signIn").tap()
 
         let error = waitFor("cloud.error")
@@ -14,7 +14,7 @@ final class CloudSignInFailureUITests: WhaleReinUITestCase {
     }
 
     func testExchangeFailureReturnsToTheWelcomePageWithAnError() {
-        let app = launchApp(["-ui-cloud-complete-fail"])
+        let app = launchScenario("cloud.complete-failure")
         waitFor("cloud.signIn").tap()
 
         XCTAssertTrue(waitFor("cloud.error").exists)
@@ -23,7 +23,7 @@ final class CloudSignInFailureUITests: WhaleReinUITestCase {
     }
 
     func testCancellingTheSheetShowsNoError() {
-        let app = launchApp(["-ui-cloud-cancel-sheet"])
+        let app = launchScenario("cloud.cancel-sheet")
         waitFor("cloud.signIn").tap()
 
         XCTAssertTrue(waitFor("cloud.signIn").exists)
@@ -32,7 +32,7 @@ final class CloudSignInFailureUITests: WhaleReinUITestCase {
     }
 
     func testRevokedRestoreReturnsToWelcomeWithAnError() {
-        let app = launchApp(["-ui-cloud-revoked"])
+        let app = launchScenario("cloud.revoked")
         XCTAssertTrue(waitFor("cloud.error").exists)
         XCTAssertTrue(waitFor("cloud.signIn").exists)
         XCTAssertFalse(element("cloud.account").exists)

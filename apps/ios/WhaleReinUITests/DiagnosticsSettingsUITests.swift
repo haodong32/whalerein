@@ -47,7 +47,7 @@ final class DiagnosticsSettingsUITests: WhaleReinUITestCase {
     }
 
     func testSettingsShowsStagingOnlyWhenRequested() {
-        launchAndOpenConversation(["-ui-staging"])
+        launchAndOpenConversation(scenario: "conversation.staging")
         tap(waitFor("conversation.settings"))
         XCTAssertTrue(waitFor("settings.staging").exists)
     }

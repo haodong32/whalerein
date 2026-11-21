@@ -5,7 +5,7 @@ import XCTest
 
 final class CloudHostOpenFlowUITests: WhaleReinUITestCase {
     func testEnrolledHostWithoutGrantConnectsThenOpensAndStays() {
-        let app = launchApp(["-ui-cloud-signed-in"])
+        let app = launchScenario("cloud.signed-in")
 
         waitFor("cloud.account")
         XCTAssertTrue(waitFor("cloud.host.connect.granted-mac").exists)

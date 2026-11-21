@@ -81,8 +81,8 @@ enum ScenarioCatalog {
                 id: "onboarding.keychain-locked",
                 category: .onboarding,
                 title: "Locked Keychain",
-                notes: "Recoverable service starts from an unavailable secret store.",
-                launch: LaunchOverrides(serviceMode: .live, resetState: true, keychainLocked: true),
+                notes: "A locked secret store keeps the pairing and reports a recoverable failure.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true, keychainLocked: true),
                 entry: .conversation
             ),
             Scenario(
@@ -197,6 +197,24 @@ enum ScenarioCatalog {
                 launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
                 fixture: FixtureScenario(initiallyPaired: true),
                 presentation: PresentationOverrides(accessibilityTextSize: true)
+            ),
+            Scenario(
+                id: "conversation.cloud-account",
+                category: .conversation,
+                title: "Cloud account conversation",
+                notes: "Paired Cloud instance with a signed-in account.",
+                launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
+                fixture: FixtureScenario(initiallyPaired: true, cloudSignedIn: true),
+                entry: .conversation
+            ),
+            Scenario(
+                id: "conversation.staging",
+                category: .conversation,
+                title: "Staging conversation",
+                notes: "Paired fixture launched with the staging identity.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true, staging: true),
+                fixture: FixtureScenario(initiallyPaired: true),
+                entry: .conversation
             ),
             Scenario(
                 id: "conversation.compact-diagnostics",
@@ -338,9 +356,9 @@ enum ScenarioCatalog {
                 id: "cloud.switch-accounts",
                 category: .cloud,
                 title: "Cloud switch accounts",
-                notes: "Sign-out returns a different account.",
+                notes: "Signing in after a sign-out returns a different account.",
                 launch: LaunchOverrides(serviceMode: .fixtures, fixtureInstance: .cloudProduction, resetState: true),
-                fixture: FixtureScenario(cloudSignedIn: true, cloudSwitchAccounts: true),
+                fixture: FixtureScenario(cloudSwitchAccounts: true),
                 entry: .cloudSignIn
             ),
             Scenario(
