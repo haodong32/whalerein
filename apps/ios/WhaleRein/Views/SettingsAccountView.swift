@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct SettingsAccountView: View {
-    @Environment(AppShellModel.self) private var app
+    let account: AccountSettingsModel?
     @Binding var showDiagnostics: Bool
     @State private var pendingScope: AccountSessionScope?
 
@@ -18,7 +18,7 @@ struct SettingsAccountView: View {
         diagnosticsSection
         statusSection
         defaultComputerSection
-        if let model = app.accountSettings, model.canManageSessions {
+        if let model = account, model.canManageSessions {
             appSessionsSection(model)
         }
     }
@@ -28,7 +28,7 @@ struct SettingsAccountView: View {
     @ViewBuilder
     private var statusSection: some View {
         Section(L10n.settingsStatus.key) {
-            if let model = app.accountSettings, let status = model.status {
+            if let model = account, let status = model.status {
                 row(
                     L10n.settingsStatusService,
                     value: status.service.labelKey.string,
@@ -65,7 +65,7 @@ struct SettingsAccountView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("settings.status.pendingSignOut")
                 }
-            } else if let error = app.accountSettings?.statusError {
+            } else if let error = account?.statusError {
                 Text(L10n.settingsStatusUnavailable.key)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -80,8 +80,8 @@ struct SettingsAccountView: View {
             }
         }
         .task {
-            if app.accountSettings?.statusState == .idle {
-                await app.accountSettings?.load()
+            if account?.statusState == .idle {
+                await account?.load()
             }
         }
     }
@@ -91,7 +91,7 @@ struct SettingsAccountView: View {
     @ViewBuilder
     private var defaultComputerSection: some View {
         Section(L10n.settingsDefaultTitle.key) {
-            if let model = app.accountSettings {
+            if let model = account {
                 if model.hosts.isEmpty {
                     Text(
                         model.defaultHostError == nil
@@ -154,8 +154,8 @@ struct SettingsAccountView: View {
             }
         }
         .task {
-            await app.accountSettings?.loadStatus()
-            await app.accountSettings?.loadHosts()
+            await account?.loadStatus()
+            await account?.loadHosts()
         }
     }
 

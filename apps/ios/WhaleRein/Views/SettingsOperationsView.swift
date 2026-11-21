@@ -4,11 +4,11 @@
 import SwiftUI
 
 struct SettingsOperationsView: View {
-    @Environment(AppShellModel.self) private var app
+    let model: OperationRecoveryModel?
 
     var body: some View {
         Section(L10n.settingsOperations.key) {
-            if let recovery = app.operationRecovery {
+            if let recovery = model {
                 if recovery.operations.isEmpty {
                     Text(L10n.settingsOperationsEmpty.key)
                         .font(.footnote)
@@ -44,7 +44,7 @@ struct SettingsOperationsView: View {
             }
         }
         .task {
-            await app.operationRecovery?.load()
+            await model?.load()
         }
     }
 

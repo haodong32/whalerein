@@ -36,7 +36,18 @@ struct RootView: View {
             Task { await app.handleOpenURL(url) }
         }
         .sheet(isPresented: sheet(.settings)) {
-            SettingsView()
+            SettingsView(
+                settings: app.settings,
+                diagnostics: app.diagnostics,
+                account: app.accountSettings,
+                operations: app.operationRecovery,
+                cloud: app.cloudSignIn,
+                dataPath: app.dataDirectory.path,
+                reasoningVisible: app.reasoningVisible,
+                setReasoningVisible: { app.setReasoningVisible($0) },
+                onSignOutCloud: { Task { await app.signOutCloud() } },
+                onAddHost: { app.openManualPairing() }
+            )
         }
         .sheet(isPresented: sheet(.diagnostics)) {
             DiagnosticsView(model: app.diagnostics)

@@ -4,10 +4,21 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(AppShellModel.self) private var app
+    let settings: SettingsModel
+    let diagnostics: DiagnosticsModel
+    let account: AccountSettingsModel?
+    let operations: OperationRecoveryModel?
+    let cloud: CloudSignInModel?
+    let dataPath: String
+    let reasoningVisible: Bool
+    /// Returns a typed error when the preference could not be saved.
+    let setReasoningVisible: (Bool) -> AppErrorCode?
+    let onSignOutCloud: () -> Void
+    let onAddHost: () -> Void
+
     @Environment(\.dismiss) private var dismiss
     /// The destructive action awaiting confirmation, owned by the model.
-    private var pendingAction: SettingsAction? { app.settings.state.pendingConfirmation }
+    private var pendingAction: SettingsAction? { settings.state.pendingConfirmation }
     @State private var reasoningErrorKey: L10nKey?
     @State private var showDiagnostics = false
 
@@ -16,12 +27,12 @@ struct SettingsView: View {
             Form {
                 Section(L10n.settingsAbout.key) {
                     LabeledContent(L10n.settingsCoreRevision.key) {
-                        Text(verbatim: app.settings.coreRevision)
+                        Text(verbatim: settings.coreRevision)
                             .font(.footnote.monospaced())
                             .accessibilityIdentifier("settings.coreRevision")
                     }
                     LabeledContent(L10n.settingsAppVersion.key) {
-                        Text(verbatim: app.settings.appVersion)
+                        Text(verbatim: settings.appVersion)
                             .accessibilityIdentifier("settings.appVersion")
                     }
                     VStack(alignment: .leading, spacing: 4) {
@@ -35,21 +46,21 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    if app.settings.isStaging {
+                    if settings.isStaging {
                         Label(L10n.settingsStaging.key, systemImage: "flag")
                             .accessibilityIdentifier("settings.staging")
                     }
-                    if app.settings.isFixtureBacked {
+                    if settings.isFixtureBacked {
                         Label(L10n.settingsFixtureData.key, systemImage: "shippingbox")
                             .accessibilityIdentifier("settings.fixtureData")
                     }
-                    if let statusKey = app.settings.statusKey {
+                    if let statusKey = settings.statusKey {
                         Text(statusKey.key)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("settings.status")
                     }
-                    if let errorKey = app.settings.errorKey {
+                    if let errorKey = settings.errorKey {
                         Text(errorKey.key)
                             .font(.footnote)
                             .foregroundStyle(.red)
@@ -60,7 +71,7 @@ struct SettingsView: View {
                 Section(L10n.settingsData.key) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.settingsStorage.key)
-                        Text(verbatim: app.dataDirectory.path)
+                        Text(verbatim: dataPath)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                         Text(L10n.settingsStorageNote.key)
@@ -73,19 +84,19 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        app.settings.requestConfirmation(.forgetDevice)
+                        settings.requestConfirmation(.forgetDevice)
                     } label: {
                         Text(L10n.settingsForget.key)
                     }
-                    .disabled(app.settings.isBusy)
+                    .disabled(settings.isBusy)
                     .accessibilityIdentifier("settings.forget")
 
                     Button(role: .destructive) {
-                        app.settings.requestConfirmation(.revokeDevice)
+                        settings.requestConfirmation(.revokeDevice)
                     } label: {
                         Text(L10n.settingsRevoke.key)
                     }
-                    .disabled(app.settings.isBusy)
+                    .disabled(settings.isBusy)
                     .accessibilityIdentifier("settings.revoke")
                 }
 
@@ -93,9 +104,9 @@ struct SettingsView: View {
                     Toggle(
                         L10n.settingsReasoning.key,
                         isOn: Binding(
-                            get: { app.reasoningVisible },
+                            get: { reasoningVisible },
                             set: { visible in
-                                if let code = app.setReasoningVisible(visible) {
+                                if let code = setReasoningVisible(visible) {
                                     reasoningErrorKey = L10nKey.errorKey(for: code)
                                 } else {
                                     reasoningErrorKey = nil
@@ -115,21 +126,21 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsOperationsView()
+                SettingsOperationsView(model: operations)
 
                 Section(L10n.settingsLogs.key) {
-                    if let url = app.settings.state.logExport.fileURL {
+                    if let url = settings.state.logExport.fileURL {
                         ShareLink(item: url) {
                             Text(L10n.settingsShareLogs.key)
                         }
                         .accessibilityIdentifier("settings.shareLogs")
                     } else {
                         Button {
-                            app.settings.prepareLogExport()
+                            settings.prepareLogExport()
                         } label: {
                             Text(L10n.settingsExportLogs.key)
                         }
-                        .disabled(app.settings.state.logExport == .preparing)
+                        .disabled(settings.state.logExport == .preparing)
                         .accessibilityIdentifier("settings.exportLogs")
                     }
                     Text(L10n.settingsExportLogsNote.key)
@@ -142,7 +153,7 @@ struct SettingsView: View {
                     ServiceSelectionView(showsStandaloneCA: true)
                 }
 
-                if let cloud = app.cloudSignIn {
+                if let cloud = cloud {
                     Section(L10n.cloudSettingsTitle.key) {
                         if let account = cloud.account {
                             LabeledContent(L10n.cloudAccountLabel.key) {
@@ -156,7 +167,7 @@ struct SettingsView: View {
                                     .accessibilityIdentifier("settings.cloudLogoutPending")
                             }
                             Button(role: .destructive) {
-                                Task { await app.signOutCloud() }
+                                onSignOutCloud()
                             } label: {
                                 Text(L10n.cloudSignOut.key)
                             }
@@ -178,7 +189,7 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsAccountView(showDiagnostics: $showDiagnostics)
+                SettingsAccountView(account: account, showDiagnostics: $showDiagnostics)
 
                 Section(L10n.hostsTitle.key) {
                     Button {
@@ -187,7 +198,7 @@ struct SettingsView: View {
                         dismiss()
                         Task {
                             try? await Task.sleep(for: .milliseconds(350))
-                            app.openManualPairing()
+                            onAddHost()
                         }
                     } label: {
                         Label(L10n.settingsAddHost.key, systemImage: "plus.circle")
@@ -207,7 +218,7 @@ struct SettingsView: View {
                 }
             }
             .sheet(isPresented: $showDiagnostics) {
-                DiagnosticsView(model: app.diagnostics)
+                DiagnosticsView(model: diagnostics)
             }
             .alert(
                 pendingAction == .revokeDevice
@@ -215,11 +226,11 @@ struct SettingsView: View {
                     : L10n.settingsForgetConfirm.string,
                 isPresented: Binding(
                     get: { pendingAction != nil },
-                    set: { if !$0 { app.settings.cancelConfirmation() } }
+                    set: { if !$0 { settings.cancelConfirmation() } }
                 )
             ) {
                 Button(L10n.commonCancel.key, role: .cancel) {
-                    app.settings.cancelConfirmation()
+                    settings.cancelConfirmation()
                 }
                 Button(
                     pendingAction == .revokeDevice
@@ -230,7 +241,7 @@ struct SettingsView: View {
                     // Capture the action before the alert dismisses: dismissal
                     // clears the confirmation in the model.
                     guard let action = pendingAction else { return }
-                    Task { await app.settings.perform(action) }
+                    Task { await settings.perform(action) }
                 }
                 .accessibilityIdentifier("settings.confirm")
             }
