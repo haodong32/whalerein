@@ -116,6 +116,47 @@ struct ComposerView: View {
                 statusLabel(key.key, systemImage: "paperplane", color: .secondary)
                     .accessibilityIdentifier("conversation.sendStatus")
             }
+            if let key = model.operationStatusKey {
+                statusLabel(key.key, systemImage: "envelope.badge", color: .secondary)
+                    .accessibilityIdentifier("conversation.operationStatus")
+            }
+            if model.operationInputRequired {
+                statusLabel(L10n.conversationOperationInputRequired.key, systemImage: "questionmark.circle", color: .secondary)
+                    .accessibilityIdentifier("conversation.operationInputRequired")
+            }
+            if let reference = model.operationReferenceText {
+                HStack(spacing: 4) {
+                    Image(systemName: "text.magnifyingglass")
+                        .accessibilityHidden(true)
+                    Text(verbatim: reference)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("conversation.operationReference")
+            }
+            if let key = model.operationReadErrorKey {
+                statusLabel(key.key, systemImage: "exclamationmark.triangle", color: .orange)
+                    .accessibilityIdentifier("conversation.operationReadError")
+            }
+            if model.canRecoverSend || model.canReadExactReply {
+                HStack(spacing: 12) {
+                    if model.canRecoverSend {
+                        Button(L10n.conversationOperationRecover.key) {
+                            Task { await model.recoverSendResult() }
+                        }
+                        .font(.caption)
+                        .accessibilityIdentifier("conversation.operationRecover")
+                    }
+                    if model.canReadExactReply {
+                        Button(L10n.conversationOperationReadExact.key) {
+                            Task { await model.readExactReply() }
+                        }
+                        .font(.caption)
+                        .accessibilityIdentifier("conversation.operationReadExact")
+                    }
+                }
+            }
             if let key = model.stopStatusKey {
                 statusLabel(key.key, systemImage: "stop.circle", color: .secondary)
                     .accessibilityIdentifier("conversation.stopStatus")

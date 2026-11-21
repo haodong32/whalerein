@@ -12,7 +12,8 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    private let core: MobileCore
+    let core: MobileCore
+    let instanceId: String
     let appVersion: String
 
     private var eventPump: Task<Void, Never>?
@@ -33,59 +34,67 @@ final class LiveSessionService: SessionService {
 
     // MARK: - Construction
 
-    /// Production initializer: app data directory plus an explicit Keychain
-    /// namespace. The staging app passes the staging service.
-    convenience init(dataDirectory: URL, keychainService: String, appVersion: String) throws {
+    /// Production initializer: the materialized per-instance TOML produced by
+    /// the authoritative app document plus an explicit Keychain namespace.
+    ///
+    /// Opening never creates or rewrites configuration; composition owns that.
+    convenience init(
+        configPath: URL,
+        keychainService: String,
+        appVersion: String,
+        instanceId: String
+    ) throws {
         let store = KeychainSecretStore(service: keychainService)
-        try self.init(dataDirectory: dataDirectory, secretStore: store, appVersion: appVersion)
+        try self.init(
+            configPath: configPath,
+            secretStore: store,
+            appVersion: appVersion,
+            instanceId: instanceId
+        )
     }
 
-    /// Test initializer with an explicit data directory and secret store.
-    init(dataDirectory: URL, secretStore: any SecretStore, appVersion: String) throws {
+    /// Test initializer with an explicit materialized config and secret store.
+    init(
+        configPath: URL,
+        secretStore: any SecretStore,
+        appVersion: String,
+        instanceId: String
+    ) throws {
         do {
             self.core = try MobileCore(
-                configPath: try Self.configurationPath(in: dataDirectory),
+                configPath: configPath.path,
                 secretStore: secretStore,
                 appVersion: appVersion
             )
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
+        self.instanceId = instanceId
         self.appVersion = appVersion
         self.eventPump = startEventPump()
     }
 
     /// Isolated Simulator/test initializer: process-local secrets, no Keychain.
-    static func memory(dataDirectory: URL, appVersion: String) throws -> LiveSessionService {
+    static func memory(
+        configPath: URL,
+        appVersion: String,
+        instanceId: String
+    ) throws -> LiveSessionService {
         let core: MobileCore
         do {
             core = try MobileCore.newWithMemorySecretStore(
-                configPath: try Self.configurationPath(in: dataDirectory),
+                configPath: configPath.path,
                 appVersion: appVersion
             )
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
-        return LiveSessionService(core: core, appVersion: appVersion)
+        return LiveSessionService(core: core, appVersion: appVersion, instanceId: instanceId)
     }
 
-    private static func configurationPath(in dataDirectory: URL) throws -> String {
-        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-        let path = dataDirectory.appendingPathComponent("config.toml").path
-        if !FileManager.default.fileExists(atPath: path) {
-            try WhaleReinMobile.writeClientConfig(
-                configPath: path,
-                service: .standalone,
-                dataDir: "instance",
-                cloudEnvironment: nil,
-                standaloneCaCertificate: nil
-            )
-        }
-        return path
-    }
-
-    private init(core: MobileCore, appVersion: String) {
+    private init(core: MobileCore, appVersion: String, instanceId: String) {
         self.core = core
+        self.instanceId = instanceId
         self.appVersion = appVersion
         self.eventPump = startEventPump()
     }
@@ -624,7 +633,7 @@ final class LiveSessionService: SessionService {
 
     /// Runs one synchronous Core call on a detached thread and converts binding
     /// failures into typed app errors. Raw Core text never crosses this seam.
-    private func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    func call<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await Task.detached(priority: .userInitiated) { try body() }.value
         } catch let error as MobileError {
@@ -794,7 +803,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(message view: MessageView) -> ConversationMessage {
+    static func map(message view: MessageView) -> ConversationMessage {
         ConversationMessage(
             messageId: view.messageId,
             role: map(role: view.role),
@@ -810,7 +819,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
+    static func map(command view: CommandView, delivery: DeliveryChoice?) -> CommandReceipt {
         CommandReceipt(
             commandId: view.commandId,
             requestId: view.requestId,
@@ -906,7 +915,7 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private static func map(error: MobileError) -> AppErrorCode {
+    static func map(error: MobileError) -> AppErrorCode {
         map(code: error.code)
     }
 

@@ -9,13 +9,15 @@ import Foundation
 @MainActor
 final class UnavailableSessionService: SessionService {
     let connectionStatus: ConnectionStatus = .offline
+    let instanceId: String
     let coreRevision = "unavailable"
     let appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
 
     private let code: AppErrorCode
 
-    init(code: AppErrorCode = .integrationUnavailable) {
+    init(code: AppErrorCode = .integrationUnavailable, instanceId: String = "unavailable") {
         self.code = code
+        self.instanceId = instanceId
     }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {

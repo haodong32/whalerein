@@ -160,8 +160,9 @@ final class SuspendedResponse<Value: Sendable> {
 }
 
 @MainActor
-final class StubSessionService: SessionService {
+class StubSessionService: SessionService {
     var connectionStatus: ConnectionStatus = .online
+    var instanceId = "test"
     var coreRevision = "stub-add-ios-client-1"
     var appVersion = "0.1.0"
     private var continuations: [UUID: AsyncStream<SessionEventEnvelope>.Continuation] = [:]

@@ -68,6 +68,12 @@ struct SettingsView: View {
                     }
                 }
 
+                SettingsOperationsView()
+
+                Section {
+                    ServiceSelectionView(showsStandaloneCA: true)
+                }
+
                 Section(L10n.hostsTitle.key) {
                     Button {
                         // Dismiss this sheet first: two sheets cannot be

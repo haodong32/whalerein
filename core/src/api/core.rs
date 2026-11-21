@@ -249,6 +249,31 @@ impl Core {
         Instance::write(config_path, config)
     }
 
+    /// Validate one configuration with the same rules as [`Core::open`].
+    ///
+    /// Shared by the CLI file-opening path and typed bindings that keep their
+    /// own authoritative document. Nothing is written and no instance state is
+    /// created.
+    pub fn validate_client_config(config_path: &Path, config: &ClientConfig) -> CoreResult<()> {
+        Instance::validate(config_path, config)
+    }
+
+    /// Durable atomic replacement for a configuration document.
+    ///
+    /// Uses Core's shared configuration writer (temporary file in the target
+    /// directory, fsync, rename, directory fsync). The previous complete
+    /// document survives any failure before the rename.
+    pub fn write_config_atomically(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+        let selected = std::path::absolute(path)
+            .map_err(|_| CoreError::Config("configuration path could not be resolved".into()))?;
+        crate::configuration::writer::write_atomically(&selected, bytes).map_err(|_| {
+            CoreError::Config(format!(
+                "{}: could not write the configuration atomically",
+                selected.display()
+            ))
+        })
+    }
+
     pub fn client_config(&self) -> &ClientConfig {
         &self
             .instance

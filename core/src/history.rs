@@ -200,6 +200,11 @@ impl MessageReference {
     pub fn projection_id(&self) -> &str {
         &self.projection_id
     }
+    /// Source-provided locator needed to reconstruct this exact reference.
+    /// It is opaque to callers and never contains message content.
+    pub fn source_locator(&self) -> &str {
+        &self.source_locator
+    }
 
     pub(crate) fn from_committed(
         session: &SessionKey,

@@ -11,6 +11,13 @@ enum AppStorageLocations {
     static let preferencesFileName = "preferences.json"
     static let fixtureStateFileName = "fixture-state.json"
 
+    /// New authoritative layout. Legacy root `preferences.json`/`core/` are
+    /// never read, migrated or deleted.
+    static let clientDirectoryName = "client"
+    static let appConfigurationFileName = "app.toml"
+    static let instancesDirectoryName = "instances"
+    static let instanceConfigurationFileName = "instance.toml"
+
     static let keychainService = "com.whalerein.ios.secrets"
     static let stagingKeychainService = "com.whalerein.ios.staging.secrets"
 
@@ -18,6 +25,31 @@ enum AppStorageLocations {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
         return base.appendingPathComponent(dataDirectoryName, isDirectory: true)
+    }
+
+    /// `Application Support/WhaleRein/client`.
+    static func clientDirectory(in dataDirectory: URL) -> URL {
+        dataDirectory.appendingPathComponent(clientDirectoryName, isDirectory: true)
+    }
+
+    /// `Application Support/WhaleRein/client/app.toml`.
+    static func appConfigurationURL(in dataDirectory: URL) -> URL {
+        clientDirectory(in: dataDirectory)
+            .appendingPathComponent(appConfigurationFileName, isDirectory: false)
+    }
+
+    /// `.../client/instances/<id>`.
+    static func instanceDirectory(in dataDirectory: URL, instanceId: String) -> URL {
+        clientDirectory(in: dataDirectory)
+            .appendingPathComponent(instancesDirectoryName, isDirectory: true)
+            .appendingPathComponent(instanceId, isDirectory: true)
+    }
+
+    /// Stable per-instance Keychain namespace. The staging app keeps its
+    /// existing `.staging` service suffix and adds the instance id.
+    static func keychainService(instanceId: String, staging: Bool = false) -> String {
+        let base = staging ? stagingKeychainService : keychainService
+        return "\(base).\(instanceId)"
     }
 
     /// Creates the app data directory with complete file protection and returns it.

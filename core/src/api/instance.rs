@@ -155,6 +155,13 @@ impl Instance {
         Self::resolve(selected, configuration)
     }
 
+    /// Validate one configuration against the same rules used by `Core::open`
+    /// without writing the file or creating instance state.
+    pub(crate) fn validate(path: &Path, configuration: &ClientConfig) -> CoreResult<()> {
+        let selected = resolve_path(path)?;
+        Self::resolve(selected, configuration.clone()).map(|_| ())
+    }
+
     pub fn write(path: &Path, configuration: &ClientConfig) -> CoreResult<()> {
         let selected = resolve_path(path)?;
         let instance = Self::resolve(selected.clone(), configuration.clone())?;
@@ -473,6 +480,42 @@ mod tests {
         let path = root.join(name);
         Core::write_config(&path, &ClientConfig::new(service, data)).unwrap();
         path
+    }
+
+    #[test]
+    fn cli_single_instance_toml_fixture_still_opens_and_validates() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("config.toml");
+        fs::write(
+            &selected,
+            "version = 1\nservice = \"standalone\"\ndata_dir = \"instance\"\n",
+        )
+        .unwrap();
+        let client = Core::open(&selected, Arc::new(MemorySecretStore::new())).unwrap();
+        assert_eq!(client.client_config().version, 1);
+        assert_eq!(client.client_config().service, ClientService::Standalone);
+        assert_eq!(
+            client.configured_data_dir(),
+            root.path().canonicalize().unwrap().join("instance")
+        );
+
+        // The shared validation entry accepts the same fixture without writing
+        // or creating the data directory.
+        Core::validate_client_config(
+            &selected,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&selected).unwrap(),
+            "version = 1\nservice = \"standalone\"\ndata_dir = \"instance\"\n"
+        );
+        assert!(!root.path().join("instance").exists());
+
+        let mut invalid = ClientConfig::new(ClientService::Standalone, "instance");
+        invalid.version = 2;
+        assert!(Core::validate_client_config(&selected, &invalid).is_err());
+        assert!(!root.path().join("instance").exists());
     }
 
     #[test]

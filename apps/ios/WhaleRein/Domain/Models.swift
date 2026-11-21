@@ -474,6 +474,9 @@ enum AppErrorCode: String, CaseIterable, Codable, Sendable {
     /// first unlock after a reboot). Recoverable after unlocking; never a tight
     /// retry loop.
     case keychainUnavailable
+    /// The app configuration document is invalid or could not be saved. The
+    /// previous committed selection and runtime stay in place.
+    case configuration
 }
 
 struct SessionServiceError: Error, Equatable, LocalizedError, Sendable {

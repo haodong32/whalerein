@@ -7,6 +7,8 @@ import Foundation
 @MainActor
 protocol SessionService: AnyObject {
     var connectionStatus: ConnectionStatus { get }
+    /// Stable app configuration instance this service was opened for.
+    var instanceId: String { get }
     var coreRevision: String { get }
     var appVersion: String { get }
     /// Creates a fresh event stream for the caller. Each active watch consumer

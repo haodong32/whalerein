@@ -7,11 +7,17 @@
 
 uniffi::setup_scaffolding!("WhaleReinMobile");
 
+mod app_config;
 mod client;
 mod error;
 mod secret;
 mod types;
 
+pub use app_config::{
+    app_config_bootstrap, app_config_read, app_config_remove_ca, app_config_remove_instance,
+    app_config_save_instance, app_config_set_active, app_config_set_reasoning_visible,
+    app_config_validate_instance, AppConfigView, AppSettingsView, InstanceInput, InstanceView,
+};
 pub use client::{
     core_revision, write_client_config, MobileClientService, MobileCloudEnvironment, MobileCore,
 };
@@ -22,6 +28,6 @@ pub use types::{
     DiagnosticsReportView, HostSummary, MessageReferenceView, MessageReplyView, MessageView,
     NoticeView, PairingPromptView, QuestionAnswerView, QuestionBatchView, QuestionIntentView,
     QuestionItemView, QuestionOptionView, QuestionPageView, QuestionStampView, QuestionSubjectView,
-    QuestionsView, SendOperationView, SessionCapabilitiesView, SessionKeyView, SessionSummaryView,
-    ToolActivityView, ToolResultPartView,
+    QuestionsView, RetainedOperationView, SendOperationView, SessionCapabilitiesView,
+    SessionKeyView, SessionSummaryView, ToolActivityView, ToolResultPartView,
 };

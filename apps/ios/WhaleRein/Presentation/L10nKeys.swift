@@ -41,6 +41,8 @@ extension L10nKey {
             return .errorUnsupportedCapability
         case .keychainUnavailable:
             return .errorKeychainUnavailable
+        case .configuration:
+            return .errorConfiguration
         }
     }
 
