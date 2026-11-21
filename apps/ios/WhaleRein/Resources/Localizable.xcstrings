@@ -5560,6 +5560,23 @@
         }
       }
     },
+    "service.localFileSecrets": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This local instance keeps its keys in a protected app-container file instead of the Keychain. Debug builds only."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地实例使用应用容器内受保护的文件保存密钥，不使用 Keychain。仅限 Debug 构建。"
+          }
+        }
+      }
+    },
     "service.selectionTitle": {
       "extractionState": "manual",
       "localizations": {

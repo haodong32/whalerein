@@ -206,6 +206,10 @@ struct ServiceSelectionView: View {
             Text(L10n.serviceLocalCANote.key)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            Text(L10n.serviceLocalFileSecrets.key)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("service.localFileSecrets")
             Button {
                 errorKey = nil
                 isImportingLocalCA = true

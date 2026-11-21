@@ -240,7 +240,12 @@ See [CI test tiers](testing.md#ci-test-tiers) for timing and revision rules.
 ## Security and accessibility
 
 Secrets live in the device-only Keychain namespace and never in UserDefaults or
-the app container. Drafts and cached conversation data are encrypted by Core and
+the app container. The one exception is the Debug-only local Cloud instance
+(`cloud-local`), which uses a 0700, complete-file-protection, backup-excluded
+file store beside its materialized configuration because the local test stack is
+used from Simulator builds where the Keychain identity may be absent. Every
+other instance, including Staging and production, keeps the Keychain store.
+Drafts and cached conversation data are encrypted by Core and
 scoped to the profile, Host and session. A confirmed revocation clears the
 affected authorization, cache and drafts while preserving the device identity.
 Diagnostics are redacted by Core and shared only after an explicit user

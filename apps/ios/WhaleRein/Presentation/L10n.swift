@@ -297,6 +297,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case serviceLocalCANone = "service.localCANone"
     case serviceLocalCAImported = "service.localCAImported"
     case serviceLocalCANote = "service.localCANote"
+    case serviceLocalFileSecrets = "service.localFileSecrets"
     case errorConfiguration = "error.configuration"
     case revokedTitle = "revoked.title"
     case revokedBody = "revoked.body"
@@ -737,6 +738,7 @@ enum L10n {
     static let serviceLocalCANone = L10nKey.serviceLocalCANone
     static let serviceLocalCAImported = L10nKey.serviceLocalCAImported
     static let serviceLocalCANote = L10nKey.serviceLocalCANote
+    static let serviceLocalFileSecrets = L10nKey.serviceLocalFileSecrets
     static let errorConfiguration = L10nKey.errorConfiguration
     static let revokedTitle = L10nKey.revokedTitle
     static let revokedBody = L10nKey.revokedBody
