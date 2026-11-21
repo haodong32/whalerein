@@ -10,6 +10,7 @@ struct SettingsView: View {
     let operations: OperationRecoveryModel?
     let cloud: CloudSignInModel?
     let dataPath: String
+    let serviceSelection: ServiceSelectionContext
     let reasoningVisible: Bool
     /// Returns a typed error when the preference could not be saved.
     let setReasoningVisible: (Bool) -> AppErrorCode?
@@ -150,7 +151,7 @@ struct SettingsView: View {
 
 
                 Section {
-                    ServiceSelectionView(showsStandaloneCA: true)
+                    ServiceSelectionView(showsStandaloneCA: true, context: serviceSelection)
                 }
 
                 if let cloud = cloud {

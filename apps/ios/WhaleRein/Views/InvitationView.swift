@@ -4,7 +4,9 @@
 import SwiftUI
 
 struct InvitationView: View {
-    @Environment(AppShellModel.self) private var model
+    let pairing: PairingModel
+    let serviceSelection: ServiceSelectionContext
+    var onDismiss: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     var isModal = false
 
@@ -12,12 +14,12 @@ struct InvitationView: View {
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
-        @Bindable var pairing = model.pairing
+        @Bindable var pairing = pairing
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
-                ServiceSelectionView()
+                ServiceSelectionView(context: serviceSelection)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(L10n.invitationFieldPlaceholder.key)
@@ -133,7 +135,7 @@ struct InvitationView: View {
             if isModal {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(L10n.commonClose.key) {
-                        model.dismissInvitationSheet()
+                        onDismiss()
                         dismiss()
                     }
                     .accessibilityIdentifier("invitation.close")
@@ -173,7 +175,7 @@ struct InvitationView: View {
     }
 
     private var effectiveErrorKey: L10nKey? {
-        pasteboardError ?? model.pairing.errorKey
+        pasteboardError ?? pairing.errorKey
     }
 
     private func statusText(_ key: L10nKey) -> some View {
@@ -189,7 +191,7 @@ struct InvitationView: View {
             pasteboardError = .invitationPastedNothing
             return
         }
-        model.pairing.paste(value)
+        pairing.paste(value)
     }
 }
 

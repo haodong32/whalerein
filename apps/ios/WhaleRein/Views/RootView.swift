@@ -12,13 +12,12 @@ import SwiftUI
 struct RootView: View {
     /// The shell injects its model and runtime directly; only the remaining
     /// feature views still read the environment while they migrate.
-    let model: AppShellModel
+    let app: AppShellModel
     let runtime: AppRuntime
     @Environment(\.scenePhase) private var scenePhase
     @State private var availableWidth: CGFloat = 0
 
     var body: some View {
-        @Bindable var app = model
         ZStack {
             content
             if app.isPrivacyShieldVisible {
@@ -45,6 +44,7 @@ struct RootView: View {
                 operations: app.operationRecovery,
                 cloud: app.cloudSignIn,
                 dataPath: app.dataDirectory.path,
+                serviceSelection: serviceSelection,
                 reasoningVisible: app.reasoningVisible,
                 setReasoningVisible: { app.setReasoningVisible($0) },
                 onSignOutCloud: { Task { await app.signOutCloud() } },
@@ -56,7 +56,11 @@ struct RootView: View {
         }
         .sheet(isPresented: sheet(.invitation)) {
             NavigationStack {
-                InvitationView(isModal: true)
+                InvitationView(
+                    pairing: app.pairing,
+                    serviceSelection: serviceSelection,
+                    onDismiss: { app.dismissInvitationSheet() }
+                )
             }
         }
         .sheet(isPresented: sheet(.sessionSwitcher)) {
@@ -72,12 +76,26 @@ struct RootView: View {
         #endif
     }
 
+    private var serviceSelection: ServiceSelectionContext {
+        ServiceSelectionContext(
+            configuration: app.configuration,
+            activeInstance: app.activeInstance,
+            actions: ServiceSelectionActions(
+                switchToService: { await app.switchToService($0) },
+                enableLocal: { await app.enableLocal(pem: $0) },
+                removeLocalCA: { await app.removeLocalCA() },
+                importStandaloneCA: { await app.importStandaloneCA($0) },
+                removeStandaloneCA: { await app.removeStandaloneCA() }
+            )
+        )
+    }
+
     private var switcherModels: SessionSwitcherModels {
         SessionSwitcherModels(
-            hosts: model.hostList,
-            sessions: model.sessionList,
-            management: model.sessionManagement,
-            currentConversation: model.conversation.map {
+            hosts: app.hostList,
+            sessions: app.sessionList,
+            management: app.sessionManagement,
+            currentConversation: app.conversation.map {
                 SessionContext(hostId: $0.hostId, sessionId: $0.sessionId)
             }
         )
@@ -85,12 +103,12 @@ struct RootView: View {
 
     private var switcherActions: SessionSwitcherActions {
         SessionSwitcherActions(
-            refresh: { await model.refreshSwitcher() },
-            selectHost: { await model.selectHostInSwitcher($0) },
-            selectSession: { model.selectSessionInSwitcher($0) },
-            openConversation: { model.openConversation(hostId: $0, session: $1) },
-            addHost: { model.openManualPairing() },
-            close: { model.dismissSheet() }
+            refresh: { await app.refreshSwitcher() },
+            selectHost: { await app.selectHostInSwitcher($0) },
+            selectSession: { app.selectSessionInSwitcher($0) },
+            openConversation: { app.openConversation(hostId: $0, session: $1) },
+            addHost: { app.openManualPairing() },
+            close: { app.dismissSheet() }
         )
     }
 
@@ -109,20 +127,24 @@ struct RootView: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.isRevoked {
-            RevokedDeviceView(app: model)
-        } else if model.isPaired {
+        if app.isRevoked {
+            RevokedDeviceView(app: app)
+        } else if app.isPaired {
             pairedRoot
-        } else if let cloud = model.cloudSignIn, !model.prefersInvitationAfterDeviceReset {
+        } else if let cloud = app.cloudSignIn, !app.prefersInvitationAfterDeviceReset {
             // Cloud instances use the official hosted sign-in and computer
             // directory; the self-hosted invitation flow remains reachable
             // from the welcome surface. An explicit local forget/revoke
             // returns to the invitation flow so the reset is visible.
-            CloudSignInRootView(cloud: cloud) {
-                model.openManualPairing()
+            CloudSignInRootView(cloud: cloud, serviceSelection: serviceSelection) {
+                app.openManualPairing()
             }
         } else {
-            InvitationView()
+            InvitationView(
+                pairing: app.pairing,
+                serviceSelection: serviceSelection,
+                onDismiss: { app.dismissInvitationSheet() }
+            )
         }
     }
 
@@ -150,7 +172,7 @@ struct RootView: View {
                     if !showsSidebar {
                         ToolbarItem(placement: .topBarLeading) {
                             Button {
-                                model.showSessionSwitcher()
+                                app.showSessionSwitcher()
                             } label: {
                                 Image(systemName: "sidebar.left")
                             }
@@ -199,18 +221,18 @@ struct RootView: View {
 
     @ViewBuilder
     private var conversationContent: some View {
-        if let conversation = model.conversation {
+        if let conversation = app.conversation {
             ConversationView(
                 model: conversation,
-                reasoningVisible: model.reasoningVisible,
-                isCached: model.isOfflineCached,
-                isCurrent: { model.conversation === conversation }
+                reasoningVisible: app.reasoningVisible,
+                isCached: app.isOfflineCached,
+                isCurrent: { app.conversation === conversation }
             )
                 // Selecting a different session replaces the conversation and
                 // must not inherit the previous transcript's scroll position.
                 .id(ObjectIdentifier(conversation))
         } else {
-            ConversationRootPlaceholderView(app: model)
+            ConversationRootPlaceholderView(app: app)
         }
     }
 }
