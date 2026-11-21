@@ -116,3 +116,38 @@ enum ContentProvenance: Equatable, Sendable {
     case confirmed
     case cached
 }
+
+/// Question facet of the conversation: Core-owned batches, the user's review
+/// draft, the answer submission and the truncated-page indicator.
+struct QuestionFacet: Equatable, Sendable {
+    var questions: QuestionsState = .loading
+    var review: QuestionReview?
+    var answer: QuestionAnswerState = .idle
+    var cancelReceipt: QuestionCancelReceipt?
+    var errorKey: L10nKey?
+    var loadingTruncated = false
+}
+
+/// Older-history facet: one one-shot traversal beside the live watch.
+struct HistoryFacet: Equatable, Sendable {
+    struct Prepend: Equatable, Sendable {
+        let id: Int
+        let anchorMessageId: String?
+    }
+
+    var provenance: HistoryProvenance?
+    var loading = false
+    var complete = false
+    var needsFreshTraversal = false
+    var errorKey: L10nKey?
+    var prepend: Prepend?
+}
+
+/// Streaming preview of the reply currently being generated, plus the typed
+/// activity rows that will be replaced by committed content.
+struct PreviewFacet: Equatable, Sendable {
+    var text: String?
+    var attemptId: String?
+    var reasoning: String?
+    var toolActivities: [ToolActivity] = []
+}

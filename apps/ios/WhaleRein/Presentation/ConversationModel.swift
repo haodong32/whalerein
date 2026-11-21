@@ -12,6 +12,8 @@
 import Foundation
 import Observation
 
+typealias ConversationHistoryPrepend = HistoryFacet.Prepend
+
 struct ConversationScrollRequest: Equatable, Sendable {
     let id: Int
     let animated: Bool
@@ -42,20 +44,79 @@ final class ConversationModel {
     var messages: [ConversationMessage] { state.messages }
     var approvals: [Approval] { state.approvals }
     /// Core-owned question facet. Only `current` may establish an empty list.
-    private(set) var questions: QuestionsState = .loading
-    private(set) var questionReview: QuestionReview?
-    private(set) var questionAnswerState: QuestionAnswerState = .idle
-    private(set) var questionCancelReceipt: QuestionCancelReceipt?
-    private(set) var questionErrorKey: L10nKey?
     /// Exact approval status refreshes keyed by the original approval identity.
     private(set) var approvalStatusRefresh: [String: ApprovalStatusRefresh] = [:]
-    private(set) var isLoadingTruncatedQuestions = false
-    private(set) var previewText: String?
-    private(set) var previewAttemptId: String?
     /// The one business state of this screen. Every dimension below projects
     /// from it; the legacy property names stay read-only for existing views and
     /// are removed once each view is rewritten.
     private(set) var state = ConversationState()
+
+    var questions: QuestionsState {
+        get { state.question.questions }
+        set { state.question.questions = newValue }
+    }
+    var questionReview: QuestionReview? {
+        get { state.question.review }
+        set { state.question.review = newValue }
+    }
+    var questionAnswerState: QuestionAnswerState {
+        get { state.question.answer }
+        set { state.question.answer = newValue }
+    }
+    var questionCancelReceipt: QuestionCancelReceipt? {
+        get { state.question.cancelReceipt }
+        set { state.question.cancelReceipt = newValue }
+    }
+    var questionErrorKey: L10nKey? {
+        get { state.question.errorKey }
+        set { state.question.errorKey = newValue }
+    }
+    var isLoadingTruncatedQuestions: Bool {
+        get { state.question.loadingTruncated }
+        set { state.question.loadingTruncated = newValue }
+    }
+
+    var historyProvenance: HistoryProvenance? {
+        get { state.historyFacet.provenance }
+        set { state.historyFacet.provenance = newValue }
+    }
+    var isLoadingOlderHistory: Bool {
+        get { state.historyFacet.loading }
+        set { state.historyFacet.loading = newValue }
+    }
+    var historyComplete: Bool {
+        get { state.historyFacet.complete }
+        set { state.historyFacet.complete = newValue }
+    }
+    var historyNeedsFreshTraversal: Bool {
+        get { state.historyFacet.needsFreshTraversal }
+        set { state.historyFacet.needsFreshTraversal = newValue }
+    }
+    var historyErrorKey: L10nKey? {
+        get { state.historyFacet.errorKey }
+        set { state.historyFacet.errorKey = newValue }
+    }
+    var historyPrepend: HistoryFacet.Prepend? {
+        get { state.historyFacet.prepend }
+        set { state.historyFacet.prepend = newValue }
+    }
+
+    var previewText: String? {
+        get { state.previewFacet.text }
+        set { state.previewFacet.text = newValue }
+    }
+    var previewAttemptId: String? {
+        get { state.previewFacet.attemptId }
+        set { state.previewFacet.attemptId = newValue }
+    }
+    var reasoningPreviewText: String? {
+        get { state.previewFacet.reasoning }
+        set { state.previewFacet.reasoning = newValue }
+    }
+    var liveToolActivities: [ToolActivity] {
+        get { state.previewFacet.toolActivities }
+        set { state.previewFacet.toolActivities = newValue }
+    }
 
     var connection: ConnectionStatus { state.connection }
     var loadState: LoadState {
@@ -113,24 +174,8 @@ final class ConversationModel {
 
     // Older committed history is an independent one-shot read; it never
     // replaces the single live watch.
-    private(set) var historyProvenance: HistoryProvenance?
-    private(set) var isLoadingOlderHistory = false
-    private(set) var historyComplete = false
-    private(set) var historyNeedsFreshTraversal = false
-    private(set) var historyErrorKey: L10nKey?
-    /// Increments after a page is prepended so the view can restore the row
-    /// that was visible before the insertion.
-    private(set) var historyPrepend: HistoryPrepend?
-    private(set) var reasoningPreviewText: String?
-    /// Live typed activity rows that preview their committed replacement.
-    private(set) var liveToolActivities: [ToolActivity] = []
     /// Verified attachment transfers for committed attachment blocks.
     let attachments: AttachmentTransferModel
-
-    struct HistoryPrepend: Equatable, Sendable {
-        let id: Int
-        let anchorMessageId: String?
-    }
 
     private var historyContinuation: String?
     private var historyProjection: String?
@@ -1547,7 +1592,7 @@ final class ConversationModel {
         historyComplete = page.complete
         historyErrorKey = nil
         if !prepended.isEmpty {
-            historyPrepend = HistoryPrepend(
+            historyPrepend = HistoryFacet.Prepend(
                 id: (historyPrepend?.id ?? 0) + 1,
                 anchorMessageId: anchor
             )

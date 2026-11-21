@@ -22,6 +22,9 @@ struct ConversationState: Equatable, Sendable {
     var provenance: ContentProvenance = .confirmed
     var messages: [ConversationMessage] = []
     var approvals: [Approval] = []
+    var question = QuestionFacet()
+    var historyFacet = HistoryFacet()
+    var previewFacet = PreviewFacet()
     /// Terminal receipt of the most recent command, for the status row.
     var lastReceipt: CommandReceipt?
     /// Which command the last receipt belongs to (send or stop).
