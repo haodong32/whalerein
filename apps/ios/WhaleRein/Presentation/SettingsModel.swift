@@ -62,8 +62,41 @@ final class SettingsModel {
         appVersion = service.appVersion
     }
 
+    /// Opens the confirmation dialog for `action`.
+    func requestConfirmation(_ action: SettingsAction) {
+        state = SettingsReduce.reduce(state, .confirmationRequested(action))
+    }
+
+    func cancelConfirmation() {
+        state = SettingsReduce.reduce(state, .confirmationCancelled)
+    }
+
+    /// Runs the action the user just confirmed.
+    func confirmPendingAction() async {
+        guard let action = state.pendingConfirmation else { return }
+        await perform(action)
+    }
+
+    /// Prepares the redacted log snapshot on demand. Nothing leaves the device
+    /// until the user picks a share destination.
+    func prepareLogExport() {
+        state = SettingsReduce.reduce(state, .logExportStarted)
+        if let url = try? AppLog.shared.exportSnapshot() {
+            state = SettingsReduce.reduce(state, .logExportReady(url))
+        } else {
+            state = SettingsReduce.reduce(state, .logExportFailed)
+        }
+    }
+
+    func dismissLogExport() {
+        state = SettingsReduce.reduce(state, .logExportDismissed)
+    }
+
     func perform(_ confirmation: Confirmation) async {
-        let action: SettingsAction = confirmation == .forget ? .forgetDevice : .revokeDevice
+        await perform(confirmation == .forget ? .forgetDevice : .revokeDevice)
+    }
+
+    func perform(_ action: SettingsAction) async {
         guard !isBusy else { return }
         state = SettingsReduce.reduce(state, .confirmationRequested(action))
         state = SettingsReduce.reduce(state, .performStarted(action))

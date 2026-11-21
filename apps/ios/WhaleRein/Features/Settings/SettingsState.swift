@@ -40,6 +40,11 @@ enum LogExportPhase: Equatable, Sendable {
     case preparing
     case ready(URL)
     case failed
+
+    var fileURL: URL? {
+        if case .ready(let url) = self { return url }
+        return nil
+    }
 }
 
 struct SettingsState: Equatable, Sendable {

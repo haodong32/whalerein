@@ -12,6 +12,7 @@ enum SettingsEvent: Equatable, Sendable {
     case logExportStarted
     case logExportReady(URL)
     case logExportFailed
+    case logExportDismissed
 }
 
 enum SettingsReduce {
@@ -53,6 +54,9 @@ enum SettingsReduce {
 
         case .logExportFailed:
             state.logExport = .failed
+
+        case .logExportDismissed:
+            state.logExport = .idle
         }
         return state
     }

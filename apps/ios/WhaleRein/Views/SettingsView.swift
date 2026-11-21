@@ -6,10 +6,10 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
-    @State private var confirmation: SettingsModel.Confirmation?
+    /// The destructive action awaiting confirmation, owned by the model.
+    private var pendingAction: SettingsAction? { app.settings.state.pendingConfirmation }
     @State private var reasoningErrorKey: L10nKey?
     @State private var showDiagnostics = false
-    @State private var logExportURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -73,7 +73,7 @@ struct SettingsView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        confirmation = .forget
+                        app.settings.requestConfirmation(.forgetDevice)
                     } label: {
                         Text(L10n.settingsForget.key)
                     }
@@ -81,7 +81,7 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.forget")
 
                     Button(role: .destructive) {
-                        confirmation = .revoke
+                        app.settings.requestConfirmation(.revokeDevice)
                     } label: {
                         Text(L10n.settingsRevoke.key)
                     }
@@ -118,17 +118,18 @@ struct SettingsView: View {
                 SettingsOperationsView()
 
                 Section(L10n.settingsLogs.key) {
-                    if let logExportURL {
-                        ShareLink(item: logExportURL) {
+                    if let url = app.settings.state.logExport.fileURL {
+                        ShareLink(item: url) {
                             Text(L10n.settingsShareLogs.key)
                         }
                         .accessibilityIdentifier("settings.shareLogs")
                     } else {
                         Button {
-                            logExportURL = try? AppLog.shared.exportSnapshot()
+                            app.settings.prepareLogExport()
                         } label: {
                             Text(L10n.settingsExportLogs.key)
                         }
+                        .disabled(app.settings.state.logExport == .preparing)
                         .accessibilityIdentifier("settings.exportLogs")
                     }
                     Text(L10n.settingsExportLogsNote.key)
@@ -209,19 +210,24 @@ struct SettingsView: View {
                 DiagnosticsView()
             }
             .alert(
-                confirmation == .revoke ? L10n.settingsRevokeConfirm.string : L10n.settingsForgetConfirm.string,
+                pendingAction == .revokeDevice
+                    ? L10n.settingsRevokeConfirm.string
+                    : L10n.settingsForgetConfirm.string,
                 isPresented: Binding(
-                    get: { confirmation != nil },
-                    set: { if !$0 { confirmation = nil } }
+                    get: { pendingAction != nil },
+                    set: { if !$0 { app.settings.cancelConfirmation() } }
                 )
             ) {
                 Button(L10n.commonCancel.key, role: .cancel) {
-                    confirmation = nil
+                    app.settings.cancelConfirmation()
                 }
-                Button(confirmation == .revoke ? L10n.settingsRevoke.string : L10n.settingsForget.string, role: .destructive) {
-                    guard let confirmation else { return }
-                    self.confirmation = nil
-                    Task { await app.settings.perform(confirmation) }
+                Button(
+                    pendingAction == .revokeDevice
+                        ? L10n.settingsRevoke.string
+                        : L10n.settingsForget.string,
+                    role: .destructive
+                ) {
+                    Task { await app.settings.confirmPendingAction() }
                 }
                 .accessibilityIdentifier("settings.confirm")
             }
