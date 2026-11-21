@@ -40,14 +40,7 @@ final class AdaptiveLayoutUITests: WhaleReinUITestCase {
         // keyboard presentation is covered by the dedicated keyboard tests;
         // typing here can stall simulator UI automation on CI.
         let field = waitFor("composer.field")
-        // The sidebar's host menu leaves a transient reparenting view behind on
-        // first layout; wait for the composer to become touchable instead of
-        // sampling immediately.
-        let hittable = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "hittable == true"),
-            object: field
-        )
-        XCTAssertEqual(XCTWaiter().wait(for: [hittable], timeout: 10), .completed)
+        XCTAssertTrue(field.isHittable)
 
         XCUIDevice.shared.orientation = .portrait
         let sidebarGone = XCTNSPredicateExpectation(
