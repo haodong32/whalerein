@@ -456,6 +456,18 @@ struct CloudSignInModelTests {
 @Suite("Cloud AppModel wiring")
 @MainActor
 struct CloudAppModelTests {
+    private func cloudInstance(_ directory: URL) -> AppInstance {
+        AppInstance(
+            id: "cloud-production",
+            service: .cloud,
+            environment: .production,
+            dataDirectory: directory,
+            configPath: directory.appendingPathComponent("instance.toml"),
+            hasStandaloneCA: false,
+            standaloneCAPath: nil
+        )
+    }
+
     @Test("fixture launch restores the Cloud account and directory")
     func restoresCloudSession() async {
         let options = testLaunchOptions(["-ui-fixtures", "-ui-test-reset", "-ui-cloud-signed-in"])
@@ -468,7 +480,8 @@ struct CloudAppModelTests {
             service: service,
             preferences: PreferencesStore(directory: directory),
             dataDirectory: directory,
-            options: options
+            options: options,
+            activeInstance: cloudInstance(directory)
         )
 
         #expect(app.cloudSignIn != nil)
@@ -498,7 +511,8 @@ struct CloudAppModelTests {
             service: service,
             preferences: preferences,
             dataDirectory: directory,
-            options: options
+            options: options,
+            activeInstance: cloudInstance(directory)
         )
         await app.launchRestore()
         await waitUntil { app.cloudSignIn?.phase.isSignedIn == true }
@@ -520,7 +534,8 @@ struct CloudAppModelTests {
             service: FixtureSessionService(options: options, draftStore: InMemoryDraftStore()),
             preferences: PreferencesStore(directory: directory),
             dataDirectory: directory,
-            options: options
+            options: options,
+            activeInstance: cloudInstance(directory)
         )
         await app.launchRestore()
         await waitUntil { app.cloudSignIn?.phase.isSignedIn == true }

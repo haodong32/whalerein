@@ -44,10 +44,6 @@ enum ScenarioCatalog {
         return arguments[index + 1]
     }
 
-    static func hasScenarioArgument(_ arguments: [String]) -> Bool {
-        arguments.contains("-ui-scenario")
-    }
-
     // MARK: - Onboarding
 
     private static var onboarding: [Scenario] {

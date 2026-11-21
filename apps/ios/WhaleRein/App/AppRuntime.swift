@@ -86,15 +86,12 @@ final class AppRuntime {
         ))
         #if DEBUG
         let scenario = ScenarioCatalog.resolve(arguments: arguments)
-        let forceScenario = ScenarioCatalog.hasScenarioArgument(arguments)
         #else
         let scenario = Scenario.normal
-        let forceScenario = false
         #endif
         let group = makeGroup(
             scenario: scenario,
             arguments: arguments,
-            forceScenario: forceScenario,
             fileManager: fileManager
         )
         return AppRuntime(environment: group.environment, legacy: group.model)
@@ -107,7 +104,6 @@ final class AppRuntime {
         let group = Self.makeGroup(
             scenario: scenario,
             arguments: [],
-            forceScenario: true,
             fileManager: .default
         )
         environment = group.environment
@@ -121,13 +117,10 @@ final class AppRuntime {
     static func makeGroup(
         scenario: Scenario,
         arguments: [String],
-        forceScenario: Bool,
         fileManager: FileManager
     ) -> RuntimeGroup {
         #if DEBUG
-        let options = forceScenario
-            ? LaunchOptions(scenarioOnly: scenario, arguments: arguments)
-            : LaunchOptions(scenario: scenario, arguments: arguments)
+        let options = LaunchOptions(scenario: scenario, arguments: arguments)
         #else
         let options = LaunchOptions()
         #endif
