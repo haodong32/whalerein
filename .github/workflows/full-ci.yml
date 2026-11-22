@@ -282,6 +282,11 @@ jobs:
       - name: Add Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
+      - name: Build the Android test APK
+        run: |
+          cd apps/android
+          ./gradlew :app:assembleNoGmsDebugAndroidTest --console=plain --stacktrace
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
