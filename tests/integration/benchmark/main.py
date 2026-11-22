@@ -246,7 +246,9 @@ class Fixture:
         # ciphertext directory. Bounds cover the declared bounded workload (four
         # history pages plus one chunked attachment) so the fixture quota does
         # not become the variable under measurement.
-        self.scenario.configure_relay_directory(max_objects=64, max_active_uploads=8)
+        self.scenario.configure_relay_directory(
+            max_objects=1024, max_active_uploads=32, max_host_bytes=512 << 20, max_node_bytes=1 << 30,
+        )
         self.run.session = self.scenario
         self.scenario.start_dsh()
         before = time.monotonic_ns()
