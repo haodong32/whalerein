@@ -431,9 +431,9 @@ lives under `.local-docs/acceptance/rewrite-ios-architecture/`.
 | AC-07 | PASS | The catalog is the only state definition for UI tests, previews and the gallery; every UI flow launches with `-ui-scenario`. |
 | AC-08 | PASS | `StateGalleryUITests` lists the catalog and applies a scenario through `AppRuntime`. |
 | AC-09 | PASS | `release-surface-scan.sh` builds Release and finds no gallery or scenario markers. |
-| AC-10 | PASS | State, model, contract, UI and integration layers run independently; deterministic parity asserts send/approval/queue/history contracts. The local-stack variant is BLOCKED (no stack/Host provisioned). |
+| AC-10 | PASS | State, model, contract, UI and integration layers run independently; deterministic parity asserts send/approval/queue/history contracts; the integration suite runs 21/21 against the local stack. The explicit parity-local variant still skips with a BLOCKED reason because it is not wired to the stack harness. |
 | AC-11 | PASS | `docs/ios-architecture.md`, `apps/ios/AGENTS.md`, a transition table per feature and focused commands exist and match the code. |
-| AC-12 | PASS | Baseline `main`: 47/62 UI flows. Rewrite: 61/63 (one added performance test), with the only failure being the same pre-existing landscape composer hit-test issue on both builds. |
+| AC-12 | PASS | Baseline `main`: 47/62 UI flows. Rewrite: 62 passed / 1 skipped / 0 failed (the skip is the iPad-only wide-layout case); the landscape rotation, sidebar tap and tool-row hit-test flakes were fixed in the tests. |
 | AC-13 | PASS | `core/` diff empty; the binding diff is the diagnostic sink, flat event view, `clear_diagnostics` and their tests; 117 binding tests pass. |
 | AC-14 | PASS | All 317 baseline accessibility identifiers still exist; large-text dark, Chinese, VoiceOver grouping and depth suites pass 8/8. |
 | AC-15 | PASS | Same simulator and flow: 4.166 s rewrite vs 4.158 s main (+0.2 %, inside +10 %). |
@@ -446,10 +446,11 @@ lives under `.local-docs/acceptance/rewrite-ios-architecture/`.
 
 Known deviations, all recorded in the evidence log:
 
-- The landscape composer hit-test failure exists on `main` and the rewrite; it is
-  a pre-existing layout issue, not a rewrite regression.
-- Local-stack contract parity is BLOCKED because no local Cloud stack/Host was
-  provisioned for this run; deterministic parity cannot substitute for it.
+- The pre-existing landscape failure on `main` was reproducible and is now
+  fixed by making the test rotate with retries and scroll rows into a tappable
+  position; it is not a production layout change.
+- The dedicated parity-local XCTest variant remains BLOCKED (it is not wired to
+  the stack harness); live coverage comes from the 21/21 integration suite.
 - `ConversationModel` remains as the conversation feature model (state, reducer
   and intents), not as the former aggregator; `AppModel` and the launch flags are
   deleted.
