@@ -2640,7 +2640,7 @@ mod tests {
                 }
                 ("GET", "/api/v1/client/me") => {
                     counted_me.fetch_add(1, Ordering::SeqCst);
-                    assert!(request.headers.get("authorization").is_some());
+                    assert!(request.headers.contains_key("authorization"));
                     MockResponse::json(
                         200,
                         &json!({
