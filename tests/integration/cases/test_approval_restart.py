@@ -74,13 +74,17 @@ def test_offline_host_decision_is_not_approved_and_retry_is_explicit(scenario):
     wait_online(device, scenario.host)
     code, values = _resolve(device, card)
     if code == 0:
-        assert values[-1]["data"]["status"] == "succeeded"
+        # Approval resolution is asynchronous: the Host may accept the command
+        # and report host_accepted before the durable decision lands. Both
+        # statuses are successful; the waits below prove the terminal effect.
+        assert values[-1]["data"]["status"] in {"host_accepted", "succeeded"}
     else:
         # If Access had already handed the offline submission to the restarted
         # Host, the retry must report the terminal already-resolved decision.
         assert code == 8
         assert values[-1]["error"]["code"] == "approval_already_resolved"
-    assert _resolve_count(scenario) == before + 1
+    wait(lambda: scenario.dsh.approval(pending["approval_id"])["state"] == "approved")
+    wait(lambda: _resolve_count(scenario) == before + 1)
     assert scenario.dsh.approval(pending["approval_id"])["state"] == "approved"
 
 
