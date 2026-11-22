@@ -16,7 +16,7 @@ import { ProtoCodec } from '../../src/protocol.js'
 import { silentLogger } from '../../src/log.js'
 import { hex, sha256Text } from '../../src/security/digest.js'
 import { FakeBroker } from './fake-mqtt.js'
-import { DeviceClient, FakeAccessSimulator } from './wire-client.js'
+import { DeviceClient, FakeAccessSimulator, MemoryRelayObjects } from './wire-client.js'
 
 export function pairingTokenHash(token) {
   return hex(sha256Text(token))
@@ -51,7 +51,8 @@ export async function startHarness(options = {}) {
   const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), 'whalerein-host-'))
   const codec = new ProtoCodec(options.protoPath)
   const broker = new FakeBroker({ maxPacketBytes: options.maxPacketBytes ?? Infinity })
-  const access = new FakeAccessSimulator({ broker, codec, hostId, now })
+  const relay = new MemoryRelayObjects()
+  const access = new FakeAccessSimulator({ broker, codec, hostId, now, relay })
   await access.ready
   const adapter = options.adapter ?? new TestSource({ now, sessions: options.sessions ?? [] })
   const config = { ...testConfig({ host_id: hostId, host_token: hostToken, state_dir: stateDir }), ...options.config, stateDir }
@@ -63,6 +64,7 @@ export async function startHarness(options = {}) {
     logger: silentLogger,
     now,
     codec,
+    relayClient: relay,
   })
   const host = new HostRuntime({ credentials: new MemoryHostCredentials(), config, adapter, access: mqtt, logger: silentLogger, now, codec })
   await host.start()

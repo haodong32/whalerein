@@ -132,6 +132,8 @@ func TestMetricsExposeExpectedSeriesWithoutIdentityLabels(t *testing.T) {
 	metrics.ObserveHostRequest(2*time.Millisecond, false)
 	metrics.RouteError()
 	metrics.EventDropped()
+	metrics.LiveDropped("disconnected")
+	metrics.LiveDropped("not-a-reason")
 	metrics.SetConnected(2, 3)
 	metrics.ObserveRevocation(100 * time.Millisecond)
 	metrics.PresenceEvent("sys", "offline")
@@ -152,6 +154,12 @@ func TestMetricsExposeExpectedSeriesWithoutIdentityLabels(t *testing.T) {
 	}
 	if count := testutil.CollectAndCount(metrics.RevocationLatency); count != 1 {
 		t.Fatalf("revocation metric count = %d", count)
+	}
+	if value := testutil.ToFloat64(metrics.LiveDrops.WithLabelValues("disconnected")); value != 1 {
+		t.Fatalf("live drops = %v", value)
+	}
+	if value := testutil.ToFloat64(metrics.LiveDrops.WithLabelValues("publish")); value != 1 {
+		t.Fatalf("normalized live drops = %v", value)
 	}
 	if value := testutil.ToFloat64(metrics.DevicePresenceEvents.WithLabelValues("sys", "offline")); value != 1 {
 		t.Fatalf("sys offline presence = %v", value)
@@ -211,6 +219,7 @@ func TestNilMetricsAcceptObservationsSafely(t *testing.T) {
 	metrics.ObserveHostRequest(time.Second, true)
 	metrics.RouteError()
 	metrics.EventDropped()
+	metrics.LiveDropped("publish")
 	metrics.SetConnected(1, 1)
 	metrics.ObserveRevocation(time.Second)
 }

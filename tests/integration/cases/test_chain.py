@@ -105,6 +105,7 @@ def test_answer_reads_stdin_and_rejects_unusable_input(scenario, paired_device, 
     assert paired_device.call("session", "question", "list", "--session", session_id)["batches"] == []
 
 
+@pytest.mark.relay_directory
 def test_question_payload_pages_and_oversized_detail(scenario, paired_device, session_id):
     """Large complete question pages keep every batch and oversized detail is explicitly unavailable."""
     scenario.dsh.process.control("request_question_pages", session_id=session_id)
@@ -814,6 +815,7 @@ def test_delivery_queue_while_running(scenario, paired_device, session_id):
     assert snapshot["summary"]["running"]
     assert snapshot["summary"]["queuedPrompts"] == 1
     assert not any(event["type"] == "user/message" for event in snapshot["events"])
+@pytest.mark.relay_directory
 def test_queue_edit_encoded_envelope_budget_and_complete_response(scenario, paired_device):
     """Queue edit enforces the encrypted request boundary and refuses an oversized complete response without mutating source."""
     import json
@@ -829,7 +831,9 @@ def test_queue_edit_encoded_envelope_budget_and_complete_response(scenario, pair
     first,second=[item["item_id"] for item in queue["items"]]
     estimate=subprocess.run(["node",str(ROOT / "tests/integration/drivers/delivery/budget-size.mjs"),scenario.host,paired_device.identity["device_id"],session,first],cwd=ROOT,capture_output=True,text=True,timeout=60,check=True)
     budget=json.loads(estimate.stdout)
-    assert budget["sizes"] == [budget["wire_limit"]-1,budget["wire_limit"],budget["wire_limit"]+1]
+    assert budget["sizes"][0] < budget["sizes"][1] <= budget["wire_limit"] < budget["sizes"][2]
+    assert budget["reference_fits_packet"], "a reference must fit one complete packet"
+    assert budget["over"] == budget["sizes"][2]
     executable=ROOT / "target/debug/examples/delivery_budget_driver"
     env=paired_device.env()
     before=scenario.dsh.process.control("gx_effect_counts")["updatePendingQueue"]
@@ -849,6 +853,7 @@ def test_queue_edit_encoded_envelope_budget_and_complete_response(scenario, pair
     assert scenario.dsh.process.control("gx_effect_counts")["updatePendingQueue"] == before+3
 
 
+@pytest.mark.relay_directory
 def test_queue_complete_response_exact_encrypted_boundary(scenario, paired_device):
     """The full encrypted queue result is accepted through the transport limit without truncation."""
     import json
@@ -913,7 +918,7 @@ def test_queue_denied_for_unpaired_and_revoked_token(scenario, paired_device):
     query=f"""SELECT json_build_object(
       'requestId',request_id,'hostId',host_id,'deviceId',device_id,'commandId',command_id,
       'kind',kind,'protocolVersion',protocol_version,'channelId',channel_id,
-      'clientTransportVersion',client_transport_version,'body',encode(request_body,'base64'),
+      'relayVersion',relay_version,'body',encode(request_body,'base64'),
       'payloadDigest',encode(payload_digest,'base64')) FROM {scenario.schema}.requests
       WHERE kind=2 AND device_id='{paired_device.identity["device_id"]}' ORDER BY created_at DESC LIMIT 1"""
     row=subprocess.run(["psql","-h","127.0.0.1","-p","55432","-U","postgres","-d","whalerein_test","-tAc",query],capture_output=True,text=True,timeout=5,check=True)
@@ -956,6 +961,7 @@ def test_pending_queue_chain(scenario, paired_device):
     assert paired_device.call("session", "queue", "list", "--session", session)["items"] == []
 
 
+@pytest.mark.relay_directory
 def test_delivery_encoded_envelope_budget(scenario, paired_device, session_id):
     """Encrypted delivery immediately below, at, and above the forwarded envelope budget reaches the source only within budget."""
     import json
@@ -971,7 +977,9 @@ def test_delivery_encoded_envelope_budget(scenario, paired_device, session_id):
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=True,
     )
     budget = json.loads(estimate.stdout)
-    assert budget["sizes"] == [budget["wire_limit"] - 1, budget["wire_limit"], budget["wire_limit"] + 1]
+    assert budget["sizes"][0] < budget["sizes"][1] <= budget["wire_limit"] < budget["sizes"][2]
+    assert budget["reference_fits_packet"], "a reference must fit one complete packet"
+    assert budget["over"] == budget["sizes"][2]
     executable = ROOT / "target/debug/examples/delivery_budget_driver"
     env = paired_device.env()
     for offset, expected in [(-1, "succeeded"), (0, "succeeded"), (1, "payload_too_large")]:
@@ -1333,6 +1341,7 @@ def _attachment_row(history, name):
     return rows[0]
 
 
+@pytest.mark.relay_directory
 def test_attachment_history_and_verified_download(scenario, paired_device, session_id):
     """A committed tool-result file and user image are discoverable in history and save exact verified bytes."""
     file_bytes = _fixture_attachment_bytes(2 * 1024 * 1024 + 12345, 7)
@@ -1423,6 +1432,7 @@ def test_attachment_foreign_scope_and_wrong_reference_fail_closed(scenario, pair
     assert list(wrong_host_dir.iterdir()) == []
 
 
+@pytest.mark.relay_directory
 def test_attachment_revocation_fences_in_flight_download_then_regrant_succeeds(scenario, paired_device, session_id):
     """Revoking during a held read fences its result, and a fresh grant can save the same occurrence."""
     data = _fixture_attachment_bytes(512 * 1024, 5)
@@ -1499,6 +1509,7 @@ def test_attachment_total_budget_rejects_before_save(scenario, paired_device, se
 
 
 @pytest.mark.attachment_policy(chunk=8192)
+@pytest.mark.relay_directory
 def test_attachment_configured_chunk_budget_transfers_multipart(scenario, paired_device, session_id):
     """An attachment larger than one configured chunk completes over bounded parts with exact bytes."""
     size = 96 * 1024 + 77

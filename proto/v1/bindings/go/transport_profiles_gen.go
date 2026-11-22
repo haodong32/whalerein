@@ -10,60 +10,51 @@ const TransportProfilesSchema = "whalerein/transport-profiles/v1"
 // DefaultTransportProfile names the packaged default profile.
 const DefaultTransportProfile = "default"
 
+// BrokerPacketLimitBytes is the checked broker PUBLISH ceiling.
+const BrokerPacketLimitBytes uint64 = 1048576
+
 // TransportProfileValues is one validated packaged transport profile.
 type TransportProfileValues struct {
-	Name                  string
-	WireName              string
-	PacketBytes           uint32
-	PacketOverheadBytes   uint32
-	FragmentPayloadBytes  uint32
-	FragmentCount         uint32
-	EnvelopeBytes         uint64
-	BulkConcurrency       uint32
-	ReservedBytes         uint64
-	FragmentIdleTimeoutMs uint32
-	TransferTimeoutMs     uint32
+	Name                string
+	WireName            string
+	PacketBytes         uint32
+	PacketOverheadBytes uint32
+	EnvelopeBytes       uint64
+	BulkConcurrency     uint32
+	ReservedBytes       uint64
+	TransferTimeoutMs   uint32
 }
 
 var transportProfiles = map[string]TransportProfileValues{
 	"default": {
-		Name:                  "default",
-		WireName:              "TRANSPORT_PROFILE_DEFAULT",
-		PacketBytes:           65536,
-		PacketOverheadBytes:   4096,
-		FragmentPayloadBytes:  61440,
-		FragmentCount:         274,
-		EnvelopeBytes:         16777216,
-		BulkConcurrency:       4,
-		ReservedBytes:         33554432,
-		FragmentIdleTimeoutMs: 30000,
-		TransferTimeoutMs:     120000,
+		Name:                "default",
+		WireName:            "TRANSPORT_PROFILE_DEFAULT",
+		PacketBytes:         65536,
+		PacketOverheadBytes: 4096,
+		EnvelopeBytes:       16777216,
+		BulkConcurrency:     4,
+		ReservedBytes:       33554432,
+		TransferTimeoutMs:   120000,
 	},
 	"compact": {
-		Name:                  "compact",
-		WireName:              "TRANSPORT_PROFILE_COMPACT",
-		PacketBytes:           32768,
-		PacketOverheadBytes:   4096,
-		FragmentPayloadBytes:  28672,
-		FragmentCount:         293,
-		EnvelopeBytes:         8388608,
-		BulkConcurrency:       2,
-		ReservedBytes:         8388608,
-		FragmentIdleTimeoutMs: 30000,
-		TransferTimeoutMs:     120000,
+		Name:                "compact",
+		WireName:            "TRANSPORT_PROFILE_COMPACT",
+		PacketBytes:         32768,
+		PacketOverheadBytes: 4096,
+		EnvelopeBytes:       8388608,
+		BulkConcurrency:     2,
+		ReservedBytes:       8388608,
+		TransferTimeoutMs:   120000,
 	},
 	"roomy": {
-		Name:                  "roomy",
-		WireName:              "TRANSPORT_PROFILE_ROOMY",
-		PacketBytes:           131072,
-		PacketOverheadBytes:   8192,
-		FragmentPayloadBytes:  122880,
-		FragmentCount:         274,
-		EnvelopeBytes:         33554432,
-		BulkConcurrency:       8,
-		ReservedBytes:         67108864,
-		FragmentIdleTimeoutMs: 30000,
-		TransferTimeoutMs:     300000,
+		Name:                "roomy",
+		WireName:            "TRANSPORT_PROFILE_ROOMY",
+		PacketBytes:         131072,
+		PacketOverheadBytes: 8192,
+		EnvelopeBytes:       33554432,
+		BulkConcurrency:     8,
+		ReservedBytes:       67108864,
+		TransferTimeoutMs:   300000,
 	},
 }
 
@@ -78,30 +69,22 @@ func TransportProfileValuesFor(name string) (TransportProfileValues, bool) {
 	return profile, ok
 }
 
-func ceilDiv(value, divisor uint64) uint64 {
-	return (value + divisor - 1) / divisor
-}
-
 // ValidateTransportProfile checks the packaged relations for one profile.
 func ValidateTransportProfile(profile TransportProfileValues) error {
-	if profile.PacketBytes <= profile.FragmentPayloadBytes {
-		return fmt.Errorf("transport profile %s: packet budget must exceed the fragment payload", profile.Name)
+	if profile.PacketBytes == 0 || profile.BulkConcurrency == 0 || profile.TransferTimeoutMs == 0 {
+		return fmt.Errorf("transport profile %s: packet budget, bulk concurrency and timeout must be positive", profile.Name)
 	}
-	if uint64(profile.FragmentPayloadBytes)+uint64(profile.PacketOverheadBytes) > uint64(profile.PacketBytes) {
-		return fmt.Errorf("transport profile %s: fragment payload exceeds packetBytes - packetOverheadBytes", profile.Name)
+	if profile.PacketOverheadBytes >= profile.PacketBytes {
+		return fmt.Errorf("transport profile %s: packet overhead must be below the packet budget", profile.Name)
 	}
-	if uint64(profile.FragmentCount) < ceilDiv(profile.EnvelopeBytes, uint64(profile.FragmentPayloadBytes)) {
-		return fmt.Errorf("transport profile %s: fragment count does not cover the envelope", profile.Name)
+	if uint64(profile.PacketBytes) > BrokerPacketLimitBytes {
+		return fmt.Errorf("transport profile %s: packet budget exceeds the broker limit", profile.Name)
+	}
+	if profile.EnvelopeBytes < uint64(profile.PacketBytes) {
+		return fmt.Errorf("transport profile %s: envelope must cover one packet", profile.Name)
 	}
 	if profile.ReservedBytes < profile.EnvelopeBytes {
 		return fmt.Errorf("transport profile %s: reserved bytes do not cover one envelope", profile.Name)
-	}
-	if profile.ReservedBytes < uint64(profile.BulkConcurrency)*uint64(profile.FragmentPayloadBytes) {
-		return fmt.Errorf("transport profile %s: reserved bytes do not cover in-flight fragments", profile.Name)
-	}
-	if profile.FragmentIdleTimeoutMs == 0 || profile.TransferTimeoutMs == 0 ||
-		profile.FragmentIdleTimeoutMs >= profile.TransferTimeoutMs {
-		return fmt.Errorf("transport profile %s: fragment idle timeout must be positive and below the transfer timeout", profile.Name)
 	}
 	return nil
 }

@@ -1,42 +1,34 @@
 {
   "schema": "whalerein/transport-profiles/v1",
-  "comment": "Single packaged transport profile vocabulary shared by Access, Host and Core. Byte limits are encoded bytes. A profile is validated before readiness; invalid relations fail startup or connection setup. Application protocol version stays 1.",
+  "comment": "Single packaged transport profile vocabulary shared by Access, Host and Core. All byte limits are encoded bytes. packetBytes is the largest complete encoded MQTT PUBLISH accepted; envelopeBytes is the largest complete encoded message carried inline or by reference. brokerPacketLimitBytes is the deployment's checked broker PUBLISH ceiling: no profile may exceed it. A profile is validated before readiness; invalid relations fail startup or connection setup. Application protocol version stays 1 and the relay epoch stays 3.",
   "defaultProfile": "default",
+  "brokerPacketLimitBytes": 1048576,
   "profiles": {
     "default": {
       "wireName": "TRANSPORT_PROFILE_DEFAULT",
       "packetBytes": 65536,
       "packetOverheadBytes": 4096,
-      "fragmentPayloadBytes": 61440,
-      "fragmentCount": 274,
       "envelopeBytes": 16777216,
       "bulkConcurrency": 4,
       "reservedBytes": 33554432,
-      "fragmentIdleTimeoutMs": 30000,
       "transferTimeoutMs": 120000
     },
     "compact": {
       "wireName": "TRANSPORT_PROFILE_COMPACT",
       "packetBytes": 32768,
       "packetOverheadBytes": 4096,
-      "fragmentPayloadBytes": 28672,
-      "fragmentCount": 293,
       "envelopeBytes": 8388608,
       "bulkConcurrency": 2,
       "reservedBytes": 8388608,
-      "fragmentIdleTimeoutMs": 30000,
       "transferTimeoutMs": 120000
     },
     "roomy": {
       "wireName": "TRANSPORT_PROFILE_ROOMY",
       "packetBytes": 131072,
       "packetOverheadBytes": 8192,
-      "fragmentPayloadBytes": 122880,
-      "fragmentCount": 274,
       "envelopeBytes": 33554432,
       "bulkConcurrency": 8,
       "reservedBytes": 67108864,
-      "fragmentIdleTimeoutMs": 30000,
       "transferTimeoutMs": 300000
     }
   }

@@ -333,9 +333,10 @@ acl subscribe %d - whalerein/v1/h/%s/request
 acl read %d - whalerein/v1/h/%s/request
 acl write %d - whalerein/v1/h/%s/result
 acl write %d - whalerein/v1/h/%s/event
+acl write %d - whalerein/v1/h/%s/live
 acl subscribe %d - whalerein/v1/h/%s/presence
 acl read %d - whalerein/v1/h/%s/presence
-`, host, revision, revision, host, revision, host, revision, host, revision, host, revision, host, revision, host)
+`, host, revision, revision, host, revision, host, revision, host, revision, host, revision, host, revision, host, revision, host)
 }
 
 func hostPolicy(revision uint64) string { return hostPolicyFor(revision, "host1") }
@@ -354,8 +355,15 @@ will whalerein/v1/presence/device/dev1
 	for _, host := range hosts {
 		builder += fmt.Sprintf(`acl subscribe %d %s whalerein/v1/h/%s/d/dev1/event
 acl read %d %s whalerein/v1/h/%s/d/dev1/event
-acl write %d %s whalerein/v1/h/%s/d/dev1/ack
-`, revision, host, host, revision, host, host, revision, host, host)
+acl subscribe %d %s whalerein/v1/h/%s/d/dev1/notice
+acl read %d %s whalerein/v1/h/%s/d/dev1/notice
+acl subscribe %d %s whalerein/v1/h/%s/d/dev1/live
+acl read %d %s whalerein/v1/h/%s/d/dev1/live
+acl write %d %s whalerein/v1/h/%s/d/dev1/ready
+`, revision, host, host, revision, host, host,
+			revision, host, host, revision, host, host,
+			revision, host, host, revision, host, host,
+			revision, host, host)
 	}
 	builder += fmt.Sprintf(`acl write %d - whalerein/v1/presence/device/dev1
 `, revision)
@@ -372,9 +380,13 @@ ready 1
 will whalerein/v1/presence/device/dev1
 acl subscribe %d host1 whalerein/v1/h/host1/d/dev1/event
 acl read %d host1 whalerein/v1/h/host1/d/dev1/event
-acl write %d host1 whalerein/v1/h/host1/d/dev1/ack
+acl subscribe %d host1 whalerein/v1/h/host1/d/dev1/notice
+acl read %d host1 whalerein/v1/h/host1/d/dev1/notice
+acl subscribe %d host1 whalerein/v1/h/host1/d/dev1/live
+acl read %d host1 whalerein/v1/h/host1/d/dev1/live
+acl write %d host1 whalerein/v1/h/host1/d/dev1/ready
 acl write %d host1 whalerein/v1/presence/device/dev1
-`, revision, revision, revision, revision, revision)
+`, revision, revision, revision, revision, revision, revision, revision, revision, revision)
 }
 
 func controlClient(t *testing.T, b *broker) *client {
@@ -510,6 +522,12 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 		if err := host.publish(t, "whalerein/v1/h/host1/result", []byte("ok")); err != nil {
 			t.Fatalf("allowed publish: %v", err)
 		}
+		if err := host.publish(t, "whalerein/v1/h/host1/live", []byte("preview")); err != nil {
+			t.Fatalf("host live publish: %v", err)
+		}
+		if err := host.publish(t, "whalerein/v1/h/host1/d/dev1/live", []byte("preview")); err == nil {
+			t.Fatal("host device live publish accepted")
+		}
 		if err := host.publish(t, "whalerein/v1/h/other/result", []byte("x")); err == nil {
 			t.Fatal("foreign topic publish accepted")
 		}
@@ -538,17 +556,56 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev1/event"); err != nil {
 			t.Fatalf("device subscribe: %v", err)
 		}
+		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev1/live"); err != nil {
+			t.Fatalf("device live subscribe: %v", err)
+		}
 		if err := control.publish(t, "whalerein/v1/h/host1/d/dev1/event", []byte("payload")); err != nil {
 			t.Fatalf("event publish: %v", err)
 		}
 		if got := string(device.next(t, "whalerein/v1/h/host1/d/dev1/event")); got != "payload" {
 			t.Fatalf("delivered %q", got)
 		}
+		if err := control.publish(t, "whalerein/v1/h/host1/d/dev1/live", []byte("preview")); err != nil {
+			t.Fatalf("live publish: %v", err)
+		}
+		if got := string(device.next(t, "whalerein/v1/h/host1/d/dev1/live")); got != "preview" {
+			t.Fatalf("delivered live %q", got)
+		}
 		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev2/event"); err == nil {
 			t.Fatal("foreign device subscription accepted")
 		}
+		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev2/live"); err == nil {
+			t.Fatal("foreign device live subscription accepted")
+		}
 		if err := device.publish(t, "whalerein/v1/presence/device/dev2", []byte("{}")); err == nil {
 			t.Fatal("foreign will topic publish accepted")
+		}
+		// The ready advertisement is the only Device transport publication; the
+		// retired acknowledgement topic is denied.
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("whalerein/1")); err != nil {
+			t.Fatalf("device ready publish: %v", err)
+		}
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("x")); err == nil {
+			t.Fatal("retired device acknowledgement accepted")
+		}
+	})
+
+	t.Run("access_relay_topics", func(t *testing.T) {
+		// Access publishes the device notice and live topics and subscribes to
+		// device advertisements and host live previews. The internal Access
+		// identity is trusted by the plugin and is not subject to its own ACL
+		// array; external principals are checked against their installed policy.
+		if err := control.publish(t, "whalerein/v1/h/host1/d/dev1/notice", []byte("notice")); err != nil {
+			t.Fatalf("access notice publish: %v", err)
+		}
+		if err := control.subscribe(t, "whalerein/v1/h/+/d/+/ready"); err != nil {
+			t.Fatalf("access ready subscribe: %v", err)
+		}
+		if err := control.subscribe(t, "whalerein/v1/h/+/live"); err != nil {
+			t.Fatalf("access host live subscribe: %v", err)
+		}
+		if err := control.publish(t, "whalerein/v1/h/host1/d/dev1/live", []byte("preview")); err != nil {
+			t.Fatalf("access device live publish: %v", err)
 		}
 	})
 
@@ -598,6 +655,9 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev1/event"); err != nil {
 			t.Fatalf("device subscribe: %v", err)
 		}
+		if err := device.subscribe(t, "whalerein/v1/h/host1/d/dev1/live"); err != nil {
+			t.Fatalf("device live subscribe: %v", err)
+		}
 		fields := sendControl(t, control, "deny-1", "deny",
 			"device dev1\ngeneration 2\nhost host1\nkick 1\n")
 		if _, ok := fields["applied_generation"]; !ok {
@@ -614,7 +674,7 @@ func TestNativeBrokerCapabilities(t *testing.T) {
 			return
 		}
 		// A broker that closes without OnClientError still fails writes.
-		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("x")); err == nil {
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("x")); err == nil {
 			t.Fatal("revoked connection still publishes")
 		}
 	})
@@ -915,7 +975,7 @@ func TestNativeBrokerPresenceLifecycleAndRevocationScopes(t *testing.T) {
 		if err := device.subscribe(t, "whalerein/v1/h/host2/d/dev1/event"); err != nil {
 			t.Fatalf("host2 subscribe: %v", err)
 		}
-		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("before")); err != nil {
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("before")); err != nil {
 			t.Fatalf("host1 publish before revoke: %v", err)
 		}
 		fields := sendControl(t, revoke, "deny-host1", "deny",
@@ -929,10 +989,10 @@ func TestNativeBrokerPresenceLifecycleAndRevocationScopes(t *testing.T) {
 			t.Fatal("host-scoped revocation closed a connection with another Host's grant")
 		case <-time.After(300 * time.Millisecond):
 		}
-		if err := device.publish(t, "whalerein/v1/h/host2/d/dev1/ack", []byte("after")); err != nil {
+		if err := device.publish(t, "whalerein/v1/h/host2/d/dev1/ready", []byte("after")); err != nil {
 			t.Fatalf("host2 publish after revoking host1: %v", err)
 		}
-		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ack", []byte("after")); err == nil {
+		if err := device.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("after")); err == nil {
 			t.Fatal("revoked host1 topic still accepts publishes")
 		}
 		sendControl(t, revoke, "deny-host2", "deny",
@@ -981,13 +1041,13 @@ func TestNativeBrokerManagedSessionExpiryRenewalAndScopedLogout(t *testing.T) {
 	if snapshot["session_capability"] != "1" {
 		t.Fatal("broker does not announce the managed session capability")
 	}
-	const ackTopic = "whalerein/v1/h/host1/d/dev1/ack"
+	const readyTopic = "whalerein/v1/h/host1/d/dev1/ready"
 	const eventTopic = "whalerein/v1/h/host1/d/dev1/event"
 	setPolicy := func(session string, deadline time.Time) {
 		policy.set("session:"+session, fmt.Sprintf(
 			"whalerein/1\nok\nkind device\ndevice dev1\nrevision 1\nready 1\nsession %s 1 %d\n"+
 				"acl write 1 host1 %s\nacl subscribe 1 host1 %s\nacl read 1 host1 %s\n",
-			session, deadline.UnixMilli(), ackTopic, eventTopic, eventTopic))
+			session, deadline.UnixMilli(), readyTopic, eventTopic, eventTopic))
 	}
 	open := func(session string) *client {
 		t.Helper()
@@ -1011,7 +1071,7 @@ func TestNativeBrokerManagedSessionExpiryRenewalAndScopedLogout(t *testing.T) {
 	sendControl(t, control, "managed-renew", "renew_session", fmt.Sprintf(
 		"session old-login\nsession_revision 2\ndeadline_ms %d\n", renewed.UnixMilli()))
 	time.Sleep(time.Until(initial.Add(20 * time.Millisecond)))
-	if err := old.publish(t, ackTopic, []byte("after renewal")); err != nil {
+	if err := old.publish(t, readyTopic, []byte("after renewal")); err != nil {
 		t.Fatalf("renewed connection did not survive the first deadline: %v", err)
 	}
 	sendControl(t, control, "managed-revoke", "end_session", "session old-login\n")
@@ -1026,7 +1086,7 @@ func TestNativeBrokerManagedSessionExpiryRenewalAndScopedLogout(t *testing.T) {
 		conn.close()
 		t.Fatal("deferred CONNECT reopened a fenced session")
 	}
-	if err := current.publish(t, ackTopic, []byte("sibling is live")); err != nil {
+	if err := current.publish(t, readyTopic, []byte("sibling is live")); err != nil {
 		t.Fatalf("old logout interrupted the new session of the same Device: %v", err)
 	}
 	setPolicy("partitioned", time.Now().Add(time.Second))
@@ -1036,7 +1096,7 @@ func TestNativeBrokerManagedSessionExpiryRenewalAndScopedLogout(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("idle transport survived without renewal")
 	}
-	if err := current.publish(t, ackTopic, []byte("still live")); err != nil {
+	if err := current.publish(t, readyTopic, []byte("still live")); err != nil {
 		t.Fatalf("unrelated expiry interrupted the new session: %v", err)
 	}
 }

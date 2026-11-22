@@ -121,6 +121,49 @@ def render(document):
             lines.append(
                 "History errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
             )
+    if "attachment_measured" in workflow:
+        lines.append(
+            f"Background attachment reads: {workflow['attachment_correct']}/"
+            f"{workflow['attachment_measured']} verified"
+        )
+        lines.extend(_samples(workflow, {"attachment_read_ms": ("attachment read time", "ms")}))
+        if errors := workflow.get("attachment_errors"):
+            lines.append(
+                "Attachment errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
+            )
+    if "bulk" in workflow:
+        bulk = workflow["bulk"]
+        lines.append(
+            f"Bulk reads: {bulk['successful_reads']}/{bulk['expected_reads']} successful, "
+            f"{bulk['bytes_verified']}/{bulk['bytes_expected']} bytes verified"
+        )
+        if errors := bulk.get("errors"):
+            lines.append(
+                "Bulk read errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
+            )
+        gate = bulk.get("gate") or {}
+        detail = f" ({', '.join(gate.get('reasons', []))})" if gate.get("reasons") else ""
+        lines.append(f"Bulk read gate: {gate.get('state', 'unavailable')}{detail}")
+    if "arms" in workflow:
+        for arm in model.ARMS:
+            entry = workflow["arms"][arm]
+            lines.append(f"{arm} arm: {entry['correct']}/{entry['measured']} correct")
+            lines.extend(_samples(entry["samples"], model.PAIR_STREAMING_LABELS))
+    if "paired" in workflow:
+        paired = workflow["paired"]
+        for pair in paired["pairs"]:
+            if pair["reason"]:
+                lines.append(f"paired {pair['pair_id']}: unavailable ({pair['reason']})")
+                continue
+            gap = pair["deltas"]["longest_output_gap_ms"]
+            share = pair["deltas"]["largest_output_share"]
+            lines.append(
+                f"paired {pair['pair_id']}: longest gap {gap:+.1f} ms, "
+                f"largest share {share * 100:+.1f} pp"
+            )
+        gate = paired["gate"]
+        detail = f" ({', '.join(gate['reasons'])})" if gate["reasons"] else ""
+        lines.append(f"Idle/bulk gate: {gate['state']}{detail}")
     if "catch_up_ms" in workflow:
         lines.extend(_samples(workflow, {"catch_up_ms": ("catch-up after network restore", "ms")}))
     for entry in document["latency"].get("analysis", {}).get("reasons", []):
@@ -197,6 +240,16 @@ def comparison(result):
             f"{label} p95 change: {delta * scale:+.1f} {unit}"
             f" [{low * scale:+.1f}, {high * scale:+.1f}] {unit} (95% interval)"
         )
+    if "bulk" in result:
+        bulk = result["bulk"]
+        lines.append(f"Bulk control: {bulk['state']}")
+        for entry in bulk["runs"]:
+            gate = entry["gate"]
+            if gate is None:
+                lines.append(f"  {entry['run']}: not applicable")
+                continue
+            detail = f" ({', '.join(gate['reasons'])})" if gate["reasons"] else ""
+            lines.append(f"  {entry['run']}: {gate['state']}{detail}")
     if result["reasons"]:
         lines.append("Reasons: " + ", ".join(result["reasons"]))
     return "\n".join(lines)
@@ -212,5 +265,16 @@ def method():
         f"  repeats: {declaration['repeats']}  confidence: {declaration['confidence']}",
         f"  statistic: {declaration['statistic']}",
         "  correctness floor: " + str(declaration["correctness_floor"]),
+        "Idle/bulk control (AC-19):",
+        "  gated metrics: " + ", ".join(analysis.BULK_DECLARATION["gated_metrics"]),
+        "  reported metrics: " + ", ".join(analysis.BULK_DECLARATION["reported_metrics"]),
+        "  tolerance: "
+        + analysis.BULK_DECLARATION["decision"]
+        + " ("
+        + analysis.BULK_DECLARATION["aa_noise_statistic"]
+        + " x "
+        + str(analysis.BULK_DECLARATION["aa_noise_multiplier"])
+        + ")",
+        "  bulk correctness: " + analysis.BULK_DECLARATION["correctness"],
     ]
     return "\n".join(lines)

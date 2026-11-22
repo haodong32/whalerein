@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { DshHistory } from './history.js'
+import { splitUtf8 } from 'whalerein-host/events/preview-split.js'
 import { AdapterError } from 'whalerein-host/errors.js'
 
 // This normalization state belongs to the DSH adapter, never the Host or CLI.
@@ -8,7 +9,12 @@ export class DshConversation {
   #origins=new Map()
   #settlements=new Map()
   #interruptSerial=0
+  #previewBytes=8192
   constructor(source) { this.source=source;this.history=new DshHistory(source);this.epoch=randomUUID() }
+  /** Apply the Host's smallest usable preview text budget on the active route. */
+  setPreviewBytes(bytes) {
+    if (Number.isSafeInteger(bytes) && bytes > 0) this.#previewBytes = bytes
+  }
   async state(sessionId,{signal}={}) {
     if(signal?.aborted)throw new AdapterError('unavailable')
     const sessions=await this.source.listSessions({signal})
@@ -71,6 +77,18 @@ export class DshConversation {
         if(this.#settlements.size>64)this.#settlements.delete(this.#settlements.keys().next().value)
       }
       payload={ended:{outcome:data.outcome==='committed'?'COMMITTED':'ABANDONED'}}
+    }
+    if(data.phase==='chunk'&&payload.delta) {
+      // A large native delta becomes several complete ordered previews before
+      // the Host seals them. Each split gets its own normalized sequence, so
+      // the emitted intervals stay contiguous with no gap or overlap.
+      let parts
+      try { parts=splitUtf8(payload.delta.text,this.#previewBytes) }
+      catch { parts=[payload.delta.text] }
+      if(parts.length>1)return parts.map(text=>{
+        const seq=++stream.seq
+        return {session:{session_id:event.sessionId},live:{attempt:stream.attempt,block_id:data.block_id??'text',first_seq:seq,last_seq:seq,delta:{...payload.delta,text}}}
+      })
     }
     const seq=++stream.seq
     if(data.phase==='end')stream.ended=true

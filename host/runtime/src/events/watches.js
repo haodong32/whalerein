@@ -1,9 +1,17 @@
 // Channel-scoped observation. Source data is already normalized; this module
 // owns only watch lifetime, recipients, encryption and bounded publication.
 import { LiveBuffer } from './live-buffer.js'
+import { splitLivePreview, utf8ByteLength } from './preview-split.js'
 import { randomUUID } from 'node:crypto'
 import { ERROR_CODES, PluginError } from '../errors.js'
-import { MESSAGE_BYTES } from '../access/transport.js'
+import {
+  BROKER_PACKET_LIMIT_BYTES,
+  MESSAGE_BYTES,
+  RELAY_VERSION,
+  effectivePacketBytes,
+  maxPlaintextBytes,
+  publishPacketBytes,
+} from '../access/transport.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   questionDescriptorToProto,
@@ -11,7 +19,7 @@ import {
   validateQuestionDescriptor,
   validateSessionUpdate,
 } from '../contracts/source.js'
-import { transportProfileBudget } from '../contracts/transport.js'
+import { transportProfileBudget, validateTransportBudget } from '../contracts/transport.js'
 
 const LEASE = 30000
 // Bounded replay/settlement memory per shared Source. It suppresses exact
@@ -20,9 +28,10 @@ const LEASE = 30000
 const SETTLED_LIMIT = 128
 const LIVE_SEEN_LIMIT = 128
 const BATCH_SEEN_LIMIT = 512
-// Per-channel live publication lane. It bounds latency, not canonical content.
-const LIVE_LANE_PUBLICATIONS = 64
-const LIVE_LANE_BYTES = 256 * 1024
+// Per-connection live queue bound. Live is lossy derived state: the Host drops
+// a preview instead of letting it consume unbounded memory or delay control.
+const LIVE_QUEUE_PACKETS = 64
+const LIVE_QUEUE_BYTES = 256 * 1024
 
 function attemptKey(attempt, projectionId) {
   return `${projectionId ?? ''}\u0000${attempt?.live_epoch ?? ''}\u0000${attempt?.attempt_id ?? ''}`
@@ -81,6 +90,9 @@ export class WatchedEvents {
   #timer = null
   #outboxDrops = 0
   #snapshotRequired = new Map()
+  #previewBudgetCache = new Map()
+  #livePendingBytes = 0
+  #livePendingPackets = 0
   constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger }) {
     Object.assign(this, { hostId, store, security, adapter, access, now, config, logger }); this.codec = resolveCodec(codec)
   }
@@ -88,7 +100,7 @@ export class WatchedEvents {
   async stop() {
     clearInterval(this.#timer); this.#timer = null
     for (const id of [...this.#watches.keys()]) this.#remove(id)
-    await Promise.all([...this.#lanes.values()].flatMap(l => [l.live, l.committed]))
+    await Promise.all([...this.#lanes.values()].map(l => l.committed))
     this.#lanes.clear()
   }
   #expire() { for (const [id, w] of this.#watches) if (w.expires <= this.now() || !this.security.getChannel(w.channelId)) this.#remove(id) }
@@ -136,6 +148,7 @@ export class WatchedEvents {
     return this.codec.encode('whalerein.v1.EventEnvelope', {
       host_id: this.hostId, device_id: watch.deviceId, channel_id: watch.channelId,
       nonce: sealed.nonce, ciphertext: sealed.ciphertext, created_at_unix_ms: at,
+      relay_version: RELAY_VERSION,
     })
   }
 
@@ -412,6 +425,11 @@ export class WatchedEvents {
       this.logger?.warn('source_update_rejected', { code: safeCode(error?.code), reason: 'stream' })
       return
     }
+    if (update.live?.delta) {
+      const previewBytes = this.#previewTextBudget(source, update)
+      source.buffer.setMaxBytes(previewBytes)
+      this.#applyAdapterPreviewBudget()
+    }
     source.buffer.push(update)
   }
 
@@ -498,34 +516,129 @@ export class WatchedEvents {
     const questionsOnly = update.questions != null
     // One shared event route is bounded by its smallest authenticated receiver
     // and by local Host policy. A larger receiver cannot raise it.
-    const budget = this.#eventBudget(source)
+    const route = this.#routeForSource(source)
     for (const id of source.recipients) {
       const watch = this.#watches.get(id); if (!watch) continue
       if (questionsOnly ? !watch.interests.questions : !watch.interests.conversation) continue
-      this.#enqueue(watch, { ...update, watch_id: id }, budget)
+      this.#enqueue(watch, { ...update, watch_id: id }, route)
     }
   }
 
-  #eventBudget(source) {
-    let limit = this.config.transportBudget?.envelope_bytes
-    if (!Number.isSafeInteger(limit) || limit < 1) {
-      try { limit = transportProfileBudget(this.config.transportProfile ?? 'default').envelope_bytes }
-      catch { limit = MESSAGE_BYTES }
+  #localBudget() {
+    const configured = this.config.transportBudget
+    if (configured && typeof configured === 'object') {
+      try { return validateTransportBudget(configured) } catch { /* fall through */ }
     }
+    try { return transportProfileBudget(this.config.transportProfile ?? 'default') }
+    catch { return transportProfileBudget('default') }
+  }
+
+  #routeForSource(source) {
+    const local = this.#localBudget()
+    let packetLimit = Math.min(local.packet_bytes, BROKER_PACKET_LIMIT_BYTES)
+    let envelopeLimit = local.envelope_bytes
+    const advertisedBudgets = [this.access?.accessReceiveAdvertisement?.()?.budget]
+    for (const id of source.recipients) {
+      const watch = this.#watches.get(id)
+      if (watch) advertisedBudgets.push(this.security.getChannelReceive?.(watch.channelId)?.budget)
+    }
+    for (const advertised of advertisedBudgets) {
+      if (!advertised || typeof advertised !== 'object') continue
+      if (Number.isSafeInteger(advertised.packet_bytes) && advertised.packet_bytes > 0) {
+        packetLimit = Math.min(packetLimit, advertised.packet_bytes)
+      }
+      if (Number.isSafeInteger(advertised.envelope_bytes) && advertised.envelope_bytes > 0) {
+        envelopeLimit = Math.min(envelopeLimit, advertised.envelope_bytes)
+      }
+    }
+    return {
+      packetLimit,
+      envelopeLimit,
+      topic: this.access?.eventTopic ?? `whalerein/v1/h/${this.hostId}/event`,
+      liveTopic: this.access?.liveTopic ?? `whalerein/v1/h/${this.hostId}/live`,
+    }
+  }
+
+  /**
+   * Largest delta text byte length whose complete sealed EventEnvelope still
+   * fits the route's smallest usable packet budget. The protobuf and AEAD
+   * overhead is measured with the real codec, not estimated from ciphertext.
+   */
+  #maxPreviewTextBytes(watch, update, route) {
+    const live = update?.live ?? {}
+    const attempt = live.attempt ?? {}
+    const blockId = live.block_id ?? 'budget'
+    const kind = live.delta?.kind ?? 'BLOCK_KIND_TEXT'
+    const watchId = update?.watch_id ?? watch.id
+    const key = `${watch.deviceId}\u0000${watch.channelId}\u0000${watch.id}\u0000${attempt.live_epoch ?? ''}\u0000${attempt.attempt_id ?? ''}\u0000${blockId}\u0000${kind}\u0000${watchId}\u0000${route.packetLimit}\u0000${route.envelopeLimit}\u0000${route.liveTopic}`
+    const cached = this.#previewBudgetCache.get(key)
+    if (cached !== undefined) return cached
+    const at = this.now()
+    const envelopeSizeFor = (textBytes) => {
+      const text = 'x'.repeat(textBytes)
+      let plaintext
+      try {
+        plaintext = this.codec.encode('whalerein.v1.EventPayload', {
+          update: {
+            session: { host_id: this.hostId, session_id: watch.sessionId },
+            watch_id: watchId,
+            live: {
+              attempt: { live_epoch: attempt.live_epoch ?? 'preview', attempt_id: attempt.attempt_id ?? 'budget' },
+              block_id: blockId,
+              first_seq: 1,
+              last_seq: 1,
+              delta: { kind, text },
+            },
+          },
+        })
+      } catch {
+        return Number.MAX_SAFE_INTEGER
+      }
+      const envelope = this.codec.encode('whalerein.v1.EventEnvelope', {
+        host_id: this.hostId,
+        device_id: watch.deviceId,
+        channel_id: watch.channelId,
+        nonce: new Uint8Array(12),
+        ciphertext: new Uint8Array(plaintext.length + 16),
+        created_at_unix_ms: at,
+        relay_version: RELAY_VERSION,
+      })
+      return publishPacketBytes(route.liveTopic, envelope.length, { qos: 0 })
+    }
+    // Leave a small reserve so a created-at varint that grows while the split
+    // is sealed cannot push the last preview over the limit.
+    const max = maxPlaintextBytes(envelopeSizeFor, Math.max(1, route.packetLimit - 64))
+    if (this.#previewBudgetCache.size > 512) this.#previewBudgetCache.clear()
+    this.#previewBudgetCache.set(key, max)
+    return max
+  }
+
+  #applyAdapterPreviewBudget() {
+    if (typeof this.adapter?.setPreviewBytes !== 'function') return
+    let min = Number.POSITIVE_INFINITY
+    for (const source of this.#sources.values()) min = Math.min(min, this.#previewTextBudget(source))
+    if (Number.isFinite(min) && min > 0) this.adapter.setPreviewBytes(min)
+  }
+
+  #previewTextBudget(source, update = null) {
+    let max = Number.POSITIVE_INFINITY
+    const route = this.#routeForSource(source)
     for (const id of source.recipients) {
       const watch = this.#watches.get(id)
       if (!watch) continue
-      const receive = this.security.getChannelReceive?.(watch.channelId)
-      const advertised = receive?.budget?.envelope_bytes
-      if (Number.isSafeInteger(advertised) && advertised > 0) limit = Math.min(limit, advertised)
+      const candidate = update ? { ...update, watch_id: id } : null
+      max = Math.min(max, candidate
+        ? this.#maxPreviewTextBytes(watch, candidate, route)
+        : this.#maxPreviewTextBytes(watch, null, route))
     }
-    return limit
+    return Number.isFinite(max) && max > 0 ? max : 8 * 1024
   }
 
   /**
    * An oversized complete event is not delivered partially. The durable outbox
    * receives a tiny HistoryReset instead and the channel is marked for snapshot
-   * repair; canonical content is repaired from committed history.
+   * repair; canonical content is repaired from committed history. Live
+   * previews never take this path.
    */
   #eventTooLarge(watch, kind, bytes, limit) {
     const previous = this.#snapshotRequired.get(watch.channelId)
@@ -556,35 +669,54 @@ export class WatchedEvents {
     if (this.access?.connected) this.access.publishEvent(envelope).catch(() => {})
   }
 
-  #enqueue(watch, update, budget = MESSAGE_BYTES) {
+  #enqueue(watch, update, route) {
+    if (update.live && typeof update.live.delta?.text === 'string') {
+      const maxTextBytes = this.#maxPreviewTextBytes(watch, update, route)
+      if (maxTextBytes > 0 && utf8ByteLength(update.live.delta.text) > maxTextBytes) {
+        const parts = splitLivePreview(update, { maxTextBytes })
+        if (parts) {
+          // Ordered split: contiguous intervals, exact prefix once, never a
+          // partial reset or a reference for a normal preview.
+          for (const part of parts) this.#publishUpdate(watch, part, route)
+          return
+        }
+      }
+    }
+    this.#publishUpdate(watch, update, route)
+  }
+
+  #publishUpdate(watch, update, route = null) {
+    const resolved = route ?? this.#routeForSource(this.#sources.get(watch.sessionId))
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
     const at = this.now()
     const envelope = this.#envelope(watch, plaintext, at)
     if (!envelope) return
-    if (envelope.length > budget) {
-      this.#eventTooLarge(watch, update.live ? 'live' : update.history ? 'committed' : 'control', envelope.length, budget)
+    if (envelope.length > resolved.envelopeLimit) {
+      if (update.live) {
+        // A live preview is never replaced by a HistoryReset. If the complete
+        // envelope cannot be carried inline or by reference it is dropped and
+        // the committed message remains authoritative.
+        this.logger?.warn('event_oversize', {
+          code: 'payload_too_large', kind: 'live', bytes: envelope.length, limit: resolved.envelopeLimit,
+        })
+        return
+      }
+      this.#eventTooLarge(watch, update.history ? 'committed' : 'control', envelope.length, resolved.envelopeLimit)
       return
     }
-    let lane = this.#lanes.get(watch.channelId)
-    if (!lane) {
-      lane = { live: Promise.resolve(), committed: Promise.resolve(), bytes: 0, count: 0 }
-      this.#lanes.set(watch.channelId, lane)
-    }
     if (update.live) {
-      if (!this.access?.connected || lane.count >= LIVE_LANE_PUBLICATIONS || lane.bytes + envelope.length > LIVE_LANE_BYTES) return
-      lane.count++
-      lane.bytes += envelope.length
-      lane.live = lane.live.then(() => {
-        if (this.now() - at <= 1000 && this.#watches.has(watch.id) && this.security.getChannel(watch.channelId) && this.access.connected) {
-          return this.access.publishEvent(envelope)
-        }
-      }).catch(() => {}).finally(() => {
-        lane.count--
-        lane.bytes -= envelope.length
-      })
+      // Live is fire-and-forget: publish immediately, never behind a chain and
+      // never on the control event topic. A disconnected or over-bound live
+      // queue drops the preview and leaves the committed message authoritative.
+      this.#publishLive(envelope)
       return
     }
 
+    let lane = this.#lanes.get(watch.channelId)
+    if (!lane) {
+      lane = { committed: Promise.resolve() }
+      this.#lanes.set(watch.channelId, lane)
+    }
     const row = this.#addOutbox(watch, envelope, at)
     if (row.overflow) {
       this.#outboxDrops++
@@ -598,6 +730,38 @@ export class WatchedEvents {
       await this.access.publishEvent(envelope)
       this.store.removeOutbox(row.id)
     }).catch(() => this.logger?.warn('event_publish_failed', { code: 'unavailable' }))
+  }
+
+  /**
+   * Publish one complete preview on the live class. There is no per-watch or
+   * per-topic serialization: two previews may be in flight at once and QoS 0
+   * preserves their client order. Only the bounded per-connection queue can
+   * drop a preview.
+   */
+  #publishLive(envelope) {
+    if (!this.access?.connected || typeof this.access.publishLive !== 'function') return false
+    if (this.#livePendingPackets >= LIVE_QUEUE_PACKETS || this.#livePendingBytes + envelope.length > LIVE_QUEUE_BYTES) {
+      this.logger?.warn('live_preview_dropped', { code: 'rate_limited', reason: 'queue' })
+      return false
+    }
+    let pending
+    try {
+      pending = this.access.publishLive(envelope)
+    } catch {
+      return false
+    }
+    this.#livePendingPackets++
+    this.#livePendingBytes += envelope.length
+    Promise.resolve(pending)
+      .then((accepted) => {
+        if (accepted === false) this.logger?.warn('live_preview_dropped', { code: 'unavailable', reason: 'publish' })
+      })
+      .catch(() => this.logger?.warn('live_preview_dropped', { code: 'unavailable', reason: 'publish' }))
+      .finally(() => {
+        this.#livePendingPackets--
+        this.#livePendingBytes -= envelope.length
+      })
+    return true
   }
 
   async flushOutbox() {

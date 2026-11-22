@@ -19,6 +19,7 @@ export function defaultReceive(generation = 1) {
     profile: 'TRANSPORT_PROFILE_DEFAULT',
     budget: transportProfileBudget('default'),
     connection_generation: generation,
+    relay_version: 4,
   }
 }
 

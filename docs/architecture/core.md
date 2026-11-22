@@ -37,7 +37,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `conversation` | Bounded provisional Attempts, typed blocks, one tool activity per call, order, resets and final-message precedence. |
 | `history` | Independent bounded committed-history pages, exact message references, source/cache selection and projection fencing. |
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
-| `access` | HTTPS and device MQTT, including opaque fragmentation. |
+| `access` | HTTPS and device MQTT, including the complete-message inline/reference control relay and QoS 0 live preview reception. |
 | `diagnostics` | Redacted live events, bounded operation history and exports. |
 | `account` | Cloud App sessions, verified account scope, regional permission renewal, and durable sign-out retries. |
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
@@ -234,20 +234,36 @@ surface is reserved for that path; in this build it reports the capability as
 unavailable and reads no bytes.
 
 The client `[transport]` profile is loaded from the packaged generated Rust
-artifact and validated before any connection use: packet and fragment widths,
-fragment coverage, aggregate reservations, timeout ordering and the minimum
-control message must all fit. Invalid relations fail `Core::open`. Changes take
-effect on restart. The effective profile bounds HTTPS responses, MQTT packet and
-logical-envelope receive limits, reassembly concurrency/reservations and the
-outbound request/result metadata. `ChannelHello` advertises the device receive
-budget with its own monotonic channel generation. `ChannelReady` must name a
-known packaged profile and carry a relation-valid budget; a valid override of
-that profile is accepted without clamping, and the profile remains the base
-label. The Hello and Ready generations are scoped to their own legs and are not
-compared. Outbound requests use the lower of the local and peer envelope
-budgets. `result_max_bytes` is bound to the
-request and every stored result is read under that exact bound. No content is
-written to transport diagnostics.
+artifact and validated before any connection use: the complete MQTT packet
+budget, logical envelope, aggregate reservations, timeout ordering and the
+minimum control message must all fit. Invalid relations fail `Core::open`.
+Changes take effect on restart. The relay uses one coordinated epoch
+(`relay_version = 4`): every received `EventEnvelope`, live preview and
+`RequestStateNotice` must advertise it, and a peer with any other epoch is
+rejected with `protocol_version_incompatible`. Core subscribes to its control
+event and notice topics at QoS 1 and to its own Device live topic
+`.../d/{device_id}/live` at QoS 0. A live preview must carry inline ciphertext
+at epoch 4; a reference, missing nonce or foreign epoch is rejected. Live
+frames feed the same observation pipeline and sequence/duplicate path as control
+events, with no acknowledgement, retransmission or control blocking: a gap or
+loss marks only the preview incomplete, and the committed message or an
+authoritative HTTPS read repairs the view. An inline ciphertext or sealed body
+is used directly. A control `*_reference` is fetched with the Device bearer from
+the Access HTTPS directory and its exact reserved length and SHA-256 are
+verified before AEAD or business handling; a failed, truncated, longer or
+corrupt fetch is terminal for that message and never a completed result.
+`ChannelHello` advertises the device
+receive budget with its own monotonic channel generation, and the Device
+publishes the same advertisement on its `.../ready` topic after every successful
+broker connect. `ChannelReady` must name a known packaged profile and carry a
+relation-valid budget; a valid override of that profile is accepted without
+clamping, and the profile remains the base label. Outbound requests use the
+lower of the local and peer envelope budgets; a sealed command body above the
+effective inline request budget is reserved, uploaded and finished on Access
+before the same request identity is submitted with `body_reference` and a
+matching `payload_digest`. `result_max_bytes` is bound to the request and every
+stored result is read under that exact bound. No content is written to transport
+diagnostics.
 
 The initial device transport has one active watch per Core instance. Competing
 calls fail explicitly rather than opening clients with the same MQTT identity.
@@ -315,8 +331,15 @@ Pairing creates the cache encryption key under the instance identity lock
 before publishing regional state. SQLite schema inspection and updates run in
 one write transaction so concurrent Core processes serialize initialization.
 
-Send waits through `received`/`host_accepted` command-result replies until a
-terminal outcome or timeout. An accepted receipt is not confirmed execution.
+A foreground send attaches its scoped MQTT receiver before submission, then
+waits for state changes instead of polling status. It reconciles the original
+request once on attach and on reconnect, reads the complete result over HTTPS
+only on a matching notice, and reserves one final authoritative lookup before an
+authorized wait would end unconfirmed; no repeating status loop runs while the
+receiver stays connected. An exact-request heartbeat renews only that request
+while the wait is live, stops on completion, cancellation or a terminal
+response, and never treats a result read as renewal. An accepted receipt is not
+confirmed execution.
 
 Derived development cache schemas can be rebuilt; credentials and command outcome
 metadata are retained. OS keyring, TLS and real-source behavior require their own

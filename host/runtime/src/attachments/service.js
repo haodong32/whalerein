@@ -138,16 +138,15 @@ export class AttachmentService {
     }
     const base = profileBudget
       ? defaultAttachmentPolicy({
-        fragmentPayloadBytes: profileBudget.fragment_payload_bytes ?? 61440,
+        packetBytes: profileBudget.packet_bytes,
         bulkConcurrency: profileBudget.bulk_concurrency ?? 4,
-        fragmentIdleTimeoutMs: profileBudget.fragment_idle_timeout_ms ?? 30000,
         transferTimeoutMs: profileBudget.transfer_timeout_ms ?? 120000,
       })
       : {
         max_total_bytes: 0,
-        max_chunk_bytes: 61440,
+        max_chunk_bytes: 65536,
         max_concurrent: 4,
-        idle_timeout_ms: 30000,
+        idle_timeout_ms: 120000,
         overall_timeout_ms: 120000,
       }
     const overrides = {}

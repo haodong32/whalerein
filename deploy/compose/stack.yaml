@@ -52,10 +52,10 @@ services:
     environment:
       WHALEREIN_BROKER_PASSWORD: "${WHALEREIN_BROKER_PASSWORD:-dev-broker-password}"
       WHALEREIN_INTERNAL_TOKEN: "compose-internal-token"
-      # Broker packet ceiling. The transport profile selects encoded packet and
-      # envelope budgets independently; keep this at or above the largest
-      # configured packet budget. The entrypoint renders the mounted config.
-      WHALEREIN_MQTT_MAX_PACKET_SIZE: "${WHALEREIN_MQTT_MAX_PACKET_SIZE:-4194304}"
+      # Broker PUBLISH ceiling. The packaged brokerPacketLimitBytes is 1 MiB
+      # and every transport profile packet budget must not exceed it. The
+      # entrypoint renders the mounted config from this value.
+      WHALEREIN_MQTT_MAX_PACKET_SIZE: "${WHALEREIN_MQTT_MAX_PACKET_SIZE:-1048576}"
     ports:
       - "127.0.0.1:1883:1883"
     volumes:
@@ -96,6 +96,11 @@ services:
       - "127.0.0.1:8081:8081"
     volumes:
       - ../compose/access.yaml:/etc/whalerein/access.yaml:ro
+      # Disposable, node-local temporary ciphertext. The named volume is
+      # initialized with the image directory ownership so the unprivileged
+      # Access process can write it. It carries no durable command, grant or
+      # key state; PostgreSQL remains authoritative.
+      - access-payloads:/var/lib/whalerein/payloads
     # Access stops its HTTP servers and workers within a 10 s budget. Give
     # Docker a longer grace period so SIGKILL never races that budget.
     stop_grace_period: 20s
@@ -114,3 +119,7 @@ services:
 networks:
   default:
     name: whalerein
+
+volumes:
+  access-payloads:
+    name: whalerein-access-payloads

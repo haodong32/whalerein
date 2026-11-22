@@ -3,6 +3,8 @@
 // stay identical. Settlement/reset/state/history updates always flush first so a
 // preview can never overtake the authoritative update that retires it.
 
+// Conservative default until the active route's smallest authenticated packet
+// budget is known. The Host sets the effective value per Source.
 export const MAX_PREVIEW_BYTES = 8 * 1024
 
 function bytes(value) {
@@ -20,7 +22,19 @@ function sameIdentity(previous, frame) {
 export class LiveBuffer {
   #pending = null
   #timer = null
-  constructor(publish, delayMs = 20) { this.publish = publish; this.delayMs = delayMs }
+  #maxBytes
+  constructor(publish, delayMs = 20, maxBytes = MAX_PREVIEW_BYTES) {
+    this.publish = publish
+    this.delayMs = delayMs
+    this.#maxBytes = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : MAX_PREVIEW_BYTES
+  }
+
+  get maxBytes() { return this.#maxBytes }
+
+  /** Apply the smallest usable preview budget for the active route. */
+  setMaxBytes(maxBytes) {
+    if (Number.isSafeInteger(maxBytes) && maxBytes > 0) this.#maxBytes = maxBytes
+  }
 
   /** Whether a coalesced preview is waiting for its short hold window. */
   get pending() { return this.#pending !== null }
@@ -35,7 +49,7 @@ export class LiveBuffer {
     }
     const previous = this.#pending?.live
     if (previous && !sameIdentity(previous, frame)) this.flush()
-    if (previous && bytes(previous.delta.text) + bytes(frame.delta.text) > MAX_PREVIEW_BYTES) this.flush()
+    if (previous && bytes(previous.delta.text) + bytes(frame.delta.text) > this.#maxBytes) this.flush()
     if (!this.#pending) {
       this.#pending = { ...update, live: { ...frame, delta: { ...frame.delta } } }
       this.#timer = setTimeout(() => this.flush(), this.delayMs)
@@ -44,7 +58,7 @@ export class LiveBuffer {
       this.#pending.live.delta.text += frame.delta.text
       this.#pending.live.last_seq = frame.last_seq
     }
-    if (bytes(this.#pending.live.delta.text) >= MAX_PREVIEW_BYTES) this.flush()
+    if (bytes(this.#pending.live.delta.text) >= this.#maxBytes) this.flush()
   }
 
   flush() {

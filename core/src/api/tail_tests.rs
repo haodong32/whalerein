@@ -88,19 +88,48 @@ async fn subscribe_with_reason(listener: &TcpListener, reason: u8) -> TcpStream 
         Packet::Connect(..)
     ));
     stream.write_all(&[0x20, 3, 0, 0, 0]).await.unwrap();
-    let Packet::Subscribe(subscription) = read_packet(&mut stream, &mut buffer).await else {
-        panic!("expected subscribe")
-    };
-    let [high, low] = subscription.pkid.to_be_bytes();
-    stream
-        .write_all(&[0x90, 4, high, low, 0, reason])
-        .await
-        .unwrap();
+    // The Device publishes its receive advertisement after CONNACK and then
+    // subscribes to its control event and notice topics at QoS 1 and its live
+    // preview topic at QoS 0. Acknowledge the QoS 1 publication and each
+    // subscription so the event loop can progress. A rejected subscription
+    // stops the client before the remaining filters are sent.
+    let mut subscriptions = 0;
+    while subscriptions < 3 {
+        match read_packet(&mut stream, &mut buffer).await {
+            Packet::Publish(publish) => {
+                let [high, low] = publish.pkid.to_be_bytes();
+                stream.write_all(&[0x40, 2, high, low]).await.unwrap();
+            }
+            Packet::Subscribe(subscription) => {
+                let [high, low] = subscription.pkid.to_be_bytes();
+                stream
+                    .write_all(&[0x90, 4, high, low, 0, reason])
+                    .await
+                    .unwrap();
+                subscriptions += 1;
+                if reason != 0 {
+                    break;
+                }
+            }
+            other => panic!("unexpected packet before subscribe: {other:?}"),
+        }
+    }
     stream
 }
 
+/// Publish a live-class preview envelope on the device live topic.
 async fn publish(stream: &mut TcpStream, envelope: EventEnvelope) {
+    let topic = crate::access::mqtt::device_live_topic(&envelope.host_id, &envelope.device_id);
+    publish_on(stream, topic, envelope).await;
+}
+
+/// Publish a control-class envelope on the device control event topic.
+async fn publish_control(stream: &mut TcpStream, envelope: EventEnvelope) {
     let topic = crate::access::device_event_topic(&envelope.host_id, &envelope.device_id);
+    publish_on(stream, topic, envelope).await;
+}
+
+async fn publish_on(stream: &mut TcpStream, topic: String, envelope: EventEnvelope) {
     let packet = Publish::new(topic, QoS::AtMostOnce, envelope.encode_to_vec(), None);
     let mut bytes = BytesMut::new();
     packet.write(&mut bytes).unwrap();
@@ -154,6 +183,7 @@ fn event(core: &Core, session: &str, watch: &str) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 4,
         ..Default::default()
     }
 }
@@ -203,7 +233,11 @@ async fn invalid_live_ciphertext_is_reported_without_revoking_pairing() {
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         let mut frame = event(&peer_core, "session-1", "watch-1");
-        frame.nonce.clear();
+        // Tamper with the sealed ciphertext: AEAD must reject it before
+        // business handling without revoking the pairing.
+        if let Some(byte) = frame.ciphertext.last_mut() {
+            *byte ^= 1;
+        }
         publish(&mut stream, frame).await;
         let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
@@ -586,6 +620,7 @@ fn sealed_event(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 4,
         ..Default::default()
     }
 }
@@ -657,8 +692,8 @@ async fn gap_recovery_delivers_unseen_committed_messages_and_not_the_baseline() 
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         let _ = gap_rx.await;
-        // A live history frame that cannot continue the local cursor is a gap.
-        publish(
+        // A control history frame that cannot continue the local cursor is a gap.
+        publish_control(
             &mut stream,
             history_event(
                 &peer_core,
@@ -723,7 +758,7 @@ async fn reconnect_does_not_replay_committed_history() {
         // First connection: the source resets, forcing a reconnect.
         let mut first = subscribe(&listener).await;
         let _ = reset_rx.await;
-        publish(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
+        publish_control(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
         let mut b = [0; 16];
         let _ = first.read(&mut b).await;
         // Second connection: only new live output may be delivered.
@@ -1138,7 +1173,7 @@ async fn gap_recovery_with_a_lost_local_cursor_delivers_the_missed_messages() {
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         let _ = gap_rx.await;
-        publish(
+        publish_control(
             &mut stream,
             history_event(
                 &peer_core,
@@ -1207,14 +1242,14 @@ async fn reconnect_delivers_one_committed_id_once_across_attach_and_buffered_bat
                 .push(history_message("message-2", "new"));
             host.history_cut = "bookmark:turn-2".into();
         }
-        publish(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
+        publish_control(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
         let mut b = [0; 16];
         let _ = first.read(&mut b).await;
         // The reconnected connection also buffers the live history batch for
         // the same committed message. The attach sync and the live batch must
         // resolve to one delivery for that message id.
         let mut second = subscribe(&listener).await;
-        publish(
+        publish_control(
             &mut second,
             history_event(
                 &peer_core,
@@ -1265,7 +1300,7 @@ async fn a_user_and_assistant_pair_are_two_distinct_ids_each_delivered_once() {
             host.history_messages.extend([user, assistant]);
             host.history_cut = "bookmark:turn-2".into();
         }
-        publish(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
+        publish_control(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
         let mut b = [0; 16];
         let _ = first.read(&mut b).await;
         let mut second = subscribe(&listener).await;
@@ -1304,7 +1339,7 @@ async fn a_transient_channel_path_failure_reconnects_the_watch_and_keeps_output(
         // A gap forces a history read; make that read fail the way a channel
         // path change does, then let the retry succeed.
         host_state.lock().unwrap().query_error = Some(whalerein_proto::ErrorCode::Internal);
-        publish(
+        publish_control(
             &mut first,
             history_event(
                 &peer_core,

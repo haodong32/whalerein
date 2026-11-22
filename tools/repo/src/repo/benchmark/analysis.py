@@ -14,6 +14,7 @@ it never compares releases.
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 
 # Declared once, before measuring candidates. A/A pilot evidence sets the
 # sample floors; the tolerances are the smallest change worth reporting.
@@ -25,6 +26,28 @@ DECLARATION = {
     "confidence": 0.95,
     "correctness_floor": 0.95,
     "statistic": "paired mean difference, two-sided t interval",
+}
+
+# AC-19's within-run control. The two Watch-primary metrics are gated against
+# a tolerance derived from the run's own idle-arm A/A spread instead of a
+# fixed allowance: idle attempts see the same cadence, deadline, profile and
+# Device/session lifecycle, so their successive differences are measurement
+# noise. The diagnostic metrics are reported but do not gate.
+BULK_DECLARATION = {
+    "reported_metrics": (
+        "max_display_delay_ms",
+        "longest_output_gap_ms",
+        "largest_output_share",
+        "final_output_share",
+    ),
+    "gated_metrics": ("longest_output_gap_ms", "largest_output_share"),
+    "aa_noise_statistic": "max absolute change between successive idle-arm pairs",
+    "aa_noise_multiplier": 2.0,
+    "minimum_aa_differences": 5,
+    "minimum_pairs": 2,
+    "direction": "bulk-minus-idle mean paired difference",
+    "decision": "the mean bulk-minus-idle difference must not exceed the A/A tolerance",
+    "correctness": "every scheduled bulk read completes and verifies its expected bytes",
 }
 
 # Two-sided 95% Student t critical values for small degrees of freedom.
@@ -212,3 +235,127 @@ def compare(baseline, candidate):
         if verdict not in INFERENCE:
             result["reasons"].append(metric + ":" + reason)
     return result
+
+
+def aa_noise(values):
+    """A/A noise proxy: absolute change between successive idle observations."""
+    return [abs(later - earlier) for earlier, later in pairwise(values)]
+
+
+def paired_arm_comparison(pairs):
+    """Within-run bulk-minus-idle deltas with an A/A-derived non-regression gate.
+
+    `pairs` carries completed idle/bulk metric values per pair identity. The
+    tolerance is twice the largest successive idle-arm change, which is the
+    noise the same run exhibited without bulk reads. Too few idle pairs leave
+    the gate incomplete instead of silently passing it.
+    """
+    metrics = BULK_DECLARATION["gated_metrics"]
+    reported = BULK_DECLARATION["reported_metrics"]
+    results = []
+    for pair in pairs:
+        values = pair.get("values")
+        if values is None:
+            delta = {metric: None for metric in reported}
+            reason = pair.get("reason") or "incomplete_pair"
+        else:
+            idle, bulk = values["idle"], values["bulk"]
+            delta = {metric: round(bulk[metric] - idle[metric], 6) for metric in reported}
+            reason = None
+        results.append({"pair_id": pair["pair_id"], "deltas": delta, "reason": reason})
+
+    idle_series = {
+        metric: [pair["values"]["idle"][metric] for pair in pairs if pair.get("values") is not None]
+        for metric in metrics
+    }
+    gate_metrics = {}
+    checks = []
+    for metric in metrics:
+        changes = aa_noise(idle_series[metric])
+        tolerance = (
+            BULK_DECLARATION["aa_noise_multiplier"] * max(changes)
+            if len(changes) >= BULK_DECLARATION["minimum_aa_differences"]
+            else None
+        )
+        deltas = [
+            entry["deltas"][metric] for entry in results if entry["deltas"][metric] is not None
+        ]
+        if tolerance is None:
+            verdict, reason = "inconclusive", "insufficient_aa_noise"
+            mean_delta = max_delta = None
+        elif len(deltas) < BULK_DECLARATION["minimum_pairs"]:
+            verdict, reason = "inconclusive", "insufficient_pairs"
+            mean_delta = mean(deltas)
+            max_delta = max(deltas) if deltas else None
+        else:
+            mean_delta = mean(deltas)
+            max_delta = max(deltas)
+            if mean_delta <= tolerance:
+                verdict, reason = "within_tolerance", "bulk_difference_within_aa_noise"
+            else:
+                verdict, reason = "regression", "bulk_difference_exceeds_aa_noise"
+        gate_metrics[metric] = {
+            "aa_noise": max(changes) if changes else None,
+            "aa_differences": len(changes),
+            "tolerance": tolerance,
+            "mean_delta": mean_delta,
+            "max_delta": max_delta,
+            "verdict": verdict,
+            "reason": reason,
+        }
+        checks.append(
+            {
+                "name": metric + "_within_tolerance",
+                "required_aa_differences": BULK_DECLARATION["minimum_aa_differences"],
+                "observed_aa_differences": len(changes),
+                "ok": verdict == "within_tolerance",
+            }
+        )
+    reasons = []
+    for entry in gate_metrics.values():
+        if entry["verdict"] == "regression" and "bulk_degradation" not in reasons:
+            reasons.append("bulk_degradation")
+        if entry["verdict"] == "inconclusive" and entry["reason"] not in reasons:
+            reasons.append(entry["reason"])
+    if any(entry["verdict"] == "regression" for entry in gate_metrics.values()):
+        state = "failed"
+    elif any(entry["verdict"] == "inconclusive" for entry in gate_metrics.values()):
+        state = "incomplete"
+    else:
+        state = "complete"
+    return {
+        "pairs": results,
+        "gate": {
+            "state": state,
+            "metrics": gate_metrics,
+            "checks": checks,
+            "reasons": reasons,
+        },
+    }
+
+
+def bulk_read_gate(bulk):
+    """The bulk arm's correctness gate: full count and full verified bytes."""
+    expected = bulk.get("expected_reads") or 0
+    successful = bulk.get("successful_reads") or 0
+    expected_bytes = bulk.get("bytes_expected") or 0
+    verified = bulk.get("bytes_verified") or 0
+    errors = bulk.get("errors") or {}
+    reasons = []
+    if expected < 1:
+        reasons.append("no_bulk_reads")
+    if successful != expected:
+        reasons.append("bulk_reads_not_successful")
+    if verified != expected_bytes:
+        reasons.append("bulk_bytes_not_verified")
+    if errors:
+        reasons.append("bulk_read_errors")
+    return {
+        "state": "complete" if not reasons else "incomplete",
+        "expected_reads": expected,
+        "successful_reads": successful,
+        "bytes_expected": expected_bytes,
+        "bytes_verified": verified,
+        "errors": errors,
+        "reasons": reasons,
+    }

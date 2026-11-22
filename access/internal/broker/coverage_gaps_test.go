@@ -13,9 +13,7 @@ import (
 
 	"github.com/eclipse/paho.golang/paho"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/whalerein/whalerein/access/internal/config"
-	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/proto"
@@ -23,6 +21,24 @@ import (
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func profileBudget(t *testing.T, name string) config.TransportEffective {
+	t.Helper()
+	values, ok := whalereinv1.TransportProfileValuesFor(name)
+	if !ok {
+		t.Fatalf("unknown profile %q", name)
+	}
+	cfg := config.Default()
+	cfg.Transport.Profile = name
+	effective, err := cfg.ResolveTransport()
+	if err != nil {
+		t.Fatalf("resolve %q: %v", name, err)
+	}
+	if effective.PacketBytes != values.PacketBytes {
+		t.Fatalf("profile %q packet = %d", name, effective.PacketBytes)
+	}
+	return effective
 }
 
 func TestTransportRejectionsUseBoundedCodes(t *testing.T) {
@@ -35,7 +51,7 @@ func TestTransportRejectionsUseBoundedCodes(t *testing.T) {
 		t.Fatal("plain error did not map to the header code")
 	}
 	empty := &TransportError{}
-	if empty.Error() != "logical transport rejected" || empty.Unwrap() != nil {
+	if empty.Error() != "relay rejected" || empty.Unwrap() != nil {
 		t.Fatalf("empty transport error = %q", empty.Error())
 	}
 }
@@ -46,28 +62,23 @@ func TestNegotiateBudgetKeepsTheStricterOfEachLimit(t *testing.T) {
 	roomy := profileBudget(t, "roomy")
 	zero := config.TransportEffective{}
 	intersectedCompact := compact
-	intersectedCompact.FragmentCount = 274
+	intersectedCompact.ResultLimitBytes = local.ResultLimitBytes
+	intersectedCompact.HTTPBodyBytes = local.HTTPBodyBytes
 	narrow := local
-	narrow.FragmentPayloadBytes = local.FragmentPayloadBytes / 2
+	narrow.PacketBytes = local.PacketBytes / 2
 	tightened := local
 	tightened.EnvelopeBytes = 8 << 20
-	tightened.FragmentPayloadBytes = 32 << 10
-	tightened.FragmentCount = 256
+	tightened.PacketBytes = 32 << 10
 	tightened.ReservedBytes = 8 << 20
 	wantTightened := tightened
 	for name, tc := range map[string]struct {
 		local, advertised, want config.TransportEffective
 	}{
-		"unregistered peer":       {local, zero, local},
-		"smaller peer envelope":   {local, compact, intersectedCompact},
-		"larger peer envelope":    {local, roomy, local},
-		"equal envelope narrower": {local, narrow, narrow},
-		"equal envelope wider": {local, func() config.TransportEffective {
-			wider := local
-			wider.FragmentPayloadBytes++
-			return wider
-		}(), local},
-		"peer tightens width and envelope": {local, tightened, wantTightened},
+		"unregistered peer":                 {local, zero, local},
+		"smaller peer envelope":             {local, compact, intersectedCompact},
+		"larger peer envelope":              {local, roomy, local},
+		"equal envelope narrower":           {local, narrow, narrow},
+		"peer tightens packet and envelope": {local, tightened, wantTightened},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := negotiateBudget(tc.local, tc.advertised); got != tc.want {
@@ -77,29 +88,51 @@ func TestNegotiateBudgetKeepsTheStricterOfEachLimit(t *testing.T) {
 	}
 }
 
-func TestReceiverBudgetsFenceSupersededConnectionsAndRoutes(t *testing.T) {
+func TestReceiverBudgetsTrackSiblingConnectionsSeparately(t *testing.T) {
 	registry := NewReceiverBudgets()
 	host := receiverRoute{kind: "host", hostID: "h1"}
-	registry.NoteConnection(host, 5, true)
+	registry.NoteConnection(host, 5, "whalerein-host-h1", true)
 	if !registry.Register(host, 5, 1, profileBudget(t, "default")) {
 		t.Fatal("current advertisement rejected")
 	}
 	if registry.Register(host, 4, 2, profileBudget(t, "roomy")) {
-		t.Fatal("older connection overwrote the current one")
+		t.Fatal("unknown connection accepted an advertisement")
 	}
-
-	// A broker device notification is not host-scoped: every route for that
-	// device is invalidated so a reconnect must re-advertise.
-	first := receiverRoute{kind: "device", hostID: "h1", deviceID: "d1"}
-	second := receiverRoute{kind: "device", hostID: "h2", deviceID: "d1"}
-	for _, route := range []receiverRoute{first, second} {
-		if !registry.Register(route, 0, 1, profileBudget(t, "compact")) {
-			t.Fatalf("device advertisement %+v rejected", route)
-		}
+	// A sibling device connection with its own generation keeps the first
+	// receiver's budget; the route takes the stricter of both.
+	first := receiverRoute{kind: "device", deviceID: "d1"}
+	registry.NoteConnection(first, 10, "whalerein-device-d1-a", true)
+	registry.NoteConnection(first, 11, "whalerein-device-d1-b", true)
+	if !registry.Register(first, 10, 10, profileBudget(t, "roomy")) {
+		t.Fatal("first device sibling rejected")
 	}
-	registry.NoteConnection(receiverRoute{kind: "device", deviceID: "d1"}, 0, true)
-	if registry.Count() != 1 {
-		t.Fatalf("device reconnect retained %d routes", registry.Count())
+	if !registry.Register(first, 11, 11, profileBudget(t, "compact")) {
+		t.Fatal("second device sibling rejected")
+	}
+	if registry.Register(first, 12, 12, profileBudget(t, "default")) {
+		t.Fatal("unknown device generation accepted")
+	}
+	budget, ok := registry.Lookup(DeviceEventTopic("h1", "d1"))
+	if !ok || budget.Profile != "compact" || budget.PacketBytes != 32768 {
+		t.Fatalf("shared route budget = %+v/%v", budget, ok)
+	}
+	if registry.Connections(first) != 2 {
+		t.Fatalf("sibling connections = %d", registry.Connections(first))
+	}
+	// A sibling reconnect clears only its own advertisement.
+	registry.NoteConnection(first, 11, "whalerein-device-d1-b", false)
+	budget, ok = registry.Lookup(DeviceNoticeTopic("h2", "d1"))
+	if !ok || budget.Profile != "roomy" {
+		t.Fatalf("sibling disconnect cleared the survivor: %+v/%v", budget, ok)
+	}
+	// An old generation never refreshes a newer one.
+	if registry.Register(first, 10, 9, profileBudget(t, "default")) {
+		t.Fatal("stale device generation refreshed the entry")
+	}
+	// A grant or app-session revocation fences every receiver at once.
+	registry.FenceDevice("d1")
+	if _, ok := registry.Lookup(DeviceEventTopic("h1", "d1")); ok {
+		t.Fatal("fenced device kept an advertisement")
 	}
 
 	if _, ok := registry.Lookup("not-a-topic"); ok {
@@ -116,7 +149,7 @@ func TestReceiverBudgetsFenceSupersededConnectionsAndRoutes(t *testing.T) {
 
 func TestReceiverBudgetNilRegistryIsInert(t *testing.T) {
 	var registry *ReceiverBudgets
-	registry.NoteConnection(receiverRoute{kind: "host", hostID: "h1"}, 1, true)
+	registry.NoteConnection(receiverRoute{kind: "host", hostID: "h1"}, 1, "client", true)
 	if registry.Register(receiverRoute{kind: "host", hostID: "h1"}, 1, 1, config.TransportEffective{}) {
 		t.Fatal("nil registry accepted an advertisement")
 	}
@@ -124,8 +157,9 @@ func TestReceiverBudgetNilRegistryIsInert(t *testing.T) {
 		t.Fatal("nil registry produced a budget")
 	}
 	registry.Clear(receiverRoute{kind: "host", hostID: "h1"})
+	registry.FenceDevice("d1")
 	registry.Reset()
-	if registry.Count() != 0 {
+	if registry.Count() != 0 || registry.Connections(receiverRoute{}) != 0 {
 		t.Fatal("nil registry count")
 	}
 }
@@ -134,18 +168,30 @@ func TestReceiverBudgetNilRegistryIsInert(t *testing.T) {
 type budgetRecordingConnector struct {
 	*fakeConnector
 	installed *ReceiverBudgets
+	stager    PayloadStager
 }
 
 func (c *budgetRecordingConnector) SetReceiverBudgets(receivers *ReceiverBudgets) {
 	c.installed = receivers
 }
 
-func TestNewInstallsReceiverBudgetsOnAwareConnectors(t *testing.T) {
+func (c *budgetRecordingConnector) SetPayloadStager(stager PayloadStager) {
+	c.stager = stager
+}
+
+type fakeStager struct{}
+
+func (fakeStager) Stage(context.Context, StageRequest) (*whalereinv1.PayloadReference, error) {
+	return nil, errors.New("not used")
+}
+
+func TestNewInstallsReceiverBudgetsAndStagerOnAwareConnectors(t *testing.T) {
 	connector := &budgetRecordingConnector{fakeConnector: &fakeConnector{sessions: []*fakeSession{newFakeSession()}}}
 	service, err := New(Dependencies{
 		Connector: connector,
 		Presence:  newPresence(),
 		Logger:    discardLogger(),
+		Stager:    fakeStager{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,16 +199,33 @@ func TestNewInstallsReceiverBudgetsOnAwareConnectors(t *testing.T) {
 	if connector.installed == nil || connector.installed != service.Receivers() {
 		t.Fatal("connector did not receive the shared registry")
 	}
+	if connector.stager == nil {
+		t.Fatal("connector did not receive the payload stager")
+	}
+	service.SetPayloadStager(fakeStager{})
 	if service.Available() {
 		t.Fatal("empty presence reported available")
 	}
 }
 
-func TestHandleNotificationIgnoresNilAndBindsAdvertisement(t *testing.T) {
+func defaultAdvertisement(t *testing.T, generation uint64) *whalereinv1.ReceiveAdvertisement {
+	t.Helper()
+	return &whalereinv1.ReceiveAdvertisement{
+		Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
+		Budget: &whalereinv1.TransportBudget{
+			PacketBytes: 65536, EnvelopeBytes: 16 << 20,
+			BulkConcurrency: 4, ReservedBytes: 32 << 20, TransferTimeoutMs: 120000,
+		},
+		ConnectionGeneration: generation,
+		RelayVersion:         RelayEpoch,
+	}
+}
+
+func TestHandleNotificationBindsAdvertisements(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	service.handleNotification(nil)
 
-	service.handleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "host", HostID: "h1", ConnID: 1, AtUnixMilli: time.Now().UnixMilli()})
+	service.handleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "host", HostID: "h1", ConnID: 7, AtUnixMilli: time.Now().UnixMilli()})
 	// The host is connected but HostReady has not confirmed subscriptions, so
 	// no advertisement may bind yet.
 	service.registerHostAdvertisement("h1", defaultAdvertisement(t, 1))
@@ -171,31 +234,70 @@ func TestHandleNotificationIgnoresNilAndBindsAdvertisement(t *testing.T) {
 	}
 
 	readyAt := time.Now().UTC()
-	service.handleReady(hostReadyResult(t, "h1", readyAt, defaultAdvertisement(t, 1)))
+	service.handleReady(hostReadyResult(t, "h1", readyAt, defaultAdvertisement(t, 7)))
 	if _, ok := service.Receivers().Lookup(RequestTopic("h1")); !ok {
 		t.Fatal("ready host did not bind its budget")
 	}
 	// A replayed generation is ignored without refreshing the entry.
-	service.registerHostAdvertisement("h1", defaultAdvertisement(t, 1))
+	service.registerHostAdvertisement("h1", defaultAdvertisement(t, 7))
 	if budget, ok := service.Receivers().Lookup(RequestTopic("h1")); !ok || budget.Profile != "default" {
 		t.Fatalf("replayed generation changed the budget: %+v/%v", budget, ok)
 	}
-	// Contradictory metadata clears the entry instead of leaving stale
-	// authority. The named profile stays valid, but the fragment count no
-	// longer covers the overridden envelope.
-	invalid := defaultAdvertisement(t, 2)
-	invalid.Budget.EnvelopeBytes = 17 << 20
+	// A contradictory readiness proof is rejected without clearing the last
+	// valid advertisement for the same connection generation.
+	invalid := defaultAdvertisement(t, 7)
+	invalid.Budget.EnvelopeBytes = 1 << 10
+	service.handleReady(hostReadyResult(t, "h1", readyAt.Add(time.Millisecond), invalid))
+	if _, ok := service.Receivers().Lookup(RequestTopic("h1")); !ok {
+		t.Fatal("invalid readiness proof cleared the valid advertisement")
+	}
+	// A direct contradictory advertisement clears the route instead of
+	// leaving stale authority.
 	service.registerHostAdvertisement("h1", invalid)
-	if service.Receivers().Count() != 0 {
+	if _, ok := service.Receivers().Lookup(RequestTopic("h1")); ok {
 		t.Fatal("invalid advertisement left a stale route")
 	}
-	service.handleReady(hostReadyResult(t, "h1", readyAt.Add(time.Millisecond), defaultAdvertisement(t, 2)))
+	service.handleReady(hostReadyResult(t, "h1", readyAt.Add(2*time.Millisecond), defaultAdvertisement(t, 7)))
 	if _, ok := service.Receivers().Lookup(RequestTopic("h1")); !ok {
-		t.Fatal("fresh advertisement after a rejection was not registered")
+		t.Fatal("fresh advertisement after rejection was not registered")
 	}
 	service.registerHostAdvertisement("h1", nil)
 	if service.Receivers().Count() != 0 {
 		t.Fatal("missing advertisement left a stale route")
+	}
+
+	// Device ready advertisements are registered per connection generation.
+	service.handleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 21, ClientID: "device-a", AtUnixMilli: time.Now().UnixMilli()})
+	payload, _ := proto.Marshal(defaultAdvertisement(t, 21))
+	service.HandleMessage(DeviceReadyTopic("h1", "d1"), payload)
+	budget, ok := service.Receivers().Lookup(DeviceEventTopic("h1", "d1"))
+	if !ok || budget.PacketBytes != 65536 {
+		t.Fatalf("device ready advertisement = %+v/%v", budget, ok)
+	}
+	// A sibling generation is tracked beside the first advertisement instead
+	// of clearing it; an exact replay of a generation is ignored.
+	sibling, _ := proto.Marshal(defaultAdvertisement(t, 22))
+	service.HandleMessage(DeviceReadyTopic("h1", "d1"), sibling)
+	if service.Receivers().Count() != 2 {
+		t.Fatalf("sibling advertisement count = %d", service.Receivers().Count())
+	}
+	service.HandleMessage(DeviceReadyTopic("h1", "d1"), payload)
+	if service.Receivers().Count() != 2 {
+		t.Fatalf("replayed generation changed the registry count: %d", service.Receivers().Count())
+	}
+	// A foreign epoch is rejected before registration.
+	foreign := defaultAdvertisement(t, 22)
+	foreign.RelayVersion = 2
+	foreignPayload, _ := proto.Marshal(foreign)
+	service.HandleMessage(DeviceReadyTopic("h1", "d1"), foreignPayload)
+	if service.Receivers().Count() != 2 {
+		t.Fatal("foreign epoch device advertisement registered")
+	}
+	// The last broker connection going offline clears every generation for the
+	// device route, including a stale sibling.
+	service.handleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 21, ClientID: "device-a", AtUnixMilli: time.Now().UnixMilli()})
+	if service.Receivers().Count() != 0 {
+		t.Fatalf("device route survived its last disconnect: %d", service.Receivers().Count())
 	}
 }
 
@@ -206,28 +308,21 @@ func hostReceiverRoute(hostID string) receiverRoute {
 func hostReadyResult(t *testing.T, hostID string, at time.Time, advertisement *whalereinv1.ReceiveAdvertisement) *whalereinv1.HostResult {
 	t.Helper()
 	body, err := proto.Marshal(&whalereinv1.HostReady{
-		HostId: hostID, ConnectedAtUnixMs: at.UnixMilli(), TransportVersion: transportVersion, Receive: advertisement,
+		HostId: hostID, ConnectedAtUnixMs: at.UnixMilli(), Receive: advertisement, RelayVersion: RelayEpoch,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &whalereinv1.HostResult{HostId: hostID, Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body}
+	return &whalereinv1.HostResult{HostId: hostID, Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body, RelayVersion: RelayEpoch}
 }
 
-func TestHostReadyValidatesIdentityAndAuthorizationKey(t *testing.T) {
+func TestHostReadyValidatesIdentityAdvertisementAndAuthorizationKey(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	now := time.Now().UTC()
 
 	// A ready proof without a host id falls back to the result host, and a
 	// mismatched result host is rejected.
-	service.handleReady(&whalereinv1.HostResult{
-		HostId: "h1",
-		Status: whalereinv1.OnlineStatus_succeeded,
-		ResultBody: func() []byte {
-			body, _ := proto.Marshal(&whalereinv1.HostReady{ConnectedAtUnixMs: now.UnixMilli()})
-			return body
-		}(),
-	})
+	service.handleReady(hostReadyResult(t, "h1", now, defaultAdvertisement(t, 1)))
 	if _, _, ready, known := service.Presence().HostConnection("h1"); !known || !ready {
 		t.Fatal("result host fallback did not mark the host ready")
 	}
@@ -236,7 +331,7 @@ func TestHostReadyValidatesIdentityAndAuthorizationKey(t *testing.T) {
 	// losing readiness.
 	keyErr := errors.New("key store unavailable")
 	service.SetHostKeyHandler(func(context.Context, string, []byte) error { return keyErr })
-	keyResult := hostReadyResult(t, "h1", now, nil)
+	keyResult := hostReadyResult(t, "h1", now, defaultAdvertisement(t, 1))
 	var ready whalereinv1.HostReady
 	if err := proto.Unmarshal(keyResult.ResultBody, &ready); err != nil {
 		t.Fatal(err)
@@ -245,7 +340,7 @@ func TestHostReadyValidatesIdentityAndAuthorizationKey(t *testing.T) {
 	keyResult.ResultBody, _ = proto.Marshal(&ready)
 	service.handleReady(keyResult)
 
-	keyResult = hostReadyResult(t, "h1", now, nil)
+	keyResult = hostReadyResult(t, "h1", now, defaultAdvertisement(t, 1))
 	if err := proto.Unmarshal(keyResult.ResultBody, &ready); err != nil {
 		t.Fatal(err)
 	}
@@ -255,15 +350,29 @@ func TestHostReadyValidatesIdentityAndAuthorizationKey(t *testing.T) {
 
 	// The result handler error path is counted without changing the outcome.
 	service.SetResultHandler(func(context.Context, string, *whalereinv1.HostResult) error { return keyErr })
-	result := &whalereinv1.HostResult{HostId: "h1", RequestId: "r1", Status: whalereinv1.OnlineStatus_succeeded}
+	result := &whalereinv1.HostResult{HostId: "h1", RequestId: "r1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: RelayEpoch}
 	payload, err := proto.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	service.HandleMessage(ResultTopic("h1"), payload)
 
-	if budget, ok := service.Receivers().Lookup(RequestTopic("h1")); ok || budget.Profile != "" {
-		t.Fatalf("readiness without an advertisement registered %+v", budget)
+	// Readiness without a valid advertisement is rejected: a Host that cannot
+	// publish its receive limits cannot be forwarded to.
+	other := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
+	missing := hostReadyResult(t, "h2", now, nil)
+	other.handleReady(missing)
+	if _, _, readyNow, _ := other.Presence().HostConnection("h2"); readyNow {
+		t.Fatal("readiness without an advertisement marked the host ready")
+	}
+	foreign := hostReadyResult(t, "h2", now, defaultAdvertisement(t, 1))
+	var foreignReady whalereinv1.HostReady
+	_ = proto.Unmarshal(foreign.ResultBody, &foreignReady)
+	foreignReady.RelayVersion = 2
+	foreign.ResultBody, _ = proto.Marshal(&foreignReady)
+	other.handleReady(foreign)
+	if _, _, readyNow, _ := other.Presence().HostConnection("h2"); readyNow {
+		t.Fatal("foreign relay epoch marked the host ready")
 	}
 }
 
@@ -300,6 +409,10 @@ func TestPahoConnectorDefaultsAddressAndTransportBudget(t *testing.T) {
 			if conn.receivers != replacement {
 				t.Fatal("replacement registry not installed")
 			}
+			conn.SetPayloadStager(fakeStager{})
+			if conn.stager.get() == nil {
+				t.Fatal("stager not installed")
+			}
 		})
 	}
 }
@@ -317,98 +430,18 @@ func TestTLSConfigForRejectsUnreadableAndEmptyCAs(t *testing.T) {
 	}
 }
 
-func TestPahoSessionPublishFallsBackForDeviceEvents(t *testing.T) {
-	metrics := diagnostics.NewMetrics()
-	var published string
-	transport := newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
-		published = topic
-		return nil
-	}, func(string, []byte) {})
-	session := &pahoSession{
-		transport: transport, peers: &sync.Map{}, budget: profileBudget(t, "compact"),
-		receivers: NewReceiverBudgets(), metrics: metrics,
-	}
-	topic := DeviceEventTopic("h1", "d1")
-	if err := session.Publish(context.Background(), topic, []byte("small-event"), 1); err != nil {
-		t.Fatal(err)
-	}
-	if published != topic {
-		t.Fatalf("published topic = %q", published)
-	}
-	if got := testutil.ToFloat64(metrics.TransportBudgetFallbacks.WithLabelValues("device")); got != 1 {
-		t.Fatalf("fallback metric = %v", got)
-	}
-}
-
-func TestPahoSessionUsesRegisteredReceiverBudget(t *testing.T) {
-	var published string
-	transport := newLogicalTransport(func(_ context.Context, topic string, payload []byte) error {
-		published = topic
-		return nil
-	}, func(string, []byte) {})
-	receivers := NewReceiverBudgets()
-	receivers.NoteConnection(hostReceiverRoute("h1"), 0, true)
-	if !receivers.Register(hostReceiverRoute("h1"), 0, 1, profileBudget(t, "compact")) {
-		t.Fatal("receiver budget not registered")
-	}
-	session := &pahoSession{transport: transport, peers: &sync.Map{}, budget: profileBudget(t, "default"), receivers: receivers}
-	request, err := proto.Marshal(&whalereinv1.HostRequest{
-		HostId: "h1", DeviceId: "d1", RequestId: "r1", ClientTransportVersion: transportVersion,
-		Kind: whalereinv1.RequestKind_REQUEST_KIND_QUERY,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	topic := RequestTopic("h1")
-	if err := session.Publish(context.Background(), topic, request, 1); err != nil {
-		t.Fatal(err)
-	}
-	if published != topic {
-		t.Fatalf("published topic = %q", published)
-	}
-	// The request recorded the device's transport capability under the device
-	// event route; the host request route itself remains legacy-sized.
-	if capable, ok := session.peers.Load(DeviceEventTopic("h1", "d1")); !ok || capable != true {
-		t.Fatalf("device capability = %v/%v", capable, ok)
-	}
-}
-
-// scriptedMQTTClient drives pahoSession without a broker connection.
-type scriptedMQTTClient struct {
-	publishResponse *paho.PublishResponse
-	publishErr      error
-	suback          *paho.Suback
-	subscribeErr    error
-	disconnectErr   error
-	done            chan struct{}
-	published       int
-}
-
-func (c *scriptedMQTTClient) Publish(context.Context, *paho.Publish) (*paho.PublishResponse, error) {
-	c.published++
-	return c.publishResponse, c.publishErr
-}
-func (c *scriptedMQTTClient) Subscribe(context.Context, *paho.Subscribe) (*paho.Suback, error) {
-	return c.suback, c.subscribeErr
-}
-func (c *scriptedMQTTClient) Done() <-chan struct{} {
-	if c.done == nil {
-		c.done = make(chan struct{})
-	}
-	return c.done
-}
-func (c *scriptedMQTTClient) Disconnect(*paho.Disconnect) error { return c.disconnectErr }
-
 func TestPahoSessionReportsPublishRejectionAndSubscribeFailures(t *testing.T) {
 	client := &scriptedMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0x80}}
-	session := &pahoSession{client: client}
-	if err := session.Publish(context.Background(), "topic", []byte("payload"), 1); err == nil {
+	session := newRelayTestSession(&fakeMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0x80}})
+	payload, _ := proto.Marshal(&whalereinv1.HostRequest{RequestId: "r1", HostId: "h1", Body: []byte("x")})
+	if err := session.Publish(context.Background(), RequestTopic("h1"), payload, 1); err == nil {
 		t.Fatal("rejected publish acknowledged")
 	}
 	if err := session.Subscribe(context.Background(), []string{"topic"}, 1); err == nil {
 		t.Fatal("empty suback accepted")
 	}
 	client.suback = &paho.Suback{Reasons: []byte{0x80}}
+	session.client = client
 	if err := session.Subscribe(context.Background(), []string{"topic"}, 1); err == nil {
 		t.Fatal("rejected subscription accepted")
 	}
@@ -427,9 +460,9 @@ func TestPahoSessionClosePreservesRealDisconnectErrors(t *testing.T) {
 	if err := (&pahoSession{client: client}).Close(); err == nil {
 		t.Fatal("real disconnect error swallowed")
 	}
-	transport := newLogicalTransport(func(context.Context, string, []byte) error { return nil }, func(string, []byte) {})
-	if err := (&pahoSession{client: client, transport: transport}).Close(); err == nil {
-		t.Fatal("close with transport hid the disconnect error")
+	publisher := newPublisher(func(context.Context, string, []byte) error { return nil }, config.DefaultTransportEffective(), nil)
+	if err := (&pahoSession{client: client, publisher: publisher}).Close(); err == nil {
+		t.Fatal("close with a publisher hid the disconnect error")
 	}
 }
 
@@ -546,3 +579,29 @@ func (c *cancelOnConnectConnector) Connect(context.Context) (Session, error) {
 	c.cancel()
 	return nil, errors.New("dial failed")
 }
+
+// scriptedMQTTClient drives pahoSession without a broker connection.
+type scriptedMQTTClient struct {
+	publishResponse *paho.PublishResponse
+	publishErr      error
+	suback          *paho.Suback
+	subscribeErr    error
+	disconnectErr   error
+	done            chan struct{}
+	published       int
+}
+
+func (c *scriptedMQTTClient) Publish(context.Context, *paho.Publish) (*paho.PublishResponse, error) {
+	c.published++
+	return c.publishResponse, c.publishErr
+}
+func (c *scriptedMQTTClient) Subscribe(context.Context, *paho.Subscribe) (*paho.Suback, error) {
+	return c.suback, c.subscribeErr
+}
+func (c *scriptedMQTTClient) Done() <-chan struct{} {
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	return c.done
+}
+func (c *scriptedMQTTClient) Disconnect(*paho.Disconnect) error { return c.disconnectErr }

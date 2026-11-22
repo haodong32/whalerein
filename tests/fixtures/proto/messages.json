@@ -867,46 +867,40 @@
     },
     {
       "caseId": "typed-receive-advertisement",
-      "description": "When {language} round-trips a receive advertisement, the named profile, encoded budget and authenticated connection generation stay correlated.",
+      "description": "When {language} round-trips a receive advertisement, the named packet profile, encoded budget, relay epoch and authenticated connection generation stay correlated.",
       "name": "whalerein.v1.HostReady",
       "json": {
         "hostId": "host-1",
         "connectedAtUnixMs": "1700000000000",
-        "transportVersion": 2,
         "receive": {
           "profile": "TRANSPORT_PROFILE_DEFAULT",
           "budget": {
             "packetBytes": 65536,
-            "fragmentPayloadBytes": 61440,
-            "fragmentCount": 274,
             "envelopeBytes": "16777216",
             "bulkConcurrency": 4,
             "reservedBytes": "33554432",
-            "fragmentIdleTimeoutMs": 30000,
             "transferTimeoutMs": 120000
           },
-          "connectionGeneration": "3"
-        }
+          "connectionGeneration": "3",
+          "relayVersion": 4
+        },
+        "relayVersion": 4
       },
-      "hex": "0a06686f73742d311080d095ffbc3120022a250801121f088080041080e00318920220808080082804308080801038b0ea0140c0a9071803"
+      "hex": "0a06686f73742d311080d095ffbc312a1c080112140880800420808080082804308080801040c0a907180320043004"
     },
     {
-      "caseId": "typed-transport-frame",
-      "description": "When {language} round-trips a transport frame, the selected fragment payload width and named profile stay bound to the transfer.",
-      "name": "whalerein.v1.TransportFrame",
+      "caseId": "typed-payload-reference",
+      "description": "When {language} round-trips a payload reference, the opaque owner, exact length, ciphertext digest, fixed expiry and checked purpose stay bound to one object.",
+      "name": "whalerein.v1.PayloadReference",
       "json": {
-        "version": 2,
-        "transferId": "transfer-1",
-        "topic": "whalerein/v1/h/h/event",
-        "count": 1,
-        "totalBytes": 16,
-        "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        "payload": "AQIDBA==",
-        "complete": true,
-        "fragmentPayloadBytes": 61440,
-        "profile": "TRANSPORT_PROFILE_DEFAULT"
+        "objectId": "0123456789abcdef0123456789abcdef",
+        "ownerNodeId": "access-node-1",
+        "ciphertextBytes": "16",
+        "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "expiresAtUnixMs": "1700000060000",
+        "purpose": "PAYLOAD_PURPOSE_EVENT"
       },
-      "hex": "0802120a7472616e736665722d311a167768616c657265696e2f76312f682f682f6576656e74280130103a20000000000000000000000000000000000000000000000000000000000000000042040102030458016080e0036801"
+      "hex": "0a203031323334353637383961626364656630313233343536373839616263646566120d6163636573732d6e6f64652d3118102220000000000000000000000000000000000000000000000000000000000000000028e0a499ffbc313003"
     },
     {
       "caseId": "typed-source-capabilities-expanded",

@@ -12,7 +12,6 @@ generated from it here so Access, Host and Core consume one source.
 from __future__ import annotations
 
 import json
-import math
 import tempfile
 from pathlib import Path
 
@@ -35,15 +34,13 @@ PROFILE_FIELDS = (
     "wireName",
     "packetBytes",
     "packetOverheadBytes",
-    "fragmentPayloadBytes",
-    "fragmentCount",
     "envelopeBytes",
     "bulkConcurrency",
     "reservedBytes",
-    "fragmentIdleTimeoutMs",
     "transferTimeoutMs",
 )
 UINT32_LIMIT = 2**32 - 1
+UINT64_LIMIT = 2**64 - 1
 
 
 def go_command(root: Path, out_dir: Path, plugin: str | None = None) -> list[str]:
@@ -130,6 +127,11 @@ def load_profiles(root: Path) -> dict:
     profiles = data.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
         raise RepoError(f"{PROFILES_REL}: profiles must be a non-empty object")
+    broker_limit = _uint(
+        "broker", "brokerPacketLimitBytes", data.get("brokerPacketLimitBytes"), UINT32_LIMIT
+    )
+    if broker_limit == 0:
+        raise RepoError(f"{PROFILES_REL}: brokerPacketLimitBytes must be positive")
     default = data.get("defaultProfile")
     if default not in profiles:
         raise RepoError(f"{PROFILES_REL}: defaultProfile must name a packaged profile")
@@ -143,35 +145,26 @@ def load_profiles(root: Path) -> dict:
             raise RepoError(f"{PROFILES_REL}: {name}.wireName must be a non-empty string")
         packet = _uint(name, "packetBytes", profile["packetBytes"], UINT32_LIMIT)
         overhead = _uint(name, "packetOverheadBytes", profile["packetOverheadBytes"], UINT32_LIMIT)
-        payload = _uint(name, "fragmentPayloadBytes", profile["fragmentPayloadBytes"], UINT32_LIMIT)
-        count = _uint(name, "fragmentCount", profile["fragmentCount"], UINT32_LIMIT)
-        envelope = _uint(name, "envelopeBytes", profile["envelopeBytes"], 2**64 - 1)
+        envelope = _uint(name, "envelopeBytes", profile["envelopeBytes"], UINT64_LIMIT)
         concurrency = _uint(name, "bulkConcurrency", profile["bulkConcurrency"], UINT32_LIMIT)
-        reserved = _uint(name, "reservedBytes", profile["reservedBytes"], 2**64 - 1)
-        idle = _uint(name, "fragmentIdleTimeoutMs", profile["fragmentIdleTimeoutMs"], UINT32_LIMIT)
+        reserved = _uint(name, "reservedBytes", profile["reservedBytes"], UINT64_LIMIT)
         transfer = _uint(name, "transferTimeoutMs", profile["transferTimeoutMs"], UINT32_LIMIT)
-        if payload + overhead > packet:
-            raise RepoError(
-                f"{PROFILES_REL}: {name}.fragmentPayloadBytes must not exceed "
-                "packetBytes - packetOverheadBytes"
-            )
-        if count < math.ceil(envelope / payload):
-            raise RepoError(f"{PROFILES_REL}: {name}.fragmentCount does not cover envelopeBytes")
+        if packet == 0 or concurrency == 0 or transfer == 0:
+            raise RepoError(f"{PROFILES_REL}: {name} limits and timeout must be positive")
+        if overhead >= packet:
+            raise RepoError(f"{PROFILES_REL}: {name}.packetOverheadBytes must be below packetBytes")
+        if packet > broker_limit:
+            raise RepoError(f"{PROFILES_REL}: {name}.packetBytes exceeds brokerPacketLimitBytes")
+        if envelope < packet:
+            raise RepoError(f"{PROFILES_REL}: {name}.envelopeBytes must cover one packet")
         if reserved < envelope:
             raise RepoError(f"{PROFILES_REL}: {name}.reservedBytes does not cover one envelope")
-        if reserved < concurrency * payload:
-            raise RepoError(
-                f"{PROFILES_REL}: {name}.reservedBytes does not cover in-flight fragments"
-            )
-        if idle == 0 or transfer == 0 or idle >= transfer:
-            raise RepoError(f"{PROFILES_REL}: {name} requires positive idle < transfer timeouts")
     default_profile = profiles[default]
     if (
         default_profile["packetBytes"],
-        default_profile["fragmentPayloadBytes"],
         default_profile["envelopeBytes"],
-    ) != (65536, 61440, 16 * 1024 * 1024):
-        raise RepoError(f"{PROFILES_REL}: the default profile must retain 64 KiB / 60 KiB / 16 MiB")
+    ) != (65536, 16 * 1024 * 1024):
+        raise RepoError(f"{PROFILES_REL}: the default profile must retain 64 KiB / 16 MiB")
     return data
 
 
@@ -193,19 +186,19 @@ def render_go_profiles(data: dict) -> str:
         "// DefaultTransportProfile names the packaged default profile.",
         f'const DefaultTransportProfile = "{data["defaultProfile"]}"',
         "",
+        "// BrokerPacketLimitBytes is the checked broker PUBLISH ceiling.",
+        f"const BrokerPacketLimitBytes uint64 = {data['brokerPacketLimitBytes']}",
+        "",
         "// TransportProfileValues is one validated packaged transport profile.",
         "type TransportProfileValues struct {",
-        "\tName                  string",
-        "\tWireName              string",
-        "\tPacketBytes           uint32",
-        "\tPacketOverheadBytes   uint32",
-        "\tFragmentPayloadBytes  uint32",
-        "\tFragmentCount         uint32",
-        "\tEnvelopeBytes         uint64",
-        "\tBulkConcurrency       uint32",
-        "\tReservedBytes         uint64",
-        "\tFragmentIdleTimeoutMs uint32",
-        "\tTransferTimeoutMs     uint32",
+        "\tName                string",
+        "\tWireName            string",
+        "\tPacketBytes         uint32",
+        "\tPacketOverheadBytes uint32",
+        "\tEnvelopeBytes       uint64",
+        "\tBulkConcurrency     uint32",
+        "\tReservedBytes       uint64",
+        "\tTransferTimeoutMs   uint32",
         "}",
         "",
         "var transportProfiles = map[string]TransportProfileValues{",
@@ -213,17 +206,14 @@ def render_go_profiles(data: dict) -> str:
     for name, profile in _profile_pairs(data):
         lines += [
             f'\t"{name}": {{',
-            f'\t\tName:                  "{name}",',
-            f'\t\tWireName:              "{profile["wireName"]}",',
-            f"\t\tPacketBytes:           {profile['packetBytes']},",
-            f"\t\tPacketOverheadBytes:   {profile['packetOverheadBytes']},",
-            f"\t\tFragmentPayloadBytes:  {profile['fragmentPayloadBytes']},",
-            f"\t\tFragmentCount:         {profile['fragmentCount']},",
-            f"\t\tEnvelopeBytes:         {profile['envelopeBytes']},",
-            f"\t\tBulkConcurrency:       {profile['bulkConcurrency']},",
-            f"\t\tReservedBytes:         {profile['reservedBytes']},",
-            f"\t\tFragmentIdleTimeoutMs: {profile['fragmentIdleTimeoutMs']},",
-            f"\t\tTransferTimeoutMs:     {profile['transferTimeoutMs']},",
+            f'\t\tName:                "{name}",',
+            f'\t\tWireName:            "{profile["wireName"]}",',
+            f"\t\tPacketBytes:         {profile['packetBytes']},",
+            f"\t\tPacketOverheadBytes: {profile['packetOverheadBytes']},",
+            f"\t\tEnvelopeBytes:       {profile['envelopeBytes']},",
+            f"\t\tBulkConcurrency:     {profile['bulkConcurrency']},",
+            f"\t\tReservedBytes:       {profile['reservedBytes']},",
+            f"\t\tTransferTimeoutMs:   {profile['transferTimeoutMs']},",
             "\t},",
         ]
     lines += [
@@ -240,30 +230,22 @@ def render_go_profiles(data: dict) -> str:
         "\treturn profile, ok",
         "}",
         "",
-        "func ceilDiv(value, divisor uint64) uint64 {",
-        "\treturn (value + divisor - 1) / divisor",
-        "}",
-        "",
         "// ValidateTransportProfile checks the packaged relations for one profile.",
         "func ValidateTransportProfile(profile TransportProfileValues) error {",
-        "\tif profile.PacketBytes <= profile.FragmentPayloadBytes {",
-        '\t\treturn fmt.Errorf("transport profile %s: packet budget must exceed the fragment payload", profile.Name)',  # noqa: E501
+        "\tif profile.PacketBytes == 0 || profile.BulkConcurrency == 0 || profile.TransferTimeoutMs == 0 {",  # noqa: E501
+        '\t\treturn fmt.Errorf("transport profile %s: packet budget, bulk concurrency and timeout must be positive", profile.Name)',  # noqa: E501
         "\t}",
-        "\tif uint64(profile.FragmentPayloadBytes)+uint64(profile.PacketOverheadBytes) > uint64(profile.PacketBytes) {",  # noqa: E501
-        '\t\treturn fmt.Errorf("transport profile %s: fragment payload exceeds packetBytes - packetOverheadBytes", profile.Name)',  # noqa: E501
+        "\tif profile.PacketOverheadBytes >= profile.PacketBytes {",
+        '\t\treturn fmt.Errorf("transport profile %s: packet overhead must be below the packet budget", profile.Name)',  # noqa: E501
         "\t}",
-        "\tif uint64(profile.FragmentCount) < ceilDiv(profile.EnvelopeBytes, uint64(profile.FragmentPayloadBytes)) {",  # noqa: E501
-        '\t\treturn fmt.Errorf("transport profile %s: fragment count does not cover the envelope", profile.Name)',  # noqa: E501
+        "\tif uint64(profile.PacketBytes) > BrokerPacketLimitBytes {",
+        '\t\treturn fmt.Errorf("transport profile %s: packet budget exceeds the broker limit", profile.Name)',  # noqa: E501
+        "\t}",
+        "\tif profile.EnvelopeBytes < uint64(profile.PacketBytes) {",
+        '\t\treturn fmt.Errorf("transport profile %s: envelope must cover one packet", profile.Name)',  # noqa: E501
         "\t}",
         "\tif profile.ReservedBytes < profile.EnvelopeBytes {",
         '\t\treturn fmt.Errorf("transport profile %s: reserved bytes do not cover one envelope", profile.Name)',  # noqa: E501
-        "\t}",
-        "\tif profile.ReservedBytes < uint64(profile.BulkConcurrency)*uint64(profile.FragmentPayloadBytes) {",  # noqa: E501
-        '\t\treturn fmt.Errorf("transport profile %s: reserved bytes do not cover in-flight fragments", profile.Name)',  # noqa: E501
-        "\t}",
-        "\tif profile.FragmentIdleTimeoutMs == 0 || profile.TransferTimeoutMs == 0 ||",
-        "\t\tprofile.FragmentIdleTimeoutMs >= profile.TransferTimeoutMs {",
-        '\t\treturn fmt.Errorf("transport profile %s: fragment idle timeout must be positive and below the transfer timeout", profile.Name)',  # noqa: E501
         "\t}",
         "\treturn nil",
         "}",
@@ -290,6 +272,8 @@ def render_node_profiles(data: dict) -> str:
         "",
         f"export const DEFAULT_TRANSPORT_PROFILE = '{data['defaultProfile']}'",
         "",
+        f"export const BROKER_PACKET_LIMIT_BYTES = {data['brokerPacketLimitBytes']}",
+        "",
         "export const TRANSPORT_PROFILES = Object.freeze({",
     ]
     for name, profile in _profile_pairs(data):
@@ -298,12 +282,9 @@ def render_node_profiles(data: dict) -> str:
             f"    wireName: '{profile['wireName']}',",
             f"    packetBytes: {profile['packetBytes']},",
             f"    packetOverheadBytes: {profile['packetOverheadBytes']},",
-            f"    fragmentPayloadBytes: {profile['fragmentPayloadBytes']},",
-            f"    fragmentCount: {profile['fragmentCount']},",
             f"    envelopeBytes: {profile['envelopeBytes']},",
             f"    bulkConcurrency: {profile['bulkConcurrency']},",
             f"    reservedBytes: {profile['reservedBytes']},",
-            f"    fragmentIdleTimeoutMs: {profile['fragmentIdleTimeoutMs']},",
             f"    transferTimeoutMs: {profile['transferTimeoutMs']},",
             "  }),",
         ]
@@ -331,6 +312,9 @@ def render_rust_profiles(data: dict) -> str:
         "/// Packaged default profile name.",
         f'pub const DEFAULT_TRANSPORT_PROFILE: &str = "{data["defaultProfile"]}";',
         "",
+        "/// Checked broker PUBLISH ceiling.",
+        f"pub const BROKER_PACKET_LIMIT_BYTES: u64 = {data['brokerPacketLimitBytes']};",
+        "",
         "/// One validated packaged transport profile. Byte counts are encoded bytes.",
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
         "pub struct TransportProfileValues {",
@@ -338,12 +322,9 @@ def render_rust_profiles(data: dict) -> str:
         "    pub wire_name: &'static str,",
         "    pub packet_bytes: u32,",
         "    pub packet_overhead_bytes: u32,",
-        "    pub fragment_payload_bytes: u32,",
-        "    pub fragment_count: u32,",
         "    pub envelope_bytes: u64,",
         "    pub bulk_concurrency: u32,",
         "    pub reserved_bytes: u64,",
-        "    pub fragment_idle_timeout_ms: u32,",
         "    pub transfer_timeout_ms: u32,",
         "}",
         "",
@@ -357,12 +338,9 @@ def render_rust_profiles(data: dict) -> str:
             f'        wire_name: "{profile["wireName"]}",',
             f"        packet_bytes: {profile['packetBytes']},",
             f"        packet_overhead_bytes: {profile['packetOverheadBytes']},",
-            f"        fragment_payload_bytes: {profile['fragmentPayloadBytes']},",
-            f"        fragment_count: {profile['fragmentCount']},",
             f"        envelope_bytes: {profile['envelopeBytes']},",
             f"        bulk_concurrency: {profile['bulkConcurrency']},",
             f"        reserved_bytes: {profile['reservedBytes']},",
-            f"        fragment_idle_timeout_ms: {profile['fragmentIdleTimeoutMs']},",
             f"        transfer_timeout_ms: {profile['transferTimeoutMs']},",
             "    },",
         ]
@@ -404,37 +382,25 @@ def render_rust_profiles(data: dict) -> str:
         "        profile: profile.name,",
         "        reason,",
         "    };",
-        "    if profile.packet_bytes <= profile.fragment_payload_bytes {",
-        '        return Err(error("packet budget must exceed the fragment payload"));',
-        "    }",
-        "    if u64::from(profile.fragment_payload_bytes) + u64::from(profile.packet_overhead_bytes)",  # noqa: E501
-        "        > u64::from(profile.packet_bytes)",
+        "    if profile.packet_bytes == 0",
+        "        || profile.bulk_concurrency == 0",
+        "        || profile.transfer_timeout_ms == 0",
         "    {",
         "        return Err(error(",
-        '            "fragment payload exceeds packetBytes - packetOverheadBytes",',
+        '            "packet budget, bulk concurrency and timeout must be positive",',
         "        ));",
         "    }",
-        "    let required = profile",
-        "        .envelope_bytes",
-        "        .div_ceil(u64::from(profile.fragment_payload_bytes));",
-        "    if u64::from(profile.fragment_count) < required {",
-        '        return Err(error("fragment count does not cover the envelope"));',
+        "    if profile.packet_overhead_bytes >= profile.packet_bytes {",
+        '        return Err(error("packet overhead must be below the packet budget"));',
+        "    }",
+        "    if u64::from(profile.packet_bytes) > BROKER_PACKET_LIMIT_BYTES {",
+        '        return Err(error("packet budget exceeds the broker limit"));',
+        "    }",
+        "    if profile.envelope_bytes < u64::from(profile.packet_bytes) {",
+        '        return Err(error("envelope must cover one packet"));',
         "    }",
         "    if profile.reserved_bytes < profile.envelope_bytes {",
         '        return Err(error("reserved bytes do not cover one envelope"));',
-        "    }",
-        "    let in_flight = u64::from(profile.bulk_concurrency)"
-        " * u64::from(profile.fragment_payload_bytes);",
-        "    if profile.reserved_bytes < in_flight {",
-        '        return Err(error("reserved bytes do not cover in-flight fragments"));',
-        "    }",
-        "    if profile.fragment_idle_timeout_ms == 0",
-        "        || profile.transfer_timeout_ms == 0",
-        "        || profile.fragment_idle_timeout_ms >= profile.transfer_timeout_ms",
-        "    {",
-        "        return Err(error(",
-        '            "fragment idle timeout must be positive and below the transfer timeout",',
-        "        ));",
         "    }",
         "    Ok(())",
         "}",

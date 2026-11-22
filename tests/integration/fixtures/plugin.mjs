@@ -21,6 +21,7 @@ const approvalTtlMs = Number(process.env.WHALEREIN_APPROVAL_TTL_MS || 0)
 const config = {
   adapter: 'fake',
   mqtt_url: process.env.WHALEREIN_MQTT_URL,
+  ...(process.env.WHALEREIN_ACCESS_URL ? { access_url: process.env.WHALEREIN_ACCESS_URL } : {}),
   host_id: process.env.WHALEREIN_HOST_ID,
   host_token: process.env.WHALEREIN_HOST_TOKEN,
   state_dir: process.env.WHALEREIN_STATE_DIR,

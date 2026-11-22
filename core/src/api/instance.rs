@@ -795,7 +795,7 @@ mod tests {
             profile: crate::api::TransportProfile::Compact,
             overrides: Some(crate::api::TransportOverrides {
                 envelope_bytes: Some(4 * 1024 * 1024),
-                fragment_idle_timeout_ms: Some(5_000),
+                transfer_timeout_ms: Some(5_000),
                 ..Default::default()
             }),
         });
@@ -811,14 +811,14 @@ mod tests {
         );
         // Local overrides are validated and effective for this instance.
         assert_eq!(core.transport_budget().envelope_bytes, 4 * 1024 * 1024);
-        assert_eq!(core.transport_budget().fragment_idle_timeout_ms, 5_000);
+        assert_eq!(core.transport_budget().transfer_timeout_ms, 5_000);
 
         // Invalid relations fail during open, before any channel or cache is
         // created, and leave the selected file readable for correction.
         let invalid = root.path().join("invalid.toml");
         fs::write(
             &invalid,
-            "version = 1\nservice = 'standalone'\ndata_dir = 'other'\n[transport]\nprofile = 'roomy'\n[transport.overrides]\nfragment_count = 1\n",
+            "version = 1\nservice = 'standalone'\ndata_dir = 'other'\n[transport]\nprofile = 'roomy'\n[transport.overrides]\nreserved_bytes = 1\n",
         )
         .unwrap();
         let error = match Core::open(&invalid, Arc::new(MemorySecretStore::new())) {

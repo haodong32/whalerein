@@ -139,10 +139,15 @@ export class DshAdapter extends SourceAdapter {
   }
 
   #publish(sessionId,update) {
-    if(update)for(const sink of this.#watchers.get(sessionId)??[]) {
-      try{sink(update)}catch{this.logger?.warn('source_observer_failed',{code:'internal'})}
+    if(!update)return
+    const updates=Array.isArray(update)?update:[update]
+    for(const item of updates)for(const sink of this.#watchers.get(sessionId)??[]) {
+      try{sink(item)}catch{this.logger?.warn('source_observer_failed',{code:'internal'})}
     }
   }
+
+  /** Forward the Host's active preview text budget to native delta splitting. */
+  setPreviewBytes(bytes) { this.conversation.setPreviewBytes(bytes) }
   // Question discovery is independent of committed history: broker capture or
   // removal, phase/local resolution and root replacement publish a lightweight
   // invalidation. The Host reconciles it authoritatively and coalesces bursts.

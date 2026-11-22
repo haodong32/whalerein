@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { assistantReplyData, assistantStreamEvent } from '../src/adapter/assistant-stream.js'
+import { DshConversation } from '../src/adapter/conversation.js'
 
 const agent = { session: { id: 's' } }
 const base = { attemptId: 'a', revision: 1 }
@@ -62,4 +63,33 @@ test('when a durable assistant reply has native coordinates, only the adapter co
   assert.equal(assistantReplyData('assistant/message', {} ).reply_id, undefined)
   assert.equal(assistantReplyData('assistant/message', null), null)
   assert.equal(assistantReplyData('assistant/message', { turn: 0, step: 0 }).reply_id, undefined)
+})
+
+test('the DSH adapter splits an oversized native delta before sequence allocation and preserves UTF-8 text', () => {
+  const conversation = new DshConversation({})
+  conversation.setPreviewBytes(5)
+  const notification = (text) => ({
+    sessionId: 's', ephemeral: true, type: 'assistant/preview',
+    data: {
+      stream_id: 'a', phase: 'chunk', revision: 1,
+      block_id: 'text-0', block_kind: 'BLOCK_KIND_TEXT', text,
+    },
+    dshSeq: null,
+  })
+  const updates = conversation.notification(notification('éééé'))
+  assert.ok(Array.isArray(updates))
+  assert.ok(updates.length > 1, 'one large native delta becomes several complete previews')
+  assert.equal(updates.map((update) => update.live.delta.text).join(''), 'éééé')
+  assert.deepEqual(updates.map((update) => [update.live.first_seq, update.live.last_seq]),
+    [[1, 1], [2, 2]])
+  for (const update of updates) {
+    assert.equal(update.live.delta.kind, 'BLOCK_KIND_TEXT')
+    assert.equal(update.live.block_id, 'text-0')
+    assert.equal(update.live.attempt.attempt_id, 'a')
+    assert.ok(Buffer.byteLength(update.live.delta.text, 'utf8') <= 5)
+  }
+  // The next native delta keeps the contiguous normalized sequence.
+  const next = conversation.notification({ ...notification('x'), data: { ...notification('x').data, revision: 2 } })
+  assert.equal(Array.isArray(next), false)
+  assert.equal(next.live.first_seq, 3)
 })

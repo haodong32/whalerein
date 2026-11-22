@@ -47,7 +47,7 @@ func TestExpandedContractVectorsRoundTrip(t *testing.T) {
 		"typed-attachment-close":             func() proto.Message { return &RequestPayload{} },
 		"typed-request-transport":            func() proto.Message { return &HostRequest{} },
 		"typed-receive-advertisement":        func() proto.Message { return &HostReady{} },
-		"typed-transport-frame":              func() proto.Message { return &TransportFrame{} },
+		"typed-payload-reference":            func() proto.Message { return &PayloadReference{} },
 		"typed-source-capabilities-expanded": func() proto.Message { return &SourceCapabilities{} },
 	}
 	seen := 0

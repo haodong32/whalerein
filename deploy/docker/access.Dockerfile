@@ -13,7 +13,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # stage and BusyBox provides the healthcheck wget applet.
 FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN addgroup -S whalerein && adduser -S -G whalerein whalerein
+RUN addgroup -S whalerein && adduser -S -G whalerein whalerein && \
+    mkdir -p /var/lib/whalerein/payloads && \
+    chown -R whalerein:whalerein /var/lib/whalerein
 COPY --from=build /out/whalerein-access /usr/local/bin/whalerein-access
 USER whalerein
 EXPOSE 8080 8081

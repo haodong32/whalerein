@@ -27,6 +27,7 @@ import { PluginError } from '../errors.js'
 import { sanitizeDisplayName } from '../display-name.js'
 import { sanitizeOs } from '../os.js'
 import {
+  RELAY_VERSION,
   resolveTransportProfile,
   transportProfileBudget,
   validateReceiveAdvertisement,
@@ -55,6 +56,7 @@ export function defaultReceiveAdvertisement(generation = 1) {
     profile: profile.wireName,
     budget: transportProfileBudget(profile.name),
     connection_generation: generation,
+    relay_version: RELAY_VERSION,
   }
 }
 
@@ -184,6 +186,7 @@ export class SecurityManager {
       profile: hostReceive.profile,
       budget: hostReceive.budget,
       connection_generation: this.#channelReceiveGeneration,
+      relay_version: hostReceive.relay_version,
     })
   }
 

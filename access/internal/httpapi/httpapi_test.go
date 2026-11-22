@@ -142,6 +142,8 @@ type fakeRequests struct {
 	getErr         error
 	releaseErr     error
 	touchErr       error
+	heartbeatErr   error
+	heartbeatRow   store.Request
 	touchRenewed   bool
 	submitted      []requests.SubmitInput
 	gotDevice      string
@@ -176,10 +178,19 @@ func (f *fakeRequests) Get(_ context.Context, deviceID, requestID string) (store
 	return f.row, f.getErr
 }
 
-func (f *fakeRequests) Touch(_ context.Context, deviceID, requestID string) (bool, error) {
+func (f *fakeRequests) Heartbeat(_ context.Context, deviceID, sessionID, requestID string) (store.Request, error) {
 	f.touchDevice = deviceID
 	f.touchRequest = requestID
-	return f.touchRenewed, f.touchErr
+	if f.heartbeatErr != nil {
+		return store.Request{}, f.heartbeatErr
+	}
+	if f.touchErr != nil {
+		return store.Request{}, f.touchErr
+	}
+	if f.heartbeatRow.RequestID != "" {
+		return f.heartbeatRow, nil
+	}
+	return f.row, nil
 }
 
 type apiFixture struct {
@@ -432,18 +443,21 @@ func TestGetRequestRouteReturnsAuthorizedRequest(t *testing.T) {
 	if f.requests.gotDevice != "d1" || f.requests.gotRequest != "r1" {
 		t.Fatalf("get args = %q %q", f.requests.gotDevice, f.requests.gotRequest)
 	}
-	if f.requests.touchDevice != "d1" || f.requests.touchRequest != "r1" {
-		t.Fatalf("get renewed %q %q instead of the exact request", f.requests.touchDevice, f.requests.touchRequest)
+	if f.requests.touchRequest != "" {
+		t.Fatalf("get renewed %q instead of leaving liveness to heartbeat", f.requests.touchRequest)
 	}
 	if f.requests.releaseDevice != "d1" || f.requests.releaseLimit != requests.ResultValueLimit(1<<20) {
 		t.Fatalf("release args = device %q limit %d", f.requests.releaseDevice, f.requests.releaseLimit)
 	}
-	// Read-only recovery: a failed renewal must not hide the recorded outcome
-	// and a read never reopens an expired lease.
+	// Read-only recovery: a failed heartbeat bookkeeping path cannot affect a
+	// status read, and a read never reopens an expired lease.
 	f.requests.touchErr = errors.New("lease update failed")
 	recorder = doRequest(t, f.server.PublicHandler(), http.MethodGet, "/v1/requests/r1", nil, map[string]string{"Authorization": "Bearer device-token"})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("read-only recovery status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if f.requests.touchRequest != "" {
+		t.Fatal("failed read path renewed the lease")
 	}
 	f.requests.touchErr = nil
 	f.requests.getErr = requests.ErrNotFound

@@ -488,6 +488,32 @@
         "number": 4
       }
     ],
+    "PayloadPurpose": [
+      {
+        "name": "PAYLOAD_PURPOSE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "PAYLOAD_PURPOSE_REQUEST",
+        "number": 1
+      },
+      {
+        "name": "PAYLOAD_PURPOSE_RESULT",
+        "number": 2
+      },
+      {
+        "name": "PAYLOAD_PURPOSE_EVENT",
+        "number": 3
+      },
+      {
+        "name": "PAYLOAD_PURPOSE_ATTACHMENT_PART",
+        "number": 4
+      },
+      {
+        "name": "PAYLOAD_PURPOSE_HISTORY_PAGE",
+        "number": 5
+      }
+    ],
     "QuestionAvailability": [
       {
         "name": "QUESTION_AVAILABILITY_UNSPECIFIED",
@@ -564,6 +590,16 @@
         "number": 3
       }
     ],
+    "RelayEpoch": [
+      {
+        "name": "RELAY_EPOCH_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "RELAY_EPOCH_V4",
+        "number": 4
+      }
+    ],
     "RequestKind": [
       {
         "name": "REQUEST_KIND_UNSPECIFIED",
@@ -596,6 +632,10 @@
       {
         "name": "REQUEST_KIND_HOST_CLIENTS",
         "number": 7
+      },
+      {
+        "name": "REQUEST_KIND_ACCESS_READY",
+        "number": 8
       }
     ],
     "RunPhase": [
@@ -1615,6 +1655,21 @@
           "number": 7,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "payloadReference",
+          "name": "payload_reference",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PayloadReference"
         }
       ]
     },
@@ -2366,19 +2421,19 @@
           "type": "TYPE_BYTES"
         },
         {
-          "json_name": "transportVersion",
-          "name": "transport_version",
-          "number": 4,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
           "json_name": "receive",
           "name": "receive",
           "number": 5,
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ReceiveAdvertisement"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -2463,26 +2518,27 @@
           "type": "TYPE_BYTES"
         },
         {
-          "json_name": "clientTransportVersion",
-          "name": "client_transport_version",
-          "number": 12,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "relayTransportVersion",
-          "name": "relay_transport_version",
-          "number": 13,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
           "json_name": "transport",
           "name": "transport",
           "number": 14,
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.RequestTransportMetadata"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "bodyReference",
+          "name": "body_reference",
+          "number": 16,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PayloadReference"
         }
       ]
     },
@@ -2580,6 +2636,21 @@
           "number": 13,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "resultReference",
+          "name": "result_reference",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PayloadReference"
         }
       ]
     },
@@ -3719,6 +3790,53 @@
         }
       ]
     },
+    "PayloadReference": {
+      "fields": [
+        {
+          "json_name": "objectId",
+          "name": "object_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "ownerNodeId",
+          "name": "owner_node_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "ciphertextBytes",
+          "name": "ciphertext_bytes",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sha256",
+          "name": "sha256",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "purpose",
+          "name": "purpose",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PayloadPurpose"
+        }
+      ]
+    },
     "PendingQueue": {
       "fields": [
         {
@@ -4339,6 +4457,13 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -4350,6 +4475,238 @@
           "number": 1,
           "repeated": true,
           "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "RelayObject": {
+      "fields": [
+        {
+          "json_name": "objectId",
+          "name": "object_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "ownerNodeId",
+          "name": "owner_node_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "purpose",
+          "name": "purpose",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PayloadPurpose"
+        },
+        {
+          "json_name": "ciphertextBytes",
+          "name": "ciphertext_bytes",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sha256",
+          "name": "sha256",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "RelayObjectDeleteResult": {
+      "fields": [
+        {
+          "json_name": "cancelled",
+          "name": "cancelled",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "RelayObjectFinishRequest": {
+      "fields": [
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "ciphertextBytes",
+          "name": "ciphertext_bytes",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sha256",
+          "name": "sha256",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
+    "RelayObjectReservation": {
+      "fields": [
+        {
+          "json_name": "objectId",
+          "name": "object_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "ownerNodeId",
+          "name": "owner_node_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "uploadPath",
+          "name": "upload_path",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "maxBytes",
+          "name": "max_bytes",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "uploadTimeoutMs",
+          "name": "upload_timeout_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        }
+      ]
+    },
+    "RelayObjectReserveRequest": {
+      "fields": [
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "purpose",
+          "name": "purpose",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.PayloadPurpose"
+        },
+        {
+          "json_name": "partId",
+          "name": "part_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "ciphertextBytes",
+          "name": "ciphertext_bytes",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sha256",
+          "name": "sha256",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -4765,6 +5122,76 @@
           "number": 12,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "resultReference",
+          "name": "result_reference",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PayloadReference"
+        }
+      ]
+    },
+    "RequestStateNotice": {
+      "fields": [
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "status",
+          "name": "status",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.OnlineStatus"
+        },
+        {
+          "json_name": "commandId",
+          "name": "command_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "resultReference",
+          "name": "result_reference",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.PayloadReference"
+        },
+        {
+          "json_name": "relayVersion",
+          "name": "relay_version",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_UINT32"
         }
       ]
     },
@@ -5854,20 +6281,6 @@
           "type": "TYPE_UINT32"
         },
         {
-          "json_name": "fragmentPayloadBytes",
-          "name": "fragment_payload_bytes",
-          "number": 2,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "fragmentCount",
-          "name": "fragment_count",
-          "number": 3,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
           "json_name": "envelopeBytes",
           "name": "envelope_bytes",
           "number": 4,
@@ -5889,114 +6302,11 @@
           "type": "TYPE_UINT64"
         },
         {
-          "json_name": "fragmentIdleTimeoutMs",
-          "name": "fragment_idle_timeout_ms",
-          "number": 7,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
           "json_name": "transferTimeoutMs",
           "name": "transfer_timeout_ms",
           "number": 8,
           "repeated": false,
           "type": "TYPE_UINT32"
-        }
-      ]
-    },
-    "TransportFrame": {
-      "fields": [
-        {
-          "json_name": "version",
-          "name": "version",
-          "number": 1,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "transferId",
-          "name": "transfer_id",
-          "number": 2,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "topic",
-          "name": "topic",
-          "number": 3,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "index",
-          "name": "index",
-          "number": 4,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "count",
-          "name": "count",
-          "number": 5,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "totalBytes",
-          "name": "total_bytes",
-          "number": 6,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "digest",
-          "name": "digest",
-          "number": 7,
-          "repeated": false,
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "payload",
-          "name": "payload",
-          "number": 8,
-          "repeated": false,
-          "type": "TYPE_BYTES"
-        },
-        {
-          "json_name": "ack",
-          "name": "ack",
-          "number": 9,
-          "repeated": false,
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "rejected",
-          "name": "rejected",
-          "number": 10,
-          "repeated": false,
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "complete",
-          "name": "complete",
-          "number": 11,
-          "repeated": false,
-          "type": "TYPE_BOOL"
-        },
-        {
-          "json_name": "fragmentPayloadBytes",
-          "name": "fragment_payload_bytes",
-          "number": 12,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "profile",
-          "name": "profile",
-          "number": 13,
-          "repeated": false,
-          "type": "TYPE_ENUM",
-          "type_name": "whalerein.v1.TransportProfile"
         }
       ]
     },

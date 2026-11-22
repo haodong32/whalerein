@@ -89,6 +89,12 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 	if req.ResultBody == nil {
 		req.ResultBody = []byte{}
 	}
+	if req.BodyReference == nil {
+		req.BodyReference = []byte{}
+	}
+	if req.ResultReference == nil {
+		req.ResultReference = []byte{}
+	}
 	if req.ClientLeaseState == "" {
 		req.ClientLeaseState = ClientLeaseLive
 	}
@@ -133,12 +139,21 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 		stampRevocationGeneration(req),
 		stampDeviceRevocationGeneration(req),
 		stampResultLimitBytes(req),
+		int32(req.RelayVersion),
+		req.BodyReference,
+		req.ResultReference,
+		req.NoticePending,
+		req.NoticeAttempts,
+		req.NoticeNextAttempt,
+		req.NoticePublishedAt,
+		noticeStatusName(req.NoticeStatus),
+		req.NoticeUpdatedAt,
 	}
 
 	if req.CommandID != "" {
 		insertSQL := `
 			INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,true)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,true)
 			ON CONFLICT (host_id, device_id, command_id) WHERE command_id <> '' DO NOTHING
 			RETURNING ` + requestColumns
 		row := queryRow(ctx, insertSQL, args...)
@@ -164,7 +179,7 @@ func createRequest(ctx context.Context, queryRow func(context.Context, string, .
 
 	insertSQL := `
 		INSERT INTO requests (` + requestColumns + `,forward_provenance_known)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,true)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,true)
 		RETURNING ` + requestColumns
 	row := queryRow(ctx, insertSQL, args...)
 	inserted, err := scanRequest(row)
@@ -226,6 +241,15 @@ func stampResultLimitBytes(req Request) any {
 		return nil
 	}
 	return req.Stamp.ResultLimitBytes
+}
+
+// noticeStatusName stores the durable notice status. An empty status means no
+// notice intent is pending.
+func noticeStatusName(status whalereinv1.OnlineStatus) string {
+	if status == whalereinv1.OnlineStatus_online_status_unspecified {
+		return ""
+	}
+	return StatusName(status)
 }
 
 func requestByCommand(ctx context.Context, queryRow func(context.Context, string, ...any) pgx.Row, hostID, deviceID, commandID string) (Request, error) {
@@ -599,6 +623,24 @@ func (s *Store) MarkPublishFailure(ctx context.Context, requestID string, now ti
                 WHEN kind = 5 THEN $3
 		        WHEN forward_attempts >= $2 THEN forward_after
 		        ELSE $3 END,
+		    -- Exhausting the publication budget without any recorded publish
+		    -- is an authoritative unknown outcome. It records the same durable
+		    -- notice intent as a Host result so the client is not left waiting.
+		    notice_pending = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN true
+		        ELSE notice_pending END,
+		    notice_attempts = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN 0
+		        ELSE notice_attempts END,
+		    notice_next_attempt = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN NULL
+		        ELSE notice_next_attempt END,
+		    notice_status = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN 'unknown'
+		        ELSE notice_status END,
+		    notice_updated_at = CASE
+		        WHEN kind <> 5 AND forward_attempts >= $2 AND NOT published_once THEN GREATEST(COALESCE(notice_updated_at, $4), $4)
+		        ELSE notice_updated_at END,
 		    updated_at = $4
 		WHERE request_id = $1 AND status = 'received'`,
 		requestID, maxAttempts, now.Add(retryAfter), now, int32(whalereinv1.ErrorCode_unavailable))
@@ -725,10 +767,20 @@ func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, e
 		UPDATE requests
 		SET status = CASE WHEN $13 AND (NOT forward_provenance_known OR published_once OR forward_attempts <> 1) THEN 'unknown' ELSE $4 END,
 		    result_body = CASE WHEN $10 THEN $5 ELSE result_body END,
+		    result_reference = CASE WHEN $15::bytea IS NULL THEN result_reference ELSE $15 END,
 		    error_code = CASE WHEN $13 AND (NOT forward_provenance_known OR published_once OR forward_attempts <> 1) THEN $14::integer ELSE $6::integer END,
 		    error_message = $7,
 		    channel_id = CASE WHEN $8 <> '' THEN $8 ELSE channel_id END,
 		    forward_state = 'none',
+		    -- The same transaction records durable notice intent. A newer
+		    -- transition overwrites a pending intermediate one; the terminal
+		    -- state is never dropped because it is the last transition the
+		    -- status matrix admits.
+		    notice_pending = true,
+		    notice_attempts = 0,
+		    notice_next_attempt = NULL,
+		    notice_status = CASE WHEN $13 AND (NOT forward_provenance_known OR published_once OR forward_attempts <> 1) THEN 'unknown' ELSE $4 END,
+		    notice_updated_at = GREATEST(COALESCE(notice_updated_at, $9), $9),
 		    updated_at = GREATEST(updated_at,$9,$11,$12)
 		WHERE request_id = $1 AND host_id = $2 AND device_id = $3
 		  AND (`+hostResultStatusPredicate+`)`,
@@ -746,6 +798,7 @@ func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, e
 		databaseNow,
 		update.TransportPreflight,
 		int32(whalereinv1.ErrorCode_unavailable),
+		update.ResultReference,
 	)
 	if err != nil {
 		return false, fmt.Errorf("apply host result: %w", err)
@@ -782,11 +835,15 @@ func (s *Store) ClearExpiredBodies(ctx context.Context, now time.Time) (int64, e
 	// the caller repeats until a pass returns fewer than CleanupBatchSize rows.
 	cmd, err := s.db.Exec(ctx, `
 		UPDATE requests
-		SET request_body = ''::bytea, result_body = ''::bytea, bodies_cleared=true, updated_at = GREATEST(updated_at,$1)
+		SET request_body = ''::bytea, result_body = ''::bytea,
+		    body_reference = ''::bytea, result_reference = ''::bytea,
+		    bodies_cleared=true, updated_at = GREATEST(updated_at,$1)
 		WHERE request_id IN (
 			SELECT request_id FROM requests
 			WHERE expires_at <= $1
-			  AND (request_body <> ''::bytea OR result_body <> ''::bytea OR bodies_cleared IS DISTINCT FROM true)
+			  AND (request_body <> ''::bytea OR result_body <> ''::bytea
+			       OR body_reference <> ''::bytea OR result_reference <> ''::bytea
+			       OR bodies_cleared IS DISTINCT FROM true)
 			ORDER BY expires_at, request_id
 			LIMIT $2)`, now, CleanupBatchSize)
 	if err != nil {

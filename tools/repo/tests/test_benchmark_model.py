@@ -326,29 +326,108 @@ def test_display_diagnostics_use_each_increment_while_excluding_warmups_and_fail
         model.validate(facts)
 
 
-def test_mixed_load_preserves_read_failures_separately_from_watch():
-    facts = streaming_document()
+def mixed_load_document(pairs=2, *, bulk_failure=None, count=None):
+    """A paired v7 mixed-load document built from completed Watch attempts."""
+    pair_count = count if count is not None else pairs * 2
+    facts = streaming_document(count=pair_count)
     configuration = facts["run"]["configuration"]
     configuration["workflow"] = "mixed-load"
     facts["scenario"] = model.scenario(configuration)
-    facts["attempts"][0]["history_reads"] = [
-        {"at_ms": at, "duration_ms": 80, "outcome": outcome}
-        for at, outcome in (
-            (40, "completed"),
-            (70, "timeout"),
-            (100, "completed"),
-            (130, "product_error"),
-        )
-    ]
-    facts["attempts"][0]["history_reads"][-1]["error_code"] = "rate_limited"
-    facts["workflow_results"] = model.workflow_summary(facts["attempts"], "mixed-load")
+    workload = facts["scenario"]["workload"]
+    history_expected = sum(len(text.encode()) for text in model.history_texts(workload["history"]))
+    attachment_expected = workload["attachment"]["bytes"]
+    for index, attempt in enumerate(facts["attempts"]):
+        attempt["arm"] = model.ARMS[index % 2]
+        attempt["pair_id"] = f"pair-{index // 2:04d}"
+        if attempt["arm"] != "bulk":
+            continue
+        bulk_ordinal = index // 2
+        attempt["history_reads"] = [
+            read_observation(index, history_expected, history_expected)
+            for index in range(len(workload["history"]["start_ms"]))
+        ]
+        attempt["attachment_reads"] = [
+            read_observation(
+                index,
+                attachment_expected,
+                attachment_expected,
+                failure=bulk_failure if bulk_ordinal == 0 and index == 0 else None,
+            )
+            for index in range(len(workload["attachment"]["start_ms"]))
+        ]
+    facts["workflow_results"] = model.workflow_summary(
+        facts["attempts"],
+        "mixed-load",
+        final_bytes=len(facts["scenario"]["response"]["final_text"].encode()),
+        sizes=model.source_sizes(facts["scenario"]),
+        paired=True,
+        burst_window_ms=model.BURST_WINDOW_MS,
+    )
+    return facts
+
+
+def read_observation(index, expected_bytes, success_bytes, failure=None):
+    observation = {
+        "scheduled_at_ms": index * 100.0,
+        "started_at_ms": index * 100.0,
+        "at_ms": index * 100.0,
+        "duration_ms": 80.0,
+        "outcome": "completed",
+        "bytes": success_bytes,
+        "expected_bytes": expected_bytes,
+    }
+    if failure:
+        observation.update(outcome="product_error", bytes=0, error_code=failure)
+    return observation
+
+
+def test_mixed_load_preserves_read_failures_separately_from_watch():
+    facts = mixed_load_document(pairs=2, bulk_failure="rate_limited")
     measured = model.validate(facts)
-    assert measured["outcomes"]["correct_by_deadline"] == 1
-    assert measured["workflow_results"]["history_correct"] == 2
-    assert measured["workflow_results"]["history_measured"] == 4
-    assert measured["workflow_results"]["history_errors"] == {"rate_limited": 1}
-    facts["attempts"][0]["history_reads"].pop()
-    with pytest.raises(RepoError, match="every scheduled read"):
+    workflow = measured["workflow_results"]
+    # Two bulk attempts each schedule four history reads; the first attachment
+    # read fails, the second verifies its bytes.
+    assert workflow["history_correct"] == 8
+    assert workflow["history_measured"] == 8
+    assert workflow["attachment_correct"] == 1
+    assert workflow["attachment_measured"] == 2
+    assert workflow["attachment_errors"] == {"rate_limited": 1}
+    assert workflow["bulk"]["expected_reads"] == 10
+    assert workflow["bulk"]["successful_reads"] == 9
+    assert workflow["bulk"]["errors"] == {"rate_limited": 1}
+    assert workflow["bulk"]["gate"]["state"] == "incomplete"
+    assert "bulk_read_errors" in workflow["bulk"]["gate"]["reasons"]
+    assert workflow["arms"]["idle"]["correct"] == 2
+    assert workflow["arms"]["bulk"]["correct"] == 2
+    assert len(workflow["paired"]["pairs"]) == 2
+    assert all(pair["deltas"]["longest_output_gap_ms"] == 0 for pair in workflow["paired"]["pairs"])
+    # Two idle samples are one A/A difference; the gate says so instead of passing.
+    assert workflow["paired"]["gate"]["state"] == "incomplete"
+    assert "insufficient_aa_noise" in workflow["paired"]["gate"]["reasons"]
+    text = summary.render(measured)
+    assert "Background history reads: 8/8" in text
+    assert "Background attachment reads: 1/2" in text
+    assert "Bulk read gate: incomplete" in text
+    assert "idle arm: 2/2 correct" in text
+    assert "Idle/bulk gate: incomplete" in text
+    facts["attempts"][1]["attachment_reads"].pop()
+    with pytest.raises(RepoError, match="every scheduled attachment read"):
+        model.validate(facts)
+
+
+def test_mixed_load_requires_alternating_complete_pairs():
+    facts = mixed_load_document(pairs=2)
+    facts["attempts"][1]["pair_id"] = "pair-0001"
+    with pytest.raises(RepoError, match="one bulk attempt per idle pair"):
+        model.validate(facts)
+    facts = mixed_load_document(pairs=2)
+    facts["attempts"][0]["arm"] = "bulk"
+    facts["attempts"][1]["arm"] = "idle"
+    with pytest.raises(RepoError, match="alternate idle then bulk"):
+        model.validate(facts)
+    facts = mixed_load_document(pairs=2)
+    facts["attempts"][0]["history_reads"] = facts["attempts"][1]["history_reads"]
+    with pytest.raises(RepoError, match="idle arm must not perform bulk reads"):
         model.validate(facts)
 
 
@@ -374,6 +453,24 @@ def test_history_read_retains_only_a_safe_public_code(monkeypatch, code, expecte
     assert observation["outcome"] == "product_error"
     assert observation.get("error_code") == expected
     assert "message" not in observation
+
+
+def test_legacy_v6_mixed_load_report_keeps_its_history_only_schema():
+    facts = streaming_document(version=6)
+    configuration = facts["run"]["configuration"]
+    configuration["workflow"] = "mixed-load"
+    facts["scenario"] = model.scenario(configuration)
+    facts["scenario"]["version"] = 6
+    facts["scenario"]["workload"].pop("attachment")
+    facts["scenario"]["workload"].pop("pairing")
+    facts["attempts"][0]["history_reads"] = [read_observation(index, 64, 64) for index in range(4)]
+    facts["workflow_results"] = model.workflow_summary(facts["attempts"], "mixed-load")
+    measured = model.validate(facts)
+    workflow = measured["workflow_results"]
+    assert "attachment_measured" not in workflow
+    assert "arms" not in workflow
+    assert "paired" not in workflow
+    assert workflow["history_correct"] == 4
 
 
 def test_recovery_requires_source_activity_during_the_blackout():
@@ -672,6 +769,142 @@ def test_run_checks_mark_insufficient_samples_incomplete():
     checks = analysis.run_checks(facts)
     assert checks["state"] == "incomplete"
     assert any(item["name"] == "attempts_below_declared_floor" for item in checks["reasons"])
+
+
+def paired_arm(identity, gap, share, *, delay=10.0, final=0.2):
+    return {
+        "max_display_delay_ms": delay,
+        "longest_output_gap_ms": gap,
+        "largest_output_share": share,
+        "final_output_share": final,
+    }
+
+
+def paired_arm_pairs(idle_gaps, bulk_gaps, idle_shares=None, bulk_shares=None):
+    idle_shares = idle_shares or [0.1] * len(idle_gaps)
+    bulk_shares = bulk_shares or idle_shares
+    return [
+        {
+            "pair_id": f"pair-{index:04d}",
+            "values": {
+                "idle": paired_arm("i", idle_gaps[index], idle_shares[index]),
+                "bulk": paired_arm("b", bulk_gaps[index], bulk_shares[index]),
+            },
+            "reason": None,
+        }
+        for index in range(len(idle_gaps))
+    ]
+
+
+def test_paired_arms_derive_tolerance_from_idle_aa_noise():
+    # Idle changes by at most 2 ms, so the declared 2x noise tolerance is 4 ms.
+    pairs = paired_arm_pairs([100, 102, 101, 103, 102, 104], [103] * 6)
+    result = analysis.paired_arm_comparison(pairs)
+    entry = result["gate"]["metrics"]["longest_output_gap_ms"]
+    assert entry["aa_noise"] == 2
+    assert entry["aa_differences"] == 5
+    assert entry["tolerance"] == 4
+    assert entry["mean_delta"] == 1
+    assert entry["verdict"] == "within_tolerance"
+    assert result["gate"]["state"] == "complete"
+    assert [pair["deltas"]["longest_output_gap_ms"] for pair in result["pairs"]] == [
+        3,
+        1,
+        2,
+        0,
+        1,
+        -1,
+    ]
+
+    excessive = paired_arm_pairs([100, 102, 101, 103, 102, 104], [107] * 6)
+    gate = analysis.paired_arm_comparison(excessive)["gate"]
+    assert gate["metrics"]["longest_output_gap_ms"]["mean_delta"] == 5
+    assert gate["metrics"]["longest_output_gap_ms"]["verdict"] == "regression"
+    assert gate["state"] == "failed"
+    assert "bulk_degradation" in gate["reasons"]
+
+
+def test_paired_arms_gate_share_and_require_aa_samples():
+    pairs = paired_arm_pairs(
+        [100] * 6,
+        [100] * 6,
+        idle_shares=[0.10, 0.11, 0.10, 0.11, 0.10, 0.11],
+        bulk_shares=[0.15] * 6,
+    )
+    gate = analysis.paired_arm_comparison(pairs)["gate"]
+    share = gate["metrics"]["largest_output_share"]
+    assert share["aa_noise"] == pytest.approx(0.01)
+    assert share["tolerance"] == pytest.approx(0.02)
+    assert share["verdict"] == "regression"
+
+    short = analysis.paired_arm_comparison(paired_arm_pairs([100, 101], [101, 102]))
+    assert short["gate"]["state"] == "incomplete"
+    assert short["gate"]["reasons"] == ["insufficient_aa_noise"]
+    assert short["gate"]["metrics"]["longest_output_gap_ms"]["tolerance"] is None
+
+
+def test_paired_arms_report_incomplete_pairs_without_inventing_deltas():
+    pairs = [
+        {
+            "pair_id": "pair-0000",
+            "values": {
+                "idle": paired_arm("i", 100, 0.1),
+                "bulk": paired_arm("b", 120, 0.2),
+            },
+            "reason": None,
+        },
+        {"pair_id": "pair-0001", "values": None, "reason": "incomplete_pair"},
+    ]
+    result = analysis.paired_arm_comparison(pairs)
+    assert result["pairs"][1] == {
+        "pair_id": "pair-0001",
+        "deltas": {metric: None for metric in model.PAIR_STREAMING_METRICS},
+        "reason": "incomplete_pair",
+    }
+
+
+def test_bulk_read_gate_requires_every_read_and_verified_byte():
+    complete = {
+        "expected_reads": 5,
+        "successful_reads": 5,
+        "bytes_expected": 1024,
+        "bytes_verified": 1024,
+        "errors": {},
+    }
+    assert analysis.bulk_read_gate(complete)["state"] == "complete"
+    partial = {**complete, "successful_reads": 4, "errors": {"rate_limited": 1}}
+    gate = analysis.bulk_read_gate(partial)
+    assert gate["state"] == "incomplete"
+    assert gate["reasons"] == ["bulk_reads_not_successful", "bulk_read_errors"]
+    assert analysis.bulk_read_gate({**complete, "bytes_verified": 1023})["reasons"] == [
+        "bulk_bytes_not_verified"
+    ]
+
+
+def test_attachment_read_retains_only_a_safe_public_code(monkeypatch):
+    integration = Path(__file__).resolve().parents[3] / "tests" / "integration"
+    monkeypatch.syspath_prepend(str(integration))
+    workflow = runpy.run_path(str(integration / "benchmark" / "workflow.py"))
+    response = {
+        "schema": "whalerein/client/v1",
+        "command": "session.download",
+        "error": {"code": "not_found", "message": "A detailed failure message"},
+    }
+    monkeypatch.setattr(
+        workflow["subprocess"],
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=3, stdout=json.dumps(response)),
+    )
+    reader = SimpleNamespace(args=lambda *args: args, env={}, envelope=json.loads)
+    load = workflow["AttachmentLoad"](
+        reader, "host", "session", "0" * 64, 4, "0" * 64, "fixture.bin"
+    )
+    observation = load.read(0, 1000)
+    assert observation["outcome"] == "product_error"
+    assert observation["error_code"] == "not_found"
+    assert observation["bytes"] == 0
+    assert observation["expected_bytes"] == 4
+    assert "message" not in observation
 
 
 def test_benchmark_cli_reports_result_and_compares_saved_evidence(monkeypatch, capsys, tmp_path):

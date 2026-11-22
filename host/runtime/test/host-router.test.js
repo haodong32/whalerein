@@ -79,7 +79,7 @@ function baseRequest(overrides = {}) {
     device_id: 'd1',
     kind: 'REQUEST_KIND_QUERY',
     protocol_version: 1,
-    relay_transport_version: 2,
+    relay_version: 4,
     expires_at_unix_ms: Date.now() + 60_000,
     channel_id: 'channel-1',
     body: new Uint8Array(0),
@@ -115,6 +115,7 @@ function encryptedQuery({ security, store, channel, payload, plaintext: rawPaylo
     payload_digest: commandId === '' ? new Uint8Array(0) : sha256Bytes(frame),
     expires_at_unix_ms: expiresAt,
     protocol_version: 1,
+    relay_version: 4,
     channel_id: channelId,
     body: frame,
     ...overrides,
@@ -212,7 +213,7 @@ test('the Host reports observation, not a cached channel, for an internal client
   }))
   assert.equal((await read({ device_id: 'd1' })).error_code, 'forbidden')
   assert.equal((await read({ host_id: '' })).error_code, 'forbidden')
-  assert.equal((await read({ relay_transport_version: 0 })).error_code, 'forbidden')
+  assert.equal((await read({ relay_version: 2 })).error_code, 'protocol_version_incompatible')
   assert.equal((await read()).error_code, 'unavailable')
   ctx.host.security.setRevocationsPending(false)
   const channel = establishChannel({ hostId: 'host-1', deviceId: 'd1', security: ctx.host.security, store: ctx.store })
@@ -1254,12 +1255,12 @@ test('typed send replies are scoped to the request and attachment transfers fail
   }
 })
 
-test('pairing requests require relay transport version 2 and safe expiry metadata', async () => {
+test('pairing requests require relay epoch 4 and safe expiry metadata', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
     let result = await send(ctx.access, baseRequest({
-      request_id: 'pair-old-relay', kind: 'REQUEST_KIND_PAIRING_CLAIM', relay_transport_version: 1,
+      request_id: 'pair-old-relay', kind: 'REQUEST_KIND_PAIRING_CLAIM', relay_version: 1,
     }))
     assert.equal(result.status, 'rejected')
     assert.equal(result.error_code, 'protocol_version_incompatible')

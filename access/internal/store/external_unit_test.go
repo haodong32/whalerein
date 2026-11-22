@@ -510,63 +510,6 @@ func TestConsumeHostProofNonceIsFirstWriterWins(t *testing.T) {
 	}
 }
 
-func TestAdmitOperationRecordsBeforeMutationAndReplaysIdempotently(t *testing.T) {
-	operation := ExternalOperation{
-		OperationID: "op-a", AuthorizationID: "auth-a", Purpose: "host_enrollment",
-		WorkspaceID: "ws-1", HostID: "host-1", PayloadDigest: []byte("digest"),
-		EnrollmentRevision: "1",
-	}
-	tx := &externalTx{}
-	tx.queryRowFn = func(_ context.Context, sql string, _ ...any) pgx.Row {
-		if strings.Contains(sql, "INSERT INTO external_operations") {
-			return externalRow{values: []any{"op-a"}}
-		}
-		return operationRow(operation)
-	}
-	tx.execFn = func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("INSERT 0 1"), nil
-	}
-	db := &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}
-	recorded, admitted, err := newStore(db).AdmitOperation(context.Background(), operation)
-	if err != nil || !admitted || recorded.OperationID != "op-a" || !tx.committed {
-		t.Fatalf("admission = %+v admitted=%v err=%v committed=%v", recorded, admitted, err, tx.committed)
-	}
-
-	replay := &externalTx{}
-	replay.queryRowFn = func(_ context.Context, sql string, _ ...any) pgx.Row {
-		if strings.Contains(sql, "INSERT INTO external_operations") {
-			return externalRow{err: pgx.ErrNoRows}
-		}
-		return operationRow(operation)
-	}
-	replay.execFn = func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		t.Fatal("a replay must not write")
-		return pgconn.CommandTag{}, nil
-	}
-	db = &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return replay, nil }}
-	recorded, admitted, err = newStore(db).AdmitOperation(context.Background(), operation)
-	if err != nil || admitted || recorded.OperationID != "op-a" || !replay.committed {
-		t.Fatalf("replay = %+v admitted=%v err=%v committed=%v", recorded, admitted, err, replay.committed)
-	}
-
-	changed := &externalTx{}
-	changedPayload := operation
-	changedPayload.PayloadDigest = []byte("other")
-	changed.queryRowFn = func(_ context.Context, sql string, _ ...any) pgx.Row {
-		if strings.Contains(sql, "INSERT INTO external_operations") {
-			return externalRow{err: pgx.ErrNoRows}
-		}
-		return operationRow(changedPayload)
-	}
-	db = &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return changed, nil }}
-	if _, _, err := newStore(db).AdmitOperation(context.Background(), operation); !errors.Is(err, ErrOperationConflict) {
-		t.Fatalf("expected an admission conflict, got %v", err)
-	}
-	if changed.committed {
-		t.Fatal("a mismatched admission must not commit")
-	}
-}
-
 func TestMarkEnrollmentReadyAdvancesAndRecordsTheOutcomeAtomically(t *testing.T) {
 	tx := &externalTx{}
 	tx.queryRowFn = func(_ context.Context, sql string, _ ...any) pgx.Row {

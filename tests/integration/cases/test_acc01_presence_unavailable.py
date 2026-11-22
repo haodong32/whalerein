@@ -71,9 +71,14 @@ def test_send_during_unavailable_presence_is_queued_and_delivered(
         assert code in (5, 7), values
         error = values[-1]["error"]
         assert error["code"] != "host_offline", error
-        # A queue-window attempt is a retryable failure (unavailable/unknown/
-        # expired), never a terminal host_offline.
-        assert error.get("action") == "retry", error
+        # A queue-window attempt is a retryable or recoverable failure
+        # (unavailable/unknown/expired), never a terminal host_offline. An
+        # uncertain outcome requires `operation recover` (action refresh); a
+        # proven-unavailable outcome is a plain retry.
+        if error.get("code") == "unknown":
+            assert error.get("action") == "refresh", error
+        else:
+            assert error.get("action") == "retry", error
         statuses = _request_statuses(scenario.schema)
         assert statuses, "no request was recorded during the presence window"
         assert "host_offline" not in statuses, statuses
