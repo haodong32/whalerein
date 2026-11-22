@@ -3,7 +3,7 @@ package com.whalerein.android.ui.conversation
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalView
 import com.whalerein.android.R
 import com.whalerein.android.state.conversation.AnnouncementMilestone
@@ -22,13 +22,13 @@ fun AnnouncementPolicy(
     onConsumed: () -> Unit,
 ) {
     val view = LocalView.current
-    val context = LocalContext.current
+    val milestone = state.announcement
+    val message = if (milestone != null) stringResource(milestone.labelRes()) else ""
     LaunchedEffect(state.announcementToken) {
-        val milestone = state.announcement ?: return@LaunchedEffect
-        if (state.announcementToken == 0L) {
+        if (milestone == null || state.announcementToken == 0L) {
             return@LaunchedEffect
         }
-        view.announceForAccessibility(context.getString(milestone.labelRes()))
+        view.announceForAccessibility(message)
         onConsumed()
     }
 }

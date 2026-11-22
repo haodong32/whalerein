@@ -35,9 +35,3 @@ internal fun AccessScaffold(
         )
     }
 }
-
-/** Renders the typed value the caller already selected; it never infers trust. */
-@Composable
-internal fun AccessLabel(text: String) {
-    Text(text = text, style = MaterialTheme.typography.bodyMedium)
-}

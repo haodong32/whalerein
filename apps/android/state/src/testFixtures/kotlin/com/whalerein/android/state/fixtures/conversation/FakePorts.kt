@@ -34,7 +34,6 @@ import com.whalerein.android.state.conversation.SendReceipt
 import com.whalerein.android.state.conversation.SessionDetails
 import com.whalerein.android.state.conversation.SessionListPort
 import com.whalerein.android.state.conversation.SessionListSnapshot
-import com.whalerein.android.state.conversation.SessionSummary
 import com.whalerein.android.state.conversation.SendRequest
 import com.whalerein.android.state.conversation.StopOutcome
 import com.whalerein.android.state.conversation.WaitPort

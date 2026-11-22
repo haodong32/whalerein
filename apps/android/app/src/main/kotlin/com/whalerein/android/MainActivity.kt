@@ -4,11 +4,11 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.core.view.WindowCompat
 import com.whalerein.android.platform.ActivityPlatform
 import com.whalerein.android.ui.AppRoot
 import com.whalerein.android.ui.theme.WhaleReinTheme
@@ -31,7 +31,7 @@ class MainActivity : ComponentActivity() {
         platform = ActivityPlatform(this, container.diagnostics.sink)
         container.platform.attach(platform)
         container.appLinks.dispatch(intent)
-        enableEdgeToEdge()
+        WindowCompat.enableEdgeToEdge(window)
         setContent {
             WhaleReinTheme {
                 Surface(

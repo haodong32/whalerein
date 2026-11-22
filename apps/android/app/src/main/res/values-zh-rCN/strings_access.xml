@@ -7,14 +7,11 @@
     <string name="access_standalone_setup">独立 Host</string>
     <string name="access_profiles">连接配置</string>
     <string name="access_refresh">刷新</string>
-    <string name="access_loading">正在加载</string>
-    <string name="access_error">出现错误</string>
     <string name="access_previous_session">存在之前验证过的会话。</string>
 
     <string name="access_sign_in_title">登录</string>
     <string name="access_sign_in_body">浏览器将打开 WhaleRein Cloud 官方登录页。应用不会要求输入设备代码。</string>
     <string name="access_sign_in_start">打开浏览器</string>
-    <string name="access_sign_in_retry">重试</string>
     <string name="access_sign_in_cancel">取消登录</string>
     <string name="access_sign_in_recover">检查登录结果</string>
     <string name="access_sign_in_waiting">请在浏览器中完成登录，然后返回应用。</string>
@@ -66,7 +63,6 @@
     <string name="access_target_validate">验证 TLS 目标</string>
     <string name="access_accept">与 Host 配对</string>
     <string name="access_reject">拒绝</string>
-    <string name="access_paired">已配对</string>
 
     <string name="access_profiles_title">配置</string>
     <string name="access_profiles_body">每个配置独立保存存储、信任、凭据、草稿和恢复记录。</string>
@@ -90,8 +86,6 @@
     <string name="access_settings_credential">凭据状态</string>
     <string name="access_settings_kind">配置类型</string>
     <string name="access_back">返回</string>
-    <string name="access_read_only_cache">只读缓存视图</string>
-    <string name="access_offline">离线</string>
     <string name="access_unavailable">不可用</string>
     <string name="access_activate">启用</string>
     <string name="access_directory_sign_in">登录 WhaleRein Cloud</string>

@@ -7,7 +7,6 @@ import com.whalerein.android.state.fixtures.conversation.ConversationFixtures
 import com.whalerein.android.state.fixtures.conversation.FakeSessionListPort
 import com.whalerein.android.state.fixtures.conversation.RecordingDiagnosticSink
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals

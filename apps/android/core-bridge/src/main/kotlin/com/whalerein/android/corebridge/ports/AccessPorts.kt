@@ -1,11 +1,9 @@
 package com.whalerein.android.corebridge.ports
 
 import com.whalerein.android.corebridge.AndroidCore
-import com.whalerein.android.corebridge.AppConfigView
 import com.whalerein.android.corebridge.CloudAccountView
 import com.whalerein.android.corebridge.InstanceInput
 import com.whalerein.android.corebridge.InstanceView
-import com.whalerein.android.corebridge.appConfigRead
 import com.whalerein.android.corebridge.appConfigRemoveInstance
 import com.whalerein.android.corebridge.appConfigSaveInstance
 import com.whalerein.android.corebridge.appConfigSetActive
@@ -42,7 +40,6 @@ import com.whalerein.android.state.access.TransportValidation
 import com.whalerein.android.corebridge.secret.AndroidSecretStore
 import com.whalerein.android.corebridge.SecretStoreException
 import com.whalerein.android.state.core.AttemptId
-import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.HostId
 import com.whalerein.android.state.core.HostRef
 import com.whalerein.android.state.core.InstanceId
@@ -204,7 +201,6 @@ internal class ProfileAdapter(private val owner: AndroidCore) : ProfilePort {
 
     override suspend fun remove(instance: InstanceId): Outcome<Unit> = suspendOutcome {
         appConfigRemoveInstance(owner.appConfigPath, instance.value)
-        Unit
     }
 
     override suspend fun credentialState(instance: InstanceId): CredentialState {

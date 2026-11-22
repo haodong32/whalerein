@@ -51,7 +51,7 @@ import kotlinx.coroutines.withContext
  * - `accessPorts { cloudAuth, profiles, directory, pairing, startup, externalEntry }`
  * - `conversationPorts { observation, history, composer, wait, command,
  *   modelsQueue, pendingInput, draft, sessionList }`
- * - `supportPorts { operations, account, failureSummary, sendRecovery }`
+ * - `supportPorts { operations, account, failureSummary }`
  * - `attachmentPorts { attachments, staging, authorization }`
  * - `activeInstance`, `provenance { coreRevision, coreVersion, appVersion }`,
  *   `close()`

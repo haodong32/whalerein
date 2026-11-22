@@ -209,7 +209,7 @@ class PendingInputViewModelCoverageTest : ConversationTestBase() {
     @DisplayName("AC-18.freshness pending collection and blank answer defaults are explicit")
     fun ac18Defaults() {
         val approval = ConversationFixtures.approvalItem()
-        val collection = PendingCollection(listOf(approval))
+        val collection = PendingListResult.Current(listOf(approval))
         assertEquals(1, collection.items.size)
         assertNull(QuestionAnswerDraft().toAnswer("q1").text)
         assertEquals(emptyList<String>(), QuestionAnswerDraft().toAnswer("q1").selectedOptionIds)

@@ -1,6 +1,5 @@
 package com.whalerein.android.platform.lan
 
-import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.ComponentActivity

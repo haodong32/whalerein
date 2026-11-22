@@ -21,7 +21,6 @@ import com.whalerein.android.state.conversation.WaitPort
 import com.whalerein.android.state.support.AccountPort
 import com.whalerein.android.state.support.CoreFailureSummaryPort
 import com.whalerein.android.state.support.OperationsPort
-import com.whalerein.android.state.support.SendRecoveryPort
 
 data class AccessPorts(
     val cloudAuth: CloudAuthPort,
@@ -48,7 +47,6 @@ data class SupportPorts(
     val operations: OperationsPort,
     val account: AccountPort,
     val failureSummary: CoreFailureSummaryPort,
-    val sendRecovery: SendRecoveryPort,
 )
 
 data class AttachmentPorts(

@@ -1,7 +1,6 @@
 package com.whalerein.android.state.conversation
 
 import com.whalerein.android.state.core.AttemptId
-import com.whalerein.android.state.core.SessionRef
 
 /**
  * Domain model for the conversation slice.

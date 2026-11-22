@@ -70,11 +70,6 @@
     <string name="support_scope_local_identity">此设备的本地身份</string>
     <string name="support_scope_local_identity_remote">此本地身份及其远程授权</string>
 
-    <string name="support_settings_title">支持与诊断</string>
-    <string name="support_settings_open_account">账号</string>
-    <string name="support_settings_open_operations">操作</string>
-    <string name="support_settings_open_diagnostics">诊断</string>
-
     <string name="support_diagnostics_title">诊断</string>
     <string name="support_diagnostics_scope">日志范围：%1$s</string>
     <string name="support_diagnostics_healthy">日志状态正常。</string>

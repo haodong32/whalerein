@@ -61,7 +61,7 @@ class DiagnosticsRuntime(
             wake.receive()
             delay(FLUSH_DEBOUNCE_MILLIS)
             // Drain any wakeups that arrived while flushing.
-            while (wake.tryReceive().isSuccess) Unit
+            while (wake.tryReceive().isSuccess) { }
             runCatching { journal.flush() }
         }
     }

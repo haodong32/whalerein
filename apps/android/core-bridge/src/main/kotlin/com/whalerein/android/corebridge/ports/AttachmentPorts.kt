@@ -13,10 +13,8 @@ import com.whalerein.android.state.attachments.AttachmentScope
 import com.whalerein.android.state.attachments.AttachmentStaging
 import com.whalerein.android.state.attachments.StagingHandle
 import com.whalerein.android.state.attachments.VerifiedAttachment
-import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.InstanceId
 import com.whalerein.android.state.core.Outcome
-import com.whalerein.android.state.core.SessionRef
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID

@@ -1,17 +1,13 @@
 package com.whalerein.android.corebridge.ports
 
 import com.whalerein.android.corebridge.AndroidCore
-import com.whalerein.android.corebridge.CloudAccountSessionView
 import com.whalerein.android.corebridge.RetainedOperationView
 import com.whalerein.android.corebridge.MobileException
 import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.HostId
 import com.whalerein.android.state.core.InstanceId
 import com.whalerein.android.state.core.Outcome
-import com.whalerein.android.state.core.SendId
 import com.whalerein.android.state.core.SessionId
-import com.whalerein.android.state.core.SessionRef
-import com.whalerein.android.state.support.AccountAction
 import com.whalerein.android.state.support.AccountConnection
 import com.whalerein.android.state.support.AccountPort
 import com.whalerein.android.state.support.AccountStatus
@@ -28,21 +24,14 @@ import com.whalerein.android.state.support.OperationRecoveryRequest
 import com.whalerein.android.state.support.OperationScope
 import com.whalerein.android.state.support.OperationStatus
 import com.whalerein.android.state.support.OperationsPort
-import com.whalerein.android.state.support.PairingHistoryEntry
 import com.whalerein.android.state.support.RecoveredOperation
 import com.whalerein.android.state.support.RetainedOperation
 import com.whalerein.android.state.support.RetainedOperationKind
 import com.whalerein.android.state.support.RetentionCertainty
 import com.whalerein.android.state.support.RevocationReport
 import com.whalerein.android.state.support.RevocationScope
-import com.whalerein.android.state.support.SendReceipt as RecoverySendReceipt
-import com.whalerein.android.state.support.SendReceiptStatus
-import com.whalerein.android.state.support.SendRecoveryPort
-import com.whalerein.android.state.support.SendRequest as RecoverySendRequest
-import com.whalerein.android.state.support.ReplyRef
 import com.whalerein.android.state.support.SignOutReport
 import java.io.File
-import java.security.MessageDigest
 
 private fun RetainedOperationView.kind(): RetainedOperationKind = when (kind) {
     "send" -> RetainedOperationKind.Send
@@ -221,38 +210,9 @@ internal class CoreFailureSummaryAdapter(private val owner: AndroidCore) : CoreF
     }
 
     override suspend fun clear(instance: InstanceId): Outcome<Unit> = outcomeOf {
-        file(instance)?.delete()
-        Unit
-    }
-}
-
-internal class SendRecoveryAdapter(private val owner: AndroidCore) : SendRecoveryPort {
-    override suspend fun submit(request: RecoverySendRequest): Outcome<RecoverySendReceipt> = outcomeOf {
-        val operationId = MessageDigest.getInstance("SHA-256")
-            .digest(request.sendId.value.toByteArray(Charsets.UTF_8))
-            .take(16)
-            .joinToString("") { "%02x".format(it) }
-        val view = owner.core().sendWithOperationId(
-            request.session.host.hostId.value,
-            request.session.sessionId.value,
-            request.text,
-            com.whalerein.android.corebridge.DeliveryChoice.QUEUE,
-            operationId,
-        )
-        RecoverySendReceipt(
-            sendId = request.sendId,
-            status = if (view.receipt == null) SendReceiptStatus.Unconfirmed
-            else SendReceiptStatus.Confirmed,
-        )
-    }
-
-    override suspend fun readReply(ref: ReplyRef): Outcome<String> = outcomeOf {
-        val operationId = MessageDigest.getInstance("SHA-256")
-            .digest(ref.sendId.value.toByteArray(Charsets.UTF_8))
-            .take(16)
-            .joinToString("") { "%02x".format(it) }
-        val view = owner.core().recoverSendWithContent(operationId, true, 5_000uL)
-        val message = view.content ?: throw MobileException.NotFound("reply not readable")
-        message.blocks.filter { it.kind == "text" }.joinToString("\n") { it.text }
+        val target = file(instance)
+        if (target != null && !target.delete() && target.exists()) {
+            error("diagnostic summary could not be removed")
+        }
     }
 }

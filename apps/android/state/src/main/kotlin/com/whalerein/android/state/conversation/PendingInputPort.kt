@@ -9,8 +9,6 @@ import com.whalerein.android.state.core.SessionRef
  * Every decision carries the reviewed [Guard]. The adapter must reject a stale
  * guard instead of applying a decision to newer Host state.
  */
-data class PendingCollection(val items: List<PendingItem>)
-
 /** A fixed-entry collection result; "current empty" is not "unavailable". */
 sealed interface PendingListResult {
     data class Current(val items: List<PendingItem>) : PendingListResult

@@ -24,12 +24,9 @@ import com.whalerein.android.state.conversation.QuestionAnswer
 import com.whalerein.android.state.conversation.QuestionBatch
 import com.whalerein.android.state.conversation.QuestionKind
 import com.whalerein.android.state.conversation.QuestionOption
-import com.whalerein.android.state.conversation.PendingApproval
 import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.Outcome
 import com.whalerein.android.state.core.SessionRef
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 private fun guardParts(guard: Guard): Pair<Long, String>? {
     val separator = guard.value.indexOf(':')

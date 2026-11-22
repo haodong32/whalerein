@@ -8,7 +8,6 @@ import com.whalerein.android.state.core.SendId
 import com.whalerein.android.state.fixtures.support.FakeSendRecoveryPort
 import com.whalerein.android.state.fixtures.support.confirmedSendReceipt
 import com.whalerein.android.state.fixtures.support.testSessionRef
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull

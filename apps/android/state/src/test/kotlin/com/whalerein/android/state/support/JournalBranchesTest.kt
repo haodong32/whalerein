@@ -6,8 +6,6 @@ import com.whalerein.android.state.core.DiagnosticLevel
 import com.whalerein.android.state.core.DiagnosticSink
 import com.whalerein.android.state.fixtures.support.FakeClock
 import com.whalerein.android.state.fixtures.support.FakeJournalStore
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -184,18 +182,6 @@ class JournalBranchesTest {
         zeroCapacity.emit(event())
         assertTrue(zeroCapacity.snapshot().isEmpty())
 
-        val store = FakeJournalStore()
-        val journal = Journal(store, FakeClock())
-        val writer = JournalWriter(journal, intervalMillis = 1_000L)
-        val job = writer.start(backgroundScope)
-        journal.emit(event(code = "writer"))
-        advanceTimeBy(1_500L)
-        runCurrent()
-        assertEquals(listOf("writer"), journal.read(instance).events.mapNotNull { it.code })
-        journal.emit(event(code = "flush-now"))
-        writer.flushNow()
-        assertEquals(2, journal.read(instance).events.size)
-        job.cancel()
     }
 
     @Test

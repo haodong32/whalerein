@@ -23,7 +23,6 @@ import com.whalerein.android.corebridge.ports.OperationsAdapter
 import com.whalerein.android.corebridge.ports.PairingAdapter
 import com.whalerein.android.corebridge.ports.PendingInputAdapter
 import com.whalerein.android.corebridge.ports.ProfileAdapter
-import com.whalerein.android.corebridge.ports.SendRecoveryAdapter
 import com.whalerein.android.corebridge.ports.SessionListAdapter
 import com.whalerein.android.corebridge.ports.StartupAdapter
 import com.whalerein.android.corebridge.ports.SupportPorts
@@ -33,7 +32,7 @@ import com.whalerein.android.state.core.DiagnosticSink
 import com.whalerein.android.state.core.InstanceId
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 
@@ -68,7 +67,7 @@ class AndroidCore private constructor(
     private val lock = Any()
     @Volatile
     private var installed: CoreBridge = openBridge(initial)
-    private val closed = AtomicReference(false)
+    private val closed = AtomicBoolean(false)
 
     val accessPorts: AccessPorts by lazy {
         AccessPorts(
@@ -100,7 +99,6 @@ class AndroidCore private constructor(
             operations = OperationsAdapter(this),
             account = AccountAdapter(this),
             failureSummary = CoreFailureSummaryAdapter(this),
-            sendRecovery = SendRecoveryAdapter(this),
         )
     }
 
@@ -113,7 +111,6 @@ class AndroidCore private constructor(
     }
 
     /** Alias matching the composition-root naming used by the app shell. */
-    val attachmentsPorts: AttachmentPorts get() = attachmentPorts
 
     /** Direct session-lifecycle accessor for `SessionListViewModel`. */
     val sessionList: com.whalerein.android.state.conversation.SessionListPort
@@ -183,7 +180,6 @@ class AndroidCore private constructor(
             instanceDirectory = instanceRoot,
             filesDir = context.filesDir,
             diagnosticReceiver = receiver,
-            dispatcher = dispatcher,
             appVersion = appVersion,
         )
     }

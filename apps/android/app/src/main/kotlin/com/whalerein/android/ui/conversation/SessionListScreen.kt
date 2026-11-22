@@ -24,10 +24,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -248,8 +248,7 @@ fun SessionDetailSheet(
                 Button(
                     onClick = onFork,
                     enabled = details is SessionDetailsUiState.Loaded &&
-                        (details as SessionDetailsUiState.Loaded)
-                            .details.latestCompletedTurnId != null &&
+                        details.details.latestCompletedTurnId != null &&
                         fork !is ForkSessionUiState.InFlight,
                 ) {
                     Text(stringResource(R.string.conversation_session_fork))

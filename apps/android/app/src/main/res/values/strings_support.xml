@@ -70,11 +70,6 @@
     <string name="support_scope_local_identity">this device\'s local identity</string>
     <string name="support_scope_local_identity_remote">this local identity and its remote authority</string>
 
-    <string name="support_settings_title">Support and diagnostics</string>
-    <string name="support_settings_open_account">Account</string>
-    <string name="support_settings_open_operations">Operations</string>
-    <string name="support_settings_open_diagnostics">Diagnostics</string>
-
     <string name="support_diagnostics_title">Diagnostics</string>
     <string name="support_diagnostics_scope">Journal scope: %1$s</string>
     <string name="support_diagnostics_healthy">Journal is healthy.</string>
