@@ -13,14 +13,19 @@ DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}"
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
-xcodebuild \
+BUILD_LOG="${DERIVED}/release-scan-build.log"
+mkdir -p "${DERIVED}"
+if ! xcodebuild \
   -project "${IOS_DIR}/WhaleRein.xcodeproj" \
   -scheme WhaleRein \
   -configuration Release \
   -destination "${DESTINATION}" \
   -derivedDataPath "${DERIVED}" \
   ARCHS=arm64 \
-  build >/dev/null
+  build >"${BUILD_LOG}" 2>&1; then
+  tail -n 120 "${BUILD_LOG}" >&2
+  exit 1
+fi
 
 APP="${DERIVED}/Build/Products/Release-iphonesimulator/WhaleRein.app"
 BINARY="${APP}/WhaleRein"
