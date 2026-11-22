@@ -258,6 +258,8 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 	ready, err := proto.Marshal(&whalereinv1.HostReady{
 		HostId:            s.hostID,
 		ConnectedAtUnixMs: now,
+		Receive:           acceptanceAdvertisement(1),
+		RelayVersion:      relayEpochV4,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady: %v", err)
@@ -268,6 +270,7 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 		ResultBody:        ready,
 		CompletedAtUnixMs: now,
 		ProtocolVersion:   1,
+		RelayVersion:      relayEpochV4,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady result: %v", err)
@@ -425,6 +428,24 @@ func waitNotReady(t *testing.T, accessURL string) {
 	t.Fatal("Access stayed ready on a read-only database")
 }
 
+// relayEpochV4 is the only relay contract Access admits (proto/v1/WIRE.md).
+const relayEpochV4 uint32 = 4
+
+// acceptanceAdvertisement is the Host receive budget the broker requires on
+// readiness; values mirror the packaged default transport profile.
+func acceptanceAdvertisement(generation uint64) *whalereinv1.ReceiveAdvertisement {
+	return &whalereinv1.ReceiveAdvertisement{
+		Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
+		Budget: &whalereinv1.TransportBudget{
+			PacketBytes: 65536, EnvelopeBytes: 16 << 20,
+			BulkConcurrency: 4, ReservedBytes: 32 << 20,
+			TransferTimeoutMs: 120000,
+		},
+		ConnectionGeneration: generation,
+		RelayVersion:         relayEpochV4,
+	}
+}
+
 func eventPayload(hostID, deviceID string) []byte {
 	envelope := &whalereinv1.EventEnvelope{
 		HostId:          hostID,
@@ -434,6 +455,7 @@ func eventPayload(hostID, deviceID string) []byte {
 		Ciphertext:      []byte("ciphertext-acceptance"),
 		TraceId:         "acceptance",
 		CreatedAtUnixMs: time.Now().UnixMilli(),
+		RelayVersion:    relayEpochV4,
 	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
