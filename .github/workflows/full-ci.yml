@@ -282,6 +282,9 @@ jobs:
       - name: Add Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+
       - name: Build the Android test APK
         run: |
           cd apps/android
