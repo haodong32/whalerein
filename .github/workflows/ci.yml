@@ -21,7 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [rust, go, node, python]
+        # Kotlin is the JDK-only Android state module. It never installs the
+        # Android SDK/NDK and never runs a device suite.
+        kind: [rust, go, node, kotlin, python]
     steps:
       - name: Start quick-check timer
         run: echo "QUICK_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
@@ -71,6 +73,22 @@ jobs:
           python-version: '3.15.2'
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
+      - name: Set up JDK 21 for the Android state module
+        if: steps.selection.outputs.selected == 'true' && matrix.kind == 'kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Cache Gradle for the Android state module
+        if: steps.selection.outputs.selected == 'true' && matrix.kind == 'kotlin'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-state-ubuntu-26.04-${{ hashFiles('apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/state/build.gradle.kts', 'apps/android/state/settings.gradle.kts') }}
+          restore-keys: |
+            gradle-state-ubuntu-26.04-
       - name: Run quick checks
         if: steps.selection.outputs.selected == 'true'
         env:
@@ -84,6 +102,7 @@ jobs:
           path: |
             .data/runs/**/report.json
             .data/runs/**/report.html
+            apps/android/state/build/test-results/test/*.xml
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

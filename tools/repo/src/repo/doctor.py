@@ -44,6 +44,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         hint="go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12",
     ),
     ToolSpec("docker", ("--version",), hint="install Docker"),
+    ToolSpec(
+        "java",
+        ("-version",),
+        hint="install JDK 21 for the Android JVM state module",
+        min_version=(21,),
+    ),
+    ToolSpec(
+        "adb",
+        ("version",),
+        hint="install Android platform-tools and attach a compatible device",
+    ),
     ToolSpec("git", ("--version",), required=False),
 )
 
@@ -190,6 +201,8 @@ def specs_for_target(target):
     if target.kind in ("integration", "proto"):
         return specs_for(target.kind)
     base = [spec for spec in TOOL_SPECS if spec.name in ("uv", "git")]
+    if target.kind == "android":
+        return [*base, *(spec for spec in TOOL_SPECS if spec.name in ("java", "adb"))]
     if target.kind == "ios":
         return [
             *base,
@@ -210,5 +223,6 @@ def specs_for_target(target):
         "go": ("go",),
         "node": ("node", "pnpm"),
         "python": (),
+        "kotlin": ("java",),
     }[target.project.kind]
     return base + [spec for spec in TOOL_SPECS if spec.name in names]

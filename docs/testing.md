@@ -31,8 +31,9 @@ macOS or Windows validation.
   macOS or Windows behavior.
 - The CI workflow runs affected Rust projects' checks, builds, unit tests and
   per-crate coverage on Linux, macOS 26 and Windows Server 2025. Linux also owns
-  the Go, Node.js and Python groups and the separate container integration suite.
-  All selected native matrix jobs must pass the `Full CI gate`.
+  the Go, Node.js, Kotlin and Python groups and the separate container
+  integration suite. All selected native matrix jobs must pass the
+  `Full CI gate`.
 - Windows runs the Core file-lock/sharing and reparse-point cases natively,
   plus focused repository-runner tests for Windows pipes and process-tree
   termination. macOS additionally invokes the ignored SecretStore Keychain
@@ -53,6 +54,7 @@ The opt-in `.github/workflows/full-ci.yml` owns the full platform matrix:
 |---|---|---|
 | Checks and coverage | `ubuntu-26.04` | Static checks, builds and affected-project unit coverage. |
 | Native Rust checks and coverage | `macos-26`, `windows-2025` | Native checks, builds, unit tests and per-crate coverage. |
+| Android device suites | `macos-26` emulator; physical device for performance | Compose fixtures, native bridge/Keystore/TLS checks and the explicit Macrobenchmark. |
 | Deployment acceptance | `ubuntu-24.04` | Compose restart/recovery, shutdown, backup/restore and retention. |
 
 The full native jobs reuse the affected-project selection and invoke the repo
@@ -67,6 +69,43 @@ Named platform-gated tests include
 `scutil` display-name path in the CLI. The Windows reparse-point test needs
 Developer Mode or symlink privilege on the runner; a failure there is a runner
 capability failure, not permission to skip the case in another job.
+
+## Android layers
+
+The Android client has one JDK-only layer and three explicit device layers:
+
+| Layer | Entry | Prerequisites | Ordinary PR |
+|---|---|---|---|
+| Kotlin/JVM state | `./repo test --project android-state` | JDK 21 and the Gradle wrapper only. No Android SDK, NDK, emulator or Rust compiler. | Yes, together with `./repo check android-state`. |
+| Compose UI | `./repo test android-ui` | Android SDK, `adb`, a compatible target, and the fixture test APK. | No. Explicit label event, manual dispatch or full workflow only. |
+| Native integration | `./repo test android-integration` | Android SDK, `adb`, a device, and the official local stack when `WHALEREIN_ANDROID_LOCAL_STACK=1` is requested. | No. |
+| Performance | `./repo test android-performance` | Physical device, Android SDK and a release-like Macrobenchmark package. | No. |
+
+`android-state` is the only Android project registered in
+`tools/repo/projects.toml`; bare `./repo test` selects it as a unit project and
+never selects a device suite. Focused JVM runs pass the literal selector to the
+state build's `-PcaseFilter` condition, which disables non-matching bodies
+before execution; discovery uses `-PcaseList=true`, which disables every body.
+Filter-skipped JVM cases are not selected evidence; a genuinely skipped
+selected case is reported by an unfiltered run. The device targets accept
+`--only` (a literal case-ID substring), `--list` and `--json`, and save the
+common repository report with the selected suite, task, case IDs, statuses,
+tested revision, and device ABI/API/page-size facts when `adb` can report them.
+`--only` with no observed match is a usage error.
+
+A missing SDK, device, physical device or requested local stack is recorded as
+unavailable evidence with prerequisite exit status 3. It is not a skip and not a
+pass, and it cannot be used as an Android acceptance result. Kotlin/JVM
+`--coverage` runs JaCoCo and enforces the per-package 90% line gate; it never
+reports a passing coverage gate without measurements.
+
+Android device work is bound to the tested revision. The `run-full-ci` label
+event, manual dispatch and the full workflow may request it; a later push that
+merely leaves the label attached stays on the quick path. `CI gate` requires
+only the JDK-only Android quick checks on ordinary pushes, and `Full CI gate`
+requires the selected device suites. See
+[apps/android/README.md](../apps/android/README.md) for build, signing and
+device-suite commands.
 
 ## Contract checks
 
@@ -207,7 +246,8 @@ Choose integration scope by behavior, not the number of changed directories:
   establish. Name those risks before starting; crossing directories alone is
   insufficient. A full suite deferred to CI is reported as pending, not passed.
 
-Bare `./repo test` selects all registered unit projects. Use
+Bare `./repo test` selects all registered unit projects, including the JDK-only
+`android-state`; it never selects an Android device suite. Use
 `./repo test integration` for the complete Linux integration scope. State the
 scope reason when running repository-wide validation.
 
@@ -279,9 +319,10 @@ queue, main and nightly tiers prove the exact trees that land.
 
 `.github/workflows/ci.yml` runs parallel affected-project quick checks. Rust
 checks formatting without compiling; Go, Node and Python run static checks and
-unit tests without coverage or a separate build. Full Rust tests, coverage,
-platform matrices, iOS builds and deployment acceptance do not run on ordinary
-PR pushes. Three minutes is a performance target for each quick job, including
+unit tests without coverage or a separate build; Kotlin runs the JDK-only
+`android-state` Gradle checks and tests without the Android SDK, NDK or a
+device. Full Rust tests, coverage, platform matrices, Android device suites, iOS
+builds and deployment acceptance do not run on ordinary PR pushes. Three minutes is a performance target for each quick job, including
 setup and report upload but excluding runner queueing. A final timing step warns
 if a job exceeds that target without changing its test result. Quick jobs and
 lightweight gate/decision jobs have ten-minute safety timeouts to stop stuck
@@ -389,6 +430,9 @@ Require at least 90% per Rust crate, Go package and Node package. Rust/Node use
 line coverage; Go uses its native statement coverage. Integration results do not
 replace unit coverage. The Repo Tooling project also enforces 90% Python lines.
 Generated protocol bindings are excluded from coverage; their tests still run.
+The Kotlin/JVM `android-state` project uses JaCoCo line coverage and the same
+90% gate per package. `--coverage` runs the Gradle verification task and reports
+each package; ordinary push CI does not request coverage, while full CI does.
 
 Passing test cases and satisfying coverage are separate outcomes. Missing tools,
 invalid measurements and below-threshold values fail the coverage gate. See

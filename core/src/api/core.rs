@@ -459,6 +459,21 @@ impl Core {
         self.account_client(true).await?.auth_start().await
     }
 
+    /// Begin the Android authorization-code flow with the pinned local client,
+    /// `/api/v1/client/android` routes and the HTTPS App Link callback.
+    pub async fn cloud_auth_start_android(&self) -> CoreResult<crate::api::CloudAuthAttempt> {
+        self.account_client(true)
+            .await?
+            .auth_start_platform(crate::api::CloudAuthPlatform::Android)
+            .await
+    }
+
+    /// Recover a lost exchange response with the pending attempt credential and
+    /// the scoped `/me`. Never re-exchanges the authorization code.
+    pub async fn cloud_auth_recover(&self) -> CoreResult<crate::api::SignedInAccount> {
+        self.account_client(false).await?.auth_recover().await
+    }
+
     /// Complete the exact pending iOS attempt from the callback URL. This is
     /// the only path that binds an account for the native flow.
     pub async fn cloud_auth_complete(
@@ -796,7 +811,13 @@ impl Core {
     /// the binding pairs this read-only identity with the list so Settings can
     /// label the current sign-in without a second session store.
     pub fn current_cloud_session_id(&self) -> CoreResult<Option<String>> {
-        self.cloud_session_id()
+        match self.cloud_session_id() {
+            // A fresh Cloud profile has a manifest but no signed-in session.
+            // For this read-only accessor that is absence, not authentication
+            // failure; a real store failure still propagates.
+            Err(CoreError::AuthenticationRequired) => Ok(None),
+            other => other,
+        }
     }
 
     pub(crate) async fn cloud_transport(

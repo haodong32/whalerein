@@ -62,7 +62,7 @@ def validate_scope(scope):
         scope.get("tests"), list
     ):
         raise RepoError("invalid report scope completeness or tests")
-    strings(scope, ("kind", "language", "path", "module", "note"))
+    strings(scope, ("kind", "language", "path", "module", "note", "revision"))
     if (
         "exit_code" in scope
         and scope["exit_code"] is not None

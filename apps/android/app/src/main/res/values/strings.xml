@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WhaleRein</string>
+    <string name="app_retry">Retry</string>
+    <string name="app_diagnostics">Diagnostics</string>
+    <string name="app_startup_loading">Opening WhaleRein…</string>
+    <string name="app_startup_failed">WhaleRein could not start</string>
+    <string name="app_startup_unavailable_body">Startup information could not be restored. Retry, or review diagnostics for details.</string>
+    <string name="app_core_unavailable_body">The native Core is not available in this build. Diagnostics remain available.</string>
+    <string name="app_import_ca_file">Import CA file</string>
+</resources>

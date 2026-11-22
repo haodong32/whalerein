@@ -44,7 +44,7 @@ pub use crate::access::transport::{
 };
 pub use crate::account::native::{
     AccountHost, AccountIdentity, AccountLoginPrompt, AccountSessionInfo, AccountSessionState,
-    AccountWorkspace, CloudAuthAttempt, SignedInAccount,
+    AccountWorkspace, CloudAuthAttempt, CloudAuthPlatform, SignedInAccount, ANDROID_REDIRECT_URI,
 };
 pub use crate::account::Environment;
 #[cfg(test)]

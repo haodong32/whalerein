@@ -30,6 +30,11 @@ IOS = (
     Target("ios-ui-smoke", "ios", "six CI UI smoke cases", leaf=False),
     Target("ios-integration", "ios", "iOS stack-backed integration plan"),
 )
+ANDROID = (
+    Target("android-ui", "android", "Compose fixture instrumentation on a device"),
+    Target("android-integration", "android", "native bridge, Keystore and TLS device checks"),
+    Target("android-performance", "android", "physical-device Macrobenchmark"),
+)
 PROTO = Target("proto", "proto", "generated Go/JS binding consistency")
 
 
@@ -46,7 +51,7 @@ def available(action, projects):
             name = project_target_name(action, project.id)
             result[name] = Target(name, "unit", f"{project.kind} · {project.rel}", project=project)
     if action in ("test", "doctor"):
-        result.update((target.name, target) for target in (*INTEGRATION, *IOS))
+        result.update((target.name, target) for target in (*INTEGRATION, *IOS, *ANDROID))
     if action in ("check", "doctor"):
         result["proto"] = PROTO
     return result

@@ -23,6 +23,75 @@ const MAX_LOGIN: u64 = 20 * 60;
 const ACCOUNT_SESSION: &str = "cloud-app-session";
 /// Fixed native callback registered for the iOS authorization-code flow.
 const IOS_REDIRECT_URI: &str = "whalerein://auth/callback";
+/// Fixed Android App Link callback for the pinned local native client.
+pub const ANDROID_REDIRECT_URI: &str = "https://app.whalerein.test/client/android/callback";
+
+/// Native authorization-code platform. The platform decides the Cloud route,
+/// the registered redirect and the callback shape; an attempt can only be
+/// completed by its own platform.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudAuthPlatform {
+    #[default]
+    Ios,
+    Android,
+}
+
+impl CloudAuthPlatform {
+    fn attempts_path(self) -> &'static str {
+        match self {
+            Self::Ios => "ios/attempts",
+            Self::Android => "android/attempts",
+        }
+    }
+
+    fn exchange_path(self) -> &'static str {
+        match self {
+            Self::Ios => "ios/exchange",
+            Self::Android => "android/exchange",
+        }
+    }
+
+    fn redirect_uri(self) -> &'static str {
+        match self {
+            Self::Ios => IOS_REDIRECT_URI,
+            Self::Android => ANDROID_REDIRECT_URI,
+        }
+    }
+
+    /// Reject a callback that is not the exact registered redirect for this
+    /// platform before any attempt state is read.
+    fn accepts_callback(self, parsed: &Url) -> bool {
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return false;
+        }
+        match self {
+            Self::Ios => {
+                parsed.scheme() == "whalerein"
+                    && parsed.host_str() == Some("auth")
+                    && parsed.path() == "/callback"
+            }
+            Self::Android => {
+                parsed.scheme() == "https"
+                    && parsed.host_str() == Some("app.whalerein.test")
+                    && parsed.port_or_known_default() == Some(443)
+                    && parsed.path() == "/client/android/callback"
+            }
+        }
+    }
+
+    /// Android pins the authorization page to the configured issuer authority;
+    /// iOS keeps its existing hosted-page contract.
+    fn validate_authorization_url(self, url: &Url, issuer: &Url) -> bool {
+        match self {
+            Self::Ios => true,
+            Self::Android => same_authority(url, issuer),
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SignedInAccount {
@@ -96,7 +165,7 @@ pub struct AccountLoginPrompt {
     pub user_code: String,
 }
 
-/// One native iOS authorization-code attempt. The URL is the official hosted
+/// One native authorization-code attempt. The URL is the official hosted
 /// sign-in page; the attempt identity, PKCE material, Cloud state and the
 /// locally generated credential material never leave Core's SecretStore.
 pub struct CloudAuthAttempt {
@@ -182,9 +251,10 @@ struct LoginAttempt {
     prompt: Option<LoginPrompt>,
 }
 
-/// Pending native iOS authorization-code attempt. `state` is the exact value
+/// Pending native authorization-code attempt. `state` is the exact value
 /// Cloud embedded in the authorization URL; a callback carrying any other
 /// value belongs to a cancelled, expired or different attempt and is rejected.
+/// `platform` binds the Cloud route, redirect and callback shape.
 #[derive(Clone, Serialize, Deserialize)]
 struct IOSAttempt {
     attempt_id: String,
@@ -194,6 +264,8 @@ struct IOSAttempt {
     challenge: String,
     state: String,
     expires: u64,
+    #[serde(default)]
+    platform: CloudAuthPlatform,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -703,6 +775,14 @@ impl AccountClient {
     /// the URL's state and deadline with the attempt in the SecretStore. Any
     /// previous pending attempt is replaced, so its late callback cannot win.
     pub async fn auth_start(&self) -> CoreResult<CloudAuthAttempt> {
+        self.auth_start_platform(CloudAuthPlatform::Ios).await
+    }
+
+    /// Begin one native authorization-code attempt for `platform`.
+    pub async fn auth_start_platform(
+        &self,
+        platform: CloudAuthPlatform,
+    ) -> CoreResult<CloudAuthAttempt> {
         let _lock = self.lock("account.lock").await?;
         let mut state = load_state(&self.secrets)?;
         if state
@@ -727,17 +807,32 @@ impl AccountClient {
             code_challenge: &'a str,
             code_challenge_method: &'a str,
             redirect_uri: &'a str,
+            /// Android Cloud routes bind the attempt to the app instance.
+            /// iOS keeps its existing body.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            instance_id: Option<&'a str>,
         }
+        let manifest = self.instance.manifest()?;
+        let android_instance = match platform {
+            CloudAuthPlatform::Android => Some(
+                manifest
+                    .as_ref()
+                    .map(|manifest| manifest.id.as_str())
+                    .ok_or(CoreError::Unauthorized)?,
+            ),
+            CloudAuthPlatform::Ios => None,
+        };
         let response = self
             .http
-            .post(self.endpoint("ios/attempts")?)
+            .post(self.endpoint(platform.attempts_path())?)
             .json(&Begin {
                 attempt_id: &attempt_id,
                 credential_digest: token_digest(&credential),
                 revocation_digest: token_digest(&revocation),
                 code_challenge: &challenge,
                 code_challenge_method: "S256",
-                redirect_uri: IOS_REDIRECT_URI,
+                redirect_uri: platform.redirect_uri(),
+                instance_id: android_instance,
             })
             .send()
             .await
@@ -755,6 +850,7 @@ impl AccountClient {
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
+            || !platform.validate_authorization_url(&url, &self.issuer)
         {
             return Err(CoreError::ProtocolIncompatible);
         }
@@ -773,6 +869,7 @@ impl AccountClient {
             challenge,
             state: cloud_state,
             expires: begin.expires_at,
+            platform,
         });
         self.save(&state)?;
         Ok(CloudAuthAttempt {
@@ -788,15 +885,15 @@ impl AccountClient {
     /// the instance signed out (or in its prior verified state) and can never
     /// establish a session. The URL's raw code is never persisted or logged.
     pub async fn auth_complete(&self, callback_url: &str) -> CoreResult<SignedInAccount> {
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let Some(attempt) = state.ios.clone() else {
+            return Err(CoreError::Unauthorized);
+        };
+        let platform = attempt.platform;
         let parsed = Url::parse(callback_url)
             .map_err(|_| CoreError::InvalidInput("invalid Cloud sign-in callback".into()))?;
-        if parsed.scheme() != "whalerein"
-            || parsed.host_str() != Some("auth")
-            || parsed.path() != "/callback"
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.fragment().is_some()
-        {
+        if !platform.accepts_callback(&parsed) {
             return Err(CoreError::Unauthorized);
         }
         if parsed
@@ -811,12 +908,6 @@ impl AccountClient {
         let cloud_state = single_query_value(&parsed, "state")
             .filter(|value| !value.is_empty() && value.len() <= 512)
             .ok_or(CoreError::Unauthorized)?;
-
-        let _lock = self.lock("account.lock").await?;
-        let mut state = load_state(&self.secrets)?;
-        let Some(attempt) = state.ios.clone() else {
-            return Err(CoreError::Unauthorized);
-        };
         if attempt.expires <= unix_now() {
             state.ios = None;
             self.save(&state)?;
@@ -839,7 +930,7 @@ impl AccountClient {
         }
         let response = self
             .http
-            .post(self.endpoint("ios/exchange")?)
+            .post(self.endpoint(platform.exchange_path())?)
             .json(&Exchange {
                 attempt_id: &attempt.attempt_id,
                 code: &code,
@@ -851,6 +942,12 @@ impl AccountClient {
             .map_err(request_error)?;
         let active: IOSSessionResponse = match decode_scoped(response).await {
             Ok(session) => session,
+            Err(error @ (CoreError::Timeout | CoreError::Unavailable(_))) => {
+                // The exchange may have committed the App Session while its
+                // response was lost. Keep the pending material so recovery can
+                // use the original credential and never replay the code.
+                return Err(error);
+            }
             Err(error) => {
                 // Cloud consumed the attempt even for a rejected exchange. Drop
                 // it so the same attempt can never be retried.
@@ -883,6 +980,65 @@ impl AccountClient {
             self.save(&state)?;
             return Err(error);
         }
+        state.ios = None;
+        state.active = Some(Session {
+            id: active.session_id,
+            credential: attempt.credential,
+            revocation: attempt.revocation,
+            expires: active.expires_at,
+            verified: verified.clone(),
+            regional: None,
+        });
+        self.save(&state)?;
+        Ok(verified)
+    }
+
+    /// Recover an exchange whose response was lost after Cloud may have
+    /// committed the App Session. Uses only the attempt's original credential
+    /// with the scoped `/me`, clears the attempt on success and never replays
+    /// the authorization code. An inconclusive lookup keeps the attempt.
+    pub async fn auth_recover(&self) -> CoreResult<SignedInAccount> {
+        let _lock = self.lock("account.lock").await?;
+        let mut state = load_state(&self.secrets)?;
+        let Some(attempt) = state.ios.clone() else {
+            return Err(CoreError::Unauthorized);
+        };
+        if attempt.expires <= unix_now() {
+            state.ios = None;
+            self.save(&state)?;
+            return Err(CoreError::Unauthorized);
+        }
+        let response = self
+            .http
+            .get(self.endpoint("me")?)
+            .bearer_auth(&attempt.credential)
+            .send()
+            .await;
+        let active: ActiveSession = match response {
+            Ok(response) => match decode_success(response).await {
+                Ok(active) => active,
+                Err(error @ (CoreError::Timeout | CoreError::Unavailable(_))) => {
+                    return Err(error);
+                }
+                // A definitive rejection means no session was committed under
+                // the original attempt credential yet. Keep the attempt so the
+                // callback path can still complete or cancel it.
+                Err(error) => return Err(error),
+            },
+            Err(error) => return Err(request_error(error)),
+        };
+        if active.expires_at <= unix_now()
+            || !valid_session_id(&active.session_id)
+            || active.account.account.id.is_empty()
+            || active.account.account.issuer.is_empty()
+            || active.account.account.subject.is_empty()
+            || active.account.workspace.id.is_empty()
+            || Url::parse(&active.account.account.issuer).is_err()
+        {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        let verified = active.account;
+        self.instance.bind_account(&verified.scope())?;
         state.ios = None;
         state.active = Some(Session {
             id: active.session_id,
@@ -2320,6 +2476,292 @@ mod tests {
 
     fn callback_with_state(state: &str) -> String {
         format!("whalerein://auth/callback?code=code-ios&state={state}")
+    }
+
+    fn android_callback_with_state(state: &str) -> String {
+        format!("{ANDROID_REDIRECT_URI}?code=code-android&state={state}")
+    }
+
+    #[tokio::test]
+    async fn native_android_uses_android_routes_app_link_and_rejects_other_callbacks() {
+        let recorded = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let fixture = recorded.clone();
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let counted = exchanges.clone();
+        let origin = Arc::new(std::sync::Mutex::new(String::new()));
+        let server = MockServer::start(Arc::new(move |request| {
+            let authority = format!("http://{}", request.headers["host"]);
+            *origin.lock().unwrap() = authority.clone();
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/android/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    assert_eq!(body["redirectUri"], ANDROID_REDIRECT_URI);
+                    assert_eq!(body["codeChallengeMethod"], "S256");
+                    assert!(body["instanceId"]
+                        .as_str()
+                        .is_some_and(|instance| !instance.is_empty()));
+                    let state = format!("state-{attempt_id}");
+                    let mut fixture = fixture.lock().unwrap();
+                    fixture.begin = Some(body);
+                    fixture.produced_state = Some(state.clone());
+                    fixture.challenge = None;
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{authority}/oidc/auth?client_id=android&state={state}"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/android/exchange") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    MockResponse::json(200, &ios_active_body())
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let attempt = client
+            .auth_start_platform(CloudAuthPlatform::Android)
+            .await
+            .unwrap();
+        assert_eq!(attempt.attempt_id.len(), 32);
+        let stored = load_state(&secrets).unwrap();
+        let pending = stored.ios.expect("android attempt retained");
+        assert_eq!(pending.platform, CloudAuthPlatform::Android);
+        let state = pending.state;
+
+        // iOS, cross-host and fragment callbacks never reach the exchange.
+        for callback in [
+            format!("whalerein://auth/callback?code=code-android&state={state}"),
+            format!("https://evil.example/client/android/callback?code=code-android&state={state}"),
+            format!("{ANDROID_REDIRECT_URI}?code=code-android&state={state}&state=other"),
+            format!("{ANDROID_REDIRECT_URI}?code=code-android&state=other"),
+            format!("{ANDROID_REDIRECT_URI}?code=code-android&state={state}#fragment"),
+        ] {
+            assert!(
+                matches!(
+                    client.auth_complete(&callback).await,
+                    Err(CoreError::Unauthorized)
+                ),
+                "{callback}"
+            );
+        }
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+        assert!(load_state(&secrets).unwrap().ios.is_some());
+
+        let account = client
+            .auth_complete(&android_callback_with_state(&state))
+            .await
+            .unwrap();
+        assert_eq!(account.account.id, "acct-ios");
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("ios-session")
+        );
+        // A replayed code cannot establish a second session.
+        assert!(matches!(
+            client
+                .auth_complete(&android_callback_with_state(&state))
+                .await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_android_rejects_authorization_url_outside_the_issuer_authority() {
+        let server = MockServer::start(Arc::new(|request| match request.path.as_str() {
+            "/api/v1/client/android/attempts" => {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let attempt_id = body["attemptId"].as_str().unwrap();
+                MockResponse::json(
+                    201,
+                    &json!({
+                        "authorizationUrl": format!(
+                            "https://untrusted.example/auth?state=state-{attempt_id}"
+                        ),
+                        "expiresAt": unix_now() + 600,
+                    }),
+                )
+            }
+            _ => MockResponse::empty(404),
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        assert!(matches!(
+            client.auth_start_platform(CloudAuthPlatform::Android).await,
+            Err(CoreError::ProtocolIncompatible)
+        ));
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_android_lost_exchange_response_recovers_with_the_original_credential() {
+        let recorded = Arc::new(std::sync::Mutex::new(IOSFixture::default()));
+        let fixture = recorded.clone();
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let counted = exchanges.clone();
+        let me_calls = Arc::new(AtomicUsize::new(0));
+        let counted_me = me_calls.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            let authority = format!("http://{}", request.headers["host"]);
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/android/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
+                    let state = format!("state-{attempt_id}");
+                    fixture.lock().unwrap().produced_state = Some(state.clone());
+                    fixture.lock().unwrap().begin = Some(body);
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!("{authority}/oidc/auth?state={state}"),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                // Cloud committed the App Session but the response is lost.
+                ("POST", "/api/v1/client/android/exchange") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    MockResponse::empty(503)
+                }
+                ("GET", "/api/v1/client/me") => {
+                    counted_me.fetch_add(1, Ordering::SeqCst);
+                    assert!(request.headers.get("authorization").is_some());
+                    MockResponse::json(
+                        200,
+                        &json!({
+                            "sessionId": "android-session",
+                            "expiresAt": unix_now() + 600,
+                            "account": {
+                                "id": "acct-android",
+                                "email": "user@example.test",
+                                "issuer": "https://login.whalerein.com/oidc",
+                                "subject": "subject-android",
+                            },
+                            "workspace": {"id": "ws-android"},
+                        }),
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let attempt = client
+            .auth_start_platform(CloudAuthPlatform::Android)
+            .await
+            .unwrap();
+        let state = load_state(&secrets).unwrap().ios.unwrap().state;
+        let error = match client
+            .auth_complete(&android_callback_with_state(&state))
+            .await
+        {
+            Ok(_) => panic!("lost exchange response must not report success"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CoreError::Unavailable(_)));
+        // The pending attempt and its original credential survive.
+        let pending = load_state(&secrets).unwrap().ios.expect("attempt retained");
+        assert_eq!(pending.attempt_id, attempt.attempt_id);
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+
+        let account = client.auth_recover().await.unwrap();
+        assert_eq!(account.account.id, "acct-android");
+        assert_eq!(account.workspace.id, "ws-android");
+        assert_eq!(me_calls.load(Ordering::SeqCst), 1);
+        assert!(load_state(&secrets).unwrap().ios.is_none());
+        // Recovery never replays the code.
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            AccountClient::local_session_id(&instance, &secrets)
+                .unwrap()
+                .as_deref(),
+            Some("android-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_cross_platform_callback_cannot_consume_the_other_platforms_attempt() {
+        let server = MockServer::start(Arc::new(|request| {
+            let authority = format!("http://{}", request.headers["host"]);
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/api/v1/client/android/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap();
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{authority}/oidc/auth?state=state-{attempt_id}"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                ("POST", "/api/v1/client/ios/attempts") => {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let attempt_id = body["attemptId"].as_str().unwrap();
+                    MockResponse::json(
+                        201,
+                        &json!({
+                            "authorizationUrl": format!(
+                                "{authority}/oidc/auth?state=state-{attempt_id}"
+                            ),
+                            "expiresAt": unix_now() + 600,
+                        }),
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let (instance, secrets, _) = native_test_instance(root.path());
+        let client = native_test_client(&instance, &secrets, &server, true).await;
+        let android = client
+            .auth_start_platform(CloudAuthPlatform::Android)
+            .await
+            .unwrap();
+        let state = load_state(&secrets).unwrap().ios.unwrap().state;
+        // An iOS-shaped callback cannot complete the Android attempt even with
+        // the exact Android state value.
+        assert!(matches!(
+            client.auth_complete(&callback_with_state(&state)).await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert!(load_state(&secrets).unwrap().ios.is_some());
+        let _ = android;
+
+        let ios = client.auth_start().await.unwrap();
+        let state = load_state(&secrets).unwrap().ios.unwrap().state;
+        assert_eq!(
+            load_state(&secrets).unwrap().ios.unwrap().platform,
+            CloudAuthPlatform::Ios
+        );
+        assert!(matches!(
+            client
+                .auth_complete(&android_callback_with_state(&state))
+                .await,
+            Err(CoreError::Unauthorized)
+        ));
+        assert!(load_state(&secrets).unwrap().ios.is_some());
+        let _ = ios;
     }
 
     #[tokio::test]
