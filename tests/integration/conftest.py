@@ -337,7 +337,7 @@ def scenario(tmp_path, postgres, broker_control, shared_broker, request):
     else:
         value = Scenario(tmp_path, schema)
     relay_marker = request.node.get_closest_marker("relay_directory")
-    if relay_marker is not None and not native:
+    if relay_marker is not None:
         value.configure_relay_directory(**relay_marker.kwargs)
     access_transport = request.node.get_closest_marker("access_transport")
     if access_transport is not None and not native:

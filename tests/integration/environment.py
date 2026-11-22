@@ -118,15 +118,17 @@ class Process:
         raise TimeoutError("Fixture control timed out")
 
 
-def relay_http(path, method="GET", body=None, token=None, headers=None, timeout=10):
+def relay_http(path, method="GET", body=None, token=None, headers=None, timeout=10,
+               origin="http://127.0.0.1:18080"):
     """One raw Access directory request; returns (status, headers, bytes).
 
     The exact ciphertext routes carry raw bytes, so the generic JSON helper is
     not sufficient. Error statuses are returned rather than raised so a case can
-    assert the documented terminal code without parsing product logs.
+    assert the documented terminal code without parsing product logs. ``origin``
+    lets a two-node case address a specific node instead of the first listener.
     """
     request = urllib.request.Request(
-        "http://127.0.0.1:18080" + path,
+        origin.rstrip("/") + path,
         data=body,
         method=method,
         headers={
@@ -192,11 +194,18 @@ class RelayDirectory:
         if owner_node is not None:
             headers["WhaleRein-Owner-Node"] = owner_node
         status, response_headers, payload = relay_http(
-            "/v1/relay/objects", "POST", body, token, headers
+            "/v1/relay/objects", "POST", body, token, headers, origin=self.origin
         )
         return status, response_headers, payload
 
-    def upload(self, token, reservation, ciphertext, epoch=4, headers=None):
+    @staticmethod
+    def _owner(headers, owner_node):
+        return {
+            **({"WhaleRein-Owner-Node": owner_node} if owner_node is not None else {}),
+            **(headers or {}),
+        }
+
+    def upload(self, token, reservation, ciphertext, epoch=4, headers=None, owner_node=None):
         status, response_headers, payload = relay_http(
             reservation["uploadPath"],
             "PUT",
@@ -205,12 +214,14 @@ class RelayDirectory:
             {
                 "Content-Type": "application/octet-stream",
                 "WhaleRein-Relay-Epoch": str(epoch),
-                **(headers or {}),
+                **self._owner(headers, owner_node),
             },
+            origin=self.origin,
         )
         return status, response_headers, payload
 
-    def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None, epoch=4):
+    def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None,
+               epoch=4, owner_node=None):
         import base64
         import hashlib
 
@@ -229,25 +240,37 @@ class RelayDirectory:
             "POST",
             body,
             token,
-            {"Content-Type": "application/json"},
+            {
+                "Content-Type": "application/json",
+                **self._owner(None, owner_node),
+            },
+            origin=self.origin,
         )
 
-    def fetch(self, token, object_id, epoch=4):
+    def fetch(self, token, object_id, epoch=4, owner_node=None):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "GET",
             None,
             token,
-            {"WhaleRein-Relay-Epoch": str(epoch)},
+            {
+                "WhaleRein-Relay-Epoch": str(epoch),
+                **self._owner(None, owner_node),
+            },
+            origin=self.origin,
         )
 
-    def delete(self, token, object_id, epoch=4):
+    def delete(self, token, object_id, epoch=4, owner_node=None):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "DELETE",
             None,
             token,
-            {"WhaleRein-Relay-Epoch": str(epoch)},
+            {
+                "WhaleRein-Relay-Epoch": str(epoch),
+                **self._owner(None, owner_node),
+            },
+            origin=self.origin,
         )
 
     def store(self, token, *, ciphertext, purpose="PAYLOAD_PURPOSE_RESULT", **scope):
