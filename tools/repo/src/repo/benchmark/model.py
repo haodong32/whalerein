@@ -554,7 +554,6 @@ def _bulk_summary(attempts):
         ]
         by_arm[arm] = _read_bucket(reads)
     bulk = dict(by_arm["bulk"])
-    bulk["by_arm"] = by_arm
     bulk["gate"] = analysis.bulk_read_gate(bulk)
     return bulk
 

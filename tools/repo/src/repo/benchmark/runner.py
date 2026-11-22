@@ -184,8 +184,6 @@ def _run_matrix(directory, report, document, root, runner, request):
                 measured=outcomes["measured"],
                 correct=outcomes["correct_by_deadline"],
                 workflow_results=workflow_results,
-                bulk_reads=workflow_results.get("bulk"),
-                paired_gate=(workflow_results.get("paired") or {}).get("gate"),
                 streaming_p95={
                     metric: samples.get(metric, {}).get("quantiles", {}).get("p95")
                     for metric in model.PRIMARY_STREAMING_METRICS

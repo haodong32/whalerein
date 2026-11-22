@@ -1,11 +1,9 @@
 """Host presence-driven release of an abruptly disconnected question claimant."""
 
 import json
-import os
 import signal
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 

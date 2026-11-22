@@ -2225,10 +2225,6 @@ test('startup settles a refused uncertain enrollment without re-enrolling', asyn
   }
 })
 
-function metadataResponse() {
-  return json(200, metadataDocument())
-}
-
 function patched(object, method, replacement) {
   const original = object[method]
   object[method] = replacement

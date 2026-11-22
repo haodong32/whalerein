@@ -395,13 +395,6 @@ def test_mixed_load_preserves_read_failures_separately_from_watch():
     assert workflow["bulk"]["expected_reads"] == 10
     assert workflow["bulk"]["successful_reads"] == 9
     assert workflow["bulk"]["errors"] == {"rate_limited": 1}
-    assert workflow["bulk"]["by_arm"]["idle"] == {
-        "expected_reads": 0,
-        "successful_reads": 0,
-        "bytes_expected": 0,
-        "bytes_verified": 0,
-        "errors": {},
-    }
     assert workflow["bulk"]["gate"]["state"] == "incomplete"
     assert "bulk_read_errors" in workflow["bulk"]["gate"]["reasons"]
     assert workflow["arms"]["idle"]["correct"] == 2

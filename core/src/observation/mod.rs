@@ -700,7 +700,6 @@ async fn run_connection(
                     transport_core.cloud_session_id().ok().flatten().as_ref() != Some(id)
                 })
         };
-        let live_tx = live_tx;
         let mqtt = client.run(
             stop_requested,
             |envelope| {

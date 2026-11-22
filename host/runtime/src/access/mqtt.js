@@ -408,21 +408,14 @@ export class MqttAccess {
       this.#connected = false
       this.#transport.reset()
       this.#accessReceive = null
+      const code = classifyTransportFailure(undefined, this.#disconnectReason)
       if (wasConnected) {
-        const code = classifyTransportFailure(undefined, this.#disconnectReason)
         this.logger?.warn('mqtt_disconnected', { code, reasonCode: this.#disconnectReason, reason: this.#disconnectReason < 0 ? 'transport_closed' : 'broker_disconnect', generation, ...this.#lastPublish })
         this.#handlers.onDisconnected?.()
-        if (code !== 'unavailable') {
-          this.#failDefinitive(code, generation)
-          return
-        }
       }
-      if (!this.#connected) {
-        const code = classifyTransportFailure(undefined, this.#disconnectReason)
-        if (code !== 'unavailable') {
-          this.#failDefinitive(code, generation)
-          return
-        }
+      if (code !== 'unavailable') {
+        this.#failDefinitive(code, generation)
+        return
       }
       this.#scheduleReconnect()
     })
