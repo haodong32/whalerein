@@ -62,7 +62,6 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
         launchAndOpenConversation()
 
         let expand = waitFor("tool.expand.msg-0319-block-0")
-        makeConversationElementHittable(expand)
         tap(expand)
         XCTAssertTrue(waitFor("tool.details.msg-0319-block-0").exists)
 
