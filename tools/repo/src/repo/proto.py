@@ -206,8 +206,8 @@ def render_go_profiles(data: dict) -> str:
     for name, profile in _profile_pairs(data):
         lines += [
             f'\t"{name}": {{',
-            f'\t\tName:                  "{name}",',
-            f'\t\tWireName:              "{profile["wireName"]}",',
+            f'\t\tName:                "{name}",',
+            f'\t\tWireName:            "{profile["wireName"]}",',
             f"\t\tPacketBytes:         {profile['packetBytes']},",
             f"\t\tPacketOverheadBytes: {profile['packetOverheadBytes']},",
             f"\t\tEnvelopeBytes:       {profile['envelopeBytes']},",

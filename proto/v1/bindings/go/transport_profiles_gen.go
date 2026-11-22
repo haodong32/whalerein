@@ -27,8 +27,8 @@ type TransportProfileValues struct {
 
 var transportProfiles = map[string]TransportProfileValues{
 	"default": {
-		Name:                  "default",
-		WireName:              "TRANSPORT_PROFILE_DEFAULT",
+		Name:                "default",
+		WireName:            "TRANSPORT_PROFILE_DEFAULT",
 		PacketBytes:         65536,
 		PacketOverheadBytes: 4096,
 		EnvelopeBytes:       16777216,
@@ -37,8 +37,8 @@ var transportProfiles = map[string]TransportProfileValues{
 		TransferTimeoutMs:   120000,
 	},
 	"compact": {
-		Name:                  "compact",
-		WireName:              "TRANSPORT_PROFILE_COMPACT",
+		Name:                "compact",
+		WireName:            "TRANSPORT_PROFILE_COMPACT",
 		PacketBytes:         32768,
 		PacketOverheadBytes: 4096,
 		EnvelopeBytes:       8388608,
@@ -47,8 +47,8 @@ var transportProfiles = map[string]TransportProfileValues{
 		TransferTimeoutMs:   120000,
 	},
 	"roomy": {
-		Name:                  "roomy",
-		WireName:              "TRANSPORT_PROFILE_ROOMY",
+		Name:                "roomy",
+		WireName:            "TRANSPORT_PROFILE_ROOMY",
 		PacketBytes:         131072,
 		PacketOverheadBytes: 8192,
 		EnvelopeBytes:       33554432,
