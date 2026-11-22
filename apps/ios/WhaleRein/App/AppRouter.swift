@@ -38,8 +38,4 @@ final class AppRouter {
         presented = nil
     }
 
-    func setRoot(_ route: AppRoute) {
-        root = route
-        presented = nil
-    }
 }

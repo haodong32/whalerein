@@ -105,12 +105,6 @@ extension ConversationModel {
         }
     }
 
-    /// Advances the expiry display on demand (foreground, timer, tests).
-    func refreshApprovalExpiry() {
-        approvalClock = now()
-        restartApprovalTimer()
-    }
-
     func applyServerApproval(_ approval: Approval) {
         guard approval.sessionId == sessionId else { return }
         if let index = approvals.firstIndex(where: { $0.approvalId == approval.approvalId }) {

@@ -83,7 +83,4 @@ struct AppEnvironment {
         preferencesFactory(instanceId, fallback)
     }
 
-    func makeFeatureSet() -> FeatureSet {
-        FeatureSet.resolved(instance: activeInstance, serviceIsAvailable: true)
-    }
 }

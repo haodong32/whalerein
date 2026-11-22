@@ -22,6 +22,4 @@ struct CloudState: Equatable, Sendable {
 
     var account: CloudAccount? { phase.account }
     var isSignedIn: Bool { phase.isSignedIn }
-    var isConnecting: Bool { connectingHostId != nil }
-    var directoryHosts: [CloudDirectoryHost] { directory.hosts }
 }

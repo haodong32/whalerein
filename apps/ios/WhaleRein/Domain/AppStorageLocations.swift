@@ -10,14 +10,12 @@ enum AppStorageLocations {
     static let draftsDirectoryName = "drafts"
     static let attachmentsDirectoryName = "downloads"
     static let preferencesFileName = "preferences.json"
-    static let fixtureStateFileName = "fixture-state.json"
 
     /// New authoritative layout. Legacy root `preferences.json`/`core/` are
     /// never read, migrated or deleted.
     static let clientDirectoryName = "client"
     static let appConfigurationFileName = "app.toml"
     static let instancesDirectoryName = "instances"
-    static let instanceConfigurationFileName = "instance.toml"
 
     static let keychainService = "com.whalerein.ios.secrets"
     static let stagingKeychainService = "com.whalerein.ios.staging.secrets"

@@ -54,7 +54,7 @@ final class FixtureCloudAccountState {
 
     func complete(callbackURL: URL) throws -> CloudAccount {
         if let completeError { throw SessionServiceError(completeError) }
-        guard let pendingAttempt else {
+        guard pendingAttempt != nil else {
             throw SessionServiceError(.security)
         }
         let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)

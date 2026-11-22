@@ -82,7 +82,7 @@ extension ConversationModel {
             createdAtUnixMs: Int64(now().timeIntervalSince1970 * 1000)
         )
         state.messages.append(message)
-        scroll.recordIncoming(isOwnMessage: true)
+        _ = scroll.recordIncoming(isOwnMessage: true)
         requestScroll(animated: true)
         return messageId
     }

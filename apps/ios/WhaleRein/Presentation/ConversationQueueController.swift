@@ -39,11 +39,6 @@ final class ConversationQueueController {
     var isCurrent: Bool { freshness == .current }
     var isEmptyAndCurrent: Bool { freshness == .current && items.isEmpty }
     var canRead: Bool { capabilities?.supportsQueueRead ?? false }
-    var canMutate: Bool {
-        canRead && !isMutating && !isRefreshing
-            && !items.isEmpty
-    }
-
     var editWarningVisible: Bool { editItemID != nil && editReplacesAttachments }
 
     func applyCapabilities(_ next: SessionCapabilities) {
@@ -187,11 +182,6 @@ final class ConversationQueueController {
         if !saved, lastMutation == nil {
             editErrorKey = mutationErrorKey ?? .errorInternal
         }
-    }
-
-    func clearMutationStatus() {
-        mutationErrorKey = nil
-        lastMutation = nil
     }
 
     private func clearEdit() {

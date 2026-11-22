@@ -180,10 +180,6 @@ final class OperationRecoveryModel {
         conversation.applyRecoveredOperations(operations(for: scope))
     }
 
-    func clearError() {
-        errorKey = nil
-    }
-
     /// Keep locally read content and a recorded read failure when a status-only
     /// lookup returns the same operation without content.
     private func mergingContent(into incoming: OperationReceipt) -> OperationReceipt {

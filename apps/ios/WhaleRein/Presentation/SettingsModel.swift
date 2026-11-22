@@ -12,13 +12,6 @@ final class SettingsModel {
         case revoke
     }
 
-    /// Typed successful outcome for the selected instance only. The owning
-    /// service is per instance, so another instance's pairing is untouched.
-    enum Outcome: Equatable {
-        case forgotten
-        case revoked
-    }
-
     /// One business state for the screen. The legacy property names below are
     /// read-only projections kept while the view migrates to `state`.
     private(set) var state = SettingsState()
@@ -26,14 +19,6 @@ final class SettingsModel {
     var isBusy: Bool { state.isBusy }
     var statusKey: L10nKey? { state.statusKey }
     var errorKey: L10nKey? { state.errorKey }
-    var lastOutcome: Outcome? {
-        switch state.phase {
-        case .finished(.forgetDevice): .forgotten
-        case .finished(.revokeDevice): .revoked
-        default: nil
-        }
-    }
-
     let coreRevision: String
     let appVersion: String
     let isStaging: Bool
@@ -71,12 +56,6 @@ final class SettingsModel {
         state = SettingsReduce.reduce(state, .confirmationCancelled)
     }
 
-    /// Runs the action the user just confirmed.
-    func confirmPendingAction() async {
-        guard let action = state.pendingConfirmation else { return }
-        await perform(action)
-    }
-
     /// Prepares the redacted log snapshot on demand. Nothing leaves the device
     /// until the user picks a share destination.
     func prepareLogExport() {
@@ -86,10 +65,6 @@ final class SettingsModel {
         } else {
             state = SettingsReduce.reduce(state, .logExportFailed)
         }
-    }
-
-    func dismissLogExport() {
-        state = SettingsReduce.reduce(state, .logExportDismissed)
     }
 
     func perform(_ confirmation: Confirmation) async {

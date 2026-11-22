@@ -139,11 +139,6 @@ final class SessionManagementModel {
     /// Instance that owns the active adapter; used for the shared receipt scope.
     var instanceId: String { service.instanceId }
 
-    /// Shared retained-operation projection for one mutation receipt.
-    func sharedReceipt(for receipt: SessionMutationReceipt) -> OperationReceipt {
-        receipt.operationReceipt(instanceId: instanceId)
-    }
-
     // MARK: - Create
 
     func canCreate(hostId: String) -> Bool { createSupport[hostId] == true }
@@ -159,16 +154,6 @@ final class SessionManagementModel {
         } catch {
             createSupport[hostId] = false
         }
-    }
-
-    func refreshCreateSupport(hostId: String) async {
-        createSupport[hostId] = nil
-        await loadCreateSupport(hostId: hostId)
-    }
-
-    func resetCreate() {
-        createForm = SessionCreateForm()
-        createState = .idle
     }
 
     @discardableResult
@@ -238,11 +223,6 @@ final class SessionManagementModel {
     func isForkConfirmed(for scope: SessionScope) -> Bool {
         guard forkScope == scope, case .result(let outcome) = forkState else { return false }
         return outcome.isConfirmed
-    }
-
-    func resetFork() {
-        forkState = .idle
-        forkScope = nil
     }
 
     @discardableResult

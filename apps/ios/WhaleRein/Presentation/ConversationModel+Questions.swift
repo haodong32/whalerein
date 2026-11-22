@@ -42,7 +42,7 @@ extension ConversationModel {
 
     func setQuestionCustomText(batchId: String, itemId: String, text: String) {
         guard let batch = questions.batches.first(where: { $0.batchID == batchId }),
-              let item = batch.questions.first(where: { $0.id == itemId }) else { return }
+              batch.questions.contains(where: { $0.id == itemId }) else { return }
         var draft = questionDrafts[batchId]
             ?? QuestionDraft(guardValue: batch.guardValue)
         guard draft.guardValue == batch.guardValue else { return }

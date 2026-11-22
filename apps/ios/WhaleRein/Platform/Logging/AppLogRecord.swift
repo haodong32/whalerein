@@ -74,9 +74,6 @@ struct AppLogRecord: Codable, Equatable, Sendable {
     /// Allowlisted scalar fields. Values are already redacted.
     var fields: [String: String]
 
-    var lineBytes: Int {
-        (try? JSONEncoder().encode(self).count) ?? 0
-    }
 }
 
 /// Small, explicit redaction surface shared by app logs and the Core bridge.

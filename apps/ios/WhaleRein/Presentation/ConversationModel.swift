@@ -12,8 +12,6 @@
 import Foundation
 import Observation
 
-typealias ConversationHistoryPrepend = HistoryFacet.Prepend
-
 struct ConversationScrollRequest: Equatable, Sendable {
     let id: Int
     let animated: Bool
@@ -417,10 +415,6 @@ final class ConversationModel {
     }
 
     var operationReferenceText: String? { operationResult?.confirmedReference?.messageId }
-
-    var operationDeliveryIdentity: String? {
-        operationResult?.receipt?.deliveryId ?? operationResult?.receipt?.messageId
-    }
 
     var livePreview: String? {
         guard let previewText, !previewText.isEmpty else { return nil }

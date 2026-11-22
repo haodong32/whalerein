@@ -205,14 +205,4 @@ struct Scenario: Identifiable, Equatable, Sendable {
         notes: "Real Core through the binding with existing on-device state.",
         entry: .conversation
     )
-
-    /// Default scenario for deterministic UI work: fresh state, fixtures.
-    static let fixturesDefault = Scenario(
-        id: "fixtures.default",
-        category: .onboarding,
-        title: "Fixtures, fresh state",
-        notes: "Unpaired fixture instance with reset local state.",
-        launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
-        entry: .invitation
-    )
 }

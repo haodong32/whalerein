@@ -231,7 +231,6 @@ struct ConversationMessage: Identifiable, Hashable, Sendable {
 
     var plainText: String { blocks.map(\.text).joined(separator: "\n") }
 
-    var hasToolBlock: Bool { blocks.contains { $0.kind == .tool } }
 }
 
 // MARK: - Committed history

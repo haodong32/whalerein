@@ -355,7 +355,7 @@ final class LiveSessionService: SessionService {
         let timeoutTask = Task { [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            await self?.failPairingWaiter(id)
+            self?.failPairingWaiter(id)
         }
         defer { timeoutTask.cancel() }
         return try await withCheckedThrowingContinuation { continuation in

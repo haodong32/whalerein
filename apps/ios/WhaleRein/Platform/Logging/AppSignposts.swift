@@ -27,12 +27,4 @@ enum AppSignposts {
         AppLog.shared.log(.info, .conversation, "conversation.first_render")
     }
 
-    /// First rendered conversation content. Emitted once per runtime group.
-    static func beginFirstConversation() -> OSSignpostIntervalState {
-        signposter.beginInterval("conversation.first_render", id: signposter.makeSignpostID())
-    }
-
-    static func endFirstConversation(_ state: OSSignpostIntervalState) {
-        signposter.endInterval("conversation.first_render", state)
-    }
 }

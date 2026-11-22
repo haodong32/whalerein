@@ -36,7 +36,7 @@ extension AppShellModel {
             // The document committed before the runtime existed; restore the
             // previous selection rather than leaving startup and runtime split.
             if let previousInstance {
-                try? configuration.activate(id: previousInstance.id)
+                _ = try? configuration.activate(id: previousInstance.id)
             }
             return reportInstanceError(error)
         }

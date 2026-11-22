@@ -82,10 +82,6 @@ final class FixtureOperationJournal {
         entries[operationId]
     }
 
-    func isRetained(_ operationId: String) -> Bool {
-        entries[operationId] != nil
-    }
-
     func content(for messageId: String) -> ConversationMessage? {
         contents[messageId]
     }

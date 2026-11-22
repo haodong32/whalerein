@@ -242,13 +242,6 @@ final class AppShellModel {
         set { shell.resumeMarker = newValue }
     }
 
-    var isUsingFixtures: Bool { service is FixtureSessionService }
-
-    /// True when the stored preferences were discarded and the app is running
-    /// on safe defaults. The app then shows the invitation flow unless Core
-    /// still has a usable pairing.
-    var preferenceRecovery: PreferencesStore.Recovery? { preferences.recovery }
-
     /// App-section reasoning visibility. The history feature reads and writes
     /// this through the same authoritative document; no reasoning UI lives here.
     var reasoningVisible: Bool { configuration?.configuration.reasoningVisible ?? false }

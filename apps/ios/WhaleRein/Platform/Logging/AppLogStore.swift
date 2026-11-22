@@ -70,10 +70,6 @@ final class AppLogStore: @unchecked Sendable {
         lock.locked { droppedRecords + writeFailures }
     }
 
-    var failedWriteCount: Int {
-        lock.locked { writeFailures }
-    }
-
     /// Appends one record. Never blocks the caller on disk IO.
     func append(_ record: AppLogRecord) {
         guard record.level >= AppLogRecord.Level.floor else { return }
