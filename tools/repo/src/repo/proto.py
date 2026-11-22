@@ -386,8 +386,9 @@ def render_rust_profiles(data: dict) -> str:
         "        || profile.bulk_concurrency == 0",
         "        || profile.transfer_timeout_ms == 0",
         "    {",
-        "        return Err(error("
-        '"packet budget, bulk concurrency and timeout must be positive"));',
+        "        return Err(error(",
+        '            "packet budget, bulk concurrency and timeout must be positive",',
+        "        ));",
         "    }",
         "    if profile.packet_overhead_bytes >= profile.packet_bytes {",
         '        return Err(error("packet overhead must be below the packet budget"));',
