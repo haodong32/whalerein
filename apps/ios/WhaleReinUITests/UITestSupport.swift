@@ -68,8 +68,6 @@ class WhaleReinUITestCase: XCTestCase {
         )
     }
 
-    /// Taps a control, dismissing a keyboard or scrolling the frontmost content
-    /// when the control is not yet hittable.
     func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: 15), "Element does not exist", file: file, line: line)
         var attempts = 0
@@ -237,18 +235,6 @@ class WhaleReinUITestCase: XCTestCase {
         XCTAssertTrue(scroll.waitForExistence(timeout: 15))
         for _ in 0..<times {
             scroll.swipeDown()
-        }
-    }
-
-    /// Scrolls the transcript until the element can actually receive a tap.
-    /// A row can exist while still clipped below or above the visible range.
-    func makeConversationElementHittable(_ element: XCUIElement, maxSwipes: Int = 6) {
-        let scroll = self.element("conversation.scroll")
-        for _ in 0..<maxSwipes where !element.isHittable {
-            if scroll.exists {
-                scroll.swipeUp()
-            }
-            Thread.sleep(forTimeInterval: 0.25)
         }
     }
 
