@@ -262,33 +262,23 @@ fun registerPackageNative(
     outputs.dir(destination)
 }
 
-val packageNativeDebug = tasks.register("packageNativeDebug") {
-    group = "rust"
-    androidAbis.forEachIndexed { index, (abi, _, _) ->
-        dependsOn(
-            registerPackageNative(
-                "packageNativeDebug${abi.replace("-", "")}",
-                abi,
-                androidDebugLibs.getValue(abi),
-                jniDebugDir,
-                cargoBuildAndroidDebug[index],
-            ),
-        )
-    }
+val packageNativeDebug = androidAbis.mapIndexed { index, (abi, _, _) ->
+    registerPackageNative(
+        "packageNativeDebug${abi.replace("-", "")}",
+        abi,
+        androidDebugLibs.getValue(abi),
+        jniDebugDir,
+        cargoBuildAndroidDebug[index],
+    )
 }
-val packageNativeRelease = tasks.register("packageNativeRelease") {
-    group = "rust"
-    androidAbis.forEachIndexed { index, (abi, _, _) ->
-        dependsOn(
-            registerPackageNative(
-                "packageNativeRelease${abi.replace("-", "")}",
-                abi,
-                androidReleaseLibs.getValue(abi),
-                jniReleaseDir,
-                cargoBuildAndroidRelease[index],
-            ),
-        )
-    }
+val packageNativeRelease = androidAbis.mapIndexed { index, (abi, _, _) ->
+    registerPackageNative(
+        "packageNativeRelease${abi.replace("-", "")}",
+        abi,
+        androidReleaseLibs.getValue(abi),
+        jniReleaseDir,
+        cargoBuildAndroidRelease[index],
+    )
 }
 
 android {
