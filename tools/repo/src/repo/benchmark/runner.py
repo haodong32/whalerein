@@ -9,7 +9,7 @@ it, records cleanup, and writes the report atomically.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -35,12 +35,6 @@ EXIT_FAILED_ATTEMPTS = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
 
-# The streaming scenario emits this many visible updates; the container entry
-# point owns the same list. Kept here so a cadence/deadline combination that
-# cannot settle before the deadline fails as a usage error instead of wasting a
-# container run.
-SCENARIO_UPDATES = 5
-
 
 @dataclass(frozen=True)
 class BenchRequest:
@@ -48,7 +42,10 @@ class BenchRequest:
     warmup: int = 3
     delay_ms: int = 0
     cadence_ms: int = 100
-    deadline_ms: int = 5000
+    workflow: str = "watch"
+    network_profile: str = "normal"
+    link: str = "host"
+    deadline_ms: int = 10000
     observation_window_ms: int = 1000
     seed: int = 0
     concurrency: int = 1
@@ -63,14 +60,23 @@ class BenchRequest:
             raise UsageError("--delay must be between 0 and 60000 milliseconds")
         if not 10 <= self.cadence_ms <= 60000:
             raise UsageError("--cadence must be between 10 and 60000 milliseconds")
+        if self.workflow not in model.WORKFLOWS:
+            raise UsageError("--scenario must be watch, recovery, or mixed-load")
+        if self.workflow == "recovery" and self.link != "client":
+            raise UsageError("the recovery scenario uses --link client")
+        if self.network_profile not in model.NETWORK_PROFILES:
+            raise UsageError("--network must be a named benchmark network profile")
+        if self.link not in model.NETWORK_LINKS:
+            raise UsageError("--link must be host, client, or both")
         if not 100 <= self.deadline_ms <= 600000:
             raise UsageError("--deadline must be between 100 and 600000 milliseconds")
         # The scripted reply settles one cadence step after the last update, so a
         # slow cadence against a short deadline can never be observed in time.
-        if self.cadence_ms * SCENARIO_UPDATES >= self.deadline_ms:
+        final_ms = self.cadence_ms * len(model.UPDATES)
+        if final_ms >= self.deadline_ms:
             raise UsageError(
-                f"--cadence {self.cadence_ms} ms needs a deadline above "
-                f"{self.cadence_ms * SCENARIO_UPDATES} ms to observe the scripted reply"
+                f"--cadence {self.cadence_ms} ms needs "
+                f"a deadline above {final_ms} ms to observe the scripted reply"
             )
         if not 0 <= self.observation_window_ms <= 60000:
             raise UsageError("--observation-window must be between 0 and 60000 milliseconds")
@@ -87,6 +93,8 @@ class BenchRequest:
             "profile": "warm-client",
             "delay_ms": self.delay_ms,
             "cadence_ms": self.cadence_ms,
+            "workflow": self.workflow,
+            "network": model.network_settings(self.network_profile, self.link),
             "deadline_ms": self.deadline_ms,
             "observation_window_ms": self.observation_window_ms,
             "seed": self.seed,
@@ -101,19 +109,134 @@ class BenchResult:
     errors: list = field(default_factory=list)
 
 
-def run(root, runner, request, directory):
-    """Execute one benchmark run; never raises for measurement or cleanup faults."""
+def _create_output(directory):
     directory = Path(directory).resolve()
-    request.validate()
     try:
         directory.mkdir(mode=0o700, parents=True)
     except FileExistsError as exc:
         raise UsageError("output directory already exists; choose a new directory") from exc
+    return directory
+
+
+def run(root, runner, request, directory, *, prepared=None):
+    """Execute one benchmark run; never raises for measurement or cleanup faults."""
+    request.validate()
+    directory = _create_output(directory)
     with run_lock(directory), interrupt_on_termination():
-        return _run_in_directory(root, runner, request, directory)
+        return _run_in_directory(root, runner, request, directory, prepared)
 
 
-def _run_in_directory(root, runner, request, directory):
+def run_matrix(root, runner, request, directory):
+    """Run all declared user workloads in fresh containers with one build."""
+    request.validate()
+    directory = _create_output(directory)
+    report = directory / "suite.json"
+    cases = [
+        {"workflow": workflow, "network": profile, "link": link, "status": "pending"}
+        for workflow, profile, link in model.DEFAULT_CASES
+    ]
+    document = {
+        "schema_version": 1,
+        "status": "running",
+        "attempts_per_case": request.attempts,
+        "warmup_per_case": request.warmup,
+        "source": None,
+        "cases": cases,
+        "errors": [],
+    }
+    with run_lock(directory), interrupt_on_termination():
+        return _run_matrix(directory, report, document, root, runner, request)
+
+
+def _write_matrix(report, document):
+    atomic_write(report, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+
+
+def _run_matrix(directory, report, document, root, runner, request):
+    cases = document["cases"]
+    exit_code = EXIT_OK
+    context = _context(root, directory, "benchmark-matrix")
+    _write_matrix(report, document)
+    try:
+        try:
+            prepared = _prepare(context, runner)
+        finally:
+            context.cleanup()
+        if context.cleanup_errors:
+            raise VerificationError("benchmark-build-cleanup-unverified")
+        source = context.sources["public"]
+        document["source"] = {"revision": source.revision, "fingerprint": source.fingerprint}
+        for index, case in enumerate(cases, 1):
+            workflow, profile, link = case["workflow"], case["network"], case["link"]
+            name = f"{workflow}-{profile}-{link}"
+            case["status"] = "running"
+            _write_matrix(report, document)
+            runner.out.info(f"Benchmark {index}/{len(cases)}: {workflow}, {profile} on {link}")
+            scenario = replace(request, workflow=workflow, network_profile=profile, link=link)
+            result = run(root, runner, scenario, directory / name, prepared=prepared)
+            outcomes = result.document["outcomes"]
+            workflow_results = result.document.get("workflow_results", {})
+            samples = (result.document.get("streaming") or {}).get("samples", {})
+            case.update(
+                status=result.document["status"]["state"],
+                exit_code=result.exit_code,
+                report=str(result.path.relative_to(directory)) if result.path else None,
+                measured=outcomes["measured"],
+                correct=outcomes["correct_by_deadline"],
+                workflow_results=workflow_results,
+                streaming_p95={
+                    metric: samples.get(metric, {}).get("quantiles", {}).get("p95")
+                    for metric in model.PRIMARY_STREAMING_METRICS
+                },
+            )
+            _write_matrix(report, document)
+            status = f"{name}: {case['status']}, Watch {case['correct']}/{case['measured']} correct"
+            if "history_measured" in workflow_results:
+                correct = workflow_results["history_correct"]
+                measured = workflow_results["history_measured"]
+                status += f", history {correct}/{measured} correct"
+            runner.out.info(status)
+            if result.exit_code == EXIT_INTERRUPTED:
+                raise KeyboardInterrupt
+            if result.exit_code != EXIT_OK:
+                exit_code = EXIT_FAILED_ATTEMPTS
+        document["status"] = "complete"
+    except KeyboardInterrupt:
+        runner.interrupted = True
+        exit_code = EXIT_INTERRUPTED
+        document["errors"].append("Benchmark suite was interrupted")
+    except (ToolMissingError, VerificationError, SourceError, OSError, ValueError) as exc:
+        exit_code = (
+            3
+            if isinstance(exc, ToolMissingError)
+            else getattr(exc, "exit_code", EXIT_FAILED_ATTEMPTS)
+        )
+        document["errors"].append(sanitize(exc))
+    if document["status"] == "running":
+        document["status"] = "incomplete"
+        for case in cases:
+            if case["status"] == "running":
+                case["status"] = "incomplete"
+    _write_matrix(report, document)
+    return BenchResult(document, exit_code, report, document["errors"])
+
+
+def _context(root, directory, purpose="benchmark"):
+    return RunContext(
+        Invocation(purpose, "protocol-http", (SourceSelection("public", root),), timeout=3600),
+        directory,
+    )
+
+
+def _prepare(context, runner):
+    with context.phase("source-capture"):
+        context.sources = capture_sources(
+            context.invocation.sources, context.run_directory / "sources"
+        )
+    return prepare(context, runner, "protocol-http")
+
+
+def _run_in_directory(root, runner, request, directory, prepared):
     export = directory / "container"
     export.mkdir()
     timeout = request.timeout or DEFAULT_EXECUTION_TIMEOUT_SECONDS
@@ -123,14 +246,9 @@ def _run_in_directory(root, runner, request, directory):
     cleanup = {"result": "unverified", "reason": "container_not_launched"}
     interrupted = False
     started = monotonic()
-    context = RunContext(
-        Invocation("benchmark", "protocol-http", (SourceSelection("public", root),), timeout=3600),
-        directory,
-    )
+    context = _context(root, directory)
     try:
-        with context.phase("source-capture"):
-            context.sources = capture_sources(context.invocation.sources, directory / "sources")
-        image, workspace = prepare(context, runner, "protocol-http")
+        image, workspace = prepared if prepared is not None else _prepare(context, runner)
         container = _container(context, runner, workspace, image, "benchmark")
         container.create(
             _container_options(workspace, export, timeout, request),
@@ -223,6 +341,8 @@ def _container_options(workspace, export, timeout, request):
     return [
         "--network",
         "none",
+        "--cap-add",
+        "NET_ADMIN",
         "--tmpfs",
         "/tmp:rw,exec,size=1024m,mode=1777",
         "--env",
@@ -258,21 +378,7 @@ def _placeholder(request, errors):
     """Facts that make an unsuccessful run explicit without inventing attempts."""
     return {
         "schema_version": model.SCHEMA_VERSION,
-        "scenario": {
-            "id": model.SCENARIO_ID,
-            "version": model.SCENARIO_VERSION,
-            "seed": str(request.seed),
-            "deadline_ms": request.deadline_ms,
-            "observation_window_ms": request.observation_window_ms,
-            "workload": {"updates": ["placeholder"], "gap_ms": 0, "delivery": "immediate"},
-            "response": {
-                "start_ms": 0,
-                "final_ms": 0,
-                "delay_ms": 0,
-                "duplicate_final_ms": 0,
-                "final_text": "placeholder",
-            },
-        },
+        "scenario": model.scenario(request.as_configuration()),
         "run": {
             "id": "unavailable",
             "started_at": datetime.now(UTC).isoformat(),
@@ -286,19 +392,12 @@ def _placeholder(request, errors):
             "versions": {},
             "fixture": {},
         },
-        "attempts": [
-            {
-                "id": "not-run",
-                "phase": "measured",
-                "outcome": "product_error",
-                "reason": "run_not_executed",
-            }
-        ],
+        "attempts": [],
         "outcomes": {
-            "counts": {name: int(name == "product_error") for name in model.OUTCOMES},
-            "measured": 1,
+            "counts": {name: 0 for name in model.OUTCOMES},
+            "measured": 0,
             "correct_by_deadline": 0,
-            "success_share": 0.0,
+            "success_share": None,
             "warmup": {"attempts": 0, "completed": 0},
         },
         "latency": {
@@ -309,6 +408,10 @@ def _placeholder(request, errors):
             },
             "tails": [{"name": "p95", "state": "unavailable", "reason": "run_not_executed"}],
         },
+        "streaming": model.streaming_summary(
+            [], 0, burst_window_ms=model.BURST_WINDOW_MS, display_delay=True
+        ),
+        "workflow_results": model.workflow_summary([], request.workflow),
         "status": {
             "state": "invalid",
             "reasons": errors or ["run_not_executed"],

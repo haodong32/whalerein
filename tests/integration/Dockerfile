@@ -81,7 +81,7 @@ ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:/usr/lib/postgresql/18/bi
     PYTHONPATH=/workspace/tools/repo/src PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl libcjson1 libssl3t64 libnuma1 liburing2 libdbus-1-3 libatomic1 \
-    dbus-daemon dbus-bin gnome-keyring libsecret-tools && rm -rf /var/lib/apt/lists/*
+    dbus-daemon dbus-bin gnome-keyring libsecret-tools iproute2 && rm -rf /var/lib/apt/lists/*
 COPY --from=mosquitto-build /usr/local/sbin/mosquitto /usr/local/sbin/mosquitto
 COPY --from=mosquitto-build /usr/local/lib/libmosquitto.so* /usr/local/lib/
 RUN ldconfig && test -x /usr/local/sbin/mosquitto

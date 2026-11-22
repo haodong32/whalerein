@@ -279,17 +279,11 @@ WHALEREIN_ACCEPTANCE_RESTART_BROKER='docker restart whalerein-mosquitto' \
   go test -tags acceptance ./tests/acceptance -run TestMosquittoLineAcceptance -v
 ```
 
-The target-line benchmark is part of the same acceptance binary and needs the
-TLS listener and seeded fixture:
-
-```bash
-WHALEREIN_BENCH=1 WHALEREIN_BENCH_DEVICES=2000 \
-WHALEREIN_BENCH_MQTT=<host>:8883 WHALEREIN_BENCH_ACCESS=http://127.0.0.1:8080 \
-  go test -tags acceptance ./tests/acceptance -run TestMosquittoLineBenchmark -v
-```
-
-Both fixtures stay outside the default unit suite; record their output under
-`.local-docs/acceptance/`. See the [repo command reference](../tools/repo/README.md#test-selection) for exact
+The stack acceptance suite stays outside the default unit suite. Record its
+output under `.local-docs/acceptance/`. Use the isolated
+[link performance benchmark](../tools/repo/README.md#link-performance-benchmark)
+for repeatable network profiles.
+See the [repo command reference](../tools/repo/README.md#test-selection) for exact
 project IDs, case discovery, selector syntax and unsupported combinations.
 The [integration guide](../tests/integration/README.md) describes container and
 fixture ownership. Development services are not prerequisites for integration.

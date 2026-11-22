@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from statistics import median
+
 from . import analysis, model
 
 
@@ -34,7 +36,93 @@ def render(document):
         lines.append(
             f"Warmup (excluded): {warmup['attempts']} attempts, {warmup['completed']} completed"
         )
-    lines.extend(_samples(document["latency"]["samples"]))
+    version = document["scenario"]["version"]
+    if version < 6:
+        lines.extend(
+            _samples(
+                document["latency"]["samples"],
+                {
+                    "first_text_ms": (
+                        "first text" if document["scenario"]["version"] >= 4 else "first preview",
+                        "ms",
+                    ),
+                    "final_ms": ("final reply", "ms"),
+                    "update_gaps_ms": ("preview gap", "ms"),
+                },
+            )
+        )
+    if "streaming" in document:
+        streaming = document["streaming"]
+        scenario = document["scenario"]
+        if scenario["version"] == 2:
+            lines.append(f"Host event completion floor: {scenario['event_ack_floor_ms']} ms")
+        elif scenario["version"] >= 5:
+            network = scenario["network"]
+            lines.append(
+                f"Network: {network['profile']} on {network['link']}, "
+                f"{network['extra_rtt_ms']} ms extra RTT, "
+                f"{network['jitter_ms_per_direction']} ms jitter and "
+                f"{network['loss_percent_per_direction']:g}% loss per direction"
+            )
+            probe = document["environment"].get("network_probe")
+            if probe:
+                reference = median(probe["reference_ms"])
+                lines.append(
+                    "Observed extra TCP RTT: "
+                    + ", ".join(
+                        f"{link} {max(0, median(probe[link + '_ms']) - reference):.1f} ms"
+                        for link in ("host", "client")
+                    )
+                )
+            counters = document["environment"].get("network_counters")
+            if counters:
+                lines.append(
+                    f"Netem workload: {counters['packets']} forwarded packets, "
+                    f"{counters['dropped']} dropped"
+                )
+        else:
+            requested = scenario["host_broker_extra_rtt_ms"]
+            probe = document["environment"].get("network_probe")
+            observed = (
+                "unavailable" if probe is None else f"{model.observed_extra_rtt(probe):.1f} ms"
+            )
+            lines.append(
+                f"Host–broker extra TCP RTT: {requested} ms requested, {observed} observed"
+            )
+        metrics = model.STREAMING_METRICS
+        if scenario["version"] >= 6:
+            metrics = model.PRIMARY_STREAMING_METRICS
+        elif scenario["version"] == 5:
+            metrics = {**metrics, **model.LINK_STREAMING_METRICS}
+        lines.extend(_samples(streaming["samples"], metrics))
+        lines.append(
+            f"Completed without previews: {streaming['zero_preview']}/{counts['completed']}"
+        )
+    if version >= 6:
+        lines.append("Diagnostics")
+        lines.extend(
+            _samples(document["latency"]["samples"], {"first_text_ms": ("first text", "ms")})
+        )
+        if "diagnostics" in document:
+            lines.extend(
+                _samples(
+                    document["diagnostics"],
+                    {"segment_display_delay_ms": ("per-segment display delay", "ms")},
+                )
+            )
+    workflow = document.get("workflow_results", {})
+    if "history_measured" in workflow:
+        lines.append(
+            f"Background history reads: {workflow['history_correct']}/"
+            f"{workflow['history_measured']} correct by deadline"
+        )
+        lines.extend(_samples(workflow, {"history_read_ms": ("history read time", "ms")}))
+        if errors := workflow.get("history_errors"):
+            lines.append(
+                "History errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
+            )
+    if "catch_up_ms" in workflow:
+        lines.extend(_samples(workflow, {"catch_up_ms": ("catch-up after network restore", "ms")}))
     for entry in document["latency"].get("analysis", {}).get("reasons", []):
         lines.append(f"analysis: incomplete ({entry['name']})")
     status = document["status"]
@@ -51,13 +139,9 @@ def render(document):
     return "\n".join(lines)
 
 
-def _samples(samples):
+def _samples(samples, metrics):
     lines = []
-    for metric, label in (
-        ("first_text_ms", "first text"),
-        ("final_ms", "final reply"),
-        ("update_gaps_ms", "update gap"),
-    ):
+    for metric, (label, unit) in metrics.items():
         entry = samples.get(metric) or {}
         quantiles = entry.get("quantiles") or {}
         if not entry.get("count"):
@@ -71,7 +155,8 @@ def _samples(samples):
                 reason = unavailable.get(name, model.UNAVAILABLE_TAIL)
                 parts.append(f"{name}=unavailable(n>={minimum},{reason})")
             else:
-                parts.append(f"{name}={value:.1f}ms")
+                scale = 100 if unit == "%" else 1
+                parts.append(f"{name}={value * scale:.1f}{unit}")
         lines.append(f"{label}: " + " ".join(parts))
     return lines
 
@@ -90,6 +175,27 @@ def comparison(result):
         lines.append(
             f"{metric}: {shown} {bounds} against +/-{entry['tolerance_ms']:.1f} ms"
             f" -> {entry['verdict']} ({entry['reason']})"
+        )
+    if "vary" in result:
+        lines.append("Comparison variable: " + result["vary"])
+        for arm, count in result["outcomes"].items():
+            lines.append(f"{arm} correct: {count['correct']}/{count['measured']}")
+    streaming_metrics = {
+        **model.STREAMING_METRICS,
+        **model.PRIMARY_STREAMING_METRICS,
+    }
+    for metric, entry in result.get("streaming", {}).items():
+        label, unit = streaming_metrics[metric]
+        scale = 100 if unit == "%" else 1
+        unit = "pp" if unit == "%" else unit
+        delta = entry["mean_paired_p95_delta"]
+        if delta is None:
+            lines.append(f"{label} p95 change: unavailable ({entry['reason']})")
+            continue
+        low, high = entry["interval_95"]
+        lines.append(
+            f"{label} p95 change: {delta * scale:+.1f} {unit}"
+            f" [{low * scale:+.1f}, {high * scale:+.1f}] {unit} (95% interval)"
         )
     if result["reasons"]:
         lines.append("Reasons: " + ", ".join(result["reasons"]))

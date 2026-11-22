@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from test_benchmark_model import attempt, document
+from test_benchmark_model import attempt, document, streaming_document
 
 from repo.benchmark import compare, summary
 from repo.errors import RepoError, UsageError
@@ -157,3 +157,41 @@ def test_method_text_states_the_declaration():
     assert "first_text_ms" in text
     assert "tolerance" in text or "tolerances" in text
     assert "paired" in text.lower()
+
+
+def test_comparison_reports_paired_streaming_tails_and_rejects_mixed_conditions(tmp_path):
+    def load(name, **settings):
+        path = tmp_path / name
+        path.write_text(json.dumps(streaming_document(count=20, version=4, **settings)))
+        return compare.load(path)
+
+    before = load("before.json", with_previews=False)
+    after = load("after.json", with_previews=True)
+    result = compare.compare([before] * 5, [after] * 5)
+    assert result["streaming"]["longest_output_gap_ms"]["mean_paired_p95_delta"] == -180
+    assert result["streaming"]["largest_output_share"]["mean_paired_p95_delta"] == pytest.approx(
+        -0.2
+    )
+    assert "largest output share p95 change: -20.0 pp" in summary.comparison(result)
+    with pytest.raises(UsageError, match="identical benchmark conditions"):
+        compare.compare([before], [load("delayed.json", extra_rtt=280)])
+
+
+def test_link_effect_compares_profiles_only_on_the_same_build(tmp_path):
+    def saved(name, **settings):
+        path = tmp_path / name
+        path.write_text(json.dumps(streaming_document(count=20, **settings)))
+        return compare.load(path)
+
+    baseline = saved("normal.json")
+    delayed = saved("delayed.json", extra_rtt=280, with_previews=False)
+    with pytest.raises(UsageError, match="identical conditions"):
+        compare.compare([baseline], [delayed])
+    result = compare.compare([baseline] * 5, [delayed] * 5, vary="network")
+    assert result["verdict"] == "measured"
+    assert result["streaming"]["largest_burst_share"]["mean_paired_p95_delta"] == pytest.approx(0.2)
+    assert result["streaming"]["max_display_delay_ms"]["mean_paired_p95_delta"] == 60
+
+    delayed["artifacts"]["cli"] = "sha256:" + "a" * 64
+    with pytest.raises(UsageError, match="same product build"):
+        compare.compare([baseline], [delayed], vary="network")
