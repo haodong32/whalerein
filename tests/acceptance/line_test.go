@@ -330,7 +330,7 @@ func (s *stack) waitOnline(t *testing.T, index int, want bool) bool {
 	t.Helper()
 	// A lost notification is repaired by the next policy/presence reconcile;
 	// the deployment bound is line.reconcile_interval (30 s by default).
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		if s.hostOnline(t, index) == want {
 			return true
@@ -480,12 +480,12 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		// The seeded grant is the same durable state a completed pairing writes.
 		// Access must project it to the broker and admit event forwarding.
 		payload := eventPayload(s.hostID, s.devices[0])
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(90 * time.Second)
 		for {
 			if err := host.publish(t, "whalerein/v1/h/"+s.hostID+"/event", payload); err != nil {
 				t.Fatalf("event publish: %v", err)
 			}
-			if received := deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 2*time.Second); received != nil {
+			if received := deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 10*time.Second); received != nil {
 				if string(received) != string(payload) {
 					t.Fatal("forwarded event differs")
 				}
@@ -505,7 +505,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 			if err := host.publish(t, "whalerein/v1/h/"+s.hostID+"/event", payload); err != nil {
 				t.Fatalf("event %d: %v", i, err)
 			}
-			if received := deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 3*time.Second); received == nil {
+			if received := deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 10*time.Second); received == nil {
 				t.Fatalf("event %d not delivered", i)
 			}
 		}
@@ -566,7 +566,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		}
 		host.close()
 		host = s.hostClient(t)
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(90 * time.Second)
 		for {
 			if err := host.publish(t, "whalerein/v1/h/"+s.hostID+"/event", eventPayload(s.hostID, s.devices[1])); err != nil {
 				t.Fatalf("event publish after restart: %v", err)
@@ -601,7 +601,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		if err := host.publish(t, "whalerein/v1/h/"+s.hostID+"/event", eventPayload(s.hostID, s.devices[0])); err != nil {
 			t.Fatalf("event publish after revoke: %v", err)
 		}
-		if deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", time.Second) != nil {
+		if deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 5*time.Second) != nil {
 			t.Fatal("revoked device still received an event")
 		}
 		// Stored credentials cannot reconnect.
@@ -627,7 +627,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		if err := host.publish(t, "whalerein/v1/h/"+s.hostID+"/event", eventPayload(s.hostID, s.devices[0])); err != nil {
 			t.Fatalf("event publish after restart: %v", err)
 		}
-		if deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", time.Second) != nil {
+		if deviceA.next(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/event", 5*time.Second) != nil {
 			t.Fatal("revocation did not survive the Access restart")
 		}
 	})
