@@ -183,8 +183,14 @@ jobs:
           DERIVED_DATA: .data/ios-release-scan
         run: |
           set -euo pipefail
+          # `repo test` builds the bindings in its mirrored source tree; use
+          # that checkout when the workspace has no generated framework.
+          scan_root=apps/ios
+          if [[ -d .data/ios-build/source/apps/ios/Vendor/WhaleReinMobile.xcframework ]]; then
+            scan_root=.data/ios-build/source/apps/ios
+          fi
           DESTINATION="platform=iOS Simulator,id=${SIMULATOR}" \
-            apps/ios/scripts/release-surface-scan.sh
+            "$scan_root/scripts/release-surface-scan.sh"
 
       - name: Upload native results
         if: always()
