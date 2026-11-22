@@ -542,16 +542,10 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("AC-06 receipts are authorized locally", func(t *testing.T) {
-		before := s.metrics(t)
-		for i := 0; i < 10; i++ {
-			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("ack")); err != nil {
-				t.Fatalf("ack %d: %v", i, err)
-			}
-		}
-		after := s.metrics(t)
-		if delta := after["grant_admission_loads_total"] - before["grant_admission_loads_total"]; delta != 0 {
-			t.Fatalf("receipts performed %v grant loads", delta)
+	t.Run("AC-06 retired acknowledgement topic is rejected", func(t *testing.T) {
+		// The relay epoch has no device acknowledgement or receipt topic.
+		if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("ack")); err == nil {
+			t.Fatal("retired device acknowledgement topic was accepted")
 		}
 	})
 
@@ -611,7 +605,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		// The broker connection must be closed with its published policy.
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("x")); err != nil {
+			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ready", nil); err != nil {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -640,7 +634,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 			retry.close()
 		}
 		// Other grants remain usable.
-		if err := deviceB.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[1]+"/ack", []byte("ok")); err != nil {
+		if err := deviceB.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[1]+"/ready", nil); err != nil {
 			t.Fatalf("unrelated grant lost after revoke: %v", err)
 		}
 		// Revocation survives an Access restart.
