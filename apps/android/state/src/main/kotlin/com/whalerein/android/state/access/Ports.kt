@@ -108,3 +108,18 @@ interface ExternalEntryPort {
     /** Authorizes the hint against the current profile, Host and session. */
     suspend fun authorize(target: ExternalTarget): ExternalAuthorization
 }
+
+/**
+ * Debug-build control for the official Cloud environment of the active
+ * profile. Release builds never surface it.
+ */
+interface DebugCloudEnvironmentPort {
+    fun current(): String
+
+    suspend fun apply(environment: String, cloudCaPem: String?): com.whalerein.android.state.core.Outcome<Unit>
+}
+
+/** Composition-root marker implemented only by the real bridge. */
+interface DebugEnvironmentAware {
+    val debugCloudEnvironment: DebugCloudEnvironmentPort
+}

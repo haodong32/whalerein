@@ -185,7 +185,6 @@ class FakeAppDependencies : AppDependencies {
     override val clock: Clock = FixedClock()
     override val ids: IdGenerator = SequentialIds()
     override val diagnosticSink: DiagnosticSink = fakeSink
-    override val coreRevision: String = "test-core-revision"
     override val coreVersion: String = "test-core"
     override val appVersion: String = "test-app"
     override val instance: InstanceId = InstanceId("test-instance")

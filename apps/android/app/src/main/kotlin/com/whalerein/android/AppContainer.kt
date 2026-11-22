@@ -57,6 +57,14 @@ class AppContainer(
         open()
     }
 
+    /** Rebuild the graph after a debug environment switch. */
+    fun restart() {
+        if (mutableState.value is AppGraphState.Opening) return
+        (mutableState.value as? AppGraphState.Ready)?.dependencies?.close()
+        mutableState.value = AppGraphState.Opening
+        open()
+    }
+
     private fun open() {
         scope.launch {
             val opened = openBridgeFacade(

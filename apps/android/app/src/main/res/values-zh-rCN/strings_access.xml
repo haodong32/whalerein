@@ -90,4 +90,12 @@
     <string name="access_activate">启用</string>
     <string name="access_directory_sign_in">登录 WhaleRein Cloud</string>
     <string name="access_directory_sign_in_body">登录后即可加载此设备的 Host 目录。</string>
+    <string name="access_debug_environment">Cloud 环境（调试）</string>
+    <string name="access_debug_production">生产</string>
+    <string name="access_debug_staging">预发布</string>
+    <string name="access_debug_local">本地</string>
+    <string name="access_debug_choose_ca">选择开发 CA</string>
+    <string name="access_debug_ca_hint">已选择本地 Cloud 的开发 CA。</string>
+    <string name="access_debug_ca_required">本地 Cloud 需要先选择 mkcert 开发 CA 才能应用。</string>
+    <string name="access_debug_apply">应用并重启</string>
 </resources>

@@ -26,10 +26,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.whalerein.android.AppDependencies
+import com.whalerein.android.BuildConfig
 import com.whalerein.android.R
 import com.whalerein.android.platform.ActivityPlatform
 import com.whalerein.android.state.access.CloudSignInPhase
 import com.whalerein.android.state.access.CloudSignInViewModel
+import com.whalerein.android.state.access.DebugEnvironmentAware
 import com.whalerein.android.state.access.DirectoryViewModel
 import com.whalerein.android.state.access.Profile
 import com.whalerein.android.state.access.ProfilesViewModel
@@ -39,8 +41,10 @@ import com.whalerein.android.state.access.StartupViewModel
 import com.whalerein.android.state.access.WelcomeViewModel
 import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.InstanceId
+import com.whalerein.android.state.core.Outcome
 import com.whalerein.android.state.core.Route
 import com.whalerein.android.ui.access.CloudSignInScreen
+import com.whalerein.android.ui.access.DebugEnvironmentPicker
 import com.whalerein.android.ui.access.DirectoryScreen
 import com.whalerein.android.ui.access.ProfileSettingsScreen
 import com.whalerein.android.ui.access.ProfilesScreen
@@ -116,6 +120,7 @@ fun CloudSignInRoute(
     appLinks: com.whalerein.android.platform.applinks.AppLinkRouter,
     platform: ActivityPlatform?,
     onNavigate: (Route) -> Unit,
+    onRestartGraph: () -> Unit,
 ) {
     val viewModel: CloudSignInViewModel = viewModel(
         factory = viewModelFactory {
@@ -134,6 +139,14 @@ fun CloudSignInRoute(
     val callback by appLinks.callback.collectAsStateWithLifecycle()
     var browserRequested by remember { mutableStateOf(false) }
     val browser = platform?.browser
+    val debug = dependencies as? DebugEnvironmentAware
+    var debugEnvironment by remember {
+        mutableStateOf(debug?.debugCloudEnvironment?.current() ?: "production")
+    }
+    var debugCaPem by remember { mutableStateOf<String?>(null) }
+    var debugBusy by remember { mutableStateOf(false) }
+    var debugError by remember { mutableStateOf<String?>(null) }
+    val debugScope = rememberCoroutineScope()
 
     LaunchedEffect(state.destination) {
         state.destination?.let(onNavigate)
@@ -151,17 +164,52 @@ fun CloudSignInRoute(
         viewModel.handleCallback(pendingCallback)
         appLinks.consumeCallback()
     }
-    CloudSignInScreen(
-        state = state,
-        onStart = {
-            browserRequested = true
-            viewModel.start()
-        },
-        onCancel = viewModel::cancel,
-        onRecover = viewModel::recover,
-        onNavigate = onNavigate,
-        modifier = Modifier.fillMaxSize(),
-    )
+    Column(modifier = Modifier.fillMaxSize()) {
+        CloudSignInScreen(
+            state = state,
+            onStart = {
+                browserRequested = true
+                viewModel.start()
+            },
+            onCancel = viewModel::cancel,
+            onRecover = viewModel::recover,
+            onNavigate = onNavigate,
+            modifier = Modifier.weight(1f),
+        )
+        if (BuildConfig.DEBUG && debug != null) {
+            DebugEnvironmentPicker(
+                current = debugEnvironment,
+                hasCa = debugCaPem != null,
+                busy = debugBusy,
+                error = debugError,
+                onSelect = {
+                    debugEnvironment = it
+                    debugError = null
+                },
+                onChooseCa = {
+                    debugScope.launch {
+                        debugCaPem = platform?.documents?.openPem()
+                        if (debugCaPem == null) {
+                            debugError = "Development CA was not selected."
+                        }
+                    }
+                },
+                onApply = {
+                    debugScope.launch {
+                        debugBusy = true
+                        debugError = null
+                        when (val result = debug.debugCloudEnvironment.apply(debugEnvironment, debugCaPem)) {
+                            is Outcome.Success -> onRestartGraph()
+                            is Outcome.Failure -> debugError = result.failure.message
+                            is Outcome.Unconfirmed -> debugError = result.failure.message
+                            Outcome.Cancelled -> debugError = "Environment change cancelled."
+                        }
+                        debugBusy = false
+                    }
+                },
+            )
+        }
+    }
 }
 
 @Composable

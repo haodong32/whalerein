@@ -5,6 +5,8 @@ import com.whalerein.android.corebridge.AndroidCore
 import com.whalerein.android.platform.PlatformServices
 import com.whalerein.android.platform.lan.LanAwarePairingPort
 import com.whalerein.android.state.access.CloudAuthPort
+import com.whalerein.android.state.access.DebugCloudEnvironmentPort
+import com.whalerein.android.state.access.DebugEnvironmentAware
 import com.whalerein.android.state.access.DirectoryPort
 import com.whalerein.android.state.access.ExternalEntryPort
 import com.whalerein.android.state.access.PairingPort
@@ -65,7 +67,7 @@ class BridgeAppDependencies(
     override val ids: IdGenerator,
     override val diagnosticSink: DiagnosticSink,
     private val platform: PlatformServices,
-) : AppDependencies {
+) : AppDependencies, DebugEnvironmentAware {
     override val cloudAuth: CloudAuthPort get() = core.accessPorts.cloudAuth
     override val profiles: ProfilePort get() = core.accessPorts.profiles
     override val directory: DirectoryPort get() = core.accessPorts.directory
@@ -97,6 +99,14 @@ class BridgeAppDependencies(
     override val coreVersion: String get() = core.provenance.coreVersion
     override val appVersion: String get() = core.provenance.appVersion
     override val instance: InstanceId get() = core.activeInstance
+
+    override val debugCloudEnvironment: DebugCloudEnvironmentPort =
+        object : DebugCloudEnvironmentPort {
+            override fun current(): String = core.currentCloudEnvironment()
+
+            override suspend fun apply(environment: String, cloudCaPem: String?): Outcome<Unit> =
+                core.applyCloudEnvironment(environment, cloudCaPem)
+        }
 
     override fun close() {
         core.close()

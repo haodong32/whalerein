@@ -44,6 +44,7 @@ fun AppNavHost(
     dependencies: AppDependencies,
     appLinks: AppLinkRouter,
     platform: ActivityPlatform?,
+    onRestartGraph: () -> Unit,
 ) {
     val backStack = rememberNavBackStack(StartupKey)
     val twoPane = isTwoPaneWindow()
@@ -126,6 +127,7 @@ fun AppNavHost(
                     appLinks = appLinks,
                     platform = platform,
                     onNavigate = ::navigate,
+                    onRestartGraph = onRestartGraph,
                 )
             }
             entry<DirectoryKey>(

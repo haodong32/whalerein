@@ -59,6 +59,7 @@ fun AppRoot(
             dependencies = current.dependencies,
             appLinks = container.appLinks,
             platform = platform,
+            onRestartGraph = container::restart,
         )
     }
 }

@@ -90,4 +90,12 @@
     <string name="access_activate">Activate</string>
     <string name="access_directory_sign_in">Sign in to WhaleRein Cloud</string>
     <string name="access_directory_sign_in_body">Sign in to load the Host directory for this device.</string>
+    <string name="access_debug_environment">Cloud environment (debug)</string>
+    <string name="access_debug_production">Production</string>
+    <string name="access_debug_staging">Staging</string>
+    <string name="access_debug_local">Local</string>
+    <string name="access_debug_choose_ca">Choose development CA</string>
+    <string name="access_debug_ca_hint">Development CA selected for Local Cloud.</string>
+    <string name="access_debug_ca_required">Local Cloud requires the mkcert development CA before applying.</string>
+    <string name="access_debug_apply">Apply and restart</string>
 </resources>

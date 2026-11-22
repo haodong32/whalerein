@@ -156,6 +156,30 @@ class NativeBridgeDeviceTest {
     }
 
     @Test
+    fun ac_05_debug_environment_switch_updates_the_active_cloud_profile() {
+        val root = File(context.filesDir, "device-tests/debug-environment").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val documentPath = File(root, "client/app.toml").absolutePath
+        appConfigBootstrap(documentPath)
+        AndroidCore.open(
+            context,
+            documentPath,
+            com.whalerein.android.state.core.InstanceId("cloud-production"),
+        ).use { core ->
+            assertEquals("production", core.currentCloudEnvironment())
+            val applied = kotlinx.coroutines.runBlocking {
+                core.applyCloudEnvironment("staging", null)
+            }
+            assertTrue(applied is com.whalerein.android.state.core.Outcome.Success)
+            assertEquals("staging", core.currentCloudEnvironment())
+            val materialized = File(root, "client/instances/cloud-production/instance.toml")
+            assertTrue(materialized.readText().contains("cloud_environment = \"staging\""))
+        }
+    }
+
+    @Test
     fun ac_06_tls_policy_platform_roots_and_scoped_private_ca_policy() {
         val root = File(context.filesDir, "device-tests/trust").apply { deleteRecursively(); mkdirs() }
         val pem = AndroidTrustRoots.install(root)

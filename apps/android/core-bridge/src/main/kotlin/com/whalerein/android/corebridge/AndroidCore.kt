@@ -28,13 +28,16 @@ import com.whalerein.android.corebridge.ports.StartupAdapter
 import com.whalerein.android.corebridge.ports.SupportPorts
 import com.whalerein.android.corebridge.ports.WaitAdapter
 import com.whalerein.android.corebridge.state.StateDiagnosticSinkAdapter
+import com.whalerein.android.state.core.CoreFailure
 import com.whalerein.android.state.core.DiagnosticSink
 import com.whalerein.android.state.core.InstanceId
+import com.whalerein.android.state.core.Outcome
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** Immutable app/Core provenance for diagnostics and settings. */
 data class CoreProvenanceView(
@@ -136,6 +139,75 @@ class AndroidCore private constructor(
 
     internal fun appConfig(): AppConfigView = appConfigRead(appConfigPath)
 
+    /** The environment currently recorded for the active Cloud profile. */
+    fun currentCloudEnvironment(): String =
+        appConfig().instances.firstOrNull { it.id == activeInstance.value }?.environment
+            ?: "production"
+
+    /**
+     * Debug-build profile switch. Persists the selected environment and, for
+     * the local environment, the imported root bundle before the graph is
+     * rebuilt. Release builds never expose this path.
+     */
+    suspend fun applyCloudEnvironment(
+        environment: String,
+        cloudCaPem: String?,
+    ): Outcome<Unit> = withContext(Dispatchers.IO) {
+        if (environment !in CLOUD_ENVIRONMENTS) {
+            return@withContext Outcome.Failure(
+                CoreFailure("invalid_environment", "Unsupported Cloud environment."),
+            )
+        }
+        val document = try {
+            appConfigRead(appConfigPath)
+        } catch (_: Throwable) {
+            return@withContext Outcome.Failure(
+                CoreFailure("profile_unavailable", "The active profile could not be read."),
+            )
+        }
+        val record = document.instances.firstOrNull { it.id == activeInstance.value }
+            ?: return@withContext Outcome.Failure(
+                CoreFailure("profile_missing", "The active profile no longer exists."),
+            )
+        if (record.service != "whalerein_cloud") {
+            return@withContext Outcome.Failure(
+                CoreFailure("not_cloud", "The active profile is not a Cloud profile."),
+            )
+        }
+        val ca = if (environment == "local") {
+            cloudCaPem
+                ?: record.cloudCaPath?.let { path ->
+                    File(path).takeIf(File::isFile)?.readText()
+                }
+                ?: return@withContext Outcome.Failure(
+                    CoreFailure("local_ca_required", "Local Cloud requires the development CA."),
+                )
+        } else {
+            null
+        }
+        try {
+            appConfigSaveInstance(
+                appConfigPath,
+                InstanceInput(
+                    id = record.id,
+                    service = "whalerein_cloud",
+                    environment = environment,
+                    dataDir = "instances/${record.id}/data",
+                    standaloneCaPem = null,
+                    cloudCaPem = ca,
+                ),
+            )
+            Outcome.Success(Unit)
+        } catch (error: Throwable) {
+            Outcome.Failure(
+                CoreFailure(
+                    "environment_update_failed",
+                    error.message?.takeIf { it.isNotBlank() } ?: "The environment could not be updated.",
+                ),
+            )
+        }
+    }
+
     /** Commit-then-swap profile activation. */
     internal fun switchTo(instance: InstanceId) {
         if (instance == activeInstance) return
@@ -192,6 +264,7 @@ class AndroidCore private constructor(
     }
 
     companion object {
+        private val CLOUD_ENVIRONMENTS = setOf("production", "staging", "local")
         /**
          * Open the composition root.
          *
