@@ -7,6 +7,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/pairing"
+	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -55,6 +56,35 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid pagination parameters; limit is 1-500 and offset is 0-1000000", ""}
 	case errors.Is(err, errInvalidBody):
 		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "request body is not valid JSON for this endpoint", ""}
+	case errors.Is(err, relay.ErrDisabled):
+		return errorInfo{http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability,
+			"temporary ciphertext storage is not configured on this Access deployment", ""}
+	case errors.Is(err, relay.ErrEpoch):
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_protocol_version_incompatible, "relay epoch incompatible", ""}
+	case errors.Is(err, relay.ErrInvalid):
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid relay request", ""}
+	case errors.Is(err, relay.ErrUnauthorized):
+		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized", ""}
+	case errors.Is(err, relay.ErrForbidden):
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "forbidden", ""}
+	case errors.Is(err, relay.ErrNotFound):
+		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "relay object not found", ""}
+	case errors.Is(err, relay.ErrWrongOwner):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "wrong owner node", "wrong_owner_path"}
+	case errors.Is(err, relay.ErrDigestMismatch):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_payload_digest_mismatch, "payload digest mismatch", ""}
+	case errors.Is(err, relay.ErrConflict):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "relay object conflict", ""}
+	case errors.Is(err, relay.ErrExpired):
+		return errorInfo{http.StatusGone, whalereinv1.ErrorCode_expired, "relay object expired", ""}
+	case errors.Is(err, relay.ErrTooLarge):
+		return errorInfo{http.StatusRequestEntityTooLarge, whalereinv1.ErrorCode_payload_too_large, "relay object is too large", ""}
+	case errors.Is(err, relay.ErrQuota):
+		return errorInfo{http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited, "relay quota exceeded", "quota_exceeded"}
+	case errors.Is(err, relay.ErrPressure):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "relay storage pressure", "storage_pressure"}
+	case errors.Is(err, relay.ErrUnavailable):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "relay directory unavailable", ""}
 	case errors.Is(err, errMissingAuth), errors.Is(err, auth.ErrUnauthorized), errors.Is(err, pairing.ErrUnauthorized), errors.Is(err, errInternalToken):
 		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized", ""}
 	case denial != nil:

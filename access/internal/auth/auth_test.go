@@ -647,12 +647,18 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 	}{
 		{"allows Access to subscribe to host results", access, ActionSubscribe, "whalerein/v1/h/+/result", true},
 		{"allows Access to subscribe to host events", access, ActionSubscribe, "whalerein/v1/h/+/event", true},
+		{"allows Access to subscribe to host live previews", access, ActionSubscribe, "whalerein/v1/h/+/live", true},
 		{"allows Access to subscribe to broker connect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/connected", true},
 		{"allows Access to subscribe to broker disconnect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/disconnected", true},
 		{"allows Access to subscribe to device last wills", access, ActionSubscribe, "whalerein/v1/presence/device/+", true},
 		{"denies Access subscription to host requests", access, ActionSubscribe, "whalerein/v1/h/h1/request", false},
 		{"allows Access to publish host requests", access, ActionPublish, "whalerein/v1/h/h1/request", true},
 		{"allows Access to publish device events", access, ActionPublish, "whalerein/v1/h/h1/d/d1/event", true},
+		{"allows Access to publish device notices", access, ActionPublish, "whalerein/v1/h/h1/d/d1/notice", true},
+		{"allows Access to publish device live previews", access, ActionPublish, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies Access publication to host live previews", access, ActionPublish, "whalerein/v1/h/h1/live", false},
+		{"allows Access to subscribe to device advertisements", access, ActionSubscribe, "whalerein/v1/h/+/d/+/ready", true},
+		{"denies Access device acknowledgement publishes", access, ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
 		{"allows Access to publish host-scoped presence", access, ActionPublish, "whalerein/v1/h/h1/presence", true},
 		{"denies Access publication to host results", access, ActionPublish, "whalerein/v1/h/h1/result", false},
 		{"denies Access publication to device will topics", access, ActionPublish, "whalerein/v1/presence/device/d1", false},
@@ -666,9 +672,16 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"denies host publication to presence", host, ActionPublish, "whalerein/v1/h/h1/presence", false},
 		{"allows host publication to its own results", host, ActionPublish, "whalerein/v1/h/h1/result", true},
 		{"allows host publication to its own events", host, ActionPublish, "whalerein/v1/h/h1/event", true},
+		{"allows host publication to its own live previews", host, ActionPublish, "whalerein/v1/h/h1/live", true},
+		{"denies host publication to another host live previews", host, ActionPublish, "whalerein/v1/h/h2/live", false},
+		{"denies host subscription to live previews", host, ActionSubscribe, "whalerein/v1/h/h1/live", false},
 		{"denies host publication to request topics", host, ActionPublish, "whalerein/v1/h/h1/request", false},
 		{"denies host publication to device event topics", host, ActionPublish, "whalerein/v1/h/h1/d/d1/event", false},
 		{"allows device subscription to its granted event topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/event", true},
+		{"allows device subscription to its granted live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies device subscription to another device live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d2/live", false},
+		{"denies device subscription to host live topic", device, ActionSubscribe, "whalerein/v1/h/h1/live", false},
+		{"denies device publication to live previews", device, ActionPublish, "whalerein/v1/h/h1/d/d1/live", false},
 		{"denies device subscription to another device events", device, ActionSubscribe, "whalerein/v1/h/h1/d/d2/event", false},
 		{"denies device subscription to host event topic", device, ActionSubscribe, "whalerein/v1/h/h1/event", false},
 		{"denies device wildcard subscriptions", device, ActionSubscribe, "whalerein/v1/h/h1/d/+/event", false},
@@ -938,7 +951,7 @@ func TestRevocationAuditIncludesOriginEvenWhenHostOffline(t *testing.T) {
 	}
 }
 
-func TestDeviceCanOnlyPublishItsOwnTransportReceipts(t *testing.T) {
+func TestDeviceCanOnlyPublishItsOwnReadyAdvertisement(t *testing.T) {
 	service, fs, _, _ := newService(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
@@ -948,18 +961,21 @@ func TestDeviceCanOnlyPublishItsOwnTransportReceipts(t *testing.T) {
 		topic   string
 		allowed bool
 	}{
-		{ActionPublish, "whalerein/v1/h/h1/d/d1/ack", true},
-		{ActionSubscribe, "whalerein/v1/h/h1/d/d1/ack", false},
-		{ActionPublish, "whalerein/v1/h/h1/d/other/ack", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/ready", true},
+		{ActionSubscribe, "whalerein/v1/h/h1/d/d1/ready", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/other/ready", false},
 		{ActionPublish, "whalerein/v1/h/h1/d/d1/event", false},
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/notice", false},
+		// The retired device acknowledgement topic is denied.
+		{ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
 	} {
 		allowed, err := service.AuthorizeACL(ctx, identity, item.action, item.topic)
 		if err != nil || allowed != item.allowed {
-			t.Fatal("invalid receipt authorization")
+			t.Fatalf("invalid ready authorization for %s %s: allowed=%v err=%v", item.action, item.topic, allowed, err)
 		}
 	}
 	fs.grantErr = errors.New("offline")
-	if _, err := service.AuthorizeACL(ctx, identity, ActionPublish, "whalerein/v1/h/h1/d/d1/ack"); err == nil {
+	if _, err := service.AuthorizeACL(ctx, identity, ActionPublish, "whalerein/v1/h/h1/d/d1/ready"); err == nil {
 		t.Fatal("authorization lookup failure ignored")
 	}
 }

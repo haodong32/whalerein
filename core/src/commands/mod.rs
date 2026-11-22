@@ -7,19 +7,22 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use prost::Message;
 use whalerein_proto::{
-    CommandAccepted, CommandResult, ErrorCode, GetCommandResult, HostRequest, RequestKind,
-    RequestPayload, RequestReceipt, RequestState, RequestTransportMetadata, ResponsePayload,
+    CommandAccepted, CommandResult, ErrorCode, GetCommandResult, HostRequest, PayloadPurpose,
+    PayloadReference, RelayObjectFinishRequest, RelayObjectReserveRequest, RequestKind,
+    RequestPayload, RequestReceipt, RequestState, RequestStateNotice, RequestTransportMetadata,
+    ResponsePayload,
 };
 
 use crate::access::{
-    http::{receipt_matches_request, TransportObservation},
+    http::{receipt_matches_request, TransportObservation, FINAL_LOOKUP_RESERVE},
     transport::TransportBudget,
-    AccessClient,
+    AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSettings,
 };
 use crate::api::{
     error_code_name, CommandHandle, CoreError, CoreResult, LifecycleReceipt,
@@ -32,6 +35,10 @@ use crate::util::{now_unix_ms, random_id, sha256};
 
 pub const REQUEST_TTL_MS: i64 = 30_000;
 pub const MAX_SUBMIT_ATTEMPTS: u32 = 3;
+/// How long a resumed foreground command waits for a terminal result notice
+/// before spending its reserved authoritative lookup.
+pub const FOREGROUND_WAIT: Duration = Duration::from_secs(10);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 struct SubmitFailure {
     error: CoreError,
@@ -44,39 +51,136 @@ struct Admission {
     secrets: std::sync::Arc<dyn crate::security::SecretStore>,
 }
 
+/// Scoped MQTT receiver configuration for one foreground invocation.
+struct ForegroundTransport {
+    settings: MqttSettings,
+    device_id: String,
+    token: String,
+    session_id: Option<String>,
+}
+
+/// Why a heartbeat stopped renewing. A terminal response (404/expired/closed)
+/// is observable so renewal never loops after the exact request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatOutcome {
+    /// The exact request is no longer renewable; renewal stopped.
+    Closed,
+    /// Renewal ended with a transient transport failure.
+    TransportFailed,
+}
+
 /// Bounded, non-blocking renewal of one command's original request identity.
 ///
 /// The task renewal is independent of result polling, so a slow heartbeat can
 /// never stall terminal-result or deadline progress. Dropping the guard stops
 /// renewal; there is no detached heartbeat after completion or cancellation.
+/// A 404/expired/terminal response stops renewal instead of looping.
 struct CommandHeartbeat {
     stop: Arc<AtomicBool>,
+    /// Latest closure/failure fact. Renewal stops on a terminal response and
+    /// the guard stops on completion, so no detached heartbeat survives.
+    outcome: Arc<std::sync::Mutex<Option<HeartbeatOutcome>>>,
     task: Option<JoinHandle<()>>,
 }
 
 impl CommandHeartbeat {
     fn start(access: Arc<AccessClient>, request_id: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let outcome = Arc::new(std::sync::Mutex::new(None));
         let task_stop = stop.clone();
+        let task_outcome = outcome.clone();
         let task = tokio::spawn(async move {
             loop {
                 if task_stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let _ = access.heartbeat_request(&request_id).await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                match access.heartbeat_request(&request_id).await {
+                    Ok(()) => {}
+                    Err(error) if error.is_retryable_transport() => {
+                        *task_outcome.lock().expect("heartbeat outcome") =
+                            Some(HeartbeatOutcome::TransportFailed);
+                    }
+                    Err(_) => {
+                        // The exact request is expired, cancelled or terminal.
+                        // Renewing again cannot help and could mask closure.
+                        *task_outcome.lock().expect("heartbeat outcome") =
+                            Some(HeartbeatOutcome::Closed);
+                        break;
+                    }
+                }
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             }
         });
         Self {
             stop,
+            outcome,
             task: Some(task),
         }
+    }
+
+    /// Latest observable heartbeat outcome, if any renewal failed.
+    #[allow(dead_code)]
+    fn outcome(&self) -> Option<HeartbeatOutcome> {
+        *self.outcome.lock().expect("heartbeat outcome")
     }
 }
 
 impl Drop for CommandHeartbeat {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ForegroundSignal {
+    /// A matching result notice may carry a newer authoritative state.
+    Notice(Box<RequestStateNotice>),
+    /// A successful reconnect: reconcile the original request once more.
+    Reconnected,
+}
+
+/// Attached before submission. Signals are scoped to this invocation's MQTT
+/// connection; closing the guard stops the receiver without touching a sibling
+/// receiver under the same Device.
+struct ForegroundNotices {
+    signals: mpsc::Receiver<ForegroundSignal>,
+    stop: Arc<AtomicBool>,
+    task: Option<JoinHandle<()>>,
+    last_seen: Option<(String, i64)>,
+}
+
+impl ForegroundNotices {
+    fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Return true when this notice is new and matches the invocation scope.
+    /// Foreign, stale and duplicate notices are ignored and never fetched.
+    fn accept(&mut self, notice: &RequestStateNotice, request: &HostRequest) -> bool {
+        if notice.request_id != request.request_id
+            || notice.host_id != request.host_id
+            || notice.device_id != request.device_id
+            || notice.command_id != request.command_id
+        {
+            return false;
+        }
+        let seen = self.last_seen.as_ref().is_some_and(|(id, updated)| {
+            id == &notice.request_id && *updated >= notice.updated_at_unix_ms
+        });
+        if seen {
+            return false;
+        }
+        self.last_seen = Some((notice.request_id.clone(), notice.updated_at_unix_ms));
+        true
+    }
+}
+
+impl Drop for ForegroundNotices {
+    fn drop(&mut self) {
+        self.stop();
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -90,6 +194,10 @@ pub struct CommandService {
     admission: Option<Admission>,
     transport: TransportBudget,
     outbound_envelope_bytes: u64,
+    /// Largest complete inline request this device sends. A larger sealed body
+    /// is uploaded and submitted as a reference before any submit attempt.
+    outbound_inline_bytes: u64,
+    foreground: Option<ForegroundTransport>,
 }
 
 impl CommandService {
@@ -102,6 +210,8 @@ impl CommandService {
             admission: None,
             transport,
             outbound_envelope_bytes: transport.envelope_bytes,
+            outbound_inline_bytes: transport.inline_request_bytes(),
+            foreground: None,
         }
     }
 
@@ -110,11 +220,31 @@ impl CommandService {
         // Locally valid overrides take effect; the peer minimum is applied by
         // `with_outbound_envelope` once the channel advertisement is known.
         self.outbound_envelope_bytes = transport.envelope_bytes;
+        self.outbound_inline_bytes = transport.inline_request_bytes();
         self
     }
 
     pub(crate) fn with_outbound_envelope(mut self, envelope_bytes: u64) -> Self {
         self.outbound_envelope_bytes = envelope_bytes.min(self.transport.envelope_bytes);
+        self
+    }
+
+    /// Configure the scoped MQTT receiver attached before a foreground
+    /// submission. Without it (for example a bare unit fixture) the wait uses
+    /// bounded authoritative recovery only.
+    pub(crate) fn with_foreground_transport(
+        mut self,
+        settings: MqttSettings,
+        device_id: impl Into<String>,
+        token: impl Into<String>,
+        session_id: Option<String>,
+    ) -> Self {
+        self.foreground = Some(ForegroundTransport {
+            settings,
+            device_id: device_id.into(),
+            token: token.into(),
+            session_id,
+        });
         self
     }
 
@@ -254,6 +384,7 @@ impl CommandService {
             .access
             .wait_for_request_observed(&request, false, transport)
             .await?;
+        let state = self.resolve_state(state).await?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         let result = decrypt_response_raw(channel, &aad, &state).map_err(|error| {
             if source_sensitive
@@ -445,6 +576,21 @@ impl CommandService {
             command_parent_session_id,
         })?;
         drop(admission_guard);
+        // Attach the scoped MQTT receiver before the request can be submitted,
+        // so a result published before the wait is installed is still routed
+        // to this invocation.
+        let mut notices = self.attach_notices(host_id, device_id);
+        // A sealed body above the effective encoded request budget is uploaded
+        // and finished first. Only then is the reference submitted. The
+        // original request id, command id and payload digest are unchanged, so
+        // an upload retry can never create a second execution.
+        if let Err(error) = self.ensure_representation(&mut request).await {
+            if let Some(notices) = notices.as_mut() {
+                notices.stop();
+            }
+            self.cache.remove_unsent_command(&request_id)?;
+            return Err(error);
+        }
         let receipt = match self.submit(&request).await {
             Ok(receipt) => receipt,
             Err(failure) => {
@@ -476,7 +622,15 @@ impl CommandService {
             | DomainStatus::HostOffline => {}
         }
 
-        let state = self.access.wait_for_request(&request, true).await?;
+        let state = self
+            .wait_foreground(
+                notices.as_mut(),
+                &request,
+                true,
+                Some(receipt.expires_at_unix_ms),
+            )
+            .await?;
+        let state = self.resolve_state(state).await?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         if matches!(
             status,
@@ -568,7 +722,11 @@ impl CommandService {
     }
 
     /// Wait for the host to produce a terminal payload for an already accepted
-    /// command, using the encrypted `GetCommandResult` query.
+    /// command. The wait is notification-driven: it attaches the scoped MQTT
+    /// receiver, reconciles the original command once, reads the authoritative
+    /// result only on a matching notice or reconnect, and reserves exactly one
+    /// final read before reporting an unconfirmed outcome. A fresh secure
+    /// channel still recovers the original outcome through `GetCommandResult`.
     pub async fn await_command_result(
         &self,
         host_id: &str,
@@ -580,44 +738,156 @@ impl CommandService {
         // Terminal-result queries use their own request ids. Renewal must
         // remain bound to the original accepted command R.
         let _heartbeat = CommandHeartbeat::start(self.access.clone(), request_id.to_owned());
-        for attempt in 0..50u32 {
-            match self
-                .get_command_result(host_id, device_id, channel, command_id)
-                .await
-            {
-                Ok(result)
-                    if matches!(
-                        DomainStatus::from_proto(result.status),
-                        Some(DomainStatus::Received | DomainStatus::HostAccepted)
-                    ) =>
-                {
-                    if attempt == 49 {
-                        return Err(CoreError::Timeout);
+        // Attach before resuming the wait so an already-published terminal
+        // notice is not lost.
+        let mut notices = self.attach_notices(host_id, device_id);
+        let budget = FOREGROUND_WAIT + FINAL_LOOKUP_RESERVE;
+        let final_reserve = FINAL_LOOKUP_RESERVE.min(budget);
+        let deadline = Instant::now() + budget;
+
+        // Reconcile once on attach/resume by the original command identity.
+        let probe = self
+            .get_command_result(host_id, device_id, channel, command_id)
+            .await;
+        if let Some(outcome) = self.command_probe_outcome(request_id, command_id, probe) {
+            return outcome;
+        }
+        let mut recovery_attempt = 0u32;
+        let mut receiver_ready = false;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining <= final_reserve {
+                break;
+            }
+            let slice = (remaining - final_reserve).min(Duration::from_secs(2));
+            let mut read_now = false;
+            if receiver_ready {
+                match notices.as_mut() {
+                    Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
+                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                            // The notice carries the original request/command
+                            // identity; it is a hint, never the result itself.
+                            let scope = HostRequest {
+                                request_id: request_id.to_owned(),
+                                host_id: host_id.to_owned(),
+                                device_id: device_id.to_owned(),
+                                command_id: command_id.to_owned(),
+                                ..Default::default()
+                            };
+                            read_now = watch.accept(&notice, &scope);
+                        }
+                        Ok(Some(ForegroundSignal::Reconnected)) => read_now = true,
+                        Ok(None) => break,
+                        // A connected receiver with no notice performs no
+                        // status fetch: the final lookup covers a lost notice.
+                        Err(_) => {}
+                    },
+                    None => break,
+                }
+            } else {
+                // Until the first successful subscription the receiver cannot
+                // deliver notices. Bounded recovery reads keep an already
+                // accepted command recoverable without a fixed poll loop.
+                match notices.as_mut() {
+                    Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
+                        Ok(Some(ForegroundSignal::Reconnected)) => {
+                            receiver_ready = true;
+                            read_now = true;
+                        }
+                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                            receiver_ready = true;
+                            let scope = HostRequest {
+                                request_id: request_id.to_owned(),
+                                host_id: host_id.to_owned(),
+                                device_id: device_id.to_owned(),
+                                command_id: command_id.to_owned(),
+                                ..Default::default()
+                            };
+                            read_now = watch.accept(&notice, &scope);
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            if recovery_attempt < 4 {
+                                let backoff = Duration::from_millis(100 * (1 << recovery_attempt));
+                                tokio::time::sleep(backoff.min(remaining - final_reserve)).await;
+                                recovery_attempt = recovery_attempt.saturating_add(1);
+                                read_now = true;
+                            }
+                        }
+                    },
+                    None => {
+                        if recovery_attempt < 4 {
+                            let backoff = Duration::from_millis(100 * (1 << recovery_attempt));
+                            tokio::time::sleep(backoff.min(remaining - final_reserve)).await;
+                            recovery_attempt = recovery_attempt.saturating_add(1);
+                            read_now = true;
+                        }
                     }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                Ok(result) => {
-                    return self.handle_from_command_result(request_id, command_id, &result);
-                }
-                Err(CoreError::UnknownResult) if attempt < 49 => {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                Err(error)
-                    if matches!(
-                        error,
-                        CoreError::ChannelMismatch
-                            | CoreError::FingerprintMismatch { .. }
-                            | CoreError::Security(_)
-                    ) || error.device_authorization_lost() =>
-                {
-                    return Err(error);
-                }
-                // A failure of the observation is not a rejection of the
-                // already-admitted original control; keep its identity pending.
-                Err(_) => return Err(CoreError::UnknownResult),
+            }
+            if !read_now {
+                continue;
+            }
+            let probe = self
+                .get_command_result(host_id, device_id, channel, command_id)
+                .await;
+            match self.command_probe_outcome(request_id, command_id, probe) {
+                Some(outcome) => return outcome,
+                None => continue,
             }
         }
-        Err(CoreError::Timeout)
+
+        // The one reserved final authoritative read.
+        let probe = self
+            .get_command_result(host_id, device_id, channel, command_id)
+            .await;
+        match self.command_probe_outcome(request_id, command_id, probe) {
+            Some(outcome) => outcome,
+            None => Err(CoreError::Timeout),
+        }
+    }
+
+    /// Classify one authoritative `GetCommandResult` probe. `None` means the
+    /// original command is still pending; `Some` is the final handle or error.
+    fn command_probe_outcome(
+        &self,
+        request_id: &str,
+        command_id: &str,
+        probe: CoreResult<CommandResult>,
+    ) -> Option<CoreResult<CommandHandle>> {
+        match probe {
+            Ok(result)
+                if matches!(
+                    DomainStatus::from_proto(result.status),
+                    Some(DomainStatus::Received | DomainStatus::HostAccepted)
+                ) =>
+            {
+                None
+            }
+            Ok(result) => Some(self.handle_from_command_result(request_id, command_id, &result)),
+            Err(CoreError::UnknownResult) => None,
+            Err(error)
+                if matches!(
+                    error,
+                    CoreError::ChannelMismatch
+                        | CoreError::FingerprintMismatch { .. }
+                        | CoreError::Security(_)
+                ) || error.device_authorization_lost() =>
+            {
+                Some(Err(error))
+            }
+            // A transient transport failure is not a rejection of the
+            // already-admitted original control; bounded recovery keeps its
+            // identity pending.
+            Err(CoreError::Unavailable(_) | CoreError::Timeout) => None,
+            // Any other authoritative query failure cannot produce a proven
+            // outcome for this probe; report the original identity as unknown.
+            Err(_) => Some(Err(CoreError::UnknownResult)),
+        }
     }
 
     /// Recover a terminal command payload over the current channel after a
@@ -787,6 +1057,292 @@ impl CommandService {
         Ok(())
     }
 
+    /// Upload and finish the exact sealed body when the inline complete request
+    /// would exceed the effective encoded request budget. The reference is
+    /// submitted only after finish succeeds; small bodies stay inline.
+    async fn ensure_representation(&self, request: &mut HostRequest) -> CoreResult<()> {
+        if request.body.is_empty() || request.encoded_len() as u64 <= self.outbound_inline_bytes {
+            return Ok(());
+        }
+        let body = std::mem::take(&mut request.body);
+        let digest = sha256(&body).to_vec();
+        if body.len() as u64 > self.outbound_envelope_bytes {
+            return Err(CoreError::Api {
+                code: Some(ErrorCode::PayloadTooLarge),
+                message: "logical request exceeds transport budget".into(),
+            });
+        }
+        let reference = self.upload_reference(request, &body, &digest).await?;
+        request.payload_digest = digest;
+        request.body_reference = Some(reference);
+        // The reference request itself must fit before it is ever submitted.
+        ensure_forwardable_with(request, self.outbound_envelope_bytes).map_err(|_| CoreError::Api {
+            code: Some(ErrorCode::PayloadTooLarge),
+            message: "reference request exceeds transport budget".into(),
+        })
+    }
+
+    async fn upload_reference(
+        &self,
+        request: &HostRequest,
+        body: &[u8],
+        digest: &[u8],
+    ) -> CoreResult<PayloadReference> {
+        let reserve = RelayObjectReserveRequest {
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+            host_id: request.host_id.clone(),
+            device_id: request.device_id.clone(),
+            session_id: self
+                .access
+                .cloud_session_id()
+                .unwrap_or_default()
+                .to_owned(),
+            channel_id: request.channel_id.clone(),
+            purpose: PayloadPurpose::Request as i32,
+            part_id: String::new(),
+            ciphertext_bytes: body.len() as u64,
+            sha256: digest.to_vec(),
+            expires_at_unix_ms: request.expires_at_unix_ms,
+            signed_at_unix_ms: 0,
+            signature: Vec::new(),
+        };
+        let reservation = self.access.reserve_relay_object(&reserve).await?;
+        if let Err(error) = self.access.upload_relay_object(&reservation, body).await {
+            let _ = self
+                .access
+                .delete_relay_object(&reservation.object_id)
+                .await;
+            return Err(error.into());
+        }
+        let finish = RelayObjectFinishRequest {
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+            ciphertext_bytes: body.len() as u64,
+            sha256: digest.to_vec(),
+            signed_at_unix_ms: 0,
+            signature: Vec::new(),
+        };
+        match self
+            .access
+            .finish_relay_object(&reservation.object_id, &finish)
+            .await
+        {
+            Ok(object) => Ok(PayloadReference {
+                object_id: object.object_id,
+                owner_node_id: object.owner_node_id,
+                ciphertext_bytes: object.ciphertext_bytes,
+                sha256: object.sha256,
+                expires_at_unix_ms: object.expires_at_unix_ms,
+                purpose: object.purpose,
+            }),
+            Err(error) => {
+                let _ = self
+                    .access
+                    .delete_relay_object(&reservation.object_id)
+                    .await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Resolve a stored status copy to its complete verified result body so the
+    /// rest of the command path applies identical AEAD and business checks for
+    /// the inline and referenced representations.
+    async fn resolve_state(&self, state: RequestState) -> CoreResult<RequestState> {
+        let body = crate::access::transport::resolve_request_state_body(&self.access, &state)
+            .await
+            .map_err(CoreError::from)?;
+        let mut resolved = state;
+        resolved.result_body = body.unwrap_or_default();
+        resolved.result_reference = None;
+        Ok(resolved)
+    }
+
+    /// Attach this invocation's scoped MQTT receiver. The receiver subscribes
+    /// to the Device event and notice topics; only notices for this exact
+    /// request are surfaced. Attaching never blocks submission: a broker that
+    /// is not reachable yet is a bounded recovery case, not a duplicate submit.
+    fn attach_notices(&self, host_id: &str, device_id: &str) -> Option<ForegroundNotices> {
+        let transport = self.foreground.as_ref()?;
+        if transport.device_id != device_id {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel(32);
+        let notice_tx = tx.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = stop.clone();
+        let mut client = DeviceMqttClient::with_diagnostics(
+            transport.settings.clone(),
+            host_id,
+            &transport.device_id,
+            transport.token.clone(),
+            Arc::default(),
+        )
+        // Presence belongs to the long-lived watch observation. This
+        // short-lived command receiver must not publish the shared device
+        // last will when it stops while a watch is still attached.
+        .without_last_will();
+        if let Some(session) = &transport.session_id {
+            client = client.with_cloud_session(session.clone());
+        }
+        let task = tokio::spawn(async move {
+            let stop_requested = || task_stop.load(Ordering::SeqCst);
+            let _ = client
+                .run(
+                    stop_requested,
+                    // The event stream belongs to a Watch receiver, not to a
+                    // foreground command; never print or forward it here.
+                    |_| true,
+                    // Foreground commands never consume live previews.
+                    |_| true,
+                    |notice| {
+                        let _ =
+                            notice_tx.try_send(ForegroundSignal::Notice(Box::new(notice.clone())));
+                        true
+                    },
+                    |state| {
+                        // Every successful (re)subscribe binds a fresh
+                        // advertisement; reconcile the original request once.
+                        if state == MqttConnectionEvent::Subscribed {
+                            let _ = tx.try_send(ForegroundSignal::Reconnected);
+                        }
+                    },
+                )
+                .await;
+        });
+        Some(ForegroundNotices {
+            signals: rx,
+            stop,
+            task: Some(task),
+            last_seen: None,
+        })
+    }
+
+    /// Wait for a proven state change. Notices wake the wait; each wake performs
+    /// one authoritative read of the original request identity. On an attach or
+    /// reconnect the original request is reconciled once. No status polling
+    /// loop runs while the receiver stays connected: the one reserved final
+    /// authoritative lookup covers a lost terminal notice.
+    async fn wait_foreground(
+        &self,
+        mut notices: Option<&mut ForegroundNotices>,
+        request: &HostRequest,
+        allow_host_accepted: bool,
+        expires_at_unix_ms: Option<i64>,
+    ) -> CoreResult<RequestState> {
+        let mut budget = self.access.request_timeout();
+        if let Some(expires) = expires_at_unix_ms {
+            let remaining = expires.saturating_sub(now_unix_ms()).max(0) as u64;
+            budget = budget.min(Duration::from_millis(remaining));
+        }
+        let final_reserve = FINAL_LOOKUP_RESERVE.min(budget);
+        let deadline = Instant::now() + budget;
+
+        // Reconcile once on attach, before waiting on notifications. An
+        // identity mismatch is a security failure, never another request.
+        let mut state = self.access.read_request_authoritative(request).await?;
+        self.access.validate_request_state(request, &state)?;
+        if state_is_proven(&state, allow_host_accepted) {
+            return Ok(state);
+        }
+        let mut recovery_attempt = 0u32;
+        let mut receiver_ready = false;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining <= final_reserve {
+                break;
+            }
+            let slice = (remaining - final_reserve).min(Duration::from_secs(2));
+            let mut read_now = false;
+            if receiver_ready {
+                match notices.as_mut() {
+                    Some(watch) => {
+                        match tokio::time::timeout(slice, watch.signals.recv()).await {
+                            Ok(Some(ForegroundSignal::Notice(notice))) => {
+                                read_now = watch.accept(&notice, request);
+                            }
+                            // A reconnect binds a fresh advertisement;
+                            // reconcile the original identity once more.
+                            Ok(Some(ForegroundSignal::Reconnected)) => read_now = true,
+                            Ok(None) => break,
+                            // A connected receiver with no notice performs no
+                            // status fetch; the final lookup covers a lost one.
+                            Err(_) => {}
+                        }
+                    }
+                    None => break,
+                }
+            } else {
+                // Before the first successful subscription there is no
+                // notification path. Bounded recovery uses widening backoff,
+                // never a fixed poll loop.
+                match notices.as_mut() {
+                    Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
+                        Ok(Some(ForegroundSignal::Reconnected)) => {
+                            receiver_ready = true;
+                            read_now = true;
+                        }
+                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                            receiver_ready = true;
+                            read_now = watch.accept(&notice, request);
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            if recovery_attempt < 4 {
+                                let backoff = Duration::from_millis(100 * (1 << recovery_attempt));
+                                tokio::time::sleep(backoff.min(remaining - final_reserve)).await;
+                                recovery_attempt = recovery_attempt.saturating_add(1);
+                                read_now = true;
+                            }
+                        }
+                    },
+                    None => {
+                        if recovery_attempt < 4 {
+                            let backoff = Duration::from_millis(100 * (1 << recovery_attempt));
+                            tokio::time::sleep(backoff.min(remaining - final_reserve)).await;
+                            recovery_attempt = recovery_attempt.saturating_add(1);
+                            read_now = true;
+                        } else {
+                            tokio::time::sleep(slice).await;
+                        }
+                    }
+                }
+            }
+            if !read_now {
+                continue;
+            }
+            match self.access.read_request_authoritative(request).await {
+                Ok(next) => {
+                    self.access.validate_request_state(request, &next)?;
+                    state = next;
+                    if state_is_proven(&state, allow_host_accepted) {
+                        return Ok(state);
+                    }
+                }
+                Err(error) if error.is_retryable_transport() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        // Spend exactly one final authoritative lookup before reporting an
+        // unconfirmed wait, even while MQTT stayed connected.
+        match self.access.read_request_authoritative(request).await {
+            Ok(next) => {
+                self.access.validate_request_state(request, &next)?;
+                if state_is_proven(&next, allow_host_accepted) {
+                    Ok(next)
+                } else {
+                    Err(CoreError::Timeout)
+                }
+            }
+            Err(error) if error.is_retryable_transport() => Err(CoreError::Timeout),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn submit(&self, request: &HostRequest) -> Result<RequestReceipt, SubmitFailure> {
         self.submit_observed(request, None).await
     }
@@ -893,22 +1449,21 @@ fn build_request(
         command_id: command_id.to_owned(),
         payload_digest,
         expires_at_unix_ms,
-        client_transport_version: 2,
-        relay_transport_version: 0,
+        relay_version: crate::access::transport::RELAY_EPOCH_V4,
         trace_id: random_id(16),
         protocol_version: PROTOCOL_VERSION,
         channel_id: channel_id.to_owned(),
         body,
+        body_reference: None,
         transport: None,
     }
 }
 
-// Access adds its relay transport version before forwarding the complete
-// authenticated envelope. Reject the actual encoded size before journaling or I/O.
+// Access adds its own hop metadata before forwarding the complete authenticated
+// envelope. Reject the actual encoded size before journaling or I/O.
 fn ensure_forwardable_with(request: &HostRequest, limit: u64) -> CoreResult<()> {
-    let mut forwarded = request.clone();
-    forwarded.relay_transport_version = 2;
-    if forwarded.encoded_len() as u64 > limit {
+    crate::access::transport::validate_request_representation(request).map_err(CoreError::from)?;
+    if request.encoded_len() as u64 > limit {
         return Err(CoreError::Api {
             code: Some(ErrorCode::PayloadTooLarge),
             message: "logical request exceeds transport budget".into(),
@@ -1125,6 +1680,13 @@ fn error_code_of(state: &RequestState) -> Option<ErrorCode> {
     ErrorCode::try_from(state.error_code).ok()
 }
 
+/// A proven state is a terminal outcome or, for control commands, an explicit
+/// host acceptance. `received`/`unknown` are never proof of execution.
+fn state_is_proven(state: &RequestState, allow_host_accepted: bool) -> bool {
+    let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
+    status.is_terminal() || (allow_host_accepted && status == DomainStatus::HostAccepted)
+}
+
 fn status_error(status: DomainStatus, code: Option<ErrorCode>) -> CoreError {
     if let Some(code) = code {
         return CoreError::Host {
@@ -1210,6 +1772,7 @@ mod tests {
             expires_at_unix_ms: expires_at,
             updated_at_unix_ms: 0,
             channel_id: channel.channel_id().into(),
+            result_reference: None,
         }
     }
 
@@ -1239,7 +1802,7 @@ mod tests {
                 .seal_request(&aad, &payload.encode_to_vec())
                 .unwrap();
             let body = encode_frame(&frame);
-            let mut request = build_request(
+            let request = build_request(
                 "r",
                 "h-1",
                 "d-1",
@@ -1250,8 +1813,6 @@ mod tests {
                 channel.channel_id(),
                 body,
             );
-            // Access sets this field before encoding the forwarded MQTT envelope.
-            request.relay_transport_version = 2;
             request.encoded_len()
         };
         let sample = MESSAGE_BYTES - 4096;
@@ -1390,15 +1951,12 @@ mod tests {
         };
         let target = crate::access::transport::MESSAGE_BYTES;
         let sample = target - 4096;
-        let mut probe = request_for(sample);
-        probe.relay_transport_version = 2;
+        let probe = request_for(sample);
         let at = target - (probe.encoded_len() - sample);
         for delta in [-1isize, 0, 1] {
             let request = request_for(at.checked_add_signed(delta).unwrap());
-            let mut forwarded = request.clone();
-            forwarded.relay_transport_version = 2;
             assert_eq!(
-                forwarded.encoded_len(),
+                request.encoded_len(),
                 target.checked_add_signed(delta).unwrap()
             );
             assert_eq!(ensure_forwardable(&request).is_ok(), delta <= 0);
@@ -1599,6 +2157,9 @@ mod tests {
         let channel = channel();
         let remote = channel.clone();
         let server = MockServer::start(Arc::new(move |mock| {
+            if mock.method == "POST" && mock.path.ends_with("/heartbeat") {
+                return MockResponse::empty(204);
+            }
             if mock.method == "POST" {
                 let request: HostRequest = serde_json::from_slice(&mock.body).unwrap();
                 let receipt = RequestReceipt {
@@ -2626,6 +3187,9 @@ mod host_tests {
         use crate::api::test_support::{MockResponse, MockServer};
 
         let server = MockServer::start(Arc::new(|request| {
+            if request.method == "POST" && request.path.ends_with("/heartbeat") {
+                return MockResponse::empty(204);
+            }
             let query: HostRequest = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(query.kind, RequestKind::Query as i32);
             MockResponse::json(
@@ -2699,7 +3263,8 @@ mod directional_budget_tests {
         );
         let encoded = request.encoded_len() as u64;
         assert!(ensure_forwardable_with(&request, encoded + 16).is_ok());
-        let error = ensure_forwardable_with(&request, encoded).unwrap_err();
+        assert!(ensure_forwardable_with(&request, encoded).is_ok());
+        let error = ensure_forwardable_with(&request, encoded - 1).unwrap_err();
         assert_eq!(error.code(), "payload_too_large");
         assert!(matches!(
             error,
@@ -2751,5 +3316,466 @@ mod directional_budget_tests {
         assert!(check_result_bound(&state, 3).is_ok());
         let error = check_result_bound(&state, 2).unwrap_err();
         assert_eq!(error.code(), "payload_too_large");
+    }
+}
+
+#[cfg(test)]
+mod relay_command_tests {
+    use super::*;
+    use crate::api::test_support::{MockResponse, MockServer};
+    use std::sync::{Arc, Mutex};
+    use whalerein_proto::{
+        RelayObject, RelayObjectReservation, RequestKind, RequestReceipt, RequestState,
+    };
+
+    fn service(server: &MockServer, cache: Arc<Cache>) -> CommandService {
+        CommandService::new(
+            Arc::new(AccessClient::new(server.url(), Some("device-token".into())).unwrap()),
+            cache,
+        )
+    }
+
+    fn request(body: Vec<u8>, kind: RequestKind) -> HostRequest {
+        let digest = (!body.is_empty()).then(|| sha256(&body).to_vec());
+        build_request(
+            "r-1",
+            "h-1",
+            "d-1",
+            kind,
+            if kind == RequestKind::Command {
+                "c-1"
+            } else {
+                ""
+            },
+            digest.unwrap_or_default(),
+            now_unix_ms() + 30_000,
+            "chan",
+            body,
+        )
+    }
+
+    async fn start_relay_server(
+        order: Arc<Mutex<Vec<String>>>,
+        state: Arc<Mutex<Option<HostRequest>>>,
+    ) -> MockServer {
+        let object_id = "f".repeat(32);
+        MockServer::start(Arc::new(move |mock| {
+            order
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", mock.method, mock.path));
+            match (mock.method.as_str(), mock.path.as_str()) {
+                ("POST", "/v1/relay/objects") => MockResponse::json(
+                    200,
+                    &RelayObjectReservation {
+                        object_id: object_id.clone(),
+                        owner_node_id: "node-1".into(),
+                        upload_path: format!("/v1/relay/objects/{object_id}"),
+                        max_bytes: 1024 * 1024,
+                        expires_at_unix_ms: 9,
+                        upload_timeout_ms: 5_000,
+                    },
+                ),
+                ("PUT", _) => MockResponse::empty(204),
+                ("POST", path) if path.ends_with("/finish") => {
+                    let finish: RelayObjectFinishRequest =
+                        serde_json::from_slice(&mock.body).unwrap();
+                    MockResponse::json(
+                        200,
+                        &RelayObject {
+                            object_id: object_id.clone(),
+                            owner_node_id: "node-1".into(),
+                            purpose: PayloadPurpose::Request as i32,
+                            ciphertext_bytes: finish.ciphertext_bytes,
+                            sha256: finish.sha256,
+                            expires_at_unix_ms: 9,
+                        },
+                    )
+                }
+                ("POST", "/v1/hosts/h-1/requests") => {
+                    let submitted: HostRequest = serde_json::from_slice(&mock.body).unwrap();
+                    *state.lock().unwrap() = Some(submitted.clone());
+                    MockResponse::json(
+                        200,
+                        &RequestReceipt {
+                            request_id: submitted.request_id,
+                            status: whalerein_proto::OnlineStatus::HostOffline as i32,
+                            command_id: submitted.command_id,
+                            expires_at_unix_ms: submitted.expires_at_unix_ms,
+                        },
+                    )
+                }
+                ("POST", path) if path.ends_with("/heartbeat") => MockResponse::empty(204),
+                ("GET", path) if path.starts_with("/v1/requests/") => {
+                    let saved = state.lock().unwrap().clone().expect("submitted first");
+                    MockResponse::json(
+                        200,
+                        &RequestState {
+                            request_id: saved.request_id,
+                            host_id: saved.host_id,
+                            device_id: saved.device_id,
+                            status: whalerein_proto::OnlineStatus::HostOffline as i32,
+                            command_id: saved.command_id,
+                            ..Default::default()
+                        },
+                    )
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await
+    }
+
+    #[tokio::test]
+    async fn inline_body_below_and_at_the_budget_stays_inline_and_above_becomes_a_reference() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let submitted = Arc::new(Mutex::new(None));
+        let server = start_relay_server(order.clone(), submitted).await;
+        let cache = Arc::new(Cache::open_in_memory([1; 32]).unwrap());
+        let service = service(&server, cache);
+        let budget = service.transport;
+        let limit = service.outbound_inline_bytes;
+
+        let encoded_at =
+            |len: usize| request(vec![0; len], RequestKind::Command).encoded_len() as u64;
+        // The length prefix is not linear across a varint boundary, so find the
+        // exact inclusive boundary with a small bounded adjustment.
+        let mut at = limit
+            .checked_sub(encoded_at(64) - 64)
+            .expect("inline budget covers framing") as usize;
+        while encoded_at(at) > limit {
+            at -= 1;
+        }
+        while encoded_at(at + 1) <= limit {
+            at += 1;
+        }
+        assert_eq!(encoded_at(at), limit);
+        assert_eq!(encoded_at(at + 1), limit + 1);
+
+        for (len, referenced) in [(at - 1, false), (at, false), (at + 1, true)] {
+            order.lock().unwrap().clear();
+            let mut request = request(vec![7; len], RequestKind::Command);
+            service.ensure_representation(&mut request).await.unwrap();
+            if referenced {
+                let reference = request.body_reference.as_ref().expect("reference");
+                assert!(request.body.is_empty());
+                assert_eq!(reference.ciphertext_bytes, len as u64);
+                assert_eq!(request.payload_digest, reference.sha256);
+                assert_eq!(reference.purpose, PayloadPurpose::Request as i32);
+                assert_eq!(reference.object_id.len(), 32);
+                assert_eq!(
+                    order.lock().unwrap().as_slice(),
+                    [
+                        "POST /v1/relay/objects".to_owned(),
+                        format!("PUT /v1/relay/objects/{}", "f".repeat(32)),
+                        format!("POST /v1/relay/objects/{}/finish", "f".repeat(32)),
+                    ]
+                );
+            } else {
+                assert!(!request.body.is_empty());
+                assert!(request.body_reference.is_none());
+                assert!(order.lock().unwrap().is_empty());
+            }
+            assert_eq!(budget.packet_bytes, 64 * 1024);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reference_is_finished_before_the_request_is_submitted() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let submitted = Arc::new(Mutex::new(None));
+        let server = start_relay_server(order.clone(), submitted.clone()).await;
+        let cache = Arc::new(Cache::open_in_memory([2; 32]).unwrap());
+        let service = service(&server, cache).with_transport_budget(TransportBudget {
+            packet_bytes: 4096,
+            packet_overhead_bytes: 512,
+            envelope_bytes: 16 * 1024 * 1024,
+            ..TransportBudget::default()
+        });
+        let channel = SecureChannel::from_handshake(&[3u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let result = service
+            .control(
+                "h-1",
+                "d-1",
+                &channel,
+                RequestPayload {
+                    payload: Some(whalerein_proto::request_payload::Payload::SendMessage(
+                        whalerein_proto::SendMessage {
+                            session_id: "s".into(),
+                            text: "x".repeat(8 * 1024),
+                            delivery_mode: whalerein_proto::DeliveryMode::StartIfIdle as i32,
+                        },
+                    )),
+                },
+            )
+            .await;
+        // The terminal copy is bodyless, so the command path reports that the
+        // original identity needs recovery; the ordering facts below are what
+        // this case verifies.
+        assert!(result.is_err(), "{result:?}");
+        let recorded = order.lock().unwrap().clone();
+        let submit_at = recorded
+            .iter()
+            .position(|call| call.contains("/requests"))
+            .expect("submitted");
+        let finish_at = recorded
+            .iter()
+            .position(|call| call.ends_with("/finish"))
+            .expect("finished");
+        assert!(
+            finish_at < submit_at,
+            "a reference is never submitted before finish: {recorded:?}"
+        );
+        assert!(recorded.iter().any(|call| call.starts_with("PUT ")));
+        let submitted = submitted.lock().unwrap().clone().expect("request body");
+        assert!(submitted.body.is_empty());
+        let reference = submitted.body_reference.expect("body reference");
+        assert_eq!(submitted.payload_digest, reference.sha256);
+    }
+
+    #[tokio::test]
+    async fn a_small_body_is_submitted_inline_without_touching_the_directory() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let submitted = Arc::new(Mutex::new(None));
+        let server = start_relay_server(order.clone(), submitted.clone()).await;
+        let cache = Arc::new(Cache::open_in_memory([4; 32]).unwrap());
+        let service = service(&server, cache);
+        let channel = SecureChannel::from_handshake(&[5u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let result = service
+            .control(
+                "h-1",
+                "d-1",
+                &channel,
+                RequestPayload {
+                    payload: Some(whalerein_proto::request_payload::Payload::SendMessage(
+                        whalerein_proto::SendMessage {
+                            session_id: "s".into(),
+                            text: "small".into(),
+                            delivery_mode: whalerein_proto::DeliveryMode::StartIfIdle as i32,
+                        },
+                    )),
+                },
+            )
+            .await;
+        // The terminal copy is bodyless, so the command path reports that the
+        // original identity needs recovery; the ordering facts below are what
+        // this case verifies.
+        assert!(result.is_err(), "{result:?}");
+        assert!(!order
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("/relay/")));
+        let submitted = submitted.lock().unwrap().clone().expect("request body");
+        assert!(!submitted.body.is_empty());
+        assert!(submitted.body_reference.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_reserves_exactly_one_final_authoritative_lookup_on_timeout() {
+        let reads = Arc::new(Mutex::new(0u32));
+        let served = reads.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            if mock.method == "GET" {
+                *served.lock().unwrap() += 1;
+                return MockResponse::json(
+                    200,
+                    &RequestState {
+                        request_id: "r-1".into(),
+                        host_id: "h-1".into(),
+                        device_id: "d-1".into(),
+                        status: whalerein_proto::OnlineStatus::Received as i32,
+                        ..Default::default()
+                    },
+                );
+            }
+            MockResponse::empty(204)
+        }))
+        .await;
+        let mut access = AccessClient::new(server.url(), None).unwrap();
+        access.set_poll_timing(Duration::from_millis(150), Duration::from_millis(1));
+        let cache = Arc::new(Cache::open_in_memory([6; 32]).unwrap());
+        let service = CommandService::new(Arc::new(access), cache);
+        let request = request(vec![1], RequestKind::Query);
+        let error = service
+            .wait_foreground(None, &request, false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Timeout));
+        assert_eq!(
+            *reads.lock().unwrap(),
+            2,
+            "one reconcile read plus exactly one reserved final lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_reconciles_the_original_request_identity() {
+        let reads = Arc::new(Mutex::new(0u32));
+        let served = reads.clone();
+        let channel_id = Arc::new(Mutex::new(String::new()));
+        let observed_channel = channel_id.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            if mock.method != "GET" {
+                return MockResponse::empty(204);
+            }
+            let mut count = served.lock().unwrap();
+            *count += 1;
+            let status = if *count == 1 {
+                whalerein_proto::OnlineStatus::Received
+            } else {
+                whalerein_proto::OnlineStatus::Succeeded
+            };
+            MockResponse::json(
+                200,
+                &RequestState {
+                    request_id: "r-1".into(),
+                    host_id: "h-1".into(),
+                    device_id: "d-1".into(),
+                    status: status as i32,
+                    channel_id: observed_channel.lock().unwrap().clone(),
+                    ..Default::default()
+                },
+            )
+        }))
+        .await;
+        let mut access = AccessClient::new(server.url(), None).unwrap();
+        access.set_poll_timing(Duration::from_secs(5), Duration::from_millis(1));
+        let cache = Arc::new(Cache::open_in_memory([7; 32]).unwrap());
+        let service = CommandService::new(Arc::new(access), cache);
+        let request = request(vec![1], RequestKind::Query);
+        *channel_id.lock().unwrap() = "chan".into();
+
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(ForegroundSignal::Reconnected).await.unwrap();
+        let mut notices = ForegroundNotices {
+            signals: rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            task: None,
+            last_seen: None,
+        };
+        let state = service
+            .wait_foreground(Some(&mut notices), &request, false, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.status,
+            whalerein_proto::OnlineStatus::Succeeded as i32
+        );
+        assert_eq!(*reads.lock().unwrap(), 2);
+    }
+
+    fn notice(request_id: &str, updated: i64) -> RequestStateNotice {
+        RequestStateNotice {
+            request_id: request_id.into(),
+            host_id: "h-1".into(),
+            device_id: "d-1".into(),
+            status: whalerein_proto::OnlineStatus::Succeeded as i32,
+            command_id: "c-1".into(),
+            updated_at_unix_ms: updated,
+            result_reference: None,
+            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+        }
+    }
+
+    #[tokio::test]
+    async fn notice_routing_ignores_foreign_stale_and_duplicate_notices() {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut notices = ForegroundNotices {
+            signals: rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            task: None,
+            last_seen: None,
+        };
+        let request = request(vec![1], RequestKind::Command);
+        assert!(!notices.accept(&notice("foreign", 2), &request));
+        assert!(notices.accept(&notice("r-1", 2), &request));
+        assert!(!notices.accept(&notice("r-1", 2), &request), "duplicate");
+        assert!(!notices.accept(&notice("r-1", 1), &request), "stale");
+        assert!(notices.accept(&notice("r-1", 3), &request), "newer");
+    }
+
+    #[tokio::test]
+    async fn an_exact_heartbeat_stops_on_a_terminal_response() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = calls.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            observed
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", mock.method, mock.path));
+            MockResponse::json(
+                404,
+                &whalerein_proto::ErrorResponse {
+                    code: ErrorCode::NotFound as i32,
+                    message: "request not found".into(),
+                    ..Default::default()
+                },
+            )
+        }))
+        .await;
+        let access = Arc::new(AccessClient::new(server.url(), None).unwrap());
+        let heartbeat = CommandHeartbeat::start(access, "r-1".into());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["POST /v1/requests/r-1/heartbeat".to_owned()],
+            "only the exact request is renewed and a terminal response stops it"
+        );
+        assert_eq!(heartbeat.outcome(), Some(HeartbeatOutcome::Closed));
+        drop(heartbeat);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "no detached heartbeat survives termination"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_guard_stops_renewal_without_a_detached_heartbeat() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = calls.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            observed
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", mock.method, mock.path));
+            MockResponse::empty(204)
+        }))
+        .await;
+        let access = Arc::new(AccessClient::new(server.url(), None).unwrap());
+        let heartbeat = CommandHeartbeat::start(access, "r-1".into());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(heartbeat);
+        let settled = calls.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert_eq!(calls.lock().unwrap().len(), settled);
+    }
+
+    #[tokio::test]
+    async fn the_foreground_receiver_attaches_before_submission() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let settings = MqttSettings::parse(&format!("mqtt://{address}")).unwrap();
+        let cache = Arc::new(Cache::open_in_memory([8; 32]).unwrap());
+        let fake = crate::api::test_support::FakeAccess::start().await;
+        let service = CommandService::new(
+            Arc::new(AccessClient::new(fake.url(), None).unwrap()),
+            cache,
+        )
+        .with_foreground_transport(settings, "d-1", "token", None);
+        // A receiver for another Device is never attached to this invocation.
+        assert!(service.attach_notices("h-1", "other-device").is_none());
+        let notices = service
+            .attach_notices("h-1", "d-1")
+            .expect("scoped receiver attached");
+        assert!(notices.task.is_some());
+        let accepted = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("the receiver connects before any submission")
+            .is_ok();
+        assert!(accepted);
+        drop(notices);
     }
 }

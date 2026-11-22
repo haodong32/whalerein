@@ -9,6 +9,8 @@ package broker
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,8 +34,12 @@ var ErrTimeout = errors.New("broker result timeout")
 // ResultHandler consumes a permanent HostResult (a request status copy).
 type ResultHandler func(ctx context.Context, hostID string, result *whalereinv1.HostResult) error
 
-// EventHandler consumes an EventEnvelope payload published by a host.
+// EventHandler consumes a control EventEnvelope payload published by a host.
 type EventHandler func(ctx context.Context, hostID string, payload []byte) error
+
+// LiveHandler consumes a lossy EventEnvelope preview published by a host. It
+// must not persist, retry or enqueue work; a drop is a normal outcome.
+type LiveHandler func(ctx context.Context, hostID string, payload []byte) error
 
 // ReadyHandler runs host readiness work (revocation replay).
 type ReadyHandler func(ctx context.Context, hostID string) error
@@ -53,6 +59,7 @@ type Dependencies struct {
 	Connector   Connector
 	DeviceHosts DeviceHosts
 	Receivers   *ReceiverBudgets
+	Stager      PayloadStager
 	Metrics     *diagnostics.Metrics
 	Masker      *diagnostics.Masker
 	Logger      *slog.Logger
@@ -72,11 +79,19 @@ type Service struct {
 	masker      *diagnostics.Masker
 	logger      *slog.Logger
 
+	advertisedMu sync.Mutex
+	advertised   map[string]string
+
 	handlersMu    sync.RWMutex
 	resultHandler ResultHandler
 	eventHandler  EventHandler
+	liveHandler   LiveHandler
 	readyHandler  ReadyHandler
 	keyHandler    HostKeyHandler
+
+	// liveSlots bounds concurrent QoS 0 live handoffs. A full slot set drops
+	// the preview instead of blocking the broker read loop or control delivery.
+	liveSlots chan struct{}
 
 	sessionMu sync.RWMutex
 	session   Session
@@ -127,10 +142,17 @@ func New(deps Dependencies) (*Service, error) {
 		masker:      deps.Masker,
 		logger:      deps.Logger,
 		transient:   make(map[string]chan *whalereinv1.HostResult),
+		advertised:  map[string]string{},
+		liveSlots:   make(chan struct{}, max(1, deps.Transport.MaxInFlight())),
 		now:         func() time.Time { return time.Now().UTC() },
 	}
 	if registrar, ok := deps.Connector.(interface{ SetReceiverBudgets(*ReceiverBudgets) }); ok {
 		registrar.SetReceiverBudgets(receivers)
+	}
+	if deps.Stager != nil {
+		if registrar, ok := deps.Connector.(interface{ SetPayloadStager(PayloadStager) }); ok {
+			registrar.SetPayloadStager(deps.Stager)
+		}
 	}
 	control, err := NewControl(service.publishControl)
 	if err != nil {
@@ -149,11 +171,18 @@ func (s *Service) SetResultHandler(handler ResultHandler) {
 	s.resultHandler = handler
 }
 
-// SetEventHandler installs the event consumer.
+// SetEventHandler installs the control event consumer.
 func (s *Service) SetEventHandler(handler EventHandler) {
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
 	s.eventHandler = handler
+}
+
+// SetLiveEventHandler installs the lossy live preview consumer.
+func (s *Service) SetLiveEventHandler(handler LiveHandler) {
+	s.handlersMu.Lock()
+	defer s.handlersMu.Unlock()
+	s.liveHandler = handler
 }
 
 // SetReadyHandler installs the host readiness consumer.
@@ -168,6 +197,14 @@ func (s *Service) SetHostKeyHandler(handler HostKeyHandler) {
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
 	s.keyHandler = handler
+}
+
+// SetPayloadStager installs the temporary ciphertext staging seam. It is
+// optional: without it an oversized hop fails explicitly before publish.
+func (s *Service) SetPayloadStager(stager PayloadStager) {
+	if registrar, ok := s.connector.(interface{ SetPayloadStager(PayloadStager) }); ok {
+		registrar.SetPayloadStager(stager)
+	}
 }
 
 // Presence returns the broker-derived presence source.
@@ -188,11 +225,11 @@ func (s *Service) handleNotification(notification *Notification) {
 	switch notification.Kind {
 	case "host":
 		if notification.HostID != "" {
-			s.receivers.NoteConnection(receiverRoute{kind: "host", hostID: notification.HostID}, notification.ConnID, online)
+			s.receivers.NoteConnection(receiverRoute{kind: "host", hostID: notification.HostID}, notification.ConnID, notification.ClientID, online)
 		}
 	case "device":
 		if notification.DeviceID != "" {
-			s.receivers.NoteConnection(receiverRoute{kind: "device", deviceID: notification.DeviceID}, notification.ConnID, online)
+			s.receivers.NoteConnection(receiverRoute{kind: "device", deviceID: notification.DeviceID}, notification.ConnID, notification.ClientID, online)
 		}
 	}
 }
@@ -266,9 +303,13 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
-			ResultFilter, EventFilter, DeviceAckFilter, DeviceWillFilter,
+			ResultFilter, EventFilter, DeviceReadyFilter, DeviceWillFilter,
 			ControlReplyFilter, ControlEventFilter,
 		}, 1)
+		if err == nil {
+			// Live previews are a separate QoS 0 class; control stays QoS 1.
+			err = session.Subscribe(subscribeCtx, []string{LiveFilter}, 0)
+		}
 		cancel()
 		if err != nil {
 			_ = session.Close()
@@ -370,6 +411,13 @@ func (s *Service) HandleMessage(topic string, payload []byte) {
 		s.handleResult(parsed.HostID, payload)
 	case KindEvent:
 		s.handleEvent(parsed.HostID, payload)
+	case KindLive:
+		s.handleLive(parsed.HostID, payload)
+	case KindDeviceLive:
+		// Access publishes device live; an echoed copy is not control input.
+		return
+	case KindDeviceReady:
+		s.handleDeviceReady(parsed.HostID, parsed.DeviceID, payload)
 	case KindPresence:
 		// Access publishes host-scoped presence; Hosts consume it. If a
 		// broker/ACL change ever echoes it back, it must not enter result or
@@ -385,6 +433,9 @@ func (s *Service) handleResult(topicHost string, payload []byte) {
 	if err := proto.Unmarshal(payload, &result); err != nil {
 		s.metrics.RouteError()
 		s.logger.Warn("mqtt result decode failed", "error", err.Error())
+		return
+	}
+	if !s.requireRelayEpoch("result", result.GetHostId(), result.GetRelayVersion()) {
 		return
 	}
 	if result.GetHostId() == "" {
@@ -445,27 +496,57 @@ func (s *Service) rememberHostKey(hostID string, publicKey []byte) {
 // connection and never compares it with a device-leg generation. Missing,
 // invalid, replayed or stale-generation metadata fails explicitly and leaves no
 // stale entry behind.
-func (s *Service) registerHostAdvertisement(hostID string, advertisement *whalereinv1.ReceiveAdvertisement) {
+func (s *Service) registerHostAdvertisement(hostID string, advertisement *whalereinv1.ReceiveAdvertisement) bool {
 	route := receiverRoute{kind: "host", hostID: hostID}
 	connID, _, ready, known := s.presence.HostConnection(hostID)
 	if known && !ready {
-		return
+		return false
 	}
 	if advertisement == nil {
 		s.receivers.Clear(route)
 		s.metrics.TransportRejected(transportCodeBudget, 0, 0)
 		s.logger.Warn("host receive advertisement missing", "host", s.masker.Host(hostID), "code", transportCodeBudget)
-		return
+		return false
 	}
 	budget, generation, err := validateAdvertisement(advertisement)
 	if err != nil {
 		s.receivers.Clear(route)
 		s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
 		s.logger.Warn("host receive advertisement rejected", "host", s.masker.Host(hostID), "code", transportCodeOf(err))
-		return
+		return false
 	}
 	if !s.receivers.Register(route, connID, generation, budget) {
 		s.logger.Warn("stale host receive advertisement ignored", "host", s.masker.Host(hostID), "code", transportCodeBudgetBad)
+		return false
+	}
+	return true
+}
+
+// handleDeviceReady registers one authenticated Device receive advertisement.
+// The advertisement generation must be one of the broker's current connection
+// generations for that Device; a sibling reconnect does not clear another
+// receiver's limits, and an old generation never refreshes a newer one.
+func (s *Service) handleDeviceReady(hostID, deviceID string, payload []byte) {
+	var advertisement whalereinv1.ReceiveAdvertisement
+	if err := proto.Unmarshal(payload, &advertisement); err != nil {
+		s.metrics.RouteError()
+		s.logger.Warn("device receive advertisement decode failed", "device", s.masker.Device(deviceID))
+		return
+	}
+	budget, generation, err := validateAdvertisement(&advertisement)
+	if err != nil {
+		s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
+		s.logger.Warn("device receive advertisement rejected", "device", s.masker.Device(deviceID), "code", transportCodeOf(err))
+		return
+	}
+	route := receiverRoute{kind: "device", deviceID: deviceID}
+	// The broker subscriber cannot observe which sibling connection published
+	// this topic, so the advertised generation is the per-receiver key. An
+	// offline broker notification for the last known connection clears the
+	// whole route; a sibling's advertisement persists across another sibling's
+	// reconnect.
+	if !s.receivers.Register(route, 0, generation, budget) {
+		s.logger.Warn("replayed device receive advertisement ignored", "device", s.masker.Device(deviceID), "code", transportCodeBudgetBad)
 	}
 }
 
@@ -478,6 +559,17 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	if err := proto.Unmarshal(result.GetResultBody(), &ready); err != nil {
 		s.metrics.RouteError()
 		s.logger.Warn("host ready decode failed", "error", err.Error())
+		return
+	}
+	// The readiness gate requires the relay epoch and a valid advertisement.
+	// A foreign epoch is rejected before any presence or capability effect.
+	if !s.requireRelayEpoch("ready", result.GetHostId(), ready.GetRelayVersion()) {
+		return
+	}
+	if _, _, err := validateAdvertisement(ready.GetReceive()); err != nil {
+		s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
+		s.logger.Warn("host ready has no valid receive advertisement",
+			"host", s.masker.Host(result.GetHostId()), "code", transportCodeOf(err))
 		return
 	}
 	hostID := ready.GetHostId()
@@ -501,6 +593,8 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	s.rememberHostKey(hostID, ready.GetAuthorizationPublicKey())
 	if accepted {
 		s.registerHostAdvertisement(hostID, ready.GetReceive())
+		connID, _, _, _ := s.presence.HostConnection(hostID)
+		s.publishAccessReady(hostID, accessReceiveAdvertisement(s.transport, connID))
 	}
 
 	s.handlersMu.RLock()
@@ -519,7 +613,60 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	}()
 }
 
+// publishAccessReady answers one accepted HostReady with a single
+// REQUEST_KIND_ACCESS_READY control request whose inline body is Access's own
+// receive advertisement. It refreshes only when the effective budget or the
+// broker connection generation changes and is never routed as business.
+func (s *Service) publishAccessReady(hostID string, advertisement *whalereinv1.ReceiveAdvertisement) {
+	if hostID == "" || advertisement == nil {
+		return
+	}
+	fingerprint := fmt.Sprintf("%d\x00%d\x00%d\x00%d\x00%d\x00%d",
+		advertisement.GetConnectionGeneration(), advertisement.GetRelayVersion(),
+		advertisement.GetBudget().GetPacketBytes(), advertisement.GetBudget().GetEnvelopeBytes(),
+		advertisement.GetBudget().GetBulkConcurrency(), advertisement.GetBudget().GetReservedBytes())
+	s.advertisedMu.Lock()
+	previous, seen := s.advertised[hostID]
+	s.advertised[hostID] = fingerprint
+	s.advertisedMu.Unlock()
+	if seen && previous == fingerprint {
+		return
+	}
+	body, err := proto.Marshal(advertisement)
+	if err != nil {
+		s.metrics.RouteError()
+		return
+	}
+	request := &whalereinv1.HostRequest{
+		RequestId:       newControlID(),
+		HostId:          hostID,
+		Kind:            whalereinv1.RequestKind_REQUEST_KIND_ACCESS_READY,
+		Body:            body,
+		ProtocolVersion: 1,
+		RelayVersion:    RelayEpoch,
+		ExpiresAtUnixMs: s.now().Add(5 * time.Minute).UnixMilli(),
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(s.baseContext(), 10*time.Second)
+		defer cancel()
+		if err := s.PublishRequest(ctx, hostID, request); err != nil {
+			s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
+			s.logger.Warn("access receive advertisement publish failed",
+				"host", s.masker.Host(hostID), "code", transportCodeOf(err))
+		}
+	}()
+}
+
 func (s *Service) handleEvent(topicHost string, payload []byte) {
+	var event whalereinv1.EventEnvelope
+	if err := proto.Unmarshal(payload, &event); err != nil {
+		s.metrics.RouteError()
+		s.logger.Warn("mqtt event decode failed", "error", err.Error())
+		return
+	}
+	if !s.requireRelayEpoch("event", topicHost, event.GetRelayVersion()) {
+		return
+	}
 	s.handlersMu.RLock()
 	handler := s.eventHandler
 	s.handlersMu.RUnlock()
@@ -533,6 +680,65 @@ func (s *Service) handleEvent(topicHost string, payload []byte) {
 		s.metrics.RouteError()
 		s.logger.Warn("event route failed", "error", err.Error())
 	}
+}
+
+// handleLive validates one Host live preview and hands it to the lossy live
+// consumer without blocking the broker read loop. A full bounded slot set drops
+// the preview; control delivery never waits behind it.
+func (s *Service) handleLive(topicHost string, payload []byte) {
+	var event whalereinv1.EventEnvelope
+	if err := proto.Unmarshal(payload, &event); err != nil {
+		s.metrics.RouteError()
+		s.logger.Warn("mqtt live decode failed", "error", err.Error())
+		return
+	}
+	if !s.requireRelayEpoch("live", topicHost, event.GetRelayVersion()) {
+		return
+	}
+	if event.GetHostId() != "" && event.GetHostId() != topicHost {
+		s.metrics.RouteError()
+		s.logger.Warn("mqtt live host mismatch")
+		return
+	}
+	if event.GetDeviceId() == "" {
+		s.metrics.RouteError()
+		s.logger.Warn("mqtt live device missing")
+		return
+	}
+	s.handlersMu.RLock()
+	handler := s.liveHandler
+	s.handlersMu.RUnlock()
+	if handler == nil {
+		s.metrics.RouteError()
+		return
+	}
+	select {
+	case s.liveSlots <- struct{}{}:
+	default:
+		s.metrics.LiveDropped("backpressure")
+		return
+	}
+	go func() {
+		defer func() { <-s.liveSlots }()
+		ctx, cancel := context.WithTimeout(s.baseContext(), 15*time.Second)
+		defer cancel()
+		if err := handler(ctx, topicHost, payload); err != nil {
+			s.metrics.RouteError()
+			s.logger.Warn("live route failed", "error", err.Error())
+		}
+	}()
+}
+
+// requireRelayEpoch rejects every foreign or missing relay epoch before
+// business handling. It only logs bounded metadata.
+func (s *Service) requireRelayEpoch(kind, hostID string, version uint32) bool {
+	if err := validateRelayEpoch(version); err != nil {
+		s.metrics.RouteError()
+		s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
+		s.logger.Warn("relay epoch incompatible", "kind", kind, "host", s.masker.Host(hostID), "code", transportCodeOf(err))
+		return false
+	}
+	return true
 }
 
 func (s *Service) deliverTransient(result *whalereinv1.HostResult) bool {
@@ -605,7 +811,7 @@ func (s *Service) PublishRequest(ctx context.Context, hostID string, request *wh
 		return errors.New("broker: request host mismatch")
 	}
 	request = proto.Clone(request).(*whalereinv1.HostRequest)
-	request.RelayTransportVersion = transportVersion
+	request.RelayVersion = RelayEpoch
 	payload, err := proto.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("marshal host request: %w", err)
@@ -636,10 +842,21 @@ func (s *Service) SupportsPairing(hostID string) bool {
 }
 
 // PublishDeviceEvent republishes an already validated EventEnvelope to exactly
-// one device topic, using only the outer device id for routing.
+// one device topic, using only the outer device id for routing. The complete
+// message keeps one identity and is never split or retried at packet level.
 func (s *Service) PublishDeviceEvent(ctx context.Context, hostID, deviceID string, payload []byte) error {
 	if !validID(hostID) || !validID(deviceID) {
 		return ErrInvalidTopic
+	}
+	var event whalereinv1.EventEnvelope
+	if err := proto.Unmarshal(payload, &event); err != nil {
+		return transportReject(transportCodeHeader, ErrPeerTransportUnsupported)
+	}
+	if err := validateRelayEpoch(event.GetRelayVersion()); err != nil {
+		return err
+	}
+	if event.GetDeviceId() != "" && event.GetDeviceId() != deviceID {
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
 	}
 	session, ok := s.currentSession()
 	if !ok || session == nil {
@@ -649,6 +866,85 @@ func (s *Service) PublishDeviceEvent(ctx context.Context, hostID, deviceID strin
 	defer cancel()
 	if err := session.Publish(publishCtx, DeviceEventTopic(hostID, deviceID), payload, 1); err != nil {
 		return fmt.Errorf("publish device event: %w", err)
+	}
+	return nil
+}
+
+// PublishDeviceLive republishes the exact opaque live preview to one Device
+// live topic at QoS 0 using only the authenticated outer device id. It adds no
+// durable row, outbox entry, receipt or retry: a disconnected session or a
+// failed handoff drops the preview and counts one bounded reason.
+func (s *Service) PublishDeviceLive(ctx context.Context, hostID, deviceID string, payload []byte) error {
+	if !validID(hostID) || !validID(deviceID) {
+		return ErrInvalidTopic
+	}
+	var event whalereinv1.EventEnvelope
+	if err := proto.Unmarshal(payload, &event); err != nil {
+		return transportReject(transportCodeHeader, ErrPeerTransportUnsupported)
+	}
+	if err := validateRelayEpoch(event.GetRelayVersion()); err != nil {
+		return err
+	}
+	if event.GetHostId() != "" && event.GetHostId() != hostID {
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
+	}
+	if event.GetDeviceId() != "" && event.GetDeviceId() != deviceID {
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
+	}
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		s.metrics.LiveDropped("disconnected")
+		return nil
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer cancel()
+	if err := session.Publish(publishCtx, DeviceLiveTopic(hostID, deviceID), payload, 0); err != nil {
+		s.metrics.LiveDropped("publish")
+		s.logger.Debug("live preview dropped",
+			"host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "error", err.Error())
+		return nil
+	}
+	return nil
+}
+
+// PublishDeviceNotice publishes one packet-sized RequestStateNotice on the
+// Device notice topic. It carries status, command identity and an optional
+// opaque result reference only; it never carries content or preview text.
+func (s *Service) PublishDeviceNotice(ctx context.Context, hostID, deviceID string, notice *whalereinv1.RequestStateNotice) error {
+	if !validID(hostID) || !validID(deviceID) {
+		return ErrInvalidTopic
+	}
+	if notice == nil || notice.GetRequestId() == "" {
+		return errors.New("broker: notice is required")
+	}
+	if notice.GetHostId() != "" && notice.GetHostId() != hostID {
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
+	}
+	if notice.GetDeviceId() != "" && notice.GetDeviceId() != deviceID {
+		return transportReject(transportCodeTopic, ErrInvalidTopic)
+	}
+	if err := validateRelayEpoch(notice.GetRelayVersion()); err != nil {
+		return err
+	}
+	clone := proto.Clone(notice).(*whalereinv1.RequestStateNotice)
+	clone.HostId = hostID
+	clone.DeviceId = deviceID
+	clone.RelayVersion = RelayEpoch
+	payload, err := proto.Marshal(clone)
+	if err != nil {
+		return fmt.Errorf("marshal device notice: %w", err)
+	}
+	if uint64(len(payload)) > s.transport.EnvelopeBytes {
+		return transportReject(transportCodeEnvelope, ErrMessageBudget)
+	}
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		return ErrUnavailable
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer cancel()
+	if err := session.Publish(publishCtx, DeviceNoticeTopic(hostID, deviceID), payload, 1); err != nil {
+		return fmt.Errorf("publish device notice: %w", err)
 	}
 	return nil
 }
@@ -764,8 +1060,21 @@ func (s *Service) DisconnectDevice(ctx context.Context, deviceID string) error {
 	if deviceID == "" {
 		return errors.New("device id is required")
 	}
+	// Revocation and explicit disconnect fence every sibling receiver's
+	// advertisement before the broker closes their connections.
+	s.receivers.FenceDevice(deviceID)
 	_, err := s.control.Request(ctx, "kick", []string{"username device:" + deviceID})
 	return err
+}
+
+// newControlID returns one opaque correlation id for an Access-authored control
+// request. It carries no identity or authority.
+func newControlID() string {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Sprintf("access-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(raw)
 }
 
 // EndDeviceSession fences admissions and closes exactly this Cloud session.

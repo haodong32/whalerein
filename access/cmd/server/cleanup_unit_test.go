@@ -162,8 +162,8 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 				public = failedListener{}
 			}
 			internal := &blockingListener{closed: make(chan struct{})}
-			started := make(chan struct{}, 3)
-			stopped := make(chan struct{}, 3)
+			started := make(chan struct{}, 4)
+			stopped := make(chan struct{}, 4)
 			cleanupStopped := make(chan struct{})
 			worker := func(ctx context.Context) error {
 				started <- struct{}{}
@@ -174,9 +174,9 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 			cleanup := func(ctx context.Context) { <-ctx.Done(); close(cleanupStopped) }
 			result := make(chan error, 1)
 			go func() {
-				result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, cleanup, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), time.Second)
+				result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, worker, cleanup, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), time.Second)
 			}()
-			for i := 0; i < 3; i++ {
+			for i := 0; i < 4; i++ {
 				select {
 				case <-started:
 				case <-time.After(time.Second):
@@ -197,7 +197,7 @@ func TestRunServicesCancelsWorkersWhenContextStopsOrListenerFails(t *testing.T) 
 			case <-time.After(2 * time.Second):
 				t.Fatal("service failed to stop")
 			}
-			for i := 0; i < 3; i++ {
+			for i := 0; i < 4; i++ {
 				select {
 				case <-stopped:
 				default:
@@ -377,7 +377,7 @@ func TestRunServicesRecordsWorkerFailureAndContinuesUntilCancelled(t *testing.T)
 	var logs safeBuffer
 	result := make(chan error, 1)
 	go func() {
-		result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&logs, nil)), time.Second)
+		result <- runServices(ctx, &http.Server{}, &http.Server{}, public, internal, worker, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&logs, nil)), time.Second)
 	}()
 	for i := 0; i < 3; i++ {
 		select {
@@ -415,7 +415,7 @@ func TestRunServicesReportsShutdownDeadlineWhenARequestStaysActive(t *testing.T)
 	worker := func(ctx context.Context) error { <-ctx.Done(); return nil }
 	result := make(chan error, 1)
 	go func() {
-		result <- runServices(ctx, publicServer, internalServer, listener, internal, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 100*time.Millisecond)
+		result <- runServices(ctx, publicServer, internalServer, listener, internal, worker, worker, worker, worker, func(ctx context.Context) { <-ctx.Done() }, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), 100*time.Millisecond)
 	}()
 	clientDone := make(chan struct{})
 	go func() {

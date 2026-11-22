@@ -16,7 +16,6 @@ import (
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
-	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -262,11 +261,10 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		s.writeError(w, r, err)
 		return
 	}
-	// Renewal is best-effort for a read: the recorded outcome stays
-	// recoverable even when liveness bookkeeping fails, and a GET never
-	// reopens an expired lease.
-	_, _ = s.deps.Requests.Touch(store.WithRequestDeviceSession(r.Context(), identity.SessionID), identity.DeviceID, requestID)
-	s.writeProto(w, http.StatusOK, &whalereinv1.RequestState{
+	// A status read is observational for execution liveness: it never renews
+	// the request lease or extends expires_at. Only an explicit heartbeat
+	// sustains a live one-shot command.
+	state := &whalereinv1.RequestState{
 		RequestId:       row.RequestID,
 		HostId:          row.HostID,
 		DeviceId:        row.DeviceID,
@@ -279,7 +277,14 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request, params
 		ExpiresAtUnixMs: row.ExpiresAt.UnixMilli(),
 		UpdatedAtUnixMs: row.UpdatedAt.UnixMilli(),
 		ChannelId:       row.ChannelID,
-	})
+	}
+	if len(row.ResultReference) > 0 {
+		var reference whalereinv1.PayloadReference
+		if err := proto.Unmarshal(row.ResultReference, &reference); err == nil {
+			state.ResultReference = &reference
+		}
+	}
+	s.writeProto(w, http.StatusOK, state)
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params map[string]string) {
@@ -304,7 +309,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, params 
 			return
 		}
 	}
-	if _, err := s.deps.Requests.Touch(store.WithRequestDeviceSession(r.Context(), identity.SessionID), identity.DeviceID, requestID); err != nil {
+	// The store takes the row lock and renews only the exact live,
+	// non-terminal, unexpired request. A non-renewal is a typed 404/410/409,
+	// never a silent 204.
+	if _, err := s.deps.Requests.Heartbeat(r.Context(), identity.DeviceID, identity.SessionID, requestID); err != nil {
 		s.writeError(w, r, err)
 		return
 	}

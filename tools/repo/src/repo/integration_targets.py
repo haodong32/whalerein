@@ -24,9 +24,19 @@ LEAVES = {
         ("node-dependencies", "noise-peer", "proto-peer"),
     ),
     "protocol-http": Leaf(("acc_http_contract",), CLI),
-    "storage": Leaf(("storage", "stream_cache"), (*CLI, "storage-tests")),
+    "storage": Leaf(
+        ("relay_storage", "storage", "stream_cache"),
+        (*CLI, "storage-tests"),
+    ),
     "transport": Leaf(
-        ("transport", "transport_presence", "transport_tls"),
+        (
+            "relay_authorization",
+            "relay_cutover",
+            "relay_transport",
+            "transport",
+            "transport_presence",
+            "transport_tls",
+        ),
         (*CLI, "mqtt-driver", "broker-tests", "server-tests"),
     ),
     "chain": Leaf(
@@ -53,6 +63,7 @@ LEAVES = {
             "qmq_queue",
             "qmq_questions",
             "queue_capability",
+            "relay_chain",
             "request_stale_recovery",
             "sess_create",
             "sess_discovery",

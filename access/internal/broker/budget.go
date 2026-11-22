@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,30 +14,52 @@ import (
 // Stable transport rejection codes. They are the only labels emitted to logs
 // and metrics; they never carry a topic, peer identity or payload.
 const (
-	transportCodePacket     = "frame_packet"
-	transportCodeHeader     = "frame_header"
-	transportCodeWidth      = "frame_width"
-	transportCodeGeometry   = "frame_geometry"
+	transportCodePacket     = "packet_limit"
+	transportCodeHeader     = "envelope_header"
 	transportCodeEnvelope   = "envelope_budget"
-	transportCodeFragments  = "fragment_count"
-	transportCodeReassembly = "reassembly_budget"
-	transportCodeIntegrity  = "frame_integrity"
-	transportCodeTopic      = "frame_topic"
-	transportCodeReceipt    = "receipt"
-	transportCodeAdmission  = "bulk_admission"
+	transportCodeReference  = "reference_limit"
+	transportCodeTopic      = "relay_topic"
+	transportCodeStaging    = "staging"
+	transportCodeQueue      = "queue"
 	transportCodeBudget     = "budget_missing"
 	transportCodeBudgetBad  = "budget_invalid"
+	transportCodeRelayEpoch = "relay_epoch"
 )
 
 var transportCodes = map[string]struct{}{
-	transportCodePacket: {}, transportCodeHeader: {}, transportCodeWidth: {},
-	transportCodeGeometry: {}, transportCodeEnvelope: {}, transportCodeFragments: {},
-	transportCodeReassembly: {}, transportCodeIntegrity: {}, transportCodeTopic: {},
-	transportCodeReceipt: {}, transportCodeAdmission: {}, transportCodeBudget: {},
-	transportCodeBudgetBad: {},
+	transportCodePacket: {}, transportCodeHeader: {}, transportCodeEnvelope: {},
+	transportCodeReference: {}, transportCodeTopic: {}, transportCodeStaging: {},
+	transportCodeQueue: {}, transportCodeBudget: {}, transportCodeBudgetBad: {},
+	transportCodeRelayEpoch: {},
 }
 
-// TransportError is a rejected frame or admission decision with a stable code.
+// RelayEpoch is the only accepted complete-message relay contract.
+const RelayEpoch uint32 = 4
+
+// Typed relay errors. Callers map these to stable wire outcomes; they never
+// include a topic, peer identity or payload byte.
+var (
+	// ErrPeerTransportUnsupported means the peer does not advertise the relay
+	// epoch or cannot take a complete message.
+	ErrPeerTransportUnsupported = errors.New("peer does not support the relay epoch")
+	// ErrMessageBudget is a permanent complete-message refusal (payload_too_large).
+	ErrMessageBudget = errors.New("complete message exceeds the relay budget")
+	// ErrRelayEpoch is a missing or foreign relay epoch (protocol_version_incompatible).
+	ErrRelayEpoch = fmt.Errorf("%w: relay epoch is not v4", ErrPeerTransportUnsupported)
+	// ErrReferenceTooLarge means the reference packet itself cannot fit.
+	ErrReferenceTooLarge = fmt.Errorf("%w: reference packet exceeds the packet limit", ErrMessageBudget)
+	// ErrStagingUnavailable means a reference was required but no stager is wired.
+	ErrStagingUnavailable = fmt.Errorf("%w: payload staging is unavailable", ErrPeerTransportUnsupported)
+	// ErrStagingFailed is a bounded staging failure; nothing was published.
+	ErrStagingFailed = fmt.Errorf("%w: payload staging failed", ErrPeerTransportUnsupported)
+	// ErrQueueFull and ErrQueueBytes are transient ordered-queue refusals.
+	ErrQueueFull  = errors.New("ordered publication queue is full")
+	ErrQueueBytes = fmt.Errorf("%w: waiting bytes exceed the queue bound", ErrQueueFull)
+	// ErrQueueClosed means the MQTT connection that owned the queue is gone.
+	ErrQueueClosed = errors.New("ordered publication queue is closed")
+)
+
+// TransportError is a rejected packet or admission decision with a stable code.
 // It never includes peer identifiers or payload content.
 type TransportError struct {
 	Code string
@@ -47,7 +68,7 @@ type TransportError struct {
 
 func (e *TransportError) Error() string {
 	if e.err == nil {
-		return "logical transport rejected"
+		return "relay rejected"
 	}
 	return e.err.Error()
 }
@@ -70,6 +91,14 @@ func transportCodeOf(err error) string {
 	return transportCodeHeader
 }
 
+// validateRelayEpoch checks the single required relay epoch.
+func validateRelayEpoch(version uint32) error {
+	if version != RelayEpoch {
+		return transportReject(transportCodeRelayEpoch, ErrRelayEpoch)
+	}
+	return nil
+}
+
 // validateAdvertisement checks one peer receive advertisement for internal
 // consistency. Its named profile selects the packaged base vocabulary and
 // supplies the packet framing allowance, but the advertised values are not
@@ -80,56 +109,54 @@ func transportCodeOf(err error) string {
 func validateAdvertisement(advertisement *whalereinv1.ReceiveAdvertisement) (config.TransportEffective, uint64, error) {
 	if advertisement == nil {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudget,
-			fmt.Errorf("%w: receive advertisement missing", ErrPeerBudgetMissing))
+			fmt.Errorf("%w: receive advertisement missing", ErrPeerTransportUnsupported))
+	}
+	if err := validateRelayEpoch(advertisement.GetRelayVersion()); err != nil {
+		return config.TransportEffective{}, 0, err
 	}
 	if advertisement.GetConnectionGeneration() == 0 {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: receive advertisement generation missing", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: receive advertisement generation missing", ErrPeerTransportUnsupported))
 	}
 	profile := advertisement.GetProfile()
 	wireName, known := whalereinv1.TransportProfile_name[int32(profile)]
 	if !known || profile == whalereinv1.TransportProfile_TRANSPORT_PROFILE_UNSPECIFIED {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: unknown transport profile", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: unknown transport profile", ErrPeerTransportUnsupported))
 	}
 	profileName, ok := config.ProfileForWireName(wireName)
 	if !ok {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: unknown transport profile", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: unknown transport profile", ErrPeerTransportUnsupported))
 	}
 	base, ok := whalereinv1.TransportProfileValuesFor(profileName)
 	if !ok {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: unknown transport profile", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: unknown transport profile", ErrPeerTransportUnsupported))
 	}
 	budget := advertisement.GetBudget()
 	if budget == nil {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudget,
-			fmt.Errorf("%w: receive budget missing", ErrPeerBudgetMissing))
+			fmt.Errorf("%w: receive budget missing", ErrPeerTransportUnsupported))
 	}
 	effective := config.TransportEffective{
-		Profile:              profileName,
-		WireName:             wireName,
-		WireProfile:          profile,
-		PacketBytes:          budget.GetPacketBytes(),
-		PacketOverheadBytes:  base.PacketOverheadBytes,
-		FragmentPayloadBytes: budget.GetFragmentPayloadBytes(),
-		FragmentCount:        budget.GetFragmentCount(),
-		EnvelopeBytes:        budget.GetEnvelopeBytes(),
-		BulkConcurrency:      budget.GetBulkConcurrency(),
-		ReservedBytes:        budget.GetReservedBytes(),
-		FragmentIdleTimeout:  time.Duration(budget.GetFragmentIdleTimeoutMs()) * time.Millisecond,
-		TransferTimeout:      time.Duration(budget.GetTransferTimeoutMs()) * time.Millisecond,
+		Profile:             profileName,
+		WireName:            wireName,
+		WireProfile:         profile,
+		PacketBytes:         budget.GetPacketBytes(),
+		PacketOverheadBytes: base.PacketOverheadBytes,
+		EnvelopeBytes:       budget.GetEnvelopeBytes(),
+		BulkConcurrency:     budget.GetBulkConcurrency(),
+		ReservedBytes:       budget.GetReservedBytes(),
+		TransferTimeout:     time.Duration(budget.GetTransferTimeoutMs()) * time.Millisecond,
 	}
-	// A TransportFrame total is a uint32, so a larger logical envelope could
-	// never be transferred even if its fragment count were representable.
-	if effective.EnvelopeBytes > math.MaxUint32 {
+	if effective.EnvelopeBytes > math.MaxInt64 {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: receive envelope is not representable", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: receive envelope is not representable", ErrPeerTransportUnsupported))
 	}
 	if err := config.ValidateTransportEffective(effective); err != nil {
 		return config.TransportEffective{}, 0, transportReject(transportCodeBudgetBad,
-			fmt.Errorf("%w: invalid receive budget", ErrPeerBudgetInvalid))
+			fmt.Errorf("%w: invalid receive budget", ErrPeerTransportUnsupported))
 	}
 	return effective, advertisement.GetConnectionGeneration(), nil
 }
@@ -138,8 +165,7 @@ func validateAdvertisement(advertisement *whalereinv1.ReceiveAdvertisement) (con
 // field. A peer can only lower a local limit, and a relation-valid override may
 // tighten one dimension without being silently raised back to a packaged
 // profile. The result is an intersection rather than a named profile, so the
-// profile label names only the base vocabulary. Geometry that no longer fits
-// makes the oversized send fail explicitly in sendTo; it is never clamped.
+// profile label names only the base vocabulary.
 func negotiateBudget(local, advertised config.TransportEffective) config.TransportEffective {
 	if advertised.EnvelopeBytes == 0 {
 		return local
@@ -150,18 +176,25 @@ func negotiateBudget(local, advertised config.TransportEffective) config.Transpo
 	}
 	strict.PacketBytes = min(local.PacketBytes, advertised.PacketBytes)
 	strict.PacketOverheadBytes = min(local.PacketOverheadBytes, advertised.PacketOverheadBytes)
-	strict.FragmentPayloadBytes = min(local.FragmentPayloadBytes, advertised.FragmentPayloadBytes)
-	strict.FragmentCount = min(local.FragmentCount, advertised.FragmentCount)
 	strict.EnvelopeBytes = min(local.EnvelopeBytes, advertised.EnvelopeBytes)
 	strict.BulkConcurrency = min(local.BulkConcurrency, advertised.BulkConcurrency)
 	strict.ReservedBytes = min(local.ReservedBytes, advertised.ReservedBytes)
-	strict.FragmentIdleTimeout = min(local.FragmentIdleTimeout, advertised.FragmentIdleTimeout)
 	strict.TransferTimeout = min(local.TransferTimeout, advertised.TransferTimeout)
+	// Ordered-publisher settings are local: a receiver advertisement never
+	// raises or lowers this publisher's queue bounds.
+	strict.ReceiveMaximum = local.ReceiveMaximum
+	strict.SendQueueDepth = local.SendQueueDepth
+	strict.SendQueueBytes = local.SendQueueBytes
+	strict.SendInFlight = local.SendInFlight
+	strict.ResultLimitBytes = local.ResultLimitBytes
+	strict.HTTPBodyBytes = local.HTTPBodyBytes
 	return strict
 }
 
 // receiverRoute identifies one Access -> peer route whose receive limits are
-// registered from an authenticated advertisement.
+// registered from an authenticated advertisement. Device routes are not
+// host-scoped: the same authenticated receiver connection carries the same
+// limits for every Host grant it holds.
 type receiverRoute struct {
 	kind     string // "host" or "device"
 	hostID   string
@@ -180,92 +213,134 @@ func routeForTopic(topic string) (receiverRoute, bool) {
 	switch parsed.Kind {
 	case KindRequest, KindPresence:
 		return receiverRoute{kind: "host", hostID: parsed.HostID}, true
-	case KindDeviceEvent:
-		return receiverRoute{kind: "device", hostID: parsed.HostID, deviceID: parsed.DeviceID}, true
+	case KindDeviceEvent, KindDeviceNotice:
+		return receiverRoute{kind: "device", deviceID: parsed.DeviceID}, true
 	default:
 		return receiverRoute{}, false
 	}
 }
 
+// maxReceiversPerRoute bounds advertisements retained for one route.
+const maxReceiversPerRoute = 64
+
 type receiverEntry struct {
 	connID     uint64
 	generation uint64
+	clientID   string
 	budget     config.TransportEffective
 }
 
-// ReceiverBudgets registers authenticated receive advertisements per route and
-// broker-derived connection. It is deliberately outside the request forwarding
-// loop: forwarding reads a snapshot, never waits on advertisements.
+// ReceiverBudgets registers authenticated receive advertisements per concrete
+// receiver connection. One sibling connection reconnecting never clears
+// another sibling's advertisement: entries are keyed by the broker-derived
+// connection identity, and only an offline notification for that exact
+// connection removes it. A shared destination route publishes at the minimum
+// limit of every eligible connection.
 type ReceiverBudgets struct {
 	mu      sync.RWMutex
-	entries map[string]receiverEntry
-	current map[string]uint64
+	entries map[string]map[uint64]receiverEntry
+	current map[string]map[uint64]string
 }
 
 // NewReceiverBudgets creates an empty advertisement registry.
 func NewReceiverBudgets() *ReceiverBudgets {
 	return &ReceiverBudgets{
-		entries: map[string]receiverEntry{},
-		current: map[string]uint64{},
+		entries: map[string]map[uint64]receiverEntry{},
+		current: map[string]map[uint64]string{},
 	}
 }
 
-// NoteConnection records the broker-derived current connection for a route
-// prefix. A newer connection invalidates the prior advertisement so a delayed
-// readiness proof cannot refresh it.
-func (b *ReceiverBudgets) NoteConnection(route receiverRoute, connID uint64, online bool) {
-	if b == nil {
+// NoteConnection records one broker-derived receiver connection. A newer
+// connection is tracked beside every other live sibling; only an offline event
+// for the same connection invalidates its advertisement.
+func (b *ReceiverBudgets) NoteConnection(route receiverRoute, connID uint64, clientID string, online bool) {
+	if b == nil || connID == 0 {
 		return
 	}
 	key := route.key()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if route.kind == "device" && route.hostID == "" {
-		// A broker device notification is not host-scoped. Invalidate every
-		// route for that device; a reconnect must re-advertise.
-		for existing := range b.entries {
-			if strings.Contains(existing, "\x00"+route.deviceID) {
-				delete(b.entries, existing)
-				delete(b.current, existing)
-			}
-		}
-		return
-	}
 	if !online {
-		delete(b.entries, key)
+		connections, ok := b.current[key]
+		if !ok || len(connections) == 0 {
+			return
+		}
+		delete(connections, connID)
+		if len(connections) > 0 {
+			// A sibling receiver is still connected: only this exact
+			// broker-derived connection loses its advertisement.
+			if entries, ok := b.entries[key]; ok {
+				delete(entries, connID)
+				if len(entries) == 0 {
+					delete(b.entries, key)
+				}
+			}
+			return
+		}
+		// The last known connection for the route is gone. Device
+		// advertisements are keyed by their advertised generation rather than
+		// the broker connection, so the whole route is invalidated.
 		delete(b.current, key)
+		delete(b.entries, key)
 		return
 	}
-	if previous, ok := b.current[key]; ok && previous != 0 && connID != 0 && previous != connID {
-		delete(b.entries, key)
+	connections := b.current[key]
+	if connections == nil {
+		connections = map[uint64]string{}
+		b.current[key] = connections
 	}
-	b.current[key] = connID
+	connections[connID] = clientID
 }
 
 // Register stores one authenticated advertisement. It returns false for a
-// stale generation, a superseded connection or an advertisement that does not
-// match the broker-derived current connection.
+// stale generation, an unknown connection or a superseded entry. A device
+// advertisement is accepted only when its generation is one of the broker's
+// current connections for that device; an old generation never refreshes a
+// newer one.
 func (b *ReceiverBudgets) Register(route receiverRoute, connID, generation uint64, budget config.TransportEffective) bool {
-	if b == nil {
+	if b == nil || generation == 0 {
 		return false
 	}
 	key := route.key()
+	entryKey := connID
+	if entryKey == 0 {
+		entryKey = generation
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if current, ok := b.current[key]; ok && current != 0 && connID != current {
+	if connections, ok := b.current[key]; ok && len(connections) > 0 && connID != 0 {
+		if _, live := connections[connID]; !live {
+			return false
+		}
+	}
+	entries := b.entries[key]
+	if entries == nil {
+		entries = map[uint64]receiverEntry{}
+		b.entries[key] = entries
+	}
+	if existing, ok := entries[entryKey]; ok && existing.generation >= generation {
 		return false
 	}
-	if existing, ok := b.entries[key]; ok {
-		if existing.connID == connID && existing.generation >= generation {
-			return false
+	// Bound one route's receivers. A Device may use a fresh local generation
+	// per sibling connection and Access cannot observe which connection
+	// published an advertisement, so old generations are pruned rather than
+	// rejected: rejecting a lower sibling generation would drop a live
+	// receiver's limits.
+	if len(entries) >= maxReceiversPerRoute {
+		var oldest uint64
+		first := true
+		for id := range entries {
+			if first || id < oldest {
+				oldest, first = id, false
+			}
 		}
-		// An unknown or superseded connection can never overwrite a newer
-		// broker-derived connection.
-		if existing.connID != 0 && (connID == 0 || existing.connID > connID) {
-			return false
-		}
+		delete(entries, oldest)
 	}
-	b.entries[key] = receiverEntry{connID: connID, generation: generation, budget: budget}
+	clientID := ""
+	if connections, ok := b.current[key]; ok {
+		clientID = connections[connID]
+	}
+	entries[entryKey] = receiverEntry{connID: connID, generation: generation, clientID: clientID, budget: budget}
 	return true
 }
 
@@ -288,22 +363,20 @@ func (b *ReceiverBudgets) minimum(routes []receiverRoute) (config.TransportEffec
 	var selected config.TransportEffective
 	found := false
 	for _, route := range routes {
-		entry, ok := b.entries[route.key()]
-		if !ok {
-			continue
+		for _, entry := range b.entries[route.key()] {
+			if !found {
+				selected = entry.budget
+				found = true
+				continue
+			}
+			selected = negotiateBudget(selected, entry.budget)
 		}
-		if !found {
-			selected = entry.budget
-			found = true
-			continue
-		}
-		selected = negotiateBudget(selected, entry.budget)
 	}
 	return selected, found
 }
 
-// Clear removes the advertisement for one route (for example when metadata is
-// missing or invalid).
+// Clear removes every advertisement for one route (for example when metadata
+// is missing or invalid).
 func (b *ReceiverBudgets) Clear(route receiverRoute) {
 	if b == nil {
 		return
@@ -313,6 +386,19 @@ func (b *ReceiverBudgets) Clear(route receiverRoute) {
 	b.mu.Unlock()
 }
 
+// FenceDevice removes every advertisement registered for a device. A grant or
+// app-session revocation fences all of its sibling receivers at once.
+func (b *ReceiverBudgets) FenceDevice(deviceID string) {
+	if b == nil || deviceID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	route := receiverRoute{kind: "device", deviceID: deviceID}
+	delete(b.entries, route.key())
+	delete(b.current, route.key())
+}
+
 // Reset drops every advertisement; a new Access MQTT connection must receive
 // fresh readiness proofs.
 func (b *ReceiverBudgets) Reset() {
@@ -320,17 +406,33 @@ func (b *ReceiverBudgets) Reset() {
 		return
 	}
 	b.mu.Lock()
-	b.entries = map[string]receiverEntry{}
-	b.current = map[string]uint64{}
+	b.entries = map[string]map[uint64]receiverEntry{}
+	b.current = map[string]map[uint64]string{}
 	b.mu.Unlock()
 }
 
-// Count returns the number of registered routes, for operational assertions.
+// Count returns the number of registered receiver connections, for operational
+// assertions.
 func (b *ReceiverBudgets) Count() int {
 	if b == nil {
 		return 0
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return len(b.entries)
+	count := 0
+	for _, entries := range b.entries {
+		count += len(entries)
+	}
+	return count
+}
+
+// Connections returns the number of live broker connections tracked for one
+// route. It is the aggregate view used for presence diagnostics.
+func (b *ReceiverBudgets) Connections(route receiverRoute) int {
+	if b == nil {
+		return 0
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.current[route.key()])
 }

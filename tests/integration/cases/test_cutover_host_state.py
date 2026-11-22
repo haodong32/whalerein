@@ -66,6 +66,7 @@ def _old_key_generation_cursor() -> str:
     return f"{encoded}.previous-signature"
 
 
+@pytest.mark.relay_directory
 @pytest.mark.description(
     "When the old Host artifact stops and the current artifact starts against retained state, host identity, peer pins, question pager key and Source session identity survive without re-pairing."
 )

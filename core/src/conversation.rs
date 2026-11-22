@@ -903,6 +903,15 @@ impl Conversation {
         ViewUpdate::Reset
     }
 
+    /// Mark every active preview as incomplete after a live-class loss. The
+    /// next frame for an attempt reports `incomplete`, and the committed
+    /// message or an authoritative read repairs the final view.
+    pub(crate) fn mark_preview_incomplete(&mut self) {
+        for attempt in self.active.values_mut() {
+            attempt.intact = false;
+        }
+    }
+
     /// Replace every projection-bound view after the Source reports a new
     /// canonical content projection. Unlike a reconnect reset, this discards
     /// delivered identities and settled tool state because they belonged to
@@ -1481,6 +1490,32 @@ mod tests {
                 preview_prefix: Some(PreviewPrefix { text_bytes: 1, .. }),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn a_live_loss_marks_the_next_preview_incomplete() {
+        let mut state = Conversation::default();
+        state.reset("epoch");
+        state
+            .live(&frame(1, Payload::Started(AttemptStarted {})))
+            .unwrap();
+        assert!(matches!(
+            state.live(&delta(2, WireBlockKind::Text, "x")).unwrap(),
+            Some(ViewUpdate::Preview {
+                incomplete: false,
+                ..
+            })
+        ));
+        // A dropped live frame outside the sequence path marks the attempt
+        // without failing the reducer; the next frame exposes the hole.
+        state.mark_preview_incomplete();
+        assert!(matches!(
+            state.live(&delta(3, WireBlockKind::Text, "y")).unwrap(),
+            Some(ViewUpdate::Preview {
+                incomplete: true,
+                ..
+            })
         ));
     }
 

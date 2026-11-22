@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use prost::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use whalerein_proto::{
@@ -19,7 +20,7 @@ use whalerein_proto::{
     RefreshWatches, UnwatchSession, WatchSession,
 };
 
-use crate::access::{DeviceMqttClient, MqttConnectionEvent};
+use crate::access::{DeliveryClass, DeviceMqttClient, MqttConnectionEvent};
 use crate::api::core::watch::{SinkFuture, UpdateSink};
 use crate::api::{Cancellation, ObservationInterests, SessionEvent, SessionEventPayload};
 use crate::api::{Core, CoreError, CoreResult, QuestionView};
@@ -65,6 +66,7 @@ fn watch_fatal(error: &CoreError) -> bool {
             | CoreError::FingerprintMismatch { .. }
             | CoreError::Unsupported
             | CoreError::ProtocolIncompatible
+            | CoreError::Security(_)
             | CoreError::InvalidInput(_)
             | CoreError::Config(_)
             | CoreError::Cache(_)
@@ -662,9 +664,11 @@ async fn run_connection(
     if let Some(id) = &session_id {
         client = client.with_cloud_session(id.clone());
     }
-    // A snapshot attach can take several pages; buffers must absorb the live
-    // frames that arrive meanwhile instead of dropping previews.
-    let (tx, rx) = mpsc::channel(1024);
+    // Snapshot attach can take several pages; the control buffer must absorb
+    // the committed frames that arrive meanwhile. Live previews use their own
+    // bounded queue so a preview burst or drop can never displace control.
+    let (control_tx, control_rx) = mpsc::channel(1024);
+    let (live_tx, live_rx) = mpsc::channel(1024);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let mut ready_tx = Some(ready_tx);
     let stop = Arc::new(AtomicBool::new(false));
@@ -675,12 +679,19 @@ async fn run_connection(
     let task_interrupted = interrupted.clone();
     let queued = Arc::new(AtomicUsize::new(0));
     let task_queued = queued.clone();
+    let live_queued = Arc::new(AtomicUsize::new(0));
+    let task_live_queued = live_queued.clone();
     let error = Arc::new(Mutex::new(None));
     let task_error = error.clone();
     let overflow = Arc::new(AtomicBool::new(false));
     let task_overflow = overflow.clone();
+    let live_overflow = Arc::new(AtomicBool::new(false));
+    let task_live_overflow = live_overflow.clone();
     let transport_core = core.clone();
     let event_queue_bytes = core.transport_budget().reserved_bytes as usize;
+    // Live is derived state: bound it independently of control. A full live
+    // queue drops the newest preview and only marks the preview incomplete.
+    let live_queue_bytes = event_queue_bytes.min(256 * 1024);
     let task = tokio::spawn(async move {
         let stop_requested = || {
             task_stop.load(Ordering::SeqCst)
@@ -692,18 +703,40 @@ async fn run_connection(
         let mqtt = client.run(
             stop_requested,
             |envelope| {
-                let bytes = envelope.ciphertext.len();
+                let bytes = envelope.encoded_len();
                 if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > event_queue_bytes {
                     task_queued.fetch_sub(bytes, Ordering::SeqCst);
                     task_overflow.store(true, Ordering::SeqCst);
                     return true;
                 }
-                if tx.try_send(envelope.clone()).is_err() {
+                if control_tx
+                    .try_send((DeliveryClass::Control, envelope.clone()))
+                    .is_err()
+                {
                     task_queued.fetch_sub(bytes, Ordering::SeqCst);
                     task_overflow.store(true, Ordering::SeqCst);
                 }
                 true
             },
+            |envelope| {
+                let bytes = envelope.encoded_len();
+                if task_live_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > live_queue_bytes {
+                    task_live_queued.fetch_sub(bytes, Ordering::SeqCst);
+                    task_live_overflow.store(true, Ordering::SeqCst);
+                    return true;
+                }
+                if live_tx
+                    .try_send((DeliveryClass::Live, envelope.clone()))
+                    .is_err()
+                {
+                    task_live_queued.fetch_sub(bytes, Ordering::SeqCst);
+                    task_live_overflow.store(true, Ordering::SeqCst);
+                }
+                true
+            },
+            // Result notices are command-scoped; the observation receiver
+            // ignores them instead of printing or fetching anything.
+            |_| true,
             |state| match state {
                 MqttConnectionEvent::Subscribed => {
                     if let Some(sender) = ready_tx.take() {
@@ -866,15 +899,18 @@ async fn run_connection(
         state_revision,
         projection,
         conversation,
-        rx,
+        control_rx,
+        live_rx,
         events,
         cancellation,
         questions,
         pump,
         interrupted,
         overflow,
+        live_overflow,
         error,
         queued,
+        live_queued,
         sync,
     )
     .await
@@ -894,17 +930,21 @@ async fn conversation_loop(
     initial_revision: u64,
     mut projection: String,
     conversation: &mut Conversation,
-    mut rx: mpsc::Receiver<EventEnvelope>,
+    mut control_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
+    mut live_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
     events: &mpsc::Sender<SessionEvent>,
     cancellation: &Cancellation,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
     pump: Pump,
     interrupted: Arc<AtomicBool>,
     overflow: Arc<AtomicBool>,
+    live_overflow: Arc<AtomicBool>,
     error: Arc<Mutex<Option<CoreError>>>,
     queued: Arc<AtomicUsize>,
+    live_queued: Arc<AtomicUsize>,
     sync: Option<crate::sync::SyncService>,
 ) -> CoreResult<End> {
+    let mut live_open = true;
     let mut state_revision = initial_revision;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.tick().await;
@@ -918,10 +958,15 @@ async fn conversation_loop(
             return Err(CoreError::Revoked);
         }
         if overflow.swap(false, Ordering::SeqCst) {
-            // A dropped live frame or question hint would leave a hole; the
-            // owner reconnects and re-registers from current authority.
+            // A dropped control frame would leave a durable hole; the owner
+            // reconnects and re-registers from current authority.
             pump.finish().await;
             return Ok(End::Reconnect);
+        }
+        if live_overflow.swap(false, Ordering::SeqCst) {
+            // A dropped live preview only makes derived display state
+            // incomplete. It never reconnects, retries or blocks control.
+            conversation.mark_preview_incomplete();
         }
         if interrupted.load(Ordering::SeqCst) {
             let failure = error.lock().expect("watch error mutex").take();
@@ -933,8 +978,9 @@ async fn conversation_loop(
             return Ok(End::Reconnect);
         }
         tokio::select! {
-            envelope = rx.recv() => {
-                let Some(envelope) = envelope else {
+            biased;
+            received = control_rx.recv() => {
+                let Some((class, envelope)) = received else {
                     let failure = error.lock().expect("watch error mutex").take();
                     if let Some(failure) = failure {
                         return Err(failure);
@@ -942,39 +988,65 @@ async fn conversation_loop(
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 };
-                queued.fetch_sub(envelope.ciphertext.len(), Ordering::SeqCst);
-                let update = match crate::sync::open_event(&channel, &envelope)? {
-                    crate::sync::OpenedEvent::Update(update) => update,
-                    crate::sync::OpenedEvent::Closed(closed) => {
-                        if closed.watch_id == watch_id && closed.session.as_ref() == Some(&wire_key) {
-                            // A Host-authored terminal close is authoritative,
-                            // like an Access authority reason: never reconnect.
-                            return Err(CoreError::AuthorityClosed(closed.reason));
-                        }
-                        continue;
-                    }
-                };
-                if update.session.as_ref() != Some(&wire_key) || update.watch_id != watch_id {
-                    continue;
-                }
-                let Some(payload) = update.payload else {
-                    return Err(CoreError::Security("empty typed update".into()));
-                };
-                match handle_update(
+                queued.fetch_sub(envelope.encoded_len(), Ordering::SeqCst);
+                match handle_envelope(
                     core,
                     key,
                     observation_id,
                     generation,
                     interests,
                     &wire_key,
+                    &watch_id,
+                    class,
                     &epoch,
+                    &channel,
                     &mut state_revision,
                     &mut projection,
                     conversation,
                     events,
                     questions,
                     sync.as_ref(),
-                    payload,
+                    &envelope,
+                )
+                .await?
+                {
+                    Flow::Continue => {}
+                    Flow::Done => {
+                        pump.finish().await;
+                        return Ok(End::Done);
+                    }
+                    Flow::Reconnect => {
+                        pump.finish().await;
+                        return Ok(End::Reconnect);
+                    }
+                }
+            }
+            received = live_rx.recv(), if live_open => {
+                let Some((class, envelope)) = received else {
+                    // The live sender ended with the same MQTT task that owns
+                    // control; control completion determines the loop's end.
+                    live_open = false;
+                    continue;
+                };
+                live_queued.fetch_sub(envelope.encoded_len(), Ordering::SeqCst);
+                match handle_envelope(
+                    core,
+                    key,
+                    observation_id,
+                    generation,
+                    interests,
+                    &wire_key,
+                    &watch_id,
+                    class,
+                    &epoch,
+                    &channel,
+                    &mut state_revision,
+                    &mut projection,
+                    conversation,
+                    events,
+                    questions,
+                    sync.as_ref(),
+                    &envelope,
                 )
                 .await?
                 {
@@ -1111,6 +1183,94 @@ async fn conversation_loop(
     }
 }
 
+/// Enforce the delivery-class payload contract after decryption. Control may
+/// carry committed history, state, question and reset updates; only the live
+/// class may carry a `LiveFrame`. The two classes never fall back to each
+/// other, so a crossed payload is a stable security/protocol failure.
+fn enforce_delivery_class(
+    class: DeliveryClass,
+    update: &whalerein_proto::SessionUpdate,
+) -> CoreResult<()> {
+    let live = matches!(update.payload, Some(session_update::Payload::Live(_)));
+    match (class, live) {
+        (DeliveryClass::Control, true) => Err(CoreError::Security(
+            "live preview received on the control event topic".into(),
+        )),
+        (DeliveryClass::Live, false) => Err(CoreError::Security(
+            "control payload received on the live topic".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve, decrypt and apply one received envelope through the class contract.
+#[allow(clippy::too_many_arguments)]
+async fn handle_envelope(
+    core: &Core,
+    key: &SessionKey,
+    observation_id: &str,
+    generation: u64,
+    interests: ObservationInterests,
+    wire_key: &whalerein_proto::SessionKey,
+    watch_id: &str,
+    class: DeliveryClass,
+    epoch: &str,
+    channel: &crate::security::SecureChannel,
+    state_revision: &mut u64,
+    projection: &mut String,
+    conversation: &mut Conversation,
+    events: &mpsc::Sender<SessionEvent>,
+    questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
+    sync: Option<&crate::sync::SyncService>,
+    envelope: &EventEnvelope,
+) -> CoreResult<Flow> {
+    // A referenced control event is fetched and verified over HTTPS before
+    // AEAD; a partial or failed fetch never becomes an event. Live envelopes
+    // are always inline, so this resolves to the same bytes without a fetch.
+    let envelope = core.resolve_event_envelope(envelope).await?;
+    let update = match crate::sync::open_event(channel, &envelope)? {
+        crate::sync::OpenedEvent::Update(update) => update,
+        crate::sync::OpenedEvent::Closed(closed) => {
+            // A terminal close is control intent; it is never a live preview.
+            if class != DeliveryClass::Control {
+                return Err(CoreError::Security(
+                    "control payload received on the live topic".into(),
+                ));
+            }
+            if closed.watch_id == watch_id && closed.session.as_ref() == Some(wire_key) {
+                // A Host-authored terminal close is authoritative, like an
+                // Access authority reason: never reconnect.
+                return Err(CoreError::AuthorityClosed(closed.reason));
+            }
+            return Ok(Flow::Continue);
+        }
+    };
+    enforce_delivery_class(class, &update)?;
+    if update.session.as_ref() != Some(wire_key) || update.watch_id != watch_id {
+        return Ok(Flow::Continue);
+    }
+    let Some(payload) = update.payload else {
+        return Err(CoreError::Security("empty typed update".into()));
+    };
+    handle_update(
+        core,
+        key,
+        observation_id,
+        generation,
+        interests,
+        wire_key,
+        epoch,
+        state_revision,
+        projection,
+        conversation,
+        events,
+        questions,
+        sync,
+        payload,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_update(
     core: &Core,
@@ -1172,7 +1332,8 @@ async fn handle_update(
                 *projection = batch.projection_id.clone();
                 return Ok(Flow::Reconnect);
             }
-            match sync.apply_batch(key, &batch)? {
+            let outcome = sync.apply_batch(key, &batch)?;
+            match outcome {
                 BatchOutcome::Applied => {
                     for change in &batch.changes {
                         let Some(view) = conversation.committed_once(change)? else {

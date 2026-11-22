@@ -290,6 +290,7 @@ func TestRouteTableSnapshot(t *testing.T) {
 	f := newAPIFixture(t)
 	wantPublic := []string{
 		"DELETE /v1/devices/{device_id}",
+		"DELETE /v1/relay/objects/{object_id}",
 		"GET /healthz",
 		"GET /metrics",
 		"GET /readyz",
@@ -301,6 +302,7 @@ func TestRouteTableSnapshot(t *testing.T) {
 		"GET /v1/hosts/{host_id}/authority",
 		"GET /v1/hosts/{host_id}/enrollment",
 		"GET /v1/operations/{operation_id}",
+		"GET /v1/relay/objects/{object_id}",
 		"GET /v1/requests/{request_id}",
 		"POST /v1/enrollments/devices/pairing",
 
@@ -314,7 +316,10 @@ func TestRouteTableSnapshot(t *testing.T) {
 		"POST /v1/hosts/{host_id}/requests",
 		"POST /v1/pairing/claims",
 		"POST /v1/pairing/invitations",
+		"POST /v1/relay/objects",
+		"POST /v1/relay/objects/{object_id}/finish",
 		"POST /v1/requests/{request_id}/heartbeat",
+		"PUT /v1/relay/objects/{object_id}",
 	}
 	gotPublic := routeTable(f.server.publicRoutes())
 	if strings.Join(gotPublic, "\n") != strings.Join(wantPublic, "\n") {

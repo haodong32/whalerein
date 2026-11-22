@@ -8,6 +8,13 @@ option go_package = "github.com/whalerein/whalerein/proto/v1/bindings/go;whalere
 //
 // HTTPS uses the proto3 JSON encoding of these messages. MQTT carries the
 // binary protobuf encoding. There is no second OpenAPI or JSON Schema.
+//
+// The application protocol version stays 1. The MQTT relay uses one
+// coordinated epoch, RELAY_EPOCH_V4 (4): control messages travel inline in one
+// MQTT PUBLISH when the full encoded packet fits, or as a packet-sized
+// PayloadReference to complete HTTPS ciphertext, while live previews travel
+// fire-and-forget on dedicated QoS 0 live topics. There is no fragment,
+// reassembly or application receipt protocol and no legacy relay fallback.
 
 // ---------------------------------------------------------------------------
 // Enumerations
@@ -43,6 +50,9 @@ enum RequestKind {
   REQUEST_KIND_REVOCATION = 6;
   // Access -> Host query for Devices with a current Session observation.
   REQUEST_KIND_HOST_CLIENTS = 7;
+  // Access -> Host receive advertisement for the Host -> Access hop. `body` is
+  // a ReceiveAdvertisement. Internal: a Device request can never submit it.
+  REQUEST_KIND_ACCESS_READY = 8;
 }
 
 enum ErrorCode {
@@ -125,16 +135,34 @@ enum QuestionAvailability {
 }
 
 // ---------------------------------------------------------------------------
-// Transport configuration and receive advertisements
+// Relay epoch, transport configuration and receive advertisements
 // ---------------------------------------------------------------------------
+
+// One coordinated relay contract. This value is carried as `relay_version` on
+// every relay envelope and advertisement and is independent of application
+// protocol version 1. A peer that does not advertise RELAY_EPOCH_V4 is
+// rejected with protocol_version_incompatible; there is no unframed or
+// fragment-based fallback.
+//
+// Epoch 4 hard-cuts epoch 3: it adds the QoS 0 live delivery class on dedicated
+// live topics next to the unchanged ordered/acked control topics. Epoch 3 is
+// reserved and never accepted; there is no dual epoch and no fallback.
+enum RelayEpoch {
+  RELAY_EPOCH_UNSPECIFIED = 0;
+  reserved 3;
+  reserved "RELAY_EPOCH_V3";
+  // Inline-or-reference control relay over MQTT QoS 1 and HTTPS ciphertext
+  // objects, with lossy QoS 0 live previews on the live topics.
+  RELAY_EPOCH_V4 = 4;
+}
 
 // Shared packaged transport profile vocabulary. The executable defaults and
 // valid alternate profiles live in proto/v1/transport_profiles.json so Access,
 // Host and Core validate the same names and relations. A profile never changes
-// application protocol version 1.
+// application protocol version 1 or the relay epoch.
 enum TransportProfile {
   TRANSPORT_PROFILE_UNSPECIFIED = 0;
-  // 64 KiB packet, 60 KiB fragment payload, 16 MiB logical envelope.
+  // 64 KiB packet and 16 MiB logical envelope.
   TRANSPORT_PROFILE_DEFAULT = 1;
   // Smaller deployment profile; see transport_profiles.json.
   TRANSPORT_PROFILE_COMPACT = 2;
@@ -143,29 +171,126 @@ enum TransportProfile {
 }
 
 // One validated set of encoded receive limits. All byte counts are encoded
-// bytes, never canonical content bytes. The fragment count is derived at
-// validation time and must cover envelope_bytes at the configured fragment
-// payload width.
+// bytes, never canonical content bytes. A complete message is one MQTT
+// envelope; it is never a fragment. `packet_bytes` is the largest complete
+// encoded MQTT PUBLISH this receiver accepts, including the fixed header,
+// topic name, MQTT 5 properties, outer envelope and ciphertext framing.
 message TransportBudget {
   uint32 packet_bytes = 1;
-  uint32 fragment_payload_bytes = 2;
-  uint32 fragment_count = 3;
+  // Retired fragment geometry. Tags and names stay reserved so an old writer
+  // cannot silently repurpose them.
+  reserved 2, 3, 7;
+  reserved "fragment_payload_bytes", "fragment_count", "fragment_idle_timeout_ms";
+  // Largest complete encoded message accepted through any representation.
   uint64 envelope_bytes = 4;
+  // Concurrent HTTPS ciphertext transfers admitted for this receiver.
   uint32 bulk_concurrency = 5;
+  // Ciphertext bytes this receiver may hold reserved or in flight.
   uint64 reserved_bytes = 6;
-  uint32 fragment_idle_timeout_ms = 7;
+  // One bound for a complete HTTPS upload or fetch.
   uint32 transfer_timeout_ms = 8;
 }
 
-// An event receive advertisement. It applies only to the authenticated
+// A relay receive advertisement. It applies only to the authenticated
 // transport connection generation that carried it; a reconnect starts a new
 // generation, and a delayed or replayed advertisement can never update a newer
-// connection. Access registers the advertisement against the broker-derived
-// connection identity, and only receive information crosses this seam.
+// connection. Access registers an advertisement against the broker-derived
+// connection identity, and only receive information crosses this seam. A peer
+// cannot raise another peer's limit; every sender takes the minimum of its own
+// limit, the broker limit and every advertised limit on the route.
 message ReceiveAdvertisement {
   TransportProfile profile = 1;
   TransportBudget budget = 2;
   uint64 connection_generation = 3;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  uint32 relay_version = 4;
+}
+
+// The checked purpose of one temporary ciphertext object. The purpose is part
+// of the reservation scope; a fetch for a different purpose is denied.
+enum PayloadPurpose {
+  PAYLOAD_PURPOSE_UNSPECIFIED = 0;
+  // Complete HostRequest body for a QUERY or COMMAND.
+  PAYLOAD_PURPOSE_REQUEST = 1;
+  // Complete HostResult result body for a request.
+  PAYLOAD_PURPOSE_RESULT = 2;
+  // Complete EventEnvelope payload for a live observation event.
+  PAYLOAD_PURPOSE_EVENT = 3;
+  // One bounded attachment part body.
+  PAYLOAD_PURPOSE_ATTACHMENT_PART = 4;
+  // One complete history page body.
+  PAYLOAD_PURPOSE_HISTORY_PAGE = 5;
+}
+
+// Opaque locator for one complete ciphertext object on its owning Access node.
+// A reference confers no authority: the reader must still authenticate and
+// match host, device, session, channel, purpose, part and the original grant
+// and revocation revisions. `object_id` is 32 lowercase hexadecimal
+// characters; `owner_node_id` is an opaque Access node identity. The digest is
+// SHA-256 over the exact ciphertext bytes, not over plaintext content.
+message PayloadReference {
+  string object_id = 1;
+  string owner_node_id = 2;
+  uint64 ciphertext_bytes = 3;
+  bytes sha256 = 4;
+  int64 expires_at_unix_ms = 5;
+  PayloadPurpose purpose = 6;
+}
+
+// Access-owned ciphertext directory. HTTPS bodies use the proto3 JSON encoding
+// except for the exact-length PUT upload and the GET ciphertext stream, which
+// carry raw ciphertext bytes with length and digest headers.
+message RelayObjectReserveRequest {
+  uint32 relay_version = 1;
+  string host_id = 2;
+  string device_id = 3;
+  string session_id = 4;
+  string channel_id = 5;
+  PayloadPurpose purpose = 6;
+  // Attachment occurrence or part identity; empty for non-part purposes.
+  string part_id = 7;
+  uint64 ciphertext_bytes = 8;
+  bytes sha256 = 9;
+  int64 expires_at_unix_ms = 10;
+  // Host authority only; Device callers authenticate with a bearer token.
+  int64 signed_at_unix_ms = 11;
+  bytes signature = 12;
+}
+
+message RelayObjectReservation {
+  string object_id = 1;
+  string owner_node_id = 2;
+  // Node-scoped upload path under the configured Access origin.
+  string upload_path = 3;
+  uint64 max_bytes = 4;
+  int64 expires_at_unix_ms = 5;
+  uint32 upload_timeout_ms = 6;
+}
+
+message RelayObjectFinishRequest {
+  uint32 relay_version = 1;
+  uint64 ciphertext_bytes = 2;
+  bytes sha256 = 3;
+  int64 signed_at_unix_ms = 4;
+  bytes signature = 5;
+}
+
+// Metadata returned after finish or by a HEAD-style lookup. The ciphertext
+// itself is streamed only by GET; filenames, MIME metadata and content stay
+// inside the seal.
+message RelayObject {
+  string object_id = 1;
+  string owner_node_id = 2;
+  PayloadPurpose purpose = 3;
+  uint64 ciphertext_bytes = 4;
+  bytes sha256 = 5;
+  int64 expires_at_unix_ms = 6;
+}
+
+message RelayObjectDeleteResult {
+  // True when this call released a reserved or ready object; false when the
+  // exact object was already terminal for the same authorized scope.
+  bool cancelled = 1;
 }
 
 // Device request metadata bound at submission. Access stores every value with
@@ -197,7 +322,8 @@ message HostRequest {
   string device_id = 3;
   RequestKind kind = 4;
   // Empty for handshakes and queries. Control commands carry an opaque random
-  // id plus the SHA-256 of `body`.
+  // id plus the SHA-256 of the complete body. For a referenced body,
+  // payload_digest equals body_reference.sha256.
   string command_id = 5;
   bytes payload_digest = 6;
   int64 expires_at_unix_ms = 7;
@@ -207,14 +333,24 @@ message HostRequest {
   // Selected secure channel. Empty while a channel is being established.
   string channel_id = 10;
   // Opaque to Access: raw Noise handshake bytes, an EncryptedFrame, a
-  // PairingClaim, or a RevocationNotice depending on `kind`.
+  // PairingClaim, or a RevocationNotice depending on `kind`. The representation
+  // is per hop: Access may rewrite this inline body into body_reference for the
+  // next hop using the same message identity and exact ciphertext.
   bytes body = 11;
-  // Device receiver capability, preserved by Access when relaying.
-  uint32 client_transport_version = 12;
-  // Access receiver capability, set by Access before MQTT forwarding.
-  uint32 relay_transport_version = 13;
+  // Retired per-direction capability flags. The relay epoch replaces them.
+  reserved 12, 13;
+  reserved "client_transport_version", "relay_transport_version";
   // Device result bound and grant generation bound by Access at admission.
   RequestTransportMetadata transport = 14;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access rejects a
+  // Device request and Host rejects an Access-forwarded request otherwise with
+  // protocol_version_incompatible.
+  uint32 relay_version = 15;
+  // Complete-body locator for a durable QUERY or COMMAND. Exactly one of
+  // `body` and `body_reference` is set for those kinds. HANDSHAKE,
+  // PAIRING_CLAIM and internal Access notices are small bootstrap bodies and
+  // must stay inline, so they never carry body_reference.
+  PayloadReference body_reference = 16;
 }
 
 message HostResult {
@@ -225,7 +361,9 @@ message HostResult {
   string command_id = 5;
   bytes payload_digest = 6;
   // Opaque to Access: raw Noise handshake bytes, an EncryptedFrame, or a
-  // PairingClaimResult. Access stores it verbatim.
+  // PairingClaimResult. Access stores it verbatim. As with HostRequest, the
+  // representation is per hop and Access may rewrite the same ciphertext into
+  // result_reference for the next hop.
   bytes result_body = 7;
   ErrorCode error_code = 8;
   string trace_id = 9;
@@ -234,6 +372,14 @@ message HostResult {
   int64 completed_at_unix_ms = 11;
   uint32 protocol_version = 12;
   string channel_id = 13;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  uint32 relay_version = 14;
+  // Exactly one of `result_body` and `result_reference` is set when a result
+  // body exists. HostReady, pairing results and internal control results are
+  // small bootstrap bodies and stay inline. A packet-sized terminal status may
+  // carry neither when the complete body could not be admitted; the recorded
+  // outcome is unchanged.
+  PayloadReference result_reference = 15;
 }
 
 message ErrorResponse {
@@ -268,6 +414,27 @@ message RequestState {
   int64 expires_at_unix_ms = 10;
   int64 updated_at_unix_ms = 11;
   string channel_id = 12;
+  // Complete result locator when the body was stored as a reference. Exactly
+  // one of result_body and result_reference is present when content exists.
+  PayloadReference result_reference = 13;
+}
+
+// Scoped, packet-sized result notice published by Access on the Device notice
+// topic after the authoritative outcome and durable notice intent commit. It
+// carries no plaintext content: only status metadata and, once the ciphertext
+// is readable, an opaque reference. Duplicate notices are harmless; Core reads
+// the complete result over HTTPS and reconciles by the original request or
+// command identity.
+message RequestStateNotice {
+  string request_id = 1;
+  string host_id = 2;
+  string device_id = 3;
+  OnlineStatus status = 4;
+  string command_id = 5;
+  int64 updated_at_unix_ms = 6;
+  PayloadReference result_reference = 7;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  uint32 relay_version = 8;
 }
 
 message HostInfo {
@@ -381,16 +548,24 @@ message RevocationAck {
 }
 
 // Host -> Access readiness signal, carried as result_body on the result topic
-// with an empty request_id and status succeeded.
+// with an empty request_id and status succeeded. Access answers with a
+// REQUEST_KIND_ACCESS_READY request whose body is Access's own
+// ReceiveAdvertisement, so the Host knows the Host -> Access hop budget.
 message HostReady {
   string host_id = 1;
   int64 connected_at_unix_ms = 2;
   // Ed25519 public key registered on the authenticated MQTT session.
-  // The first key for a host is kept.
+  // The first key for a host is kept. The same key signs Host-origin relay
+  // object HTTP requests.
   bytes authorization_public_key = 3;
-  uint32 transport_version = 4;
+  // Retired transport version; the relay epoch replaces it.
+  reserved 4;
+  reserved "transport_version";
   // Host receive limits for the authenticated broker connection generation.
   ReceiveAdvertisement receive = 5;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access refuses to
+  // mark an older or unknown epoch Host ready.
+  uint32 relay_version = 6;
 }
 
 // Host-scoped grant revocation. The host id and device id come from the URL.
@@ -803,10 +978,20 @@ message EventEnvelope {
   string host_id = 1;
   string device_id = 2;
   string channel_id = 3;
+  // `nonce` is always present; it is framing metadata, not stored content.
+  // Exactly one of `ciphertext` and `payload_reference` is then set. Access may
+  // rewrite the same exact ciphertext into payload_reference for the Device
+  // hop while preserving the nonce and event identity.
   bytes nonce = 4;
   bytes ciphertext = 5;
   int64 created_at_unix_ms = 6;
   string trace_id = 7;
+  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  uint32 relay_version = 8;
+  // Complete ciphertext locator. Exactly one of `ciphertext` and
+  // `payload_reference` is set; the reference resolves to the same ciphertext
+  // under the same event identity and `nonce`.
+  PayloadReference payload_reference = 9;
 }
 
 // Encrypted event plaintext.
@@ -824,30 +1009,6 @@ message WatchClosed {
   string watch_id = 1;
   SessionKey session = 2;
   string reason = 3;
-}
-
-// Opaque MQTT fragmentation. A packet starts with ASCII WRMQTT2 followed by
-// this protobuf. V2 uses 60 KiB chunks inside a 64 KiB packet budget, with a
-// 16 MiB logical envelope budget. Hashes cover opaque encoded envelopes, not
-// a separate plaintext-content digest.
-message TransportFrame {
-  uint32 version = 1;
-  string transfer_id = 2;
-  string topic = 3;
-  uint32 index = 4;
-  uint32 count = 5;
-  uint32 total_bytes = 6;
-  bytes digest = 7;
-  bytes payload = 8;
-  bool ack = 9;
-  bool rejected = 10;
-  // Only true after the entire logical envelope passed integrity checks.
-  bool complete = 11;
-  // Fragment payload width selected for this transfer. It must stay identical
-  // for every part and must not exceed the negotiated receive budget.
-  uint32 fragment_payload_bytes = 12;
-  // Named profile the selected width came from, for diagnostics and validation.
-  TransportProfile profile = 13;
 }
 
 // Normalized conversation domain. Sources interpret native identifiers; clients

@@ -536,6 +536,10 @@ func (stubRequests) Release(context.Context, string, string, string, int64) (sto
 
 func (stubRequests) Touch(context.Context, string, string) (bool, error) { return false, nil }
 
+func (stubRequests) Heartbeat(context.Context, string, string, string) (store.Request, error) {
+	return store.Request{}, errors.New("unused")
+}
+
 // TestHostProofStatusReadsTheEnrollmentWithoutACredential proves that the
 // original Host can read state/revision with a scoped proof while a bare id,
 // the admin bearer and a replayed proof are refused.

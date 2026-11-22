@@ -20,12 +20,6 @@ pytestmark = pytest.mark.transport
             ),
         ),
         pytest.param(
-            "logical",
-            marks=pytest.mark.description(
-                "When two MiB logical messages cross Go, Node.js and Rust through a packet-limited broker, complete requests, results and receipted events are delivered."
-            ),
-        ),
-        pytest.param(
             "identity",
             marks=pytest.mark.description(
                 "When the CLI exchanges large encrypted snapshots and live events, revocation denies the old token and removes grants and peers; re-pairing after revocation or config loss retains key identity with one active grant and peer."
@@ -34,13 +28,13 @@ pytestmark = pytest.mark.transport
         pytest.param(
             "node",
             marks=pytest.mark.description(
-                "When the Node.js MQTT adapter publishes a two MiB result, bounded MQTT frames deliver the complete body without reconnecting."
+                "When the Node.js MQTT adapter publishes a two MiB result, one packet-sized reference is delivered after the complete object is readable and the connection never reconnects."
             ),
         ),
         pytest.param(
             "boundaries",
             marks=pytest.mark.description(
-                "Payloads of one byte and at 60 KiB plus or minus one cross the real broker intact, with every wire packet inside the packet budget."
+                "Results immediately below, exactly at, and one encoded byte above the negotiated packet boundary are delivered as one inline PUBLISH or as one packet-sized reference, and the topic length moves that boundary exactly."
             ),
         ),
     ],
@@ -63,11 +57,6 @@ def test_native_transport(case, postgres, broker):
             "-test.run=^TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto$",
             "-test.v",
         ],
-        "logical": [
-            "/workspace/.verification/bin/broker-tests",
-            "-test.run=^TestMQTTLogicalTransportCarriesLargeMessagesBetweenGoNodeAndRust$",
-            "-test.v",
-        ],
         "identity": [
             "/workspace/.verification/bin/server-tests",
             "-test.run=^TestIdentityAndEncryptedTransportAgainstIsolatedStack$",
@@ -88,7 +77,7 @@ def test_native_transport(case, postgres, broker):
         "access/cmd/server"
         if case == "identity"
         else "access/internal/broker"
-        if case in ("logical", "routes")
+        if case == "routes"
         else "."
     )
     result = subprocess.run(

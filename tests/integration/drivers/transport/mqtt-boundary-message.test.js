@@ -1,127 +1,212 @@
-// TRAN-14: exact payload boundaries through the real broker.
+// AC-01.below / .at / .above / .headers against the real broker.
 //
-// One byte, one chunk minus one, exactly one chunk, one chunk plus one and two
-// chunks plus one must all arrive with content preserved. Every wire packet
-// stays inside the broker's packet budget, so a boundary cannot be delivered by
-// silently raising the MQTT packet size.
+// Every HostResult is one complete MQTT PUBLISH. The encoded packet, including
+// the topic, packet identifier and properties, is compared with the negotiated
+// 64 KiB limit. Exactly at or below it the result stays inline; one encoded byte
+// above it the complete ciphertext is uploaded first and only a packet-sized
+// reference is published. No fragment, receipt or acknowledgement packet exists.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-
-const require = createRequire(
-  new URL('../../../../host/runtime/package.json', import.meta.url),
-)
-const mqtt = require('mqtt')
 import { MqttAccess } from '../../../../host/runtime/src/access/mqtt.js'
-import { LogicalTransport, PACKET_BYTES } from '../../../../host/runtime/src/access/transport.js'
+import { publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
 import { codec } from '../../../../host/runtime/src/protocol.js'
+import {
+  capturePublishes,
+  createRelayStub,
+  hasLegacyFraming,
+  nextMessage,
+  subscribe,
+} from './relay-fixture.mjs'
 
-const CHUNK = 60 * 1024
-const SIZES = [1, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK - 1, 2 * CHUNK + 1]
+const MQTT_URL = process.env.WHALEREIN_TEST_MQTT_URL ?? 'mqtt://127.0.0.1:1884'
+const TOKEN = process.env.WHALEREIN_TEST_HOST_PASSWORD ?? 'host-pass'
+const proto = codec()
 
-test('payloads at and around the fragmentation boundary survive the real broker', { timeout: 30000 }, async () => {
-  const hostId = process.env.WHALEREIN_TEST_HOST_ID ?? `boundary-${randomUUID()}`
-  const url = process.env.WHALEREIN_TEST_MQTT_URL ?? 'mqtt://127.0.0.1:1884'
-  const proto = codec()
-  const resultTopic = `whalerein/v1/h/${hostId}/result`
-  const requestTopic = `whalerein/v1/h/${hostId}/request`
-  const subscriber = await mqtt.connectAsync(url, {
-    protocolVersion: 5,
-    clientId: `boundary-reader-${randomUUID()}`,
-    username: process.env.WHALEREIN_TEST_ACCESS_USERNAME ?? 'access',
-    password: process.env.WHALEREIN_TEST_ACCESS_PASSWORD,
-    reconnectPeriod: 0,
-    connectTimeout: 3000,
+function envelope(hostId, requestId, body) {
+  return proto.encode('whalerein.v1.HostResult', {
+    request_id: requestId,
+    host_id: hostId,
+    device_id: 'device-fixture',
+    channel_id: 'channel-fixture',
+    status: 'succeeded',
+    result_body: body,
+    completed_at_unix_ms: 1,
+    protocol_version: 1,
+    relay_version: 4,
   })
-  const packetSizes = []
-  const expected = new Map()
-  const received = new Map()
-  let resolveProbe
-  const probed = new Promise((resolve) => {
-    resolveProbe = resolve
-  })
+}
+
+// The exact packet size never needs the topic's message body to be published:
+// publishPacketBytes only needs the payload length. Use the real codec shape.
+function packetSize(topic, bodyLength, hostId) {
+  const size = proto.encode('whalerein.v1.HostResult', {
+    request_id: 'r'.repeat(36),
+    host_id: hostId,
+    device_id: 'device-fixture',
+    channel_id: 'channel-fixture',
+    status: 'succeeded',
+    result_body: new Uint8Array(bodyLength),
+    completed_at_unix_ms: 1,
+    protocol_version: 1,
+    relay_version: 4,
+  }).length
+  return publishPacketBytes(topic, size)
+}
+
+function maxBodyForPacket(topic, limit, hostId) {
+  let low = 1
+  let high = limit
+  if (packetSize(topic, low, hostId) > limit) return 0
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (packetSize(topic, middle, hostId) <= limit) low = middle
+    else high = middle - 1
+  }
+  return low
+}
+
+function body(length, seed = 0) {
+  const value = new Uint8Array(length)
+  for (let index = 0; index < length; index++) value[index] = (index * 31 + seed) % 251
+  return value
+}
+
+async function hostAccess(hostId, relay) {
   const access = new MqttAccess({
-    url,
+    url: MQTT_URL,
     hostId,
-    token: process.env.WHALEREIN_TEST_HOST_PASSWORD ?? 'host-pass',
+    token: TOKEN,
+    relayClient: relay,
     connect: (target, options) => {
-      const client = mqtt.connect(target, options)
-      const publish = client.publish.bind(client)
-      client.publish = (topic, bytes, ...args) => {
-        packetSizes.push(bytes.length)
-        return publish(topic, bytes, ...args)
-      }
+      const client = mqttConnect(target, options)
+      access.__packets = capturePublishes(client)
       return client
     },
   })
+  access.start({})
+  await access.waitForConnected(5000)
+  return access
+}
+
+const require = createRequire(new URL('../../../../host/runtime/package.json', import.meta.url))
+const mqtt = require('mqtt')
+function mqttConnect(target, options) {
+  return mqtt.connect(target, options)
+}
+
+test('AC-01 complete result packets stay inline below and at the encoded boundary', { timeout: 30000 }, async () => {
+  const hostId = `h-ac01-${randomUUID().slice(0, 12)}`
+  const topic = `whalerein/v1/h/${hostId}/result`
+  const stub = createRelayStub()
+  const subscriber = await subscribe(MQTT_URL, topic)
+  const access = await hostAccess(hostId, stub.relay)
   try {
-    await subscriber.subscribeAsync('whalerein/v1/h/+/result', { qos: 1 })
-    const receiver = new LogicalTransport({
-      codec: proto,
-      publish: (topic, bytes) => subscriber.publishAsync(topic, bytes, { qos: 1 }),
-    })
-    subscriber.on('message', (topic, bytes) => {
-      if (topic !== resultTopic) return
-      receiver
-        .receive(topic, bytes, requestTopic, (body) => {
-          const result = proto.decode('whalerein.v1.HostResult', body)
-          if (expected.has(result.request_id)) {
-            received.set(result.request_id, result.result_body.length)
-          }
-        })
-        .then((consumed) => {
-          if (!consumed) {
-            const result = proto.decode('whalerein.v1.HostResult', bytes)
-            if (expected.has(result.request_id)) {
-              received.set(result.request_id, result.result_body.length)
-            }
-          }
-        })
-        .catch(() => {})
-    })
-    access.start({
-      onRequest: (request) => {
-        if (request.request_id === 'probe') resolveProbe()
-      },
-    })
-    await access.waitForConnected(3000)
-    await subscriber.publishAsync(
-      requestTopic,
-      proto.encode('whalerein.v1.HostRequest', {
-        request_id: 'probe',
-        host_id: hostId,
-        relay_transport_version: 2,
-      }),
-      { qos: 1 },
-    )
-    await probed
-    for (const size of SIZES) {
+    const limit = access.sendPacketLimit()
+    const at = maxBodyForPacket(topic, limit, hostId)
+    const below = maxBodyForPacket(topic, limit - 1, hostId)
+    assert.equal(packetSize(topic, below, hostId), limit - 1)
+    assert.equal(packetSize(topic, at, hostId), limit)
+
+    for (const [label, size] of [['below', below], ['at', at]]) {
       const requestId = randomUUID()
-      const body = new Uint8Array(size)
-      for (let index = 0; index < size; index++) body[index] = index % 251
-      expected.set(requestId, size)
-      await access.publishResult(
-        proto.encode('whalerein.v1.HostResult', {
-          request_id: requestId,
-          host_id: hostId,
-          status: 'succeeded',
-          result_body: body,
-        }),
-      )
-      const deadline = Date.now() + 5000
-      while (!received.has(requestId) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10))
-      }
-      assert.equal(received.get(requestId), size, `payload size ${size} was not delivered intact`)
+      const bodyBytes = body(size)
+      const received = nextMessage(subscriber, (_, bytes) => proto.decode('whalerein.v1.HostResult', bytes).request_id === requestId)
+      const result = await access.publishResult(envelope(hostId, requestId, bodyBytes))
+      assert.equal(result.representation, 'inline', `AC-01.${label} must stay inline`)
+      assert.equal(result.packetBytes, size === at ? limit : limit - 1)
+      const message = await received
+      const delivered = proto.decode('whalerein.v1.HostResult', message.bytes)
+      assert.deepEqual(Buffer.from(delivered.result_body), Buffer.from(bodyBytes))
+      assert.ok(delivered.result_reference == null)
+      assert.equal(stub.events.length, 0, 'an inline result never touches the directory')
     }
-    assert.equal(access.connected, true)
-    assert.equal(access.describe().reconnects, 0)
-    assert.ok(packetSizes.length > 0)
-    assert.ok(packetSizes.every((size) => size <= PACKET_BYTES), 'a wire packet exceeded the broker budget')
+    const packets = access.__packets
+    assert.ok(packets.length >= 2)
+    assert.ok(packets.every((packet) => packet.packetBytes <= limit))
+    assert.equal(hasLegacyFraming(packets), false)
   } finally {
     await access.stop()
     await subscriber.endAsync(true)
+  }
+})
+
+test('AC-01.above publishes one packet-sized reference after the object is readable', { timeout: 30000 }, async () => {
+  const hostId = `h-ac01-above-${randomUUID().slice(0, 10)}`
+  const topic = `whalerein/v1/h/${hostId}/result`
+  const stub = createRelayStub()
+  const subscriber = await subscribe(MQTT_URL, topic)
+  const access = await hostAccess(hostId, stub.relay)
+  try {
+    const limit = access.sendPacketLimit()
+    const at = maxBodyForPacket(topic, limit, hostId)
+    const above = at + 1
+    assert.equal(packetSize(topic, above, hostId), limit + 1)
+    const requestId = randomUUID()
+    const bodyBytes = body(above, 7)
+    const received = nextMessage(subscriber, (_, bytes) => proto.decode('whalerein.v1.HostResult', bytes).request_id === requestId)
+    const result = await access.publishResult(envelope(hostId, requestId, bodyBytes))
+    assert.equal(result.representation, 'reference')
+    assert.ok(result.packetBytes <= limit, 'the reference itself must fit one packet')
+    const message = await received
+    assert.ok(publishPacketBytes(topic, message.bytes.length) <= limit)
+    const delivered = proto.decode('whalerein.v1.HostResult', message.bytes)
+    assert.equal((delivered.result_body ?? new Uint8Array()).length, 0)
+    const reference = delivered.result_reference
+    assert.ok(reference, 'the oversized result must carry a reference')
+    assert.equal(Number(reference.ciphertext_bytes), bodyBytes.length)
+    assert.equal(reference.purpose, 'PAYLOAD_PURPOSE_RESULT')
+    // The directory saw reserve, upload and finish before any package was sent.
+    const names = stub.events.map((entry) => entry.event)
+    assert.deepEqual(names, ['reserve', 'upload', 'finish'])
+    assert.equal(stub.objects.get(reference.object_id).readable, true)
+    assert.deepEqual(await stub.relay.fetch({ reference }), bodyBytes)
+    const packets = access.__packets.filter((packet) => packet.topic === topic && proto.decode('whalerein.v1.HostResult', packet.raw).request_id === requestId)
+    assert.equal(packets.length, 1, 'exactly one complete reference PUBLISH')
+    assert.ok(packets.every((packet) => packet.packetBytes <= limit))
+    assert.equal(hasLegacyFraming(access.__packets), false)
+  } finally {
+    await access.stop()
+    await subscriber.endAsync(true)
+  }
+})
+
+test('AC-01.headers moves the inline boundary by exactly the topic bytes', { timeout: 30000 }, async () => {
+  const shortHost = `h-${randomUUID().slice(0, 10)}`
+  const longHost = `${shortHost}-topic-suffix`
+  const shortTopic = `whalerein/v1/h/${shortHost}/result`
+  const longTopic = `whalerein/v1/h/${longHost}/result`
+  assert.equal(longTopic.length - shortTopic.length, Buffer.byteLength(longHost) - Buffer.byteLength(shortHost))
+  const stub = createRelayStub()
+  const shortSubscriber = await subscribe(MQTT_URL, shortTopic)
+  const longSubscriber = await subscribe(MQTT_URL, longTopic)
+  const shortAccess = await hostAccess(shortHost, stub.relay)
+  const longAccess = await hostAccess(longHost, stub.relay)
+  try {
+    const limit = shortAccess.sendPacketLimit()
+    const shortAt = maxBodyForPacket(shortTopic, limit, shortHost)
+    const longAt = maxBodyForPacket(longTopic, limit, longHost)
+    const delta = packetSize(longTopic, 1, longHost) - packetSize(shortTopic, 1, shortHost)
+    assert.ok(delta > longTopic.length - shortTopic.length, 'the topic and encoded host field both count')
+    assert.equal(shortAt - longAt, delta, 'the boundary moves by the whole encoded framing delta')
+    assert.equal(packetSize(longTopic, shortAt, longHost), limit + delta)
+    // The same body that was inline for the short topic is now a reference.
+    const requestId = randomUUID()
+    const bodyBytes = body(shortAt)
+    const received = nextMessage(longSubscriber, (_, bytes) => proto.decode('whalerein.v1.HostResult', bytes).request_id === requestId)
+    const result = await longAccess.publishResult(envelope(longHost, requestId, bodyBytes))
+    assert.equal(result.representation, 'reference')
+    const message = await received
+    assert.equal(proto.decode('whalerein.v1.HostResult', message.bytes).result_reference.purpose, 'PAYLOAD_PURPOSE_RESULT')
+    assert.ok(result.packetBytes <= limit)
+    assert.ok(longAccess.__packets.every((packet) => packet.packetBytes <= limit))
+    assert.equal(hasLegacyFraming(longAccess.__packets), false)
+  } finally {
+    await shortAccess.stop()
+    await longAccess.stop()
+    await shortSubscriber.endAsync(true)
+    await longSubscriber.endAsync(true)
   }
 })

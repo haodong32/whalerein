@@ -5,7 +5,7 @@ pub mod mqtt;
 pub(crate) mod transport;
 
 pub use http::{AccessClient, AccessError, AccessErrorKind};
-pub use mqtt::{backoff_delay, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
+pub use mqtt::{backoff_delay, DeliveryClass, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
 
 #[cfg(test)]
 pub use mqtt::{device_event_topic, BACKOFF_CAP};

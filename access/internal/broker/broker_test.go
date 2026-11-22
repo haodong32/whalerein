@@ -29,7 +29,11 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 		{Topic{HostID: "h1", Kind: KindRequest}, "whalerein/v1/h/h1/request"},
 		{Topic{HostID: "h1", Kind: KindResult}, "whalerein/v1/h/h1/result"},
 		{Topic{HostID: "h1", Kind: KindEvent}, "whalerein/v1/h/h1/event"},
+		{Topic{HostID: "h1", Kind: KindLive}, "whalerein/v1/h/h1/live"},
 		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceEvent}, "whalerein/v1/h/h1/d/d1/event"},
+		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceNotice}, "whalerein/v1/h/h1/d/d1/notice"},
+		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceReady}, "whalerein/v1/h/h1/d/d1/ready"},
+		{Topic{HostID: "h1", DeviceID: "d1", Kind: KindDeviceLive}, "whalerein/v1/h/h1/d/d1/live"},
 	}
 	for _, tc := range cases {
 		var got string
@@ -40,8 +44,16 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 			got = ResultTopic(tc.topic.HostID)
 		case KindEvent:
 			got = EventTopic(tc.topic.HostID)
+		case KindLive:
+			got = LiveTopic(tc.topic.HostID)
 		case KindDeviceEvent:
 			got = DeviceEventTopic(tc.topic.HostID, tc.topic.DeviceID)
+		case KindDeviceNotice:
+			got = DeviceNoticeTopic(tc.topic.HostID, tc.topic.DeviceID)
+		case KindDeviceReady:
+			got = DeviceReadyTopic(tc.topic.HostID, tc.topic.DeviceID)
+		case KindDeviceLive:
+			got = DeviceLiveTopic(tc.topic.HostID, tc.topic.DeviceID)
 		}
 		if got != tc.want {
 			t.Fatalf("got %q want %q", got, tc.want)
@@ -56,8 +68,10 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"", "whalerein/v1/h/", "whalerein/v1/h/h1", "whalerein/v1/h/h1/other",
-		"whalerein/v1/h/h1/d/d1/other", "whalerein/v1/h/h1/d/d1", "whalerein/v1/h/+/request",
+		"whalerein/v1/h/h1/d/d1/other", "whalerein/v1/h/h1/d/d1", "whalerein/v1/h/+/live",
+		"whalerein/v1/h/h1/d/+/live", "whalerein/v1/h/+/request",
 		"whalerein/v1/h/h1/d/+/event", "other/v1/h/h1/request", "whalerein/v1/h/h1/request/",
+		"whalerein/v1/h/h1/d/d1/ack",
 	} {
 		if _, err := ParseTopic(bad); err == nil {
 			t.Fatalf("expected parse error for %q", bad)
@@ -121,16 +135,17 @@ func TestPresenceCacheTracksConnectionCountsAndExpiry(t *testing.T) {
 }
 
 type fakeSession struct {
-	mu           sync.Mutex
-	published    []string
-	payloads     [][]byte
-	subscribed   []string
-	publishErr   error
-	subscribeErr error
-	done         chan struct{}
-	closed       bool
-	onPublish    func(string, []byte)
-	qos          []byte
+	mu            sync.Mutex
+	published     []string
+	payloads      [][]byte
+	subscribed    []string
+	subscribedQoS []byte
+	publishErr    error
+	subscribeErr  error
+	done          chan struct{}
+	closed        bool
+	onPublish     func(string, []byte)
+	qos           []byte
 }
 
 func newFakeSession() *fakeSession {
@@ -149,9 +164,12 @@ func (f *fakeSession) Publish(_ context.Context, topic string, payload []byte, q
 	return f.publishErr
 }
 
-func (f *fakeSession) Subscribe(_ context.Context, topics []string, _ byte) error {
+func (f *fakeSession) Subscribe(_ context.Context, topics []string, qos byte) error {
 	f.mu.Lock()
 	f.subscribed = append(f.subscribed, topics...)
+	for range topics {
+		f.subscribedQoS = append(f.subscribedQoS, qos)
+	}
 	f.mu.Unlock()
 	return f.subscribeErr
 }
@@ -231,12 +249,21 @@ func TestBrokerReconnectsAfterFailureAndStopsOnCancellation(t *testing.T) {
 	}
 	session.mu.Lock()
 	subscribed := append([]string(nil), session.subscribed...)
+	subscribedQoS := append([]byte(nil), session.subscribedQoS...)
 	session.mu.Unlock()
-	if len(subscribed) != 6 {
+	if len(subscribed) != 7 {
 		t.Fatalf("subscribed = %v", subscribed)
 	}
 	if subscribed[3] != DeviceWillFilter {
 		t.Fatalf("device will filter not subscribed: %v", subscribed)
+	}
+	if subscribed[6] != LiveFilter || subscribedQoS[6] != 0 {
+		t.Fatalf("live filter subscription = %q qos=%d", subscribed[6], subscribedQoS[6])
+	}
+	for _, qos := range subscribedQoS[:6] {
+		if qos != 1 {
+			t.Fatalf("control subscription used qos %d", qos)
+		}
 	}
 	close(session.done)
 	time.Sleep(5 * time.Millisecond)
@@ -313,17 +340,24 @@ func TestPublishRoutesRequestsAndDeviceEventsAndRejectsInvalidInputs(t *testing.
 	}
 	session.publishErr = nil
 
-	if err := service.PublishDeviceEvent(ctx, "h1", "d1", []byte("event")); err != nil {
+	eventPayload := mustMarshalEvent(t, "h1", "d1")
+	if err := service.PublishDeviceEvent(ctx, "h1", "d1", eventPayload); err != nil {
 		t.Fatal(err)
 	}
 	if session.published[len(session.published)-1] != "whalerein/v1/h/h1/d/d1/event" {
 		t.Fatalf("device event topic = %v", session.published)
 	}
-	if err := service.PublishDeviceEvent(ctx, "h1", "bad/d1", []byte("event")); !errors.Is(err, ErrInvalidTopic) {
+	if err := service.PublishDeviceEvent(ctx, "h1", "bad/d1", eventPayload); !errors.Is(err, ErrInvalidTopic) {
 		t.Fatalf("bad device = %v", err)
 	}
+	if err := service.PublishDeviceEvent(ctx, "h1", "d1", []byte("event")); err == nil {
+		t.Fatal("invalid event envelope accepted")
+	}
+	if err := service.PublishDeviceEvent(ctx, "h1", "d1", mustMarshalEventVersion(t, 2)); !errors.Is(err, ErrRelayEpoch) {
+		t.Fatalf("foreign epoch = %v", err)
+	}
 	service.setSession(nil, false)
-	if err := service.PublishDeviceEvent(ctx, "h1", "d1", nil); !errors.Is(err, ErrUnavailable) {
+	if err := service.PublishDeviceEvent(ctx, "h1", "d1", eventPayload); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("no session device = %v", err)
 	}
 }
@@ -340,7 +374,7 @@ func TestPublishAndAwaitReturnsMatchingHostResult(t *testing.T) {
 			t.Errorf("decode: %v", err)
 			return
 		}
-		result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: sent.GetRequestId(), HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded})
+		result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: sent.GetRequestId(), HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: RelayEpoch})
 		service.HandleMessage(ResultTopic("h1"), result)
 	}
 	service.SetResultHandler(func(context.Context, string, *whalereinv1.HostResult) error { return nil })
@@ -384,25 +418,33 @@ func TestHandleMessageRoutesResultsAndEvents(t *testing.T) {
 	})
 	service.HandleMessage("bogus/topic", nil)
 	service.HandleMessage(RequestTopic("h1"), nil)
-	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1"})
+	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1", RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), result)
+	// A missing or foreign relay epoch is rejected before business handling.
+	foreign, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "foreign", HostId: "h1"})
+	service.HandleMessage(ResultTopic("h1"), foreign)
 	if len(results) != 1 || results[0] != "h1:r1" {
 		t.Fatalf("results = %v", results)
 	}
 	service.HandleMessage(ResultTopic("h1"), []byte("bad"))
-	mismatch, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r2", HostId: "h2"})
+	mismatch, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r2", HostId: "h2", RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), mismatch)
-	service.HandleMessage(EventTopic("h1"), []byte("event"))
-	if len(events) != 1 || events[0] != "h1:event" {
+	eventPayload := mustMarshalEvent(t, "h1", "d1")
+	service.HandleMessage(EventTopic("h1"), eventPayload)
+	if len(events) != 1 || events[0] != "h1:"+string(eventPayload) {
 		t.Fatalf("events = %v", events)
 	}
-	service.SetEventHandler(func(context.Context, string, []byte) error { return errors.New("route failed") })
 	service.HandleMessage(EventTopic("h1"), []byte("event"))
+	if len(events) != 1 {
+		t.Fatal("malformed event entered business handling")
+	}
+	service.SetEventHandler(func(context.Context, string, []byte) error { return errors.New("route failed") })
+	service.HandleMessage(EventTopic("h1"), eventPayload)
 
 	// Transient results take precedence over the permanent handler.
 	channel := make(chan *whalereinv1.HostResult, 1)
 	service.transient["transient"] = channel
-	transient, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "transient", HostId: "h1"})
+	transient, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "transient", HostId: "h1", RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), transient)
 	select {
 	case result := <-channel:
@@ -417,7 +459,7 @@ func TestHandleMessageRoutesResultsAndEvents(t *testing.T) {
 	service.SetResultHandler(nil)
 	service.HandleMessage(ResultTopic("h1"), result)
 	service.SetEventHandler(nil)
-	service.HandleMessage(EventTopic("h1"), []byte("event"))
+	service.HandleMessage(EventTopic("h1"), eventPayload)
 }
 
 func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
@@ -438,8 +480,9 @@ func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
 		return nil
 	})
 	key := bytes.Repeat([]byte{7}, 32)
-	body, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h1", AuthorizationPublicKey: key})
-	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body})
+	body := mustMarshalHostReady(t, "h1")
+	body, _ = proto.Marshal(&whalereinv1.HostReady{HostId: "h1", AuthorizationPublicKey: key, Receive: testAdvertisement(1), RelayVersion: RelayEpoch})
+	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body, RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), result)
 	select {
 	case host := <-ready:
@@ -456,23 +499,65 @@ func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
 		t.Fatal("authorization key was not stored")
 	}
 	// Non-succeeded ready is rejected.
-	failed, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_failed, ResultBody: body})
+	failed, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_failed, ResultBody: body, RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), failed)
 	// Malformed ready body is rejected.
-	bad, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("bad")})
+	bad, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("bad"), RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), bad)
+	// A foreign relay epoch is rejected before presence.
+	foreignBody := mustMarshalHostReadyVersion(t, "h1", 2)
+	foreign, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: foreignBody, RelayVersion: 2})
+	service.HandleMessage(ResultTopic("h1"), foreign)
 	// Ready host id must match the topic.
-	mismatch, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h2")})
+	mismatchBody := mustMarshalHostReady(t, "h2")
+	mismatch, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mismatchBody, RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), mismatch)
 }
 
 func mustMarshalHostReady(t *testing.T, hostID string) []byte {
 	t.Helper()
-	data, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID})
+	data, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID, Receive: testAdvertisement(1), RelayVersion: RelayEpoch})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func mustMarshalHostReadyVersion(t *testing.T, hostID string, version uint32) []byte {
+	t.Helper()
+	data, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID, Receive: testAdvertisement(1), RelayVersion: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func mustMarshalEvent(t *testing.T, hostID, deviceID string) []byte {
+	t.Helper()
+	return mustMarshalEventVersion(t, RelayEpoch)
+}
+
+func mustMarshalEventVersion(t *testing.T, version uint32) []byte {
+	t.Helper()
+	data, err := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h1", DeviceId: "d1", ChannelId: "c1", Nonce: []byte("nonce"), Ciphertext: []byte("event"), RelayVersion: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// testAdvertisement is one internally consistent peer receive budget bound to
+// the supplied broker connection generation.
+func testAdvertisement(generation uint64) *whalereinv1.ReceiveAdvertisement {
+	return &whalereinv1.ReceiveAdvertisement{
+		Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
+		Budget: &whalereinv1.TransportBudget{
+			PacketBytes: 65536, EnvelopeBytes: 16 << 20,
+			BulkConcurrency: 4, ReservedBytes: 32 << 20, TransferTimeoutMs: 120000,
+		},
+		ConnectionGeneration: generation,
+		RelayVersion:         RelayEpoch,
+	}
 }
 
 func TestPahoConnectorRejectsInvalidConfiguration(t *testing.T) {
@@ -552,7 +637,7 @@ func TestPahoConnectorDistinguishesDialAndHandshakeFailures(t *testing.T) {
 
 func TestHandleReadyIgnoresMissingResultHandler(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
-	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h1")})
+	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h1"), RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), result)
 }
 
@@ -590,7 +675,7 @@ func TestPublishAndAwaitUsesDefaultTimeoutAndRejectsDuplicateOutstandingRequestI
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{session}})
 	service.setSession(session, true)
 	session.onPublish = func(string, []byte) {
-		result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded})
+		result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: RelayEpoch})
 		service.HandleMessage(ResultTopic("h1"), result)
 	}
 	if _, err := service.PublishAndAwait(context.Background(), "h1", &whalereinv1.HostRequest{RequestId: "r1", HostId: "h1"}, 0); err != nil {
@@ -612,7 +697,7 @@ func TestHandleResultFillsMissingHostIDFromTopic(t *testing.T) {
 		}
 		return nil
 	})
-	data, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1"})
+	data, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), data)
 	if gotHost != "h1" {
 		t.Fatalf("host = %q", gotHost)
@@ -624,7 +709,7 @@ func TestPublishDeviceEventReturnsBrokerFailure(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{session}})
 	service.setSession(session, true)
 	session.publishErr = errors.New("mqtt down")
-	if err := service.PublishDeviceEvent(context.Background(), "h1", "d1", []byte("x")); err == nil {
+	if err := service.PublishDeviceEvent(context.Background(), "h1", "d1", mustMarshalEvent(t, "h1", "d1")); err == nil {
 		t.Fatal("expected publish error")
 	}
 }
@@ -636,7 +721,7 @@ func TestReadyUsesBaseContextWhenRequestContextIsNil(t *testing.T) {
 		ready <- struct{}{}
 		return nil
 	})
-	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h1")})
+	result, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "", HostId: "h1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: mustMarshalHostReady(t, "h1"), RelayVersion: RelayEpoch})
 	service.HandleMessage(ResultTopic("h1"), result)
 	select {
 	case <-ready:
@@ -683,22 +768,55 @@ func (f *fakeMQTTClient) Done() <-chan struct{} {
 
 func (f *fakeMQTTClient) Disconnect(*paho.Disconnect) error { return f.disconnectErr }
 
-func TestPahoSessionPreservesRequestedQoSAndReportsBrokerRejections(t *testing.T) {
+// newRelayTestSession builds one pahoSession with the packaged default budget,
+// a queue and no registered receiver advertisement.
+func newRelayTestSession(client *fakeMQTTClient) *pahoSession {
+	local := config.DefaultTransportEffective()
+	publish := func(ctx context.Context, topic string, payload []byte) error {
+		response, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Payload: payload})
+		if err != nil {
+			return err
+		}
+		if response != nil && response.ReasonCode >= 0x80 {
+			return errors.New("mqtt publish rejected")
+		}
+		return nil
+	}
+	return &pahoSession{
+		client:      client,
+		publisher:   newPublisher(publish, local, nil),
+		peers:       &sync.Map{},
+		budget:      local,
+		brokerLimit: whalereinv1.BrokerPacketLimitBytes,
+		receivers:   NewReceiverBudgets(),
+		stager:      &stagerRef{},
+	}
+}
+
+func TestPahoSessionPublishesInlineAndReportsBrokerRejections(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0}, suback: &paho.Suback{Reasons: []byte{0}}}
-	session := &pahoSession{client: client}
-	if err := session.Publish(ctx, "topic", []byte("x"), 1); err != nil || client.publishTopic != "topic" || client.publishQoS != 1 || !bytes.Equal(client.publishPayload, []byte("x")) {
+	session := newRelayTestSession(client)
+	payload, _ := proto.Marshal(&whalereinv1.HostRequest{RequestId: "r1", HostId: "h1", Body: []byte("x"), RelayVersion: RelayEpoch})
+	if err := session.Publish(ctx, RequestTopic("h1"), payload, 1); err != nil || client.publishTopic != RequestTopic("h1") || client.publishQoS != 1 || !bytes.Equal(client.publishPayload, payload) {
 		t.Fatalf("publish err=%v topic=%q", err, client.publishTopic)
 	}
 	client.publishResponse = &paho.PublishResponse{ReasonCode: 0x80}
-	if err := session.Publish(ctx, "topic", nil, 1); err == nil {
+	if err := session.Publish(ctx, RequestTopic("h1"), payload, 1); err == nil {
 		t.Fatal("expected publish rejection")
 	}
+	client.publishResponse = &paho.PublishResponse{ReasonCode: 0}
 	client.publishErr = errors.New("network")
-	if err := session.Publish(ctx, "topic", nil, 1); err == nil {
+	if err := session.Publish(ctx, RequestTopic("h1"), payload, 1); err == nil {
 		t.Fatal("expected publish error")
 	}
 	client.publishErr = nil
+	if err := session.Publish(ctx, "topic", []byte("x"), 1); err == nil {
+		t.Fatal("invalid topic accepted")
+	}
+	if err := session.Publish(ctx, RequestTopic("h1"), nil, 1); err == nil {
+		t.Fatal("empty packet accepted")
+	}
 	if err := session.Subscribe(ctx, []string{"a", "b"}, 1); err != nil || len(client.subscribeTopics) != 2 || client.subscribeTopics[0] != "a" || client.subscribeTopics[1] != "b" || !bytes.Equal(client.subscribeQoS, []byte{1, 1}) {
 		t.Fatalf("subscribe err=%v topics=%v", err, client.subscribeTopics)
 	}
@@ -732,12 +850,7 @@ func TestPahoSessionPreservesRequestedQoSAndReportsBrokerRejections(t *testing.T
 
 func TestPahoSessionPublishesPresenceJsonAsRawMqtt(t *testing.T) {
 	client := &fakeMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0}}
-	peers := &sync.Map{}
-	transport := newLogicalTransport(func(ctx context.Context, topic string, payload []byte) error {
-		_, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Payload: payload})
-		return err
-	}, func(string, []byte) {})
-	session := &pahoSession{client: client, transport: transport, peers: peers}
+	session := newRelayTestSession(client)
 	payload := []byte(`{"event":"device_offline","device_id":"d1","reason":"will","observed_at":"2026-11-13T12:00:00Z"}`)
 	if err := session.Publish(context.Background(), PresenceTopic("h1"), payload, 1); err != nil {
 		t.Fatal(err)
@@ -761,7 +874,7 @@ func TestReadyHandlerRunsOnlyForAnEmptyRequestIDHostReady(t *testing.T) {
 	body, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h1"})
 	normal, _ := proto.Marshal(&whalereinv1.HostResult{
 		RequestId: "request-1", HostId: "h1",
-		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body,
+		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body, RelayVersion: RelayEpoch,
 	})
 	service.HandleMessage(ResultTopic("h1"), normal)
 	select {
@@ -783,13 +896,13 @@ func TestReadyHandlerRunsOnlyForAnEmptyRequestIDHostReady(t *testing.T) {
 
 func mustHostReadyResult(t *testing.T, hostID string) []byte {
 	t.Helper()
-	body, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID})
+	body, err := proto.Marshal(&whalereinv1.HostReady{HostId: hostID, Receive: testAdvertisement(1), RelayVersion: RelayEpoch})
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := proto.Marshal(&whalereinv1.HostResult{
 		RequestId: "", HostId: hostID,
-		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body,
+		Status: whalereinv1.OnlineStatus_succeeded, ResultBody: body, RelayVersion: RelayEpoch,
 	})
 	if err != nil {
 		t.Fatal(err)

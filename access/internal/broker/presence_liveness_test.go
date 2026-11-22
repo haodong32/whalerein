@@ -105,9 +105,13 @@ func TestDeviceWillCannotOverrideANewerConnection(t *testing.T) {
 	})
 
 	presence.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 1000})
-	// A duplicate client id takes over the device identity; the older
-	// connection's delayed Will arrives afterwards.
+	// A duplicate client id takes over the device identity; the broker reports
+	// the older connection's disconnect first, then the older Will arrives.
 	presence.HandleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 2000})
+	presence.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 2500})
+	if len(transitions) != 0 {
+		t.Fatalf("superseded disconnect emitted offline: %+v", transitions)
+	}
 	presence.HandleDeviceWill(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
 	if len(transitions) != 0 {
 		t.Fatalf("stale will marked the newer connection offline: %+v", transitions)
@@ -116,7 +120,7 @@ func TestDeviceWillCannotOverrideANewerConnection(t *testing.T) {
 		t.Fatalf("newer connection state = %+v", presence.devices["d1"])
 	}
 	// The real disconnect for the current connection still transitions.
-	presence.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 3000})
+	presence.HandleNotification(&Notification{Sequence: 4, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 3000})
 	if len(transitions) != 1 || transitions[0].source != PresenceSourceBroker {
 		t.Fatalf("current disconnect = %+v", transitions)
 	}

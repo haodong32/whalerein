@@ -95,11 +95,13 @@ class Attempt:
     later attempts' updates indistinguishable from replays and drop them.
     """
 
-    def __init__(self, index, phase):
+    def __init__(self, index, phase, arm=None, pair_id=None):
         self.identity = f"attempt-{index:04d}"
         self.stream = f"benchmark-attempt-{index:04d}"
         self.fault = FAULTS.get(index, "none")
         self.phase = phase
+        self.arm = arm
+        self.pair_id = pair_id
         self.outcome = None
         self.first_text_ms = None
         self.final_ms = None
@@ -111,6 +113,7 @@ class Attempt:
         self.watch_failed = False
         self.recovery = None
         self.history_reads = None
+        self.attachment_reads = None
         self.content = None
         self.session = None
 
@@ -137,8 +140,13 @@ class Attempt:
         }
         if self.recovery is not None:
             document["recovery"] = self.recovery
+        if self.arm is not None:
+            document["arm"] = self.arm
+            document["pair_id"] = self.pair_id
         if self.history_reads is not None:
             document["history_reads"] = self.history_reads
+        if self.attachment_reads is not None:
+            document["attachment_reads"] = self.attachment_reads
         if self.session:
             document["session_id"] = self.session
             document["host_id"] = host
@@ -182,7 +190,8 @@ def main():
         return 1
     if any(
         read["outcome"] != "completed"
-        for attempt in measured for read in attempt.get("history_reads", [])
+        for attempt in measured
+        for read in (*attempt.get("history_reads", []), *attempt.get("attachment_reads", []))
     ):
         return 1
     return 0
@@ -233,6 +242,13 @@ class Fixture:
             1,
         )
         self.scenario.config.write_text(config)
+        # The mixed-load attachment read needs the existing node-scoped
+        # ciphertext directory. Bounds cover the declared bounded workload (four
+        # history pages plus one chunked attachment) so the fixture quota does
+        # not become the variable under measurement.
+        self.scenario.configure_relay_directory(
+            max_objects=1024, max_active_uploads=32, max_host_bytes=512 << 20, max_node_bytes=1 << 30,
+        )
         self.run.session = self.scenario
         self.scenario.start_dsh()
         before = time.monotonic_ns()
@@ -444,19 +460,37 @@ def execute(run, fixture):
         with isolated_keyring(Path(directory)) as keyring:
             scenario = fixture.scenario
             dsh = scenario.dsh.process
-            history_spec = SCENARIO["workload"].get("history")
+            specification = SCENARIO["workload"]
+            history_spec = specification.get("history")
+            attachment_spec = specification.get("attachment")
             history = None
+            attachment = None
             if history_spec:
                 reader = pair_device(scenario, "history-reader", keyring)
                 history = workflow.prepare_history(scenario, reader, history_spec)
+            if attachment_spec:
+                attachment_reader = pair_device(scenario, "attachment-reader", keyring)
+                attachment = workflow.prepare_attachment(
+                    scenario, attachment_reader, attachment_spec
+                )
             for index in range(WARMUP + ATTEMPTS):
                 phase = "warmup" if index < WARMUP else "measured"
-                attempt = Attempt(len(run.attempts), phase)
+                # Arms alternate independently inside each phase, so the first
+                # measured attempt is always the idle control and its pair
+                # identity is stable across runs.
+                local = index if phase == "warmup" else index - WARMUP
+                arm = model.ARMS[local % 2] if attachment_spec else None
+                pair_id = (
+                    f"{'warmup' if phase == 'warmup' else 'pair'}-{local // 2:04d}"
+                    if attachment_spec
+                    else None
+                )
+                attempt = Attempt(index, phase, arm, pair_id)
                 # A fresh Device keeps previous CLI channels out of this attempt.
                 device = pair_device(fixture.scenario, attempt.identity, keyring)
                 session = fixture.scenario.dsh.create_session()
                 attempt.session = session
-                measure(device, fixture, dsh, session, attempt, history)
+                measure(device, fixture, dsh, session, attempt, history, attachment)
                 run.attempts.append(attempt.record(fixture.scenario.host))
             if dsh.control("gx_effect_counts")["sendUserMessage"] != 0:
                 raise RuntimeError("the Watch-only benchmark invoked a native send")
@@ -470,7 +504,7 @@ def pair_device(scenario, name, keyring):
     return device
 
 
-def measure(device, fixture, dsh, session, attempt, history):
+def measure(device, fixture, dsh, session, attempt, history, attachment):
     observer = Observer(device, fixture.scenario, session, attempt.stream)
     try:
         wait(observer.ready, timeout=120, process=observer.process)
@@ -488,25 +522,50 @@ def measure(device, fixture, dsh, session, attempt, history):
                     attempt, *interrupted.result(), source_start, SOURCE_SIZES
                 )
         elif history is not None:
-            offsets = specification["history"]["start_ms"]
-            with ThreadPoolExecutor(max_workers=len(offsets)) as executor:
-                reads = [
-                    executor.submit(history.read, planned_start + offset * 1_000_000, DEADLINE_MS)
-                    for offset in offsets
-                ]
-                source_start = observer.settle(attempt, planned_start, dsh, session)
-                attempt.history_reads = []
-                for read in reads:
-                    observation = read.result()
-                    observation["at_ms"] = workflow.milliseconds(
-                        observation.pop("started_ns") - source_start
-                    )
-                    attempt.history_reads.append(observation)
+            if attachment is not None and attempt.arm != "bulk":
+                # The idle control shares every non-read condition with bulk.
+                observer.settle(attempt, planned_start, dsh, session)
+            else:
+                read_loads(observer, attempt, planned_start, dsh, session, history, attachment)
         else:
             observer.settle(attempt, planned_start, dsh, session)
     finally:
         observer.close()
     settle(attempt)
+
+
+def read_loads(observer, attempt, planned_start, dsh, session, history, attachment):
+    """Schedule bounded HTTPS reads concurrently with the active Watch."""
+    specification = SCENARIO["workload"]
+    offsets = specification["history"]["start_ms"]
+    attachment_offsets = (specification.get("attachment") or {}).get("start_ms", [])
+    readers = len(offsets) + len(attachment_offsets)
+    with ThreadPoolExecutor(max_workers=readers) as executor:
+        reads = [
+            executor.submit(history.read, planned_start + offset * 1_000_000, DEADLINE_MS)
+            for offset in offsets
+        ]
+        attachments = [
+            executor.submit(attachment.read, planned_start + offset * 1_000_000, DEADLINE_MS)
+            for offset in attachment_offsets
+        ]
+        source_start = observer.settle(attempt, planned_start, dsh, session)
+        attempt.history_reads = record_reads(reads, source_start)
+        if attachment is not None:
+            attempt.attachment_reads = record_reads(attachments, source_start)
+
+
+def record_reads(futures, source_start):
+    observations = []
+    for future in futures:
+        observation = future.result()
+        scheduled_ns = observation.pop("scheduled_ns")
+        started_ns = observation.pop("started_ns")
+        observation["scheduled_at_ms"] = workflow.milliseconds(scheduled_ns - source_start)
+        observation["started_at_ms"] = workflow.milliseconds(started_ns - source_start)
+        observation["at_ms"] = observation["started_at_ms"]
+        observations.append(observation)
+    return observations
 
 
 def start_source(dsh, session, attempt):
@@ -787,7 +846,14 @@ def document_for(run):
             display_delay=True,
         ),
         "diagnostics": model.diagnostic_summary(attempts, SOURCE_SIZES),
-        "workflow_results": model.workflow_summary(attempts, RUN_CONFIG["workflow"]),
+        "workflow_results": model.workflow_summary(
+            attempts,
+            RUN_CONFIG["workflow"],
+            final_bytes=len(FINAL_BYTES),
+            sizes=SOURCE_SIZES,
+            paired=SCENARIO["version"] >= 7 and RUN_CONFIG["workflow"] == "mixed-load",
+            burst_window_ms=model.BURST_WINDOW_MS,
+        ),
         "status": {
             "state": run.state,
             "reasons": list(run.reasons),
@@ -814,7 +880,8 @@ def artifacts():
         ("tests/integration/benchmark",),
         ("tests/integration/environment.py", "tests/integration/fixtures/plugin.mjs",
          "tests/integration/fixtures/adapter.mjs", "tests/integration/client_environment.py",
-         "tools/repo/src/repo/benchmark/model.py"),
+         "tools/repo/src/repo/benchmark/model.py",
+         "tools/repo/src/repo/benchmark/analysis.py"),
     )
     return values
 

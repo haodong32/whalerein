@@ -250,6 +250,7 @@ pub fn request_kind_name(kind: RequestKind) -> &'static str {
         RequestKind::PairingAuthorize => "REQUEST_KIND_PAIRING_AUTHORIZE",
         RequestKind::Revocation => "REQUEST_KIND_REVOCATION",
         RequestKind::HostClients => "REQUEST_KIND_HOST_CLIENTS",
+        RequestKind::AccessReady => "REQUEST_KIND_ACCESS_READY",
     }
 }
 

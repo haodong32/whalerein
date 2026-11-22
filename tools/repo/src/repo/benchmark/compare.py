@@ -33,6 +33,8 @@ def load(directory):
         "artifacts": document["environment"]["artifacts"],
         "fixture": document["environment"]["fixture"],
         "workflow_results": document.get("workflow_results", {}),
+        "bulk": document.get("workflow_results", {}).get("bulk"),
+        "paired": document.get("workflow_results", {}).get("paired"),
         "conditions": {
             "scenario": document["scenario"],
             "surface": document["run"]["surface"],
@@ -124,7 +126,47 @@ def compare(baselines, candidates, *, vary="build"):
         result["reasons"].append("metrics_disagree_or_cross_tolerance")
     if baselines[0]["streaming"] is not None:
         result["streaming"] = _streaming(baselines, candidates)
+    _apply_bulk_gate(result, [*baselines, *candidates])
     return result
+
+
+def _bulk_gate(run):
+    """Combine the declared bulk-read correctness and idle/bulk coverage gates."""
+    bulk = run.get("bulk")
+    paired = run.get("paired")
+    if bulk is None and paired is None:
+        return None
+    read_gate = (bulk or {}).get("gate") or {}
+    arm_gate = (paired or {}).get("gate") or {}
+    reasons = [*read_gate.get("reasons", []), *arm_gate.get("reasons", [])]
+    if read_gate.get("state") == "incomplete" or arm_gate.get("state") == "failed":
+        state = "failed"
+    elif not read_gate or not arm_gate or arm_gate.get("state") != "complete":
+        state = "incomplete"
+    else:
+        state = "complete"
+    return {"state": state, "reasons": reasons}
+
+
+def _apply_bulk_gate(result, runs):
+    """Never let a failed or unproven bulk control pass as a release verdict."""
+    entries = [{"run": run["run"], "gate": _bulk_gate(run)} for run in runs]
+    gates = [entry["gate"] for entry in entries if entry["gate"] is not None]
+    if not gates:
+        return
+    if any(gate["state"] == "failed" for gate in gates):
+        state = "failed"
+    elif any(gate["state"] != "complete" for gate in gates):
+        state = "incomplete"
+    else:
+        state = "complete"
+    result["bulk"] = {"state": state, "runs": entries}
+    if state == "failed":
+        result["reasons"].append("bulk_gate_failed")
+        result["verdict"] = "inconclusive"
+    elif state != "complete":
+        result["reasons"].append("bulk_gate_incomplete")
+        result["verdict"] = "inconclusive"
 
 
 def _link_conditions(run, vary):
@@ -184,7 +226,7 @@ def _compare_links(baselines, candidates, vary):
         for label, arm in (("baseline", baselines), ("candidate", candidates))
     }
     reasons = sorted({entry["reason"] for entry in streaming.values() if entry["reason"]})
-    return {
+    result = {
         "vary": vary,
         "pairs": len(baselines),
         "required_pairs": analysis.DECLARATION["sample_floor"]["run_pairs"],
@@ -198,6 +240,8 @@ def _compare_links(baselines, candidates, vary):
             "candidate": [run["run"] for run in candidates],
         },
     }
+    _apply_bulk_gate(result, all_runs)
+    return result
 
 
 def _streaming(baselines, candidates, metrics=model.STREAMING_METRICS):
@@ -239,6 +283,9 @@ def _correct_streaming_run(run):
     if share is None or share < threshold:
         return False
     workflow = run.get("workflow_results", {})
+    bulk = run.get("bulk")
+    if bulk is not None and (bulk.get("gate") or {}).get("state") != "complete":
+        return False
     if "history_measured" in workflow:
         count = workflow["history_measured"]
         return count > 0 and workflow["history_correct"] / count >= threshold

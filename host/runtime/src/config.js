@@ -23,6 +23,7 @@ export function topics(hostId) {
     request: `whalerein/v1/h/${hostId}/request`,
     result: `whalerein/v1/h/${hostId}/result`,
     event: `whalerein/v1/h/${hostId}/event`,
+    live: `whalerein/v1/h/${hostId}/live`,
     deviceEvent: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/event`,
     presence: `whalerein/v1/h/${hostId}/presence`,
   }

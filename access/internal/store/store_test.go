@@ -49,7 +49,7 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"device_credentials", "device_sessions", "devices", "external_device_revocations", "external_enrollments", "external_operations", "external_removals", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_device_sessions", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations"}
+	want := []string{"device_credentials", "device_sessions", "devices", "external_device_revocations", "external_enrollments", "external_operations", "external_removals", "grants", "host_proof_nonces", "host_signature_replays", "hosts", "pairing_device_sessions", "pairing_operations", "pairing_outcomes", "pairing_tokens", "requests", "schema_migrations", "temporary_ciphertext_leases", "temporary_ciphertext_objects"}
 	if len(tables) != len(want) {
 		t.Fatalf("tables = %v, want exactly %v", tables, want)
 	}
@@ -81,6 +81,9 @@ func TestMigrateCreatesVersionedTablesAndIndexes(t *testing.T) {
 		"host_proof_nonces_created_at", "external_device_revocations_pkey",
 		"cloud_pairing_outcomes_grant_idx", "cloud_pairing_outcomes_auth_idx",
 		"pairing_device_sessions_pkey",
+		"temporary_ciphertext_objects_pkey", "temporary_ciphertext_objects_expiry_idx",
+		"temporary_ciphertext_objects_cleanup_idx", "temporary_ciphertext_objects_active_upload_idx",
+		"temporary_ciphertext_leases_object_idx",
 	} {
 		if _, ok := indexes[required]; !ok {
 			t.Errorf("missing index %s; have %v", required, indexes)

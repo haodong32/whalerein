@@ -18,6 +18,21 @@ import (
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
+type payloadCheckCall struct {
+	reference *whalereinv1.PayloadReference
+	scope     store.PayloadCheckScope
+}
+
+type fakePayloadChecker struct {
+	err   error
+	calls []payloadCheckCall
+}
+
+func (f *fakePayloadChecker) CheckPayload(_ context.Context, reference *whalereinv1.PayloadReference, scope store.PayloadCheckScope) error {
+	f.calls = append(f.calls, payloadCheckCall{reference: reference, scope: scope})
+	return f.err
+}
+
 type fakeGrantAuthority struct {
 	grants map[string]store.AdmissionGrant
 	err    error
@@ -69,6 +84,24 @@ type fakeStore struct {
 	releaseOutcome store.ReleaseOutcome
 	releaseErr     error
 	releaseScopes  []store.ReleaseScope
+
+	heartbeatOutcome store.HeartbeatOutcome
+	heartbeatErr     error
+	heartbeatCalls   []renewCall
+
+	noticeRows      []store.Request
+	noticeClaimErr  error
+	noticePublished []noticePublishCall
+	noticeFailures  []string
+	noticeMarkErr   error
+	noticeStats     store.NoticeBacklog
+	noticeStatsErr  error
+}
+
+type noticePublishCall struct {
+	requestID string
+	status    whalereinv1.OnlineStatus
+	updatedAt time.Time
 }
 
 type renewCall struct {
@@ -167,6 +200,38 @@ func (f *fakeStore) RenewClientLease(_ context.Context, deviceID, requestID stri
 	return f.renewResult, nil
 }
 
+func (f *fakeStore) HeartbeatRequest(_ context.Context, deviceID, sessionID, requestID string, lease time.Duration) (store.HeartbeatOutcome, error) {
+	f.heartbeatCalls = append(f.heartbeatCalls, renewCall{deviceID: deviceID, requestID: requestID, lease: lease})
+	if f.heartbeatErr != nil {
+		return store.HeartbeatOutcome{}, f.heartbeatErr
+	}
+	if f.heartbeatOutcome.Request.RequestID == "" && f.heartbeatOutcome.Failure == "" {
+		return store.HeartbeatOutcome{Renewed: true, Request: f.rows[requestID]}, nil
+	}
+	return f.heartbeatOutcome, nil
+}
+
+func (f *fakeStore) ClaimNoticeIntents(_ context.Context, _ time.Time, _ int, _ time.Duration) ([]store.Request, error) {
+	return f.noticeRows, f.noticeClaimErr
+}
+
+func (f *fakeStore) MarkNoticePublished(_ context.Context, requestID string, status whalereinv1.OnlineStatus, updatedAt time.Time, _ time.Time) (bool, error) {
+	if f.noticeMarkErr != nil {
+		return false, f.noticeMarkErr
+	}
+	f.noticePublished = append(f.noticePublished, noticePublishCall{requestID: requestID, status: status, updatedAt: updatedAt})
+	return true, nil
+}
+
+func (f *fakeStore) MarkNoticeFailure(_ context.Context, requestID string, _, _ time.Time) error {
+	f.noticeFailures = append(f.noticeFailures, requestID)
+	return nil
+}
+
+func (f *fakeStore) NoticeStats(context.Context) (store.NoticeBacklog, error) {
+	return f.noticeStats, f.noticeStatsErr
+}
+
 func (f *fakeStore) ExpireClientLeases(_ context.Context, limit int) ([]store.Request, error) {
 	f.expireLimit = limit
 	if f.expireErr != nil {
@@ -202,6 +267,8 @@ type fakeBroker struct {
 	published []*whalereinv1.HostRequest
 	hosts     []string
 	presence  []string
+	notices   []*whalereinv1.RequestStateNotice
+	noticeErr error
 	err       error
 }
 
@@ -214,6 +281,11 @@ func (f *fakeBroker) PublishRequest(_ context.Context, hostID string, request *w
 func (f *fakeBroker) PublishPresence(_ context.Context, hostID string, payload []byte) error {
 	f.presence = append(f.presence, hostID+"|"+string(payload))
 	return f.err
+}
+
+func (f *fakeBroker) PublishDeviceNotice(_ context.Context, _, _ string, notice *whalereinv1.RequestStateNotice) error {
+	f.notices = append(f.notices, notice)
+	return f.noticeErr
 }
 
 type fakePresence struct {
@@ -245,6 +317,7 @@ type fixture struct {
 	broker   *fakeBroker
 	presence *fakePresence
 	grants   *fakeGrantAuthority
+	payloads *fakePayloadChecker
 	now      time.Time
 }
 
@@ -256,10 +329,11 @@ func newFixture(t *testing.T) *fixture {
 	grants := &fakeGrantAuthority{grants: map[string]store.AdmissionGrant{
 		"h1|d1": {HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 7, RevocationGeneration: 3, DeviceRevocationGeneration: 2},
 	}}
+	payloads := &fakePayloadChecker{}
 	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-	ref := &fixture{store: fs, broker: broker, presence: presence, grants: grants, now: now}
+	ref := &fixture{store: fs, broker: broker, presence: presence, grants: grants, payloads: payloads, now: now}
 	service, err := New(Dependencies{
-		Store: fs, Broker: broker, Presence: presence, Grants: grants,
+		Store: fs, Broker: broker, Presence: presence, Grants: grants, Payloads: payloads,
 		Config: Config{
 			ProtocolVersion: 1, MaxTTL: time.Hour, ForwardInterval: time.Second,
 			Lease: 30 * time.Second, RetryInterval: 5 * time.Second, MaxAttempts: 3, BatchSize: 10,
@@ -286,6 +360,7 @@ func validRequest(now time.Time, commandID string) *whalereinv1.HostRequest {
 		PayloadDigest:   []byte("digest"),
 		ExpiresAtUnixMs: now.Add(5 * time.Minute).UnixMilli(),
 		ProtocolVersion: 1,
+		RelayVersion:    4,
 		ChannelId:       "channel-1",
 		TraceId:         "trace-1",
 		Body:            []byte("ciphertext"),
@@ -658,6 +733,7 @@ func TestHandleHostResultAppliesOnlyValidStatusTransitions(t *testing.T) {
 		RequestId: "r1", HostId: "h1", DeviceId: "d1", Status: whalereinv1.OnlineStatus_succeeded,
 		CommandId: "c1", PayloadDigest: []byte("digest"), ResultBody: []byte("result"),
 		ChannelId: "channel-1", ErrorCode: whalereinv1.ErrorCode_internal, ErrorMessage: "diag",
+		RelayVersion: RelayEpoch,
 	}
 	if err := f.service.HandleHostResult(context.Background(), "h1", result); err != nil {
 		t.Fatal(err)
@@ -671,7 +747,7 @@ func TestHandleHostResultAppliesOnlyValidStatusTransitions(t *testing.T) {
 	}
 
 	// Empty optional fields are accepted and filled from the row.
-	result = &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_host_accepted}
+	result = &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_host_accepted, RelayVersion: RelayEpoch}
 	if err := f.service.HandleHostResult(context.Background(), "h1", result); err != nil {
 		t.Fatal(err)
 	}
@@ -765,7 +841,7 @@ func TestHostFailureLogUsesRequestTraceAndWireErrorCode(t *testing.T) {
 	var output bytes.Buffer
 	f.service.logger = slog.New(slog.NewJSONHandler(&output, nil))
 	f.store.rows["r1"] = store.Request{RequestID: "r1", HostID: "h1", DeviceID: "d1", TraceID: "operation-1", CreatedAt: f.now}
-	result := &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_rejected, ErrorCode: whalereinv1.ErrorCode_unauthorized, TraceId: "different-trace"}
+	result := &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_rejected, ErrorCode: whalereinv1.ErrorCode_unauthorized, TraceId: "different-trace", RelayVersion: RelayEpoch}
 	if err := f.service.HandleHostResult(context.Background(), "h1", result); err != nil {
 		t.Fatal(err)
 	}
@@ -799,27 +875,28 @@ func TestTransportBudgetAndVersionRejectionsStayDistinctFromHostOffline(t *testi
 	}
 }
 
-func TestReceiverCapabilitySurvivesDurableForwardingAndRejectsUnknownVersions(t *testing.T) {
+func TestRelayEpochSurvivesDurableForwardingAndRejectsForeignEpochs(t *testing.T) {
 	f := newFixture(t)
-	request := validRequest(f.now, "capability-cmd")
-	request.ClientTransportVersion = 2
+	request := validRequest(f.now, "epoch-cmd")
 	row, _, err := f.service.Submit(context.Background(), input(request))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.ClientTransportVersion != 2 {
-		t.Fatal("receiver capability lost on persistence")
+	if row.RelayVersion != RelayEpoch {
+		t.Fatal("relay epoch lost on persistence")
 	}
 	f.store.claimRows = []store.Request{row}
 	if err := f.service.ForwardDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.broker.published) == 0 || f.broker.published[len(f.broker.published)-1].ClientTransportVersion != 2 {
-		t.Fatal("receiver capability lost on replay")
+	if len(f.broker.published) == 0 || f.broker.published[len(f.broker.published)-1].RelayVersion != RelayEpoch {
+		t.Fatal("relay epoch lost on replay")
 	}
-	request.ClientTransportVersion = ^uint32(0)
-	if _, _, err := f.service.Submit(context.Background(), input(request)); !errors.Is(err, ErrProtocolVersion) {
-		t.Fatal("unknown capability poisoned durable queue")
+	for _, version := range []uint32{0, 2, 3, 5} {
+		request.RelayVersion = version
+		if _, _, err := f.service.Submit(context.Background(), input(request)); !errors.Is(err, ErrProtocolVersion) {
+			t.Fatalf("foreign epoch %d was admitted", version)
+		}
 	}
 }
 
@@ -1424,20 +1501,26 @@ func TestReleaseAppliesFenceByKind(t *testing.T) {
 	}
 }
 
-func TestHandleHostResultRejectsOversizedResultBeforeStorage(t *testing.T) {
+func TestHandleHostResultCommitsOutcomeWhenBodyRefused(t *testing.T) {
 	f := newFixture(t)
 	f.store.rows["r1"] = store.Request{
 		RequestID: "r1", HostID: "h1", DeviceID: "d1", Kind: whalereinv1.RequestKind_REQUEST_KIND_QUERY,
 		Status: whalereinv1.OnlineStatus_received,
 		Stamp:  &store.GrantStamp{GrantGeneration: 1, RevocationGeneration: 1, DeviceRevocationGeneration: 1, ResultLimitBytes: 4},
 	}
-	result := &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("12345")}
-	err := f.service.HandleHostResult(context.Background(), "h1", result)
-	if !errors.Is(err, ErrResultTooLarge) {
-		t.Fatalf("oversized result = %v", err)
+	result := &whalereinv1.HostResult{RequestId: "r1", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: []byte("12345"), ErrorCode: whalereinv1.ErrorCode_internal, RelayVersion: RelayEpoch}
+	if err := f.service.HandleHostResult(context.Background(), "h1", result); err != nil {
+		t.Fatalf("refused body discarded the outcome: %v", err)
 	}
-	if len(f.store.applyCalls) != 0 {
-		t.Fatal("oversized result reached durable storage")
+	if len(f.store.applyCalls) != 1 {
+		t.Fatalf("apply calls = %d", len(f.store.applyCalls))
+	}
+	update := f.store.applyCalls[0]
+	if update.Status != whalereinv1.OnlineStatus_succeeded || update.ErrorCode != whalereinv1.ErrorCode_internal {
+		t.Fatalf("outcome changed with refused body: %+v", update)
+	}
+	if len(update.ResultBody) != 0 {
+		t.Fatalf("refused body reached durable storage: %d bytes", len(update.ResultBody))
 	}
 	if testutil.ToFloat64(f.service.metrics.ResultBoundRejected) != 1 {
 		t.Fatal("result bound rejection was not counted")
@@ -1447,8 +1530,11 @@ func TestHandleHostResultRejectsOversizedResultBeforeStorage(t *testing.T) {
 	f = newFixture(t)
 	f.service.cfg.MaxResultBytes = 4
 	f.store.rows["r1"] = store.Request{RequestID: "r1", HostID: "h1", DeviceID: "d1", Status: whalereinv1.OnlineStatus_received}
-	if err := f.service.HandleHostResult(context.Background(), "h1", result); !errors.Is(err, ErrResultTooLarge) {
-		t.Fatalf("legacy oversized result = %v", err)
+	if err := f.service.HandleHostResult(context.Background(), "h1", result); err != nil {
+		t.Fatalf("legacy refused body discarded the outcome: %v", err)
+	}
+	if len(f.store.applyCalls) != 1 || len(f.store.applyCalls[0].ResultBody) != 0 {
+		t.Fatal("legacy refused body reached durable storage")
 	}
 }
 

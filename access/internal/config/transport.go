@@ -20,16 +20,20 @@ import (
 type TransportConfig struct {
 	Profile string `yaml:"profile"`
 
-	PacketBytes          *uint32 `yaml:"packet_bytes"`
-	PacketOverheadBytes  *uint32 `yaml:"packet_overhead_bytes"`
-	FragmentPayloadBytes *uint32 `yaml:"fragment_payload_bytes"`
-	FragmentCount        *uint32 `yaml:"fragment_count"`
-	EnvelopeBytes        *uint64 `yaml:"envelope_bytes"`
-	BulkConcurrency      *uint32 `yaml:"bulk_concurrency"`
-	ReservedBytes        *uint64 `yaml:"reserved_bytes"`
-
-	FragmentIdleTimeout *Duration `yaml:"fragment_idle_timeout"`
+	PacketBytes         *uint32   `yaml:"packet_bytes"`
+	PacketOverheadBytes *uint32   `yaml:"packet_overhead_bytes"`
+	EnvelopeBytes       *uint64   `yaml:"envelope_bytes"`
+	BulkConcurrency     *uint32   `yaml:"bulk_concurrency"`
+	ReservedBytes       *uint64   `yaml:"reserved_bytes"`
 	TransferTimeout     *Duration `yaml:"transfer_timeout"`
+
+	// Ordered publisher flow control. ReceiveMaximum is advertised in CONNECT;
+	// the queue depth and byte bound cap waiting work per destination flow and
+	// across the publisher. SendInFlight bounds concurrent QoS 1 publications.
+	ReceiveMaximum *uint16 `yaml:"receive_maximum"`
+	SendQueueDepth *uint32 `yaml:"send_queue_depth"`
+	SendQueueBytes *uint64 `yaml:"send_queue_bytes"`
+	SendInFlight   *uint32 `yaml:"send_in_flight"`
 
 	// ResultLimitBytes is Access-only: the raw ciphertext retained for one
 	// encrypted result. It is not a wire field. When omitted it derives from
@@ -37,24 +41,42 @@ type TransportConfig struct {
 	ResultLimitBytes *int64 `yaml:"result_limit_bytes"`
 }
 
+// Default ordered-publisher bounds. They are deliberately independent of the
+// packaged transport profile so the wire vocabulary stays limited to encoded
+// receive limits. A MQTT 5 peer that advertises a smaller Receive Maximum
+// lowers the effective in-flight bound; it never raises the local one.
+const (
+	defaultReceiveMaximum uint16 = 16
+	defaultSendQueueDepth uint32 = 1024
+	defaultSendQueueBytes uint64 = 32 << 20
+	defaultSendInFlight   uint32 = 16
+	maxReceiveMaximum     uint16 = 65535
+)
+
 // TransportEffective is one fully resolved and validated transport budget.
 // HTTPBodyBytes and ResultLimitBytes are local Access bounds derived from the
-// profile; every other value is the encoded transport budget.
+// profile; every other value is the encoded transport budget or a bounded
+// local publisher setting.
 type TransportEffective struct {
-	Profile              string
-	WireName             string
-	WireProfile          whalereinv1.TransportProfile
-	PacketBytes          uint32
-	PacketOverheadBytes  uint32
-	FragmentPayloadBytes uint32
-	FragmentCount        uint32
-	EnvelopeBytes        uint64
-	BulkConcurrency      uint32
-	ReservedBytes        uint64
-	FragmentIdleTimeout  time.Duration
-	TransferTimeout      time.Duration
-	ResultLimitBytes     int64
-	HTTPBodyBytes        int64
+	Profile             string
+	WireName            string
+	WireProfile         whalereinv1.TransportProfile
+	PacketBytes         uint32
+	PacketOverheadBytes uint32
+	EnvelopeBytes       uint64
+	BulkConcurrency     uint32
+	ReservedBytes       uint64
+	TransferTimeout     time.Duration
+	ResultLimitBytes    int64
+	HTTPBodyBytes       int64
+
+	// Ordered publisher settings. Zero means "use the packaged default"; the
+	// accessor methods below normalize an unset value so callers never derive
+	// an unbounded queue from a zero field.
+	ReceiveMaximum uint16
+	SendQueueDepth uint32
+	SendQueueBytes uint64
+	SendInFlight   uint32
 }
 
 // resultBodyOverheadBytes is the JSON/protobuf framing allowance added to the
@@ -75,18 +97,19 @@ func DefaultTransportEffective() TransportEffective {
 
 func transportEffectiveFromValues(values whalereinv1.TransportProfileValues) TransportEffective {
 	return TransportEffective{
-		Profile:              values.Name,
-		WireName:             values.WireName,
-		WireProfile:          wireProfileFor(values.WireName),
-		PacketBytes:          values.PacketBytes,
-		PacketOverheadBytes:  values.PacketOverheadBytes,
-		FragmentPayloadBytes: values.FragmentPayloadBytes,
-		FragmentCount:        values.FragmentCount,
-		EnvelopeBytes:        values.EnvelopeBytes,
-		BulkConcurrency:      values.BulkConcurrency,
-		ReservedBytes:        values.ReservedBytes,
-		FragmentIdleTimeout:  time.Duration(values.FragmentIdleTimeoutMs) * time.Millisecond,
-		TransferTimeout:      time.Duration(values.TransferTimeoutMs) * time.Millisecond,
+		Profile:             values.Name,
+		WireName:            values.WireName,
+		WireProfile:         wireProfileFor(values.WireName),
+		PacketBytes:         values.PacketBytes,
+		PacketOverheadBytes: values.PacketOverheadBytes,
+		EnvelopeBytes:       values.EnvelopeBytes,
+		BulkConcurrency:     values.BulkConcurrency,
+		ReservedBytes:       values.ReservedBytes,
+		TransferTimeout:     time.Duration(values.TransferTimeoutMs) * time.Millisecond,
+		ReceiveMaximum:      defaultReceiveMaximum,
+		SendQueueDepth:      defaultSendQueueDepth,
+		SendQueueBytes:      defaultSendQueueBytes,
+		SendInFlight:        defaultSendInFlight,
 	}
 }
 
@@ -117,6 +140,53 @@ func ProfileForWireName(wireName string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// MaxReceive returns the effective CONNECT Receive Maximum.
+func (e TransportEffective) MaxReceive() uint16 {
+	if e.ReceiveMaximum == 0 {
+		return defaultReceiveMaximum
+	}
+	return e.ReceiveMaximum
+}
+
+// MaxInFlight returns the bounded concurrent QoS 1 publication count.
+func (e TransportEffective) MaxInFlight() int {
+	value := e.SendInFlight
+	if value == 0 {
+		value = defaultSendInFlight
+	}
+	if value > 1024 {
+		value = 1024
+	}
+	return int(value)
+}
+
+// QueueDepth returns the per-destination ordered queue bound.
+func (e TransportEffective) QueueDepth() int {
+	value := e.SendQueueDepth
+	if value == 0 {
+		value = defaultSendQueueDepth
+	}
+	if value > 65536 {
+		value = 65536
+	}
+	return int(value)
+}
+
+// QueueBytes returns the bounded waiting bytes across one publisher.
+func (e TransportEffective) QueueBytes() int64 {
+	value := e.SendQueueBytes
+	if value == 0 {
+		value = defaultSendQueueBytes
+	}
+	if value > math.MaxInt64 {
+		value = math.MaxInt64
+	}
+	if value < uint64(e.PacketBytes) {
+		value = uint64(e.PacketBytes)
+	}
+	return int64(value)
 }
 
 // ceilDiv returns ceil(value/divisor). Callers must reject a zero divisor.
@@ -199,12 +269,6 @@ func (c Config) ResolveTransport() (TransportEffective, error) {
 	if c.Transport.PacketOverheadBytes != nil {
 		effective.PacketOverheadBytes = *c.Transport.PacketOverheadBytes
 	}
-	if c.Transport.FragmentPayloadBytes != nil {
-		effective.FragmentPayloadBytes = *c.Transport.FragmentPayloadBytes
-	}
-	if c.Transport.FragmentCount != nil {
-		effective.FragmentCount = *c.Transport.FragmentCount
-	}
 	if c.Transport.EnvelopeBytes != nil {
 		effective.EnvelopeBytes = *c.Transport.EnvelopeBytes
 	}
@@ -214,11 +278,29 @@ func (c Config) ResolveTransport() (TransportEffective, error) {
 	if c.Transport.ReservedBytes != nil {
 		effective.ReservedBytes = *c.Transport.ReservedBytes
 	}
-	if c.Transport.FragmentIdleTimeout != nil {
-		effective.FragmentIdleTimeout = c.Transport.FragmentIdleTimeout.D()
-	}
 	if c.Transport.TransferTimeout != nil {
 		effective.TransferTimeout = c.Transport.TransferTimeout.D()
+	}
+	if c.Transport.ReceiveMaximum != nil {
+		if *c.Transport.ReceiveMaximum == 0 {
+			return TransportEffective{}, errors.New("transport.receive_maximum must be positive")
+		}
+		effective.ReceiveMaximum = *c.Transport.ReceiveMaximum
+	}
+	if c.Transport.SendQueueDepth != nil {
+		if *c.Transport.SendQueueDepth == 0 {
+			return TransportEffective{}, errors.New("transport.send_queue_depth must be positive")
+		}
+		effective.SendQueueDepth = *c.Transport.SendQueueDepth
+	}
+	if c.Transport.SendQueueBytes != nil {
+		effective.SendQueueBytes = *c.Transport.SendQueueBytes
+	}
+	if c.Transport.SendInFlight != nil {
+		if *c.Transport.SendInFlight == 0 {
+			return TransportEffective{}, errors.New("transport.send_in_flight must be positive")
+		}
+		effective.SendInFlight = *c.Transport.SendInFlight
 	}
 	if err := ValidateTransportEffective(effective); err != nil {
 		return TransportEffective{}, err
@@ -238,6 +320,9 @@ func (c Config) ResolveTransport() (TransportEffective, error) {
 
 // ValidateTransportEffective checks the profile relations on a resolved budget.
 // It is the single relation checker used by startup validation and tests.
+// Ordered-publisher fields are optional here: a receive advertisement carries
+// only wire limits, so zero local queue values are normalized by the accessors
+// instead of rejecting an otherwise valid peer budget.
 func ValidateTransportEffective(effective TransportEffective) error {
 	var problems []string
 	add := func(condition bool, message string) {
@@ -246,49 +331,36 @@ func ValidateTransportEffective(effective TransportEffective) error {
 		}
 	}
 	add(effective.PacketBytes == 0, "transport.packet_bytes must be positive")
-	add(effective.FragmentPayloadBytes == 0, "transport.fragment_payload_bytes must be positive")
-	add(effective.FragmentCount == 0, "transport.fragment_count must be positive")
 	add(effective.EnvelopeBytes == 0, "transport.envelope_bytes must be positive")
 	add(effective.BulkConcurrency == 0, "transport.bulk_concurrency must be positive")
 	add(effective.ReservedBytes == 0, "transport.reserved_bytes must be positive")
-	add(effective.PacketBytes <= effective.FragmentPayloadBytes,
-		"transport.packet_bytes must exceed transport.fragment_payload_bytes")
-	if effective.PacketBytes > 0 && effective.FragmentPayloadBytes > 0 {
-		add(uint64(effective.FragmentPayloadBytes)+uint64(effective.PacketOverheadBytes) > uint64(effective.PacketBytes),
-			"transport.fragment_payload_bytes plus packet_overhead_bytes must fit packet_bytes")
-	}
-	if effective.FragmentPayloadBytes > 0 {
-		required := ceilDiv(effective.EnvelopeBytes, uint64(effective.FragmentPayloadBytes))
-		add(uint64(effective.FragmentCount) < required,
-			"transport.fragment_count does not cover the logical envelope at the selected fragment width")
-		add(required > math.MaxUint32, "transport envelope needs more fragments than the wire can express")
-	}
-	if effective.BulkConcurrency > 0 && effective.FragmentPayloadBytes > 0 {
-		inFlight := uint64(effective.BulkConcurrency) * uint64(effective.FragmentPayloadBytes)
-		if inFlight/uint64(effective.BulkConcurrency) != uint64(effective.FragmentPayloadBytes) {
-			problems = append(problems, "transport in-flight fragment reservation overflows")
-		} else {
-			add(effective.ReservedBytes < inFlight,
-				"transport.reserved_bytes does not cover in-flight fragment payloads")
-		}
-	}
+	add(uint64(effective.PacketBytes) > whalereinv1.BrokerPacketLimitBytes,
+		"transport.packet_bytes must not exceed the broker packet limit")
+	add(effective.PacketOverheadBytes >= effective.PacketBytes && effective.PacketBytes > 0,
+		"transport.packet_overhead_bytes must be below transport.packet_bytes")
+	add(effective.EnvelopeBytes < uint64(effective.PacketBytes),
+		"transport.envelope_bytes must cover one complete MQTT packet")
 	add(effective.ReservedBytes < effective.EnvelopeBytes,
 		"transport.reserved_bytes does not cover one logical envelope")
-	if effective.FragmentIdleTimeout <= 0 {
-		problems = append(problems, "transport.fragment_idle_timeout must be positive")
-	}
 	if effective.TransferTimeout <= 0 {
 		problems = append(problems, "transport.transfer_timeout must be positive")
-	}
-	add(effective.FragmentIdleTimeout > 0 && effective.TransferTimeout > 0 &&
-		effective.FragmentIdleTimeout >= effective.TransferTimeout,
-		"transport.fragment_idle_timeout must be shorter than transport.transfer_timeout")
-	if _, err := durationMillis(effective.FragmentIdleTimeout); err != nil {
-		problems = append(problems, "transport.fragment_idle_timeout "+err.Error())
 	}
 	if _, err := durationMillis(effective.TransferTimeout); err != nil {
 		problems = append(problems, "transport.transfer_timeout "+err.Error())
 	}
+	if effective.ReceiveMaximum == 0 && effective.SendInFlight == 0 && effective.SendQueueDepth == 0 && effective.SendQueueBytes == 0 {
+		// Unresolved peer budget: ordered settings are not part of the wire.
+		return joinProblems(problems)
+	}
+	add(effective.MaxReceive() == 0, "transport.receive_maximum must be positive")
+	add(effective.MaxInFlight() <= 0, "transport.send_in_flight must be positive")
+	add(effective.QueueDepth() <= 0, "transport.send_queue_depth must be positive")
+	add(effective.SendQueueBytes != 0 && effective.SendQueueBytes < uint64(effective.PacketBytes),
+		"transport.send_queue_bytes must cover one complete MQTT packet")
+	return joinProblems(problems)
+}
+
+func joinProblems(problems []string) error {
 	if len(problems) > 0 {
 		return errors.New("invalid transport configuration: " + strings.Join(problems, "; "))
 	}

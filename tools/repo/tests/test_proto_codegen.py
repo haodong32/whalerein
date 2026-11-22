@@ -24,17 +24,15 @@ def make_root(tmp_path: Path) -> Path:
             {
                 "schema": "whalerein/transport-profiles/v1",
                 "defaultProfile": "default",
+                "brokerPacketLimitBytes": 1048576,
                 "profiles": {
                     "default": {
                         "wireName": "TRANSPORT_PROFILE_DEFAULT",
                         "packetBytes": 65536,
                         "packetOverheadBytes": 4096,
-                        "fragmentPayloadBytes": 61440,
-                        "fragmentCount": 274,
                         "envelopeBytes": 16777216,
                         "bulkConcurrency": 4,
                         "reservedBytes": 33554432,
-                        "fragmentIdleTimeoutMs": 30000,
                         "transferTimeoutMs": 120000,
                     }
                 },

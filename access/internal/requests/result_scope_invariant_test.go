@@ -32,7 +32,7 @@ func TestRejectedHostResultsCannotMutateAnotherAuthority(t *testing.T) {
 			f.store.rows["r1"] = store.Request{RequestID: "r1", HostID: "h1", DeviceID: "d1", CommandID: "c1",
 				ChannelID: "channel-1", PayloadDigest: []byte{1}, Status: whalereinv1.OnlineStatus_received}
 			valid := &whalereinv1.HostResult{RequestId: "r1", DeviceId: "d1", CommandId: "c1",
-				ChannelId: "channel-1", PayloadDigest: []byte{1}, Status: whalereinv1.OnlineStatus_succeeded}
+				ChannelId: "channel-1", PayloadDigest: []byte{1}, Status: whalereinv1.OnlineStatus_succeeded, RelayVersion: 4}
 			forged := proto.Clone(valid).(*whalereinv1.HostResult)
 			tc.mutate(forged)
 			if err := f.service.HandleHostResult(context.Background(), tc.topic, forged); err == nil {

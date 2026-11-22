@@ -14,13 +14,13 @@ import (
 // authority booleans the release statement computes.
 func releaseRow() pgx.Row {
 	return syntheticRow{fill: func(dest ...any) {
-		if len(dest) != 38 {
+		if len(dest) != 47 {
 			panic("unexpected release scan width")
 		}
 		// Reuse the shared fixture filler for the request columns; the
 		// authority booleans default to false (every fence denied).
-		requestFixtureRow([]byte{1}).Scan(dest[:31]...)
-		for index := 31; index < 38; index++ {
+		requestFixtureRow([]byte{1}).Scan(dest[:40]...)
+		for index := 40; index < 47; index++ {
 			*dest[index].(*bool) = false
 		}
 	}}

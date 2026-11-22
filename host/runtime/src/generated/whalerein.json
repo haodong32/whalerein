@@ -28,7 +28,8 @@
                 "REQUEST_KIND_PAIRING_CLAIM": 4,
                 "REQUEST_KIND_PAIRING_AUTHORIZE": 5,
                 "REQUEST_KIND_REVOCATION": 6,
-                "REQUEST_KIND_HOST_CLIENTS": 7
+                "REQUEST_KIND_HOST_CLIENTS": 7,
+                "REQUEST_KIND_ACCESS_READY": 8
               }
             },
             "ErrorCode": {
@@ -105,6 +106,19 @@
                 "QUESTION_AVAILABILITY_AVAILABLE": 3
               }
             },
+            "RelayEpoch": {
+              "values": {
+                "RELAY_EPOCH_UNSPECIFIED": 0,
+                "RELAY_EPOCH_V4": 4
+              },
+              "reserved": [
+                [
+                  3,
+                  3
+                ],
+                "RELAY_EPOCH_V3"
+              ]
+            },
             "TransportProfile": {
               "values": {
                 "TRANSPORT_PROFILE_UNSPECIFIED": 0,
@@ -119,14 +133,6 @@
                   "type": "uint32",
                   "id": 1
                 },
-                "fragment_payload_bytes": {
-                  "type": "uint32",
-                  "id": 2
-                },
-                "fragment_count": {
-                  "type": "uint32",
-                  "id": 3
-                },
                 "envelope_bytes": {
                   "type": "uint64",
                   "id": 4
@@ -139,15 +145,28 @@
                   "type": "uint64",
                   "id": 6
                 },
-                "fragment_idle_timeout_ms": {
-                  "type": "uint32",
-                  "id": 7
-                },
                 "transfer_timeout_ms": {
                   "type": "uint32",
                   "id": 8
                 }
-              }
+              },
+              "reserved": [
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  7,
+                  7
+                ],
+                "fragment_payload_bytes",
+                "fragment_count",
+                "fragment_idle_timeout_ms"
+              ]
             },
             "ReceiveAdvertisement": {
               "fields": {
@@ -162,6 +181,188 @@
                 "connection_generation": {
                   "type": "uint64",
                   "id": 3
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 4
+                }
+              }
+            },
+            "PayloadPurpose": {
+              "values": {
+                "PAYLOAD_PURPOSE_UNSPECIFIED": 0,
+                "PAYLOAD_PURPOSE_REQUEST": 1,
+                "PAYLOAD_PURPOSE_RESULT": 2,
+                "PAYLOAD_PURPOSE_EVENT": 3,
+                "PAYLOAD_PURPOSE_ATTACHMENT_PART": 4,
+                "PAYLOAD_PURPOSE_HISTORY_PAGE": 5
+              }
+            },
+            "PayloadReference": {
+              "fields": {
+                "object_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "owner_node_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "ciphertext_bytes": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "sha256": {
+                  "type": "bytes",
+                  "id": 4
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 5
+                },
+                "purpose": {
+                  "type": "PayloadPurpose",
+                  "id": 6
+                }
+              }
+            },
+            "RelayObjectReserveRequest": {
+              "fields": {
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "session_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "purpose": {
+                  "type": "PayloadPurpose",
+                  "id": 6
+                },
+                "part_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "ciphertext_bytes": {
+                  "type": "uint64",
+                  "id": 8
+                },
+                "sha256": {
+                  "type": "bytes",
+                  "id": 9
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 10
+                },
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 11
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 12
+                }
+              }
+            },
+            "RelayObjectReservation": {
+              "fields": {
+                "object_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "owner_node_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "upload_path": {
+                  "type": "string",
+                  "id": 3
+                },
+                "max_bytes": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 5
+                },
+                "upload_timeout_ms": {
+                  "type": "uint32",
+                  "id": 6
+                }
+              }
+            },
+            "RelayObjectFinishRequest": {
+              "fields": {
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 1
+                },
+                "ciphertext_bytes": {
+                  "type": "uint64",
+                  "id": 2
+                },
+                "sha256": {
+                  "type": "bytes",
+                  "id": 3
+                },
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 5
+                }
+              }
+            },
+            "RelayObject": {
+              "fields": {
+                "object_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "owner_node_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "purpose": {
+                  "type": "PayloadPurpose",
+                  "id": 3
+                },
+                "ciphertext_bytes": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "sha256": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                }
+              }
+            },
+            "RelayObjectDeleteResult": {
+              "fields": {
+                "cancelled": {
+                  "type": "bool",
+                  "id": 1
                 }
               }
             },
@@ -240,19 +441,31 @@
                   "type": "bytes",
                   "id": 11
                 },
-                "client_transport_version": {
-                  "type": "uint32",
-                  "id": 12
-                },
-                "relay_transport_version": {
-                  "type": "uint32",
-                  "id": 13
-                },
                 "transport": {
                   "type": "RequestTransportMetadata",
                   "id": 14
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 15
+                },
+                "body_reference": {
+                  "type": "PayloadReference",
+                  "id": 16
                 }
-              }
+              },
+              "reserved": [
+                [
+                  12,
+                  12
+                ],
+                [
+                  13,
+                  13
+                ],
+                "client_transport_version",
+                "relay_transport_version"
+              ]
             },
             "HostResult": {
               "fields": {
@@ -307,6 +520,14 @@
                 "channel_id": {
                   "type": "string",
                   "id": 13
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 14
+                },
+                "result_reference": {
+                  "type": "PayloadReference",
+                  "id": 15
                 }
               }
             },
@@ -403,6 +624,46 @@
                 "channel_id": {
                   "type": "string",
                   "id": 12
+                },
+                "result_reference": {
+                  "type": "PayloadReference",
+                  "id": 13
+                }
+              }
+            },
+            "RequestStateNotice": {
+              "fields": {
+                "request_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "status": {
+                  "type": "OnlineStatus",
+                  "id": 4
+                },
+                "command_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "updated_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                },
+                "result_reference": {
+                  "type": "PayloadReference",
+                  "id": 7
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 8
                 }
               }
             },
@@ -680,15 +941,22 @@
                   "type": "bytes",
                   "id": 3
                 },
-                "transport_version": {
-                  "type": "uint32",
-                  "id": 4
-                },
                 "receive": {
                   "type": "ReceiveAdvertisement",
                   "id": 5
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 6
                 }
-              }
+              },
+              "reserved": [
+                [
+                  4,
+                  4
+                ],
+                "transport_version"
+              ]
             },
             "HostGrantRevocation": {
               "fields": {
@@ -2194,6 +2462,14 @@
                 "trace_id": {
                   "type": "string",
                   "id": 7
+                },
+                "relay_version": {
+                  "type": "uint32",
+                  "id": 8
+                },
+                "payload_reference": {
+                  "type": "PayloadReference",
+                  "id": 9
                 }
               }
             },
@@ -2222,62 +2498,6 @@
                 "reason": {
                   "type": "string",
                   "id": 3
-                }
-              }
-            },
-            "TransportFrame": {
-              "fields": {
-                "version": {
-                  "type": "uint32",
-                  "id": 1
-                },
-                "transfer_id": {
-                  "type": "string",
-                  "id": 2
-                },
-                "topic": {
-                  "type": "string",
-                  "id": 3
-                },
-                "index": {
-                  "type": "uint32",
-                  "id": 4
-                },
-                "count": {
-                  "type": "uint32",
-                  "id": 5
-                },
-                "total_bytes": {
-                  "type": "uint32",
-                  "id": 6
-                },
-                "digest": {
-                  "type": "bytes",
-                  "id": 7
-                },
-                "payload": {
-                  "type": "bytes",
-                  "id": 8
-                },
-                "ack": {
-                  "type": "bool",
-                  "id": 9
-                },
-                "rejected": {
-                  "type": "bool",
-                  "id": 10
-                },
-                "complete": {
-                  "type": "bool",
-                  "id": 11
-                },
-                "fragment_payload_bytes": {
-                  "type": "uint32",
-                  "id": 12
-                },
-                "profile": {
-                  "type": "TransportProfile",
-                  "id": 13
                 }
               }
             },

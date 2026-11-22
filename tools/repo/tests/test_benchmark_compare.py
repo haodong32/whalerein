@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from test_benchmark_model import attempt, document, streaming_document
+from test_benchmark_model import attempt, document, mixed_load_document, streaming_document
 
 from repo.benchmark import compare, summary
 from repo.errors import RepoError, UsageError
@@ -157,6 +157,8 @@ def test_method_text_states_the_declaration():
     assert "first_text_ms" in text
     assert "tolerance" in text or "tolerances" in text
     assert "paired" in text.lower()
+    assert "longest_output_gap_ms" in text
+    assert "bulk correctness" in text.lower()
 
 
 def test_comparison_reports_paired_streaming_tails_and_rejects_mixed_conditions(tmp_path):
@@ -195,3 +197,24 @@ def test_link_effect_compares_profiles_only_on_the_same_build(tmp_path):
     delayed["artifacts"]["cli"] = "sha256:" + "a" * 64
     with pytest.raises(UsageError, match="same product build"):
         compare.compare([baseline], [delayed], vary="network")
+
+
+def test_mixed_load_comparison_carries_the_idle_bulk_gate(tmp_path):
+    def saved(name, document):
+        path = tmp_path / name
+        path.write_text(json.dumps(document))
+        return compare.load(path)
+
+    normal = saved("normal.json", mixed_load_document(pairs=10))
+    result = compare.compare([normal] * 5, [normal] * 5)
+    assert result["bulk"]["state"] == "complete"
+    assert all(entry["gate"]["state"] == "complete" for entry in result["bulk"]["runs"])
+    assert "Bulk control: complete" in summary.comparison(result)
+
+    broken = mixed_load_document(pairs=10, bulk_failure="rate_limited")
+    failed = saved("failed.json", broken)
+    result = compare.compare([normal] * 5, [failed] * 5)
+    assert result["bulk"]["state"] == "failed"
+    assert "bulk_gate_failed" in result["reasons"]
+    assert result["verdict"] == "inconclusive"
+    assert "bulk_read_errors" in result["bulk"]["runs"][-1]["gate"]["reasons"]

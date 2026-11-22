@@ -56,16 +56,68 @@ async fn subscribe(listener: &TcpListener) -> TcpStream {
         Packet::Connect(..)
     ));
     stream.write_all(&[0x20, 3, 0, 0, 0]).await.unwrap();
-    let Packet::Subscribe(subscription) = read_packet(&mut stream, &mut buffer).await else {
-        panic!("expected subscribe")
-    };
-    let [high, low] = subscription.pkid.to_be_bytes();
-    stream.write_all(&[0x90, 4, high, low, 0, 0]).await.unwrap();
+    // The Device publishes its receive advertisement after CONNACK and then
+    // subscribes to its control event and notice topics at QoS 1 and its live
+    // preview topic at QoS 0. Acknowledge the QoS 1 publication and every
+    // subscription so the event loop can progress.
+    let mut subscriptions: Vec<(String, QoS)> = Vec::new();
+    while subscriptions.len() < 3 {
+        match read_packet(&mut stream, &mut buffer).await {
+            Packet::Publish(publish) => {
+                let [high, low] = publish.pkid.to_be_bytes();
+                stream.write_all(&[0x40, 2, high, low]).await.unwrap();
+            }
+            Packet::Subscribe(subscription) => {
+                let [high, low] = subscription.pkid.to_be_bytes();
+                stream.write_all(&[0x90, 4, high, low, 0, 0]).await.unwrap();
+                for filter in subscription.filters {
+                    subscriptions.push((filter.path, filter.qos));
+                }
+            }
+            other => panic!("unexpected packet before subscribe: {other:?}"),
+        }
+    }
+    assert!(subscriptions[0].0.ends_with("/event"));
+    assert!(subscriptions[1].0.ends_with("/notice"));
+    assert!(subscriptions[2].0.ends_with("/live"));
+    assert_eq!(
+        subscriptions[0].1,
+        QoS::AtLeastOnce,
+        "control events subscribe at QoS 1"
+    );
+    assert_eq!(
+        subscriptions[1].1,
+        QoS::AtLeastOnce,
+        "control notices subscribe at QoS 1"
+    );
+    assert_eq!(
+        subscriptions[2].1,
+        QoS::AtMostOnce,
+        "live previews subscribe at QoS 0"
+    );
+    let prefix = subscriptions[2].0.trim_end_matches("/live").to_owned();
+    assert_eq!(
+        subscriptions[0].0,
+        format!("{prefix}/event"),
+        "live and control topics share the device scope"
+    );
+    assert_eq!(subscriptions[1].0, format!("{prefix}/notice"));
     stream
 }
 
+/// Publish a live-class preview envelope on the device live topic.
 async fn publish(stream: &mut TcpStream, envelope: EventEnvelope) {
+    let topic = crate::access::mqtt::device_live_topic(&envelope.host_id, &envelope.device_id);
+    publish_on(stream, topic, envelope).await;
+}
+
+/// Publish a control-class envelope on the device control event topic.
+async fn publish_control(stream: &mut TcpStream, envelope: EventEnvelope) {
     let topic = crate::access::device_event_topic(&envelope.host_id, &envelope.device_id);
+    publish_on(stream, topic, envelope).await;
+}
+
+async fn publish_on(stream: &mut TcpStream, topic: String, envelope: EventEnvelope) {
     let packet = Publish::new(topic, QoS::AtMostOnce, envelope.encode_to_vec(), None);
     let mut bytes = BytesMut::new();
     packet.write(&mut bytes).unwrap();
@@ -93,12 +145,13 @@ fn seal(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
+        relay_version: 4,
         ..Default::default()
     }
 }
 
 fn preview_event(core: &Core, session: &str, watch: &str, text: &str) -> EventEnvelope {
-    use whalerein_proto::{live_frame, AttemptRef, LiveFrame};
+    use whalerein_proto::{AttemptRef, LiveFrame};
     seal(
         core,
         SessionUpdate {
@@ -115,13 +168,103 @@ fn preview_event(core: &Core, session: &str, watch: &str, text: &str) -> EventEn
                 block_id: "text".into(),
                 first_seq: 1,
                 last_seq: 1,
-                payload: Some(live_frame::Payload::Delta(
+                payload: Some(whalerein_proto::live_frame::Payload::Delta(
                     whalerein_proto::LiveBlockDelta {
                         kind: whalerein_proto::BlockKind::Text as i32,
                         text: text.into(),
                     },
                 )),
             })),
+        },
+    )
+}
+
+fn live_frame_event(
+    core: &Core,
+    session: &str,
+    watch: &str,
+    seq: u64,
+    payload: whalerein_proto::live_frame::Payload,
+) -> EventEnvelope {
+    use whalerein_proto::{AttemptRef, LiveFrame};
+    seal(
+        core,
+        SessionUpdate {
+            watch_id: watch.into(),
+            session: Some(WireSessionKey {
+                host_id: "host-1".into(),
+                session_id: session.into(),
+            }),
+            payload: Some(session_update::Payload::Live(LiveFrame {
+                attempt: Some(AttemptRef {
+                    live_epoch: "epoch".into(),
+                    attempt_id: "a".into(),
+                }),
+                block_id: "text".into(),
+                first_seq: seq,
+                last_seq: seq,
+                payload: Some(payload),
+            })),
+        },
+    )
+}
+
+fn delta_event(core: &Core, session: &str, watch: &str, seq: u64, text: &str) -> EventEnvelope {
+    live_frame_event(
+        core,
+        session,
+        watch,
+        seq,
+        whalerein_proto::live_frame::Payload::Delta(whalerein_proto::LiveBlockDelta {
+            kind: whalerein_proto::BlockKind::Text as i32,
+            text: text.into(),
+        }),
+    )
+}
+
+fn state_event(core: &Core, session: &str, watch: &str, revision: u64) -> EventEnvelope {
+    seal(
+        core,
+        SessionUpdate {
+            watch_id: watch.into(),
+            session: Some(WireSessionKey {
+                host_id: "host-1".into(),
+                session_id: session.into(),
+            }),
+            payload: Some(session_update::Payload::State(
+                whalerein_proto::SessionState {
+                    session: Some(WireSessionKey {
+                        host_id: "host-1".into(),
+                        session_id: session.into(),
+                    }),
+                    live_epoch: "epoch".into(),
+                    revision,
+                    history_head: "bookmark:committed".into(),
+                    run_phase: whalerein_proto::RunPhase::Idle as i32,
+                    approvals: Vec::new(),
+                    questions: None,
+                    projection_id: "projection-1".into(),
+                },
+            )),
+        },
+    )
+}
+
+fn history_event(
+    core: &Core,
+    session: &str,
+    watch: &str,
+    batch: whalerein_proto::HistoryBatch,
+) -> EventEnvelope {
+    seal(
+        core,
+        SessionUpdate {
+            watch_id: watch.into(),
+            session: Some(WireSessionKey {
+                host_id: "host-1".into(),
+                session_id: session.into(),
+            }),
+            payload: Some(session_update::Payload::History(batch)),
         },
     )
 }
@@ -206,7 +349,8 @@ fn spawn_peer(
     let task = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         while let Some(envelope) = rx.recv().await {
-            publish(&mut stream, envelope).await;
+            // Question descriptors are control-class intent.
+            publish_control(&mut stream, envelope).await;
         }
     });
     (tx, task)
@@ -783,6 +927,319 @@ async fn session_observation_ac_25_mqtt_loss_reports_reconnecting() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     observation.close().await;
+    peer.abort();
+}
+
+async fn drain_terminal_error(observation: &mut SessionObservation) -> CoreError {
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while observation.next_event().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    assert!(ended, "a protocol violation must end the observation");
+    observation
+        .take_terminal_error()
+        .expect("terminal protocol/security error is available")
+}
+
+#[tokio::test]
+async fn session_observation_live_preview_is_accepted_from_the_live_topic_without_ack() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let (no_ack_tx, no_ack_rx) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        publish(
+            &mut stream,
+            delta_event(&peer_core, "session-1", "watch-1", 1, "live"),
+        )
+        .await;
+        // Nothing in Core acknowledges, retries or publishes for a live
+        // preview. Any packet here would be an unexpected publication.
+        let mut buffer = BytesMut::new();
+        let packet = tokio::time::timeout(
+            Duration::from_millis(300),
+            read_packet(&mut stream, &mut buffer),
+        )
+        .await;
+        let _ = no_ack_tx.send(packet.is_err());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let mut preview = false;
+    for _ in 0..20 {
+        let event = next_event(&mut observation).await;
+        if let SessionEventPayload::Conversation(ViewUpdate::Preview { text, .. }) = event.payload {
+            assert_eq!(text, "live");
+            preview = true;
+            break;
+        }
+    }
+    assert!(preview, "a live frame from the live topic is accepted");
+    assert!(
+        no_ack_rx.await.expect("peer observed the live frame"),
+        "no ACK or retry is published for live delivery"
+    );
+    observation.close().await;
+    peer.abort();
+}
+
+#[tokio::test]
+async fn session_observation_rejects_a_live_frame_on_the_control_topic() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        publish_control(
+            &mut stream,
+            delta_event(&peer_core, "session-1", "watch-1", 1, "crossed"),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let error = drain_terminal_error(&mut observation).await;
+    assert_eq!(error.code(), "security_error");
+    assert!(
+        error.to_string().contains("control event topic"),
+        "the crossed live frame is rejected, not accepted through a fallback: {error}"
+    );
+    peer.abort();
+}
+
+#[tokio::test]
+async fn session_observation_rejects_a_control_payload_on_the_live_topic() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        // A committed/control state update is control-class intent. Delivering
+        // it on the live topic is a protocol violation, not a preview.
+        publish(
+            &mut stream,
+            state_event(&peer_core, "session-1", "watch-1", 2),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let error = drain_terminal_error(&mut observation).await;
+    assert_eq!(error.code(), "security_error");
+    assert!(
+        error.to_string().contains("control payload"),
+        "a non-live payload on the live topic is rejected: {error}"
+    );
+    peer.abort();
+}
+
+#[tokio::test]
+async fn session_observation_live_gap_marks_incomplete_without_failing_control() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        publish(
+            &mut stream,
+            live_frame_event(
+                &peer_core,
+                "session-1",
+                "watch-1",
+                1,
+                whalerein_proto::live_frame::Payload::Started(whalerein_proto::AttemptStarted {}),
+            ),
+        )
+        .await;
+        publish(
+            &mut stream,
+            delta_event(&peer_core, "session-1", "watch-1", 2, "a"),
+        )
+        .await;
+        // Sequence 3 is lost; the next preview cannot be contiguous.
+        publish(
+            &mut stream,
+            delta_event(&peer_core, "session-1", "watch-1", 4, "b"),
+        )
+        .await;
+        // Control must still be delivered on the same connection after the
+        // live gap: no reconnect, retry or block occurs.
+        publish_control(
+            &mut stream,
+            state_event(&peer_core, "session-1", "watch-1", 2),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let mut first = false;
+    let mut gap = false;
+    let mut control_seen = false;
+    for _ in 0..30 {
+        let event = next_event(&mut observation).await;
+        match event.payload {
+            SessionEventPayload::Conversation(ViewUpdate::Preview {
+                text, incomplete, ..
+            }) if text == "a" && !incomplete => first = true,
+            SessionEventPayload::Conversation(ViewUpdate::Preview {
+                text, incomplete, ..
+            }) if text == "b" && incomplete => gap = true,
+            SessionEventPayload::Conversation(ViewUpdate::State(state)) => {
+                control_seen = state.revision == 2
+            }
+            _ => {}
+        }
+        if first && gap && control_seen {
+            break;
+        }
+    }
+    assert!(first, "the contiguous preview is complete");
+    assert!(gap, "a live gap marks only the preview incomplete");
+    assert!(
+        control_seen,
+        "control delivery is unaffected by the live gap"
+    );
+    observation.close().await;
+    peer.abort();
+}
+
+#[tokio::test]
+async fn session_observation_committed_message_repairs_a_gapped_preview() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let cursor = core
+        .sync_service()
+        .unwrap()
+        .cursor(&key)
+        .unwrap()
+        .expect("synced history cursor");
+    let batch = whalerein_proto::HistoryBatch {
+        from_cursor: cursor,
+        to_cursor: "bookmark:repair".into(),
+        batch_id: "batch-repair".into(),
+        projection_id: "projection-1".into(),
+        changes: vec![whalerein_proto::MessageUpsert {
+            message: Some(crate::api::test_support::history_message(
+                "message-repair",
+                "committed",
+            )),
+            origin: None,
+        }],
+    };
+    let peer_core = core.clone();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        publish(
+            &mut stream,
+            live_frame_event(
+                &peer_core,
+                "session-1",
+                "watch-1",
+                1,
+                whalerein_proto::live_frame::Payload::Started(whalerein_proto::AttemptStarted {}),
+            ),
+        )
+        .await;
+        publish(
+            &mut stream,
+            delta_event(&peer_core, "session-1", "watch-1", 3, "partial"),
+        )
+        .await;
+        // The committed control message supersedes and repairs the preview.
+        publish_control(
+            &mut stream,
+            history_event(&peer_core, "session-1", "watch-1", batch),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let mut gapped = false;
+    let mut repaired = false;
+    for _ in 0..30 {
+        let event = next_event(&mut observation).await;
+        match event.payload {
+            SessionEventPayload::Conversation(ViewUpdate::Preview { incomplete, .. })
+                if incomplete =>
+            {
+                gapped = true
+            }
+            SessionEventPayload::Conversation(ViewUpdate::Message { message, .. })
+                if message.message_id == "message-repair" =>
+            {
+                repaired = true
+            }
+            _ => {}
+        }
+        if gapped && repaired {
+            break;
+        }
+    }
+    assert!(gapped, "the preview is incomplete after the gap");
+    assert!(repaired, "the committed control message repairs the view");
+    observation.close().await;
+    peer.abort();
+}
+
+#[tokio::test]
+async fn session_observation_rejects_an_epoch_three_event() {
+    let (_dir, core, _access, listener) = setup(true).await;
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        let mut event = delta_event(&peer_core, "session-1", "watch-1", 1, "old");
+        event.relay_version = crate::access::transport::RELAY_EPOCH_V4 - 1;
+        publish_control(&mut stream, event).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let error = drain_terminal_error(&mut observation).await;
+    assert_eq!(error.code(), "protocol_version_incompatible");
     peer.abort();
 }
 

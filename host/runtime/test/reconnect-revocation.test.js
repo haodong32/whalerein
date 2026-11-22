@@ -17,6 +17,9 @@ test('a broker-only reconnect publishes HostReady again and the final revocation
     await waitFor(() => harness.host.access.connected === true, 10000)
     await waitFor(() => harness.host.security.revocationsPending === true, 5000)
     await harness.access.reconnect()
+    // The Host clears revocations_pending on the notice, before its ACK result
+    // reaches the simulated Access. Wait for the replay record itself.
+    await waitFor(() => harness.access.revocationResults.length > replays, 8000)
     await waitFor(() => harness.host.security.revocationsPending === false, 8000)
     assert.ok(harness.access.revocationResults.length > replays, 'the reconnect HostReady reached revocation replay')
     const terminal = harness.access.revocationResults.at(-1)

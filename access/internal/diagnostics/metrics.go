@@ -25,6 +25,7 @@ type Metrics struct {
 	HostRequestErrors     prometheus.Counter
 	MQTTRouteErrors       prometheus.Counter
 	EventRouteDropped     prometheus.Counter
+	LiveDrops             *prometheus.CounterVec
 	ConnectedHosts        prometheus.Gauge
 	ConnectedDevices      prometheus.Gauge
 	RevocationLatency     prometheus.Histogram
@@ -55,11 +56,33 @@ type Metrics struct {
 
 	TransportRejections      *prometheus.CounterVec
 	TransportRejectedBytes   *prometheus.CounterVec
-	TransportFrames          *prometheus.CounterVec
-	TransportBytes           *prometheus.CounterVec
-	TransportIncoming        prometheus.Gauge
-	TransportReserved        prometheus.Gauge
+	TransportPackets         *prometheus.CounterVec
+	TransportPacketBytes     *prometheus.CounterVec
+	TransportQueueDepth      *prometheus.GaugeVec
+	TransportInFlightWork    *prometheus.GaugeVec
 	TransportBudgetFallbacks *prometheus.CounterVec
+
+	// Temporary ciphertext storage. Every label is a bounded enum and no
+	// object id, path, content or credential is ever attached.
+	PayloadFreeBytes         prometheus.Gauge
+	PayloadHeadroomBytes     prometheus.Gauge
+	PayloadReadyBytes        prometheus.Gauge
+	PayloadReservedBytes     prometheus.Gauge
+	PayloadExpiredBytes      prometheus.Gauge
+	PayloadObjects           *prometheus.GaugeVec
+	PayloadActiveUploads     prometheus.Gauge
+	PayloadExpiredBacklog    prometheus.Gauge
+	PayloadAdmissionRefusals *prometheus.CounterVec
+	PayloadCleanupDeleted    prometheus.Counter
+	PayloadCleanupReclaimed  prometheus.Counter
+	PayloadCleanupRetries    prometheus.Counter
+	PayloadReconcileActions  *prometheus.CounterVec
+
+	// Durable request-notice intent. Only aggregate counts and ages are
+	// exposed; no request, command or content metadata is attached.
+	NoticePending        prometheus.Gauge
+	NoticeOldestAge      prometheus.Gauge
+	NoticePublishRetries prometheus.Counter
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -94,6 +117,10 @@ func NewMetrics() *Metrics {
 			Name: "event_route_dropped_total",
 			Help: "Events dropped because the device grant is missing or revoked.",
 		}),
+		LiveDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "live_preview_dropped_total",
+			Help: "QoS 0 live previews dropped by bounded reason.",
+		}, []string{"reason"}),
 		ConnectedHosts: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "connected_hosts",
 			Help: "Broker-reported connected hosts.",
@@ -183,26 +210,90 @@ func NewMetrics() *Metrics {
 			Name: "transport_rejected_bytes_total",
 			Help: "Payload bytes seen by logical transport rejections by bounded stable code.",
 		}, []string{"code"}),
-		TransportFrames: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "transport_frames_total",
-			Help: "Completed logical transport transfers by direction.",
-		}, []string{"direction"}),
-		TransportBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "transport_bytes_total",
-			Help: "Completed logical transport bytes by direction.",
-		}, []string{"direction"}),
-		TransportIncoming: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "transport_incoming_transfers",
-			Help: "Inbound partial transfers currently holding a reassembly reservation.",
-		}),
-		TransportReserved: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "transport_reserved_bytes",
-			Help: "Inbound payload plus per-fragment bookkeeping currently reserved.",
-		}),
+		TransportPackets: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_packets_total",
+			Help: "Complete MQTT packets published by representation.",
+		}, []string{"representation"}),
+		TransportPacketBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "transport_packet_bytes_total",
+			Help: "Complete encoded message bytes published by representation.",
+		}, []string{"representation"}),
+		TransportQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "transport_queue_depth",
+			Help: "Ordered publication queue depth by bounded destination flow.",
+		}, []string{"flow"}),
+		TransportInFlightWork: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "transport_in_flight",
+			Help: "Ordered publication flows with one publication in flight.",
+		}, []string{"flow"}),
 		TransportBudgetFallbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "transport_budget_fallbacks_total",
 			Help: "Routes that used the local budget because an end-to-end peer advertisement is not observable by Access.",
 		}, []string{"route"}),
+		PayloadFreeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_free_bytes",
+			Help: "Filesystem bytes available on the temporary ciphertext quota volume.",
+		}),
+		PayloadHeadroomBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_headroom_bytes",
+			Help: "Free bytes above the configured reserve and outstanding reserved writes.",
+		}),
+		PayloadReadyBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_ready_bytes",
+			Help: "Charged bytes of complete, readable temporary ciphertext objects.",
+		}),
+		PayloadReservedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_reserved_bytes",
+			Help: "Charged bytes of partial uploads that are not readable.",
+		}),
+		PayloadExpiredBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_expired_bytes",
+			Help: "Charged bytes of expired objects still awaiting file deletion.",
+		}),
+		PayloadObjects: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "payload_objects",
+			Help: "Temporary ciphertext metadata rows by bounded lifecycle state.",
+		}, []string{"state"}),
+		PayloadActiveUploads: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_active_uploads",
+			Help: "Temporary ciphertext reservations currently accepting an upload.",
+		}),
+		PayloadExpiredBacklog: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "payload_expired_backlog_seconds",
+			Help: "Age in seconds of the oldest expired object still occupying capacity.",
+		}),
+		PayloadAdmissionRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "payload_admission_refusals_total",
+			Help: "Temporary ciphertext admission refusals by bounded reason.",
+		}, []string{"reason"}),
+		PayloadCleanupDeleted: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "payload_cleanup_deleted_total",
+			Help: "Temporary ciphertext files deleted and capacity released.",
+		}),
+		PayloadCleanupReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "payload_cleanup_reclaimed_bytes_total",
+			Help: "Temporary ciphertext capacity released after file deletion.",
+		}),
+		PayloadCleanupRetries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "payload_cleanup_retries_total",
+			Help: "Temporary ciphertext cleanup attempts that failed and stayed charged.",
+		}),
+		PayloadReconcileActions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "payload_reconcile_actions_total",
+			Help: "Temporary ciphertext reconciliation outcomes by bounded action.",
+		}, []string{"action"}),
+		NoticePending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "request_notices_pending",
+			Help: "Durable request state notices waiting for publication.",
+		}),
+		NoticeOldestAge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "request_notices_oldest_age_seconds",
+			Help: "Age in seconds of the oldest pending request state notice.",
+		}),
+		NoticePublishRetries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "request_notice_publish_retries_total",
+			Help: "Request state notice publications that failed and will retry.",
+		}),
 	}
 	registry.MustRegister(
 		m.HostResults,
@@ -212,6 +303,7 @@ func NewMetrics() *Metrics {
 		m.HostRequestErrors,
 		m.MQTTRouteErrors,
 		m.EventRouteDropped,
+		m.LiveDrops,
 		m.ConnectedHosts,
 		m.ConnectedDevices,
 		m.RevocationLatency,
@@ -234,11 +326,27 @@ func NewMetrics() *Metrics {
 		m.CleanupLastRun,
 		m.TransportRejections,
 		m.TransportRejectedBytes,
-		m.TransportFrames,
-		m.TransportBytes,
-		m.TransportIncoming,
-		m.TransportReserved,
+		m.TransportPackets,
+		m.TransportPacketBytes,
+		m.TransportQueueDepth,
+		m.TransportInFlightWork,
 		m.TransportBudgetFallbacks,
+		m.PayloadFreeBytes,
+		m.PayloadHeadroomBytes,
+		m.PayloadReadyBytes,
+		m.PayloadReservedBytes,
+		m.PayloadExpiredBytes,
+		m.PayloadObjects,
+		m.PayloadActiveUploads,
+		m.PayloadExpiredBacklog,
+		m.PayloadAdmissionRefusals,
+		m.PayloadCleanupDeleted,
+		m.PayloadCleanupReclaimed,
+		m.PayloadCleanupRetries,
+		m.PayloadReconcileActions,
+		m.NoticePending,
+		m.NoticeOldestAge,
+		m.NoticePublishRetries,
 	)
 	return m
 }
@@ -275,6 +383,20 @@ func (m *Metrics) RouteError() {
 	if m != nil {
 		m.MQTTRouteErrors.Inc()
 	}
+}
+
+// LiveDropped records one QoS 0 live preview dropped by a bounded reason.
+// Identities are never attached.
+func (m *Metrics) LiveDropped(reason string) {
+	if m == nil || m.LiveDrops == nil {
+		return
+	}
+	switch reason {
+	case "disconnected", "backpressure", "publish":
+	default:
+		reason = "publish"
+	}
+	m.LiveDrops.WithLabelValues(reason).Inc()
 }
 
 // EventDropped records an event dropped for a missing/revoked grant.
@@ -413,9 +535,9 @@ func (m *Metrics) TransportRejected(code string, bytes, limit int64) {
 		return
 	}
 	switch code {
-	case "frame_packet", "frame_header", "frame_width", "frame_geometry",
-		"envelope_budget", "fragment_count", "reassembly_budget", "frame_integrity",
-		"frame_topic", "receipt", "bulk_admission", "budget_missing", "budget_invalid":
+	case "packet_limit", "envelope_header", "envelope_budget", "reference_limit",
+		"relay_topic", "staging", "queue", "budget_missing", "budget_invalid",
+		"relay_epoch", "frame_header":
 	default:
 		code = "frame_header"
 	}
@@ -426,33 +548,60 @@ func (m *Metrics) TransportRejected(code string, bytes, limit int64) {
 	_ = limit
 }
 
-// TransportFrame counts one completed logical transfer.
-func (m *Metrics) TransportFrame(direction string, bytes int64) {
-	if m == nil || m.TransportFrames == nil {
+// TransportPacket counts one complete MQTT publication by representation.
+func (m *Metrics) TransportPacket(representation string, bytes int64) {
+	if m == nil || m.TransportPackets == nil {
 		return
 	}
-	switch direction {
-	case "in", "out":
+	switch representation {
+	case "inline", "reference":
 	default:
-		direction = "in"
+		representation = "inline"
 	}
-	m.TransportFrames.WithLabelValues(direction).Inc()
+	m.TransportPackets.WithLabelValues(representation).Inc()
 	if bytes > 0 {
-		m.TransportBytes.WithLabelValues(direction).Add(float64(bytes))
+		m.TransportPacketBytes.WithLabelValues(representation).Add(float64(bytes))
 	}
 }
 
-// TransportReservations publishes the current inbound reassembly reservation.
-func (m *Metrics) TransportReservations(transfers int, reserved int64) {
-	if m == nil || m.TransportIncoming == nil {
+// TransportQueueDepth reports the current ordered queue depth for one bounded
+// destination flow.
+func (m *Metrics) TransportQueue(flow string, depth int) {
+	if m == nil || m.TransportQueueDepth == nil {
 		return
 	}
-	m.TransportIncoming.Set(float64(transfers))
-	if reserved < 0 {
-		reserved = 0
+	switch flow {
+	case "request", "result", "event", "device_event", "notice", "presence", "other":
+	default:
+		flow = "other"
 	}
-	m.TransportReserved.Set(float64(reserved))
+	if depth < 0 {
+		depth = 0
+	}
+	m.TransportQueueDepth.WithLabelValues(flow).Set(float64(depth))
 }
+
+// TransportInFlight reports whether one bounded destination flow has an
+// in-flight publication.
+func (m *Metrics) TransportInFlightCount(flow string, inFlight int) {
+	if m == nil || m.TransportInFlightWork == nil {
+		return
+	}
+	switch flow {
+	case "request", "result", "event", "device_event", "notice", "presence", "other":
+	default:
+		flow = "other"
+	}
+	if inFlight < 0 {
+		inFlight = 0
+	}
+	m.TransportInFlightWork.WithLabelValues(flow).Set(float64(inFlight))
+}
+
+// TransportReservations is a retained no-op for source compatibility with
+// callers that still report aggregate reservations. The fragment reassembly
+// path no longer exists, so no series is published.
+func (m *Metrics) TransportReservations(_ int, _ int64) {}
 
 // CleanupCompleted records the completion instant of one cleanup operation.
 func (m *Metrics) CleanupCompleted(operation string) {
@@ -479,4 +628,94 @@ func (m *Metrics) TransportBudgetFallback(route string) {
 		route = "device"
 	}
 	m.TransportBudgetFallbacks.WithLabelValues(route).Inc()
+}
+
+// PayloadStorage publishes one accounting snapshot. Sizes are aggregate bytes;
+// no object identity is exposed.
+func (m *Metrics) PayloadStorage(free, headroom, ready, reserved, expired int64,
+	readyObjects, reservedObjects, activeUploads int, backlogSeconds float64) {
+	if m == nil || m.PayloadObjects == nil {
+		return
+	}
+	clamp := func(value int64) float64 {
+		if value < 0 {
+			return 0
+		}
+		return float64(value)
+	}
+	m.PayloadFreeBytes.Set(clamp(free))
+	m.PayloadHeadroomBytes.Set(clamp(headroom))
+	m.PayloadReadyBytes.Set(clamp(ready))
+	m.PayloadReservedBytes.Set(clamp(reserved))
+	m.PayloadExpiredBytes.Set(clamp(expired))
+	m.PayloadObjects.WithLabelValues("ready").Set(float64(readyObjects))
+	m.PayloadObjects.WithLabelValues("reserved").Set(float64(reservedObjects))
+	m.PayloadActiveUploads.Set(float64(activeUploads))
+	m.PayloadExpiredBacklog.Set(backlogSeconds)
+}
+
+// PayloadRefused records one admission refusal by bounded reason.
+func (m *Metrics) PayloadRefused(reason string) {
+	if m == nil || m.PayloadAdmissionRefusals == nil {
+		return
+	}
+	switch reason {
+	case "size", "quota", "capacity", "headroom", "duplicate", "forbidden", "invalid":
+	default:
+		reason = "capacity"
+	}
+	m.PayloadAdmissionRefusals.WithLabelValues(reason).Inc()
+}
+
+// PayloadCleanup records one bounded cleanup pass. A failed deletion remains
+// charged and is counted as a retry.
+func (m *Metrics) PayloadCleanup(deleted int, reclaimed int64, failed int) {
+	if m == nil || m.PayloadCleanupDeleted == nil {
+		return
+	}
+	if deleted > 0 {
+		m.PayloadCleanupDeleted.Add(float64(deleted))
+	}
+	if reclaimed > 0 {
+		m.PayloadCleanupReclaimed.Add(float64(reclaimed))
+	}
+	if failed > 0 {
+		m.PayloadCleanupRetries.Add(float64(failed))
+	}
+}
+
+// PayloadReconcile records reconciliation outcomes by bounded action.
+func (m *Metrics) PayloadReconcile(action string, count int) {
+	if m == nil || m.PayloadReconcileActions == nil || count <= 0 {
+		return
+	}
+	switch action {
+	case "repairs", "orphans":
+	default:
+		action = "repairs"
+	}
+	m.PayloadReconcileActions.WithLabelValues(action).Add(float64(count))
+}
+
+// NoticeBacklog publishes one aggregate snapshot of pending notice work.
+func (m *Metrics) NoticeBacklog(pending int, oldestSeconds float64) {
+	if m == nil || m.NoticePending == nil {
+		return
+	}
+	if pending < 0 {
+		pending = 0
+	}
+	if oldestSeconds < 0 {
+		oldestSeconds = 0
+	}
+	m.NoticePending.Set(float64(pending))
+	m.NoticeOldestAge.Set(oldestSeconds)
+}
+
+// NoticePublishRetry records one failed publication that stays pending.
+func (m *Metrics) NoticePublishRetry() {
+	if m == nil || m.NoticePublishRetries == nil {
+		return
+	}
+	m.NoticePublishRetries.Inc()
 }
