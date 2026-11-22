@@ -127,6 +127,7 @@ def test_ios_gate_requires_successful_selection_even_when_build_is_skipped(tmp_p
         CHANGES_RESULT=changes,
         NATIVE_REQUIRED="false",
         NATIVE_RESULT="skipped",
+        ARCHITECTURE_RESULT="success",
     )
     assert (code == 0) == (changes == "success")
 
@@ -140,6 +141,21 @@ def test_requested_ios_full_ui_failure_blocks_gate(tmp_path, result):
         CHANGES_RESULT="success",
         NATIVE_REQUIRED="true",
         NATIVE_RESULT=result,
+        ARCHITECTURE_RESULT="success",
+    )
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "success"])
+def test_ios_architecture_gate_blocks_the_gate(tmp_path, result):
+    code, _ = execute(
+        tmp_path,
+        "ios.yml",
+        "Check required results",
+        CHANGES_RESULT="success",
+        NATIVE_REQUIRED="false",
+        NATIVE_RESULT="skipped",
+        ARCHITECTURE_RESULT=result,
     )
     assert (code == 0) == (result == "success")
 
