@@ -39,8 +39,13 @@ fn diagnostic_sink_observes_core_events_with_stable_identifiers() {
     )
     .expect("create MobileCore with diagnostic sink");
 
-    // A local read produces at least one redacted core event.
+    // A local read produces at least one redacted core event. Delivery is
+    // asynchronous, so give the dispatcher a bounded window.
     let _ = core.connection_state("host-1".into());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sink.0.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let events = sink.0.lock().unwrap();
     assert!(!events.is_empty(), "the sink must observe core events");
     assert!(events.iter().all(|event| !event.event.is_empty()));
