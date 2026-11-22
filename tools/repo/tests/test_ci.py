@@ -32,11 +32,30 @@ ROOT = Path(__file__).resolve().parents[3]
         ),
         (["Cargo.lock"], {"core", "cli", "proto", "noise-peer", "mobile-bindings"}),
         (["pnpm-lock.yaml"], {"host", "dsh"}),
+        (["apps/android/state/src/test/kotlin/SampleTest.kt"], {"android-state"}),
+        (["apps/android/gradle/libs.versions.toml"], {"android-state"}),
+        # Application and bridge changes belong to the explicit Android device
+        # workflow; they must not schedule the JDK-only project.
+        (["apps/android/app/build.gradle.kts"], set()),
+        (["apps/android/core-bridge/build.gradle.kts"], set()),
     ],
 )
 def test_plan_selects_only_affected_consumers(paths, expected):
     matrix = ci.plan(ROOT, paths)
     assert {p for job in matrix["include"] for p in job["projects"]} == expected
+
+
+def test_shared_inputs_do_not_schedule_android_state():
+    for path in (
+        "proto/v1/whalerein.proto",
+        "tools/repo/src/repo/testing.py",
+        ".github/workflows/ci.yml",
+        "Cargo.lock",
+        "new-build-config",
+    ):
+        matrix = ci.plan(ROOT, [path])
+        selected = {p for job in matrix["include"] for p in job["projects"]}
+        assert "android-state" not in selected, path
 
 
 @pytest.mark.parametrize(
@@ -83,6 +102,12 @@ def test_execution_excludes_unselected_projects_and_unsupported_build(monkeypatc
     calls.clear()
     ci.run_projects(ROOT, ["cli"])
     assert [cmd[3] for cmd in calls] == ["check", "build", "test"]
+    calls.clear()
+    ci.run_projects(ROOT, ["android-state"])
+    assert calls == [
+        [sys.executable, "-m", "repo", "check", "android-state"],
+        [sys.executable, "-m", "repo", "test", "android-state", "--coverage"],
+    ]
     with pytest.raises(ValueError, match="explicit"):
         ci.run_projects(ROOT, [])
 

@@ -30,6 +30,15 @@ path = "tools/noise-peer"
 kind = "rust"
 role = "tool"
 
+# The Android JVM state module is a standalone JDK-only Gradle build. It never
+# configures an Android plugin, so ordinary PR checks need no Android SDK, NDK
+# or device. Android instrumentation suites are explicit `./repo test` targets,
+# not registered unit projects.
+[[projects]]
+id = "android-state"
+path = "apps/android/state"
+kind = "kotlin"
+
 [[projects]]
 id = "access"
 path = "."

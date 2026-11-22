@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import RepoError
-from .runners import go, node, python, rust
+from .runners import go, kotlin, node, python, rust
 
-RUNNERS = {"rust": rust, "go": go, "node": node, "python": python}
+RUNNERS = {"rust": rust, "go": go, "node": node, "python": python, "kotlin": kotlin}
 
 
 @dataclass(frozen=True)

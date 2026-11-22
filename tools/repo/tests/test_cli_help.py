@@ -62,7 +62,8 @@ def test_test_help_describes_real_targets_and_prerequisites(capsys):
     assert "core" in help_text and "cargo" in help_text
     assert "protocol-vectors" in help_text and "docker" in help_text
     assert "ios-integration" in help_text and "xcodebuild" in help_text
-    assert "--project" not in help_text
+    assert "--project" in help_text
+    assert "android-state" in help_text and "java" in help_text
 
 
 @pytest.mark.parametrize(
@@ -92,6 +93,19 @@ def test_invalid_target_options_fail_before_resource_acquisition(monkeypatch, ca
     assert cli.main(["--json", *arguments]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result["error"]["code"] == "usage_error"
+
+
+def test_project_alias_selects_the_same_unit_target(monkeypatch, capsys):
+    def test(root, projects, runner, request, output):
+        assert request.suite == "unit"
+        assert request.projects == ("android-state",)
+        return {}, 0
+
+    monkeypatch.setattr(cli.testing, "run", test)
+    assert cli.main(["test", "--project", "android-state", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert cli.main(["test", "core", "--project", "android-state", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "usage_error"
 
 
 def test_bare_test_and_check_keep_distinct_local_defaults(monkeypatch, capsys):

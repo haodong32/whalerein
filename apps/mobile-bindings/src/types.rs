@@ -14,9 +14,9 @@ use whalerein_core::api::{
 };
 use whalerein_core::attachments::{AttachmentReference, DownloadOutcome, DownloadProgress};
 use whalerein_core::conversation::{
-    content_block, ApprovalState, AttemptOutcome, BlockKind, ConversationMessage, MessageRole,
-    NoticeCategory, NoticeState, RunPhase, ToolActivity, ToolResultPart, ToolStage, ToolState,
-    ViewUpdate,
+    content_block, ApprovalState, AttemptOutcome, AttemptRef, BlockKind, ConversationMessage,
+    MessageRole, NoticeCategory, NoticeState, PreviewPrefix, RunPhase, ToolActivity,
+    ToolResultPart, ToolStage, ToolState, ViewUpdate,
 };
 use whalerein_core::history::{HistoryPage, HistorySource as CoreHistorySource, MessageReference};
 
@@ -1022,10 +1022,50 @@ impl DeliveryChoice {
     }
 }
 
+/// Full scoped identity of one live or committed Attempt.
+///
+/// `live_epoch` fences observations of the same session across watch
+/// replacement; `attempt_id` is only unique inside that epoch. A committed
+/// message carries the attempt that produced it, which can belong to a foreign
+/// or already-ended attempt (for example a replayed or recovered message).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct AttemptRefView {
+    pub live_epoch: String,
+    pub attempt_id: String,
+}
+
+impl From<&AttemptRef> for AttemptRefView {
+    fn from(value: &AttemptRef) -> Self {
+        Self {
+            live_epoch: value.live_epoch.clone(),
+            attempt_id: value.attempt_id.clone(),
+        }
+    }
+}
+
+/// Leading preview bytes Core replaced with a committed message, split by
+/// kind so a hidden reasoning prefix never offsets answer rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Record)]
+pub struct PreviewPrefixView {
+    pub text_bytes: u64,
+    pub reasoning_bytes: u64,
+}
+
+impl From<PreviewPrefix> for PreviewPrefixView {
+    fn from(value: PreviewPrefix) -> Self {
+        Self {
+            text_bytes: value.text_bytes as u64,
+            reasoning_bytes: value.reasoning_bytes as u64,
+        }
+    }
+}
+
 /// Ordered events produced by a running watch and by pairing.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ConversationEvent {
     State {
+        /// Core's observation epoch for the watched session.
+        live_epoch: String,
         run_phase: String,
         /// True while a turn is running or stopping.
         running: bool,
@@ -1035,9 +1075,17 @@ pub enum ConversationEvent {
     HistoryReset,
     Message {
         message: MessageView,
+        /// The Attempt that produced this canonical message, when Core
+        /// attributed one. A late or replayed commit can name another attempt.
+        origin: Option<AttemptRefView>,
+        /// Preview bytes already shown that this commit replaced.
+        preview_prefix: Option<PreviewPrefixView>,
     },
     Preview {
-        attempt_id: String,
+        /// Full scoped attempt identity; never merge blocks across attempts.
+        attempt: AttemptRefView,
+        /// Stable block identity inside the attempt.
+        block_id: String,
         /// The checked kind of the previewed block: `text` or `reasoning`.
         /// Callers must not merge reasoning into an answer block.
         kind: String,
@@ -1051,7 +1099,7 @@ pub enum ConversationEvent {
         activity: ToolActivityView,
     },
     AttemptEnded {
-        attempt_id: String,
+        attempt: AttemptRefView,
         outcome: String,
     },
     Connection {
@@ -1111,6 +1159,7 @@ pub(crate) fn convert_update(
                 })
                 .collect();
             let mut events = vec![ConversationEvent::State {
+                live_epoch: state.live_epoch.clone(),
                 run_phase: run_phase_name(state.run_phase),
                 running: run_phase_running(state.run_phase),
                 revision: state.revision as u64,
@@ -1133,18 +1182,25 @@ pub(crate) fn convert_update(
             events
         }
         ViewUpdate::Reset => vec![ConversationEvent::HistoryReset],
-        ViewUpdate::Message { message, .. } => vec![ConversationEvent::Message {
+        ViewUpdate::Message {
+            message,
+            origin,
+            preview_prefix,
+        } => vec![ConversationEvent::Message {
             message: message_view(message),
+            origin: origin.as_ref().map(AttemptRefView::from),
+            preview_prefix: preview_prefix.map(PreviewPrefixView::from),
         }],
         ViewUpdate::Preview {
             attempt,
+            block_id,
             kind,
             text,
             replace,
             incomplete,
-            ..
         } => vec![ConversationEvent::Preview {
-            attempt_id: attempt.attempt_id.clone(),
+            attempt: AttemptRefView::from(attempt),
+            block_id: block_id.clone(),
             kind: block_kind_name(*kind),
             text: text.clone(),
             replace: *replace,
@@ -1154,7 +1210,7 @@ pub(crate) fn convert_update(
             activity: ToolActivityView::from(activity),
         }],
         ViewUpdate::AttemptEnded { attempt, outcome } => vec![ConversationEvent::AttemptEnded {
-            attempt_id: attempt.attempt_id.clone(),
+            attempt: AttemptRefView::from(attempt),
             outcome: attempt_outcome_name(*outcome),
         }],
     }
@@ -1697,11 +1753,13 @@ mod tests {
         let events = convert_update(&update, &mut seen);
         match &events[0] {
             ConversationEvent::State {
+                live_epoch,
                 run_phase,
                 running,
                 revision,
                 approvals,
             } => {
+                assert_eq!(live_epoch, "epoch");
                 assert_eq!(run_phase, "unknown");
                 assert!(!running);
                 assert_eq!(*revision, 3);
@@ -1723,7 +1781,10 @@ mod tests {
         assert_eq!(
             events,
             vec![ConversationEvent::AttemptEnded {
-                attempt_id: "a".into(),
+                attempt: AttemptRefView {
+                    live_epoch: "e".into(),
+                    attempt_id: "a".into(),
+                },
                 outcome: "unknown".into()
             }]
         );
@@ -1792,7 +1853,9 @@ mod tests {
                         attachment: None,
                     }],
                     created_at_unix_ms: 7,
-                }
+                },
+                origin: None,
+                preview_prefix: None,
             }]
         );
 
@@ -1810,7 +1873,11 @@ mod tests {
         assert_eq!(
             convert_update(&update, &mut seen),
             vec![ConversationEvent::Preview {
-                attempt_id: "a".into(),
+                attempt: AttemptRefView {
+                    live_epoch: "e".into(),
+                    attempt_id: "a".into(),
+                },
+                block_id: "b".into(),
                 kind: "reasoning".into(),
                 text: "stream".into(),
                 replace: true,
@@ -1846,7 +1913,12 @@ mod tests {
             &mut seen,
         );
         match &events[0] {
-            ConversationEvent::Message { message } => assert_eq!(message, &direct),
+            ConversationEvent::Message {
+                message, origin, ..
+            } => {
+                assert_eq!(message, &direct);
+                assert!(origin.is_none());
+            }
             other => panic!("unexpected event: {other:?}"),
         }
         assert_eq!(direct.role, "assistant");
@@ -2187,5 +2259,219 @@ mod tests {
             Some("question_view_too_large_for_display")
         );
         assert_eq!(bounded.freshness, "current");
+    }
+    #[test]
+    fn preview_append_and_replace_keep_attempt_and_block_identity() {
+        let attempt = AttemptRef {
+            live_epoch: "epoch-1".into(),
+            attempt_id: "attempt-1".into(),
+        };
+        let mut seen = None;
+        let append = ViewUpdate::Preview {
+            attempt: attempt.clone(),
+            block_id: "block-1".into(),
+            kind: BlockKind::Text,
+            text: "hel".into(),
+            replace: false,
+            incomplete: true,
+        };
+        let replace = ViewUpdate::Preview {
+            attempt: attempt.clone(),
+            block_id: "block-1".into(),
+            kind: BlockKind::Text,
+            text: "hello".into(),
+            replace: true,
+            incomplete: false,
+        };
+        assert_eq!(
+            convert_update(&append, &mut seen),
+            vec![ConversationEvent::Preview {
+                attempt: AttemptRefView {
+                    live_epoch: "epoch-1".into(),
+                    attempt_id: "attempt-1".into(),
+                },
+                block_id: "block-1".into(),
+                kind: "text".into(),
+                text: "hel".into(),
+                replace: false,
+                incomplete: true,
+            }]
+        );
+        assert_eq!(
+            convert_update(&replace, &mut seen),
+            vec![ConversationEvent::Preview {
+                attempt: AttemptRefView {
+                    live_epoch: "epoch-1".into(),
+                    attempt_id: "attempt-1".into(),
+                },
+                block_id: "block-1".into(),
+                kind: "text".into(),
+                text: "hello".into(),
+                replace: true,
+                incomplete: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn reasoning_and_answer_previews_keep_separate_block_identities() {
+        let attempt = AttemptRef {
+            live_epoch: "epoch-1".into(),
+            attempt_id: "attempt-1".into(),
+        };
+        let mut seen = None;
+        for (block_id, kind, name) in [
+            ("reasoning-1", BlockKind::Reasoning, "reasoning"),
+            ("answer-1", BlockKind::Text, "text"),
+        ] {
+            let events = convert_update(
+                &ViewUpdate::Preview {
+                    attempt: attempt.clone(),
+                    block_id: block_id.into(),
+                    kind,
+                    text: "stream".into(),
+                    replace: false,
+                    incomplete: true,
+                },
+                &mut seen,
+            );
+            match &events[0] {
+                ConversationEvent::Preview {
+                    block_id: actual,
+                    kind: actual_kind,
+                    ..
+                } => {
+                    assert_eq!(actual, block_id);
+                    assert_eq!(actual_kind, name);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn late_commit_names_origin_and_preview_prefix_without_guessing() {
+        let message = message_with(
+            MessageRole::Assistant,
+            Some(content_block::Content::Text(TextContent {
+                text: "answer".into(),
+            })),
+        );
+        let mut seen = None;
+        let events = convert_update(
+            &ViewUpdate::Message {
+                message,
+                origin: Some(AttemptRef {
+                    live_epoch: "epoch-1".into(),
+                    attempt_id: "attempt-1".into(),
+                }),
+                preview_prefix: Some(PreviewPrefix {
+                    text_bytes: 4,
+                    reasoning_bytes: 2,
+                }),
+            },
+            &mut seen,
+        );
+        match &events[0] {
+            ConversationEvent::Message {
+                origin,
+                preview_prefix,
+                ..
+            } => {
+                assert_eq!(
+                    origin,
+                    &Some(AttemptRefView {
+                        live_epoch: "epoch-1".into(),
+                        attempt_id: "attempt-1".into(),
+                    })
+                );
+                assert_eq!(
+                    preview_prefix,
+                    &Some(PreviewPrefixView {
+                        text_bytes: 4,
+                        reasoning_bytes: 2,
+                    })
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn foreign_origin_is_preserved_as_evidence() {
+        let message = message_with(
+            MessageRole::Assistant,
+            Some(content_block::Content::Text(TextContent {
+                text: "replayed".into(),
+            })),
+        );
+        let mut seen = None;
+        let events = convert_update(
+            &ViewUpdate::Message {
+                message,
+                origin: Some(AttemptRef {
+                    live_epoch: "foreign-epoch".into(),
+                    attempt_id: "foreign-attempt".into(),
+                }),
+                preview_prefix: None,
+            },
+            &mut seen,
+        );
+        match &events[0] {
+            ConversationEvent::Message { origin, .. } => assert_eq!(
+                origin,
+                &Some(AttemptRefView {
+                    live_epoch: "foreign-epoch".into(),
+                    attempt_id: "foreign-attempt".into(),
+                })
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_attempt_end_before_its_message_keeps_both_identities() {
+        let attempt = AttemptRef {
+            live_epoch: "epoch-1".into(),
+            attempt_id: "attempt-1".into(),
+        };
+        let mut seen = None;
+        let ended = convert_update(
+            &ViewUpdate::AttemptEnded {
+                attempt: attempt.clone(),
+                outcome: AttemptOutcome::Committed,
+            },
+            &mut seen,
+        );
+        let committed = convert_update(
+            &ViewUpdate::Message {
+                message: message_with(
+                    MessageRole::Assistant,
+                    Some(content_block::Content::Text(TextContent {
+                        text: "final".into(),
+                    })),
+                ),
+                origin: Some(attempt.clone()),
+                preview_prefix: None,
+            },
+            &mut seen,
+        );
+        match (&ended[0], &committed[0]) {
+            (
+                ConversationEvent::AttemptEnded {
+                    attempt: ended_attempt,
+                    outcome,
+                },
+                ConversationEvent::Message {
+                    origin: Some(origin),
+                    ..
+                },
+            ) => {
+                assert_eq!(ended_attempt, &AttemptRefView::from(&attempt));
+                assert_eq!(outcome, "committed");
+                assert_eq!(origin, &AttemptRefView::from(&attempt));
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
     }
 }

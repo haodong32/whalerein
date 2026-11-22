@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess, FakeAttachmentObject};
 use whalerein_mobile::{
-    write_client_config, AttachmentDownloadRequestView, AttachmentReferenceView,
+    new_operation_id, write_client_config, AttachmentDownloadRequestView, AttachmentReferenceView,
     AttachmentTransferView, ConversationEvent, DeliveryChoice, MemorySecretStore,
     MessageReferenceView, MessageReplyView, MessageView, MobileClientService, MobileCore,
     QueueAction, SessionKeyView, WaitOutcome,
@@ -585,7 +585,7 @@ fn event_text(message: &MessageView) -> String {
 
 fn has_message(events: &[ConversationEvent], text: &str) -> bool {
     events.iter().any(|event| match event {
-        ConversationEvent::Message { message } => event_text(message) == text,
+        ConversationEvent::Message { message, .. } => event_text(message) == text,
         _ => false,
     })
 }
@@ -1450,6 +1450,67 @@ fn a_dropped_send_receipt_stays_listed_and_recovers_without_another_submission()
     assert!(recovered.content.is_some());
     // Recovery queried the original command; it never sent the message again.
     assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+}
+
+#[test]
+fn an_explicit_send_operation_id_is_stable_and_never_duplicates_the_submission() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+
+    let operation_id = new_operation_id();
+    assert_eq!(operation_id.len(), 32);
+    assert!(operation_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+    let submitted = core
+        .send_with_operation_id(
+            host_id.clone(),
+            "session-1".into(),
+            "stable identity".into(),
+            DeliveryChoice::Queue,
+            operation_id.clone(),
+        )
+        .unwrap();
+    assert_eq!(submitted.operation_id, operation_id);
+    assert_eq!(submitted.host_id, host_id);
+    assert_eq!(submitted.session_id, "session-1");
+    assert!(submitted.receipt.is_some());
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    // Reusing the same identity and intent recovers the durable operation
+    // instead of submitting the message twice.
+    let recovered = core
+        .send_with_operation_id(
+            host_id,
+            "session-1".into(),
+            "stable identity".into(),
+            DeliveryChoice::Queue,
+            operation_id.clone(),
+        )
+        .unwrap();
+    assert_eq!(recovered.operation_id, operation_id);
+    assert_eq!(access.host.lock().unwrap().commands_seen, 1);
+
+    for invalid in [
+        "short",
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        &format!("{operation_id}0"),
+    ] {
+        assert_eq!(
+            core.send_with_operation_id(
+                "host-1".into(),
+                "session-1".into(),
+                "text".into(),
+                DeliveryChoice::Queue,
+                invalid.to_owned(),
+            )
+            .unwrap_err()
+            .code(),
+            "invalid_input"
+        );
+    }
 }
 
 #[test]

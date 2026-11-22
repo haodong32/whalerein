@@ -9,10 +9,27 @@ import sys
 import tomllib
 from pathlib import Path
 
+ANDROID_STATE = "android-state"
+
+# The JDK-only state module is selected by its own source, its shared Android
+# Gradle inputs and the Gradle wrapper. Application, bridge and device-suite
+# changes belong to the explicit Android workflow, not to ordinary project
+# selection.
+ANDROID_STATE_INPUTS = (
+    "apps/android/state/",
+    "apps/android/gradle/",
+    "apps/android/gradlew",
+    "apps/android/gradlew.bat",
+)
+
 
 def plan(root: Path, paths: list[str]) -> dict:
     entries = tomllib.loads((root / "tools/repo/projects.toml").read_text())["projects"]
     ids = {p["id"] for p in entries}
+    # Shared build inputs and unknown configuration keep their conservative
+    # all-project behavior, but never schedule Android-only work from unrelated
+    # Rust, protocol or tooling changes.
+    shared = ids - {ANDROID_STATE}
     selected = set()
     for path in paths:
         if path.endswith(".md") or path.startswith(
@@ -29,10 +46,16 @@ def plan(root: Path, paths: list[str]) -> dict:
                 if s != "."
             )
         }
-        if path.startswith("contracts/client-environment/"):
+        if path.startswith(ANDROID_STATE_INPUTS):
+            owners.add(ANDROID_STATE)
+        elif path.startswith("apps/android/"):
+            # Only the JVM state project is registered; app/bridge changes run
+            # through the explicit heavy Android workflow.
+            pass
+        elif path.startswith("contracts/client-environment/"):
             owners |= {"core", "host"}
         elif path.startswith(("proto/", "tests/fixtures/")):
-            owners |= ids
+            owners |= shared
         elif path in ("Cargo.toml", "Cargo.lock"):
             owners |= {p["id"] for p in entries if p["kind"] == "rust"}
         elif path in ("go.mod", "go.sum"):
@@ -40,10 +63,10 @@ def plan(root: Path, paths: list[str]) -> dict:
         elif path in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
             owners |= {p["id"] for p in entries if p["kind"] == "node"}
         elif path.startswith(("tools/repo/", ".github/", "tests/integration/", "deploy/")):
-            owners |= ids
+            owners |= shared
         elif not owners:
             # Unknown build/configuration inputs must not silently skip validation.
-            owners |= ids
+            owners |= shared
         selected |= owners
     while True:
         expanded = selected | {
@@ -53,7 +76,7 @@ def plan(root: Path, paths: list[str]) -> dict:
             break
         selected = expanded
     groups = []
-    for kind in ("rust", "go", "node", "python"):
+    for kind in ("rust", "go", "node", "kotlin", "python"):
         projects = [p["id"] for p in entries if p["kind"] == kind and p["id"] in selected]
         if projects:
             groups.append({"kind": kind, "projects": projects})
@@ -184,7 +207,7 @@ def main() -> None:
     parser.add_argument(
         "operation", choices=("plan", "quick-plan", "native-plan", "run", "quick", "native")
     )
-    parser.add_argument("--kind", choices=("rust", "go", "node", "python"))
+    parser.add_argument("--kind", choices=("rust", "go", "node", "kotlin", "python"))
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--projects", default="[]")
