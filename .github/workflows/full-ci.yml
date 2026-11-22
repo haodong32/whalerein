@@ -5,6 +5,11 @@ on:
     types: [labeled]
   merge_group:
   workflow_dispatch:
+    inputs:
+      android_performance:
+        description: 'Run the physical-device Android Macrobenchmark (requires a device runner).'
+        type: boolean
+        default: false
   schedule:
     - cron: '17 18 * * *' # 02:17 Asia/Shanghai
   push:
@@ -30,6 +35,8 @@ jobs:
     outputs:
       matrix: ${{ steps.changes.outputs.matrix }}
       native_matrix: ${{ steps.changes.outputs.native_matrix }}
+      android_matrix: ${{ steps.android.outputs.matrix }}
+      android_performance: ${{ steps.android.outputs.performance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +57,50 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           native_matrix=$(python3 tools/repo/src/repo/ci.py native-plan --base "$BASE_SHA" --head "$HEAD_SHA")
           echo "native_matrix=$native_matrix" >> "$GITHUB_OUTPUT"
+      - name: Select Android work
+        id: android
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          PERFORMANCE: ${{ inputs.android_performance }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          EVENT="${EVENT:-}"
+          ACTION="${ACTION:-}"
+          LABEL="${LABEL:-}"
+          PERFORMANCE="${PERFORMANCE:-false}"
+          BASE_SHA="${BASE_SHA:-}"
+          HEAD_SHA="${HEAD_SHA:-}"
+          if [ "$EVENT" = pull_request ] && { [ "$ACTION" != labeled ] || [ "$LABEL" != run-full-ci ]; }; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            echo 'performance=false' >> "$GITHUB_OUTPUT"
+            echo 'Android verification not requested: add run-full-ci to test this revision.'
+            exit 0
+          fi
+          build=false
+          case "$EVENT" in
+            workflow_dispatch|schedule|push)
+              # Manual and main/scheduled runs verify the full tier.
+              build=true ;;
+            pull_request|merge_group)
+              changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --)
+              if printf '%s\n' "$changed" | grep -qE '^(apps/android/|tools/repo/src/repo/runners/(android|kotlin)\.py$|\.github/workflows/full-ci\.yml)'; then
+                build=true
+              fi ;;
+          esac
+          if [ "$build" = false ]; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"target":"android-ui"},{"target":"android-integration"}]}' >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$PERFORMANCE" = true ]; then
+            echo 'performance=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'performance=false' >> "$GITHUB_OUTPUT"
+          fi
 
   fast:
     name: Checks and coverage (${{ matrix.kind }})
@@ -179,8 +230,131 @@ jobs:
             .data/runs/**/report.json
             .data/runs/**/report.html
             .data/runs/**/coverage-*.coverprofile
+            apps/android/state/build/test-results/test/*.xml
             .data/bin/whalerein-access
             target/debug/whalerein
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  android:
+    name: Android device suite (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.android_matrix != '{"include":[]}'
+    runs-on: macos-26
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.android_matrix) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
+
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-macos-26-${{ hashFiles('apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/**/build.gradle.kts') }}
+          restore-keys: |
+            gradle-android-macos-26-
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.9'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Run Android device suite on a managed emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: default
+          arch: arm64-v8a
+          profile: pixel_6
+          disable-animations: true
+          script: ./repo test ${{ matrix.target }} --json
+
+      - name: Upload Android suite reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-${{ matrix.target }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            apps/android/**/build/outputs/androidTest-results/**/*.xml
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  android-performance:
+    name: Android performance (physical device)
+    needs: changes
+    if: needs.changes.outputs.android_performance == 'true'
+    runs-on: ${{ vars.WHALEREIN_ANDROID_PERFORMANCE_RUNNER || 'macos-26' }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
+
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-macos-26-${{ hashFiles('apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/**/build.gradle.kts') }}
+          restore-keys: |
+            gradle-android-macos-26-
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.9'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Run the physical-device Macrobenchmark
+        env:
+          ANDROID_SERIAL: ${{ vars.WHALEREIN_ANDROID_SERIAL }}
+        run: ./repo test android-performance --json
+
+      - name: Upload performance reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-performance-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            apps/android/**/build/outputs/androidTest-results/**/*.xml
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
@@ -407,7 +581,7 @@ jobs:
   gate:
     name: Full CI gate
     if: always() && !cancelled() && needs.changes.result != 'skipped'
-    needs: [changes, fast, native, contract, deployment]
+    needs: [changes, fast, native, contract, deployment, android, android-performance]
     runs-on: ubuntu-26.04
     steps:
       - name: Check required results
@@ -418,6 +592,10 @@ jobs:
           NATIVE_MATRIX: ${{ needs.changes.outputs.native_matrix }}
           CONTRACT_RESULT: ${{ needs.contract.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+          ANDROID_MATRIX: ${{ needs.changes.outputs.android_matrix }}
+          ANDROID_PERFORMANCE_RESULT: ${{ needs.android-performance.result }}
+          ANDROID_PERFORMANCE: ${{ needs.changes.outputs.android_performance }}
           MATRIX: ${{ needs.changes.outputs.matrix }}
         run: |
           test "$CHANGES_RESULT" = success
@@ -443,4 +621,14 @@ jobs:
             else
               test "$NATIVE_RESULT" = success
             fi
+          fi
+          if [ "$ANDROID_MATRIX" = '{"include":[]}' ]; then
+            test "$ANDROID_RESULT" = skipped
+          else
+            test "$ANDROID_RESULT" = success
+          fi
+          if [ "$ANDROID_PERFORMANCE" = true ]; then
+            test "$ANDROID_PERFORMANCE_RESULT" = success
+          else
+            test "$ANDROID_PERFORMANCE_RESULT" = skipped
           fi

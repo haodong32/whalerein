@@ -95,6 +95,9 @@ Full reference: tools/repo/README.md""",
             "  ./repo test core --only reconnect\n"
             "  ./repo test core --coverage\n"
             "  ./repo test core --list\n"
+            "  ./repo test android-state --only AC-24.focused\n"
+            "  ./repo test --project android-state --json\n"
+            "  ./repo test android-ui --only AC-12.rich\n"
             "  ./repo test protocol-vectors\n"
             "  ./repo test chain --parallel 2\n"
             "  ./repo test integration"
@@ -139,6 +142,11 @@ Full reference: tools/repo/README.md""",
         if name in ("fmt", "check", "build", "test", "doctor"):
             sub.add_argument("target", nargs="?", metavar="TARGET", help="scope to select")
         if name == "test":
+            sub.add_argument(
+                "--project",
+                metavar="ID",
+                help="unit project ID; equivalent to the TARGET positional argument",
+            )
             sub.add_argument(
                 "--integration-timeout",
                 type=int,
@@ -415,6 +423,10 @@ def dispatch(args, root, runner):
                 f"{p['id']:<12} {p['kind']:<8} {p['path']:<26} {', '.join(p['operations'])}"
             )
         return {"projects": data}, 0
+    if args.command == "test" and args.project:
+        if args.target:
+            raise UsageError("select the test target positionally or with --project, not both")
+        args.target = args.project
     target = targets.resolve(args.command, args.target, projects)
     if args.command == "doctor":
         data = doctor.run_doctor(runner, doctor.specs_for_target(target))
@@ -442,6 +454,26 @@ def dispatch(args, root, runner):
                     "--shard requires INDEX/COUNT with 1 <= INDEX <= COUNT and 2 <= COUNT <= 8"
                 )
             shard = (int(match[1]), int(match[2]))
+        if kind == "android":
+            if any(
+                (
+                    args.coverage,
+                    args.parallel is not None,
+                    args.integration_timeout is not None,
+                )
+            ):
+                raise UsageError("Android device suites support --only, --list and --output")
+            from .runners.android import run_android
+
+            result = run_android(
+                runner,
+                root,
+                target.name,
+                case_filter=args.only,
+                output=args.output,
+                list_only=args.list_only,
+            )
+            return testing.saved_test_result(result, runner.out)
         if kind == "ios":
             if any(
                 (

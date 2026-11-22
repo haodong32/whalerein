@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Profile secrets, Keystore-wrapped documents, cached content and diagnostics
+  are device-bound. They are excluded from cloud backup and device transfer so
+  a restore can never move an instance identity or credential to a new device.
+-->
+<full-backup-content>
+    <exclude domain="file" path="secrets/" />
+    <exclude domain="file" path="profiles/" />
+    <exclude domain="file" path="core/" />
+    <exclude domain="file" path="diagnostics/" />
+    <exclude domain="file" path="attachments/" />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>

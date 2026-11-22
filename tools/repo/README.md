@@ -49,18 +49,23 @@ the image. The server stack separately requires Compose.
 GitHub CI compares the PR base with the tested merge revision, or a main push's
 previous revision with its new revision. Deleted/renamed paths participate in
 selection. Documentation-only changes skip product jobs; unknown inputs select
-all projects. Missing history fails selection rather than silently skipping.
+all affected projects except the Android-only state project. Missing history
+fails selection rather than silently skipping.
 
 `projects.toml` remains the project inventory. Its `depends_on` relationships
 expand affected consumers: Core changes include CLI and noise-peer; Host changes
 include DSH. Rust/Node root manifests and lockfiles select their ecosystem;
 protocol, fixtures, shared tooling, workflow, deployment and integration changes
-select all projects. Selection changes do not change local `./repo test` defaults.
+select all projects except the Android-only project. Android state source and
+shared Android Gradle inputs select only `android-state`; app and bridge changes
+belong to the explicit Android workflow. Selection changes do not change local `./repo test` defaults.
 
-The push workflow runs independent Rust, Go, Node and Python quick jobs in
-parallel, without a preceding selection job. Each job selects affected projects
-before installing toolchains. Rust only checks formatting; Go, Node and Python
-run checks and unit tests without coverage or a separate build. These are partial
+The push workflow runs independent Rust, Go, Node, Kotlin and Python quick jobs
+in parallel, without a preceding selection job. Each job selects affected
+projects before installing toolchains. Rust only checks formatting; Go, Node and
+Python run checks and unit tests without coverage or a separate build; Kotlin
+runs the JDK-only `android-state` Gradle checks and tests with JDK 21 and no
+Android SDK, NDK or device. These are partial
 iteration checks, not evidence of Rust compilation, platform behavior or coverage.
 Three minutes is the quick-job performance target, including setup and report
 upload but excluding runner queueing. A final timing step emits a warning after
@@ -72,8 +77,11 @@ still fail the checks. Superseded push runs are cancelled.
 The separate `full-ci.yml` runs on the `run-full-ci` label event, manual dispatch,
 main pushes, merge queue and nightly schedule. Leaving the label attached does
 not rerun heavy jobs on later pushes. Full verification runs checks, supported
-builds and unit coverage, plus deployment acceptance when `access` is selected
-and protocol contracts when `proto` is selected. Protocol generation is checked
+builds and unit coverage, plus deployment acceptance when `access` is selected,
+protocol contracts when `proto` is selected, and Android device suites when
+Android-facing paths changed. A manual dispatch can additionally request the
+physical-device Macrobenchmark. Android device work is never part of the
+ordinary quick `CI gate`. Protocol generation is checked
 once in the contract job rather than again in the Node job. `Full CI gate` requires every selected job; it is distinct
 from the required quick `CI gate`.
 
@@ -268,6 +276,7 @@ validation are required. The command accepts:
 
 ```bash
 ./repo test core
+./repo test --project android-state
 ./repo test core --only reconnect
 ./repo test core --list
 ./repo test repo --coverage
@@ -285,11 +294,26 @@ targets. The iOS targets require a native macOS host. Use
 `ios-unit`, `ios-ui`, and `ios-integration` for whole plans, or `ios-ui-smoke`
 for the CI smoke selection. Bare test selects registered unit targets only.
 
+The Android JDK-only project is `android-state` (Kotlin/JVM, Gradle included
+build). It is a normal unit target and supports `check`, `test`, `--only` and
+`--list`. Focused runs use the state build's `-PcaseFilter` JUnit condition, and
+listing uses `-PcaseList=true`; neither executes unselected bodies. Filtered
+runs count only observed non-skipped cases, so an all-skipped result is an
+unmatched selector. Its `--coverage` runs JaCoCo verification and reports
+per-package line ratios against the 90% gate; ordinary quick CI does not request
+coverage. The explicit device targets are `android-ui`, `android-integration`
+and `android-performance`; they require `adb`, the Android SDK and a compatible
+target, while `android-performance` requires a physical device. A missing
+prerequisite produces unavailable evidence with exit status 3. Instrumentation
+case selection filters parsed case IDs, and an unmatched `--only` is invalid
+usage. See [apps/android/README.md](../../apps/android/README.md).
+
 | Option | Targets | Additional constraints |
 |---|---|---|
-| `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. |
-| `--coverage` | Unit targets | No `--only` or `--list`. |
-| `--list` | Unit, Linux integration, and iOS leaves | No coverage; Node static listing is unsupported. |
+| `--project ID` | `test` only | Unit project ID; equivalent to the TARGET positional argument. Do not pass both. |
+| `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. Android device suites filter parsed instrumentation case IDs. |
+| `--coverage` | Unit targets | No `--only` or `--list`. Kotlin/JVM `android-state` uses JaCoCo per-package lines; the Android device suites reject the option. |
+| `--list` | Unit, Linux integration, iOS leaves, and Android device leaves | No coverage; Node static listing is unsupported. Kotlin listing runs Gradle list mode; Android device listing runs instrumentation in log mode and requires a device. |
 | `--parallel N` | Linux integration targets | 1–8 independent hash shards, default 1; incompatible with `--list`. |
 | `--integration-timeout SECONDS` | Linux integration targets | Positive run deadline covering preparation through execution, defaults to 7200 seconds. |
 | `--simulator UDID` | iOS targets | Exact Simulator device UDID. |
@@ -369,10 +393,12 @@ per package; Rust, Node and Python report lines. Generated protocol bindings are
 excluded from coverage, but their tests still run. Missing tools, measurements
 and below-threshold results fail the gate; passing cases alone do not satisfy it.
 
-Python, Go and Node collect coverage with their case results in one execution.
-For Go projects, use `go tool cover -func=<profile>` or `go tool cover
+Python, Go, Node and Kotlin/JVM collect coverage with their case results in one
+execution. For Go projects, use `go tool cover -func=<profile>` or `go tool cover
 -html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
-to inspect the measured code blocks.
+to inspect the measured code blocks. Kotlin reports each JaCoCo package from
+`apps/android/state/build/reports/jacoco/test/jacocoTestReport.xml`; the state
+build also enforces its 90% per-package line rule.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
 serial cargo-llvm-cov execution in a temporary build directory so cached
 binaries and profile counts do not enter the measurement. The report labels
@@ -428,7 +454,7 @@ scripts come from native manifests; new projects require explicit registration.
 | `sources.py` | Frozen source inputs and their identities. |
 | `integration_targets.py` | Linux integration scope, collection paths and artifact requirements. |
 | `test_cost.py` | Advisory selection notices and comparable local wall-time history. |
-| `runners/` | Ecosystem-specific commands, discovery and coverage. |
+| `runners/` | Ecosystem-specific commands, discovery and coverage. `runners/kotlin.py` owns the JDK-only Gradle state runner; `runners/android.py` owns explicit device suites. |
 | `process.py` | Child processes, deadlines, process-group cancellation and capture. |
 | `reports/model.py` | Versioned facts, validation and atomic persistence. |
 | `reports/html.py` | Offline HTML presentation. |
