@@ -76,7 +76,6 @@ interface AppDependencies : AutoCloseable {
     val clock: Clock
     val ids: IdGenerator
     val diagnosticSink: DiagnosticSink
-    val coreRevision: String
     val coreVersion: String
     val appVersion: String
 

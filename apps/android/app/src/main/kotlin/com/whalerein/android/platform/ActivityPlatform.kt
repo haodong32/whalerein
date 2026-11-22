@@ -42,10 +42,6 @@ class PlatformServices {
         current.compareAndSet(platform, null)
     }
 
-    fun browser(): CloudBrowserLauncher? = current.get()?.browser
-
-    suspend fun openPem(): String? = current.get()?.documents?.openPem()
-
     fun lan(): LanPermissionGateway = object : LanPermissionGateway {
         override suspend fun state(): LanPermissionState =
             current.get()?.lan?.state() ?: LanPermissionState.NotRequired

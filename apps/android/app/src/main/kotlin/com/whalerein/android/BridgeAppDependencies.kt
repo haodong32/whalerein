@@ -53,7 +53,7 @@ import kotlinx.coroutines.withContext
  *   modelsQueue, pendingInput, draft, sessionList }`
  * - `supportPorts { operations, account, failureSummary }`
  * - `attachmentPorts { attachments, staging, authorization }`
- * - `activeInstance`, `provenance { coreRevision, coreVersion, appVersion }`,
+ * - `activeInstance`, `provenance { coreVersion, appVersion }`,
  *   `close()`
  */
 class BridgeAppDependencies(
@@ -94,7 +94,6 @@ class BridgeAppDependencies(
     override val attachmentAuthorization: AttachmentAuthorizationPort
         get() = core.attachmentPorts.authorization
 
-    override val coreRevision: String get() = core.provenance.coreRevision
     override val coreVersion: String get() = core.provenance.coreVersion
     override val appVersion: String get() = core.provenance.appVersion
     override val instance: InstanceId get() = core.activeInstance

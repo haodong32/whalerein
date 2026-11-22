@@ -169,7 +169,6 @@ dependencies {
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.activity.compose)
@@ -180,11 +179,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.material3.adaptive)
     implementation(libs.androidx.material3.adaptive.layout)
-    implementation(libs.androidx.material3.window.size)
-    implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.browser)
     implementation(libs.mikepenz.markdown.m3)
-    implementation(libs.mikepenz.markdown.code)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 

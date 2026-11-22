@@ -30,7 +30,6 @@ dependencies {
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.turbine)
     testRuntimeOnly(libs.junit.platform.launcher)
     testFixturesApi(libs.kotlinx.coroutines.core)
     testFixturesApi(libs.junit.jupiter)
