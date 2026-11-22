@@ -240,6 +240,18 @@ class WhaleReinUITestCase: XCTestCase {
         }
     }
 
+    /// Scrolls the transcript until the element can actually receive a tap.
+    /// A row can exist while still clipped below or above the visible range.
+    func makeConversationElementHittable(_ element: XCUIElement, maxSwipes: Int = 6) {
+        let scroll = self.element("conversation.scroll")
+        for _ in 0..<maxSwipes where !element.isHittable {
+            if scroll.exists {
+                scroll.swipeUp()
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
     /// Returns an element, scrolling toward the newest transcript content when a
     /// lazy transcript has not realised a row at the bottom yet.
     /// Waits until an element is no longer in the hierarchy, re-querying each

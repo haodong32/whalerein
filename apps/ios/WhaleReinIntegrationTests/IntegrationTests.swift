@@ -547,7 +547,7 @@ extension IntegrationTestCase {
             _ = try await live.service.pairingStart(invitation: "not-an-invitation")
             XCTFail("a malformed invitation unexpectedly produced a prompt")
         } catch {
-            assertError(error, oneOf: [.invalidInvitation], "malformed invitation")
+            assertError(error, oneOf: [.invalidInput], "malformed invitation")
         }
         await assertUnpaired(live.service)
     }
@@ -810,8 +810,15 @@ extension IntegrationTestCase {
         let environment = try environment()
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
-        _ = try await startWatching(live)
+        let watcher = try await startWatching(live)
         try await live.control.seedEvent("idle")
+        try await waitUntil(timeout: 10) {
+            let caps = try await live.service.capabilities(
+                hostId: environment.hostId,
+                sessionId: environment.sessionId
+            )
+            return caps.running ? nil : true
+        }
 
         let capabilities = try await live.service.capabilities(
             hostId: environment.hostId,
@@ -827,11 +834,19 @@ extension IntegrationTestCase {
             text: "integration idle send",
             delivery: .send
         )
-        XCTAssertEqual(receipt.status, .confirmed)
         XCTAssertFalse(receipt.commandId.isEmpty)
+        if receipt.status != .confirmed {
+            let confirmed = await watcher.wait(timeout: 15) { envelopes in
+                envelopes.contains { envelope in
+                    guard case .commandStatus(let status) = envelope.event else { return false }
+                    return status.commandId == receipt.commandId && status.status == .confirmed
+                }
+            }
+            XCTAssertTrue(confirmed, "the idle send never confirmed")
+        }
     }
 
-    func testAC06_defaultSteer() async throws {
+    func testAC06_defaultQueue() async throws {
         let environment = try environment()
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
@@ -844,7 +859,11 @@ extension IntegrationTestCase {
         )
         XCTAssertTrue(capabilities.running)
         XCTAssertTrue(capabilities.supportsSteer)
-        XCTAssertEqual(DeliveryPolicy.defaultChoice(for: capabilities), .steer)
+        XCTAssertEqual(
+            DeliveryPolicy.defaultChoice(for: capabilities),
+            .queue,
+            "ordinary Send defaults to the native queue; steering stays explicit"
+        )
 
         let receipt = try await live.service.send(
             hostId: environment.hostId,
@@ -1042,8 +1061,23 @@ extension IntegrationTestCase {
             sessionId: environment.sessionId,
             text: draft
         )
-        let configPath = live.dataDirectory.appendingPathComponent("config.toml")
-        let manifestPath = live.dataDirectory.appendingPathComponent("instance/instance.json")
+        let configPath = live.dataDirectory
+            .appendingPathComponent("client/app.toml")
+        let manifestPath = try XCTUnwrap(
+            FileManager.default.enumerator(
+                at: live.dataDirectory,
+                includingPropertiesForKeys: nil
+            )?
+            .compactMap { ($0 as? URL) }
+            .first { $0.lastPathComponent == "instance.json" },
+            "Core did not materialize an instance manifest"
+        )
+        if !FileManager.default.fileExists(atPath: configPath.path) {
+            let tree = FileManager.default.enumerator(at: live.dataDirectory, includingPropertiesForKeys: nil)?
+                .compactMap { ($0 as? URL)?.path }
+                .joined(separator: "\n") ?? "empty"
+            XCTFail("config document missing; tree:\n\(tree)")
+        }
         let selectedConfig = try Data(contentsOf: configPath)
         let instanceIdentity = try Data(contentsOf: manifestPath)
         XCTAssertFalse(FileManager.default.fileExists(

@@ -12,9 +12,7 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
         XCTAssertEqual(header.value as? String, "swift")
 
         let expand = waitFor("tool.expand.msg-0319-block-0")
-        if !expand.isHittable {
-            scrollConversationUp(times: 1)
-        }
+        makeConversationElementHittable(expand)
         XCTAssertEqual(expand.value as? String, "Show details")
         tap(expand)
         XCTAssertTrue(waitFor("tool.details.msg-0319-block-0").exists)
