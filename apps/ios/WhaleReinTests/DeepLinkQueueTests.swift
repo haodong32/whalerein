@@ -76,12 +76,13 @@ struct DeepLinkQueueTests {
         let directory = makeTempDirectory()
         let preferences = PreferencesStore(directory: directory)
         preferences.update { $0.paired = true }
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,
             options: testLaunchOptions()
         )
+        app.router = AppRouter()
         await app.bootstrapConversation()
         #expect(app.conversation != nil)
         #expect(!app.showInvitationSheet)
@@ -98,7 +99,7 @@ struct DeepLinkQueueTests {
         service.pairingStartHandler = { _ in fixturePrompt() }
         service.pairingDecideHandler = { _, _ in }
         let directory = makeTempDirectory()
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: PreferencesStore(directory: directory),
             dataDirectory: directory,

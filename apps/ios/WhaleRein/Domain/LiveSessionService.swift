@@ -58,14 +58,24 @@ final class LiveSessionService: SessionService {
         configPath: URL,
         secretStore: any SecretStore,
         appVersion: String,
-        instanceId: String
+        instanceId: String,
+        diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) throws {
         do {
-            self.core = try MobileCore(
-                configPath: configPath.path,
-                secretStore: secretStore,
-                appVersion: appVersion
-            )
+            if let diagnosticSink {
+                self.core = try MobileCore.newWithDiagnosticSink(
+                    configPath: configPath.path,
+                    secretStore: secretStore,
+                    appVersion: appVersion,
+                    sink: diagnosticSink
+                )
+            } else {
+                self.core = try MobileCore(
+                    configPath: configPath.path,
+                    secretStore: secretStore,
+                    appVersion: appVersion
+                )
+            }
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
@@ -345,7 +355,7 @@ final class LiveSessionService: SessionService {
         let timeoutTask = Task { [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            await self?.failPairingWaiter(id)
+            self?.failPairingWaiter(id)
         }
         defer { timeoutTask.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
@@ -730,6 +740,10 @@ final class LiveSessionService: SessionService {
         let core = self.core
         let view = try await call { try core.diagnosticsPreview() }
         return Self.map(diagnostics: view)
+    }
+
+    func clearDiagnostics() async throws {
+        try core.clearDiagnostics()
     }
 
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {

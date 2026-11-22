@@ -39,143 +39,247 @@ final class ConversationModel {
     let sessionId: String
     let sessionTitle: String
 
-    private(set) var messages: [ConversationMessage] = []
-    private(set) var approvals: [Approval] = []
+    var messages: [ConversationMessage] { state.messages }
+    var approvals: [Approval] { state.approvals }
     /// Core-owned question facet. Only `current` may establish an empty list.
-    private(set) var questions: QuestionsState = .loading
-    private(set) var questionReview: QuestionReview?
-    private(set) var questionAnswerState: QuestionAnswerState = .idle
-    private(set) var questionCancelReceipt: QuestionCancelReceipt?
-    private(set) var questionErrorKey: L10nKey?
     /// Exact approval status refreshes keyed by the original approval identity.
-    private(set) var approvalStatusRefresh: [String: ApprovalStatusRefresh] = [:]
-    private(set) var isLoadingTruncatedQuestions = false
-    private(set) var previewText: String?
-    private(set) var previewAttemptId: String?
-    private(set) var connection: ConnectionStatus = .offline
-    private(set) var loadState: LoadState = .idle
-    private(set) var errorKey: L10nKey?
-    private(set) var approvalErrorKey: L10nKey?
-    private(set) var sendErrorKey: L10nKey?
-    private(set) var capabilities: SessionCapabilities = .idle
-    private(set) var lastSendStatus: CommandStatus?
-    private(set) var lastStopStatus: CommandStatus?
+    /// The one business state of this screen. Every dimension below projects
+    /// from it; the legacy property names stay read-only for existing views and
+    /// are removed once each view is rewritten.
+    var state = ConversationState()
+
+    var questions: QuestionsState {
+        get { state.question.questions }
+        set { state.question.questions = newValue }
+    }
+    var questionReview: QuestionReview? {
+        get { state.question.review }
+        set { state.question.review = newValue }
+    }
+    var questionAnswerState: QuestionAnswerState {
+        get { state.question.answer }
+        set { state.question.answer = newValue }
+    }
+    var questionCancelReceipt: QuestionCancelReceipt? {
+        get { state.question.cancelReceipt }
+        set { state.question.cancelReceipt = newValue }
+    }
+    var questionErrorKey: L10nKey? {
+        get { state.question.errorKey }
+        set { state.question.errorKey = newValue }
+    }
+    var isLoadingTruncatedQuestions: Bool {
+        get { state.question.loadingTruncated }
+        set { state.question.loadingTruncated = newValue }
+    }
+
+    var historyProvenance: HistoryProvenance? {
+        get { state.historyFacet.provenance }
+        set { state.historyFacet.provenance = newValue }
+    }
+    var isLoadingOlderHistory: Bool {
+        get { state.historyFacet.loading }
+        set { state.historyFacet.loading = newValue }
+    }
+    var historyComplete: Bool {
+        get { state.historyFacet.complete }
+        set { state.historyFacet.complete = newValue }
+    }
+    var historyNeedsFreshTraversal: Bool {
+        get { state.historyFacet.needsFreshTraversal }
+        set { state.historyFacet.needsFreshTraversal = newValue }
+    }
+    var historyErrorKey: L10nKey? {
+        get { state.historyFacet.errorKey }
+        set { state.historyFacet.errorKey = newValue }
+    }
+    var historyPrepend: HistoryFacet.Prepend? {
+        get { state.historyFacet.prepend }
+        set { state.historyFacet.prepend = newValue }
+    }
+
+    var previewText: String? {
+        get { state.previewFacet.text }
+        set { state.previewFacet.text = newValue }
+    }
+    var previewAttemptId: String? {
+        get { state.previewFacet.attemptId }
+        set { state.previewFacet.attemptId = newValue }
+    }
+    var reasoningPreviewText: String? {
+        get { state.previewFacet.reasoning }
+        set { state.previewFacet.reasoning = newValue }
+    }
+    var liveToolActivities: [ToolActivity] {
+        get { state.previewFacet.toolActivities }
+        set { state.previewFacet.toolActivities = newValue }
+    }
+
+    var approvalStatusRefresh: [String: ApprovalStatusRefresh] {
+        get { state.approvalFacet.statusRefresh }
+        set { state.approvalFacet.statusRefresh = newValue }
+    }
+    var approvalClock: Date {
+        get { state.approvalFacet.clock }
+        set { state.approvalFacet.clock = newValue }
+    }
+    var approvalRefreshCount: Int {
+        get { state.approvalFacet.refreshCount }
+        set { state.approvalFacet.refreshCount = newValue }
+    }
+    var trustedPendingApprovalIds: Set<String> {
+        get { state.approvalFacet.trustedPendingIds }
+        set { state.approvalFacet.trustedPendingIds = newValue }
+    }
+    var lastSendOperationId: String? {
+        get { state.operation.lastSendOperationId }
+        set { state.operation.lastSendOperationId = newValue }
+    }
+    var operationResult: OperationReceipt? {
+        get { state.operation.result }
+        set { state.operation.result = newValue }
+    }
+    var operationErrorKey: L10nKey? {
+        get { state.operation.errorKey }
+        set { state.operation.errorKey = newValue }
+    }
+    var operationReadErrorKey: L10nKey? {
+        get { state.operation.readErrorKey }
+        set { state.operation.readErrorKey = newValue }
+    }
+    var isRecoveringOperation: Bool {
+        get { state.operation.recovering }
+        set { state.operation.recovering = newValue }
+    }
+    var isReadingExactReply: Bool {
+        get { state.operation.readingExactReply }
+        set { state.operation.readingExactReply = newValue }
+    }
+    var watchEnded: Bool {
+        get { state.watch.ended }
+        set { state.watch.ended = newValue }
+    }
+    var isSuspended: Bool {
+        get { state.watch.suspended }
+        set { state.watch.suspended = newValue }
+    }
+    var isReconnecting: Bool {
+        get { state.watch.reconnecting }
+        set { state.watch.reconnecting = newValue }
+    }
+
+    var connection: ConnectionStatus { state.connection }
+    var loadState: LoadState {
+        if let error = state.loadError { return .failed(error) }
+        if state.isLoaded { return .loaded }
+        return state.isLoading ? .loading : .idle
+    }
+    var errorKey: L10nKey?
+    var approvalErrorKey: L10nKey?
+    var capabilities: SessionCapabilities { state.capabilities }
+    var sendErrorKey: L10nKey? {
+        guard let code = state.commandError else { return nil }
+        return L10nKey.errorKey(for: code)
+    }
+    var lastSendStatus: CommandStatus? {
+        guard state.lastCommandKind?.isStop == false else { return nil }
+        return state.lastReceipt?.status
+    }
+    var lastStopStatus: CommandStatus?
     /// Original operation identity and the message-level recovery result for
     /// the last send. Submission status stays separate from these values.
-    private(set) var lastSendOperationId: String?
-    private(set) var operationResult: OperationReceipt?
-    private(set) var operationErrorKey: L10nKey?
-    private(set) var operationReadErrorKey: L10nKey?
-    private(set) var isRecoveringOperation = false
-    private(set) var isReadingExactReply = false
-    private(set) var inFlightSend: CommandReceipt?
-    private(set) var pendingStop: CommandReceipt?
+    var inFlightSend: CommandReceipt? {
+        if case .uncertain(_, let receipt) = state.lifecycle { return receipt }
+        return nil
+    }
+    var pendingStop: CommandReceipt?
     /// Command submission that has not settled yet. While set, the matching
     /// affordance is disabled and repeated taps are ignored.
-    private(set) var pendingSubmission: PendingSubmission?
-    private(set) var stopSettled = false
-    private(set) var watchEnded = false
-    private(set) var isSuspended = false
-    private(set) var isReconnecting = false
-    private(set) var resolvingApprovalId: String?
-    private(set) var lastAppliedSequence = -1
-    private(set) var expandedBlockIds: Set<String> = []
-    private(set) var scroll = ScrollAnchorState()
-    private(set) var scrollRequest: ConversationScrollRequest?
+    var pendingSubmission: PendingSubmission? {
+        guard case .submitted(let command) = state.lifecycle else { return nil }
+        return command.kind.isStop ? .stop : .send
+    }
+    var stopSettled = false
+    var resolvingApprovalId: String?
+    var lastAppliedSequence = -1
+    var expandedBlockIds: Set<String> = []
+    var scroll = ScrollAnchorState()
+    var scrollRequest: ConversationScrollRequest?
     /// Timestamp used for expiry display. It advances on a timer and on every
     /// server refresh, not by reading `Date()` in the view body.
-    private(set) var approvalClock = Date()
     /// Number of clock-driven approval refresh attempts. Tests use it to prove
     /// expiry is advanced by the timer rather than by a redraw.
-    private(set) var approvalRefreshCount = 0
-    private(set) var eventSubscriptionCount = 0
+    var eventSubscriptionCount = 0
 
     // Older committed history is an independent one-shot read; it never
     // replaces the single live watch.
-    private(set) var historyProvenance: HistoryProvenance?
-    private(set) var isLoadingOlderHistory = false
-    private(set) var historyComplete = false
-    private(set) var historyNeedsFreshTraversal = false
-    private(set) var historyErrorKey: L10nKey?
-    /// Increments after a page is prepended so the view can restore the row
-    /// that was visible before the insertion.
-    private(set) var historyPrepend: HistoryPrepend?
-    private(set) var reasoningPreviewText: String?
-    /// Live typed activity rows that preview their committed replacement.
-    private(set) var liveToolActivities: [ToolActivity] = []
     /// Verified attachment transfers for committed attachment blocks.
     let attachments: AttachmentTransferModel
 
-    struct HistoryPrepend: Equatable, Sendable {
-        let id: Int
-        let anchorMessageId: String?
-    }
-
-    private var historyContinuation: String?
-    private var historyProjection: String?
-    private var historySource: HistorySource?
-    private var historyGeneration = 0
-    private var isClosed = false
-    private var pagedMessageIds: Set<String> = []
-    private var liveMessageIds: Set<String> = []
-    private let historyPageMessages = 50
-    private let historyPageBytes = 256 * 1024
+    var historyContinuation: String?
+    var historyProjection: String?
+    var historySource: HistorySource?
+    var historyGeneration = 0
+    var isClosed = false
+    var pagedMessageIds: Set<String> = []
+    var liveMessageIds: Set<String> = []
+    let historyPageMessages = 50
+    let historyPageBytes = 256 * 1024
 
     var draft: String = ""
     var delivery: DeliveryChoice = .queue
 
-    private struct QuestionDraft {
+    struct QuestionDraft {
         let guardValue: QuestionGuard
         var selected: [String: Set<String>] = [:]
         var custom: [String: String] = [:]
     }
 
-    private struct OptimisticMessage {
+    struct OptimisticMessage {
         let localId: String
         let commandId: String
         let text: String
         let committedMessageId: String?
     }
 
-    private let service: any SessionService
+    let service: any SessionService
     /// Queue and wait are independent observations; neither owns the watch.
     let queue: ConversationQueueController
     let wait: ConversationWaitController
-    private let onStatusChange: (() -> Void)?
-    private let onFatalError: ((AppErrorCode) -> Void)?
-    private let onConnectionChange: ((ConnectionStatus) -> Void)?
-    private let onReconnected: (() -> Void)?
-    private let now: () -> Date
+    let onStatusChange: (() -> Void)?
+    let onFatalError: ((AppErrorCode) -> Void)?
+    let onConnectionChange: ((ConnectionStatus) -> Void)?
+    let onReconnected: (() -> Void)?
+    let now: () -> Date
 
-    private var consumeTask: Task<Void, Never>?
-    private var consumeGeneration = 0
-    private var draftSaveTask: Task<Void, Never>?
-    private var approvalExpiryTask: Task<Void, Never>?
-    private var scrollRequestCounter = 0
-    private var optimisticMessages: [String: OptimisticMessage] = [:]
+    var consumeTask: Task<Void, Never>?
+    var consumeGeneration = 0
+    var draftSaveTask: Task<Void, Never>?
+    var approvalExpiryTask: Task<Void, Never>?
+    var scrollRequestCounter = 0
+    var optimisticMessages: [String: OptimisticMessage] = [:]
     /// Text submitted with the currently uncertain send. A later confirmation
     /// may only consume the draft that was actually submitted, never a newer
     /// draft the user typed while the response was in flight.
-    private var inFlightSendText: String?
+    var inFlightSendText: String?
     /// Monotonic epoch for authoritative running/preview state. A Stop receipt
     /// captured before this epoch advanced must not overwrite a newer run.
-    private var authoritativeRunEpoch = 0
+    var authoritativeRunEpoch = 0
     /// Epoch captured when the pending Stop was submitted, used by both the
     /// method return and a late status event.
-    private var pendingStopSubmissionEpoch: Int?
+    var pendingStopSubmissionEpoch: Int?
     /// Status events for commands whose method response has not arrived yet.
     /// Core can queue `commandStatus` before returning the command view, so the
     /// event may legitimately precede the pending admission.
-    private var earlyCommandStatuses: [String: CommandStatus] = [:]
-    private var earlyCommandStatusOrder: [String] = []
+    var earlyCommandStatuses: [String: CommandStatus] = [:]
+    var earlyCommandStatusOrder: [String] = []
     /// Approvals the Host has confirmed as still pending even though the local
     /// clock says their TTL passed. This is how a fast device clock stops
     /// disabling a valid request without letting a genuinely expired request
     /// stay clickable while offline.
-    private var trustedPendingApprovalIds: Set<String> = []
     /// Per-batch answer edits. A draft is kept only while the batch guard is
     /// unchanged, so a changed owner/phase can never inherit a stale selection.
-    private var questionDrafts: [String: QuestionDraft] = [:]
+    var questionDrafts: [String: QuestionDraft] = [:]
 
     init(
         hostId: String,
@@ -207,10 +311,10 @@ final class ConversationModel {
         self.onConnectionChange = onConnectionChange
         self.onReconnected = onReconnected
         self.now = now
-        self.approvalClock = now()
         self.attachments = AttachmentTransferModel(
             service: service as? any AttachmentTransferService
         )
+        self.approvalClock = now()
     }
 
     // MARK: - Derived state
@@ -312,10 +416,6 @@ final class ConversationModel {
 
     var operationReferenceText: String? { operationResult?.confirmedReference?.messageId }
 
-    var operationDeliveryIdentity: String? {
-        operationResult?.receipt?.deliveryId ?? operationResult?.receipt?.messageId
-    }
-
     var livePreview: String? {
         guard let previewText, !previewText.isEmpty else { return nil }
         return previewText
@@ -346,1423 +446,5 @@ final class ConversationModel {
             && connection.isOnline
             && !watchEnded
             && approvalStatusRefresh[approval.approvalId] != .refreshing
-    }
-
-    // MARK: - Lifecycle
-
-    func start() async {
-        guard loadState != .loading, loadState != .loaded else { return }
-        loadState = .loading
-        errorKey = nil
-        watchEnded = false
-        lastAppliedSequence = -1
-        approvalClock = now()
-        questions = .loading
-        questionReview = nil
-        questionErrorKey = nil
-        questionAnswerState = .idle
-        questionCancelReceipt = nil
-        ensureSubscription()
-        do {
-            draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
-            capabilities = try await service.capabilities(hostId: hostId, sessionId: sessionId)
-            if capabilities.running {
-                delivery = .steer
-            }
-            queue.applyCapabilities(capabilities)
-            try await service.startWatch(hostId: hostId, sessionId: sessionId)
-            await queue.refresh()
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            loadState = .failed(code)
-            errorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    /// Flushes the pending draft and stops the watch before the app is
-    /// backgrounded. The local transcript is kept so a resume can render it
-    /// immediately while the fresh watch resets it.
-    func suspendForBackground() async {
-        guard !isSuspended else { return }
-        isSuspended = true
-        await persistDraftNow()
-        stopApprovalTimer()
-        consumeTask?.cancel()
-        consumeTask = nil
-        wait.close()
-        service.stopWatch()
-        connection = .offline
-    }
-
-    /// Restarts the watch and resyncs the visible session after returning to the
-    /// foreground, instead of leaving a half-open stream and stale rows.
-    func resumeAfterForeground() async {
-        guard isSuspended else { return }
-        isSuspended = false
-        watchEnded = false
-        errorKey = nil
-        lastAppliedSequence = -1
-        approvalClock = now()
-        questions = .loading
-        questionReview = nil
-        questionErrorKey = nil
-        preserveQuestionCancellation()
-        if consumeTask == nil {
-            ensureSubscription()
-        }
-        await restartWatch()
-    }
-
-    /// Recovery path for a watch that ended on its own. The composer disables
-    /// Send while ended and offers this reconnect action.
-    func reconnectWatch() async {
-        guard !isReconnecting else { return }
-        watchEnded = false
-        errorKey = nil
-        lastAppliedSequence = -1
-        approvalClock = now()
-        questions = .loading
-        questionReview = nil
-        questionErrorKey = nil
-        preserveQuestionCancellation()
-        consumeTask?.cancel()
-        consumeTask = nil
-        ensureSubscription()
-        await restartWatch()
-        onReconnected?()
-    }
-
-    func close() {
-        isClosed = true
-        historyGeneration &+= 1
-        attachments.cancelAll()
-        consumeTask?.cancel()
-        consumeTask = nil
-        stopApprovalTimer()
-        wait.close()
-        draftSaveTask?.cancel()
-        draftSaveTask = nil
-        let text = draft
-        let hostId = hostId
-        let sessionId = sessionId
-        let service = service
-        // A draft is only 120 ms behind the keyboard. Flush it synchronously
-        // enough that switching sessions, leaving the app or killing it does
-        // not lose the last edit.
-        Task {
-            try? await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
-        }
-        service.stopWatch()
-    }
-
-    // MARK: - Events
-
-    private func ensureSubscription() {
-        guard consumeTask == nil else { return }
-        consumeEvents()
-    }
-
-    private func consumeEvents() {
-        consumeTask?.cancel()
-        consumeGeneration += 1
-        let generation = consumeGeneration
-        eventSubscriptionCount += 1
-        let stream = service.makeEventStream()
-        consumeTask = Task { [weak self] in
-            for await envelope in stream {
-                guard let self else { return }
-                if Task.isCancelled { return }
-                self.handle(envelope)
-            }
-            guard let self, self.consumeGeneration == generation else { return }
-            self.consumeTask = nil
-        }
-    }
-
-    /// Applies one envelope. Events from another Host/session or an older
-    /// sequence are dropped so a late update from a previous watch cannot leak.
-    func handle(_ envelope: SessionEventEnvelope) {
-        guard envelope.hostId == hostId, envelope.sessionId == sessionId else { return }
-        guard envelope.sequence > lastAppliedSequence else { return }
-        lastAppliedSequence = envelope.sequence
-
-        switch envelope.event {
-        case .reset(let messages, let approvals):
-            self.messages = messages
-            liveMessageIds = Set(messages.map(\.messageId))
-            pagedMessageIds.removeAll()
-            historyGeneration &+= 1
-            isLoadingOlderHistory = false
-            liveToolActivities.removeAll()
-            reasoningPreviewText = nil
-            trustedPendingApprovalIds.removeAll()
-            approvalStatusRefresh.removeAll()
-            mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
-            optimisticMessages.removeAll()
-            previewText = nil
-            previewAttemptId = nil
-            authoritativeRunEpoch += 1
-            connection = .online
-            loadState = .loaded
-            approvalClock = now()
-            scroll.reset()
-            onConnectionChange?(connection)
-            restartApprovalTimer()
-
-        case .message(let message):
-            liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
-            settleAuthoritativeContent(message)
-            // A committed message identity is idempotent: a replay must not
-            // touch (or consume) any optimistic row.
-            guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
-            let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-            if let echoIndex {
-                messages.insert(message, at: min(echoIndex, messages.count))
-            } else {
-                messages.append(message)
-            }
-            if message.role == .assistant {
-                previewText = nil
-                previewAttemptId = nil
-            }
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
-
-        case .replace(let message):
-            liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
-            settleAuthoritativeContent(message)
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                messages[index] = message
-            } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
-                messages.insert(message, at: min(echoIndex, messages.count))
-            } else {
-                messages.append(message)
-            }
-            if message.role == .assistant {
-                previewText = nil
-                previewAttemptId = nil
-            }
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
-
-        case .preview(let attemptId, let text, _, _):
-            previewAttemptId = attemptId
-            previewText = text
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
-
-        case .reasoningPreview(_, let text, _, _):
-            reasoningPreviewText = text.isEmpty ? nil : text
-
-        case .toolActivity(let activity):
-            if let index = liveToolActivities.firstIndex(where: { $0.callId == activity.callId }) {
-                liveToolActivities[index] = activity
-            } else {
-                liveToolActivities.append(activity)
-            }
-
-        case .attemptEnded:
-            previewText = nil
-            previewAttemptId = nil
-            reasoningPreviewText = nil
-            authoritativeRunEpoch += 1
-            updateCapabilities(running: false)
-            Task { await queue.refresh() }
-
-        case .state(let status):
-            updateConnection(status)
-
-        case .connection(let eventHostId, let status):
-            guard eventHostId == hostId else { return }
-            updateConnection(status)
-
-        case .capabilities(let capabilities):
-            // Any capabilities refresh advances the epoch, including an
-            // approval-only or same-running update. A Stop submitted just before
-            // such an update is therefore treated as stale on its confirmed
-            // return, leaving running/preview for one transient frame; the next
-            // authoritative idle state self-corrects it. Narrowing this would
-            // require an attempt/run identity on the capabilities event.
-            authoritativeRunEpoch += 1
-            applyCapabilities(capabilities)
-
-        case .approvals(let approvals):
-            mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
-            approvalClock = now()
-            restartApprovalTimer()
-
-        case .approvalChanged(let approval):
-            guard approval.sessionId == sessionId else { return }
-            applyServerApproval(approval)
-            approvalClock = now()
-            restartApprovalTimer()
-
-        case .questions(let state):
-            applyQuestions(state)
-
-        case .commandStatus(let receipt):
-            applyCommandStatus(receipt)
-
-        case .error(let code, _):
-            if code == .revoked {
-                onFatalError?(code)
-            } else if code == .notPaired {
-                onFatalError?(code)
-            } else {
-                errorKey = .commonError
-            }
-
-        case .watchEnded:
-            watchEnded = true
-            stopApprovalTimer()
-            updateConnection(.offline)
-        }
-    }
-
-    /// User-initiated content load for a Core view that was too large to inline.
-    /// This is not a discovery loop: observation still owns freshness and the
-    /// stamp; only the oversized content is paged on demand.
-    func loadTruncatedQuestions() async {
-        guard questions.truncatedForDisplay, !isLoadingTruncatedQuestions else { return }
-        isLoadingTruncatedQuestions = true
-        defer { isLoadingTruncatedQuestions = false }
-        var collected: [QuestionBatch] = []
-        var cursor = ""
-        do {
-            for _ in 0..<64 {
-                let page = try await service.listQuestions(
-                    hostId: hostId,
-                    sessionId: sessionId,
-                    cursor: cursor
-                )
-                collected.append(contentsOf: page.batches)
-                cursor = page.nextCursor
-                if cursor.isEmpty { break }
-            }
-            questions.batches = collected
-            questions.batchCount = collected.count
-            questions.truncatedForDisplay = false
-            questions.error = nil
-            questionErrorKey = nil
-        } catch {
-            questionErrorKey = .questionsUnavailable
-        }
-    }
-
-    private func applyQuestions(_ state: QuestionsState) {
-        // Keep edits only for a batch whose exact guard still matches.
-        var guards: [String: QuestionGuard] = [:]
-        for batch in state.batches {
-            guards[batch.batchID] = batch.guardValue
-        }
-        questionDrafts = questionDrafts.filter { batchId, draft in
-            guards[batchId] == draft.guardValue
-        }
-        var reviewInvalidated = false
-        if let review = questionReview, guards[review.guardValue.batchID] != review.guardValue {
-            questionReview = nil
-            questionErrorKey = .questionsGuardChanged
-            reviewInvalidated = true
-        }
-        questions = state
-        if state.freshness == .current && !reviewInvalidated {
-            questionErrorKey = nil
-        }
-    }
-
-    private func updateConnection(_ status: ConnectionStatus) {
-        connection = status
-        onConnectionChange?(status)
-        // Reconnecting can make a locally-expired pending approval valid again
-        // (the device clock was fast); recompute the display clock.
-        if status.isOnline {
-            approvalClock = now()
-            restartApprovalTimer()
-        }
-    }
-
-    // MARK: - Commands
-
-    func send() async {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, inFlightSend == nil, pendingSubmission == nil, !watchEnded else { return }
-        // Resolve the delivery mode before claiming the submission: an
-        // unsupported mode is rejected locally and must not block the composer.
-        let choice: DeliveryChoice
-        do {
-            choice = try DeliveryPolicy.resolve(delivery, for: capabilities)
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-            return
-        }
-        pendingSubmission = .send
-        do {
-            var receipt = try await service.send(
-                hostId: hostId,
-                sessionId: sessionId,
-                text: text,
-                delivery: choice
-            )
-            // The submission settled: release the gate even though an uncertain
-            // receipt continues to block Send until reconciliation.
-            pendingSubmission = nil
-            if let early = takeEarlyCommandStatus(for: receipt.commandId) {
-                receipt.status = preferredStatus(early, over: receipt.status)
-            }
-            sendErrorKey = nil
-            lastSendStatus = receipt.status
-            lastSendOperationId = receipt.requestId
-            operationResult = nil
-            operationErrorKey = nil
-            operationReadErrorKey = nil
-            inFlightSend = receipt.status == .uncertain ? receipt : nil
-            inFlightSendText = receipt.status == .uncertain ? text : nil
-            if receipt.status != .rejected {
-                appendOptimisticUserMessage(text: text, receipt: receipt)
-            }
-            if choice == .send || (choice == .queue && !capabilities.running) {
-                // An idle native-queue submission starts the turn; a running
-                // queue submission leaves the current run untouched.
-                updateCapabilities(running: true)
-            }
-            if receipt.status == .uncertain {
-                // Keep the current draft (which may already be a newer message)
-                // until the original request is reconciled.
-                await persistDraftNow()
-            } else if receipt.status != .rejected {
-                // A successful older send consumes only the text it submitted.
-                // Text typed while the response was in flight belongs to a
-                // newer message and must survive.
-                if draftMatchesSubmission(text) {
-                    await clearDraftNow()
-                } else {
-                    await persistDraftNow()
-                }
-            }
-            if receipt.status == .uncertain {
-                requestScroll(animated: true)
-            }
-        } catch {
-            // A definite failure releases the gate so the same intent can be
-            // retried; a late settlement of the failed command cannot re-arm it.
-            pendingSubmission = nil
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    func stopRun() async {
-        guard canStop else { return }
-        // Capture the authoritative run this Stop was requested for. If a newer
-        // run becomes authoritative before a late confirmation arrives, that
-        // confirmation must settle this operation without clearing the new run.
-        let submissionEpoch = authoritativeRunEpoch
-        pendingSubmission = .stop
-        do {
-            var receipt = try await service.stop(hostId: hostId, sessionId: sessionId)
-            // The submission settled; an accepted or uncertain Stop remains
-            // pending through `pendingStop` until the Host reconciles it.
-            pendingSubmission = nil
-            if let early = takeEarlyCommandStatus(for: receipt.commandId) {
-                receipt.status = preferredStatus(early, over: receipt.status)
-            }
-            sendErrorKey = nil
-            applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
-            if receipt.status == .confirmed {
-                // Interrupt is a current-turn control; the queue stays visible
-                // and is refreshed from the source after the turn settles.
-                await queue.refresh()
-            }
-        } catch {
-            // A definite failure releases the gate so Stop can be retried. A
-            // late settlement for the failed command is only remembered as an
-            // early status and never resurrects this cleared intent.
-            pendingSubmission = nil
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            sendErrorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    // MARK: - Operation recovery
-
-    /// Manual recovery for the original send. Uses Core's recorded operation
-    /// identity and never submits another message.
-    func recoverSendResult() async {
-        guard let operationId = lastSendOperationId, !isRecoveringOperation else { return }
-        guard let recovery = service as? any OperationRecoveryService else {
-            operationErrorKey = .errorIntegrationUnavailable
-            return
-        }
-        isRecoveringOperation = true
-        operationErrorKey = nil
-        defer { isRecoveringOperation = false }
-        do {
-            let receipt = try await recovery.recoverSend(operationId: operationId, follow: true)
-            applyOperationReceipt(receipt)
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            operationErrorKey = L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    /// Explicit exact reread for a confirmed reference. A failed read keeps the
-    /// confirmation and never resubmits.
-    func readExactReply() async {
-        guard let receipt = operationResult,
-              let reference = receipt.confirmedReference,
-              !isReadingExactReply else { return }
-        guard let recovery = service as? any OperationRecoveryService else {
-            operationErrorKey = .errorIntegrationUnavailable
-            return
-        }
-        guard reference.hostId == hostId, reference.sessionId == sessionId else {
-            operationErrorKey = .errorOperationScope
-            return
-        }
-        isReadingExactReply = true
-        defer { isReadingExactReply = false }
-        do {
-            let message = try await recovery.readMessage(reference)
-            insertCommittedMessage(message)
-            operationResult = OperationReceipt(
-                operationId: receipt.operationId,
-                kind: receipt.kind,
-                scope: receipt.scope,
-                status: receipt.status,
-                receipt: receipt.receipt,
-                reply: receipt.reply,
-                content: message,
-                readError: nil
-            )
-            operationReadErrorKey = nil
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            operationErrorKey = L10nKey.errorKey(for: code)
-            operationReadErrorKey = .conversationOperationReadFailed
-        }
-    }
-
-    /// Applies results from the one coalesced visible-session refresh. Only the
-    /// original send is updated; a foreign scope is rejected.
-    func applyRecoveredOperations(_ receipts: [OperationReceipt]) {
-        guard let operationId = lastSendOperationId else { return }
-        guard let receipt = receipts.first(where: { $0.operationId == operationId }) else {
-            return
-        }
-        applyOperationReceipt(receipt)
-    }
-
-    private func applyOperationReceipt(_ receipt: OperationReceipt) {
-        guard receipt.kind == .send else { return }
-        guard let scope = receipt.scope,
-              scope.hostId == hostId,
-              scope.sessionId == sessionId else {
-            operationErrorKey = .errorOperationScope
-            return
-        }
-        operationResult = receipt
-        operationErrorKey = nil
-        if let content = receipt.content {
-            insertCommittedMessage(content)
-        }
-        if receipt.readError != nil {
-            operationReadErrorKey = .conversationOperationReadFailed
-        } else if receipt.content != nil {
-            operationReadErrorKey = nil
-        }
-        if receipt.status == .confirmed || receipt.status == .failed {
-            inFlightSend = nil
-            inFlightSendText = nil
-        }
-    }
-
-    /// Deduplicates committed messages by stable identity, including a recovered
-    /// reply that also arrived through the live watch.
-    private func insertCommittedMessage(_ message: ConversationMessage) {
-        if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-            if messages[index] != message {
-                messages[index] = message
-            }
-            return
-        }
-        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-        if let echoIndex {
-            messages.insert(message, at: min(echoIndex, messages.count))
-        } else {
-            messages.append(message)
-        }
-    }
-
-    // MARK: - Questions
-
-    /// Current edits for one question item. Presentation reads this instead of
-    /// owning selection state, so observation updates cannot wipe an edit for an
-    /// unchanged batch guard.
-    func questionSelection(batchId: String, itemId: String) -> Set<String> {
-        questionDrafts[batchId]?.selected[itemId] ?? []
-    }
-
-    func questionCustomText(batchId: String, itemId: String) -> String {
-        questionDrafts[batchId]?.custom[itemId] ?? ""
-    }
-
-    func toggleQuestionOption(batchId: String, itemId: String, label: String) {
-        guard let batch = questions.batches.first(where: { $0.batchID == batchId }),
-              batch.guardValue.isAnswerablePhase,
-              let item = batch.questions.first(where: { $0.id == itemId }),
-              item.options.contains(where: { $0.label == label }) else { return }
-        var draft = questionDrafts[batchId]
-            ?? QuestionDraft(guardValue: batch.guardValue)
-        guard draft.guardValue == batch.guardValue else { return }
-        var selected = draft.selected[itemId] ?? []
-        if item.multiSelect {
-            if selected.contains(label) {
-                selected.remove(label)
-            } else {
-                selected.insert(label)
-            }
-        } else {
-            selected = [label]
-        }
-        draft.selected[itemId] = selected
-        questionDrafts[batchId] = draft
-        questionErrorKey = nil
-    }
-
-    func setQuestionCustomText(batchId: String, itemId: String, text: String) {
-        guard let batch = questions.batches.first(where: { $0.batchID == batchId }),
-              let item = batch.questions.first(where: { $0.id == itemId }) else { return }
-        var draft = questionDrafts[batchId]
-            ?? QuestionDraft(guardValue: batch.guardValue)
-        guard draft.guardValue == batch.guardValue else { return }
-        draft.custom[itemId] = String(text.prefix(4_000))
-        questionDrafts[batchId] = draft
-        questionErrorKey = nil
-    }
-
-    /// Captures the exact reviewed guard and inputs. This is the explicit phase
-    /// review: nothing is submitted until the caller confirms this snapshot.
-    func beginQuestionReview(batchId: String) -> QuestionReview? {
-        guard canInteractWithQuestions,
-              let batch = questions.batches.first(where: { $0.batchID == batchId }) else {
-            questionErrorKey = .questionsUnavailable
-            return nil
-        }
-        guard batch.canAnswer else {
-            questionErrorKey = .questionsUnavailable
-            return nil
-        }
-        let draft = questionDrafts[batchId]
-            ?? QuestionDraft(guardValue: batch.guardValue)
-        guard draft.guardValue == batch.guardValue else {
-            questionErrorKey = .questionsGuardChanged
-            return nil
-        }
-        var answers: [QuestionAnswer] = []
-        for item in batch.questions {
-            let allowed = Set(item.options.map(\.label))
-            let selected = (draft.selected[item.id] ?? []).filter { allowed.contains($0) }
-            let custom = (draft.custom[item.id] ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if selected.isEmpty && custom.isEmpty { continue }
-            answers.append(
-                QuestionAnswer(
-                    id: item.id,
-                    selected: selected.sorted(),
-                    custom: custom.isEmpty ? nil : custom
-                )
-            )
-        }
-        guard !answers.isEmpty else {
-            questionErrorKey = .questionsSelectAnswer
-            return nil
-        }
-        let review = QuestionReview(guardValue: batch.guardValue, answers: answers)
-        questionReview = review
-        questionErrorKey = nil
-        return review
-    }
-
-    func cancelQuestionReview() {
-        questionReview = nil
-    }
-
-    /// Submit the reviewed snapshot. The task is independent of the visible
-    /// observation: closing or replacing the watch never cancels it.
-    func submitQuestionReview() async {
-        guard let review = questionReview else { return }
-        guard canInteractWithQuestions,
-              let batch = questions.batches.first(where: { $0.batchID == review.guardValue.batchID }),
-              batch.guardValue == review.guardValue else {
-            questionReview = nil
-            questionAnswerState = .failed
-            questionErrorKey = .questionsGuardChanged
-            return
-        }
-        questionAnswerState = .submitting
-        questionCancelReceipt = nil
-        questionErrorKey = nil
-        do {
-            let receipt = try await service.answerQuestion(
-                hostId: hostId,
-                sessionId: sessionId,
-                batch: batch,
-                answers: review.answers
-            )
-            switch receipt.status {
-            case .uncertain:
-                questionAnswerState = .uncertain(commandId: receipt.commandId)
-            case .rejected:
-                questionAnswerState = .failed
-                questionErrorKey = .questionsAnswerRejected
-            default:
-                questionAnswerState = .submitted(receipt.status)
-                questionReview = nil
-                questionDrafts[batch.batchID] = nil
-            }
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            questionAnswerState = .failed
-            questionErrorKey = code == .conflict || code == .staleApproval
-                ? .questionsGuardChanged
-                : L10nKey.errorKey(for: code)
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    /// Requests cancellation of the one uncertain open answer attempt. When
-    /// `false`, the answer may still complete; the UI must not promise a
-    /// rollback and the original command identity stays eligible for recovery.
-    func cancelQuestionAnswer() async {
-        guard case .uncertain(let commandId) = questionAnswerState else { return }
-        do {
-            let receipt = try await service.requestQuestionAnswerCancel(
-                hostId: hostId,
-                sessionId: sessionId,
-                commandId: commandId
-            )
-            questionCancelReceipt = receipt
-            questionErrorKey = receipt.cancellationRequested
-                ? .questionsCancelRequested
-                : .questionsCancelUnconfirmed
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            questionErrorKey = L10nKey.errorKey(for: code)
-        }
-    }
-
-    var canCancelQuestionAnswer: Bool {
-        if case .uncertain = questionAnswerState {
-            return !isSuspended && !watchEnded
-        }
-        return false
-    }
-
-    /// Keep an in-flight answer and its cancellation request across a watch
-    /// replacement: a new observer continues the original attempt recovery.
-    private func preserveQuestionCancellation() {
-        if case .uncertain = questionAnswerState {
-            return
-        }
-        questionAnswerState = .idle
-    }
-
-    // MARK: - Approvals
-
-    func resolveApproval(_ approval: Approval, allow: Bool) async {
-        guard isApprovalActionable(approval) else {
-            if approval.state == .pending, let reason = approvalActionDisabledReasonKey {
-                approvalErrorKey = reason
-            }
-            return
-        }
-        let review = ApprovalReview(approval: approval)
-        resolvingApprovalId = approval.approvalId
-        approvalErrorKey = nil
-        defer { resolvingApprovalId = nil }
-        do {
-            let updated = try await service.resolveApproval(
-                hostId: hostId,
-                sessionId: sessionId,
-                approvalId: review.approvalId,
-                version: review.version,
-                digestHex: review.digestHex,
-                allow: allow
-            )
-            applyServerApproval(updated)
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            approvalErrorKey = code == .staleApproval || code == .conflict
-                ? .approvalStale
-                : L10nKey.errorKey(for: code)
-            await refreshApprovals()
-            if code == .revoked || code == .notPaired {
-                reportFatalIfNeeded(code)
-            }
-        }
-    }
-
-    /// Read one approval's exact scoped state from the Host and update the card.
-    /// A failed or out-of-scope read never leaves a stale card actionable.
-    func refreshApprovalStatus(_ approval: Approval) async {
-        guard approval.sessionId == sessionId else {
-            approvalStatusRefresh[approval.approvalId] = .outOfScope
-            return
-        }
-        approvalStatusRefresh[approval.approvalId] = .refreshing
-        do {
-            let exact = try await service.approval(
-                hostId: hostId,
-                approvalId: approval.approvalId
-            )
-            guard exact.sessionId == sessionId else {
-                approvalStatusRefresh[approval.approvalId] = .outOfScope
-                return
-            }
-            if exact.state != .pending {
-                applyServerApproval(exact)
-                approvalStatusRefresh[approval.approvalId] = .resolved
-            } else if exact.version != approval.version
-                || exact.digestHex.caseInsensitiveCompare(approval.digestHex) != .orderedSame {
-                applyServerApproval(exact)
-                approvalStatusRefresh[approval.approvalId] = .changed
-            } else {
-                applyServerApproval(exact)
-                approvalStatusRefresh[approval.approvalId] = .current
-            }
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            if code == .revoked || code == .notPaired {
-                reportFatalIfNeeded(code)
-            }
-            markApprovalUnavailable(approval.approvalId)
-            approvalStatusRefresh[approval.approvalId] = .unavailable
-        }
-    }
-
-    /// Refreshes approvals from the Host. Core's approval listing returns only
-    /// pending requests, so the result is merged with locally decided terminal
-    /// cards rather than replacing them (APPR-04/18). A still-pending approval
-    /// missing from the list is marked expired; an unavailable session marks
-    /// its pending cards unavailable instead of leaving a dead clickable card
-    /// (APPR-19).
-    func refreshApprovals(restartTimer: Bool = true) async {
-        do {
-            let loaded = try await service.approvals(hostId: hostId, sessionId: sessionId)
-            approvalClock = now()
-            mergeApprovals(loaded, missingPendingState: .expired)
-            trustPendingApprovalsReportedByServer(loaded)
-            if restartTimer {
-                restartApprovalTimer()
-            }
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            if code == .unavailable {
-                markPendingApprovalsUnavailable()
-            }
-            if code == .revoked || code == .notPaired {
-                reportFatalIfNeeded(code)
-            }
-            // Other failures keep the last known approvals; the next event or
-            // reconnect refreshes them.
-        }
-    }
-
-    /// Advances the expiry display on demand (foreground, timer, tests).
-    func refreshApprovalExpiry() {
-        approvalClock = now()
-        restartApprovalTimer()
-    }
-
-    private func applyServerApproval(_ approval: Approval) {
-        guard approval.sessionId == sessionId else { return }
-        if let index = approvals.firstIndex(where: { $0.approvalId == approval.approvalId }) {
-            if shouldAccept(approval, over: approvals[index]) {
-                approvals[index] = approval
-            }
-        } else {
-            approvals.append(approval)
-        }
-    }
-
-    private func mergeApprovals(
-        _ incoming: [Approval],
-        missingPendingState: ApprovalState
-    ) {
-        let scoped = incoming.filter { $0.sessionId == sessionId }
-        var incomingById = Dictionary<String, Approval>()
-        for approval in scoped {
-            incomingById[approval.approvalId] = approval
-        }
-
-        var merged = approvals.filter { $0.sessionId == sessionId }
-        for index in merged.indices {
-            let local = merged[index]
-            if let server = incomingById[local.approvalId],
-               shouldAccept(server, over: local) {
-                merged[index] = server
-            }
-        }
-        let knownIds = Set(merged.map(\.approvalId))
-        for approval in scoped where !knownIds.contains(approval.approvalId) {
-            merged.append(approval)
-        }
-        // Trust only survives for requests the Host still reports pending.
-        let pendingIds = Set(
-            merged.filter { $0.state == .pending }.map(\.approvalId)
-        )
-        trustedPendingApprovalIds.formIntersection(pendingIds)
-        // A pending approval the Host no longer lists was resolved or expired
-        // elsewhere. Keep the card with a terminal state so it cannot be
-        // clicked and the user still sees what happened.
-        for index in merged.indices where merged[index].state == .pending {
-            if incomingById[merged[index].approvalId] == nil {
-                merged[index].state = missingPendingState
-            }
-        }
-        approvals = merged
-    }
-
-    /// A decided local card must never be downgraded back to pending by an
-    /// older pending-only refresh. A server terminal state with a newer
-    /// version still wins.
-    private func shouldAccept(_ server: Approval, over local: Approval) -> Bool {
-        guard local.state.isTerminal else { return true }
-        if server.state == .pending { return false }
-        return server.version >= local.version
-    }
-
-    /// The Host's approval listing is the authority for validity. A pending
-    /// request it still returns is valid even if the local clock disagrees.
-    private func trustPendingApprovalsReportedByServer(_ loaded: [Approval]) {
-        let nowMs = approvalClock.timeIntervalSince1970 * 1000
-        for approval in loaded
-        where approval.sessionId == sessionId
-            && approval.state == .pending
-            && nowMs >= Double(approval.expiresAtUnixMs) {
-            trustedPendingApprovalIds.insert(approval.approvalId)
-        }
-    }
-
-    private func markPendingApprovalsUnavailable() {
-        for index in approvals.indices where approvals[index].state == .pending {
-            approvals[index].state = .unavailable
-        }
-    }
-
-    private func markApprovalUnavailable(_ approvalID: String) {
-        guard let index = approvals.firstIndex(where: { $0.approvalId == approvalID }),
-              approvals[index].state == .pending else { return }
-        approvals[index].state = .unavailable
-    }
-
-    private func restartWatch() async {
-        guard !isReconnecting else { return }
-        isReconnecting = true
-        defer { isReconnecting = false }
-        do {
-            let loadedDraft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
-            if draft.isEmpty, !loadedDraft.isEmpty {
-                draft = loadedDraft
-            }
-            capabilities = try await service.capabilities(hostId: hostId, sessionId: sessionId)
-            try await service.startWatch(hostId: hostId, sessionId: sessionId)
-            errorKey = nil
-            if loadState != .loaded {
-                loadState = .loading
-            }
-            queue.applyCapabilities(capabilities)
-            await refreshApprovals()
-            await queue.refresh()
-        } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            errorKey = L10nKey.errorKey(for: code)
-            if case .failed = loadState {
-                // Keep the retry screen that is already visible.
-            } else if loadState != .loaded {
-                loadState = .failed(code)
-            } else {
-                watchEnded = true
-            }
-            reportFatalIfNeeded(code)
-        }
-    }
-
-    private func reportFatalIfNeeded(_ code: AppErrorCode) {
-        guard code == .revoked || code == .notPaired else { return }
-        onFatalError?(code)
-    }
-
-    // MARK: - UI state
-
-    func toggleExpansion(_ blockId: String) {
-        if expandedBlockIds.contains(blockId) {
-            expandedBlockIds.remove(blockId)
-        } else {
-            expandedBlockIds.insert(blockId)
-        }
-    }
-
-    func selectDelivery(_ choice: DeliveryChoice) {
-        guard DeliveryPolicy.isSupported(choice, for: capabilities) else { return }
-        delivery = choice
-    }
-
-    func draftChanged() {
-        draftSaveTask?.cancel()
-        let text = draft
-        let hostId = hostId
-        let sessionId = sessionId
-        draftSaveTask = Task { [service] in
-            try? await Task.sleep(for: .milliseconds(120))
-            if Task.isCancelled { return }
-            try? await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
-        }
-    }
-
-    func persistDraftNow() async {
-        draftSaveTask?.cancel()
-        draftSaveTask = nil
-        try? await service.saveDraft(hostId: hostId, sessionId: sessionId, text: draft)
-    }
-
-    func updateScroll(isAtLatest: Bool) {
-        scroll.update(isAtLatest: isAtLatest)
-    }
-
-    func noteTopVisibleMessage(_ messageId: String?) {
-        scroll.noteTopVisibleMessage(messageId)
-    }
-
-    func jumpToLatest() {
-        scroll.jumpToLatest()
-        requestScroll(animated: true)
-    }
-
-    // MARK: - Committed history
-
-    var canLoadOlderHistory: Bool {
-        capabilities.supportsHistoryPage
-            && loadState == .loaded
-            && !historyComplete
-            && !isLoadingOlderHistory
-            && !historyNeedsFreshTraversal
-    }
-
-    var canLoadFreshHistory: Bool {
-        capabilities.supportsHistoryPage
-            && historyNeedsFreshTraversal
-            && !isLoadingOlderHistory
-            && loadState == .loaded
-    }
-
-    var historyProvenanceKey: L10nKey? {
-        switch historyProvenance {
-        case .online: return .conversationHistoryOnline
-        case .cache: return .conversationHistoryCache
-        case .unavailable: return .conversationHistoryUnavailable
-        case nil: return nil
-        }
-    }
-
-    /// Live tool previews stay until their authoritative committed block
-    /// arrives; a committed identity always wins.
-    var visibleLiveToolActivities: [ToolActivity] {
-        let committed = Set(
-            messages.flatMap { message in
-                message.blocks.compactMap { $0.toolActivity?.callId }
-            }
-        )
-        return liveToolActivities.filter { !committed.contains($0.callId) }
-    }
-
-    /// Loads one older bounded page. `cacheFallback` explicitly serves the
-    /// encrypted local cache when the Host is unreachable, with cache
-    /// provenance shown to the reader.
-    func loadOlderHistory(cacheFallback: Bool = false) async {
-        guard canLoadOlderHistory,
-              let history = service as? any ConversationHistoryService else {
-            if !capabilities.supportsHistoryPage {
-                historyErrorKey = .errorUnsupportedCapability
-            }
-            return
-        }
-        let useCache = cacheFallback || historySource == .cache || !connection.isOnline
-        // Switching source requires a fresh traversal; a continuation belongs
-        // to one source, projection and scope.
-        if let historySource, historySource != (useCache ? .cache : .online) {
-            historyContinuation = nil
-            historyProjection = nil
-        }
-        let generation = historyGeneration
-        let anchor = scroll.anchorMessageId ?? messages.first?.messageId
-        scroll.capturePrependAnchor(anchor)
-        isLoadingOlderHistory = true
-        historyErrorKey = nil
-        defer {
-            if generation == historyGeneration {
-                isLoadingOlderHistory = false
-            }
-        }
-        do {
-            let page = try await history.historyPage(
-                hostId: hostId,
-                sessionId: sessionId,
-                source: useCache ? .cache : .online,
-                continuation: historyContinuation,
-                maxMessages: historyPageMessages,
-                maxBytes: historyPageBytes
-            )
-            // A replaced session/instance invalidates this late page.
-            guard generation == historyGeneration, !isClosed else { return }
-            applyHistoryPage(page, anchor: anchor)
-        } catch {
-            guard generation == historyGeneration, !isClosed else { return }
-            handleHistoryFailure(error)
-        }
-    }
-
-    /// Drops paged-only rows and starts a fresh latest-first traversal after a
-    /// stale continuation or content projection. Live rows are preserved.
-    func loadFreshHistory() async {
-        guard canLoadFreshHistory else { return }
-        historyGeneration &+= 1
-        messages.removeAll { message in
-            pagedMessageIds.contains(message.messageId)
-                && !liveMessageIds.contains(message.messageId)
-        }
-        pagedMessageIds.removeAll()
-        historyContinuation = nil
-        historyProjection = nil
-        historySource = nil
-        historyComplete = false
-        historyNeedsFreshTraversal = false
-        historyErrorKey = nil
-        await loadOlderHistory()
-    }
-
-    /// Resolve one exact scoped committed message. Stale or foreign content is
-    /// never applied: the model offers a fresh traversal instead.
-    func rereadMessage(_ reference: MessageReference) async {
-        guard reference.hostId == hostId, reference.sessionId == sessionId else {
-            historyErrorKey = .errorSecurity
-            return
-        }
-        guard capabilities.supportsHistoryExact,
-              let history = service as? any ConversationHistoryService else {
-            historyErrorKey = .errorUnsupportedCapability
-            return
-        }
-        if let historyProjection, reference.projectionId != historyProjection {
-            historyNeedsFreshTraversal = true
-            historyErrorKey = nil
-            return
-        }
-        do {
-            let message = try await history.historyMessage(reference)
-            guard !isClosed,
-                  reference.hostId == hostId,
-                  reference.sessionId == sessionId else { return }
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                messages[index] = message
-            } else {
-                messages.append(message)
-            }
-            liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
-            settleAuthoritativeContent(message)
-            historyErrorKey = nil
-        } catch {
-            handleHistoryFailure(error)
-        }
-    }
-
-    private func applyHistoryPage(_ page: ConversationHistoryPage, anchor: String?) {
-        if let historyProjection, historyProjection != page.projection {
-            historyNeedsFreshTraversal = true
-            historyContinuation = nil
-            return
-        }
-        historyProjection = page.projection
-        historySource = page.source
-        historyProvenance = page.source == .cache
-            ? .cache
-            : (connection.isOnline ? .online : .unavailable)
-        let existing = Set(messages.map(\.messageId))
-        var prepended: [ConversationMessage] = []
-        for message in page.messages where !existing.contains(message.messageId) {
-            prepended.append(message)
-            pagedMessageIds.insert(message.messageId)
-        }
-        if !prepended.isEmpty {
-            messages.insert(contentsOf: prepended, at: 0)
-        }
-        historyContinuation = page.complete ? nil : page.continuation
-        historyComplete = page.complete
-        historyErrorKey = nil
-        if !prepended.isEmpty {
-            historyPrepend = HistoryPrepend(
-                id: (historyPrepend?.id ?? 0) + 1,
-                anchorMessageId: anchor
-            )
-        }
-    }
-
-    private func handleHistoryFailure(_ error: Error) {
-        let code = (error as? SessionServiceError)?.code ?? .internalError
-        if code == .staleHistory {
-            historyNeedsFreshTraversal = true
-            historyContinuation = nil
-            historyProjection = nil
-            historyErrorKey = nil
-            return
-        }
-        historyErrorKey = L10nKey.errorKey(for: code)
-        if code == .unavailable || code == .hostOffline {
-            historyProvenance = .unavailable
-        }
-    }
-
-    /// Settles any live preview whose authoritative committed identity arrived.
-    private func settleAuthoritativeContent(_ message: ConversationMessage) {
-        let settledCallIds = Set(
-            message.blocks.compactMap { $0.toolActivity?.callId }
-        )
-        if !settledCallIds.isEmpty {
-            liveToolActivities.removeAll { settledCallIds.contains($0.callId) }
-        }
-        if message.role == .assistant {
-            previewText = nil
-            previewAttemptId = nil
-            reasoningPreviewText = nil
-        }
-    }
-
-    // MARK: - Internals
-
-    @discardableResult
-    private func appendOptimisticUserMessage(text: String, receipt: CommandReceipt) -> String? {
-        // The committed echo may have arrived before the send response (Core can
-        // deliver the message event first). In that case the authoritative row
-        // already exists and a local placeholder would be a duplicate.
-        if let committedId = receipt.messageId,
-           messages.contains(where: { $0.messageId == committedId }) {
-            return nil
-        }
-        let messageId = "local-\(receipt.commandId)"
-        guard !messages.contains(where: { $0.messageId == messageId }) else { return nil }
-        optimisticMessages[messageId] = OptimisticMessage(
-            localId: messageId,
-            commandId: receipt.commandId,
-            text: text,
-            committedMessageId: receipt.messageId
-        )
-        let message = ConversationMessage(
-            messageId: messageId,
-            role: .user,
-            blocks: [
-                ConversationBlock(
-                    blockId: "\(messageId)-block-0",
-                    kind: .text,
-                    text: text
-                )
-            ],
-            createdAtUnixMs: Int64(now().timeIntervalSince1970 * 1000)
-        )
-        messages.append(message)
-        scroll.recordIncoming(isOwnMessage: true)
-        requestScroll(animated: true)
-        return messageId
-    }
-
-    /// Removes the optimistic row that stands in for this committed echo and
-    /// returns its index, so the committed message can take the same position.
-    /// Matching uses the Core message id when the receipt supplied one; only
-    /// Sources that never echo a correlation id fall back to exact text. Text
-    /// fallback must not merge two distinct authoritative identities.
-    private func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
-        let echoText = normalizedText(message.plainText)
-        let match = messages.firstIndex { local in
-            guard let pending = optimisticMessages[local.messageId] else { return false }
-            if let committed = pending.committedMessageId {
-                return committed == message.messageId
-            }
-            return normalizedText(pending.text) == echoText
-        }
-        guard let match else { return nil }
-        let local = messages.remove(at: match)
-        optimisticMessages.removeValue(forKey: local.messageId)
-        return match
-    }
-
-    private func normalizedText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func draftMatchesSubmission(_ submittedText: String) -> Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines) == submittedText
-    }
-
-    private func applyCommandStatus(_ receipt: CommandReceipt) {
-        if let inFlightSend, inFlightSend.commandId == receipt.commandId {
-            lastSendStatus = receipt.status
-            if receipt.status != .uncertain {
-                self.inFlightSend = nil
-                if receipt.status == .confirmed || receipt.status == .accepted {
-                    let submitted = inFlightSendText
-                    if let submitted, draftMatchesSubmission(submitted) {
-                        clearDraftAfterSubmission()
-                    }
-                }
-                inFlightSendText = nil
-            }
-            return
-        }
-        if let pendingStop, pendingStop.commandId == receipt.commandId {
-            let submissionEpoch = pendingStopSubmissionEpoch ?? authoritativeRunEpoch
-            applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
-            return
-        }
-        // The method response may still be in flight; remember the early
-        // settlement so the return can apply it instead of discarding it.
-        rememberEarlyCommandStatus(receipt)
-    }
-
-    private func applyStopReceipt(_ receipt: CommandReceipt, submissionEpoch: Int) {
-        lastStopStatus = receipt.status
-        switch receipt.status {
-        case .confirmed:
-            pendingStop = nil
-            pendingStopSubmissionEpoch = nil
-            stopSettled = true
-            // Settle the operation, but only let it stop the run it was
-            // requested for. A newer authoritative run remains running.
-            if submissionEpoch == authoritativeRunEpoch {
-                updateCapabilities(running: false)
-                previewText = nil
-                previewAttemptId = nil
-            }
-        case .accepted, .uncertain:
-            pendingStop = receipt
-            pendingStopSubmissionEpoch = submissionEpoch
-            stopSettled = false
-        case .rejected, .cancelled:
-            pendingStop = nil
-            pendingStopSubmissionEpoch = nil
-            stopSettled = true
-        }
-    }
-
-    private func preferredStatus(_ early: CommandStatus, over returned: CommandStatus) -> CommandStatus {
-        switch returned {
-        case .confirmed, .rejected, .cancelled:
-            return returned
-        case .accepted, .uncertain:
-            return early
-        }
-    }
-
-    private func rememberEarlyCommandStatus(_ receipt: CommandReceipt) {
-        if earlyCommandStatuses[receipt.commandId] == nil {
-            earlyCommandStatusOrder.append(receipt.commandId)
-        }
-        earlyCommandStatuses[receipt.commandId] = receipt.status
-        while earlyCommandStatusOrder.count > 32 {
-            let oldest = earlyCommandStatusOrder.removeFirst()
-            earlyCommandStatuses.removeValue(forKey: oldest)
-        }
-    }
-
-    private func takeEarlyCommandStatus(for commandId: String) -> CommandStatus? {
-        earlyCommandStatusOrder.removeAll { $0 == commandId }
-        return earlyCommandStatuses.removeValue(forKey: commandId)
-    }
-
-    private func clearDraftAfterSubmission() {
-        draft = ""
-        draftSaveTask?.cancel()
-        draftSaveTask = nil
-        Task { [service, hostId, sessionId] in
-            try? await service.clearDraft(hostId: hostId, sessionId: sessionId)
-        }
-    }
-
-    func clearDraftNow() async {
-        draft = ""
-        draftSaveTask?.cancel()
-        draftSaveTask = nil
-        try? await service.clearDraft(hostId: hostId, sessionId: sessionId)
-    }
-
-    private func updateCapabilities(running: Bool) {
-        var next = capabilities
-        next.running = running
-        applyCapabilities(next)
-    }
-
-    private func applyCapabilities(_ next: SessionCapabilities) {
-        let wasRunning = capabilities.running
-        capabilities = next
-        queue.applyCapabilities(next)
-        let options = DeliveryPolicy.choices(for: capabilities)
-        // A run-state change returns the affordance to the ordinary queue
-        // default. An explicit choice otherwise persists while it is supported.
-        if !options.contains(delivery) || capabilities.running != wasRunning {
-            delivery = DeliveryPolicy.defaultChoice(for: capabilities) ?? .send
-        }
-        onStatusChange?()
-    }
-
-    // MARK: - Approval expiry clock
-
-    private func restartApprovalTimer(fastVerification: Bool = true) {
-        stopApprovalTimer()
-        let pending = approvals.filter { $0.state == .pending }
-        guard !pending.isEmpty else { return }
-        let current = now()
-        approvalClock = current
-        let nextExpiry = pending.map(\.expiresAt).min() ?? current
-        let remaining = nextExpiry.timeIntervalSince(current)
-        let allTrusted = pending.allSatisfy { trustedPendingApprovalIds.contains($0.approvalId) }
-        // When the local clock already says the request is expired but the Host
-        // still reports it pending, verify with the Host once, then recheck at a
-        // low frequency instead of spinning. Offline uses the slow path too.
-        let delay: Duration
-        if remaining > 0 {
-            delay = .milliseconds(max(50, Int(remaining * 1000)))
-        } else if fastVerification && connection.isOnline && !allTrusted {
-            delay = .milliseconds(250)
-        } else {
-            delay = .seconds(30)
-        }
-        approvalExpiryTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
-            guard let self, !Task.isCancelled else { return }
-            self.approvalClock = self.now()
-            self.approvalRefreshCount += 1
-            await self.refreshApprovals(restartTimer: false)
-            self.restartApprovalTimer(fastVerification: false)
-        }
-    }
-
-    private func stopApprovalTimer() {
-        approvalExpiryTask?.cancel()
-        approvalExpiryTask = nil
-    }
-
-    private func requestScroll(animated: Bool) {
-        scrollRequestCounter += 1
-        scrollRequest = ConversationScrollRequest(id: scrollRequestCounter, animated: animated)
     }
 }

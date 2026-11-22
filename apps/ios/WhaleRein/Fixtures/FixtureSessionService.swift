@@ -415,7 +415,7 @@ final class FixtureSessionService: SessionService {
             runningSessions.insert(sessionId)
         }
         let echoMessageId = options.sendEcho ? "msg-echo-\(receiptId)" : nil
-        var receipt = CommandReceipt(
+        let receipt = CommandReceipt(
             commandId: receiptId,
             requestId: "req-\(receiptId)",
             status: uncertain ? .uncertain : .accepted,
@@ -613,27 +613,6 @@ final class FixtureSessionService: SessionService {
         return true
     }
 
-    /// Complete one fixture wait deterministically from a test.
-    func completeWaitForTesting(
-        _ waitID: String,
-        outcome: WaitOutcome,
-        state: WaitSnapshot? = nil,
-        errorCode: String? = nil
-    ) {
-        guard let attempt = waitAttempts[waitID] else { return }
-        settleWait(
-            waitID,
-            result: WaitResult(
-                waitID: waitID,
-                hostID: attempt.hostID,
-                sessionID: attempt.sessionID,
-                outcome: outcome,
-                state: state,
-                errorCode: errorCode
-            )
-        )
-    }
-
     private func settleWait(_ waitID: String, result: WaitResult) {
         guard let attempt = waitAttempts[waitID] else { return }
         if let waiter = attempt.waiter {
@@ -655,27 +634,6 @@ final class FixtureSessionService: SessionService {
             waitAttempts[waitID] = nil
         }
         waiter?.resume(returning: result)
-    }
-
-    /// Replace the queue fixture deterministically from a test.
-    func seedQueueForTesting(
-        _ items: [QueueItem],
-        hostId: String = "studio-mac",
-        sessionId: String = "s-001"
-    ) {
-        queueBySession[sessionId] = QueueSnapshot(
-            available: true,
-            running: runningSessions.contains(sessionId),
-            items: items
-        )
-    }
-
-    func setQueueReadFailureForTesting(_ fails: Bool) {
-        queueReadFails = fails
-    }
-
-    var queueMutationsForTesting: [(itemID: String, action: QueueAction, text: String)] {
-        queueMutations
     }
 
     private static func fixtureQueueItems() -> [QueueItem] {
@@ -991,6 +949,10 @@ final class FixtureSessionService: SessionService {
         return FixtureCatalog.diagnostics(now: now)
     }
 
+    func clearDiagnostics() async throws {
+        // The fixture has no Core journal to clear.
+    }
+
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         try requirePaired()
         let report = try await diagnosticsPreview()
@@ -1036,12 +998,6 @@ final class FixtureSessionService: SessionService {
     }
 
     // MARK: - Test helpers
-
-    /// Emits the deterministic question state for one session. Unit tests use
-    /// this to drive freshness and guard changes without a Core observation.
-    func emitQuestionStateForTesting(_ state: QuestionsState, hostId: String, sessionId: String) {
-        emit(.questions(state), hostId: hostId, sessionId: sessionId)
-    }
 
     private func emitQuestionsForTesting(hostId: String, sessionId: String) {
         let batches = questionBatches(hostId: hostId, sessionId: sessionId)
@@ -1089,16 +1045,6 @@ final class FixtureSessionService: SessionService {
 
     func emitForTesting(_ event: MessageEvent, hostId: String, sessionId: String) {
         emit(event, hostId: hostId, sessionId: sessionId)
-    }
-
-    @discardableResult
-    func settleCommandsForTesting() -> Bool {
-        let tasks = settlementTasks
-        settlementTasks.removeAll()
-        for task in tasks {
-            task.cancel()
-        }
-        return !tasks.isEmpty
     }
 
     // MARK: - Internal

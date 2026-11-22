@@ -85,6 +85,8 @@ protocol SessionService: AnyObject {
     // Diagnostics
     func diagnosticsPreview() async throws -> DiagnosticsReport
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport
+    /// Clears Core's bounded diagnostic journal for this instance.
+    func clearDiagnostics() async throws
 
     // Device lifecycle
     func forgetDevice() async throws

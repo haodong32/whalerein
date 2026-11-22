@@ -6,7 +6,7 @@ import XCTest
 
 final class CloudSignInUITests: WhaleReinUITestCase {
     func testSignOutThenSignInSwitchesAccountWithoutReturningToWelcome() {
-        let app = launchApp(["-ui-cloud-switch"])
+        let app = launchScenario("cloud.switch-accounts")
 
         let signIn = waitFor("cloud.signIn")
         XCTAssertFalse(element("cloud.account").exists)

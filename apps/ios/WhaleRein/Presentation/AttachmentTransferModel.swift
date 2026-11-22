@@ -147,12 +147,6 @@ final class AttachmentTransferModel {
         states[attachmentRef] = state
     }
 
-    func clearExportOutcome(_ attachmentRef: String) {
-        guard var state = states[attachmentRef] else { return }
-        state.exportOutcome = nil
-        states[attachmentRef] = state
-    }
-
     /// Test/UI hand-off: waits until a transfer leaves the running phase.
     func waitForTerminal(_ attachmentRef: String, timeout: Duration = .seconds(10)) async {
         let deadline = ContinuousClock.now + timeout

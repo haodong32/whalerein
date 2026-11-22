@@ -12,18 +12,13 @@ final class SettingsModel {
         case revoke
     }
 
-    /// Typed successful outcome for the selected instance only. The owning
-    /// service is per instance, so another instance's pairing is untouched.
-    enum Outcome: Equatable {
-        case forgotten
-        case revoked
-    }
+    /// One business state for the screen. The legacy property names below are
+    /// read-only projections kept while the view migrates to `state`.
+    private(set) var state = SettingsState()
 
-    private(set) var isBusy = false
-    private(set) var statusKey: L10nKey?
-    private(set) var errorKey: L10nKey?
-    private(set) var lastOutcome: Outcome?
-
+    var isBusy: Bool { state.isBusy }
+    var statusKey: L10nKey? { state.statusKey }
+    var errorKey: L10nKey? { state.errorKey }
     let coreRevision: String
     let appVersion: String
     let isStaging: Bool
@@ -52,22 +47,40 @@ final class SettingsModel {
         appVersion = service.appVersion
     }
 
+    /// Opens the confirmation dialog for `action`.
+    func requestConfirmation(_ action: SettingsAction) {
+        state = SettingsReduce.reduce(state, .confirmationRequested(action))
+    }
+
+    func cancelConfirmation() {
+        state = SettingsReduce.reduce(state, .confirmationCancelled)
+    }
+
+    /// Prepares the redacted log snapshot on demand. Nothing leaves the device
+    /// until the user picks a share destination.
+    func prepareLogExport() {
+        state = SettingsReduce.reduce(state, .logExportStarted)
+        if let url = try? AppLog.shared.exportSnapshot() {
+            state = SettingsReduce.reduce(state, .logExportReady(url))
+        } else {
+            state = SettingsReduce.reduce(state, .logExportFailed)
+        }
+    }
+
     func perform(_ confirmation: Confirmation) async {
+        await perform(confirmation == .forget ? .forgetDevice : .revokeDevice)
+    }
+
+    func perform(_ action: SettingsAction) async {
         guard !isBusy else { return }
-        isBusy = true
-        statusKey = nil
-        errorKey = nil
-        lastOutcome = nil
+        state = SettingsReduce.reduce(state, .confirmationRequested(action))
+        state = SettingsReduce.reduce(state, .performStarted(action))
         do {
-            switch confirmation {
-            case .forget:
+            switch action {
+            case .forgetDevice:
                 try await service.forgetDevice()
-                statusKey = .settingsForgotten
-                lastOutcome = .forgotten
-            case .revoke:
+            case .revokeDevice:
                 try await service.revoke()
-                statusKey = .settingsRevoked
-                lastOutcome = .revoked
             }
             preferences.update {
                 $0.paired = false
@@ -75,11 +88,11 @@ final class SettingsModel {
                 $0.lastSessionId = nil
                 $0.lastSessionTitle = nil
             }
+            state = SettingsReduce.reduce(state, .performSucceeded(action))
             onDeviceReset()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            errorKey = L10nKey.errorKey(for: code)
+            state = SettingsReduce.reduce(state, .performFailed(code))
         }
-        isBusy = false
     }
 }

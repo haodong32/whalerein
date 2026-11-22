@@ -5,12 +5,13 @@ import SwiftUI
 import UIKit
 
 struct DiagnosticsView: View {
-    @Environment(AppModel.self) private var app
+    /// The feature model is injected by the presenting shell; the view never
+    /// reaches into the app environment for it.
+    @Bindable var model: DiagnosticsModel
     @Environment(\.dismiss) private var dismiss
     @State private var showShareConfirmation = false
 
     var body: some View {
-        @Bindable var model = app.diagnostics
         NavigationStack {
             Group {
                 switch model.loadState {
@@ -206,3 +207,18 @@ struct ShareSheet: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
+
+
+#if DEBUG
+#Preview("Diagnostics fixture") {
+    if let scenario = ScenarioCatalog.scenario(id: "diagnostics.baseline") {
+        let directory = ScenarioBuilder.temporaryDirectory()
+        DiagnosticsView(
+            model: DiagnosticsModel(
+                service: ScenarioBuilder.service(for: scenario, directory: directory),
+                stagingDirectory: directory
+            )
+        )
+    }
+}
+#endif

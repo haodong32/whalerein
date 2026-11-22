@@ -56,21 +56,37 @@ final class AccountSettingsModel {
         case failed(AppErrorCode)
     }
 
-    private(set) var status: InstanceStatus?
-    private(set) var statusState: LoadState = .idle
-    private(set) var statusError: AppErrorCode?
+    /// One business state; the legacy names below are read-only projections.
+    private(set) var state = AccountState()
 
     private(set) var hosts: [HostSummary] = []
-    private(set) var defaultHostId: String?
-    private(set) var defaultHostError: AppErrorCode?
 
-    private(set) var sessions: [AccountAppSession] = []
-    private(set) var sessionsState: LoadState = .idle
-    private(set) var sessionsError: AppErrorCode?
+    var status: InstanceStatus? { state.status.value }
+    var statusState: LoadState { Self.legacy(state.status) }
+    var statusError: AppErrorCode? { state.status.error }
+    var defaultHostId: String? { state.defaultHostId }
+    var defaultHostError: AppErrorCode? { state.defaultHostError }
+    var sessions: [AccountAppSession] { state.sessions.value ?? [] }
+    var sessionsState: LoadState { Self.legacy(state.sessions) }
+    var sessionsError: AppErrorCode? { state.sessions.error }
+    var revokingScope: AccountSessionScope? {
+        if case .revoking(let scope) = state.revocation { return scope }
+        return nil
+    }
+    var lastRevocation: AccountSessionRevocation? {
+        if case .settled(let result) = state.revocation { return result }
+        return nil
+    }
+    var statusKey: L10nKey? { state.statusKey }
 
-    private(set) var revokingScope: AccountSessionScope?
-    private(set) var lastRevocation: AccountSessionRevocation?
-    private(set) var statusKey: L10nKey?
+    private static func legacy<Value: Equatable & Sendable>(_ load: Load<Value>) -> LoadState {
+        switch load {
+        case .idle: .idle
+        case .loading: .loading
+        case .loaded: .loaded
+        case .failed(let code): .failed(code)
+        }
+    }
 
     private let service: any SessionService
     private let statusService: (any InstanceStatusService)?
@@ -112,21 +128,15 @@ final class AccountSettingsModel {
 
     func loadStatus() async {
         guard let statusService else {
-            statusState = .failed(.unavailable)
-            statusError = .unavailable
+            state = AccountReduce.reduce(state, .statusFailed(.unavailable))
             return
         }
-        if statusState == .idle { statusState = .loading }
+        state = AccountReduce.reduce(state, .statusLoadStarted)
         do {
             let loaded = try await statusService.instanceStatus()
-            status = loaded
-            defaultHostId = loaded.defaultHost
-            statusError = nil
-            statusState = .loaded
+            state = AccountReduce.reduce(state, .statusLoaded(loaded))
         } catch {
-            let code = Self.code(for: error)
-            statusState = .failed(code)
-            statusError = code
+            state = AccountReduce.reduce(state, .statusFailed(Self.code(for: error)))
         }
     }
 
@@ -140,34 +150,31 @@ final class AccountSettingsModel {
         }
         do {
             hosts = try await service.hosts()
-            defaultHostError = nil
+            state = AccountReduce.reduce(state, .defaultHostSucceeded)
         } catch {
             hosts = []
             let code = Self.code(for: error)
             if code != .notPaired {
-                defaultHostError = code
+                state = AccountReduce.reduce(state, .defaultHostFailed(code))
             }
         }
     }
 
     func loadSessions() async {
         guard let cloud, let status else {
-            sessions = []
-            sessionsState = .loaded
+            state = AccountReduce.reduce(state, .sessionsLoaded([]))
             return
         }
         guard status.service == .cloud, status.accountState == .signedIn else {
-            sessions = []
-            sessionsState = .loaded
-            sessionsError = nil
+            state = AccountReduce.reduce(state, .sessionsLoaded([]))
             return
         }
-        sessionsState = .loading
+        state = AccountReduce.reduce(state, .sessionsLoadStarted)
         do {
             let current = try await statusService?.currentCloudSessionId()
             currentSessionId = current
             let listed = try await cloud.cloudAccountSessions()
-            sessions = listed.map { session in
+            let sessions = listed.map { session in
                 AccountAppSession(
                     sessionId: session.sessionId,
                     instanceId: session.instanceId,
@@ -176,12 +183,9 @@ final class AccountSettingsModel {
                     isCurrent: session.sessionId == current
                 )
             }
-            sessionsError = nil
-            sessionsState = .loaded
+            state = AccountReduce.reduce(state, .sessionsLoaded(sessions))
         } catch {
-            let code = Self.code(for: error)
-            sessionsError = code
-            sessionsState = .failed(code)
+            state = AccountReduce.reduce(state, .sessionsFailed(Self.code(for: error)))
         }
     }
 
@@ -189,15 +193,15 @@ final class AccountSettingsModel {
 
     func selectDefaultHost(_ hostId: String) async {
         guard let statusService, !isBusy else { return }
-        statusKey = nil
-        defaultHostError = nil
+        state = AccountReduce.reduce(state, .message(nil))
+        state = AccountReduce.reduce(state, .defaultHostSelected(hostId))
         do {
             try await statusService.selectDefaultHost(hostId: hostId)
-            defaultHostId = hostId
-            statusKey = .settingsDefaultSaved
+            state = AccountReduce.reduce(state, .defaultHostSelected(hostId))
+            state = AccountReduce.reduce(state, .message(.settingsDefaultSaved))
             await loadStatus()
         } catch {
-            defaultHostError = Self.code(for: error)
+            state = AccountReduce.reduce(state, .defaultHostFailed(Self.code(for: error)))
         }
     }
 
@@ -221,29 +225,23 @@ final class AccountSettingsModel {
         scope: AccountSessionScope,
         operation: () async throws -> CloudAccountSessionState
     ) async {
-        revokingScope = scope
-        statusKey = nil
-        sessionsError = nil
+        state = AccountReduce.reduce(state, .revokeStarted(scope))
+        state = AccountReduce.reduce(state, .message(nil))
         do {
-            let state = try await operation()
+            let reportedState = try await operation()
             let affected: [String]
             switch scope {
             case .one(let id):
                 affected = [id]
-                if let index = sessions.firstIndex(where: { $0.sessionId == id }) {
-                    sessions[index].state = state
-                }
             case .all:
                 affected = sessions.map(\.sessionId)
-                for index in sessions.indices {
-                    sessions[index].state = state
-                }
             }
-            lastRevocation = AccountSessionRevocation(
+            let result = AccountSessionRevocation(
                 scope: scope,
-                state: state,
+                state: reportedState,
                 affectedSessionIds: affected
             )
+            state = AccountReduce.reduce(state, .revokeSettled(result))
             let affectsCurrent: Bool
             switch scope {
             case .one(let id):
@@ -251,17 +249,20 @@ final class AccountSettingsModel {
             case .all:
                 affectsCurrent = true
             }
-            statusKey = state == .pending
-                ? .settingsAppSessionsPending
-                : .settingsAppSessionsRevoked
-            revokingScope = nil
+            state = AccountReduce.reduce(
+                state,
+                .message(
+                    reportedState == .pending
+                        ? .settingsAppSessionsPending
+                        : .settingsAppSessionsRevoked
+                )
+            )
             if affectsCurrent {
                 currentSessionId = nil
                 onSignedOut?()
             }
         } catch {
-            revokingScope = nil
-            sessionsError = Self.code(for: error)
+            state = AccountReduce.reduce(state, .revokeFailed(scope, Self.code(for: error)))
         }
     }
 

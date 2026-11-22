@@ -37,7 +37,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testRemoteRevocationBlocksConversationAndPairsAgain() {
-        launchApp(["-ui-revoked-on-open"])
+        launchScenario("onboarding.revoked-on-open")
         pairWithoutWaitingForConversation()
 
         XCTAssertTrue(waitFor("revoked.title", timeout: 20).waitForExistence(timeout: 20))
@@ -49,7 +49,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testRemoteRevocationForgetReturnsToOnboarding() {
-        launchApp(["-ui-revoked-on-open"])
+        launchScenario("onboarding.revoked-on-open")
         pairWithoutWaitingForConversation()
         _ = waitFor("revoked.title", timeout: 20)
 
@@ -59,7 +59,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testWatchEndedDisablesSendAndReconnects() {
-        launchAndOpenConversation(["-ui-watch-ended"])
+        launchAndOpenConversation(scenario: "conversation.watch-ended")
         _ = waitFor("conversation.watchEnded")
 
         let field = waitFor("composer.field")
@@ -74,7 +74,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testUncertainSendJourneyShowsUncertainThenSettles() {
-        launchAndOpenConversation(["-ui-send-uncertain"])
+        launchAndOpenConversation(scenario: "conversation.send-uncertain")
 
         typeAndSend("uncertain journey")
         let status = waitFor("conversation.sendStatus")
@@ -92,7 +92,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testEchoedSendDoesNotDuplicateTheBubble() {
-        launchAndOpenConversation(["-ui-send-echo"])
+        launchAndOpenConversation(scenario: "conversation.send-echo")
 
         typeAndSend("single bubble")
         XCTAssertTrue(app.staticTexts["single bubble"].waitForExistence(timeout: 10))
@@ -106,7 +106,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testOfflineApprovalDisablesDecisionWithReason() {
-        launchAndOpenConversation(["-ui-offline"])
+        launchAndOpenConversation(scenario: "conversation.offline")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         let reason = waitFor("approval.disabledReason.\(Self.approvalId)")
@@ -116,7 +116,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testShortLivedApprovalExpiresOnTheTimer() {
-        launchAndOpenConversation(["-ui-approval-state", "short-lived"])
+        launchAndOpenConversation(scenario: "approvals.short-lived")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         let state = element("approval.state.\(Self.approvalId)")
@@ -133,7 +133,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testFastClockApprovalStaysActionable() {
-        launchAndOpenConversation(["-ui-approval-state", "fast-clock"])
+        launchAndOpenConversation(scenario: "approvals.fast-clock")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         let allow = waitForEnabled("approval.allowOnce", timeout: 15)
@@ -151,7 +151,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testUnavailableApprovalShowsSessionUnavailable() {
-        launchAndOpenConversation(["-ui-approval-state", "unavailable"])
+        launchAndOpenConversation(scenario: "approvals.unavailable")
         revealByScrolling("approval.card.\(Self.approvalId)")
 
         XCTAssertEqual(
@@ -164,7 +164,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testDecidedApprovalSurvivesAPendingOnlyCoreRefresh() {
-        launchAndOpenConversation(["-ui-approval-refresh-after-decision"])
+        launchAndOpenConversation(scenario: "approvals.refresh-after-decision")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         tap(waitFor("approval.allowOnce"))
@@ -183,7 +183,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testIncompatibleProtocolShowsUpgradeGuidance() {
-        launchApp(["-ui-incompatible-protocol"])
+        launchScenario("onboarding.incompatible-protocol")
         let field = waitFor("invitation.field")
         tap(field)
         field.typeText(Self.invitationLink + "\n")
@@ -196,7 +196,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testLegacyHostWithoutProtocolVersionShowsUpgradeGuidance() {
-        launchApp(["-ui-legacy-protocol"])
+        launchScenario("onboarding.legacy-protocol")
         let field = waitFor("invitation.field")
         tap(field)
         field.typeText(Self.invitationLink + "\n")
@@ -211,7 +211,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     func testAddHostEntryPointFromSettings() {
         launchAndOpenConversation()
         tap(waitFor("conversation.settings"))
-        tap(waitFor("settings.addHost"))
+        tap(scrollTo("settings.addHost"))
 
         XCTAssertTrue(waitFor("invitation.field", timeout: 20).exists)
         XCTAssertTrue(waitFor("invitation.close").exists)
@@ -255,7 +255,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testDiagnosticsFailureShowsRetryBranch() {
-        launchAndOpenConversation(["-ui-diagnostics-failure"])
+        launchAndOpenConversation(scenario: "conversation.diagnostics-failure")
         tap(waitFor("conversation.diagnostics"))
 
         XCTAssertTrue(waitFor("diagnostics.error", timeout: 15).exists)
@@ -265,7 +265,7 @@ final class LifecycleAndRecoveryUITests: WhaleReinUITestCase {
     }
 
     func testLockedKeychainShowsRecoverableGuidance() {
-        launchApp(["-ui-keychain-locked"])
+        launchScenario("onboarding.keychain-locked")
 
         XCTAssertTrue(waitFor("keychain.locked.title", timeout: 20).exists)
         XCTAssertTrue(waitFor("keychain.locked.error").exists)

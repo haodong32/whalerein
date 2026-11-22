@@ -2139,6 +2139,14 @@ impl MobileCore {
         })
     }
 
+    /// Clear Core's bounded diagnostic journal for this instance.
+    ///
+    /// The app calls this when the device state is destroyed; the journal is
+    /// diagnostic state, not user content. Core owns the retention policy.
+    pub fn clear_diagnostics(&self) -> Result<(), MobileError> {
+        self.core.clear_diagnostics().map_err(MobileError::from)
+    }
+
     /// Write a redacted diagnostic bundle to `path` after user confirmation.
     pub fn export_diagnostics(&self, path: String) -> Result<DiagnosticsReportView, MobileError> {
         if path.is_empty() || path.len() > MAX_PATH_BYTES {

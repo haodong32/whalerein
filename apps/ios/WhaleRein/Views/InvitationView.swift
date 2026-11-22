@@ -4,20 +4,22 @@
 import SwiftUI
 
 struct InvitationView: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
+    let pairing: PairingModel
+    let serviceSelection: ServiceSelectionContext
     var isModal = false
+    var onDismiss: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
 
     @State private var pasteboardError: L10nKey?
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
-        @Bindable var pairing = model.pairing
+        @Bindable var pairing = pairing
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
-                ServiceSelectionView()
+                ServiceSelectionView(context: serviceSelection)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(L10n.invitationFieldPlaceholder.key)
@@ -133,7 +135,7 @@ struct InvitationView: View {
             if isModal {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(L10n.commonClose.key) {
-                        model.dismissInvitationSheet()
+                        onDismiss()
                         dismiss()
                     }
                     .accessibilityIdentifier("invitation.close")
@@ -173,7 +175,7 @@ struct InvitationView: View {
     }
 
     private var effectiveErrorKey: L10nKey? {
-        pasteboardError ?? model.pairing.errorKey
+        pasteboardError ?? pairing.errorKey
     }
 
     private func statusText(_ key: L10nKey) -> some View {
@@ -189,117 +191,30 @@ struct InvitationView: View {
             pasteboardError = .invitationPastedNothing
             return
         }
-        model.pairing.paste(value)
+        pairing.paste(value)
     }
 }
 
-struct PairingConfirmationView: View {
-    @Bindable var pairing: PairingModel
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text(L10n.pairingTitle.key)
-                    .font(.title2.bold())
-                    .accessibilityIdentifier("pairing.title")
-
-                Text(L10n.pairingSubtitle.key)
-                    .foregroundStyle(.secondary)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    labeledValue(L10n.pairingHostLabel, value: promptHost)
-                        .accessibilityIdentifier("pairing.host")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L10n.pairingFingerprintLabel.key)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(promptFingerprint)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("pairing.fingerprint")
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(L10n.pairingExpiryNote.key, systemImage: "clock")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("pairing.expiryNote")
-                    Label(L10n.pairingLostResultNote.key, systemImage: "arrow.uturn.backward")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("pairing.lostResultNote")
-                }
-
-                if let errorKey = pairing.errorKey {
-                    Text(errorKey.key)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("pairing.error")
-                }
-
-                if let queuedKey = pairing.queuedLinkKey {
-                    Text(queuedKey.key)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("pairing.linkQueued")
-                }
-
-                VStack(spacing: 12) {
-                    Button {
-                        Task { await pairing.confirm() }
-                    } label: {
-                        HStack {
-                            Spacer()
-                            if pairing.isBusy {
-                                ProgressView().controlSize(.small)
-                            }
-                            Text(L10n.pairingConfirm.key).fontWeight(.semibold)
-                            Spacer()
-                        }
-                    }
-                    .glassButtonStyle(prominent: true)
-                    .controlSize(.large)
-                    .disabled(pairing.isBusy)
-                    .accessibilityIdentifier("pairing.confirm")
-
-                    Button(role: .destructive) {
-                        Task { await pairing.decline() }
-                    } label: {
-                        Text(L10n.pairingDecline.key)
-                            .frame(maxWidth: .infinity)
-                    }
-                    .glassButtonStyle()
-                    .controlSize(.large)
-                    .disabled(pairing.isBusy)
-                    .accessibilityIdentifier("pairing.decline")
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: 560, alignment: .leading)
-            .frame(maxWidth: .infinity)
-        }
-        .navigationTitle(L10n.pairingTitle.string)
-        .inlineNavigationTitle()
-    }
-
-    private var promptHost: String {
-        pairing.prompt?.hostId ?? ""
-    }
-
-    private var promptFingerprint: String {
-        pairing.prompt?.fingerprintDisplay ?? ""
-    }
-
-    private func labeledValue(_ label: L10nKey, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label.key)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(verbatim: value)
-                .font(.body)
-        }
+#if DEBUG
+#Preview("Invitation fixture") {
+    if let scenario = ScenarioCatalog.scenario(id: "onboarding.unpaired") {
+        let directory = ScenarioBuilder.temporaryDirectory()
+        let service = ScenarioBuilder.service(for: scenario, directory: directory)
+        InvitationView(
+            pairing: PairingModel(service: service),
+            serviceSelection: ServiceSelectionContext(
+                configuration: nil,
+                activeInstance: nil,
+                actions: ServiceSelectionActions(
+                    switchToService: { _ in nil },
+                    enableLocal: { _ in nil },
+                    removeLocalCA: { nil },
+                    importStandaloneCA: { _ in nil },
+                    removeStandaloneCA: { nil }
+                )
+            )
+        )
     }
 }
+#endif

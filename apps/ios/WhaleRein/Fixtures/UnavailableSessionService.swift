@@ -84,6 +84,7 @@ final class UnavailableSessionService: SessionService {
     func loadDraft(hostId: String, sessionId: String) async throws -> String? { try fail() }
     func clearDraft(hostId: String, sessionId: String) async throws { try fail() }
     func diagnosticsPreview() async throws -> DiagnosticsReport { try fail() }
+    func clearDiagnostics() async throws { try fail() }
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport { try fail() }
     func forgetDevice() async throws { try fail() }
     func revoke() async throws { try fail() }

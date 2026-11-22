@@ -1,0 +1,237 @@
+// Conversation events behaviour, split out of the model file.
+
+import Foundation
+
+@MainActor
+extension ConversationModel {
+    // MARK: - Events
+
+    func ensureSubscription() {
+        guard consumeTask == nil else { return }
+        consumeEvents()
+    }
+
+    func consumeEvents() {
+        consumeTask?.cancel()
+        consumeGeneration += 1
+        let generation = consumeGeneration
+        eventSubscriptionCount += 1
+        let stream = service.makeEventStream()
+        consumeTask = Task { [weak self] in
+            for await envelope in stream {
+                guard let self else { return }
+                if Task.isCancelled { return }
+                self.handle(envelope)
+            }
+            guard let self, self.consumeGeneration == generation else { return }
+            self.consumeTask = nil
+        }
+    }
+
+    /// Applies one envelope. Events from another Host/session or an older
+    /// sequence are dropped so a late update from a previous watch cannot leak.
+    func handle(_ envelope: SessionEventEnvelope) {
+        guard envelope.hostId == hostId, envelope.sessionId == sessionId else { return }
+        guard envelope.sequence > lastAppliedSequence else { return }
+        lastAppliedSequence = envelope.sequence
+
+        switch envelope.event {
+        case .reset(let messages, let approvals):
+            state.messages = messages
+            liveMessageIds = Set(messages.map(\.messageId))
+            pagedMessageIds.removeAll()
+            historyGeneration &+= 1
+            isLoadingOlderHistory = false
+            liveToolActivities.removeAll()
+            reasoningPreviewText = nil
+            trustedPendingApprovalIds.removeAll()
+            approvalStatusRefresh.removeAll()
+            mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
+            optimisticMessages.removeAll()
+            previewText = nil
+            previewAttemptId = nil
+            authoritativeRunEpoch += 1
+            state = ConversationReduce.reduce(state, .connectionChanged(.online))
+            state = ConversationReduce.reduce(state, .contentLoaded)
+            approvalClock = now()
+            scroll.reset()
+            onConnectionChange?(connection)
+            restartApprovalTimer()
+
+        case .message(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
+            // A committed message identity is idempotent: a replay must not
+            // touch (or consume) any optimistic row.
+            guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
+            let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
+            if let echoIndex {
+                state.messages.insert(message, at: min(echoIndex, state.messages.count))
+            } else {
+                state.messages.append(message)
+            }
+            if message.role == .assistant {
+                previewText = nil
+                previewAttemptId = nil
+            }
+            if scroll.recordIncoming(isOwnMessage: false) {
+                requestScroll(animated: false)
+            }
+
+        case .replace(let message):
+            liveMessageIds.insert(message.messageId)
+            pagedMessageIds.remove(message.messageId)
+            settleAuthoritativeContent(message)
+            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+                state.messages[index] = message
+            } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
+                state.messages.insert(message, at: min(echoIndex, state.messages.count))
+            } else {
+                state.messages.append(message)
+            }
+            if message.role == .assistant {
+                previewText = nil
+                previewAttemptId = nil
+            }
+            if scroll.recordIncoming(isOwnMessage: false) {
+                requestScroll(animated: false)
+            }
+
+        case .preview(let attemptId, let text, _, _):
+            previewAttemptId = attemptId
+            previewText = text
+            if scroll.recordIncoming(isOwnMessage: false) {
+                requestScroll(animated: false)
+            }
+
+        case .reasoningPreview(_, let text, _, _):
+            reasoningPreviewText = text.isEmpty ? nil : text
+
+        case .toolActivity(let activity):
+            if let index = liveToolActivities.firstIndex(where: { $0.callId == activity.callId }) {
+                liveToolActivities[index] = activity
+            } else {
+                liveToolActivities.append(activity)
+            }
+
+        case .attemptEnded:
+            previewText = nil
+            previewAttemptId = nil
+            reasoningPreviewText = nil
+            authoritativeRunEpoch += 1
+            updateCapabilities(running: false)
+            Task { await queue.refresh() }
+
+        case .state(let status):
+            updateConnection(status)
+
+        case .connection(let eventHostId, let status):
+            guard eventHostId == hostId else { return }
+            updateConnection(status)
+
+        case .capabilities(let capabilities):
+            // Any capabilities refresh advances the epoch, including an
+            // approval-only or same-running update. A Stop submitted just before
+            // such an update is therefore treated as stale on its confirmed
+            // return, leaving running/preview for one transient frame; the next
+            // authoritative idle state self-corrects it. Narrowing this would
+            // require an attempt/run identity on the capabilities event.
+            authoritativeRunEpoch += 1
+            applyCapabilities(capabilities)
+
+        case .approvals(let approvals):
+            mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
+            approvalClock = now()
+            restartApprovalTimer()
+
+        case .approvalChanged(let approval):
+            guard approval.sessionId == sessionId else { return }
+            applyServerApproval(approval)
+            approvalClock = now()
+            restartApprovalTimer()
+
+        case .questions(let state):
+            applyQuestions(state)
+
+        case .commandStatus(let receipt):
+            applyCommandStatus(receipt)
+
+        case .error(let code, _):
+            if code == .revoked {
+                onFatalError?(code)
+            } else if code == .notPaired {
+                onFatalError?(code)
+            } else {
+                errorKey = .commonError
+            }
+
+        case .watchEnded:
+            watchEnded = true
+            stopApprovalTimer()
+            updateConnection(.offline)
+        }
+    }
+
+    /// User-initiated content load for a Core view that was too large to inline.
+    /// This is not a discovery loop: observation still owns freshness and the
+    /// stamp; only the oversized content is paged on demand.
+    func loadTruncatedQuestions() async {
+        guard questions.truncatedForDisplay, !isLoadingTruncatedQuestions else { return }
+        isLoadingTruncatedQuestions = true
+        defer { isLoadingTruncatedQuestions = false }
+        var collected: [QuestionBatch] = []
+        var cursor = ""
+        do {
+            for _ in 0..<64 {
+                let page = try await service.listQuestions(
+                    hostId: hostId,
+                    sessionId: sessionId,
+                    cursor: cursor
+                )
+                collected.append(contentsOf: page.batches)
+                cursor = page.nextCursor
+                if cursor.isEmpty { break }
+            }
+            questions.batches = collected
+            questions.batchCount = collected.count
+            questions.truncatedForDisplay = false
+            questions.error = nil
+            questionErrorKey = nil
+        } catch {
+            questionErrorKey = .questionsUnavailable
+        }
+    }
+
+    func applyQuestions(_ state: QuestionsState) {
+        // Keep edits only for a batch whose exact guard still matches.
+        var guards: [String: QuestionGuard] = [:]
+        for batch in state.batches {
+            guards[batch.batchID] = batch.guardValue
+        }
+        questionDrafts = questionDrafts.filter { batchId, draft in
+            guards[batchId] == draft.guardValue
+        }
+        var reviewInvalidated = false
+        if let review = questionReview, guards[review.guardValue.batchID] != review.guardValue {
+            questionReview = nil
+            questionErrorKey = .questionsGuardChanged
+            reviewInvalidated = true
+        }
+        questions = state
+        if state.freshness == .current && !reviewInvalidated {
+            questionErrorKey = nil
+        }
+    }
+
+    func updateConnection(_ status: ConnectionStatus) {
+        state = ConversationReduce.reduce(state, .connectionChanged(status))
+        onConnectionChange?(status)
+        // Reconnecting can make a locally-expired pending approval valid again
+        // (the device clock was fast); recompute the display clock.
+        if status.isOnline {
+            approvalClock = now()
+            restartApprovalTimer()
+        }
+    }
+}

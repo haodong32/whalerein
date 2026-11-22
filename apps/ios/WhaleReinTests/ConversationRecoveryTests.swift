@@ -255,7 +255,7 @@ struct ConversationRecoveryTests {
             $0.lastHostId = "travel-laptop"
             $0.lastSessionId = "s-102"
         }
-        let app = AppModel(
+        let app = AppShellModel(
             service: service,
             preferences: preferences,
             dataDirectory: directory,

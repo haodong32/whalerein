@@ -182,11 +182,4 @@ extension L10nKey {
         }
     }
 
-    /// Convenience for presentation models rendering a localized error.
-    static func localizedErrorText(_ error: Error) -> String {
-        if let serviceError = error as? SessionServiceError {
-            return L10nKey.errorKey(for: serviceError.code).string
-        }
-        return L10nKey.errorInternal.string
-    }
 }

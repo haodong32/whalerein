@@ -8,24 +8,38 @@ import Observation
 @MainActor
 @Observable
 final class PairingModel {
-    enum Phase: Equatable {
-        case editing
-        case validating
-        case awaitingConfirmation(PairingPrompt)
-        case confirming(PairingPrompt)
-        case paired(hostId: String)
-        case declined
-        case failed(AppErrorCode)
-    }
+    /// Kept as the model's public phase name for existing views and tests.
+    typealias Phase = PairingPhase
 
     var invitationText: String = ""
-    private(set) var phase: Phase = .editing
-    private(set) var errorKey: L10nKey?
-    private(set) var parseError: InvitationParseError?
-    private(set) var isBusy = false
+    /// One business state; the legacy names below are read-only projections.
+    private(set) var state = PairingState()
+
+    var phase: Phase { state.phase }
+    var isBusy: Bool { state.isBusy }
+    var parseError: InvitationParseError? { state.parseError }
+    var errorKey: L10nKey? {
+        if let parseError = state.parseError {
+            return L10nKey.invitationErrorKey(for: parseError)
+        }
+        if let code = state.errorCode, case .failed = state.phase {
+            return L10nKey.errorKey(for: code)
+        }
+        return nil
+    }
     /// Set when a deep link arrives while another pairing step is in flight.
     /// The link is queued and disclosed instead of being silently dropped.
-    private(set) var queuedLinkKey: L10nKey?
+    var queuedLinkKey: L10nKey? {
+        switch state.hint {
+        case .linkQueued: .pairingLinkQueued
+        case .pastedNothing: .invitationPastedNothing
+        case nil: nil
+        }
+    }
+
+    private func apply(_ event: PairingEvent) {
+        state = PairingReduce.reduce(state, event)
+    }
 
     private let service: any SessionService
     var onPaired: ((String) -> Void)?
@@ -53,16 +67,12 @@ final class PairingModel {
 
     func updateInvitation(_ text: String) {
         invitationText = text
-        errorKey = nil
-        parseError = nil
-        if case .failed = phase {
-            phase = .editing
-        }
+        apply(.inputChanged)
     }
 
     func paste(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorKey = .invitationPastedNothing
+            apply(.pastedNothing)
             return
         }
         updateInvitation(text)
@@ -74,7 +84,7 @@ final class PairingModel {
         // current step finishes instead of being dropped.
         if isBusy || prompt != nil {
             pendingURL = url
-            queuedLinkKey = .pairingLinkQueued
+            apply(.linkQueued)
             return
         }
         updateInvitation(url.absoluteString)
@@ -86,26 +96,20 @@ final class PairingModel {
         let raw = invitationText.trimmingCharacters(in: .whitespacesAndNewlines)
         switch InvitationParser.parse(raw) {
         case .failure(let error):
-            parseError = error
-            errorKey = L10nKey.invitationErrorKey(for: error)
-            phase = .editing
+            apply(.parseFailed(error))
             return
         case .success:
             break
         }
 
-        isBusy = true
-        errorKey = nil
-        parseError = nil
-        phase = .validating
+        apply(.submitStarted)
         lastSubmittedInvitation = raw
         do {
             let prompt = try await service.pairingStart(invitation: raw)
-            phase = .awaitingConfirmation(prompt)
+            apply(.submitSucceeded(prompt))
         } catch {
             fail(error)
         }
-        isBusy = false
         await drainPendingLinkIfPossible()
     }
 
@@ -116,18 +120,15 @@ final class PairingModel {
 
     func confirm() async {
         guard case .awaitingConfirmation(let prompt) = phase, !isBusy else { return }
-        isBusy = true
-        phase = .confirming(prompt)
+        apply(.confirmStarted)
         do {
             try await service.pairingDecide(approved: true, expectedFingerprint: prompt.fingerprint)
-            phase = .paired(hostId: prompt.hostId)
+            apply(.approved(hostId: prompt.hostId))
             pendingURL = nil
-            queuedLinkKey = nil
             onPaired?(prompt.hostId)
         } catch {
             fail(error)
         }
-        isBusy = false
         if case .failed = phase {
             await drainPendingLinkIfPossible()
         }
@@ -135,48 +136,38 @@ final class PairingModel {
 
     func decline() async {
         guard prompt != nil, !isBusy else { return }
-        isBusy = true
         do {
             try await service.pairingDecide(approved: false, expectedFingerprint: nil)
-            phase = .declined
-            errorKey = nil
+            apply(.declined)
         } catch {
             fail(error)
         }
-        isBusy = false
         await drainPendingLinkIfPossible()
     }
 
     func cancel() async {
         await service.pairingCancel()
-        phase = .editing
-        isBusy = false
-        errorKey = nil
+        apply(.cancelled)
         await drainPendingLinkIfPossible()
     }
 
     func reset() {
-        phase = .editing
+        apply(.reset)
         invitationText = ""
-        errorKey = nil
-        parseError = nil
-        isBusy = false
         lastSubmittedInvitation = nil
         pendingURL = nil
-        queuedLinkKey = nil
     }
 
     private func drainPendingLinkIfPossible() async {
         guard let url = pendingURL, !isBusy, prompt == nil else { return }
         pendingURL = nil
-        queuedLinkKey = nil
+        apply(.linkDrained)
         updateInvitation(url.absoluteString)
         await submit()
     }
 
     private func fail(_ error: Error) {
         let code = (error as? SessionServiceError)?.code ?? .internalError
-        phase = .failed(code)
-        errorKey = L10nKey.errorKey(for: code)
+        apply(.failed(code))
     }
 }

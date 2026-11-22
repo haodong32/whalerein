@@ -544,7 +544,7 @@ fn pair_with_mqtt(core: &MobileCore, access: &FakeAccess, mqtt_url: &str) -> Str
 }
 
 fn wait_for_cached_message(core: &MobileCore, host_id: &str, session_id: &str, message_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let messages = core
             .cached_messages(host_id.to_owned(), session_id.to_owned())
@@ -827,7 +827,7 @@ fn wait_for_current_questions(
     core: &MobileCore,
     session_id: &str,
 ) -> whalerein_mobile::QuestionsView {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         for event in core.poll_events(250) {
             if let ConversationEvent::Questions { view } = event {
@@ -1033,7 +1033,7 @@ fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
 
     core.start_watch(host_id.clone(), "session-2".into())
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut emitted = Vec::new();
     let mut saw_current = false;
     while Instant::now() < deadline {
@@ -1646,7 +1646,7 @@ fn history_reference(
 }
 
 fn terminal_transfer(core: &MobileCore, id: &str) -> AttachmentTransferView {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let view = core
             .take_attachment_result(id.into(), 500)

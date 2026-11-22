@@ -21,7 +21,6 @@ enum KeychainAvailability: Equatable, Sendable {
 final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     /// Default app namespace. The staging app uses the staging suffix.
     static let defaultService = AppStorageLocations.keychainService
-    static let stagingService = AppStorageLocations.stagingKeychainService
 
     private let service: String
     private let accessGroup: String?

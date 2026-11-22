@@ -18,6 +18,15 @@ enum AppCloudEnvironment: String, CaseIterable, Sendable {
     case local
 }
 
+/// Which fixture instance a deterministic launch opens. The catalog selects it
+/// per scenario; legacy `-ui-cloud-*` flags imply the Cloud instance.
+enum FixtureInstance: String, Sendable, CaseIterable {
+    case standalone
+    case cloudProduction = "cloud-production"
+
+    var instanceId: String { rawValue }
+}
+
 struct AppInstance: Identifiable, Equatable, Sendable {
     let id: String
     let service: AppService
@@ -536,11 +545,14 @@ extension AppConfiguration {
         self.instances = instances
     }
 
-    static func fixture(documentURL: URL) -> AppConfiguration {
+    static func fixture(
+        documentURL: URL,
+        activeInstanceID: String = FixtureInstance.cloudProduction.instanceId
+    ) -> AppConfiguration {
         AppConfiguration(
             documentURL: documentURL,
             version: 1,
-            activeInstanceID: "cloud-production",
+            activeInstanceID: activeInstanceID,
             reasoningVisible: false,
             instances: fixtureInstances(in: documentURL)
         )

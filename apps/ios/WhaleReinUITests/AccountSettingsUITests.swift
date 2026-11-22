@@ -20,7 +20,7 @@ final class AccountSettingsUITests: WhaleReinUITestCase {
     }
 
     private func openSettings() {
-        launchAndOpenConversation(["-ui-cloud-signed-in"])
+        launchAndOpenConversation(scenario: "conversation.cloud-account")
         tap(waitFor("conversation.settings"))
         XCTAssertTrue(waitFor("settings.coreRevision").exists)
     }

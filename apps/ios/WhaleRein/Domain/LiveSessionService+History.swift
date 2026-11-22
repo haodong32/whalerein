@@ -32,12 +32,7 @@ extension LiveSessionService: ConversationHistoryService {
     }
 
     func historyMessage(_ reference: MessageReference) async throws -> ConversationMessage {
-        let core = self.core
-        let binding = Self.bindingReference(reference)
-        let view = try await call {
-            try core.readHistoryMessage(reference: binding)
-        }
-        return Self.map(message: view)
+        try await readMessage(reference)
     }
 }
 

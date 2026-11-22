@@ -10,8 +10,12 @@ import UniformTypeIdentifiers
 
 struct ServiceSelectionView: View {
     var showsStandaloneCA = false
+    let context: ServiceSelectionContext
 
-    @Environment(AppModel.self) private var app
+    private var configuration: AppConfigurationStore? { context.configuration }
+    private var activeInstance: AppInstance? { context.activeInstance }
+    private var actions: ServiceSelectionActions { context.actions }
+
     @State private var pending: AppServiceOption?
     @State private var showConfirmation = false
     @State private var isSwitching = false
@@ -19,37 +23,15 @@ struct ServiceSelectionView: View {
     @State private var isImportingLocalCA = false
     @State private var errorKey: L10nKey?
 
-    private var options: [AppServiceOption] {
-        guard let configuration = app.configuration else { return [] }
-        return AppConfigurationStore.serviceOptions(
-            for: configuration.instances,
-            showsStaging: AppConfigurationStore.defaultShowsStaging,
-            showsLocal: AppConfigurationStore.defaultShowsLocal
-        )
-    }
-
-    private var local: AppInstance? {
-        app.configuration?.instances.first(where: { $0.isLocal })
-    }
-
-    /// Local can be created only together with its imported mkcert root.
-    private func needsLocalImport(_ option: AppServiceOption) -> Bool {
-        option.kind == .createLocal && !(local?.hasCloudCA ?? false)
-    }
-
-    private var standalone: AppInstance? {
-        app.configuration?.instances.first(where: { $0.isStandalone })
-    }
-
     var body: some View {
-        if app.configuration != nil {
+        if configuration != nil {
             VStack(alignment: .leading, spacing: 10) {
                 Text(L10n.serviceSelectionTitle.key)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("service.selection")
                 activeRow
-                ForEach(options) { option in
+                ForEach(context.options) { option in
                     optionRow(option)
                 }
                 if isSwitching {
@@ -71,10 +53,10 @@ struct ServiceSelectionView: View {
                     .foregroundStyle(.red)
                     .accessibilityIdentifier("service.error")
                 }
-                if showsStandaloneCA, let standalone {
-                    standaloneCASection(standalone)
+                if showsStandaloneCA, let instance = context.standalone {
+                    standaloneCASection(instance)
                 }
-                if AppConfigurationStore.defaultShowsLocal, let local {
+                if AppConfigurationStore.defaultShowsLocal, let local = context.local {
                     localCASection(local)
                 }
             }
@@ -119,19 +101,19 @@ struct ServiceSelectionView: View {
     }
 
     private var activeLabel: String {
-        let id = app.activeInstance?.id ?? app.configuration?.configuration.activeInstanceID ?? ""
-        if let option = options.first(where: { $0.id == id }) {
+        let id = activeInstance?.id ?? configuration?.configuration.activeInstanceID ?? ""
+        if let option = context.options.first(where: { $0.id == id }) {
             return option.titleKey.string
         }
         return id
     }
 
     private func optionRow(_ option: AppServiceOption) -> some View {
-        let isActive = app.activeInstance?.id == option.id ||
-            (option.kind == .createStaging && app.activeInstance?.environment == .staging)
+        let isActive = activeInstance?.id == option.id ||
+            (option.kind == .createStaging && activeInstance?.environment == .staging)
         return Button {
             guard !isActive else { return }
-            if needsLocalImport(option) {
+            if context.needsLocalImport(option) {
                 errorKey = nil
                 isImportingLocalCA = true
                 return
@@ -239,7 +221,7 @@ struct ServiceSelectionView: View {
         }
         isSwitching = true
         Task {
-            let code = await app.enableLocal(pem: pem)
+            let code = await actions.enableLocal(pem)
             if let code {
                 errorKey = L10nKey.errorKey(for: code)
             }
@@ -262,7 +244,7 @@ struct ServiceSelectionView: View {
     private func removeLocalCA() async {
         guard !isSwitching else { return }
         isSwitching = true
-        let code = await app.removeLocalCA()
+        let code = await actions.removeLocalCA()
         if let code {
             errorKey = L10nKey.errorKey(for: code)
         }
@@ -273,7 +255,7 @@ struct ServiceSelectionView: View {
         guard !isSwitching else { return }
         isSwitching = true
         errorKey = nil
-        let code = await app.switchToService(option)
+        let code = await actions.switchToService(option)
         if let code {
             errorKey = L10nKey.errorKey(for: code)
         }
@@ -283,7 +265,7 @@ struct ServiceSelectionView: View {
     private func removeCA() async {
         guard !isSwitching else { return }
         isSwitching = true
-        let code = await app.removeStandaloneCA()
+        let code = await actions.removeStandaloneCA()
         if let code {
             errorKey = L10nKey.errorKey(for: code)
         }
@@ -297,7 +279,7 @@ struct ServiceSelectionView: View {
             return
         }
         Task {
-            let code = await app.importStandaloneCA(pem)
+            let code = await actions.importStandaloneCA(pem)
             if let code {
                 errorKey = L10nKey.errorKey(for: code)
             }

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "comment": "Shrinking legacy allowlist for architecture_gate.py. Paths are relative to the scan root (apps/ios/WhaleRein). legacy_files is frozen when this file is created; entries may only use those paths, so new files can never be allowlisted. Delete entries as the rewrite removes violations: the gate fails on missing paths and on stale entries.",
+  "legacy_files": [
+    "App/AppLaunchOptions.swift",
+    "Features/Shell/AppShellModel.swift",
+    "Presentation/ConversationModel.swift",
+    "Views/CloudSignInView.swift",
+    "Views/ConversationView.swift",
+    "Views/DiagnosticsView.swift",
+    "Views/InvitationView.swift",
+    "Views/QuestionCardView.swift",
+    "Views/RootView.swift",
+    "Views/ServiceSelectionView.swift",
+    "Views/SessionManagementView.swift",
+    "Views/SessionSwitcherView.swift",
+    "Views/SettingsAccountView.swift",
+    "Views/SettingsOperationsView.swift",
+    "Views/SettingsView.swift"
+  ],
+  "entries": []
+}

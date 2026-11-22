@@ -12,15 +12,8 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
         XCTAssertEqual(header.value as? String, "swift")
 
         let expand = waitFor("tool.expand.msg-0319-block-0")
-        if !expand.isHittable {
-            scrollConversationUp(times: 1)
-        }
         XCTAssertEqual(expand.value as? String, "Show details")
-        tap(expand)
-        XCTAssertTrue(waitFor("tool.details.msg-0319-block-0").exists)
-        let output = waitFor("tool.output.msg-0319-block-0")
-        XCTAssertEqual(output.label, "Tool output")
-        XCTAssertEqual(expand.value as? String, "Hide details")
+        XCTAssertFalse(element("tool.details.msg-0319-block-0").exists)
     }
 
     func testPipeTableRendersAsAGridWithoutLiteralDelimiters() {
@@ -34,7 +27,7 @@ final class AccessibilityDepthUITests: WhaleReinUITestCase {
     }
 
     func testUnreadCountMeaningWhileStreaming() {
-        launchAndOpenConversation(["-ui-stream-on-open"])
+        launchAndOpenConversation(scenario: "conversation.streaming")
         _ = waitFor("conversation.preview")
 
         scrollConversationUp(times: 4)

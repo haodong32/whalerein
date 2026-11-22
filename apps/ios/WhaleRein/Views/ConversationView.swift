@@ -5,19 +5,23 @@
 import SwiftUI
 
 struct ConversationView: View {
-    @Environment(AppModel.self) private var app
     @Bindable var model: ConversationModel
+    /// Presentation inputs the shell owns; the screen does not read it.
+    let reasoningVisible: Bool
+    let isCached: Bool
+    /// True while this model is still the shell's current conversation.
+    let isCurrent: () -> Bool
     @FocusState private var composerFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    private static let bottomAnchor = "conversation.bottom"
+    private static let bottomAnchor = ConversationRowsView.bottomAnchor
 
     var body: some View {
         VStack(spacing: 0) {
             content
             ComposerView(
                 model: model,
-                isCached: app.isOfflineCached,
+                isCached: isCached,
                 focused: $composerFocused
             )
         }
@@ -34,7 +38,7 @@ struct ConversationView: View {
         }
         .onDisappear {
             // A superseded conversation must not stop the watch that replaced it.
-            if app.conversation === model {
+            if isCurrent() {
                 model.close()
             }
         }
@@ -171,63 +175,6 @@ struct ConversationView: View {
         dynamicTypeSize.isAccessibilitySize || model.messages.count <= 50
     }
 
-    @ViewBuilder
-    private var historyHeader: some View {
-        if let provenanceKey = model.historyProvenanceKey {
-            Label(provenanceKey.key, systemImage: "clock.arrow.circlepath")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("history.provenance")
-        }
-        if model.isLoadingOlderHistory {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(L10n.conversationLoadingEarlier.key)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .accessibilityIdentifier("history.loading")
-        } else if model.historyNeedsFreshTraversal {
-            VStack(spacing: 6) {
-                Text(L10n.conversationHistoryChanged.key)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                Button(L10n.conversationHistoryLoadFresh.key) {
-                    Task { await model.loadFreshHistory() }
-                }
-                .font(.caption)
-                .glassButtonStyle()
-                .controlSize(.small)
-                .accessibilityIdentifier("history.fresh")
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-        } else if !model.historyComplete, model.canLoadOlderHistory {
-            Button(L10n.conversationLoadEarlier.key) {
-                Task { await model.loadOlderHistory() }
-            }
-            .font(.caption)
-            .glassButtonStyle()
-            .controlSize(.small)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .accessibilityIdentifier("history.loadEarlier")
-        } else if model.historyComplete {
-            Text(L10n.conversationHistoryComplete.key)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .accessibilityIdentifier("history.complete")
-        }
-        if let historyErrorKey = model.historyErrorKey {
-            Text(historyErrorKey.key)
-                .font(.caption)
-                .foregroundStyle(.red)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .accessibilityIdentifier("history.error")
-        }
-    }
 
     private var followTarget: String {
         if model.livePreview != nil {
@@ -251,101 +198,8 @@ struct ConversationView: View {
         }
     }
 
-    @ViewBuilder
+
     private var transcriptRows: some View {
-        if model.messages.isEmpty && model.livePreview == nil {
-            Text(L10n.conversationEmpty.key)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 40)
-                .accessibilityIdentifier("conversation.empty")
-        }
-
-        historyHeader
-
-        ForEach(model.messages) { message in
-            MessageRowView(
-                model: model,
-                message: message,
-                reasoningVisible: app.reasoningVisible
-            )
-            .id(message.messageId)
-        }
-
-        ForEach(model.visibleLiveToolActivities, id: \.callId) { activity in
-            LiveToolActivityRow(activity: activity)
-                .id("tool.live.\(activity.callId)")
-        }
-
-        if let preview = model.livePreview {
-            LivePreviewRow(text: preview)
-                .id("conversation.previewRow")
-        }
-
-        if app.reasoningVisible, let reasoning = model.reasoningPreviewText {
-            ReasoningPreviewRow(text: reasoning)
-                .id("conversation.reasoningPreviewRow")
-        }
-
-        QuestionStatusView(model: model)
-
-        ForEach(model.questionBatches) { batch in
-            QuestionCardView(model: model, batch: batch)
-                .id("question-\(batch.batchID)")
-        }
-
-        QuestionAnswerStatusView(model: model)
-
-        ForEach(model.approvals) { approval in
-            ApprovalCardView(model: model, approval: approval)
-                .id("approval-\(approval.approvalId)")
-        }
-
-        Color.clear
-            .frame(height: 1)
-            .id(Self.bottomAnchor)
-    }
-}
-
-
-
-
-
-
-
-/// iOS 26 soft scroll-edge blur under the transparent navigation bar. Older
-/// deployment targets keep a plain transparent bar.
-private struct TopScrollEdgeEffect: ViewModifier {
-    func body(content: Content) -> some View {
-#if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            content.scrollEdgeEffectStyle(.soft, for: .top)
-        } else {
-            content
-        }
-#else
-        content
-#endif
-    }
-}
-
-
-/// Lightens the system scroll-edge blur so the transparent titlebar reads as
-/// glass rather than a solid grey band when a card scrolls beneath it.
-private struct TopTitlebarWash: View {
-    var body: some View {
-        LinearGradient(
-            stops: [
-                .init(color: Color(.systemBackground).opacity(0.72), location: 0),
-                .init(color: Color(.systemBackground).opacity(0.35), location: 0.7),
-                .init(color: Color(.systemBackground).opacity(0), location: 1),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .frame(height: 120)
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        ConversationRowsView(model: model, reasoningVisible: reasoningVisible)
     }
 }

@@ -17,6 +17,14 @@ snapshot/watch handoff, order, delivery semantics, approval version binding and
 local encrypted state. See [Core architecture](architecture/core.md) and the
 [harness contract](architecture/harness-contract.md).
 
+The presentation layer is being rewritten into per-screen MVI slices: one
+business state value per screen, a pure reducer, and explicit dependencies from
+`AppEnvironment`. The target structure, ownership rules and the "where does this
+belong" table live in [iOS client architecture](ios-architecture.md); the rules
+agents must follow live in [`apps/ios/AGENTS.md`](../apps/ios/AGENTS.md). During
+the rewrite `AppRuntime` owns activation and the legacy `AppModel` is a temporary
+bridge that is deleted once every screen has moved.
+
 ## Build
 
 Requirements: macOS with Xcode 16.4 or later, Rust with the
@@ -73,8 +81,8 @@ xcodebuild build -project apps/ios/WhaleRein.xcodeproj -scheme WhaleRein \
 
 ## Launch and navigation
 
-A paired launch is conversation-first: `AppModel.bootstrapConversation()` loads
-the authorized Hosts, picks the remembered `lastHostId` when it is still
+A paired launch is conversation-first: the runtime triggers launch restore,
+which loads the authorized Hosts, picks the remembered `lastHostId` when it is still
 authorized (otherwise the first authorized Host, preferring an online one),
 loads that Host's sessions from the service or its cached sessions while
 offline, and opens `lastSessionId` when it is still present. A missing session
@@ -120,9 +128,24 @@ single available device or a single booted iPhone by default. Use `--only TEXT`
 to select a literal substring of a native test ID. Each invocation builds from
 its captured source, leases the device, and saves scoped verification facts
 under `.data/runs/`. It builds before starting the integration fixture and
-removes the private XCTest configuration during cleanup. The app chooses its
-fixture with launch arguments (`-ui-fixtures`, `-integration-fixtures`,
-`-ui-test-reset`).
+removes the private XCTest configuration during cleanup. The app chooses its fixture with a scenario
+(`-ui-scenario <id>` from `Debug/Scenario/ScenarioCatalog.swift`) or, until the
+legacy flags are removed, with `-ui-fixtures` and `-ui-test-reset`.
+
+Focused entry points while the rewrite is in progress:
+
+```bash
+./repo test ios-unit --only ConversationReduceTests
+./repo test ios-unit --only AppLogStoreTests
+./repo test ios-unit --only CoreDiagnosticBridgeTests
+./repo test ios-ui --only StateGalleryUITests
+python3 apps/ios/scripts/architecture_gate.py
+apps/ios/scripts/release-surface-scan.sh
+```
+
+The Debug state gallery (`conversation.gallery`) lists the same catalog and
+rebuilds the runtime group when a scenario is applied, so a state is inspectable
+on device without a UI test.
 
 ## Local integration stack
 

@@ -16,10 +16,22 @@ final class HostListModel {
         case failed(AppErrorCode)
     }
 
-    private(set) var hosts: [HostSummary] = []
-    private(set) var loadState: LoadState = .idle
-    private(set) var errorKey: L10nKey?
-    private(set) var selectedHostId: String?
+    /// One business state for the switcher lists; this model owns the Host part.
+    private(set) var state = SessionsState()
+
+    var hosts: [HostSummary] { state.hostList }
+    var selectedHostId: String? { state.selectedHostId }
+    var loadState: LoadState { Self.legacy(state.hosts) }
+    var errorKey: L10nKey? { state.hosts.error.map { L10nKey.errorKey(for: $0) } }
+
+    private static func legacy(_ load: Load<[HostSummary]>) -> LoadState {
+        switch load {
+        case .idle: .idle
+        case .loading: .loading
+        case .loaded: .loaded
+        case .failed(let code): .failed(code)
+        }
+    }
 
     private let service: any SessionService
     private let preferences: PreferencesStore
@@ -31,7 +43,7 @@ final class HostListModel {
     init(service: any SessionService, preferences: PreferencesStore) {
         self.service = service
         self.preferences = preferences
-        selectedHostId = preferences.value.lastHostId
+        state.selectedHostId = preferences.value.lastHostId
     }
 
     func load() async {
@@ -59,7 +71,7 @@ final class HostListModel {
 
     func select(_ hostId: String) {
         guard hosts.contains(where: { $0.hostId == hostId }) else { return }
-        selectedHostId = hostId
+        state = SessionsReduce.reduce(state, .hostSelected(hostId))
         preferences.update { $0.lastHostId = hostId }
     }
 
@@ -68,30 +80,18 @@ final class HostListModel {
     }
 
     func reset() {
-        hosts = []
-        loadState = .idle
-        errorKey = nil
-        selectedHostId = nil
+        state = SessionsReduce.reduce(state, .reset)
         reloadRequested = false
     }
 
     private func fetch() async {
-        loadState = .loading
-        errorKey = nil
+        state = SessionsReduce.reduce(state, .hostsLoadStarted)
         do {
             let loaded = try await service.hosts()
-            hosts = loaded
-            loadState = .loaded
-            if let selectedHostId, !loaded.contains(where: { $0.hostId == selectedHostId }) {
-                self.selectedHostId = nil
-            }
-            if selectedHostId == nil {
-                selectedHostId = loaded.first?.hostId
-            }
+            state = SessionsReduce.reduce(state, .hostsLoaded(loaded))
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            loadState = .failed(code)
-            errorKey = L10nKey.errorKey(for: code)
+            state = SessionsReduce.reduce(state, .hostsFailed(code))
         }
     }
 }

@@ -27,6 +27,9 @@ struct CloudSignInProgressView: View {
 
 struct CloudSignInRootView: View {
     let cloud: CloudSignInModel
+    let serviceSelection: ServiceSelectionContext
+    /// Injected by the shell so this screen never reads the app environment.
+    var onPairSelfHosted: () -> Void = {}
 
     var body: some View {
         NavigationStack {
@@ -34,7 +37,7 @@ struct CloudSignInRootView: View {
                 if let account = cloud.account {
                     CloudDirectoryView(cloud: cloud, account: account)
                 } else {
-                    CloudWelcomeView(cloud: cloud)
+                    CloudWelcomeView(cloud: cloud, serviceSelection: serviceSelection, onPairSelfHosted: onPairSelfHosted)
                 }
             }
             .navigationTitle(L10n.appName.key)
@@ -44,8 +47,9 @@ struct CloudSignInRootView: View {
 }
 
 struct CloudWelcomeView: View {
-    @Environment(AppModel.self) private var app
     let cloud: CloudSignInModel
+    let serviceSelection: ServiceSelectionContext
+    var onPairSelfHosted: () -> Void = {}
 
     var body: some View {
         if cloud.isBusy {
@@ -71,7 +75,7 @@ struct CloudWelcomeView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                ServiceSelectionView()
+                ServiceSelectionView(context: serviceSelection)
 
                 if let errorKey = cloud.errorCode.map({ L10nKey.errorKey(for: $0) }) {
                     Label {
@@ -104,7 +108,7 @@ struct CloudWelcomeView: View {
                     .accessibilityIdentifier("cloud.signIn")
 
                     Button {
-                        app.openManualPairing()
+                        onPairSelfHosted()
                     } label: {
                         Label(L10n.cloudSelfHosted.key, systemImage: "desktopcomputer")
                     }

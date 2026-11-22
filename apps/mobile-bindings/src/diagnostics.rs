@@ -225,7 +225,11 @@ impl DiagnosticDispatcher {
                 batch
             };
             for event in batch {
-                self.sink.on_event(event);
+                // A foreign sink may panic; the failure stays on this delivery
+                // thread and never unwinds into Core or the caller.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.sink.on_event(event);
+                }));
             }
         }
     }

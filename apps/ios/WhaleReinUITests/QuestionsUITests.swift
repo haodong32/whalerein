@@ -8,7 +8,7 @@ final class QuestionsUITests: WhaleReinUITestCase {
     private static let batchID = "question-release-s-001"
 
     func testQuestionRequiresReviewBeforeAnswering() {
-        launchAndOpenConversation(["-ui-questions"])
+        launchAndOpenConversation(scenario: "questions.pending")
 
         XCTAssertTrue(
             revealByScrolling("question.card.\(Self.batchID)").exists,
@@ -40,7 +40,7 @@ final class QuestionsUITests: WhaleReinUITestCase {
     }
 
     func testQuestionCardExposesAccessibleOptionLabels() {
-        launchAndOpenConversation(["-ui-questions"])
+        launchAndOpenConversation(scenario: "questions.pending")
         let option = revealByScrolling("question.option.question-channel.0")
         XCTAssertTrue(option.label.contains("Which release channel"))
         XCTAssertTrue(option.label.contains("Stable"))

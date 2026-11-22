@@ -3,11 +3,6 @@
 
 import Foundation
 
-struct FixtureTranscript: Hashable, Sendable {
-    let messages: [ConversationMessage]
-    let approvals: [Approval]
-}
-
 enum FixtureCatalog {
     static let seed: UInt64 = 0x5EED_1234
     static let transcriptCount = 320

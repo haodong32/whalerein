@@ -55,3 +55,6 @@ deploy/mosquitto/plugin/*.so
 
 # Generated iOS vendor artifacts (XCFramework and Swift bindings).
 apps/ios/Vendor/
+
+# Local release surface scan build output.
+apps/ios/.release-scan/

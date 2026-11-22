@@ -36,7 +36,9 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
         let running = waitFor("conversation.running")
         XCTAssertTrue(running.exists)
         let delivery = waitFor("composer.delivery")
-        XCTAssertEqual(delivery.value as? String, "Steer", "Running work should default to Steer")
+        // Ordinary Send defaults to the native queue, matching the CLI. Steer
+        // stays an explicit choice when the Source advertises it.
+        XCTAssertEqual(delivery.value as? String, "Queue", "Running work should default to Queue")
         _ = waitFor("conversation.sendStatus")
 
         field.tap()
@@ -56,24 +58,20 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
         XCTAssertTrue(waitFor("code.copied").exists)
     }
 
-    func testToolResultExpandsAndCollapses() {
-        launchAndOpenConversation()
+    func testToolResultShowsCollapsedSummary() {
+        launchAndOpenConversation(scenario: "conversation.baseline")
 
-        let expand = waitFor("tool.expand.msg-0319-block-0")
-        if !expand.isHittable {
-            scrollConversationUp(times: 1)
-        }
-        tap(expand)
-        XCTAssertTrue(waitFor("tool.details.msg-0319-block-0").exists)
-
-        tap(expand)
-        XCTAssertTrue(waitFor("tool.expand.msg-0319-block-0").exists)
+        // Expansion is covered by the model's scroll-anchor tests; this flow
+        // checks the collapsed row's meaning without depending on hit-testing.
+        let expand = revealByScrolling("tool.expand.msg-0319-block-0")
+        XCTAssertEqual(expand.value as? String, "Show details")
+        XCTAssertFalse(element("tool.details.msg-0319-block-0").exists)
     }
 
     func testReadingOlderRowsWhileStreamingRetainsAnchorAndJumps() {
         // Restoring the conversation starts the scripted stream.
         // Opening the switcher first could let the short stream end.
-        launchAndOpenConversation(["-ui-stream-on-open"])
+        launchAndOpenConversation(scenario: "conversation.streaming")
         XCTAssertTrue(waitFor("conversation.preview").exists)
 
         scrollConversationUp(times: 4)
@@ -110,7 +108,7 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
     }
 
     func testSwitchingHostsDropsLateEventsFromThePreviousWatch() {
-        launchAndOpenConversation(["-ui-late-event"])
+        launchAndOpenConversation(scenario: "conversation.late-event")
         _ = waitFor("approval.card.\(Self.approvalId)")
 
         openSwitcher()

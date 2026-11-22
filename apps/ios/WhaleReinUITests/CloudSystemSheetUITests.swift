@@ -10,7 +10,7 @@ final class CloudSystemSheetUITests: WhaleReinUITestCase {
 
         app = XCUIApplication()
         app.launchEnvironment = ["UI_CLOUD_AUTH_BASE": provider.baseURL]
-        launchApp(["-ui-cloud-system-sheet"])
+        launchScenario("cloud.system-sheet")
 
         waitFor("cloud.signIn").tap()
 

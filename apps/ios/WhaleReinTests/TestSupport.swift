@@ -5,14 +5,36 @@ import Foundation
 import Testing
 @testable import WhaleRein
 
+/// Builds the launch values a legacy flag list used to produce, now through a
+/// Scenario. Unit tests keep their flag spelling; the app does not parse flags.
 func testLaunchOptions(_ extra: [String] = [], approvalState: String? = nil) -> LaunchOptions {
-    let suiteName = "WhaleReinTests.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defaults.removePersistentDomain(forName: suiteName)
-    if let approvalState {
-        defaults.set(approvalState, forKey: "ui-approval-state")
+    let flags = Set(extra)
+    let integration = flags.contains("-integration-fixtures")
+    var launch = LaunchOverrides(
+        serviceMode: flags.contains("-ui-fixtures") && !integration ? .fixtures : .live,
+        resetState: flags.contains("-ui-test-reset")
+    )
+    var fixture = FixtureScenario()
+    fixture.initiallyPaired = launch.serviceMode == .fixtures
+        && launch.resetState
+        && flags.contains("-ui-fixture-paired")
+    fixture.offlineOnOpen = flags.contains("-ui-offline")
+    fixture.cloudSignedIn = flags.contains("-ui-cloud-signed-in")
+    if fixture.cloudSignedIn {
+        launch.fixtureInstance = .cloudProduction
     }
-    return LaunchOptions(arguments: ["WhaleRein"] + extra, defaults: defaults)
+    if let approvalState, let variant = FixtureScenario.ApprovalVariant(rawValue: approvalState) {
+        fixture.approvalVariant = variant
+    }
+    let scenario = Scenario(
+        id: "test.launch",
+        category: .conversation,
+        title: "Test launch",
+        notes: "Unit-test launch options.",
+        launch: launch,
+        fixture: fixture
+    )
+    return LaunchOptions(scenario: scenario)
 }
 
 func makeTempDirectory() -> URL {
@@ -489,6 +511,8 @@ class StubSessionService: SessionService {
         guard let diagnosticsHandler else { return FixtureCatalog.diagnostics() }
         return try await diagnosticsHandler()
     }
+
+    func clearDiagnostics() async throws {}
 
     func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
         exportCount += 1

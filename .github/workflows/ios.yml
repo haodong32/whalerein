@@ -176,6 +176,22 @@ jobs:
             .data/ios-build/source/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+      - name: Scan the Release product for the debug surface
+        if: matrix.name == 'unit'
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+          DERIVED_DATA: .data/ios-release-scan
+        run: |
+          set -euo pipefail
+          # `repo test` builds the bindings in its mirrored source tree; use
+          # that checkout when the workspace has no generated framework.
+          scan_root=apps/ios
+          if [[ -d .data/ios-build/source/apps/ios/Vendor/WhaleReinMobile.xcframework ]]; then
+            scan_root=.data/ios-build/source/apps/ios
+          fi
+          DESTINATION="platform=iOS Simulator,id=${SIMULATOR}" \
+            "$scan_root/scripts/release-surface-scan.sh"
+
       - name: Upload native results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -189,10 +205,20 @@ jobs:
           include-hidden-files: true
           retention-days: 7
 
+  architecture:
+    name: iOS architecture gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Enforce client architecture boundaries
+        run: python3 apps/ios/scripts/architecture_gate.py
+
   gate:
     name: iOS gate
     if: always() && !cancelled()
-    needs: [changes, native]
+    needs: [changes, native, architecture]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -201,9 +227,11 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           NATIVE_REQUIRED: ${{ needs.changes.outputs.build }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          ARCHITECTURE_RESULT: ${{ needs.architecture.result }}
         run: |
           set -euo pipefail
           test "$CHANGES_RESULT" = success
+          test "$ARCHITECTURE_RESULT" = success
           case "$NATIVE_REQUIRED" in
             true) test "$NATIVE_RESULT" = success ;;
             false) test "$NATIVE_RESULT" = skipped ;;

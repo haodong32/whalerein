@@ -211,7 +211,6 @@ struct SessionCreateOutcome: Hashable, Sendable {
         )
     }
 
-    var didReusePreferredIdentity: Bool { sessionId != nil }
 }
 
 struct SessionForkOutcome: Hashable, Sendable {
@@ -257,11 +256,6 @@ struct ModelChoice: Identifiable, Hashable, Sendable {
     let effort: String?
 
     var id: String { "\(provider)/\(model)/\(effort ?? "")" }
-
-    /// Whether this choice names the same target, ignoring effort.
-    func targetsSameModel(as other: ModelChoice) -> Bool {
-        provider == other.provider && model == other.model
-    }
 
     /// Whether the choice is present in `catalog` with this exact effort.
     func isContained(in catalog: ModelCatalog) -> Bool {

@@ -24,20 +24,10 @@ class WhaleReinUITestCase: XCTestCase {
 
     @discardableResult
     func launchApp(_ extraArguments: [String] = []) -> XCUIApplication {
-        var arguments = ["-ui-fixtures", "-ui-test-reset"]
-        if !extraArguments.contains("-AppleLanguages") {
-            arguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-        }
-        arguments += extraArguments
-        app.launchArguments = arguments
-        // XCTest can fail to terminate a previous test's app instance when it
-        // is still settling. Terminate explicitly first so launch starts from
-        // a known state instead of failing the whole test at launch().
-        if app.state != .notRunning {
-            app.terminate()
-        }
-        app.launch()
-        return app
+        // Every flow starts from a catalog scenario. The legacy flag path is
+        // gone; integration tests pass `-integration-fixtures` and keep the
+        // real service.
+        launchScenario("onboarding.unpaired", extraArguments: extraArguments)
     }
 
     func element(_ identifier: String) -> XCUIElement {
@@ -56,6 +46,17 @@ class WhaleReinUITestCase: XCTestCase {
         return element
     }
 
+    /// Scrolls the active scroll view until `identifier` exists. Settings grew
+    /// past one screen, so tests must not assume every row is on screen.
+    @discardableResult
+    func scrollTo(_ identifier: String, maxSwipes: Int = 8) -> XCUIElement {
+        let target = element(identifier)
+        for _ in 0..<maxSwipes where !target.exists {
+            app.swipeUp()
+        }
+        return target
+    }
+
     func waitForLabel(_ label: String, timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line) {
         let predicate = NSPredicate(format: "label == %@", label)
         let element = app.descendants(matching: .any).matching(predicate).firstMatch
@@ -67,8 +68,6 @@ class WhaleReinUITestCase: XCTestCase {
         )
     }
 
-    /// Taps a control, dismissing a keyboard or scrolling the frontmost content
-    /// when the control is not yet hittable.
     func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: 15), "Element does not exist", file: file, line: line)
         var attempts = 0
@@ -159,7 +158,28 @@ class WhaleReinUITestCase: XCTestCase {
     }
 
     func launchAndOpenConversation(_ extraArguments: [String] = []) {
-        launchApp(extraArguments + ["-ui-fixture-paired"])
+        launchAndOpenConversation(scenario: "onboarding.paired", extraArguments: extraArguments)
+    }
+
+    /// Launches one catalog scenario. New and migrated tests use this instead
+    /// of individual `-ui-*` flags.
+    @discardableResult
+    func launchScenario(_ id: String, extraArguments: [String] = []) -> XCUIApplication {
+        var arguments = ["-ui-scenario", id]
+        if !extraArguments.contains("-AppleLanguages") {
+            arguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        }
+        arguments += extraArguments
+        app.launchArguments = arguments
+        if app.state != .notRunning {
+            app.terminate()
+        }
+        app.launch()
+        return app
+    }
+
+    func launchAndOpenConversation(scenario id: String, extraArguments: [String] = []) {
+        launchScenario(id, extraArguments: extraArguments)
         waitFor("composer.field")
     }
 

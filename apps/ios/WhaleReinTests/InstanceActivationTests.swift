@@ -9,7 +9,7 @@ import Testing
 @MainActor
 struct InstanceActivationTests {
     private struct Harness {
-        let app: AppModel
+        let app: AppShellModel
         let store: AppConfigurationStore
         let binding: StubAppConfigurationBinding
         let oldService: StubSessionService
@@ -52,7 +52,7 @@ struct InstanceActivationTests {
         newService.hostsHandler = { () async throws -> [HostSummary] in
             throw SessionServiceError(.notPaired)
         }
-        let app = AppModel(
+        let app = AppShellModel(
             service: oldService,
             preferences: sourcePreferences,
             dataDirectory: dataDirectory,

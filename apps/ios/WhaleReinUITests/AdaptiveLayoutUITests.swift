@@ -9,9 +9,7 @@ final class AdaptiveLayoutUITests: WhaleReinUITestCase {
         launchAndOpenConversation()
         waitFor("composer.field")
 
-        XCUIDevice.shared.orientation = .landscapeLeft
-
-        let sidebar = waitFor("session.sidebar", timeout: 20)
+        let sidebar = rotateToLandscape()
         XCTAssertTrue(sidebar.exists)
         XCTAssertFalse(
             element("conversation.switcher").exists,
@@ -28,6 +26,7 @@ final class AdaptiveLayoutUITests: WhaleReinUITestCase {
         // The session section sits below the Host section in a short landscape
         // sidebar, so scroll the list until another session row is realized.
         let session = reveal("session.row.s-002", in: sidebar)
+        makeHittable(session, in: sidebar)
         tap(session)
         waitFor("composer.field")
         let currentSession = XCTNSPredicateExpectation(
@@ -49,6 +48,38 @@ final class AdaptiveLayoutUITests: WhaleReinUITestCase {
         )
         XCTAssertEqual(XCTWaiter().wait(for: [sidebarGone], timeout: 20), .completed)
         XCTAssertTrue(waitFor("conversation.switcher", timeout: 20).exists)
+    }
+
+    /// Scrolls the sidebar until the row can actually receive a tap. A row can
+    /// exist while still clipped below the short landscape sidebar.
+    private func makeHittable(_ element: XCUIElement, in container: XCUIElement) {
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<6 where !element.isHittable {
+            if list.exists {
+                list.swipeUp()
+            } else {
+                container.swipeUp()
+            }
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        XCTAssertTrue(element.isHittable, "Expected the sidebar row to be tappable")
+    }
+
+    /// Rotating right after launch is occasionally ignored by the simulator;
+    /// retry until the wide layout is actually on screen.
+    private func rotateToLandscape() -> XCUIElement {
+        let sidebar = element("session.sidebar")
+        for attempt in 0..<4 {
+            XCUIDevice.shared.orientation = .landscapeLeft
+            if sidebar.waitForExistence(timeout: 8) {
+                return sidebar
+            }
+            XCUIDevice.shared.orientation = .portrait
+            Thread.sleep(forTimeInterval: 1)
+            if attempt == 3 { break }
+        }
+        XCTFail("The wide layout never appeared after rotating")
+        return sidebar
     }
 
     /// Scrolls the sidebar list until the row exists. The landscape sidebar is
