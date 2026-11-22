@@ -122,6 +122,12 @@ fun CloudSignInRoute(
     onNavigate: (Route) -> Unit,
     onRestartGraph: () -> Unit,
 ) {
+    val debug = dependencies as? DebugEnvironmentAware
+    // The environment decides the installed App Link callback, so the screen
+    // validates against the same value Core registered for this profile.
+    val cloudEnvironment = remember {
+        runCatching { debug?.debugCloudEnvironment?.current() }.getOrNull() ?: "production"
+    }
     val viewModel: CloudSignInViewModel = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -130,6 +136,7 @@ fun CloudSignInRoute(
                     auth = dependencies.cloudAuth,
                     clock = dependencies.clock,
                     diagnostics = dependencies.diagnosticSink,
+                    environment = cloudEnvironment,
                     dispatcher = Dispatchers.Default,
                 )
             }
@@ -139,7 +146,6 @@ fun CloudSignInRoute(
     val callback by appLinks.callback.collectAsStateWithLifecycle()
     var browserRequested by remember { mutableStateOf(false) }
     val browser = platform?.browser
-    val debug = dependencies as? DebugEnvironmentAware
     var debugEnvironment by remember {
         mutableStateOf(debug?.debugCloudEnvironment?.current() ?: "production")
     }

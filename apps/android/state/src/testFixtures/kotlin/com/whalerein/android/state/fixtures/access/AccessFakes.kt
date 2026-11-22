@@ -89,6 +89,12 @@ fun cloudAttempt(
 )
 
 class FakeCloudAuthPort : CloudAuthPort {
+    override fun androidRedirectUri(environment: String): String = when (environment) {
+        "staging" -> "https://app.staging.whalerein.com/client/android/callback"
+        "production" -> "https://app.whalerein.com/client/android/callback"
+        else -> "https://app.whalerein.test/client/android/callback"
+    }
+
     var pending: CloudAttempt? = null
     var startResult: Outcome<CloudAttempt>? = null
     var startException: Exception? = null

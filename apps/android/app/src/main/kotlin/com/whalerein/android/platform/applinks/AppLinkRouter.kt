@@ -98,6 +98,10 @@ class AppLinkRouter(private val diagnostics: DiagnosticSink) {
         const val EXTRA_SESSION_ID = "com.whalerein.android.extra.SESSION_ID"
         const val EXTRA_ITEM_ID = "com.whalerein.android.extra.ITEM_ID"
         private const val CALLBACK_PATH = "/client/android/callback"
-        private val allowedHosts = setOf("app.whalerein.test", "app.whalerein.com")
+        private val allowedHosts = setOf(
+            "app.whalerein.test",
+            "app.staging.whalerein.com",
+            "app.whalerein.com",
+        )
     }
 }

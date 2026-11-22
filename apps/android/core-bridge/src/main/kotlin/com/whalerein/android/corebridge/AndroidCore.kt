@@ -44,7 +44,6 @@ data class CoreProvenanceView(
     val coreRevision: String,
     val coreVersion: String,
     val appVersion: String,
-    val androidRedirectUri: String,
 )
 
 /**
@@ -119,8 +118,6 @@ class AndroidCore private constructor(
     val sessionList: com.whalerein.android.state.conversation.SessionListPort
         get() = conversationPorts.sessionList
 
-    val androidRedirectUri: String get() = CoreProvenance.androidRedirectUri
-
     internal val processId: String = UUID.randomUUID().toString()
 
     val provenance: CoreProvenanceView
@@ -128,7 +125,6 @@ class AndroidCore private constructor(
             coreRevision = installed.coreRevision,
             coreVersion = CoreProvenance.coreVersion,
             appVersion = appVersion,
-            androidRedirectUri = CoreProvenance.androidRedirectUri,
         )
 
     /** Active generated handle for the port adapters in this package. */
