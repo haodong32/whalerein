@@ -97,7 +97,10 @@ val hostTag = when {
     else -> "linux-x86_64"
 }
 val toolchainBin = ndkDir.resolve("toolchains/llvm/prebuilt/$hostTag/bin")
-val androidLinker = toolchainBin.resolve("aarch64-linux-android31-clang")
+val androidAbis = listOf(
+    Triple("arm64-v8a", "aarch64-linux-android", "aarch64-linux-android31-clang"),
+    Triple("x86_64", "x86_64-linux-android", "x86_64-linux-android31-clang"),
+)
 val llvmAr = toolchainBin.resolve("llvm-ar")
 val llvmRanlib = toolchainBin.resolve("llvm-ranlib")
 
@@ -105,8 +108,12 @@ val rustTargetDir = layout.buildDirectory.dir("rust-target")
 val uniffiDir = layout.buildDirectory.dir("generated/uniffi")
 val hostLibName = "libwhalerein_mobile.dylib"
 val hostLib = rustTargetDir.map { it.file("debug/$hostLibName") }
-val androidDebugLib = rustTargetDir.map { it.file("$androidTarget/debug/libwhalerein_mobile.so") }
-val androidReleaseLib = rustTargetDir.map { it.file("$androidTarget/release/libwhalerein_mobile.so") }
+val androidDebugLibs = androidAbis.associate { (abi, target, _) ->
+    abi to rustTargetDir.map { it.file("$target/debug/libwhalerein_mobile.so") }
+}
+val androidReleaseLibs = androidAbis.associate { (abi, target, _) ->
+    abi to rustTargetDir.map { it.file("$target/release/libwhalerein_mobile.so") }
+}
 val jniDebugDir = layout.buildDirectory.dir("generated/jniLibs/debug")
 val jniReleaseDir = layout.buildDirectory.dir("generated/jniLibs/release")
 
@@ -166,12 +173,15 @@ val generateUniffiKotlin = tasks.register<Exec>("generateUniffiKotlin") {
 
 fun registerCargoBuild(
     name: String,
+    abi: String,
+    target: String,
+    linkerName: String,
     profile: String,
     profileArgs: List<String>,
     output: Provider<RegularFile>,
 ): TaskProvider<Exec> = tasks.register<Exec>(name) {
     group = "rust"
-    description = "Compile whalerein-mobile for $androidTarget ($profile)"
+    description = "Compile whalerein-mobile for $target ($profile)"
     workingDir = repoRoot
     commandLine(
         buildList {
@@ -183,19 +193,21 @@ fun registerCargoBuild(
             add("--lib")
             add("--no-default-features")
             add("--target")
-            add(androidTarget)
+            add(target)
             addAll(profileArgs)
             add("--target-dir")
             add(rustTargetDir.get().asFile.absolutePath)
         }
     )
+    val linker = toolchainBin.resolve(linkerName).absolutePath
+    val targetEnv = target.uppercase().replace('-', '_')
     environment("PATH", toolSearchPath)
     environment("WHALEREIN_MOBILE_SOURCE", mobileSource)
     environment("CARGO_NET_OFFLINE", "true")
-    environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", androidLinker.absolutePath)
-    environment("CC_aarch64-linux-android", androidLinker.absolutePath)
-    environment("AR_aarch64-linux-android", llvmAr.absolutePath)
-    environment("RANLIB_aarch64-linux-android", llvmRanlib.absolutePath)
+    environment("CARGO_TARGET_${targetEnv}_LINKER", linker)
+    environment("CC_$target", linker)
+    environment("AR_$target", llvmAr.absolutePath)
+    environment("RANLIB_$target", llvmRanlib.absolutePath)
     environment(
         "CARGO_ENCODED_RUSTFLAGS",
         listOf(
@@ -205,40 +217,79 @@ fun registerCargoBuild(
     )
     inputs.files(rustInputs)
     inputs.property("mobileSource", mobileSource)
-    inputs.property("target", androidTarget)
+    inputs.property("target", target)
     inputs.property("ndk", ndkVersion)
     inputs.property("profile", profile)
     outputs.file(output)
 }
 
-val cargoBuildAndroidDebug = registerCargoBuild(
-    "cargoBuildAndroidDebug", "debug", listOf(), androidDebugLib,
-)
-val cargoBuildAndroidRelease = registerCargoBuild(
-    "cargoBuildAndroidRelease", "release", listOf("--release"), androidReleaseLib,
-)
+val cargoBuildAndroidDebug = androidAbis.map { (abi, target, linkerName) ->
+    registerCargoBuild(
+        "cargoBuildAndroidDebug${abi.replace("-", "")}",
+        abi,
+        target,
+        linkerName,
+        "debug",
+        listOf(),
+        androidDebugLibs.getValue(abi),
+    )
+}
+val cargoBuildAndroidRelease = androidAbis.map { (abi, target, linkerName) ->
+    registerCargoBuild(
+        "cargoBuildAndroidRelease${abi.replace("-", "")}",
+        abi,
+        target,
+        linkerName,
+        "release",
+        listOf("--release"),
+        androidReleaseLibs.getValue(abi),
+    )
+}
 
 fun registerPackageNative(
     name: String,
+    abi: String,
     source: Provider<RegularFile>,
     destination: Provider<Directory>,
     buildTask: TaskProvider<Exec>,
 ): TaskProvider<Copy> = tasks.register<Copy>(name) {
     group = "rust"
-    description = "Package $androidTarget native library into the Android jniLibs output"
+    description = "Package the $abi native library into the Android jniLibs output"
     dependsOn(buildTask)
     from(source)
-    into(destination.map { it.dir("arm64-v8a") })
+    into(destination.map { it.dir(abi) })
     inputs.file(source)
     outputs.dir(destination)
 }
 
-val packageNativeDebug = registerPackageNative(
-    "packageNativeDebug", androidDebugLib, jniDebugDir, cargoBuildAndroidDebug,
-)
-val packageNativeRelease = registerPackageNative(
-    "packageNativeRelease", androidReleaseLib, jniReleaseDir, cargoBuildAndroidRelease,
-)
+val packageNativeDebug = tasks.register("packageNativeDebug") {
+    group = "rust"
+    androidAbis.forEachIndexed { index, (abi, _, _) ->
+        dependsOn(
+            registerPackageNative(
+                "packageNativeDebug${abi.replace("-", "")}",
+                abi,
+                androidDebugLibs.getValue(abi),
+                jniDebugDir,
+                cargoBuildAndroidDebug[index],
+            ),
+        )
+    }
+}
+val packageNativeRelease = tasks.register("packageNativeRelease") {
+    group = "rust"
+    androidAbis.forEachIndexed { index, (abi, _, _) ->
+        dependsOn(
+            registerPackageNative(
+                "packageNativeRelease${abi.replace("-", "")}",
+                abi,
+                androidReleaseLibs.getValue(abi),
+                jniReleaseDir,
+                cargoBuildAndroidRelease[index],
+            ),
+        )
+    }
+}
 
 android {
     namespace = "com.whalerein.android.corebridge"
@@ -258,7 +309,7 @@ android {
         manifestPlaceholders["whalereinCoreVersion"] = workspaceVersion
         manifestPlaceholders["whalereinAppVersion"] = appVersion
         ndk {
-            abiFilters += "arm64-v8a"
+            androidAbis.forEach { (abi, _, _) -> abiFilters += abi }
         }
     }
 

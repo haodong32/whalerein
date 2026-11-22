@@ -75,6 +75,10 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            // The Linux CI emulator is x86_64; release stays arm64-only.
+            ndk {
+                abiFilters += "x86_64"
+            }
         }
     }
 
