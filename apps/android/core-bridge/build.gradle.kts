@@ -106,7 +106,11 @@ val llvmRanlib = toolchainBin.resolve("llvm-ranlib")
 
 val rustTargetDir = layout.buildDirectory.dir("rust-target")
 val uniffiDir = layout.buildDirectory.dir("generated/uniffi")
-val hostLibName = "libwhalerein_mobile.dylib"
+val hostLibName = when {
+    System.getProperty("os.name").startsWith("Mac") -> "libwhalerein_mobile.dylib"
+    System.getProperty("os.name").startsWith("Windows") -> "whalerein_mobile.dll"
+    else -> "libwhalerein_mobile.so"
+}
 val hostLib = rustTargetDir.map { it.file("debug/$hostLibName") }
 val androidDebugLibs = androidAbis.associate { (abi, target, _) ->
     abi to rustTargetDir.map { it.file("$target/debug/libwhalerein_mobile.so") }
