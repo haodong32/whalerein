@@ -320,7 +320,7 @@ func TestOpenClassifiesScopeExpiryAndMissingFile(t *testing.T) {
 			requireError(t, err, tc.want)
 		})
 	}
-	t.Run("missing file closes and cancels", func(t *testing.T) {
+	t.Run("missing file releases the lease without cancelling the row", func(t *testing.T) {
 		released, cancelled := false, false
 		db := &fakeStore{t: t,
 			getFn: func(context.Context, string) (store.PayloadObject, error) { return ready, nil },
@@ -339,8 +339,8 @@ func TestOpenClassifiesScopeExpiryAndMissingFile(t *testing.T) {
 		service := newTestService(t, db, testConfig(t.TempDir()), now)
 		_, _, err := service.Open(context.Background(), Ref{ObjectID: ready.ObjectID})
 		requireError(t, err, ErrNotFound)
-		if !released || !cancelled {
-			t.Fatalf("released=%v cancelled=%v", released, cancelled)
+		if !released || cancelled {
+			t.Fatalf("released=%v cancelled=%v, want lease release without a destructive cancel", released, cancelled)
 		}
 	})
 }
@@ -362,17 +362,24 @@ func TestCancelRemovesStagedBodyAndMapsErrors(t *testing.T) {
 		}
 	})
 	for _, tc := range []struct {
-		name string
-		err  error
-		want error
+		name   string
+		get    bool
+		getErr error
+		err    error
+		want   error
 	}{
-		{"scope", store.ErrPayloadScopeMismatch, ErrForbidden},
-		{"missing", store.ErrNotFound, ErrNotFound},
+		{"scope", true, nil, store.ErrPayloadScopeMismatch, ErrForbidden},
+		{"missing", false, store.ErrNotFound, store.ErrNotFound, ErrNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeStore{t: t, cancelFn: func(context.Context, store.PayloadReadScope, time.Time) (store.PayloadObject, error) {
 				return store.PayloadObject{}, tc.err
 			}}
+			if tc.get {
+				db.getFn = func(context.Context, string) (store.PayloadObject, error) { return objectFixture(now), nil }
+			} else {
+				db.getFn = func(context.Context, string) (store.PayloadObject, error) { return store.PayloadObject{}, tc.getErr }
+			}
 			service := newTestService(t, db, testConfig(t.TempDir()), now)
 			requireError(t, service.Cancel(context.Background(), Ref{ObjectID: objectFixture(now).ObjectID}), tc.want)
 		})

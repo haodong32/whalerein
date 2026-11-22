@@ -78,7 +78,7 @@ func TestPayloadConcurrentAdmissionDoesNotOvercommit(t *testing.T) {
 			admitted++
 		}
 	}
-	stats, err := s.PayloadStats(ctx, time.Now().UTC())
+	stats, err := s.PayloadStats(ctx, "node-1", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +191,13 @@ func TestPayloadExpiryClosesReadsAndCleanupRespectsReaders(t *testing.T) {
 	if _, err := s.OpenPayloadRead(ctx, scope, "0123456789abcdef0123456789abcdef", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ExpirePayloads(ctx, now.Add(3*time.Second), 10); err != nil {
+	if _, err := s.ExpirePayloads(ctx, "node-1", now.Add(3*time.Second), 10); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.OpenPayloadRead(ctx, scope, "fedcba9876543210fedcba9876543210", now.Add(3*time.Second)); err == nil {
 		t.Fatal("expired object was still readable")
 	}
-	claimed, err := s.ClaimPayloadCleanup(ctx, now.Add(4*time.Second), 10, time.Minute)
+	claimed, err := s.ClaimPayloadCleanup(ctx, "node-1", now.Add(4*time.Second), 10, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestPayloadExpiryClosesReadsAndCleanupRespectsReaders(t *testing.T) {
 	if err := s.ReleasePayloadRead(ctx, admission.Object.ObjectID, "0123456789abcdef0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = s.ClaimPayloadCleanup(ctx, now.Add(4*time.Second), 10, time.Minute)
+	claimed, err = s.ClaimPayloadCleanup(ctx, "node-1", now.Add(4*time.Second), 10, time.Minute)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("cleanup after reader close = %+v err=%v", claimed, err)
 	}
@@ -215,7 +215,7 @@ func TestPayloadExpiryClosesReadsAndCleanupRespectsReaders(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("delete = %v err=%v", deleted, err)
 	}
-	stats, err := s.PayloadStats(ctx, now.Add(4*time.Second))
+	stats, err := s.PayloadStats(ctx, "node-1", now.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,12 +276,97 @@ func TestPayloadReconciliationQueriesBoundTheirPages(t *testing.T) {
 	if err != nil || admission.Reason != "" {
 		t.Fatalf("admission = %+v err=%v", admission, err)
 	}
-	stale, err := s.StaleReservedPayloads(ctx, now.Add(time.Minute), 10)
+	stale, err := s.StaleReservedPayloads(ctx, "node-1", now.Add(time.Minute), 10)
 	if err != nil || len(stale) != 1 {
 		t.Fatalf("stale = %+v err=%v", stale, err)
 	}
-	page, err := s.ReadyPayloadPage(ctx, "", 10)
+	page, err := s.ReadyPayloadPage(ctx, "node-1", "", 10)
 	if err != nil || len(page) != 0 {
 		t.Fatalf("ready page = %+v err=%v", page, err)
+	}
+}
+
+// Maintenance queries are owner-scoped: a distinct-root peer must not expire,
+// claim, fence or delete another owner's rows in the shared schema.
+func TestPayloadMaintenanceIsOwnerScoped(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	reserve := func(index int, owner string, expires time.Time) store.PayloadReservation {
+		reservation := payloadReservation(index, 10)
+		reservation.NodeID = "node-shared"
+		reservation.OwnerID = owner
+		reservation.ExpiresAt = expires
+		return reservation
+	}
+	readyA, err := s.ReservePayload(ctx, reserve(1, "node-a", now.Add(time.Minute)), payloadLimits())
+	if err != nil || readyA.Reason != "" {
+		t.Fatalf("reserve A = %+v err=%v", readyA, err)
+	}
+	readyB, err := s.ReservePayload(ctx, reserve(2, "node-b", now.Add(time.Minute)), payloadLimits())
+	if err != nil || readyB.Reason != "" {
+		t.Fatalf("reserve B = %+v err=%v", readyB, err)
+	}
+	for index, admission := range []store.PayloadAdmission{readyA, readyB} {
+		if _, err := s.ConfirmPayloadReady(ctx, admission.Object.ObjectID, 10,
+			payloadDigest(byte(index+1)), now); err != nil {
+			t.Fatalf("confirm: %v", err)
+		}
+	}
+	pageA, err := s.ReadyPayloadPage(ctx, "node-a", "", 10)
+	if err != nil || len(pageA) != 1 || pageA[0].ObjectID != readyA.Object.ObjectID {
+		t.Fatalf("ready page A = %+v err=%v", pageA, err)
+	}
+	pageB, err := s.ReadyPayloadPage(ctx, "node-b", "", 10)
+	if err != nil || len(pageB) != 1 || pageB[0].ObjectID != readyB.Object.ObjectID {
+		t.Fatalf("ready page B = %+v err=%v", pageB, err)
+	}
+
+	expired, err := s.ExpirePayloads(ctx, "node-b", now.Add(2*time.Minute), 10)
+	if err != nil || len(expired) != 1 || expired[0].ObjectID != readyB.Object.ObjectID {
+		t.Fatalf("expire B = %+v err=%v", expired, err)
+	}
+	stillReady, err := s.GetPayload(ctx, readyA.Object.ObjectID)
+	if err != nil || stillReady.State != store.PayloadReady {
+		t.Fatalf("node B expired node A's row: %+v err=%v", stillReady, err)
+	}
+
+	staleA, err := s.ReservePayload(ctx, reserve(3, "node-a", now.Add(time.Hour)), payloadLimits())
+	if err != nil || staleA.Reason != "" {
+		t.Fatalf("reserve stale A = %+v err=%v", staleA, err)
+	}
+	staleB, err := s.ReservePayload(ctx, reserve(4, "node-b", now.Add(time.Hour)), payloadLimits())
+	if err != nil || staleB.Reason != "" {
+		t.Fatalf("reserve stale B = %+v err=%v", staleB, err)
+	}
+	stale, err := s.StaleReservedPayloads(ctx, "node-a", now.Add(time.Minute), 10)
+	if err != nil || len(stale) != 1 || stale[0].ObjectID != staleA.Object.ObjectID {
+		t.Fatalf("stale A = %+v err=%v", stale, err)
+	}
+
+	claimedA, err := s.ClaimPayloadCleanup(ctx, "node-a", now.Add(2*time.Minute), 10, time.Minute)
+	if err != nil || len(claimedA) != 0 {
+		t.Fatalf("node A claimed another owner: %+v err=%v", claimedA, err)
+	}
+	claimedB, err := s.ClaimPayloadCleanup(ctx, "node-b", now.Add(2*time.Minute), 10, time.Minute)
+	if err != nil || len(claimedB) != 1 || claimedB[0].ObjectID != readyB.Object.ObjectID {
+		t.Fatalf("claim B = %+v err=%v", claimedB, err)
+	}
+	if deleted, err := s.MarkPayloadDeleted(ctx, readyB.Object.ObjectID, now.Add(2*time.Minute)); err != nil || !deleted {
+		t.Fatalf("delete B = %v err=%v", deleted, err)
+	}
+	if count, err := s.DeletePayloadTombstones(ctx, "node-a", now.Add(48*time.Hour), 10); err != nil || count != 0 {
+		t.Fatalf("node A deleted another owner's tombstone: count=%d err=%v", count, err)
+	}
+	if _, err := s.GetPayload(ctx, readyB.Object.ObjectID); err != nil {
+		t.Fatalf("node A removed node B's tombstone: %v", err)
+	}
+	statsB, err := s.PayloadStats(ctx, "node-b", now.Add(2*time.Minute))
+	if err != nil || statsB.DeletedObjects != 1 || statsB.ReadyObjects != 0 {
+		t.Fatalf("stats B = %+v err=%v", statsB, err)
+	}
+	statsA, err := s.PayloadStats(ctx, "node-a", now.Add(2*time.Minute))
+	if err != nil || statsA.ReadyObjects != 1 || statsA.ReservedObjects != 1 || statsA.DeletedObjects != 0 {
+		t.Fatalf("stats A = %+v err=%v", statsA, err)
 	}
 }

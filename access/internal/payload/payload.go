@@ -114,14 +114,14 @@ type Store interface {
 	OpenPayloadRead(context.Context, store.PayloadReadScope, string, time.Time) (store.PayloadObject, error)
 	ReleasePayloadRead(context.Context, string, string) error
 	CancelPayload(context.Context, store.PayloadReadScope, time.Time) (store.PayloadObject, error)
-	ExpirePayloads(context.Context, time.Time, int) ([]store.PayloadObject, error)
-	ClaimPayloadCleanup(context.Context, time.Time, int, time.Duration) ([]store.PayloadObject, error)
+	ExpirePayloads(context.Context, string, time.Time, int) ([]store.PayloadObject, error)
+	ClaimPayloadCleanup(context.Context, string, time.Time, int, time.Duration) ([]store.PayloadObject, error)
 	MarkPayloadCleanupFailure(context.Context, string, time.Time, time.Duration) error
 	MarkPayloadDeleted(context.Context, string, time.Time) (bool, error)
-	DeletePayloadTombstones(context.Context, time.Time, int) (int64, error)
-	StaleReservedPayloads(context.Context, time.Time, int) ([]store.PayloadObject, error)
-	ReadyPayloadPage(context.Context, string, int) ([]store.PayloadObject, error)
-	PayloadStats(context.Context, time.Time) (store.PayloadStats, error)
+	DeletePayloadTombstones(context.Context, string, time.Time, int) (int64, error)
+	StaleReservedPayloads(context.Context, string, time.Time, int) ([]store.PayloadObject, error)
+	ReadyPayloadPage(context.Context, string, string, int) ([]store.PayloadObject, error)
+	PayloadStats(context.Context, string, time.Time) (store.PayloadStats, error)
 }
 
 // Dependencies are the service seams.
@@ -313,7 +313,7 @@ func (s *Service) Reserve(ctx context.Context, input ReserveInput) (Object, erro
 	if reserved == 0 {
 		reserved = input.Length
 	}
-	stats, err := s.store.PayloadStats(ctx, now)
+	stats, err := s.store.PayloadStats(ctx, s.ownerID(), now)
 	if err != nil {
 		return Object{}, err
 	}
@@ -416,6 +416,13 @@ func (s *Service) ownerID() string {
 	return s.config.NodeID
 }
 
+// owns reports whether this node's quota directory stores the object. A shared
+// metadata row owned by another node must never be fenced, expired or deleted
+// from here: only the owner can see or remove its file.
+func (s *Service) owns(object Object) bool {
+	return object.OwnerID != "" && object.OwnerID == s.ownerID()
+}
+
 func (s *Service) refused(reason string) {
 	if s.metrics != nil {
 		s.metrics.PayloadRefused(reason)
@@ -432,7 +439,17 @@ func (s *Service) Cancel(ctx context.Context, ref Ref) error {
 	if err := validateRef(ref); err != nil {
 		return err
 	}
-	_, err := s.store.CancelPayload(ctx, s.readScope(ref), s.now().UTC())
+	current, err := s.store.GetPayload(ctx, ref.ObjectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !s.owns(current) {
+		return ErrNotFound
+	}
+	_, err = s.store.CancelPayload(ctx, s.readScope(ref), s.now().UTC())
 	if errors.Is(err, store.ErrPayloadScopeMismatch) {
 		return ErrForbidden
 	}
@@ -479,7 +496,7 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, ErrDisabled
 	}
 	now := s.now().UTC()
-	persisted, err := s.store.PayloadStats(ctx, now)
+	persisted, err := s.store.PayloadStats(ctx, s.ownerID(), now)
 	if err != nil {
 		return Stats{}, err
 	}
@@ -531,6 +548,7 @@ func (s *Service) observe(ctx context.Context) {
 func (s *Service) readScope(ref Ref) store.PayloadReadScope {
 	return store.PayloadReadScope{
 		ObjectID:   ref.ObjectID,
+		OwnerID:    s.ownerID(),
 		HostID:     ref.HostID,
 		DeviceID:   ref.DeviceID,
 		AppSession: ref.AppSession,

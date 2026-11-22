@@ -31,10 +31,10 @@ func (payloadWorkerStore) ReleasePayloadRead(context.Context, string, string) er
 func (payloadWorkerStore) CancelPayload(context.Context, store.PayloadReadScope, time.Time) (store.PayloadObject, error) {
 	return store.PayloadObject{}, store.ErrNotFound
 }
-func (payloadWorkerStore) ExpirePayloads(context.Context, time.Time, int) ([]store.PayloadObject, error) {
+func (payloadWorkerStore) ExpirePayloads(context.Context, string, time.Time, int) ([]store.PayloadObject, error) {
 	return nil, nil
 }
-func (payloadWorkerStore) ClaimPayloadCleanup(context.Context, time.Time, int, time.Duration) ([]store.PayloadObject, error) {
+func (payloadWorkerStore) ClaimPayloadCleanup(context.Context, string, time.Time, int, time.Duration) ([]store.PayloadObject, error) {
 	return nil, nil
 }
 func (payloadWorkerStore) MarkPayloadCleanupFailure(context.Context, string, time.Time, time.Duration) error {
@@ -43,16 +43,16 @@ func (payloadWorkerStore) MarkPayloadCleanupFailure(context.Context, string, tim
 func (payloadWorkerStore) MarkPayloadDeleted(context.Context, string, time.Time) (bool, error) {
 	return false, nil
 }
-func (payloadWorkerStore) DeletePayloadTombstones(context.Context, time.Time, int) (int64, error) {
+func (payloadWorkerStore) DeletePayloadTombstones(context.Context, string, time.Time, int) (int64, error) {
 	return 0, nil
 }
-func (payloadWorkerStore) StaleReservedPayloads(context.Context, time.Time, int) ([]store.PayloadObject, error) {
+func (payloadWorkerStore) StaleReservedPayloads(context.Context, string, time.Time, int) ([]store.PayloadObject, error) {
 	return nil, nil
 }
-func (payloadWorkerStore) ReadyPayloadPage(context.Context, string, int) ([]store.PayloadObject, error) {
+func (payloadWorkerStore) ReadyPayloadPage(context.Context, string, string, int) ([]store.PayloadObject, error) {
 	return nil, nil
 }
-func (payloadWorkerStore) PayloadStats(context.Context, time.Time) (store.PayloadStats, error) {
+func (payloadWorkerStore) PayloadStats(context.Context, string, time.Time) (store.PayloadStats, error) {
 	return store.PayloadStats{}, nil
 }
 

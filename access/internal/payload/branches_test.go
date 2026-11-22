@@ -87,9 +87,12 @@ func TestCancelRejectsInvalidAndGenericFailure(t *testing.T) {
 		requireError(t, service.Cancel(context.Background(), Ref{ObjectID: "bad"}), ErrInvalid)
 	})
 	t.Run("generic", func(t *testing.T) {
-		db := &fakeStore{t: t, cancelFn: func(context.Context, store.PayloadReadScope, time.Time) (store.PayloadObject, error) {
-			return store.PayloadObject{}, errors.New("db down")
-		}}
+		db := &fakeStore{t: t,
+			getFn: func(context.Context, string) (store.PayloadObject, error) { return objectFixture(now), nil },
+			cancelFn: func(context.Context, store.PayloadReadScope, time.Time) (store.PayloadObject, error) {
+				return store.PayloadObject{}, errors.New("db down")
+			},
+		}
 		service := newTestService(t, db, testConfig(t.TempDir()), now)
 		if err := service.Cancel(context.Background(), Ref{ObjectID: objectFixture(now).ObjectID}); err == nil {
 			t.Fatal("cancel hid a store failure")

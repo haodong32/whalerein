@@ -214,3 +214,60 @@ func TestStorageAdmissionRefusesBelowFreeSpaceReserve(t *testing.T) {
 		t.Fatalf("reserve = %v, want headroom", err)
 	}
 }
+
+// A distinct-owner node running its maintenance passes must not fence the
+// owner's finished object in the shared schema.
+func TestStoragePeerRecoveryDoesNotFenceOwnerObject(t *testing.T) {
+	db, _ := storetest.New(t)
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	configA := integrationConfig(rootA)
+	configA.NodeID, configA.OwnerID = "node-a", "node-a"
+	configB := integrationConfig(rootB)
+	configB.NodeID, configB.OwnerID = "node-b", "node-b"
+	ownerA, err := payload.New(payload.Dependencies{Store: db, Config: configA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerB, err := payload.New(payload.Dependencies{Store: db, Config: configB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("owner-scoped")
+	object, err := ownerA.Reserve(ctx, integrationInput(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerA.Write(ctx, payload.Ref{ObjectID: object.ObjectID}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerA.Finish(ctx, payload.Ref{ObjectID: object.ObjectID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A non-owner read is a pure miss and repeated probes stay harmless.
+	for probe := 0; probe < 3; probe++ {
+		if _, _, err := peerB.Open(ctx, payload.Ref{ObjectID: object.ObjectID}); !errors.Is(err, payload.ErrNotFound) {
+			t.Fatalf("peer probe = %v, want not found", err)
+		}
+	}
+	if err := peerB.Recover(ctx); err != nil {
+		t.Fatalf("peer Recover: %v", err)
+	}
+	if _, err := peerB.Cleanup(ctx); err != nil {
+		t.Fatalf("peer Cleanup: %v", err)
+	}
+
+	reader, _, err := ownerA.Open(ctx, payload.Ref{ObjectID: object.ObjectID, HostID: "host-1"})
+	if err != nil {
+		t.Fatalf("owner Open after peer maintenance: %v", err)
+	}
+	data := new(bytes.Buffer)
+	if _, err := data.ReadFrom(reader); err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	if !bytes.Equal(data.Bytes(), body) {
+		t.Fatalf("owner bytes = %q", data.Bytes())
+	}
+}

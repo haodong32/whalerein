@@ -208,8 +208,8 @@ func TestOpenRejectsWrongSizeAndStoreFailure(t *testing.T) {
 		mustWriteFile(t, service.finalPath(ready.ObjectID), []byte("short"))
 		_, _, err := service.Open(context.Background(), Ref{ObjectID: ready.ObjectID})
 		requireError(t, err, ErrNotFound)
-		if !released || !cancelled {
-			t.Fatalf("released=%v cancelled=%v", released, cancelled)
+		if !released || cancelled {
+			t.Fatalf("released=%v cancelled=%v, want a non-destructive miss", released, cancelled)
 		}
 	})
 	t.Run("classify store failure", func(t *testing.T) {

@@ -115,6 +115,7 @@ type PayloadAdmission struct {
 // callers that know the original scope should pass it.
 type PayloadReadScope struct {
 	ObjectID   string
+	OwnerID    string
 	HostID     string
 	DeviceID   string
 	AppSession string
@@ -362,6 +363,7 @@ func (s *Store) OpenPayloadRead(ctx context.Context, scope PayloadReadScope, lea
 
 func (s PayloadReadScope) matches(object PayloadObject) bool {
 	checks := []struct{ expected, actual string }{
+		{s.OwnerID, object.OwnerID},
 		{s.HostID, object.HostID},
 		{s.DeviceID, object.DeviceID},
 		{s.AppSession, object.AppSession},
@@ -427,10 +429,12 @@ func (s *Store) CancelPayload(ctx context.Context, scope PayloadReadScope, now t
 	return object, nil
 }
 
-// ExpirePayloads moves one bounded batch of elapsed objects to expired. Expiry
-// closes admission for reads and staging without waiting for file cleanup.
-func (s *Store) ExpirePayloads(ctx context.Context, now time.Time, limit int) ([]PayloadObject, error) {
-	if limit <= 0 {
+// ExpirePayloads moves one bounded batch of this owner's elapsed objects to
+// expired. Expiry closes admission for reads and staging without waiting for
+// file cleanup. The owner filter keeps a distinct-root node from mutating rows
+// whose files live on another node.
+func (s *Store) ExpirePayloads(ctx context.Context, ownerID string, now time.Time, limit int) ([]PayloadObject, error) {
+	if limit <= 0 || ownerID == "" {
 		return nil, nil
 	}
 	rows, err := s.poolQuery(ctx, `
@@ -439,22 +443,24 @@ func (s *Store) ExpirePayloads(ctx context.Context, now time.Time, limit int) ([
 		WHERE object_id IN (
 			SELECT object_id FROM temporary_ciphertext_objects
 			WHERE state IN ('reserved', 'ready') AND expires_at <= $1
+				AND owner_id = $3
 			ORDER BY expires_at
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING `+payloadColumns, now, limit)
+		RETURNING `+payloadColumns, now, limit, ownerID)
 	if err != nil {
 		return nil, err
 	}
 	return collectPayloads(rows)
 }
 
-// ClaimPayloadCleanup leases one bounded batch of expired objects with no
-// active reader. Advancing next_attempt_at bounds a crashed cleanup worker
-// without releasing the charge.
-func (s *Store) ClaimPayloadCleanup(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]PayloadObject, error) {
-	if limit <= 0 {
+// ClaimPayloadCleanup leases one bounded batch of this owner's expired objects
+// with no active reader. Advancing next_attempt_at bounds a crashed cleanup
+// worker without releasing the charge. Only the owner may delete the file and
+// release the shared metadata row.
+func (s *Store) ClaimPayloadCleanup(ctx context.Context, ownerID string, now time.Time, limit int, lease time.Duration) ([]PayloadObject, error) {
+	if limit <= 0 || ownerID == "" {
 		return nil, nil
 	}
 	if lease <= 0 {
@@ -467,11 +473,12 @@ func (s *Store) ClaimPayloadCleanup(ctx context.Context, now time.Time, limit in
 			SELECT object_id FROM temporary_ciphertext_objects
 			WHERE state = 'expired' AND reader_count = 0
 				AND (next_attempt_at IS NULL OR next_attempt_at <= $1)
+				AND owner_id = $4
 			ORDER BY next_attempt_at NULLS FIRST, object_id
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING `+payloadColumns, now, limit, now.Add(lease))
+		RETURNING `+payloadColumns, now, limit, now.Add(lease), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -505,63 +512,65 @@ func (s *Store) MarkPayloadDeleted(ctx context.Context, objectID string, now tim
 	return tag.RowsAffected() > 0, nil
 }
 
-// DeletePayloadTombstones removes bounded deleted metadata.
-func (s *Store) DeletePayloadTombstones(ctx context.Context, before time.Time, limit int) (int64, error) {
-	if limit <= 0 {
+// DeletePayloadTombstones removes bounded deleted metadata for this owner.
+func (s *Store) DeletePayloadTombstones(ctx context.Context, ownerID string, before time.Time, limit int) (int64, error) {
+	if limit <= 0 || ownerID == "" {
 		return 0, nil
 	}
 	tag, err := s.poolExec(ctx, `
 		DELETE FROM temporary_ciphertext_objects
 		WHERE object_id IN (
 			SELECT object_id FROM temporary_ciphertext_objects
-			WHERE state = 'deleted' AND updated_at <= $1
+			WHERE state = 'deleted' AND updated_at <= $1 AND owner_id = $3
 			ORDER BY updated_at
 			LIMIT $2
-		)`, before, limit)
+		)`, before, limit, ownerID)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
 }
 
-// StaleReservedPayloads lists reservations that never completed inside the
-// upload window. Reconciliation decides whether a committed file can be
-// published or the reservation must be abandoned.
-func (s *Store) StaleReservedPayloads(ctx context.Context, before time.Time, limit int) ([]PayloadObject, error) {
-	if limit <= 0 {
+// StaleReservedPayloads lists this owner's reservations that never completed
+// inside the upload window. Reconciliation decides whether a committed file can
+// be published or the reservation must be abandoned.
+func (s *Store) StaleReservedPayloads(ctx context.Context, ownerID string, before time.Time, limit int) ([]PayloadObject, error) {
+	if limit <= 0 || ownerID == "" {
 		return nil, nil
 	}
 	rows, err := s.poolQuery(ctx, `SELECT `+payloadColumns+`
 		FROM temporary_ciphertext_objects
-		WHERE state = 'reserved' AND updated_at <= $1
+		WHERE state = 'reserved' AND updated_at <= $1 AND owner_id = $3
 		ORDER BY updated_at
-		LIMIT $2`, before, limit)
+		LIMIT $2`, before, limit, ownerID)
 	if err != nil {
 		return nil, err
 	}
 	return collectPayloads(rows)
 }
 
-// ReadyPayloadPage pages committed objects so reconciliation can detect a
-// metadata row whose file disappeared without scanning the whole table.
-func (s *Store) ReadyPayloadPage(ctx context.Context, afterID string, limit int) ([]PayloadObject, error) {
-	if limit <= 0 {
+// ReadyPayloadPage pages this owner's committed objects so reconciliation can
+// detect a metadata row whose file disappeared without scanning another node's
+// rows. A foreign owner's ready row is never fenced by this page.
+func (s *Store) ReadyPayloadPage(ctx context.Context, ownerID, afterID string, limit int) ([]PayloadObject, error) {
+	if limit <= 0 || ownerID == "" {
 		return nil, nil
 	}
 	rows, err := s.poolQuery(ctx, `SELECT `+payloadColumns+`
 		FROM temporary_ciphertext_objects
-		WHERE state = 'ready' AND object_id > $1
+		WHERE state = 'ready' AND object_id > $1 AND owner_id = $3
 		ORDER BY object_id
-		LIMIT $2`, afterID, limit)
+		LIMIT $2`, afterID, limit, ownerID)
 	if err != nil {
 		return nil, err
 	}
 	return collectPayloads(rows)
 }
 
-// PayloadStats is one aggregate query so the reported numbers come from the
-// same snapshot.
-func (s *Store) PayloadStats(ctx context.Context, now time.Time) (PayloadStats, error) {
+// PayloadStats is one aggregate query for this owner so the reported numbers
+// come from the same snapshot and admission headroom ignores another node's
+// reserved writes.
+func (s *Store) PayloadStats(ctx context.Context, ownerID string, now time.Time) (PayloadStats, error) {
 	var stats PayloadStats
 	err := s.poolQueryRow(ctx, `
 		SELECT
@@ -575,8 +584,9 @@ func (s *Store) PayloadStats(ctx context.Context, now time.Time) (PayloadStats, 
 			COALESCE(SUM(reserved_bytes) FILTER (WHERE state = 'expired'), 0)::bigint,
 			COALESCE(SUM(reader_count), 0)::bigint,
 			COALESCE(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(expires_at) FILTER (WHERE state = 'expired'))), 0)::bigint
-		FROM temporary_ciphertext_objects`,
-		now).Scan(&stats.ReservedObjects, &stats.ReadyObjects, &stats.ExpiredObjects,
+		FROM temporary_ciphertext_objects
+		WHERE owner_id = $2`,
+		now, ownerID).Scan(&stats.ReservedObjects, &stats.ReadyObjects, &stats.ExpiredObjects,
 		&stats.DeletedObjects, &stats.ChargedBytes, &stats.ReservedBytes,
 		&stats.ReadyBytes, &stats.ExpiredBytes, &stats.ReaderLeases,
 		&stats.OldestExpiredBacklog)

@@ -37,6 +37,9 @@ func (s *Service) Write(ctx context.Context, ref Ref, body io.Reader) error {
 		}
 		return err
 	}
+	if !s.owns(object) {
+		return ErrNotFound
+	}
 	if !refMatches(ref, object) {
 		return ErrForbidden
 	}
@@ -110,6 +113,9 @@ func (s *Service) Finish(ctx context.Context, ref Ref) (Object, error) {
 			return Object{}, ErrNotFound
 		}
 		return Object{}, err
+	}
+	if !s.owns(object) {
+		return Object{}, ErrNotFound
 	}
 	if !refMatches(ref, object) {
 		return Object{}, ErrForbidden
@@ -208,6 +214,9 @@ func (s *Service) Open(ctx context.Context, ref Ref) (io.ReadCloser, Object, err
 		}
 		return nil, Object{}, err
 	}
+	if !s.owns(current) {
+		return nil, Object{}, ErrNotFound
+	}
 	if !refMatches(ref, current) {
 		return nil, Object{}, ErrForbidden
 	}
@@ -231,15 +240,16 @@ func (s *Service) Open(ctx context.Context, ref Ref) (io.ReadCloser, Object, err
 	}
 	file, err := os.Open(s.finalPath(object.ObjectID))
 	if err != nil {
+		// A shared metadata row can outlive another node's file. Missing local
+		// bytes are a non-destructive miss: release only this reader's lease
+		// and let the owning node's recovery fence its own row.
 		s.releaseLease(object.ObjectID, leaseID)
-		s.closeObject(ctx, object.ObjectID)
 		return nil, Object{}, ErrNotFound
 	}
 	info, err := file.Stat()
 	if err != nil || info.Size() != object.Length {
 		_ = file.Close()
 		s.releaseLease(object.ObjectID, leaseID)
-		s.closeObject(ctx, object.ObjectID)
 		return nil, Object{}, ErrNotFound
 	}
 	reader := &leaseReader{
@@ -285,35 +295,42 @@ func (s *Service) Recover(ctx context.Context) error {
 	now := s.now().UTC()
 	batch := s.config.CleanupBatch
 	var errs []error
-	expired, err := s.store.ExpirePayloads(ctx, now, batch)
+	ownerID := s.ownerID()
+	expired, err := s.store.ExpirePayloads(ctx, ownerID, now, batch)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	repairs := len(expired)
-	stale, err := s.store.StaleReservedPayloads(ctx, now.Add(-s.config.UploadTimeout), batch)
+	stale, err := s.store.StaleReservedPayloads(ctx, ownerID, now.Add(-s.config.UploadTimeout), batch)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	for _, object := range stale {
+		if !s.owns(object) {
+			continue
+		}
 		if _, statErr := os.Stat(s.finalPath(object.ObjectID)); statErr == nil {
 			if _, publishErr := s.publishCommitted(ctx, object); publishErr == nil {
 				repairs++
 				continue
 			}
 		}
-		if _, cancelErr := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: object.ObjectID}, now); cancelErr != nil {
+		if _, cancelErr := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: object.ObjectID, OwnerID: ownerID}, now); cancelErr != nil {
 			errs = append(errs, cancelErr)
 		} else {
 			repairs++
 		}
 	}
-	page, err := s.store.ReadyPayloadPage(ctx, "", batch)
+	page, err := s.store.ReadyPayloadPage(ctx, ownerID, "", batch)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	for _, object := range page {
+		if !s.owns(object) {
+			continue
+		}
 		if _, statErr := os.Stat(s.finalPath(object.ObjectID)); errors.Is(statErr, os.ErrNotExist) {
-			if _, cancelErr := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: object.ObjectID}, now); cancelErr != nil {
+			if _, cancelErr := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: object.ObjectID, OwnerID: ownerID}, now); cancelErr != nil {
 				errs = append(errs, cancelErr)
 			} else {
 				repairs++
@@ -336,6 +353,10 @@ func (s *Service) Recover(ctx context.Context) error {
 			orphans++
 		case getErr != nil:
 			errs = append(errs, getErr)
+		case !s.owns(object):
+			// Another node's metadata must not cause this node to delete a
+			// file from its own root.
+			continue
 		case object.State == store.PayloadDeleted:
 			if removeErr := os.Remove(file.Path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 				errs = append(errs, sanitizeError(removeErr))
@@ -363,17 +384,21 @@ func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
 		return result, ErrDisabled
 	}
 	now := s.now().UTC()
-	expired, err := s.store.ExpirePayloads(ctx, now, s.config.CleanupBatch)
+	ownerID := s.ownerID()
+	expired, err := s.store.ExpirePayloads(ctx, ownerID, now, s.config.CleanupBatch)
 	if err != nil {
 		return result, err
 	}
 	result.Expired = len(expired)
-	claimed, err := s.store.ClaimPayloadCleanup(ctx, now, s.config.CleanupBatch, s.cleanupLease())
+	claimed, err := s.store.ClaimPayloadCleanup(ctx, ownerID, now, s.config.CleanupBatch, s.cleanupLease())
 	if err != nil {
 		return result, err
 	}
 	var errs []error
 	for _, object := range claimed {
+		if !s.owns(object) {
+			continue
+		}
 		if err := s.removeObjectFiles(object.ObjectID); err != nil {
 			result.Failed++
 			retry := s.cleanupRetry(object.CleanupTries)
@@ -393,7 +418,7 @@ func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
 			result.ReclaimedBytes += object.Reserved
 		}
 	}
-	tombstones, err := s.store.DeletePayloadTombstones(ctx, now.Add(-s.config.Retention), s.config.CleanupBatch)
+	tombstones, err := s.store.DeletePayloadTombstones(ctx, ownerID, now.Add(-s.config.Retention), s.config.CleanupBatch)
 	if err != nil {
 		errs = append(errs, err)
 	} else {
@@ -461,7 +486,7 @@ func (s *Service) removeObjectFiles(objectID string) error {
 }
 
 func (s *Service) closeObject(ctx context.Context, objectID string) {
-	if _, err := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: objectID}, s.now().UTC()); err != nil {
+	if _, err := s.store.CancelPayload(ctx, store.PayloadReadScope{ObjectID: objectID, OwnerID: s.ownerID()}, s.now().UTC()); err != nil {
 		s.logger.Warn("payload close failed", "error", sanitizeError(err).Error())
 	}
 	s.discardStaged(objectID)

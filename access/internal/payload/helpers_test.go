@@ -35,6 +35,14 @@ type fakeStore struct {
 	staleFn     func(context.Context, time.Time, int) ([]store.PayloadObject, error)
 	readyPageFn func(context.Context, string, int) ([]store.PayloadObject, error)
 	statsFn     func(context.Context, time.Time) (store.PayloadStats, error)
+
+	// Captured owner scopes let tests prove maintenance never crosses a node.
+	expireOwner    string
+	staleOwner     string
+	readyOwner     string
+	claimOwner     string
+	tombstoneOwner string
+	statsOwner     string
 }
 
 func (f *fakeStore) ReservePayload(ctx context.Context, reservation store.PayloadReservation, limits store.PayloadLimits) (store.PayloadAdmission, error) {
@@ -79,14 +87,16 @@ func (f *fakeStore) CancelPayload(ctx context.Context, scope store.PayloadReadSc
 	return f.cancelFn(ctx, scope, now)
 }
 
-func (f *fakeStore) ExpirePayloads(ctx context.Context, now time.Time, limit int) ([]store.PayloadObject, error) {
+func (f *fakeStore) ExpirePayloads(ctx context.Context, ownerID string, now time.Time, limit int) ([]store.PayloadObject, error) {
+	f.expireOwner = ownerID
 	if f.expireFn == nil {
 		f.t.Fatal("unexpected ExpirePayloads")
 	}
 	return f.expireFn(ctx, now, limit)
 }
 
-func (f *fakeStore) ClaimPayloadCleanup(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]store.PayloadObject, error) {
+func (f *fakeStore) ClaimPayloadCleanup(ctx context.Context, ownerID string, now time.Time, limit int, lease time.Duration) ([]store.PayloadObject, error) {
+	f.claimOwner = ownerID
 	if f.claimFn == nil {
 		f.t.Fatal("unexpected ClaimPayloadCleanup")
 	}
@@ -107,28 +117,32 @@ func (f *fakeStore) MarkPayloadDeleted(ctx context.Context, id string, now time.
 	return f.deletedFn(ctx, id, now)
 }
 
-func (f *fakeStore) DeletePayloadTombstones(ctx context.Context, before time.Time, limit int) (int64, error) {
+func (f *fakeStore) DeletePayloadTombstones(ctx context.Context, ownerID string, before time.Time, limit int) (int64, error) {
+	f.tombstoneOwner = ownerID
 	if f.tombstoneFn == nil {
 		f.t.Fatal("unexpected DeletePayloadTombstones")
 	}
 	return f.tombstoneFn(ctx, before, limit)
 }
 
-func (f *fakeStore) StaleReservedPayloads(ctx context.Context, before time.Time, limit int) ([]store.PayloadObject, error) {
+func (f *fakeStore) StaleReservedPayloads(ctx context.Context, ownerID string, before time.Time, limit int) ([]store.PayloadObject, error) {
+	f.staleOwner = ownerID
 	if f.staleFn == nil {
 		f.t.Fatal("unexpected StaleReservedPayloads")
 	}
 	return f.staleFn(ctx, before, limit)
 }
 
-func (f *fakeStore) ReadyPayloadPage(ctx context.Context, after string, limit int) ([]store.PayloadObject, error) {
+func (f *fakeStore) ReadyPayloadPage(ctx context.Context, ownerID, after string, limit int) ([]store.PayloadObject, error) {
+	f.readyOwner = ownerID
 	if f.readyPageFn == nil {
 		f.t.Fatal("unexpected ReadyPayloadPage")
 	}
 	return f.readyPageFn(ctx, after, limit)
 }
 
-func (f *fakeStore) PayloadStats(ctx context.Context, now time.Time) (store.PayloadStats, error) {
+func (f *fakeStore) PayloadStats(ctx context.Context, ownerID string, now time.Time) (store.PayloadStats, error) {
+	f.statsOwner = ownerID
 	if f.statsFn == nil {
 		return store.PayloadStats{}, nil
 	}

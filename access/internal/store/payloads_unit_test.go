@@ -77,6 +77,8 @@ func (r int64Row) Scan(dest ...any) error {
 	return nil
 }
 
+const payloadOwner = "node-1"
+
 func payloadFixture() PayloadObject {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	digest := make([]byte, 32)
@@ -499,32 +501,32 @@ func TestCancelPayloadClosesReservedAndReadyOnce(t *testing.T) {
 func TestExpirePayloadsBoundsAndScans(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
-	if objects, err := newStore(&fakeDB{t: t}).ExpirePayloads(ctx, now, 0); err != nil || objects != nil {
+	if objects, err := newStore(&fakeDB{t: t}).ExpirePayloads(ctx, payloadOwner, now, 0); err != nil || objects != nil {
 		t.Fatalf("zero limit = %v %v", objects, err)
 	}
 	db := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
 		return &fakeRowSet{rows: []pgx.Row{payloadScanRow{object: payloadFixture()}}}, nil
 	}}
-	objects, err := newStore(db).ExpirePayloads(ctx, now, 5)
+	objects, err := newStore(db).ExpirePayloads(ctx, payloadOwner, now, 5)
 	if err != nil || len(objects) != 1 {
 		t.Fatalf("expire = %+v err=%v", objects, err)
 	}
 	db = &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
 		return nil, errors.New("query")
 	}}
-	if _, err := newStore(db).ExpirePayloads(ctx, now, 5); err == nil {
+	if _, err := newStore(db).ExpirePayloads(ctx, payloadOwner, now, 5); err == nil {
 		t.Fatal("query failure was ignored")
 	}
 	db = &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
 		return &fakeRowSet{err: errors.New("rows")}, nil
 	}}
-	if _, err := newStore(db).ExpirePayloads(ctx, now, 5); err == nil {
+	if _, err := newStore(db).ExpirePayloads(ctx, payloadOwner, now, 5); err == nil {
 		t.Fatal("rows failure was ignored")
 	}
 	db = &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
 		return &fakeRowSet{rows: []pgx.Row{payloadScanRow{err: errors.New("scan")}}}, nil
 	}}
-	if _, err := newStore(db).ExpirePayloads(ctx, now, 5); err == nil {
+	if _, err := newStore(db).ExpirePayloads(ctx, payloadOwner, now, 5); err == nil {
 		t.Fatal("scan failure was ignored")
 	}
 }
@@ -532,22 +534,24 @@ func TestExpirePayloadsBoundsAndScans(t *testing.T) {
 func TestClaimPayloadCleanupBoundsAndLease(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
-	if objects, err := newStore(&fakeDB{t: t}).ClaimPayloadCleanup(ctx, now, 0, 0); err != nil || objects != nil {
+	if objects, err := newStore(&fakeDB{t: t}).ClaimPayloadCleanup(ctx, payloadOwner, now, 0, 0); err != nil || objects != nil {
 		t.Fatalf("zero limit = %v %v", objects, err)
 	}
 	seen := ""
+	owner := ""
 	db := &fakeDB{t: t, queryFn: func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
 		seen = args[2].(time.Time).Sub(now).String()
+		owner = args[3].(string)
 		return &fakeRowSet{rows: []pgx.Row{payloadScanRow{object: payloadFixture()}}}, nil
 	}}
-	objects, err := newStore(db).ClaimPayloadCleanup(ctx, now, 5, 0)
-	if err != nil || len(objects) != 1 || seen != "1m0s" {
-		t.Fatalf("claim = %+v err=%v lease=%s", objects, err, seen)
+	objects, err := newStore(db).ClaimPayloadCleanup(ctx, payloadOwner, now, 5, 0)
+	if err != nil || len(objects) != 1 || seen != "1m0s" || owner != payloadOwner {
+		t.Fatalf("claim = %+v err=%v lease=%s owner=%s", objects, err, seen, owner)
 	}
 	db = &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
 		return nil, errors.New("query")
 	}}
-	if _, err := newStore(db).ClaimPayloadCleanup(ctx, now, 5, time.Second); err == nil {
+	if _, err := newStore(db).ClaimPayloadCleanup(ctx, payloadOwner, now, 5, time.Second); err == nil {
 		t.Fatal("query failure was ignored")
 	}
 }
@@ -588,30 +592,30 @@ func TestPayloadTombstonesStaleAndReadyPages(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	store := newStore(&fakeDB{t: t})
-	if count, err := store.DeletePayloadTombstones(ctx, now, 0); err != nil || count != 0 {
+	if count, err := store.DeletePayloadTombstones(ctx, payloadOwner, now, 0); err != nil || count != 0 {
 		t.Fatalf("zero tombstones = %d %v", count, err)
 	}
-	if objects, err := store.StaleReservedPayloads(ctx, now, 0); err != nil || objects != nil {
+	if objects, err := store.StaleReservedPayloads(ctx, payloadOwner, now, 0); err != nil || objects != nil {
 		t.Fatalf("zero stale = %v %v", objects, err)
 	}
-	if objects, err := store.ReadyPayloadPage(ctx, "", 0); err != nil || objects != nil {
+	if objects, err := store.ReadyPayloadPage(ctx, payloadOwner, "", 0); err != nil || objects != nil {
 		t.Fatalf("zero ready = %v %v", objects, err)
 	}
 	db := &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 		return deleteTag(3), nil
 	}}
-	if count, err := newStore(db).DeletePayloadTombstones(ctx, now, 5); err != nil || count != 3 {
+	if count, err := newStore(db).DeletePayloadTombstones(ctx, payloadOwner, now, 5); err != nil || count != 3 {
 		t.Fatalf("tombstones = %d %v", count, err)
 	}
 	db = &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 		return pgconn.CommandTag{}, errors.New("delete")
 	}}
-	if _, err := newStore(db).DeletePayloadTombstones(ctx, now, 5); err == nil {
+	if _, err := newStore(db).DeletePayloadTombstones(ctx, payloadOwner, now, 5); err == nil {
 		t.Fatal("tombstone failure was ignored")
 	}
 	for name, call := range map[string]func(*Store) ([]PayloadObject, error){
-		"stale": func(s *Store) ([]PayloadObject, error) { return s.StaleReservedPayloads(ctx, now, 5) },
-		"ready": func(s *Store) ([]PayloadObject, error) { return s.ReadyPayloadPage(ctx, "", 5) },
+		"stale": func(s *Store) ([]PayloadObject, error) { return s.StaleReservedPayloads(ctx, payloadOwner, now, 5) },
+		"ready": func(s *Store) ([]PayloadObject, error) { return s.ReadyPayloadPage(ctx, payloadOwner, "", 5) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			db := &fakeDB{t: t, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
@@ -636,7 +640,7 @@ func TestPayloadStatsAggregatesOneSnapshot(t *testing.T) {
 	db := &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row {
 		return int64Row{values: []int64{1, 2, 3, 4, 100, 40, 60, 5, 2, 90}}
 	}}
-	stats, err := newStore(db).PayloadStats(ctx, now)
+	stats, err := newStore(db).PayloadStats(ctx, payloadOwner, now)
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -648,7 +652,7 @@ func TestPayloadStatsAggregatesOneSnapshot(t *testing.T) {
 	db = &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row {
 		return int64Row{err: errors.New("stats")}
 	}}
-	if _, err := newStore(db).PayloadStats(ctx, now); err == nil {
+	if _, err := newStore(db).PayloadStats(ctx, payloadOwner, now); err == nil {
 		t.Fatal("stats failure was ignored")
 	}
 }
